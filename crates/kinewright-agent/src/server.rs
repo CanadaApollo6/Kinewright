@@ -49,8 +49,9 @@ use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-        JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
-        ToolAnnotations,
+        JsonObject, JsonRpcError, JsonRpcMessage, JsonRpcResponse, ListToolsResult,
+        PaginatedRequestParams, RequestId, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
+        ServerResult, Tool, ToolAnnotations,
     },
     service::RequestContext,
     transport::streamable_http_server::{
@@ -1576,6 +1577,24 @@ impl KinewrightMcp {
             "plan_motion" => {
                 let args: MotionPlanArgs = decode_args("plan_motion", arguments)?;
                 self.motion_plan(&args)
+            }
+            "preview_solo" => {
+                // R25: a fixed-size refusal, never an echo of the input.
+                let args: crate::solo::SoloArgs =
+                    decode_args("preview_solo", arguments).map_err(|_| {
+                        let data = serde_json::json!({"code": "solo_invalid_arguments"});
+                        McpError::invalid_params("preview_solo: invalid arguments", Some(data))
+                    })?;
+                let (revision, document) = self.snapshot()?;
+                if args.expected_revision != revision {
+                    return Ok(revision_conflict_text(args.expected_revision, revision));
+                }
+                Ok(
+                    match crate::solo::preview_solo(&*self.analysis, revision, &document, &args) {
+                        Ok(strip) => strip.to_result(),
+                        Err(error) => error.to_result(),
+                    },
+                )
             }
             "plan_room_tone_fill" => {
                 let args: RoomToneFillPlanArgs = decode_args("plan_room_tone_fill", arguments)?;
@@ -3681,6 +3700,12 @@ impl KinewrightMcp {
                 kinewright_media::TimelineVisualLayer::Title(layer) => {
                     (layer.track, layer.clip, None)
                 }
+                kinewright_media::TimelineVisualLayer::Solid(layer) => {
+                    (layer.track, layer.clip, None)
+                }
+                kinewright_media::TimelineVisualLayer::Adjustment(layer) => {
+                    (layer.track, layer.clip, None)
+                }
             };
             let Some(timeline_clip) = Self::document_clip_on_track(&document, track_id, clip_id)
             else {
@@ -3696,7 +3721,27 @@ impl KinewrightMcp {
             }
             let Some(asset_id) = asset_id else {
                 let kinewright_media::TimelineVisualLayer::Title(title_layer) = &layer else {
-                    unreachable!("only title layers omit an asset id")
+                    // MO2 R3/R18: solids and adjustments are generated layers
+                    // with no source to classify; the proof names their kind
+                    // and the stack the render runs.
+                    let content = match &timeline_clip.content {
+                        ClipContent::Solid(_) => "solid",
+                        _ => "adjustment",
+                    };
+                    active_rendered_layers.push(serde_json::json!({
+                        "track_id": track_id.0,
+                        "clip_id": clip_id.0,
+                        "content": content,
+                        "effects": proof_effect_manifest(layer.effects()),
+                        "color_nodes": proof_color_node_manifest(layer.effects(), &looks),
+                        "legacy_stage_warnings": legacy_stage_warnings(timeline_clip),
+                    }));
+                    unsupported_layer_warnings.extend(Self::layer_compatibility_warnings(
+                        track_id,
+                        timeline_clip,
+                        None,
+                    ));
+                    continue;
                 };
                 let ClipContent::Title(document_title) = &timeline_clip.content else {
                     return Ok(color_proof_error_result(ColorProofError::RenderFailed {
@@ -3772,11 +3817,11 @@ impl KinewrightMcp {
             let content = match &timeline_clip.content {
                 ClipContent::Media => "media",
                 ClipContent::Freeze(_) => "freeze",
-                ClipContent::Title(_) => {
+                ClipContent::Title(_) | ClipContent::Adjustment | ClipContent::Solid(_) => {
                     return Ok(color_proof_error_result(ColorProofError::RenderFailed {
                         stage: "visual_layer_resolution",
                         message: format!(
-                            "production visual resolver returned a source-backed layer for title clip {clip_id} on track {track_id}"
+                            "production visual resolver returned a source-backed layer for generated clip {clip_id} on track {track_id}"
                         ),
                     }));
                 }
@@ -4170,6 +4215,8 @@ impl KinewrightMcp {
                         ClipContent::Media => "media",
                         ClipContent::Freeze(_) => "freeze",
                         ClipContent::Title(_) => "title",
+                        ClipContent::Adjustment => "adjustment",
+                        ClipContent::Solid(_) => "solid",
                     },
                     "asset_id": active_asset.id.0,
                     "source": {
@@ -6200,19 +6247,11 @@ impl KinewrightMcp {
         &self,
         request: &RegionTrackingRequest<'_>,
     ) -> Result<TrackedRegion, String> {
-        let mut isolated = request.document.clone();
-        for track in &mut isolated.tracks {
-            track
-                .clips
-                .retain(|candidate| candidate.id == request.clip_id);
-            for candidate in &mut track.clips {
-                candidate
-                    .effects
-                    .retain(|effect| effect.id != request.excluded_effect);
-            }
-        }
-        isolated.tracks.retain(|track| !track.clips.is_empty());
-        let isolated = Arc::new(isolated);
+        let isolated = Arc::new(tracking_isolation(
+            request.document,
+            request.clip_id,
+            request.excluded_effect,
+        ));
         let project_frame = |local: TimeCode| {
             request
                 .clip_timeline_start
@@ -6574,6 +6613,7 @@ impl KinewrightMcp {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset.clone()],
@@ -7167,6 +7207,7 @@ impl KinewrightMcp {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset.clone()],
@@ -10712,6 +10753,7 @@ fn room_tone_fill_clip(
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     }
 }
 
@@ -11827,14 +11869,31 @@ impl ServerHandler for KinewrightMcp {
     fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let service = self.clone();
+        let solo = (request.name == "invoke_capability")
+            .then(|| request.arguments.as_ref()?.get("name")?.as_str())
+            .flatten()
+            == Some("preview_solo");
         async move {
-            tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
+            // A panicked or cancelled handler becomes fixed text: its payload
+            // may be unbounded or carry paths, and it still crosses ME4's
+            // choke point below.
+            let reply = tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
                 .await
-                .map_err(|error| McpError::internal_error(error.to_string(), None))?
-                .map(Into::into)
+                .unwrap_or_else(|_| {
+                    Err(McpError::internal_error(
+                        "tool call failed: handler panicked",
+                        None,
+                    ))
+                });
+            let reply = if solo {
+                bound_solo_reply(context.id, reply)
+            } else {
+                reply
+            };
+            reply.map(Into::into)
         }
     }
 }
@@ -13676,6 +13735,12 @@ fn inspector_tools() -> Vec<Tool> {
         )
         .with_annotations(read_only()),
         Tool::new(
+            "preview_solo",
+            "Render one video-track clip solo as a PNG strip of sampled frames plus a sampling report, so its own contribution is visible. context isolated draws it alone over black, below draws it over its true below-stack with above-layers hidden; default isolated for normal blend, below otherwise, and adjustments are always below as BEFORE-over-AFTER pairs. samples 2..16 (default 8) spread evenly over the span; full_res renders one midpoint at working resolution instead. The report names frames, cell size, backend provenance, per-sample hashes and disabled frames as inactive cells. Budgets degrade to 2 samples then half-size thumbnails; otherwise solo_over_budget, JSON-only. Read-only and revision-gated.",
+            schema_object::<crate::solo::SoloArgs>(),
+        )
+        .with_annotations(read_only()),
+        Tool::new(
             "plan_dialogue_repair",
             "Build a measured denoise, hum-removal and de-click chain at the head of the selected audio tracks' bus and REFUSE it, naming both numbers, when the measured signal-to-noise gain falls under minimum_snr_gain_db_hundredths - the floor is a 10th-percentile short window rather than a detected silence, so continuous speech reads a higher floor and a lower gain than material carrying real room tone. The noise profile is learned over the longest silence span on those tracks, so a project whose silence analysis has not finished is refused with a different sentence from one whose longest silence is too short to learn over. An existing bus is reused with its own effects preserved and the repair prefix inserted at the head; a chain that would exceed the 20 ms lookahead budget is refused by name before it can fail inside a plan; replace must be true to rebuild a repair prefix that is already there. Returns an opaque prepared_edit_plan preview; the timeline is unchanged until commit_edit_plan.",
             schema_object::<DialogueRepairPlanArgs>(),
@@ -13994,6 +14059,138 @@ fn inspector_tools() -> Vec<Tool> {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EmptyArgs {}
+
+/// MO2 R25 (ME4): the one choke point every `preview_solo` reply crosses,
+/// whatever its kind. Its size is the JSON-RPC message the transport
+/// serializes, id included, plus [`crate::solo::SOLO_FRAMING_BYTES`]; over
+/// budget, the minimal typed refusal replaces it whenever that is smaller.
+fn bound_solo_reply(
+    id: RequestId,
+    reply: Result<CallToolResult, McpError>,
+) -> Result<CallToolResult, McpError> {
+    let wire = |message: &ServerJsonRpcMessage| {
+        serde_json::to_vec(message).map_or(usize::MAX, |bytes| {
+            bytes.len().saturating_add(crate::solo::SOLO_FRAMING_BYTES)
+        })
+    };
+    let respond =
+        |result, id| ServerJsonRpcMessage::response(ServerResult::CallToolResult(result), id);
+    let fallback = respond(crate::solo::SoloError::minimal_result(), id.clone());
+    let mut message = match reply {
+        Ok(result) => respond(result, id),
+        Err(error) => ServerJsonRpcMessage::error(error, Some(id)),
+    };
+    let size = wire(&message);
+    if size > crate::solo::SOLO_WIRE_BUDGET_BYTES && wire(&fallback) < size {
+        message = fallback;
+    }
+    match message {
+        JsonRpcMessage::Response(JsonRpcResponse {
+            result: ServerResult::CallToolResult(result),
+            ..
+        }) => Ok(result),
+        JsonRpcMessage::Error(JsonRpcError { error, .. }) => Err(error),
+        _ => unreachable!("built above as a tool result or an error"),
+    }
+}
+
+#[cfg(test)]
+mod solo_bound_tests {
+    use super::*;
+    use crate::solo::{SOLO_FRAMING_BYTES, SOLO_WIRE_BUDGET_BYTES as WIRE, SoloError};
+
+    /// What the choke point measures for `reply` sent with `id`.
+    fn measure(id: &RequestId, reply: &Result<CallToolResult, McpError>) -> usize {
+        let message = match reply.clone() {
+            Ok(result) => {
+                ServerJsonRpcMessage::response(ServerResult::CallToolResult(result), id.clone())
+            }
+            Err(error) => ServerJsonRpcMessage::error(error, Some(id.clone())),
+        };
+        serde_json::to_vec(&message).unwrap().len() + SOLO_FRAMING_BYTES
+    }
+
+    fn id_of(bytes: usize) -> RequestId {
+        RequestId::String("i".repeat(bytes - 2).into())
+    }
+
+    fn is_minimal(reply: &Result<CallToolResult, McpError>) -> bool {
+        reply.as_ref().is_ok_and(|result| {
+            result.structured_content == Some(serde_json::json!({"code": "solo_over_budget"}))
+        })
+    }
+
+    /// N24 (B1): a success reply at R25−1 and R25 is kept and at R25+1 is
+    /// the minimal refusal, pinned without the render's timing field.
+    #[test]
+    fn success_boundary_exact() {
+        let id = RequestId::Number(7);
+        let success = |n| {
+            Ok(CallToolResult::success(vec![ContentBlock::text(
+                "x".repeat(n),
+            )]))
+        };
+        let overhead = measure(&id, &success(0));
+        for delta in [-1_isize, 0, 1] {
+            let reply = success((WIRE - overhead).saturating_add_signed(delta));
+            assert_eq!(measure(&id, &reply), WIRE.saturating_add_signed(delta));
+            let bounded = bound_solo_reply(id.clone(), reply.clone());
+            if delta > 0 {
+                assert!(is_minimal(&bounded), "success at R25{delta:+}");
+            } else {
+                assert_eq!(bounded, reply, "success at R25{delta:+}");
+            }
+        }
+    }
+
+    /// N24 (S2): an error larger than the minimal refusal is measured with
+    /// its id: kept at exactly R25, substituted at id + 303 one byte later
+    /// and in the residual.
+    #[test]
+    fn error_reply_bound_with_its_id() {
+        let error = || Err(McpError::internal_error("e".repeat(2000), None));
+        let overhead = measure(&id_of(2), &error()) - 2;
+        let minimal = measure(&id_of(2), &Ok(SoloError::minimal_result())) - 2;
+        assert_eq!(minimal, 303);
+        assert!(overhead > minimal);
+        for id_bytes in [WIRE - overhead, WIRE - overhead + 1, WIRE - minimal + 1] {
+            let bounded = bound_solo_reply(id_of(id_bytes), error());
+            if id_bytes + overhead <= WIRE {
+                assert_eq!(bounded, error(), "id {id_bytes}");
+            } else {
+                assert!(is_minimal(&bounded), "id {id_bytes}");
+                assert_eq!(measure(&id_of(id_bytes), &bounded), id_bytes + minimal);
+            }
+        }
+    }
+
+    /// Every typed solo refusal, a 2,000-byte render failure included,
+    /// becomes the minimal refusal at id + 303 around the residual edge.
+    #[test]
+    fn every_solo_error_exact_bound() {
+        use kinewright_core::ClipId;
+        for error in [
+            SoloError::SoloClipNotVisible {
+                clip: ClipId(1),
+                reason: "missing",
+            },
+            SoloError::SoloWindowEmpty { clip: ClipId(1) },
+            SoloError::InvalidSamples(0),
+            SoloError::RenderFailed("x".repeat(2000)),
+            SoloError::SoloOverBudget {
+                limit: "pixels",
+                observed: 9,
+                allowed: 8,
+            },
+        ] {
+            for id_bytes in [WIRE - 304, WIRE - 303, WIRE - 302] {
+                let bounded = bound_solo_reply(id_of(id_bytes), Ok(error.to_result()));
+                assert!(is_minimal(&bounded), "{error:?} id {id_bytes}");
+                assert_eq!(measure(&id_of(id_bytes), &bounded), id_bytes + 303);
+            }
+        }
+    }
+}
 
 fn decode_args<T: for<'de> Deserialize<'de>>(
     tool_name: &str,
@@ -16011,6 +16208,26 @@ fn clamp_tracking_center(
     ]
 }
 
+/// The tracking thumbnails' document: only `clip`, without `excluded`.
+/// Every other clip is disabled, not removed, so the projection stays a
+/// valid document (MO2 B1 fix G5: every render root validates).
+fn tracking_isolation(document: &Document, clip: ClipId, excluded: EffectId) -> Document {
+    let mut isolated = document.clone();
+    for candidate in isolated
+        .tracks
+        .iter_mut()
+        .flat_map(|track| &mut track.clips)
+    {
+        if candidate.id == clip {
+            candidate.effects.retain(|effect| effect.id != excluded);
+        } else {
+            candidate.enabled = false;
+            candidate.enabled_curve = None;
+        }
+    }
+    isolated
+}
+
 fn track_region(
     previous: &kinewright_core::RgbaImage,
     current: &kinewright_core::RgbaImage,
@@ -17202,6 +17419,18 @@ fn state_delta(
 
 /// IN1 §8 rule 5: mirror one `AgentEvent::Cost` into an incident's telemetry.
 ///
+/// The internal registry's half of the R25 sextuple: tool count and the
+/// serialized, input-schema and description bytes of every generated mutator
+/// and inspector — the numbers each endpoint pin site asserts beside the
+/// served quad (MO2 R25/R30).
+///
+/// # Errors
+///
+/// Returns a schema error when operation tool generation fails.
+pub fn capability_tool_metrics() -> Result<ToolSurfaceMetrics, SchemaError> {
+    KinewrightMcp::capability_tools().map(|tools| ToolSurfaceMetrics::measure(&tools))
+}
+
 /// The six token categories are the same six the event reports, each
 /// `Option`-wrapped here because IN1 records no session: a category nobody
 /// reported stays honestly absent rather than silently zero. They are *not* a
@@ -18483,6 +18712,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset],
@@ -18540,6 +18770,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
                 Clip {
                     enabled: true,
@@ -18557,6 +18788,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
             ],
         });
@@ -18738,6 +18970,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: kinewright_core::BlendMode::Normal,
                     }],
                 },
             ],
@@ -18796,6 +19029,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         let document = Document {
             tracks: vec![
@@ -23022,6 +23256,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset],
@@ -23558,6 +23793,32 @@ mod tests {
         assert_eq!(structured["details"]["allowed"]["window_count"], 1);
     }
 
+    /// MO2 B1 fix G5: every render root now validates its document, so the
+    /// tracking isolation must stay valid when the tracked clip ends before
+    /// the project does.
+    #[test]
+    fn region_tracking_isolation_stays_a_valid_document() {
+        let frames = BTreeMap::from([(TimeCode(0), matte_box_frame([160, 90]))]);
+        let (service, _core) = matte_track_service(frames, BTreeMap::new(), Vec::new());
+        let (_, document) = service.snapshot().unwrap();
+        let mut document = (*document).clone();
+        let mut longer = document.clip(ClipId(1)).unwrap().clone();
+        longer.id = ClipId(99);
+        longer.content = ClipContent::Solid(kinewright_core::SolidColor { r: 0, g: 0, b: 0 });
+        longer.timeline_start = TimeCode::ZERO;
+        longer.source_range = TimeCode::ZERO..document.duration.checked_add(TimeCode(10)).unwrap();
+        let mut track = document.tracks[0].clone();
+        track.id = TrackId(99);
+        track.clips = vec![longer];
+        document.tracks.push(track);
+        document.duration = document.duration.checked_add(TimeCode(10)).unwrap();
+        document.validate().unwrap();
+        let isolated = tracking_isolation(&document, ClipId(1), EffectId(7));
+        assert_eq!(isolated.validate(), Ok(()));
+        let hidden = isolated.clip(ClipId(99)).unwrap();
+        assert!(!hidden.enabled && hidden.enabled_curve.is_none());
+    }
+
     /// CC5 §5.2: `excluded_effect` narrows the tracker's exclusion from *every*
     /// effect sharing a name to exactly the one being tracked.
     ///
@@ -23704,7 +23965,7 @@ mod tests {
         }
         // IN1 §6.6: get_incidents and resolve_incident join the registry;
         // IN2 §4.1 rule 2 adds propose_fix beside them.
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
 
         for name in [
             "plan_primary_correction",
@@ -24106,6 +24367,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -24568,6 +24830,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }];
         document.duration = TimeCode(300);
         document
@@ -26020,6 +26283,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         document.validate().unwrap();
@@ -26627,6 +26891,82 @@ mod tests {
         );
         assert_eq!(nodes[2]["curves"]["master"]["truncated"], false);
         assert_eq!(nodes[2]["curves"]["red"]["structural_identity"], true);
+    }
+
+    /// MO2 R8/R25: the four generated mutators drive the real dispatcher —
+    /// revision-gated, typed refusals surfaced as tool errors, and the
+    /// timeline read-back naming what they wrote.
+    #[test]
+    fn mo2_generated_mutators_create_blend_and_recolour() {
+        let (core, playback, analysis) = fixture();
+        let service = KinewrightMcp::new(core, playback, analysis, ConfirmationBroker::default());
+        let call = |name: &str, arguments: serde_json::Value| {
+            service
+                .call_blocking(
+                    CallToolRequestParams::new(name.to_owned())
+                        .with_arguments(arguments.as_object().unwrap().clone()),
+                )
+                .unwrap()
+        };
+        let text = |result: &CallToolResult| result.content[0].as_text().unwrap().text.clone();
+
+        let solid = call(
+            "add_solid_clip",
+            json!({"expected_revision": 0, "track": 1, "timeline_start": 60,
+                   "duration": 30, "color": {"r": 255, "g": 16, "b": 0}}),
+        );
+        assert_eq!(solid.is_error, Some(false), "{}", text(&solid));
+        let refused = call(
+            "add_adjustment_clip",
+            json!({"expected_revision": 1, "track": 1, "timeline_start": 90,
+                   "duration": 30, "effects": [{"id": 1, "name": "chroma_key",
+                   "parameters": {}, "keyframes": {}}]}),
+        );
+        assert_eq!(refused.is_error, Some(true));
+        assert!(
+            text(&refused).contains("adjustment clip 3 cannot carry effect \"chroma_key\""),
+            "{}",
+            text(&refused)
+        );
+        let adjustment = call(
+            "add_adjustment_clip",
+            json!({"expected_revision": 1, "track": 1, "timeline_start": 90,
+                   "duration": 30, "effects": []}),
+        );
+        assert_eq!(adjustment.is_error, Some(false), "{}", text(&adjustment));
+        let blend = call(
+            "set_clip_blend_mode",
+            json!({"expected_revision": 2, "clip": 3, "blend_mode": "screen"}),
+        );
+        assert_eq!(blend.is_error, Some(false), "{}", text(&blend));
+        let recolour = call(
+            "set_solid_color",
+            json!({"expected_revision": 3, "clip": 1, "color": {"r": 0, "g": 0, "b": 0}}),
+        );
+        assert_eq!(recolour.is_error, Some(true));
+        assert!(text(&recolour).contains("SetSolidColor accepts solid clips only"));
+        let stale = call(
+            "set_solid_color",
+            json!({"expected_revision": 2, "clip": 2, "color": {"r": 0, "g": 0, "b": 0}}),
+        );
+        assert!(
+            text(&stale).contains("revision conflict"),
+            "{}",
+            text(&stale)
+        );
+
+        let (revision, document) = service.snapshot().unwrap();
+        assert_eq!(revision, TimelineRevision(3));
+        let rendered = crate::render_timeline_state(&document);
+        assert!(
+            rendered.contains("clip 2 solid=#ff1000 timeline=60f"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("clip 3 adjustment timeline=90f")
+                && rendered.contains("blend=screen"),
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -27560,7 +27900,7 @@ mod tests {
             }
         }
 
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
         // IN1 §6.1 rule 3: nothing the dispatcher accepted before is now
         // refused, and no generated operation tool became invocable.
         let stranded = crate::schema::INSPECTOR_TOOL_NAMES
@@ -27601,6 +27941,73 @@ mod tests {
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(false));
         assert_eq!(annotations.open_world_hint, Some(false));
+    }
+
+    /// MO2 R24/R25: `preview_solo` is registry-only and costs its measured
+    /// row — `2 412 / 1 550 / 703`, Part B's whole `(1,0,1)` move — with the
+    /// load-bearing clause first inside the 1 KiB description budget and the
+    /// five R24 arguments as the whole, closed input schema.
+    #[test]
+    fn mo2_preview_solo_costs_its_measured_row() {
+        let registry = KinewrightMcp::capability_tools().unwrap();
+        let tool = registry
+            .iter()
+            .find(|tool| tool.name == "preview_solo")
+            .expect("preview_solo must be registered");
+        let metrics = ToolSurfaceMetrics::measure(std::slice::from_ref(tool));
+        assert_eq!(
+            (
+                metrics.serialized_bytes,
+                metrics.input_schema_bytes,
+                metrics.description_bytes
+            ),
+            (2_412, 1_550, 703),
+            "{metrics:?}"
+        );
+        let description = tool.description.as_deref().unwrap();
+        assert!(description.len() <= 1_024);
+        assert!(description.starts_with("Render one video-track clip solo as a PNG strip"));
+
+        let schema = serde_json::to_value(tool.input_schema.as_ref()).unwrap();
+        let properties = schema["properties"].as_object().unwrap();
+        assert_eq!(
+            properties
+                .keys()
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "clip_id",
+                "context",
+                "expected_revision",
+                "full_res",
+                "samples"
+            ]),
+            "{schema}"
+        );
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["expected_revision", "clip_id"])
+        );
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(properties["samples"]["default"], serde_json::json!(8));
+        assert_eq!(properties["full_res"]["default"], serde_json::json!(false));
+        let context = schema.to_string();
+        assert!(
+            context.contains("\"isolated\"") && context.contains("\"below\""),
+            "{schema}"
+        );
+
+        let names = crate::schema::INSPECTOR_TOOL_NAMES;
+        let motion = names
+            .iter()
+            .position(|name| *name == "plan_motion")
+            .unwrap();
+        assert_eq!(names.get(motion + 1), Some(&"preview_solo"));
+        assert!(is_invocable_capability("preview_solo"));
+        assert!(!crate::runtime::COMPACT_TOOL_NAMES.contains(&"preview_solo"));
+        let annotations = tool.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
     }
 
     /// MO1 R21: `plan_motion` is registry-only and costs its measured row —
@@ -28604,6 +29011,48 @@ mod tests {
     ///   unchanged (`7 / 5 660 / 3 510 / 998`) — the twenty-first
     ///   consecutive measurement, and the first whose counter moves for a
     ///   Part C addition.
+    ///
+    /// - **MO2 A1 (R1–R4 model): +70 820 / +68 930 / +1 890.** No tool, no
+    ///   operation; the 61 tools that embed the `Clip` `$defs` grow by
+    ///   1 130 B of input schema each — the `BlendMode` def +212, the
+    ///   `SolidColor` def +335, the `Clip.blend_mode` property +129 and the
+    ///   `adjustment` / `solid` `ClipContent` branches +454 (61 × 1 130 =
+    ///   68 930) — and `add_transition` / `remove_transition` each list the
+    ///   twelve push/slide/wipe rows at +945 B of description (2 × 945 =
+    ///   1 890), isolated by deleting each piece from the dumped registry.
+    ///   The arithmetic: 1 822 003 + 70 820 = **1 892 823**,
+    ///   1 672 150 + 68 930 = **1 741 080**, 125 550 + 1 890 = **127 440**.
+    ///   Counts `148 / 60 / 88`. Served quad unchanged.
+    ///
+    /// - **MO2 A3 (R8 operations): +107 698 / +105 762 / +1 273.** Four
+    ///   generated mutators, each carrying the full shared `$defs`:
+    ///   `set_clip_blend_mode` 26 475 / 25 946 / 361, `add_adjustment_clip`
+    ///   26 658 / 26 076 / 414, `add_solid_clip` 26 545 / 26 051 / 331 and
+    ///   `set_solid_color` 26 268 / 25 937 / 167 (sum 105 946 / 104 010 /
+    ///   1 273), plus their four `oneOf` branches in `apply_edit_plan`
+    ///   (+1 752 input). The arithmetic: 1 892 823 + 107 698 =
+    ///   **2 000 521**, 1 741 080 + 105 762 = **1 846 842**, 127 440 +
+    ///   1 273 = **128 713**. Counts `152 / 64 / 88` — Part A's `(4,4,0)`.
+    ///   Served quad unchanged (`7 / 5 660 / 3 510 / 998`) — the
+    ///   twenty-second consecutive measurement.
+    ///
+    /// - **MO2 A-fix (review 1 nit): +21 / 0 / +21.** `set_clip_speed`'s
+    ///   speedless list names adjustments and solids beside titles and
+    ///   freeze frames, matching `SpeedOnNonMediaClip` (`"Titles and freeze
+    ///   frames"` → `"Titles, freeze frames, adjustments and solids"`, +21 B
+    ///   of description). The arithmetic: 2 000 521 + 21 = **2 000 542**,
+    ///   input schema unchanged at **1 846 842**, 128 713 + 21 =
+    ///   **128 734**. Counts `152 / 64 / 88`; served quad unchanged.
+    ///
+    /// - **MO2 Part B (R24 `preview_solo`): +2 412 / +1 550 / +703.** One
+    ///   registry-only inspector, pinned in
+    ///   `mo2_preview_solo_costs_its_measured_row`: +1 550 B of generated
+    ///   `SoloArgs` input schema, +703 B of description, +159 B of fixed row
+    ///   cost (147 B plus the 12 bytes of `preview_solo`). The arithmetic:
+    ///   2 000 542 + 2 412 = **2 002 954**, 1 846 842 + 1 550 =
+    ///   **1 848 392**, 128 734 + 703 = **129 437**. Counts `153 / 64 / 89` —
+    ///   Part B's `(1,0,1)`. Served quad unchanged (`7 / 5 660 / 3 510 /
+    ///   998`) — the twenty-third consecutive measurement.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28629,15 +29078,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_822_003, 5_660),
+            (2_002_954, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_672_150,
+            registry_metrics.input_schema_bytes, 1_848_392,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 125_550,
+            registry_metrics.description_bytes, 129_437,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -31755,6 +32204,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             });
         }
@@ -32283,6 +32733,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         Document {
             investigator: None,
@@ -33125,6 +33576,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         let analysis = NoopMedia {
@@ -33238,6 +33690,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         document.tracks[1].clips.push(short(3, 60, 6));
         document.tracks[1].clips.push(short(4, 66, 4));
@@ -33401,6 +33854,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         });
         let calls = Arc::new(Mutex::new(Vec::new()));
         let analysis = NoopMedia {
@@ -33575,6 +34029,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![MediaAsset {
@@ -34553,13 +35008,16 @@ mod tests {
     /// `147 / 60 / 87`. Part C (R20) adds one inspector planner
     /// (`plan_motion`): counts `148 / 60 / 88`. All are registry-only —
     /// served tools come from the compact authority, which MO1 does not
-    /// touch.
+    /// touch. MO2 A3 (R8) generates four more mutators
+    /// (`set_clip_blend_mode`, `add_adjustment_clip`, `add_solid_clip`,
+    /// `set_solid_color`), registry-only the same way: counts `152 / 64 / 88`.
+    /// MO2 Part B (R24) adds one inspector (`preview_solo`): `153 / 64 / 89`.
     #[test]
     fn in2_the_registry_grows_by_one_capability() {
         let registry = KinewrightMcp::capability_tools().unwrap();
-        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 148);
-        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 88);
-        assert_eq!(operation_tools().unwrap().len(), 60);
+        assert_eq!(crate::schema::capability_tool_names().unwrap().len(), 153);
+        assert_eq!(crate::schema::INSPECTOR_TOOL_NAMES.len(), 89);
+        assert_eq!(operation_tools().unwrap().len(), 64);
         let generated = operation_tools().unwrap();
         for name in [
             "upsert_effect_keyframe",
@@ -34568,6 +35026,10 @@ mod tests {
             "set_clip_enabled",
             "set_clip_enabled_curve",
             "copy_clip_attributes",
+            "set_clip_blend_mode",
+            "add_adjustment_clip",
+            "add_solid_clip",
+            "set_solid_color",
         ] {
             assert!(
                 generated.iter().any(|tool| tool.tool.name == name),

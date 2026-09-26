@@ -38,6 +38,7 @@ mod server;
 /// The session pump (IN2 §3.5). Not feature-gated, for the same reason.
 mod session;
 mod silence;
+mod solo;
 
 pub use acp_drivers::{
     DEVIN_SANDBOX_NOTICE, DevinDriver, KIMI_SANDBOX_NOTICE, KIRO_SANDBOX_NOTICE, KimiDriver,
@@ -75,7 +76,7 @@ pub use server::{
     IN1_INCIDENT_SERIALIZED_CEILING_BYTES, INVESTIGATOR_BROKER_TIMEOUT,
     INVESTIGATOR_CAPABILITY_DENYLIST, INVESTIGATOR_WORKER_THREADS, IncidentLogHandle,
     InvestigatorSessionContext, MIX_MEASUREMENT_SAMPLE_RATE, McpServer, McpServerError,
-    mirror_agent_cost,
+    capability_tool_metrics, mirror_agent_cost,
 };
 pub use session::{
     BudgetKind, CANCELLED_BY_OWNER, ConfirmationPolicy, INVESTIGATOR_CONFIRMATION_REFUSAL,
@@ -85,4 +86,8 @@ pub use session::{
 pub use silence::{
     shrink_silence_span_for_cutting, shrink_silence_span_for_cutting_with_transcript,
     silence_cut_margin_frames,
+};
+pub use solo::{
+    SOLO_FRAMING_BYTES, SOLO_PNG_BUDGET_BYTES, SOLO_REPORT_BUDGET_BYTES, SOLO_WIRE_BUDGET_BYTES,
+    SoloArgs, SoloContext, SoloError, SoloStrip, preview_solo, sample_offsets,
 };

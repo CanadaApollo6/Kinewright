@@ -23,7 +23,7 @@ From the repository root on Linux with the native build dependencies installed:
 source scripts/setup-ffmpeg.sh
 cargo build --release -p kinewright-app
 python3 scripts/measure-desktop.py --runs 5 --seconds 8 --output /tmp/desktop.json
-cargo build --release -p kinewright-media --example performance_workloads
+cargo build --release -p kinewright-project --example performance_workloads
 # Use separate processes so one lane does not inherit another lane's memory.
 target/release/examples/performance_workloads --lane typical --seeks 30 --plans 100 --out /tmp/typical.json
 target/release/examples/performance_workloads --lane heavy --seeks 30 --plans 100 --out /tmp/heavy.json

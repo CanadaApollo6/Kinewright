@@ -13,10 +13,10 @@ use std::{
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, AudioQcReport, AudioQcRequest,
-    AudioRepairReport, AudioRepairRequest, BeatStatus, ClipId, DeliveryAudioVerification,
-    DeliveryVerification, DeliveryVerificationRequest, Document, EffectId, Export,
-    ExportCancellation, ExportReport, ExportSettings, FrameTexture, LiveAudioChange,
-    LoudnessSnapshot, LoudnessTarget, LutAvailabilityKind, LutAvailabilityStatus,
+    AudioRepairReport, AudioRepairRequest, BeatStatus, ClipContent, ClipId,
+    DeliveryAudioVerification, DeliveryVerification, DeliveryVerificationRequest, Document,
+    EffectId, Export, ExportCancellation, ExportReport, ExportSettings, FrameTexture,
+    LiveAudioChange, LoudnessSnapshot, LoudnessTarget, LutAvailabilityKind, LutAvailabilityStatus,
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof, MatteProofError,
     MatteProofMetadata, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
@@ -190,27 +190,36 @@ fn locate_color_node(
     Ok((target.timeline_start, node))
 }
 
-/// Reduce a document to the target clip's track and clip.
+/// Project a document onto what the proof may see, keeping it valid.
 ///
 /// CC5 4.1: a matte proof renders the coverage of one node on one clip, so no
-/// other layer may composite over it. Removing every other track and clip is
-/// stronger than trusting z-order, and it also keeps the proof honest when the
-/// target sits under an opaque layer. `lut_assets` is retained so the surviving
-/// clip's LUT nodes still bind (CC4 2.4).
+/// other layer may composite over it. Every other clip is disabled rather
+/// than removed, so the duration, track tables and references stay exactly
+/// the original's (a removal broke shorter targets, MO2 B1 fix G5). An
+/// adjustment keeps the strictly lower tracks it grades (MO2 R18, G6);
+/// nothing that could occlude the proof survives. `lut_assets` is retained
+/// so the surviving clips' LUT nodes still bind (CC4 2.4).
 fn matte_proof_scratch_document(
     document: &Document,
     clip: ClipId,
     effect: EffectId,
 ) -> Result<Document, MatteProofError> {
     let mut scratch = document.clone();
-    scratch
+    let (target_track, adjustment) = scratch
         .tracks
-        .retain(|track| track.clips.iter().any(|candidate| candidate.id == clip));
-    for track in &mut scratch.tracks {
-        track.clips.retain(|candidate| candidate.id == clip);
-    }
-    if scratch.tracks.is_empty() {
-        return Err(MatteProofError::EffectNotFound { clip, effect });
+        .iter()
+        .enumerate()
+        .find_map(|(index, track)| {
+            let found = track.clips.iter().find(|candidate| candidate.id == clip);
+            found.map(|target| (index, matches!(target.content, ClipContent::Adjustment)))
+        })
+        .ok_or(MatteProofError::EffectNotFound { clip, effect })?;
+    for (index, track) in scratch.tracks.iter_mut().enumerate() {
+        let below = adjustment && index < target_track;
+        for candidate in track.clips.iter_mut().filter(|c| c.id != clip && !below) {
+            candidate.enabled = false;
+            candidate.enabled_curve = None;
+        }
     }
     Ok(scratch)
 }
@@ -2368,6 +2377,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             lut_assets: vec![asset],

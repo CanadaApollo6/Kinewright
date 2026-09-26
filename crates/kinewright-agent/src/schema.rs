@@ -13,7 +13,7 @@ use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-pub const INSPECTOR_TOOL_NAMES: [&str; 88] = [
+pub const INSPECTOR_TOOL_NAMES: [&str; 89] = [
     "get_timeline_state",
     // IN1 §6.1 rule 1: two internal capabilities, reached only through
     // `invoke_capability` and never added to `COMPACT_TOOL_NAMES`.
@@ -87,6 +87,8 @@ pub const INSPECTOR_TOOL_NAMES: [&str; 88] = [
     // MO1 R20: registered directly after `plan_clip_fades`, matching the
     // registry position. Registry-only: the served quad does not move.
     "plan_motion",
+    // MO2 R24: registry-only, directly after `plan_motion`.
+    "preview_solo",
     "plan_dialogue_repair",
     "capture_room_tone",
     "plan_room_tone_fill",
@@ -312,6 +314,10 @@ pub fn operation_tool_name(operation: &Operation) -> &'static str {
         Operation::SetMarkerParam { .. } => "set_marker_param",
         Operation::AddFreezeFrame { .. } => "add_freeze_frame",
         Operation::SetClipSpeed { .. } => "set_clip_speed",
+        Operation::SetClipBlendMode { .. } => "set_clip_blend_mode",
+        Operation::AddAdjustmentClip { .. } => "add_adjustment_clip",
+        Operation::AddSolidClip { .. } => "add_solid_clip",
+        Operation::SetSolidColor { .. } => "set_solid_color",
     }
 }
 
@@ -535,8 +541,20 @@ fn operation_tool(
             " Freeze clips hold one source frame from a real video-capable asset for a project-frame duration. They are video-track clips and remain silent.",
         ),
         "SetClipSpeed" => description.push_str(
-            " speed_percent is an integer percentage in 10..=1000; 100 is real time. Speed scales the media clip's effective source rate, so 50 doubles its project duration and 200 halves it. The operation fails if the new duration would overlap a later clip - ripple-insert a gap first when slowing a clip down. Audio is muted at any speed other than 100. Titles and freeze frames have no speed.",
+            " speed_percent is an integer percentage in 10..=1000; 100 is real time. Speed scales the media clip's effective source rate, so 50 doubles its project duration and 200 halves it. The operation fails if the new duration would overlap a later clip - ripple-insert a gap first when slowing a clip down. Audio is muted at any speed other than 100. Titles, freeze frames, adjustments and solids have no speed.",
         ),
+        // MO2 R8: the load-bearing rules first; the equations live in the
+        // design, not in every request.
+        "SetClipBlendMode" => description.push_str(
+            " blend_mode (normal, multiply, screen, overlay, darken, lighten, add) combines the clip's visual layer with the composite of lower tracks in scene-linear working space; normal is the default. Audio-only clips ignore it.",
+        ),
+        "AddAdjustmentClip" => description.push_str(
+            " An adjustment layer has no asset and no audio; its effects (the add_effect vocabulary) grade the composite of strictly lower tracks over a positive project-frame duration on a video track. chroma_key and the fade_from_black/fade_from_white transitions are refused on it.",
+        ),
+        "AddSolidClip" => description.push_str(
+            " A solid is an opaque fill of display sRGB bytes with no asset and no audio over a positive project-frame duration on a video track; effects, transitions, blend and enable apply as on any clip.",
+        ),
+        "SetSolidColor" => description.push_str(" Only solid clips accept it."),
         _ => {}
     }
     let tool =
@@ -950,6 +968,11 @@ mod tests {
                 "set_marker_param",
                 "add_freeze_frame",
                 "set_clip_speed",
+                // MO2 R8, declared after `SetClipSpeed`.
+                "set_clip_blend_mode",
+                "add_adjustment_clip",
+                "add_solid_clip",
+                "set_solid_color",
             ]
         );
         for definition in tools {
@@ -1992,5 +2015,247 @@ audio_true_peak_limiter.",
         );
         let primary = suffix_after("primary_correction");
         assert!(!primary.starts_with(LEGACY_LABEL), "{primary}");
+    }
+
+    /// Follow a local `$ref` into the tool's own `$defs`.
+    fn resolve<'a>(schema: &'a Value, node: &'a Value) -> &'a Value {
+        match node.get("$ref").and_then(Value::as_str) {
+            Some(reference) => {
+                let name = reference
+                    .strip_prefix("#/$defs/")
+                    .unwrap_or_else(|| panic!("a local $ref, got {reference}"));
+                &schema["$defs"][name]
+            }
+            None => node,
+        }
+    }
+
+    fn sorted_strings(value: &Value) -> Vec<String> {
+        let mut strings: Vec<String> = value
+            .as_array()
+            .unwrap_or_else(|| panic!("an array, got {value}"))
+            .iter()
+            .map(|entry| entry.as_str().expect("a string").to_owned())
+            .collect();
+        strings.sort();
+        strings
+    }
+
+    /// The published wire names of a string enum, whichever shape schemars
+    /// chose (`enum`, or `oneOf` of `const`/`enum` branches).
+    fn enum_values(node: &Value) -> Vec<String> {
+        if let Some(values) = node.get("enum").and_then(Value::as_array) {
+            return values
+                .iter()
+                .map(|value| value.as_str().expect("a string").to_owned())
+                .collect();
+        }
+        node["oneOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("an enum or oneOf, got {node}"))
+            .iter()
+            .flat_map(|branch| match branch.get("const") {
+                Some(value) => vec![value.as_str().expect("a string").to_owned()],
+                None => enum_values(branch),
+            })
+            .collect()
+    }
+
+    /// MO2 R25 (review 2 S4): the byte-size pins cannot see a field's domain,
+    /// so the solid and blend tools' semantics are pinned structurally —
+    /// every RGB channel's full `0..=255` bound and its required flag, every
+    /// blend wire name in declaration order with `normal` the clip default.
+    #[test]
+    fn mo2_solid_and_blend_schemas_pin_the_full_domains() {
+        use kinewright_core::BlendMode;
+        let tools = operation_tools().unwrap();
+        let schema = |name: &str| {
+            serde_json::to_value(
+                &*tools
+                    .iter()
+                    .find(|definition| definition.tool.name == name)
+                    .unwrap_or_else(|| panic!("{name} must be generated"))
+                    .tool
+                    .input_schema,
+            )
+            .unwrap()
+        };
+
+        for (name, fields) in [
+            (
+                "add_solid_clip",
+                &["color", "duration", "timeline_start", "track"][..],
+            ),
+            ("set_solid_color", &["clip", "color"][..]),
+        ] {
+            let schema = schema(name);
+            let variant = &schema["allOf"][0];
+            assert_eq!(sorted_strings(&variant["required"]), fields, "{name}");
+            let color = resolve(&schema, &variant["properties"]["color"]);
+            assert_eq!(
+                sorted_strings(&color["required"]),
+                ["b", "g", "r"],
+                "{name}: every channel is required"
+            );
+            for channel in ["r", "g", "b"] {
+                let bound = &color["properties"][channel];
+                assert_eq!(bound["type"], "integer", "{name}.{channel}: {bound}");
+                assert_eq!(bound["minimum"], 0, "{name}.{channel}: {bound}");
+                assert_eq!(bound["maximum"], 255, "{name}.{channel}: {bound}");
+            }
+        }
+
+        let wire = blend_wire_names();
+        let blend_tool = schema("set_clip_blend_mode");
+        let variant = &blend_tool["allOf"][0];
+        assert_eq!(
+            sorted_strings(&variant["required"]),
+            ["blend_mode", "clip"],
+            "the setter has no default: blend_mode is required"
+        );
+        assert_eq!(
+            enum_values(resolve(&blend_tool, &variant["properties"]["blend_mode"])),
+            wire
+        );
+        let with_clip = tools
+            .iter()
+            .map(|definition| serde_json::to_value(&*definition.tool.input_schema).unwrap())
+            .find(|schema| schema["$defs"].get("Clip").is_some())
+            .expect("a tool embeds Clip");
+        let clip_blend = &with_clip["$defs"]["Clip"]["properties"]["blend_mode"];
+        // The default is serde's (`#[serde(default)]`, omitted when normal),
+        // published as an optional property whose description names it.
+        assert!(
+            clip_blend["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("default `normal`")),
+            "{clip_blend}"
+        );
+        assert_eq!(BlendMode::default(), BlendMode::Normal);
+        assert_eq!(enum_values(resolve(&with_clip, clip_blend)), wire);
+        assert!(
+            !sorted_strings(&with_clip["$defs"]["Clip"]["required"])
+                .contains(&"blend_mode".to_owned()),
+            "a pre-MO2 clip omits blend_mode"
+        );
+    }
+
+    /// Every blend mode's wire name, in declaration order.
+    fn blend_wire_names() -> Vec<String> {
+        let wire: Vec<String> = kinewright_core::BlendMode::ALL
+            .iter()
+            .map(|mode| {
+                serde_json::to_value(mode)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(
+            wire,
+            [
+                "normal", "multiply", "screen", "overlay", "darken", "lighten", "add"
+            ]
+        );
+        wire
+    }
+
+    /// MO2 R25 (review 2 S4): the boundary requests of the solid and blend
+    /// tools round-trip through the real decoder, and every value outside
+    /// the published domain is refused.
+    #[test]
+    fn mo2_solid_and_blend_boundary_requests_round_trip() {
+        use kinewright_core::{BlendMode, SolidColor};
+        let wire = blend_wire_names();
+        let decode = |name: &str, arguments: Value| {
+            decode_operation(name, arguments.as_object().unwrap().clone())
+        };
+        for (r, g, b) in [(0, 0, 0), (255, 255, 255), (0, 255, 128)] {
+            let color = SolidColor { r, g, b };
+            let decoded = decode(
+                "set_solid_color",
+                serde_json::json!({"expected_revision": 3, "clip": 9,
+                                   "color": {"r": r, "g": g, "b": b}}),
+            )
+            .unwrap();
+            assert_eq!(
+                decoded.operation,
+                Operation::SetSolidColor {
+                    clip: ClipId(9),
+                    color
+                }
+            );
+            let decoded = decode(
+                "add_solid_clip",
+                serde_json::json!({"expected_revision": 3, "track": 1, "timeline_start": 0,
+                                   "duration": 30, "color": {"r": r, "g": g, "b": b}}),
+            )
+            .unwrap();
+            assert_eq!(
+                decoded.operation,
+                Operation::AddSolidClip {
+                    track: TrackId(1),
+                    timeline_start: TimeCode(0),
+                    duration: TimeCode(30),
+                    color
+                }
+            );
+        }
+        for channel in ["r", "g", "b"] {
+            for bad in [
+                serde_json::json!(256),
+                serde_json::json!(-1),
+                serde_json::json!(1.5),
+                Value::Null,
+            ] {
+                let mut color = serde_json::json!({"r": 0, "g": 0, "b": 0});
+                color[channel] = bad.clone();
+                assert!(
+                    matches!(
+                        decode(
+                            "set_solid_color",
+                            serde_json::json!({"expected_revision": 3, "clip": 9, "color": color}),
+                        ),
+                        Err(SchemaError::InvalidArguments { .. })
+                    ),
+                    "{channel}={bad} is outside the byte domain"
+                );
+            }
+            let mut color = serde_json::json!({"r": 0, "g": 0, "b": 0});
+            color.as_object_mut().unwrap().remove(channel);
+            assert!(
+                decode(
+                    "set_solid_color",
+                    serde_json::json!({"expected_revision": 3, "clip": 9, "color": color}),
+                )
+                .is_err(),
+                "a missing {channel} is refused"
+            );
+        }
+        for (mode, name) in BlendMode::ALL.into_iter().zip(&wire) {
+            let decoded = decode(
+                "set_clip_blend_mode",
+                serde_json::json!({"expected_revision": 3, "clip": 9, "blend_mode": name}),
+            )
+            .unwrap();
+            assert_eq!(
+                decoded.operation,
+                Operation::SetClipBlendMode {
+                    clip: ClipId(9),
+                    blend_mode: mode
+                }
+            );
+        }
+        for arguments in [
+            serde_json::json!({"expected_revision": 3, "clip": 9, "blend_mode": "hue"}),
+            serde_json::json!({"expected_revision": 3, "clip": 9, "blend_mode": "Screen"}),
+            serde_json::json!({"expected_revision": 3, "clip": 9}),
+        ] {
+            assert!(
+                decode("set_clip_blend_mode", arguments.clone()).is_err(),
+                "{arguments}"
+            );
+        }
     }
 }

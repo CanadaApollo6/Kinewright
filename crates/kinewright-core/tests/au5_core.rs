@@ -1294,6 +1294,7 @@ fn gap_corpus_tracks() -> Vec<Track> {
         audio_fade_out_frames: TimeCode::ZERO,
         audio_gain_curve: None,
         speed_percent: 100,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     vec![
         Track {
@@ -1340,6 +1341,7 @@ fn gap_corpus_tracks() -> Vec<Track> {
                     audio_fade_out_frames: TimeCode::ZERO,
                     audio_gain_curve: None,
                     speed_percent: 100,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
                 media_clip(7, AssetId(2), 20, 0..10),
             ],

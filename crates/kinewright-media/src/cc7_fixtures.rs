@@ -127,7 +127,7 @@ use kinewright_core::{
 use serde_json::{Value, json};
 
 use crate::{
-    Compositor, CompositorLayer,
+    Compositor, CompositorLayer, LayerMode,
     cc1_fixtures::{
         FixtureGpu, assert_linear_parity, backend_metadata, fallback_gpu, git_revision,
         hardware_gpu, linear_parity_metrics, working_frame, write_evidence_artefact,
@@ -203,6 +203,7 @@ impl Cc7Scene {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             });
             assets.push(asset);
             timeline_start += frames;
@@ -2859,6 +2860,7 @@ fn assert_cc7_canonical_parity(gpu: &FixtureGpu, fixture: &str) {
                 frame: &frame,
                 effects: &effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("the production GPU working-surface readback")
@@ -2896,6 +2898,7 @@ fn assert_cc7_canonical_parity(gpu: &FixtureGpu, fixture: &str) {
                 frame: &frame,
                 effects: &effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("the second production readback")

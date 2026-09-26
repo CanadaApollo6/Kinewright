@@ -13,6 +13,7 @@ use kinewright_core::{
     MediaEvent, ParamValue, Playback, Rational, TimeCode, Track, TrackId, TrackKind, Transition,
 };
 use kinewright_media::FfmpegMediaEngine;
+use kinewright_project::{load_document, min_required_format_version, write_project_document};
 
 // This manual verifier deliberately keeps its complete preview/export scenario together.
 #[allow(clippy::too_many_lines)]
@@ -69,6 +70,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             },
             Track {
@@ -91,6 +93,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             },
         ],
@@ -120,17 +123,27 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     }
     .apply(&mut document)?;
-    fs::write(
-        output_dir.join("two-track.kinewright"),
-        serde_json::to_string_pretty(&document)?,
-    )?;
+    if write_fixture(&document, &output_dir.join("two-track.kinewright"))? != 1 {
+        return Err("the pre-MO2 two-track fixture must stay v1".into());
+    }
+    // The MO2 fixture assertion: a blend on the same fixture stamps v2 and
+    // survives the round trip, so this writer cannot mislabel MO2 content.
+    let mut blended = document.clone();
+    kinewright_core::Operation::SetClipBlendMode {
+        clip: ClipId(2),
+        blend_mode: kinewright_core::BlendMode::Screen,
+    }
+    .apply(&mut blended)?;
+    if write_fixture(&blended, &output_dir.join("two-track-mo2.kinewright"))? != 2 {
+        return Err("an MO2 fixture must stamp v2".into());
+    }
 
     let frames = engine.frames();
     let events = engine.events();
     engine.set_document(Arc::new(document.clone()));
     for at in [TimeCode(0), TimeCode(7), TimeCode(30)] {
         engine.request_frame(at);
-        let frame = receive_frame(&frames, at)?;
+        let frame = receive_frame(&frames, &events, at)?;
         let center = usize::try_from(frame.width * (frame.height / 2) + frame.width / 2)? * 4;
         println!(
             "preview frame {} center={:?}",
@@ -176,6 +189,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Write a fixture through the shared R7 envelope (MO2 R7, review 2 S6), never
+/// a raw `Document` serialization, and prove the stamp: the file reopens as
+/// the same document at exactly the minimum-required format version, which
+/// is returned.
+fn write_fixture(document: &Document, path: &Path) -> Result<u32, Box<dyn Error>> {
+    write_project_document(document, path, None)?;
+    let (reopened, version, _) = load_document(path)?;
+    let required = min_required_format_version(document);
+    if reopened != *document || version != required {
+        return Err(format!(
+            "{} reopened as v{version}, expected the same document at v{required}",
+            path.display()
+        )
+        .into());
+    }
+    Ok(version)
+}
+
 fn generate_source(
     ffmpeg: &Path,
     output: &Path,
@@ -204,6 +235,18 @@ fn generate_source(
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            // Managed decode refuses untagged sources (CC1), which starved
+            // the preview-frame wait into `Error: Timeout`: tag BT.709.
+            "-vf",
+            "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-color_range",
+            "tv",
             "-c:a",
             "aac",
             "-shortest",
@@ -216,16 +259,26 @@ fn generate_source(
     Ok(())
 }
 
+/// The frame at `requested`, or the engine's own error rather than a bare
+/// `Timeout` when the preview path fails.
 fn receive_frame(
     frames: &crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    events: &crossbeam_channel::Receiver<MediaEvent>,
     requested: TimeCode,
 ) -> Result<kinewright_core::FrameTexture, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        while let Ok(event) = events.try_recv() {
+            if let MediaEvent::Error(error) = event {
+                return Err(format!("preview frame {}: {error}", requested.0).into());
+            }
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let (at, frame) = frames.recv_timeout(remaining)?;
-        if at == requested {
-            return Ok(frame);
+        match frames.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok((at, frame)) if at == requested => return Ok(frame),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) if !remaining.is_zero() => {}
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
         }
     }
 }

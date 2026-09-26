@@ -25,9 +25,9 @@ use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits
 use kinewright_project::{
     FlushOutcome, ProjectSaveError, ProjectSaveReport, RefuseRename, SidecarMode, SidecarWriter,
     can_overwrite_save, canonical_session_key, derive_lut_store, digest_bytes, load_document,
-    project_newer_format_observation, refuse_sidecar, rollback_sidecar_write,
-    serialize_project_document, sidecar_path_for_project, sidecar_write_failed_observation,
-    snapshot_sidecar_rollback, write_project_bytes,
+    min_required_format_version, project_newer_format_observation, refuse_sidecar,
+    rollback_sidecar_write, serialize_project_document, sidecar_path_for_project,
+    sidecar_write_failed_observation, snapshot_sidecar_rollback, write_project_bytes,
 };
 
 use crate::{
@@ -350,6 +350,8 @@ pub(crate) struct KinewrightApp {
     pub(crate) clip_attributes_clipboard: Option<ClipId>,
     /// MO1 R25: the open plan-a-move dialog, if any.
     pub(crate) motion_plan_dialog: Option<MotionPlanDialog>,
+    /// MO2 R26: the open solo-strip dialog, if any.
+    pub(crate) solo_dialog: Option<crate::solo_ui::SoloDialog>,
     /// IN1 §5.2: playback observations waiting for the next `route_incidents`
     /// tick, which attributes them to the focused project.
     pub(crate) pending_observations: Vec<IncidentObservation>,
@@ -634,6 +636,7 @@ impl KinewrightApp {
             pending_legacy_relink: None,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
+            solo_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
@@ -977,6 +980,7 @@ impl KinewrightApp {
         // below is what `write_project_bytes` writes and what the digest
         // covers.
         let json = serialize_project_document(to_write)?;
+        let written_version = min_required_format_version(to_write);
         let new_digest = digest_bytes(json.as_bytes());
         if save_as {
             self.drop_newer_format_note_for_save_as();
@@ -1084,7 +1088,7 @@ impl KinewrightApp {
             report.digest, new_digest,
             "one serialisation serves both files"
         );
-        self.adopt_saved_path(path, &new_digest, save_as);
+        self.adopt_saved_path(path, &new_digest, written_version);
         if let Some(reason) = &report.lut_store_error {
             // Appendix B row 3: the project **was** saved.
             self.note_label(
@@ -1160,10 +1164,10 @@ impl KinewrightApp {
     }
 
     /// The project bytes landed: the session adopts the saved path,
-    /// digest, and store, resets the read version on Save As (the bytes on
-    /// the new path are this build's — `IN2B` §4 rule 3), and checkpoints
-    /// the recovery journal onto the new baseline.
-    fn adopt_saved_path(&mut self, path: &Path, new_digest: &str, save_as: bool) {
+    /// digest, and store, records the version actually written (the bytes
+    /// on the path are this build's — `IN2B` §4 rule 3, MO2 R7), and
+    /// checkpoints the recovery journal onto the new baseline.
+    fn adopt_saved_path(&mut self, path: &Path, new_digest: &str, written_version: u32) {
         let name = project_name(Some(path), &self.focused().name);
         let (store, store_error) = match derive_lut_store(Some(path)) {
             Ok(store) => (store, None),
@@ -1177,9 +1181,7 @@ impl KinewrightApp {
         if let Some(stem) = sidecar_path_for_project(Some(path)) {
             session.established.insert(stem);
         }
-        if save_as {
-            session.format_version = PROJECT_FORMAT_VERSION;
-        }
+        session.format_version = written_version;
         session.set_lut_store(store, store_error);
         session.saved_document = Some(Arc::clone(&session.document));
         if let Some(investigator) = session.investigator.as_mut() {
@@ -1954,6 +1956,7 @@ impl KinewrightApp {
                     ClipContent::Media | ClipContent::Freeze(_) => {
                         document.asset(clip.asset).map(|asset| asset.name.clone())
                     }
+                    ClipContent::Adjustment | ClipContent::Solid(_) => None,
                 }
             }
             IncidentSubject::Chain(AudioChain::Bus(id)) => {
@@ -3021,6 +3024,7 @@ impl eframe::App for KinewrightApp {
         crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
         self.show_motion_plan_dialog(ui.ctx());
+        self.show_solo_dialog(ui.ctx());
         self.screenshot.update(ui.ctx());
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
             && probe.frame(ui.ctx(), began, self.texture.is_some())
@@ -3611,6 +3615,14 @@ pub(crate) fn operation_status(operation: &Operation) -> String {
             clip,
             speed_percent,
         } => format!("Set clip {clip} speed to {speed_percent}%"),
+        Operation::SetClipBlendMode { clip, blend_mode } => {
+            format!("Set clip {clip} blend to {blend_mode:?}")
+        }
+        Operation::AddAdjustmentClip { track, .. } => {
+            format!("Added adjustment layer to track {track}")
+        }
+        Operation::AddSolidClip { track, .. } => format!("Added solid to track {track}"),
+        Operation::SetSolidColor { clip, .. } => format!("Set solid {clip} colour"),
     }
 }
 
@@ -4987,6 +4999,7 @@ mod tests {
                     audio_fade_out_frames: super::TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             fps: Rational::new(30, 1).unwrap(),
@@ -5516,7 +5529,7 @@ pub(crate) mod in1_tests {
     /// state everywhere else. There is deliberately no window, no model, and
     /// no audio device — the same terms §9 lays down.
     #[allow(clippy::too_many_lines)]
-    fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
+    pub(crate) fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
         let playback: Arc<dyn Playback> = engine.clone();
         let analysis: Arc<dyn Analysis> = engine.clone();
@@ -5581,6 +5594,7 @@ pub(crate) mod in1_tests {
             pending_legacy_relink: None,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
+            solo_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
@@ -5817,7 +5831,7 @@ pub(crate) mod in1_tests {
     ///
     /// Two router tests drive `poll_background` itself rather than this
     /// mirror, so the production tick is pinned as well as the decision.
-    fn in1_drain_core(app: &mut KinewrightApp, project_index: usize) {
+    pub(crate) fn in1_drain_core(app: &mut KinewrightApp, project_index: usize) {
         let events: Vec<Event> = app.projects[project_index].core_events.try_iter().collect();
         for event in events {
             app.note_core_event_for_router(project_index, &event);
@@ -5874,7 +5888,7 @@ pub(crate) mod in1_tests {
 
     /// Drain until the session revision moves past `from`, or panic on a
     /// hang. Returns after adopting the newest document.
-    fn in1_drain_until_revision(
+    pub(crate) fn in1_drain_until_revision(
         app: &mut KinewrightApp,
         project_index: usize,
         from: TimelineRevision,
@@ -10230,6 +10244,7 @@ mod in2b_tests {
             pending_legacy_relink: None,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
+            solo_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
@@ -10795,6 +10810,43 @@ mod in2b_tests {
         in2b_shutdown(&mut app);
     }
 
+    /// MO2 R7: a save records the version it actually wrote — an
+    /// overwrite-save that adds MO2 content moves a v1 session to 2, and the
+    /// file reopens as 2 and stays overwritable.
+    #[test]
+    fn mo2_a_save_records_the_version_written() {
+        let temp = TempDirectory::new("mo2-save-version");
+        let project_path = temp.path("edit.kinewright");
+        let mut document = Document::default();
+        for op in [
+            Operation::AddTrack {
+                track: kinewright_core::Track {
+                    id: TrackId(1),
+                    kind: kinewright_core::TrackKind::Video,
+                    sync_lock: true,
+                    clips: Vec::new(),
+                },
+            },
+            Operation::AddSolidClip {
+                track: TrackId(1),
+                timeline_start: TimeCode(0),
+                duration: TimeCode(30),
+                color: kinewright_core::SolidColor { r: 1, g: 2, b: 3 },
+            },
+        ] {
+            op.apply(&mut document).expect("the fixture op applies");
+        }
+        let (mut app, _engine) = in2b_harness(document, Some(project_path.clone()));
+        app.focused_mut().format_version = 1;
+        app.write_project(&project_path)
+            .expect("the overwrite-save lands");
+        assert_eq!(app.focused().format_version, 2, "the session records 2");
+        let (_, version, _) = load_document(&project_path).expect("the save reopens");
+        assert_eq!(version, 2, "the file carries 2");
+        assert!(app.save_project(false), "a v2 session overwrites its file");
+        in2b_shutdown(&mut app);
+    }
+
     /// Item 18: a newer file opens with exactly one `project_newer_format`
     /// incident and no overwrite-save; Save As writes current-version bytes
     /// that reopen clean; versionless files open silently as v1.
@@ -10878,8 +10930,8 @@ mod in2b_tests {
         app.write_project(&copy_path).expect("Save As succeeds");
         assert_eq!(
             app.focused().format_version,
-            PROJECT_FORMAT_VERSION,
-            "Save As resets the read version"
+            1,
+            "Save As records the version written"
         );
         app.write_project(&copy_path)
             .expect("overwrite-save re-enables for the new path");

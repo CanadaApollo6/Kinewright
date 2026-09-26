@@ -1439,6 +1439,8 @@ fn clip_content_name(content: &ClipContent) -> &'static str {
         ClipContent::Media => "media",
         ClipContent::Title(_) => "title",
         ClipContent::Freeze(_) => "freeze",
+        ClipContent::Adjustment => "adjustment",
+        ClipContent::Solid(_) => "solid",
     }
 }
 
@@ -5474,6 +5476,7 @@ mod tests {
                     audio_fade_out_frames: kinewright_core::TimeCode(0),
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset],
@@ -5835,6 +5838,7 @@ mod tests {
                 audio_fade_out_frames: kinewright_core::TimeCode(0),
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
 

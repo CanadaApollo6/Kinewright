@@ -1954,7 +1954,8 @@ fn produce_deliverable(
         ));
         return finish_deliverable(result);
     }
-    match serde_json::to_vec_pretty(document)
+    // MO2 R7: the shared project writer stamps the minimum-required version.
+    match kinewright_project::serialize_project_document(document)
         .map_err(|error| error.to_string())
         .and_then(|json| fs::write(&result.document_path, json).map_err(|error| error.to_string()))
     {
@@ -2926,6 +2927,7 @@ fn audio_tail_document(
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset.clone()],
@@ -9430,6 +9432,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset],
@@ -9507,6 +9510,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }
     }
 
@@ -11250,6 +11254,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         let mut context = FixtureContext::default();

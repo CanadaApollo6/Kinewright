@@ -22,6 +22,622 @@
 | P12 | §11 R32 |
 | P13 | §8 R26 |
 
+## 0.2 Implementation errata (Part A)
+
+- ME1 → §12 Part A scope: the agent read-back (`render_timeline_state`,
+  clip info) names the new kinds (`adjustment`, `solid=#rrggbb`) and a
+  non-`normal` blend (` blend=<mode>`) in Part A, not Part B. Evidence:
+  otherwise the four R8 mutators' results read back as `asset=0
+  <missing>`, a false missing-media claim. `Normal` output stays
+  byte-identical (existing goldens unchanged); +83 production lines.
+- ME2 → §4 R13 (Part B1): non-`Normal` adjustment Push costs **2** copies,
+  not 3. `D0` is snapshotted into A before the backdrop draw and nothing
+  overwrites A afterwards; the shifted backdrop is re-snapshotted into a
+  second pooled texture B, so the adjustment samples `D0` from A and blends
+  against B. The "preserve `D0` before overwriting the destination
+  snapshot" copy only exists if the re-snapshot reuses A. Semantics are
+  unchanged (gate 5's adjustment-Push cases, GPU ≡ twin); the copy-count
+  probe pins 0/0/0/1/1/1/1/2/2 across Normal, Slide, Wipe, blend,
+  adjustment, Normal Push, Normal adjustment Push, blend Push and blend
+  adjustment Push. Ledger two pooled snapshots, not three. (ME10 makes a
+  `Normal` adjustment Push 2 as well.)
+- ME3 → §4 R16 (Part B1): the MO1 R26 re-gate runs each golden's raster,
+  size and transform through `WorkingFrame::from_display_frame`, the input
+  type every render composites, not the goldens' 8-bit `FrameTexture`.
+  Evidence: lavapipe filters `Rgba8Unorm` at 8-bit precision (up to 0.008
+  linear off an exact bilinear on the high-frequency gradient), which no
+  twin reproduces portably. That path is fixture-only (production never
+  composites 8-bit textures). With f16 inputs, GPU ≡ twin within 5e-4 on
+  all 13 cases.
+- ME4 → §7 R24 (Part B2): the argument is `clip_id`, not `clip` — every
+  clip-targeted capability (`plan_motion`, the colour planners) spells it
+  that way, and a lone `clip` would be the registry's only exception.
+  `SoloError` carries two variants beyond the three R24 names:
+  `InvalidSamples` (`samples` outside 2..16, which the schema cannot bound)
+  and `RenderFailed` (a typed outer variant kept apart from
+  `SoloClipNotVisible`; the proof path's inner `MediaError` is carried
+  stringified, not as a typed payload). Refusals are budgeted like strips:
+  one whose JSON body passes 4 KiB or whose serialized response passes
+  1,056 KiB (a path-bearing render failure) is answered as a fixed-size
+  `solo_over_budget` instead, and a working raster past the device's 8192-px
+  texture side is refused `solo_over_budget` (`render_side`) in every mode
+  before any product or allocation (fix round 1). Malformed arguments get
+  one fixed-size JSON-RPC InvalidParams (`preview_solo: invalid arguments`,
+  data code `solo_invalid_arguments`) instead of the decoder's message,
+  which echoes the input; other tools keep their decoder messages (fix
+  round 2). The budget is the whole reply on the wire (final fix): every
+  `preview_solo` reply — strip, solo refusal, stale-revision text,
+  InvalidParams or any other error, a panicked handler included (answered
+  with the fixed text `tool call failed: handler panicked`, never its
+  payload, as for every tool; N24) — crosses one choke point in
+  `call_tool`, which measures it as rmcp serializes the JSON-RPC message
+  (echoed request id and `resultType` included) plus
+  `SOLO_FRAMING_BYTES` = 128, a bound on rmcp 3.1.2's SSE framing (priming
+  event 25 B + reply event 13 B + two event ids of at most 41 B = 120 B).
+  Outside the measure by definition: HTTP headers, HTTP chunk framing and
+  SSE keep-alive comments (sent only while a render passes 15 s; transport
+  liveness, not reply bytes). A reply measuring over
+  1,081,344 B is replaced by the minimal typed refusal —
+  `{"resultType":"complete","content":[{"type":"text","text":"solo_over_budget"}],"structuredContent":{"code":"solo_over_budget"},"isError":true}`
+  (142 B), a 175-B message around the id, 303 B with framing — whenever
+  that is smaller (an InvalidParams already is, and stays). **Residual:** a
+  dispatched reply — one the transport hands to `call_tool` — can pass the
+  budget only when the request id's JSON is longer than
+  1,081,344 − 303 = 1,081,041 B, since the protocol must echo the id.
+  rmcp's pre-dispatch refusals are outside it: they predate MO2, cover
+  every tool and never reach the choke point (−32020 quotes the
+  request's `_meta` protocolVersion; a malformed id gets a silent HTTP
+  202). They belong to AW2 under AW2-OBL-1, which requires every
+  transport refusal to be bounded and echo-free and a malformed id to get
+  −32600 (N21, N24). A `context: isolated` sent for an
+  adjustment is answered as `below` — the report says so — rather than
+  refused, since R24 says "no override". Codes are `solo_clip_not_visible`,
+  `solo_window_empty`, `solo_over_budget`, `solo_invalid_samples`,
+  `solo_render_failed`.
+- ME5 → §12 staging (N13): Part B2 split under §12's > 20% rule. B2 is now the
+  solo transport, the registry re-pin and the R28 floors/ledger; a new
+  **B3** carries the R26 person GUI and the §8 parity checklist (budget
+  ≤ 700, stop at > 840). Evidence: B2 stopped at 423 landed lines plus a
+  634-line GUI, projecting 1,140–1,210 against ≤ 800. Thinning (moving the
+  viewer drag and wedge glyphs to MO6) was rejected as a change to R26. B3
+  landed at 688 production lines and stands at 830 after fix round 1 (inside
+  the 840 stop), over S7's ≤ 400 for GUI gestures + menus, because it also
+  holds the solo strip dialog, its context/sample controls and the parity
+  seams. The final ledger (N21) is Part A 691, B1 ≈ 1,713, B2 ≈ 715
+  (solo/registry 524, R28 191) and B3 830: ≈ 3,950 against 3,200, about
+  23% over and past §12's 20%. The overage is accepted through the
+  recorded overrides: B1's review-fix growth (N15, N18), R28's
+  resident-source scope (N19, N20) and its 191 lines (N21). R28 ran after
+  the B1 review fixes, since those change the render hot path.
+  **R28 now (N23).** The 191 was the pre-fix snapshot. The final
+  verification fix added 13 production lines and removed 1, giving
+  204 added / 29 removed; ME14 added none. ME15 adds 107 and removes 45
+  (`git diff -U0`). Fourteen of those removals are R28's own earlier
+  lines (11 from the final-verification fix, 3 from the first R28
+  commit). The other 31 are earlier code: 20 pre-MO2 lines (the
+  `write_texture` call) and 11 MO2 B1 lines (imports, the stage-layer
+  call site). R28 therefore stands at **297 added / 60 removed** (net
+  237), counted like the re-review's `current-line-count.json`:
+  `compositor.rs` production code, blank lines included, `#[cfg(test)]`
+  items excluded. The solo/registry 524 also moves: the final fix
+  (af96c8e) added 71 production lines and removed 59 (net +12), and the
+  N24 fix adds 9 and removes 1 (net +8), giving 544. B2 is then
+  ≈ 544 + 297 = 841 and the total ≈ 691 + 1,713 + 841 + 830 = 4,075,
+  about 27% over 3,200. The ME15 growth was lead-ordered (N23) and the
+  choke-point fixes review-ordered (N21, N24); those overrides carry
+  them.
+  **R28 after ME16 (N25).** ME16 adds 186 production lines and removes
+  86 (`git diff -U0`, the same count). Six of the added lines are
+  `#[cfg(test)]` hook calls inside production functions, counted anyway.
+  Twenty-eight of the removals are ME15's own lines (the upload helper
+  and the cleanup's inline submit, now shared). The other 58 are earlier
+  code: 42 pre-MO2 lines (the atlas `write_texture`, the readback wait)
+  and 16 MO2 B1 lines (the readback callers). R28 therefore stands at
+  **455 added / 118 removed** (net 337). B2 is ≈ 544 + 455 = 999 and the
+  total ≈ 691 + 1,713 + 999 + 830 = 4,233, about 32% over 3,200. The
+  ME16 growth was lead-ordered (N25), and that override carries it.
+  N26 reverts the readback deadline and adds the blocking callback wait.
+  That is +24/−17 production lines, all 17 removals ME16's own. R28 is
+  now **462 added / 118 removed** (net 344). B2 is ≈ 1,006 and the total
+  ≈ 4,240, about 32.5% over 3,200.
+- ME6 → §8 R26 (Part B3), readings the rule leaves open:
+  - Solids:
+    - The colour editor is egui's picker plus labelled R/G/B fields. A
+      picker session, a channel drag or one typed-entry session (from the
+      field taking focus) is one undo step.
+    - A new solid is mid-grey `#808080`.
+  - Adjustments:
+    - A new adjustment carries an empty look.
+    - Its "intended affected tracks" are the selected clip's track.
+      Without a selection, they are every video track with content in the
+      span.
+  - A placement refusal is a formatted typed refusal: the pure
+    `PlacementRefusal` (span, kind, the track to sit above, or a default
+    span past the last frame) is rendered as text into the Operations
+    incident log; the struct itself is not retained there.
+  - The viewer's transform overlay:
+    - It yields to an expanded matte section (CC5 owns that pointer).
+    - It writes through MO1's auto-key rule: keyed params get a key at the
+      playhead, others a static.
+    - Its outline, corner handles and scale pivot are the rendered layer:
+      the enabled effects' master, per-axis and fine scale, coarse and fine
+      offsets, rotation and anchor, as the compositor resolves them.
+  - The solo dialog never downscales: a strip past the GPU's texture side
+    (a default 8-sample strip is 2,560 px; egui's default side is 2,048) is
+    held as native-size tiles. Full-res opens at 1:1 (scroll to pan); a
+    fitted view says "shown at N%". The dialog also sends R24's context
+    (by blend, isolated, over below-stack) and sample count (2–16) — GUI
+    parity with the agent's arguments, not an exception (fix round 1).
+- ME7 → §3 R10 (B1 fix round 1, review-1 B1 / review-2 B2 + S1): R10's
+  checked set is every *special* layer — non-`Normal` blends **and every
+  adjustment, `Normal` included** (selector word 8: a `Normal` adjustment
+  validated against its snapshot; under Push, against the re-snapshotted
+  shifted backdrop, per ME10). The source, the
+  below value, the blend result and alpha must be finite, tested on the
+  bits before `min`/`max` can erase them; magnitude is checked only on the
+  value the target stores (`α·B + (1−α)·D`), so `Add(40000,40000)` at
+  α=0.25 stores 49,984 instead of refusing. **Scope (lead ruling N15.3,
+  reversed by N17.1 — see ME11):**
+  `Normal` *pixel* layers stay unchecked in MO2. Three things rule it: the
+  CC3 overflow contract (`cc3_boundary_controls_…overflows_to_infinity`),
+  R12's untouched all-`Normal` fast path, and CC8 R35. Review-2's
+  `(Normal, +inf)` pair-lanes case was therefore ruled out, not dropped
+  silently.
+- ME8 → §4 R14 / §6 R21 (B1 fix round 1, review-2 B1 + S2): no NDC
+  varying. The GPU decides coverage on the exact fragment position `i + ½`
+  against an edge the host moves into output pixels, rounded up to the
+  next pixel centre (`⌈e·n − ½⌉ + ½`), and the twin compares `(i + ½) <
+  e·n` in f64. Keep-`<`-edge therefore holds exactly when the centre
+  fraction is `< e`. Evidence: the interpolated NDC misplaced tie centres
+  on odd rasters (17×11 at `p = ½`: up to 195 bad channels per direction).
+  Separately, a centre that is rasterized on a quad's top/left edge
+  interpolates uv a few ulps below 0, and the crop test zeroed it (the
+  isolated down Push/Slide mismatch). The crop now tests uv clamped to
+  [0, 1]. Pinned by the odd/even transition grid and the exact-centre
+  probe (M22/M25 and both fixes' reversals killed).
+- ME9 → §9 R27 (B1 fix round 1, Windows CI run 36222189672, WARP): a
+  GPU≡twin working value may also differ by a **derived sub-texel
+  envelope**. D3D requires only 8 bits of sub-texel filter precision
+  (Vulkan's `subTexelPrecisionBits`; lavapipe and NVIDIA report 8). The
+  bilinear value is multilinear in its weights, so every rounding of
+  `(fx, fy)` to 2⁻⁸ lies between the four floor/ceil corners. The twin
+  renders those four corners, and the per-value slack is the largest
+  `|corner − exact|` (≤ 2⁻⁸ × the local neighbour contrast per axis),
+  carried through the rest of the pipeline. The slack is zero for
+  unfiltered values, so they keep the unit 1e-3 (pinned on a blit); a
+  filtered value's slack is not necessarily nonzero (corners can cancel).
+  *(ME11 restricts the envelope to a proved subset.)* It is computed only when a value
+  misses the exact R27. Evidence (emulated, CPU): WARP's R26 gradient
+  value 290 departs by 0.00146 against a slack of 0.00244. The
+  `slide_right` title at frame 3, pixel 6708, departs by 0.00122 against
+  a slack of 0.00171; the twin reproduces CI's exact value there. Neither
+  failure was a coverage tie. Adapters with fewer than 8 bits are out of
+  scope.
+- ME10 → §3 R9b (B1 fix round 2, lead ruling N15.1): a special layer
+  (selectors 1–6 and 8) **composites the over in its shader and emits
+  `(α·B + (1−α)·D, 1)`**, where D is the snapshot it already samples. It
+  no longer emits `(B, αs)`. The fixed-function state is unchanged, so it
+  stores the emitted value: `1·out + 0·D`, alpha `1·1 + 0·1`. `Normal`
+  pixel layers (selector 0) and the R12 fast path are untouched; their
+  pre/post identity and CC8 G2 SDR identity are re-run on both lanes.
+  - *Evidence.* ME7 checks magnitude only on the stored value. On the
+    RTX 3090, `Add(40000,40000)` at α=0.25 over D=40000 stored **46,368**,
+    not 49,984. The fixed-function unit clamped the source B=80,000 to
+    65,504 before blending: `0.25·65504 + 0.75·40000 = 46,376 → 46,368`.
+    That silently stored a wrong value (lavapipe stored 49,984).
+  - *Why this is portable.* Blending an out-of-range f16 source is
+    implementation-defined. The shader already holds `B`, `D` and `α` in
+    f32, so the only value crossing the blend unit is the representable
+    result R10 has already checked.
+  - *Consequence for Push.* The opaque emission overwrites every
+    rasterized pixel, including pixels whose coverage α is 0. So `D` must
+    be the true target. Every special entering layer under Push
+    re-snapshots the shifted backdrop. A `Normal` adjustment Push
+    therefore costs 2 copies, not 1: its quad can rasterize pixels
+    coverage rejects (pinned by a moved adjustment in gate 5, which went
+    red on the emission alone). The non-`Normal` Push re-snapshot is kept.
+    R21 does not make it provably redundant, because the backdrop's
+    in-raster test runs on the f32 fraction `x/n − q` while coverage uses
+    the host's pixel edge, and near-ties can disagree. It is noted for
+    R28 perf.
+  - *Residual (superseded by ME12).* Both lanes' f32→f16 target store can
+    round a value just above an f16 midpoint down by one ulp, where the
+    twin rounds to nearest. This is within R27's 1e-3, but a uniform frame turns it into
+    one monitor code on every pixel. The review's 60% legacy-cube Screen
+    probe fails the mean gate on both lanes for that reason, so it runs
+    at 70%.
+- ME11 → §3 R10 (B1 fix round 3, re-review B1/B2/S1, lead ruling N17):
+  - *R10 is universal.* Every layer flags on write when it would store a
+    non-finite or over-f16 value, `Normal` pixel layers included; ME7's
+    N15.3 scope is withdrawn. A `Normal` layer's store is the
+    fixed-function over of its `(S, α)` onto a representable `D`, so it
+    flags exactly when `S` or `α` is non-finite, or `α > 0` and some
+    `|S| > 65504` — the cases whose over is non-finite or
+    implementation-defined (the RTX 3090 clamps). The flag write is
+    conditional: finite bytes, copies and the R12 fast path are unchanged
+    (no schedule, no snapshot). An all-`Normal` frame binds a per-layer
+    flag buffer recycled across frames (cleared in the frame's encoder,
+    read back after the pixels), so it adds no per-frame allocation.
+    Attribution stays sticky and names the clip and frame (pinned by
+    `rereview_me7_valid_normal_solid_overflow`, covered and uncovered, on
+    the working, twin, monitor and delivery paths).
+  - *Amended pins (R10: "never accepts adapter saturation as success").*
+    Each stored value was checked first; every one is non-finite or past
+    f16, so each now expects `NonFiniteRender { layer: 0 }`:
+    `cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_infinity`
+    (slope = power = 16 at linear 4.0: f32 +inf; the CPU monitor clamp
+    to 255 is unchanged, the GPU working and monitor renders refuse);
+    `cc3_monotone_nodes_never_descend_on_the_neutral_ramps`, GPU case
+    `master_lift-2000_gamma4000_gain4000` (stores 115,538 at white on
+    both ramps; the CPU monotone check and the other seven GPU cases are
+    unchanged); `cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu`
+    §9.2.1 over-range GPU renders (slope = power = 16 inside the matte
+    and at the unmatted 4.0 sample; the GPU over-range containment now
+    runs on the finite gain grade); `zero_coverage_is_an_exact_identity`
+    (non-finite inside the matte; the outside identity is read off a
+    finite grade); and MO2's own `r10_refusal_names_clip_and_frame…`
+    (2²⁰ now refuses at layer 0) and `review1_r10_nan_extrema…` (a NaN
+    below refuses at its own layer, 0).
+  - *Sampled alpha.* Every layer tests the sampled source alpha's bits for
+    NaN/±inf right after the sample, before clamp, fade, crop or mask can
+    erase them, stickily and on both lanes (pinned by
+    `rereview_special_nonfinite_source_alpha`: Darken/Screen/Add × NaN/±inf,
+    red on both lanes before the fix). The shader writes that flag in its
+    own statement at the sample. Carrying it as a `bool` into the final
+    flag conditions made the RTX 3090 (driver 615.71.09) stop flagging
+    forced-NaN RGB operands, on the NVIDIA lane only (mechanism not
+    diagnosed; lavapipe was green).
+  - *ME9 restricted to a proved subset* (re-review S1). Four shared
+    corners bound every rounding only where the output is multilinear in
+    one sampling's weights. With two resampled layers (two opposing
+    shifted ramps, `Add`), each sample may round independently, and a
+    conformant nearest-8-bit result departs by 0.0039 where the shared
+    corners give zero slack. The twin helper now applies the envelope only
+    when at most one layer resamples distinct texels. That layer must be
+    the topmost, a `Normal` pixel layer with uniform source alpha and only
+    `transform`/`opacity`/`crop`/`mask` effects, with no Push backdrop
+    anywhere. Anything else returns an error rather than a widening (a
+    uniform source, such as a solid, never counts as resampled). Pinned by
+    `rereview_me9_envelope_refuses_unproved_stacks` (sources 2/3/5,
+    outputs 17/31/97/129). The WARP title evidence is outside the subset
+    (non-uniform alpha), so its test now asserts the refusal. The gate
+    fixture moves the title by whole pixels only (x = 20% is 32 px; the
+    slide/push offsets at frames 1/3/4 are integral), so no lane needs
+    envelope slack there. At those offsets GPU ≡ twin bit-exactly for
+    special layers (the `Normal` adjustments included, ME12). The
+    `Normal`-title frames keep the target's own store and differ by at
+    most one f16 ULP — adjacent half values, e.g. GPU 0.2156982421875 vs
+    twin 0.2158203125 (worst 0.00048828125, 12 of 16 frames) — within R27
+    with zero slack (final verification N1, re-review N1; this corrects
+    N18's "exactly" and N21's "½ ULP" wording). The solid keeps its scale and rotation.
+- ME12 → §3 R9b/R10 (B1 fix round 3, re-review S2, lead ruling N17.4):
+  **one storage rule.** A special layer (selectors 1–6 and 8) rounds its
+  composite `α·B + (1−α)·D` to f16 round-to-nearest-even **in the shader**
+  and emits that exactly representable value with alpha 1 (ME10). The
+  α = 1 fixed-function store is therefore exact on every backend. The
+  rounding is integer bit manipulation (exact power-of-two scaling built
+  from the exponent bits, WGSL `round`, which ties to even). It does not
+  rely on the target's conversion or `pack2x16float`, whose rounding
+  Vulkan and WGSL leave unspecified. Subnormals share the 2⁻²⁴ quantum;
+  a result past 65504 (a composite ≥ 65520) is ±inf and refuses, and
+  R10's magnitude check reads the rounded value. The twin's
+  `f16::from_f32` is the same RTE. `Normal` pixel stores (selector 0) and
+  the Push backdrop (selector 7) keep the target's own conversion, so
+  their bytes are the pre-MO2 bytes (B8; `normal_pre_post_identity`,
+  `cc8_g2_sdr_identity` re-run). The G7 probe runs at the review's 60%
+  again (70% kept), with and without the legacy cube. A bit-exact probe
+  pins ties to even at 1 and 2048, a signed tie, subnormal ties at α = ½,
+  65519.98 → 65504, and 65520 refused, on both lanes. The G7 probe and
+  the bit-exact probe were red with the target's conversion.
+
+- ME13 → §9 R28, §13 gate 10 (R28 worker stop, lead ruling N19):
+  **the floors bound compositor frames; decode is tracked.** R28 put
+  decode inside the floor protocol. Decode is outside MO2 and pre-dates
+  it, so the floors could not be met by optimising copies on any backend.
+  - *Evidence (release, 1280×720 proxy output from 1920×1080 documents,
+    `FrameRenderer` playback path, sequential decode).* End to end,
+    typical 1080p ran at ≈ 2 fps on both lavapipe and the RTX 3090, the
+    same as at f241aa5 (494–498 ms per frame). A probe with continuous
+    whole-clip tracks on the 3090 gave the cause:
+
+    | media tracks | mean ms | pattern |
+    |---|---|---|
+    | 1 | 64 | 21–22 ms cached frames; ~610 ms every 16th (prefetch) |
+    | 2 | 1,227 | ~1.2 s every frame |
+    | 3 | 1,909 | ~1.9 s every frame |
+
+    Mechanism: sequential prefetch holds 16 frames per source at
+    1280×720×8 B (7.37 MB). Two sources need 236 MB, over
+    `FRAME_CACHE_BYTE_BUDGET` (224 MiB). `reserve_cache_bytes` then evicts
+    by insertion order, which throws away the other source's
+    soonest-needed frames. The next frame misses, the decoder's
+    continuation no longer matches, and `decode_window` seeks from the
+    keyframe and re-decodes — every frame, for every source. A decode
+    plus convert costs ≈ 38 ms per 1080p source frame.
+  - *Amended protocol.* The absolute floors (lavapipe 8, WARP 20,
+    RTX 3090 60 fps) and p95 ≤ 3× mean apply to **compositor frames with
+    resident, pre-decoded sources**: render + readback + monitor encode,
+    measured by `FrameRenderer::render_timed` with the renderer's frame
+    cache raised to 1 GiB. Everything else is unchanged: 30 + 300 frames,
+    three runs, one frame in flight, preview proxy output, and the
+    ledger ceilings on every run. End-to-end preview frames (decode
+    included) are a **tracked, non-gating** baseline, and so is their
+    p95. The end-to-end **5% no-regression rule against f241aa5 still
+    gates** (`r28_end_to_end_tracked`, pinned typical baselines). Decode,
+    the cache policy and prefetch go to PF1.
+  - *Pins (compositor frames, three-run mean / worst p95).*
+
+    | backend | typical 1080p | blend_heavy 1080p | heavy 4K | floor |
+    |---|---|---|---|---|
+    | lavapipe (llvmpipe, LLVM 22.1.8) | 33.1 / 36.8 ms, 30.2 fps | 44.4 / 49.0 ms, 22.5 fps | 38.8 / 43.6 ms | 8 fps: holds |
+    | RTX 3090 (driver 615.71.09) | 28.9 / 36.8 ms, 34.6 fps | 36.5 / 46.1 ms, 27.4 fps | 31.9 / 42.0 ms | 60 fps: **missed, pre-existing** |
+    | WARP | owed (ME14) | owed (ME14) | — | 20 fps |
+
+    The 3090 miss is recorded, not loosened. Its breakdown (blend_heavy
+    per frame, instrumented probe): CPU monitor encode 25.8 ms (CC1's
+    per-pixel f16 → BT.709 OETF in f32), layer upload `write_texture`
+    7.8 ms (three 1280×720 RGBA16F frames), GPU passes + snapshot copies
+    1.7 ms, readback copy + map 0.8 ms (a scratch build split the submit
+    to time these). Everything MO2's render path touches — passes,
+    snapshot copies, flag readback — totals ≈ 2.5 ms. The pre-existing
+    encode and upload alone, ≈ 34 ms, exceed the 16.7 ms frame time, so
+    no copy optimisation can meet the floor; the fix goes to PF1.
+    The slowdown control fails on both local lanes: lavapipe with a
+    312.5 ms delay (2.8 fps), the 3090 with 41.7 ms (12.6 fps).
+  - *End to end (tracked; typical 1080p, three-run mean / worst p95).*
+
+    | backend | f241aa5 | MO2 tip | Δ (5% rule) |
+    |---|---|---|---|
+    | lavapipe | 497.9 / 1,587 ms | 489.1 / 1,548 ms | −1.8%: holds |
+    | RTX 3090 | 494.4 / 1,576 ms | 485.2 / 1,554 ms | −1.9%: holds |
+
+    Both trees ran the same protocol code against the same pinned FFmpeg
+    build (`BASELINES` in `mo2_perf_fixtures`). A decode-bound frame
+    moves with code layout: on identical sources, the tip binary's mean
+    ranged from −10% to +3% across three rebuilds. The pins are the
+    committed build. blend_heavy end to end: 1,709 ms (3090, one run),
+    tracked only, because it has no pre-MO2 equivalent.
+  - *Solo (lavapipe, release).* A 1080p clip under an adjustment, with
+    the adjustment soloed. The 16-sample strip took 3.8 s and the
+    full-resolution pair 0.47 s. The ledger peaked at 79.1 MiB and
+    returned to 0 (`r28_solo_peak_resources_and_elapsed`).
+  - *Ledger peaks.* Preview-proxy runs: typical 56.3 MiB, blend_heavy
+    63.3 MiB, heavy 4K 70.3 MiB. Full-resolution frames: 126.6, 142.4
+    and 632.8 MiB. Ceilings are 384 / 384 / 1,536 MiB. Every MO2 frame
+    resource is charged. Layer-upload staging and failed-frame release
+    follow ME15, which supersedes the final verification's
+    padded-upper-bound charge and unbounded flush. LUT-atlas staging and
+    the completion-owned readback follow ME16, which removes the earlier
+    atlas exception. The peaks above cannot move under ME15: every
+    workload's rows (1280, 1920 and 3840 px × 8 B) are already
+    256-aligned, so each upload's staging is the bytes charged before,
+    held for the same span (to readback). Under ME16 the full-resolution
+    peaks were re-measured and are unchanged. These workloads bind only
+    the identity atlas, whose staging is 1 KiB.
+  - *`validate()` per frame (N11-4):* 1.1–1.8 µs at 1080p, 10 µs for the
+    200-clip 4K document. No revision-keyed cache is needed.
+- ME14 → §9 R28, §13 gate 10 (Windows CI run 36248329932, lead rulings
+  N22 and Riel's follow-up): **the WARP floor is measured by hand, not in
+  hosted CI.** A shared hosted runner does not represent the floor's
+  target, a Windows desktop with no GPU. The CI step is removed. The
+  fallback-adapter test stays `--ignored` with its 20 fps floor
+  unchanged, and the lead runs it by hand on a local Windows VM
+  (`cargo test --release -p kinewright-media --lib
+  blend_heavy_holds_floors_on_the_fallback_adapter -- --ignored
+  --nocapture`, with `R28_ONLY=typical_1080p,blend_heavy_1080p`). The
+  WARP floor stays owed until that run is pinned here.
+  - *Recorded observation (hosted `windows-latest`, 4 vCPU, WARP
+    "Microsoft Basic Render Driver", release, compositor frames, three
+    runs; not a pin).*
+
+    | workload | mean ms per run | worst p95 | fps | ledger peak |
+    |---|---|---|---|---|
+    | typical 1080p | 796.9 / 740.0 / 750.0 | 857.6 ms | 1.3–1.4 | 56.3 MiB |
+    | blend_heavy 1080p | 944.2 / 941.0 / 940.4 | 1,004.4 ms | 1.1 | 63.3 MiB |
+
+    p95 ≤ 3× mean and the ledger ceilings held; the slowdown control
+    (125 ms delay, 0.9 fps) was detected. The step took 53 min (7 min of
+    it the release build). Ledger peaks match lavapipe exactly.
+  - *Breakdown print.* Every resident lane now also prints one
+    `R28 phases` line per workload: the mean over 30 frames (after 10
+    warm-up) of upload (staging and command recording), GPU passes +
+    readback (submit to mapped) and CPU monitor encode. It is recorded,
+    never gated, so a backend pathology shows in the log. The timing
+    helpers are test-only (`compositor::phases`, `render::phases`).
+    Lavapipe, typical 1080p: 7.4 / 6.3 / 18.9 ms of a 33.3 ms frame,
+    which agrees with ME13's breakdown.
+
+- ME15 → §9 R28 (re-review of the final verification, B1/B2/S2, lead
+  ruling N23): **the ledger charges API-level bytes, and MO2 owns the
+  layer-upload staging.** R28's "staging" is the buffers MO2 asks wgpu
+  for, charged at their API size. What a backend allocator rounds that up
+  to is documented here and not charged.
+  - *Explicit staging.* A pixel layer's upload no longer goes through
+    `queue.write_texture`, whose internal staging row pitch belongs to the
+    backend (Vulkan passes the driver's
+    `optimalBufferCopyRowPitchAlignment` through unclamped, so no constant
+    bounds it). `upload_layer` creates one buffer per uploaded layer
+    (`MAP_WRITE | COPY_SRC`, mapped at creation). Each row is padded to
+    `COPY_BYTES_PER_ROW_ALIGNMENT` (256), the `copy_buffer_to_texture`
+    contract on every backend. The rows are written into the mapping, the
+    buffer is unmapped and charged exactly (`padded row × height`). The
+    frame's encoder copies it into the pooled source texture before its
+    first pass. The buffer is held in the layer's resources until
+    readback and dropped with the frame. It is not reused across frames:
+    reuse would need a `map_async` and a poll per frame. The uniform and
+    grade `write_buffer` staging stays charged at its data size, because
+    buffer writes have no row pitch. The LUT atlas's upload follows the
+    same path (ME16).
+  - *Backend granularity (documented, not charged).* DX12 places
+    buffers on 64 KiB boundaries: on the Windows CI WARP adapter, wgpu's
+    buffer counter moved 65,536 B for a 32-px-wide upload charged
+    16,384 B. Vulkan implementations suballocate with their own
+    alignment; lavapipe's counter delta equals the charge. These are
+    allocator properties. The ledger bounds what MO2
+    requests, so the counters are reported (`LEDGER_UPLOAD … backend_delta`)
+    and never asserted. `reverify_b1_legal_vulkan_pitch_512` is moot:
+    MO2 now chooses the pitch, so a driver's larger recommendation no
+    longer changes the bytes staged.
+  - *Bounded failed-frame wait.* A frame that fails after staging submits
+    nothing new, registers `on_submitted_work_done`, and polls
+    `PollType::Wait` for that submission with a **100 ms** timeout
+    (`FAILED_FRAME_WAIT`). If the callback has run, the frame's
+    resources and charges drop at once. Otherwise (a timeout, a poll
+    error) the frame moves to a `retired` list, still charged. Each later
+    `composite` sweeps the list and drops only frames whose callback a
+    poll has since run. Teardown drops the list with the compositor.
+    wgpu-core runs pending completion callbacks when a lost device's
+    queue drains, so device loss releases the frames too. A malformed
+    frame's refusal therefore waits at most 100 ms, and no charge leaves
+    before its writes are done.
+  - *Tests (default lane, all backends).*
+    - `final_ledger_upload_padding_counterexample` checks the row, the
+      buffer size and the charge against `(w·8)⌈256⌉ × h` for widths
+      1–65 and heights 1/3/64. It also checks that the frame copies that
+      buffer (G02).
+    - `final_ledger_exact_resources_and_lifetime` covers exactness and
+      lifetime.
+    - `final_ledger_failed_frame_retains_pending_uploads`: four failed
+      frames retire nothing and leave the ledger at baseline.
+    - `reverify_b2_requires_bounded_wait`: the poll carries a timeout of
+      at most 1 s.
+    - `reverify_b2_poll_error_preserves_charges`: a Timeout keeps every
+      charge and one retired frame, and a sweep with no completion keeps
+      it. A later completing poll plus the next frame release it to
+      baseline.
+    - `reverify_b2_flush_observes_live_charges` (G08): the charges are
+      live when the poll runs.
+    - `reverify_me14_phases_sum_same_frame` (G09/G10): the printed phases
+      partition one measured frame, each non-zero.
+    - `reverify_me14_warp_floor_boundary` (G11): synthetic WARP adapter
+      metadata selects the 20 fps floor and its boundary.
+
+    Each probe was red against its mutation: padding at 128, uncharged
+    staging, release before the poll, an unbounded wait, a timeout taken
+    as completion, a missing sweep, a zero phase, and floor 8. Probes that
+    parse `include_str!` sources normalise CRLF, so Windows checkouts
+    parse them identically.
+- ME16 → §9 R28 (render re-verification 2, B1/B2/S1, lead rulings N25
+  and N26): **every frame resource is charged, and every submitted charge
+  is completion-owned.**
+  - *Atlas staging.* A cold LUT atlas no longer uses
+    `queue.write_texture`. `build_lut_atlas` writes every slot into one
+    ME15 staging buffer (`staging_rows`: mapped at creation, charged
+    exactly). Each lattice row (`S × 16` B) sits at the widest slot's
+    pitch, padded to 256. One `copy_buffer_to_texture` per slot goes into
+    the atlas's own command buffer, which is submitted at once. Queue
+    order therefore puts the copy ahead of any frame that samples the
+    atlas, exactly as the queue write did. The staging buffer joins the
+    `retired` list with that submission's completion flag. It stays
+    charged until a poll observes the flag. It is normally swept at the
+    end of the frame that built it, since that frame's readback wait
+    completes the copy too. Otherwise it goes at the next failed frame,
+    composite or teardown. ME13's atlas exception is gone.
+  - *Readback: wait for completion (N26 reverses N25's bound).* The
+    readback wait covers every read-back frame: normal frames, R10
+    refusals, and encode errors after readback. It polls `Wait` for the
+    frame's own submission with **no deadline**. An application
+    deadline cannot tell a slow adapter from a hung one. Hang detection
+    belongs to the driver watchdog (Windows TDR, Linux GPU reset), which
+    wgpu surfaces as device loss or a poll error. Pinned native wgpu
+    29.0.4 may instead panic on a core device error. The injected
+    timeouts in the tests exercise charge ownership; they are not
+    watchdog evidence, and no real watchdog reset has been exercised
+    (rereview-4). The map callback, not
+    the poll status, decides completion:
+    - After a completed wait the frame blocks on the callback, which
+      another thread's submit may have collected and still be running.
+    - After a poll error it takes the callback only if it already ran.
+    - If the callback has not run, the frame refuses (`wgpu readback poll
+      failed: …`, or `wgpu readback callback stopped`). Its output,
+      readback buffer and layer resources move to `retired` under the
+      submission's completion flag. A later sweep drops them exactly
+      once, after a poll observes completion; teardown also drops them.
+    - The failed-frame staging cleanup keeps its 100 ms bound (ME15).
+      That frame has already failed, and its charges stay pending on
+      non-completion.
+    - Both waits go through one `frame_poll`, which the tests observe
+      and override. These are the only waits in the frame path.
+  - *Evidence (CI 36264529798 at 527afbf, the N25 10 s bound).*
+    - On Windows (hosted WARP), three legitimate slow software frames
+      were refused with `gpu_readback_timeout … within 10s`:
+      `cc1_managed_cache_memory_bound_is_measured_in_working_bytes`
+      (frame 10), `cc5_performance_evidence_is_recorded_on_software_fallback`
+      and `r28_ledger_holds_the_ceilings_and_releases_every_charge`.
+      The run ended 831 passed / 3 failed.
+    - On Linux, `generated_media`'s
+      `timeline_decode_selects_two_clips_and_renders_the_gap_black`
+      failed with "no frame 14 arrived". The bound does not explain this:
+      the whole binary finished in 11.3 s, and a readback refused at 10 s
+      would also miss the test's own 10 s receive. The cause was that
+      N25 read the map result with a non-blocking `try_recv` right after
+      the wait. `Queue::submit` runs wgpu-core's maintain and fires the
+      completed callbacks on the *submitting* thread. The engine's GPU
+      is process-wide (`FfmpegMediaEngine`'s static `GpuContext`), so
+      another test's submit could collect this frame's map callback
+      after its wait returned. The frame then refused spuriously, and the
+      engine sent an error event instead of frame 14.
+    - Reproduced: with `try_recv` after a completed wait, 8 threads × 600
+      frames on one lavapipe device refused 1–3 frames per run (3/3
+      runs). `generated_media` failed 1 of 15 runs with that variant.
+      With the blocking wait, 0 in 5 runs and 3/3 `generated_media`
+      runs pass.
+  - *Tests (default lane; NVIDIA once, `ledger_probes` 19/19).*
+    - `rev2_api_atlas_write_staging_is_charged`: the atlas charges its
+      texture plus its staging, 1,152 B for the identity cube, against the
+      earlier 128 B. The staging is retained until completion is
+      observed, then released.
+    - `rev3_runtime_refusal_readback_waits_for_completion`: an R10
+      refusal's only wait is `Wait{Some(own), None}`.
+    - `rev3_readback_poll_error_keeps_submitted_charges`: an injected
+      poll error refuses. It keeps every charge live at the poll (51,436
+      B, against a 9,100 B baseline) and one retired frame, and a sweep
+      without completion keeps them. After a completing poll the sweep
+      releases them; the ledger returns to the baseline after the next
+      frame, and to 0 at teardown.
+    - `rev3_repeated_readback_poll_errors_all_entries` (I06): three
+      cycles of 16 unfinished readbacks across the four entries, normal
+      and special. They alternate a poll error with a return that has no
+      callback. Every charge is retained and matches an independent
+      inventory. Completion recovers to the baseline, and teardown with
+      frames pending returns to 0.
+    - `rev3_readback_callback_overrules_poll_error` (I07): a completed
+      map wins over an error status on all four entries.
+    - `rev3_actual_upload_callsite_count` (I08): `copy_uploads` issues
+      one `copy_buffer_to_texture`. This is the API call, which the H10
+      counter alone cannot see.
+    - `rev3_concurrent_readbacks_never_refuse`: 8 threads × 600 frames
+      on one device, with no refusals.
+    - The five survivor probes of re-verification 2:
+      - `rev2_failed_flush_has_submission_index` (G05).
+      - `rev2_all_staging_error_paths_have_100ms_cleanup` (G07). All 18
+        staging refusals clean up with exactly one 100 ms wait and no
+        readback wait.
+      - `rev2_exact_100ms_cleanup_argument` (H01), which checks for
+        exactly 100 ms.
+      - `rev2_callback_completion_overrules_error_status` (H06).
+      - `rev2_upload_pixels_rgba8_rgba16_and_copy_count` (H10). Each
+        pixel layer gets one upload copy, and RGBA8 and RGBA16F pixels
+        arrive exact.
+
+    Each probe was red against its mutation. The re-verification
+    survivors were:
+    - no submission index;
+    - cleanup only above one staged layer;
+    - a 500 ms wait;
+    - poll `Ok` taken as completion;
+    - a duplicated upload copy;
+    - retained frames truncated to one (I06);
+    - a poll error overriding a completed map (I07);
+    - a duplicate API copy with no counter call (I08).
+
+    The mutations for the new rules were:
+    - an uncharged atlas staging;
+    - a 10 s readback deadline;
+    - a poll error that releases the frame;
+    - a poll error that drops the output;
+    - `try_recv` after a completed wait (the concurrency test).
+
 ## Changes in revision 2
 
 | Finding | Change → section |
@@ -227,7 +843,10 @@ alpha twice (B2). Composite: `out = αs·B + (1−αs)·D`, `out_a = 1`
 (provably: `αs + 1·(1−αs)`). Vector: `Screen` S=0.75 D=0.5 αs=0.5 →
 B=0.875, out=0.6875, alpha 1. Any future transparent accumulator needs an
 explicit premultiplied contract and an alpha-aware equation — forbidden
-without a new design. Pinned by an opaque-accumulator assert (every
+without a new design. *(ME10: the over is now composited in-shader and
+emitted opaque; the composite and `out_a = 1` are unchanged. ME12: the
+emitted composite is already f16 round-to-nearest-even, so the store is
+exact.)* Pinned by an opaque-accumulator assert (every
 accumulator readback alpha ≡ 1) plus the vector. Pin a partially
 transparent colour-fade source with mask and non-Normal blending.
 
@@ -236,11 +855,15 @@ no-intermediate-clamp invariant survives MO2). MO2 refuses non-finite
 working values and overflow at an f16 storage boundary; it never accepts
 adapter saturation as success. Detect invalid values before storage and
 retain a sticky per-layer failure indication until readback, including
-failures subsequently covered by another layer. Return a typed `MediaError`
+failures subsequently covered by another layer (ME11: every layer,
+`Normal` pixel layers included). Return a typed `MediaError`
 carrying offending clip and project frame through working, monitor,
 delivery and proof paths; map it through the existing incident family
 without adding an investigator code. Representable values use
-round-to-nearest f16 storage. Pin `Add(40000,40000)` and
+round-to-nearest f16 storage: *(ME12)* a special layer rounds to f16
+round-to-nearest-even in its shader and the store is exact; `Normal`
+pixel stores and the Push backdrop keep the target's conversion
+(pre-MO2 bytes). Pin `Add(40000,40000)` and
 `Multiply(256,256)` at full alpha as overflow refusals, forced NaN/inf
 refusals, and representable `Add(2,2)=4` preservation on every backend.
 
@@ -286,10 +909,10 @@ below-stack at completion; never translate the backdrop quad or clamp edge
 samples. A non-Normal entering layer then re-snapshots this shifted
 backdrop and blends against it. An adjustment's source remains the
 original `D0`, with its colour stack evaluated once; for non-Normal
-adjustment Push, preserve `D0` in a second pooled texture before
-overwriting the destination snapshot. Copy counts are ordinary special 1,
-Normal Push 1, non-Normal Push 2, and non-Normal adjustment Push 3. Ledger
-the extra preserved source. Pin transparent/masked/transformed endpoints,
+adjustment Push, the shifted backdrop is re-snapshotted into a second
+pooled texture so `D0` stays in the first (ME2). Copy counts are ordinary
+special 1, Normal Push 1, non-Normal Push 2, and any adjustment Push 2
+(ME10). Ledger the second pooled snapshot. Pin transparent/masked/transformed endpoints,
 OOB fallback, adjustment Push, and exact completion equality with ordinary
 composition.
 
@@ -297,8 +920,8 @@ composition.
 bytes asserted by an exact layout/size test: `blend_mode` selector (0 =
 `Normal`, accumulator sample under guard) plus transition-coverage words
 (edge, axis, on) shared by wipe/slide/push; `Push`/`Slide` offsets fold
-host-side into the offset arms; the vertex stage passes NDC position as a
-second varying for output-space coverage. One pipeline, one bind-group
+host-side into the offset arms; output-space coverage uses the fragment's
+pixel position (ME8). One pipeline, one bind-group
 layout. Budget one additional writable storage binding for per-layer
 validity flags: three sampled textures, two samplers, one uniform, two
 storage buffers. Identity is recovered from the layer-to-clip mapping; the
@@ -504,7 +1127,7 @@ differentials and contract tests; no SHA-256 frame pins (N4 G5). Pinned
 tolerances per domain (B8): unit-domain working-linear max abs ≤ 1e-3/
 channel; over-range relative ≤ 2^-10 and ≤ 4 f16 ULP; monitor bytes max ≤
 2 codes, p99 ≤ 1, mean ≤ 0.25 (the CC1 `abs_code_diff_rgb` method).
-R27's tolerances are MO2-specific; the future CC8 column additionally
+Resampled GPU≡twin values add the ME9 sub-texel envelope (ME11: only on its proved subset). R27's tolerances are MO2-specific; the future CC8 column additionally
 satisfies PB1–PB4. Fixtures are production-flavoured:
 PiP-over-presenter (`Normal`), `Screen` light leak, `Multiply` callout,
 adjustment look, solid title card, push/slide/wipe midpoints, and the §3
@@ -534,7 +1157,7 @@ fail throughput. The ledger control submits four 4096×4096 RGBA16F
 reservations, totalling 512 MiB, and must reject the 1080p budget. Extra
 copies and an unspecified 8K texture alone are not guaranteed failing
 controls. Report solo peak resources and elapsed time. Part B measures on
-all three backends and pins; a miss optimises copies, never tolerances.
+all three backends and pins; a miss optimises copies, never tolerances. *(ME13: the floors bind compositor frames with resident sources; end-to-end is tracked, its 5% rule gates. ME14: WARP is measured by hand on a local Windows VM, not in hosted CI.)*
 
 ## 10 Incidents
 
@@ -545,7 +1168,9 @@ allowlist stays at 54. The seven R8 variants join the compile-forced
 Reused: `UnknownTransition` / `InvalidTransitionDuration`,
 `SpeedOnNonMediaClip`, `EditorialRequiresMedia`, keep-outside/enable
 machinery, v1/v2 refusal. Solo failures are `SoloError` (R24), not
-incidents. Pinned by table tests + one render test per reused arm.
+incidents. The render entry's `MediaError::InvalidDocument` delegates
+its code and evidence to the wrapped `OpError` (B1 fix G10). Pinned by
+table tests + one render test per reused arm.
 
 ## 11 Concurrency (AW1 / CC8 / AW2)
 
@@ -653,7 +1278,8 @@ Each names its lane; "no regressions" alone gates nothing (MO0 §0).
     control (per-frame delay greater than twice the backend's frame-time
     floor) fails throughput and the ledger control (four 4096×4096
     RGBA16F reservations, 512 MiB) rejects the 1080p budget (fails: no
-    floors). Backend + ledger tests.
+    floors). Backend + ledger tests. *(ME13: compositor frames; RTX 3090
+    floor missed, pre-existing, PF1.)*
 11. `v2_stamps_only_when_used` — MO2-feature files stamp 2 and reopen;
     the v1 corpus writes byte-identical and stays 1. Actual old-reader
     tests distinguish unknown-content parse failure,
@@ -687,7 +1313,7 @@ MO2 window.
 - Bezier evaluation/handles, transparent export, presets → MO6.
 - Ping-pong accumulator, below-stack motion blur → future perf work (the
   R13 copy counts — ordinary special 1, Normal Push 1, non-Normal Push 2,
-  non-Normal adjustment Push 3 — stand until a floor says otherwise).
+  any adjustment Push 2 (ME2, ME10) — stand until a floor says otherwise).
 - Multi-turn rotation, off-layer pivots, >8192 px stills, image
   sequences → unchanged from MO1 §11.
 

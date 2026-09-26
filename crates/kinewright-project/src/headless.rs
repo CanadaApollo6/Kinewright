@@ -238,7 +238,11 @@ mod tests {
         );
         let (reloaded, version, digest) = load_document(&project).expect("the save re-loads");
         assert_eq!(reloaded, document, "the round trip is identical");
-        assert_eq!(version, kinewright_core::PROJECT_FORMAT_VERSION);
+        assert_eq!(
+            version,
+            crate::min_required_format_version(&document),
+            "the save stamps the document's minimum version"
+        );
         assert_eq!(
             report.project.digest, digest,
             "one digest serves both files"

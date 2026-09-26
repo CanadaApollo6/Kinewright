@@ -3722,13 +3722,24 @@ fn transition_operations_validate_crossfade_duration_and_are_atomic() {
 
 #[test]
 fn transition_descriptors_validate_all_registered_names_and_document_loads() {
-    assert_eq!(TRANSITION_DESCRIPTORS.len(), 3);
+    // MO2 R4: the M20 three plus 12 push/slide/wipe rows (extended, not
+    // forked).
+    assert_eq!(TRANSITION_DESCRIPTORS.len(), 15);
     assert!(transition_descriptor("crossfade").is_some());
     assert!(transition_descriptor("fade_from_black").is_some());
     assert!(transition_descriptor("fade_from_white").is_some());
     assert!(transition_descriptor("dip_to_black").is_none());
+    for kind in ["push", "slide", "wipe"] {
+        for direction in ["left", "right", "up", "down"] {
+            assert!(transition_descriptor(&format!("{kind}_{direction}")).is_some());
+        }
+    }
 
-    for name in ["fade_from_black", "fade_from_white"] {
+    for name in TRANSITION_DESCRIPTORS
+        .iter()
+        .map(|descriptor| descriptor.name)
+        .filter(|name| *name != "crossfade")
+    {
         let mut document = document_with_one_clip();
         Operation::AddTransition {
             clip: ClipId(1),
@@ -4342,6 +4353,7 @@ fn add_and_remove_track_are_validated_and_atomic() {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }],
     };
     assert_eq!(
@@ -4615,6 +4627,7 @@ fn unsorted_input_document_is_rejected() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let earlier = Clip {
         enabled: true,

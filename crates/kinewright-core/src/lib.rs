@@ -225,13 +225,13 @@ pub use media::{
 };
 pub use model::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
-    AudioBus, AudioBusId, AudioMaster, AudioMix, BinId, CHAIN_LOOKAHEAD_MILLISECONDS,
+    AudioBus, AudioBusId, AudioMaster, AudioMix, BinId, BlendMode, CHAIN_LOOKAHEAD_MILLISECONDS,
     CLIP_GAIN_MAX, CLIP_GAIN_MIN, ChainLookahead, Clip, ClipContent, ClipId, Document,
     ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId, FreezeFrame, InvestigatorPreferences,
     LUT_ASSET_ID_MAX, LUT_SIZE_MAX, LUT_SIZE_MIN, LinkId, LutAsset, LutAssetId, LutAssetKind,
     LutAssetSource, MARKER_COLOR_TOKEN_COUNT, Marker, MarkerId, MediaAsset, MediaBin, MediaCatalog,
     MediaKind, MediaSourceFingerprint, PROJECT_FORMAT_VERSION, PanLaw, ParamValue, RelinkCandidate,
-    SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
+    SolidColor, SourceSelect, StringOut, StringOutId, SyncGroup, SyncGroupId, SyncGroupMember,
     TRACK_AUTOMATION_PARAMETERS, TRACK_MIX_GAIN_MAX, TRACK_MIX_GAIN_MIN, TRACK_MIX_PAN_MAX,
     TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
     chain_lookahead_milliseconds, clip_effective_fps, envelope_coalesce_key,
@@ -279,5 +279,6 @@ pub use transcript_edit::{
     transcript_cut_ranges_for_indices,
 };
 pub use transition::{
-    TRANSITION_DESCRIPTORS, TransitionDescriptor, TransitionShading, transition_descriptor,
+    TRANSITION_DESCRIPTORS, TransitionAxis, TransitionDescriptor, TransitionShading,
+    transition_descriptor,
 };

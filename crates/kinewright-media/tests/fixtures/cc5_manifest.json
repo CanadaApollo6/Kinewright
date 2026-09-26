@@ -201,7 +201,7 @@
   "buffer": {
     "grade_buffer_worst_case_bytes": 17680,
     "compositor_required_storage_buffer_binding_size": 32768,
-    "compositor_required_storage_buffers_per_shader_stage": 1,
+    "compositor_required_storage_buffers_per_shader_stage": 2,
     "grade_abi_version": 3,
     "matte_block_words": 64,
     "matte_window_words": 12,

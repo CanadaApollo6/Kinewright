@@ -18,4 +18,4 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 source "$script_dir/setup-ffmpeg.sh"
 
 cd "$repo_root"
-exec cargo run --release -p kinewright-media --example performance_workloads -- "$@"
+exec cargo run --release -p kinewright-project --example performance_workloads -- "$@"

@@ -1884,6 +1884,28 @@ pub enum MediaError {
         /// The store's own rendered refusal, without the label.
         message: String,
     },
+    /// MO2 R10 (N6 R-C): a non-`Normal` blend produced a non-finite or
+    /// f16-overflowing working value. The compositor fills `layer` from its
+    /// sticky per-layer validity flag; the frame renderer adds the clip and
+    /// project frame from its layer-to-clip mapping. Code-less, so it routes
+    /// to `media_backend_unclassified` like [`Self::Backend`].
+    #[error(
+        "non_finite_render: layer {layer} (clip {clip:?}, frame {at:?}) blended to a non-finite or f16-overflowing working value"
+    )]
+    NonFiniteRender {
+        /// Index into the composited bottom-to-top layer slice.
+        layer: usize,
+        /// The clip that layer was resolved from, when the caller knows it.
+        clip: Option<ClipId>,
+        /// The project frame being rendered, when the caller knows it.
+        at: Option<TimeCode>,
+    },
+    /// MO2 R8 (review-1 B1): the render entry refused a document that
+    /// violates a document invariant, disabled clips included. Boxed to keep
+    /// `MediaError` small. It has no recovery code of its own: its incident
+    /// delegates code and evidence to the wrapped `OpError`.
+    #[error("invalid_document: {0}")]
+    InvalidDocument(Box<crate::OpError>),
     #[error("{0}")]
     Backend(String),
 }
@@ -1891,10 +1913,11 @@ pub enum MediaError {
 impl MediaError {
     /// Return the machine-readable recovery code, when this error has one.
     ///
-    /// `Some` for **9 of 15** variants after `IN1b` §3.9 rule 36, the
-    /// N4/CR-D1 addendum and `IN2B` §6 rule 2: the six that answer `None` are
-    /// `NotImplemented`, `Cancelled`, the two mix-range refusals, `Backend`
-    /// and `Scope`, and `IN1b` §5.1 rule 11 step 1 routes those to
+    /// `Some` for **9 of 17** variants after `IN1b` §3.9 rule 36, the
+    /// N4/CR-D1 addendum, `IN2B` §6 rule 2 and MO2 R8/R10: the eight that
+    /// answer `None` are `NotImplemented`, `Cancelled`, the two mix-range
+    /// refusals, `Backend`, `Scope`, `NonFiniteRender` and `InvalidDocument`,
+    /// and `IN1b` §5.1 rule 11 step 1 routes those to
     /// `media_backend_unclassified`.
     #[must_use]
     pub const fn recovery_code(&self) -> Option<&'static str> {
@@ -1913,6 +1936,8 @@ impl MediaError {
             | Self::MixSpectrumRangeTooShort { .. }
             | Self::MixLoudnessRangeTooShort { .. }
             | Self::Scope(_)
+            | Self::NonFiniteRender { .. }
+            | Self::InvalidDocument(_)
             | Self::Backend(_) => None,
         }
     }
@@ -2930,6 +2955,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: crate::BlendMode::Normal,
         }
     }
 
@@ -3256,8 +3282,10 @@ mod tests {
         assert_eq!(carried_coverage.to_string(), coverage.to_string());
         assert!(carried_coverage.to_string().starts_with(coverage.code()));
 
-        // Nine of fifteen carry a code; the six that do not are the ones
-        // `IN1b` §5.1 rule 11 step 1 routes to `media_backend_unclassified`.
+        // Nine of seventeen carry a code (MO2 R8/R10 added the code-less
+        // `InvalidDocument` and `NonFiniteRender`); the eight that do not are
+        // the ones `IN1b` §5.1 rule 11 step 1 routes to
+        // `media_backend_unclassified`.
         let every_variant = [
             MediaError::NotImplemented,
             MediaError::Cancelled,
@@ -3303,9 +3331,15 @@ mod tests {
                 code: "lut_store_root_invalid",
                 message: String::new(),
             },
+            MediaError::NonFiniteRender {
+                layer: 0,
+                clip: None,
+                at: None,
+            },
+            MediaError::InvalidDocument(Box::new(crate::OpError::InvalidResolution)),
             MediaError::Backend(String::new()),
         ];
-        assert_eq!(every_variant.len(), 15);
+        assert_eq!(every_variant.len(), 17);
         assert_eq!(
             every_variant
                 .iter()

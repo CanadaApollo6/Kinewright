@@ -14,7 +14,10 @@ use kinewright_core::{
 use crate::{
     TimelineVisualLayer,
     cache::FrameCache,
-    compositor::{Compositor, CompositorLayer, DeliveryFrame, GpuContext, MatteRenderTarget},
+    compositor::{
+        Compositor, CompositorLayer, DeliveryFrame, GpuContext, LayerMode, LayerRole,
+        MatteRenderTarget,
+    },
     decode::VideoDecoder,
     derived_cache::CacheStats,
     frame::WorkingFrame,
@@ -68,6 +71,23 @@ struct DecodedLayer {
     frame: WorkingFrame,
     effects: Vec<Effect>,
     transition: TransitionRenderParams,
+    mode: LayerMode,
+}
+
+/// MO2 R10: the compositor names the offending layer; the renderer knows
+/// which clip and project frame that layer was.
+fn attribute_layer(
+    layers: &[DecodedLayer],
+    at: TimeCode,
+) -> impl Fn(MediaError) -> MediaError + '_ {
+    move |error| match error {
+        MediaError::NonFiniteRender { layer, .. } => MediaError::NonFiniteRender {
+            layer,
+            clip: layers.get(layer).map(|decoded| decoded.clip),
+            at: Some(at),
+        },
+        other => other,
+    }
 }
 
 /// One rendered CC5 matte coverage raster: one byte per pixel, in row-major
@@ -165,7 +185,15 @@ impl VideoSourceKey {
     }
 }
 
-type TitleCacheKey = (ClipId, (u32, u32), Title);
+/// Generated content cached in working space: titles and (MO2 R3) solids,
+/// both through `WorkingFrame::from_display_frame`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Generated {
+    Title(Title),
+    Solid([u8; 3]),
+}
+
+type TitleCacheKey = (ClipId, (u32, u32), Generated);
 
 struct VideoSource {
     decoder: VideoDecoder,
@@ -297,15 +325,39 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<FrameTexture, MediaError> {
+        let rendered = self.render_timed(document, project_at, resolution, scale, strategy);
+        rendered.map(|(frame, _)| frame)
+    }
+
+    /// MO2 R28 (ME13): [`Self::render`] and its compositor frame time —
+    /// render, readback and monitor encode, the decoded layers resident.
+    pub(crate) fn render_timed(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<(FrameTexture, std::time::Duration), MediaError> {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let started = std::time::Instant::now();
         let layers = compositor_layers(&decoded_layers);
-        self.compositor.render_monitor_with_luts(
-            resolution,
-            &layers,
-            &document.color_context.monitoring,
-            Some(&self.lut_library),
-        )
+        self.compositor
+            .render_monitor_with_luts(
+                resolution,
+                &layers,
+                &document.color_context.monitoring,
+                Some(&self.lut_library),
+            )
+            .map_err(attribute_layer(&decoded_layers, project_at))
+            .map(|frame| (frame, started.elapsed()))
+    }
+
+    /// MO2 R28 (ME13): hold decoded sources resident for compositor frames.
+    #[cfg(test)]
+    pub(crate) fn set_cache_budget(&mut self, bytes: usize) {
+        self.cache_budget = bytes;
     }
 
     /// Composite one project frame for the document's delivery target.
@@ -329,12 +381,14 @@ impl FrameRenderer {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
         let layers = compositor_layers(&decoded_layers);
-        self.compositor.render_delivery_with_luts(
-            resolution,
-            &layers,
-            &document.color_context.delivery,
-            Some(&self.lut_library),
-        )
+        self.compositor
+            .render_delivery_with_luts(
+                resolution,
+                &layers,
+                &document.color_context.delivery,
+                Some(&self.lut_library),
+            )
+            .map_err(attribute_layer(&decoded_layers, project_at))
     }
 
     /// Composite one project frame's **scene-linear working surface** (CC6
@@ -363,6 +417,7 @@ impl FrameRenderer {
         let layers = compositor_layers(&decoded_layers);
         self.compositor
             .render_working_with_luts(resolution, &layers, Some(&self.lut_library))
+            .map_err(attribute_layer(&decoded_layers, project_at))
     }
 
     /// Render one clip's CC5 matte coverage instead of its colour.
@@ -402,16 +457,19 @@ impl FrameRenderer {
                 at: project_at,
             })?;
         let layers = compositor_layers(&decoded_layers);
-        let coverage = self.compositor.render_matte(
-            resolution,
-            &layers,
-            Some(&self.lut_library),
-            MatteRenderTarget {
-                layer_index,
-                clip,
-                effect,
-            },
-        )?;
+        let coverage = self
+            .compositor
+            .render_matte(
+                resolution,
+                &layers,
+                Some(&self.lut_library),
+                MatteRenderTarget {
+                    layer_index,
+                    clip,
+                    effect,
+                },
+            )
+            .map_err(attribute_layer(&decoded_layers, project_at))?;
         let (width, height) = resolution;
         Ok(MatteCoverage {
             width,
@@ -431,6 +489,11 @@ impl FrameRenderer {
         strategy: DecodeStrategy,
     ) -> Result<Vec<DecodedLayer>, MediaError> {
         validate_managed_context(document)?;
+        // MO2 R8 (review-1 B1): every render root refuses an invalid
+        // document defensively, disabled clips included, before resolving.
+        document
+            .validate()
+            .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
         let layer_specs = visual_layers_at(document, project_at)?;
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
@@ -459,30 +522,74 @@ impl FrameRenderer {
                         frame,
                         effects: layer.effects,
                         transition: layer.transition,
+                        mode: pixels(layer.blend_mode),
                     });
                 }
                 TimelineVisualLayer::Title(layer) => {
-                    let key = (layer.clip, resolution, layer.title.clone());
-                    let frame = if let Some(frame) = self.title_cache.get(&key).cloned() {
-                        self.touch_title(key);
-                        frame
-                    } else {
-                        let display_frame =
-                            self.title_rasterizer.rasterize(&layer.title, resolution)?;
-                        let frame = WorkingFrame::from_display_frame(&display_frame)?;
-                        self.cache_title_frame(key, frame.clone());
-                        frame
-                    };
+                    let content = Generated::Title(layer.title);
                     decoded_layers.push(DecodedLayer {
                         clip: layer.clip,
-                        frame,
+                        frame: self.generated_frame(layer.clip, resolution, content)?,
                         effects: layer.effects,
                         transition: layer.transition,
+                        mode: pixels(layer.blend_mode),
                     });
                 }
+                TimelineVisualLayer::Solid(layer) => {
+                    let content = Generated::Solid([layer.color.r, layer.color.g, layer.color.b]);
+                    decoded_layers.push(DecodedLayer {
+                        clip: layer.clip,
+                        frame: self.generated_frame(layer.clip, resolution, content)?,
+                        effects: layer.effects,
+                        transition: layer.transition,
+                        mode: pixels(layer.blend_mode),
+                    });
+                }
+                // MO2 R18: the compositor ignores an adjustment's frame and
+                // samples the composite below it instead.
+                TimelineVisualLayer::Adjustment(layer) => decoded_layers.push(DecodedLayer {
+                    clip: layer.clip,
+                    frame: WorkingFrame::from_display_frame(&FrameTexture {
+                        width: 1,
+                        height: 1,
+                        rgba: Arc::new(vec![0; 4]),
+                    })?,
+                    effects: layer.effects,
+                    transition: layer.transition,
+                    mode: LayerMode {
+                        blend: layer.blend_mode,
+                        role: LayerRole::Adjustment,
+                    },
+                }),
             }
         }
         Ok(decoded_layers)
+    }
+
+    /// A title raster or (MO2 R3) an opaque solid fill, converted to working
+    /// space by the shared generated-content path and cached.
+    fn generated_frame(
+        &mut self,
+        clip: ClipId,
+        resolution: (u32, u32),
+        content: Generated,
+    ) -> Result<WorkingFrame, MediaError> {
+        let key = (clip, resolution, content);
+        if let Some(frame) = self.title_cache.get(&key).cloned() {
+            self.touch_title(key);
+            return Ok(frame);
+        }
+        let display_frame = match &key.2 {
+            Generated::Title(title) => self.title_rasterizer.rasterize(title, resolution)?,
+            Generated::Solid([r, g, b]) => FrameTexture {
+                width: resolution.0,
+                height: resolution.1,
+                rgba: Arc::new([*r, *g, *b, u8::MAX].repeat(rgba_bytes(resolution) / 4)),
+            },
+        };
+        let frame = WorkingFrame::from_display_frame(&display_frame)?;
+        self.cache_title_frame(key, frame.clone());
+        Ok(frame)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -759,8 +866,16 @@ fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, Working
             frame: &layer.frame,
             effects: &layer.effects,
             transition: layer.transition,
+            mode: layer.mode,
         })
         .collect()
+}
+
+const fn pixels(blend: kinewright_core::BlendMode) -> LayerMode {
+    LayerMode {
+        blend,
+        role: LayerRole::Pixels,
+    }
 }
 
 fn bounded_resolution(source: (u32, u32), max_width: Option<u32>) -> (u32, u32) {
@@ -832,6 +947,41 @@ mod tests {
         Some(FrameRenderer::new(fixture_gpu_or_skip()?))
     }
 
+    impl FrameRenderer {
+        /// MO2 R16: the CPU twin over the production resolution and decode.
+        pub(crate) fn twin_working(
+            &mut self,
+            document: &Document,
+            project_at: TimeCode,
+            resolution: (u32, u32),
+        ) -> Result<LinearRgbaImage, MediaError> {
+            let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);
+            let decoded = self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+            let layers = compositor_layers(&decoded);
+            crate::compositor::twin::render_working(resolution, &layers, Some(&self.lut_library))
+                .map_err(attribute_layer(&decoded, project_at))
+        }
+
+        /// MO2 ME9: the twin's 8-bit sub-texel envelope for the same frame.
+        pub(crate) fn twin_envelope(
+            &mut self,
+            document: &Document,
+            project_at: TimeCode,
+            resolution: (u32, u32),
+        ) -> Result<Vec<f32>, MediaError> {
+            let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);
+            let decoded = self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+            let layers = compositor_layers(&decoded);
+            let library = Some(&*self.lut_library);
+            crate::compositor::twin::subtexel_envelope(resolution, &layers, library)
+        }
+
+        /// MO2 R12/R13: accumulator snapshots this renderer has taken.
+        pub(crate) fn accumulator_copies(&self) -> u64 {
+            self.compositor.accumulator_copies()
+        }
+    }
+
     fn working_frame_with_bytes(bytes: usize) -> WorkingFrame {
         assert_eq!(bytes % std::mem::size_of::<f16>(), 0);
         WorkingFrame {
@@ -842,7 +992,7 @@ mod tests {
     }
 
     fn title_key(id: u64) -> TitleCacheKey {
-        (ClipId(id), (1, 1), Title::default())
+        (ClipId(id), (1, 1), Generated::Title(Title::default()))
     }
 
     /// A one-clip title timeline, so the LUT plumbing can be exercised without
@@ -874,6 +1024,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             ..Document::default()
@@ -895,24 +1046,9 @@ mod tests {
         };
         look.parameters
             .insert("lut_asset_id".to_owned(), ParamValue::Integer(1));
-        let document = title_document(vec![look]);
-
-        let error = renderer
-            .render(
-                &document,
-                TimeCode::ZERO,
-                document.resolution,
-                RenderScale::FullResolution,
-                DecodeStrategy::Seek,
-            )
-            .expect_err("an unpublished library blocks an active LUT node");
-        let MediaError::Backend(message) = error else {
-            panic!("expected a backend error");
-        };
-        assert!(
-            message.starts_with("missing_lut_asset:"),
-            "unexpected message: {message}"
-        );
+        // MO2 R8: the render entry validates the document, so the look's
+        // asset is registered; only the renderer's library is unpublished.
+        let mut document = title_document(vec![look]);
 
         let directory = TempDirectory::new("cc4-renderer-library");
         let store = LutStore::for_project(&directory.path("project.kinewright"))
@@ -936,6 +1072,25 @@ mod tests {
             .import_lut_asset(&source)
             .expect("the fixture LUT imports")
             .into_lut_asset(LutAssetId(1));
+        document.lut_assets.push(asset.clone());
+
+        let error = renderer
+            .render(
+                &document,
+                TimeCode::ZERO,
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .expect_err("an unpublished library blocks an active LUT node");
+        let MediaError::Backend(message) = error else {
+            panic!("expected a backend error");
+        };
+        assert!(
+            message.starts_with("missing_lut_asset:"),
+            "unexpected message: {message}"
+        );
+
         let (library, _) = LutLibrary::build(&[asset], Some(&store));
         assert_eq!(library.len(), 1);
         renderer.set_lut_library(Arc::new(library));
@@ -1441,5 +1596,96 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("source_color=supported"), "{message}");
         assert!(message.contains("source_profile="), "{message}");
+    }
+
+    /// Review-1 B1 (MO2 R8), ported from the reviewer's failing probe: the
+    /// render entry refuses an invalid document even when the offending clip
+    /// is disabled, and still omits a valid disabled clip.
+    #[test]
+    fn reviewer1_render_must_defensively_reject_disabled_invalid_adjustment() {
+        use kinewright_core::{OpError, Operation, Transition};
+        let Some(mut renderer) = test_renderer() else {
+            return;
+        };
+        let mut document = Document {
+            resolution: (32, 18),
+            ..Document::default()
+        };
+        Operation::AddTrack {
+            track: Track {
+                id: TrackId(901),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            },
+        }
+        .apply(&mut document)
+        .unwrap();
+        Operation::AddAdjustmentClip {
+            track: TrackId(901),
+            timeline_start: TimeCode(0),
+            duration: TimeCode(30),
+            effects: vec![],
+        }
+        .apply(&mut document)
+        .unwrap();
+        let clip = &mut document.tracks[0].clips[0];
+        clip.enabled = false;
+        let valid = document.clone();
+        let clip = &mut document.tracks[0].clips[0];
+        clip.transition_in = Some(Transition {
+            name: "fade_from_black".into(),
+            duration: TimeCode(5),
+        });
+        let expected = OpError::TransitionUnsupportedOnAdjustment {
+            clip: clip.id,
+            transition: "fade_from_black".into(),
+        };
+        assert_eq!(document.validate(), Err(expected.clone()));
+        let (at, full) = (TimeCode(0), RenderScale::FullResolution);
+        let refused = renderer.render(&document, at, (32, 18), full, DecodeStrategy::Seek);
+        assert_eq!(
+            refused.err(),
+            Some(MediaError::InvalidDocument(Box::new(expected))),
+            "invalid disabled adjustment rendered a frame successfully"
+        );
+        let working = renderer.render_working(&document, at, (32, 18), full, DecodeStrategy::Seek);
+        assert!(matches!(working, Err(MediaError::InvalidDocument(_))));
+        let omitted = renderer.render_working(&valid, at, (32, 18), full, DecodeStrategy::Seek);
+        assert!(
+            omitted
+                .unwrap()
+                .pixels
+                .chunks(4)
+                .all(|p| p == [0.0, 0.0, 0.0, 1.0])
+        );
+    }
+}
+
+/// MO2 R28 (ME14): a resident compositor frame's phases.
+#[cfg(test)]
+pub(crate) mod phases {
+    use std::time::Duration;
+
+    use super::*;
+
+    /// [`FrameRenderer::render_timed`]'s compositor frame, split by
+    /// [`crate::compositor::phases::monitor`].
+    pub(crate) fn render(
+        renderer: &mut FrameRenderer,
+        document: &Document,
+        at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+    ) -> Result<([Duration; 3], Duration), MediaError> {
+        let strategy = DecodeStrategy::Sequential;
+        let decoded = renderer.decoded_layers(document, at, resolution, scale, strategy)?;
+        crate::compositor::phases::monitor(
+            &renderer.compositor,
+            resolution,
+            &compositor_layers(&decoded),
+            &document.color_context.monitoring,
+            Some(&renderer.lut_library),
+        )
     }
 }

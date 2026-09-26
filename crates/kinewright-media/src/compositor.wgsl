@@ -57,6 +57,16 @@ struct LayerParams {
     frame_aspect: f32,
     anchor_x: f32,
     anchor_y: f32,
+    // MO2 R14: 0 = `Normal` (fixed-function over only), 1..6 = Multiply,
+    // Screen, Overlay, Darken, Lighten, Add against the accumulator
+    // snapshot, 7 = the R13 Push backdrop, 8 = a `Normal` adjustment,
+    // validated against the snapshot (under Push too: its covered pixels'
+    // backdrop is the unshifted `D0(x)`, R21). Coverage keeps screen `< edge`
+    // (on = 1) or `>= edge` (on = 2) along x (axis 0) or y (axis 1).
+    blend_mode: f32,
+    coverage_edge: f32,
+    coverage_axis: f32,
+    coverage_on: f32,
 };
 
 // CC3 3.2: ONE read-only storage buffer carries the whole ordered managed
@@ -104,6 +114,11 @@ var<private> matte_debug_coverage: f32 = 0.0;
 @group(0) @binding(2) var<uniform> params: LayerParams;
 @group(0) @binding(3) var lut_texture: texture_3d<f32>;
 @group(0) @binding(4) var<storage, read> grade_buffer: GradeBuffer;
+// MO2 R13/R14: the below-stack snapshot (a cached 1x1 dummy on the fast
+// path) and this layer's sticky R10 validity flag.
+@group(0) @binding(5) var accumulator: texture_2d<f32>;
+@group(0) @binding(6) var accumulator_sampler: sampler;
+@group(0) @binding(7) var<storage, read_write> validity: atomic<u32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -739,8 +754,77 @@ fn apply_color_nodes(input_rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return corrected;
 }
 
+// MO2 R9: extended-domain Screen/Overlay keep excursions as residuals.
+fn blend_channel(mode: u32, s: f32, d: f32) -> f32 {
+    let cs = clamp(s, 0.0, 1.0);
+    let cd = clamp(d, 0.0, 1.0);
+    let residual = (s - cs) + (d - cd);
+    switch mode {
+        case 1u: { return s * d; }
+        case 2u: { return 1.0 - (1.0 - cs) * (1.0 - cd) + residual; }
+        case 3u: {
+            if cd <= 0.5 {
+                return 2.0 * cs * cd + residual;
+            }
+            return 1.0 - 2.0 * (1.0 - cs) * (1.0 - cd) + residual;
+        }
+        case 4u: { return min(s, d); }
+        case 5u: { return max(s, d); }
+        case 6u: { return s + d; }
+        default: { return s; }
+    }
+}
+
+// MO2 R10: non-finite (exponent all ones), tested on the bits so min/max
+// or fast-math folding cannot erase it.
+fn non_finite(value: vec3<f32>) -> bool {
+    let bits = bitcast<vec3<u32>>(value) & vec3<u32>(0x7f800000u);
+    return any(bits == vec3<u32>(0x7f800000u));
+}
+
+// MO2 R10 (ME12): f32 → f16 round-to-nearest-even, returned as the exact
+// f32 of that f16, so the target's own store conversion (whose rounding
+// Vulkan and WGSL leave unspecified) has nothing left to round. Integer
+// bits only build exact powers of two: `value · 2^(10−e)` and the product
+// back are exact, and `round` ties to even. `e` is the f16 exponent,
+// floored at −14 so subnormals share the 2^−24 quantum; f32 zero and
+// subnormals round to a signed zero. A magnitude that rounds past 65504
+// (from 65520, the midpoint above it, up) returns ±inf; below 65520 it
+// rounds to at most 65504. NaN and ±inf fall through (callers bit-check
+// the unrounded value).
+fn f16_rte(value: vec3<f32>) -> vec3<f32> {
+    let biased = vec3<i32>((bitcast<vec3<u32>>(value) >> vec3<u32>(23u)) & vec3<u32>(0xffu));
+    let exponent = max(biased - vec3<i32>(127), vec3<i32>(-14));
+    let quantum = bitcast<vec3<f32>>(vec3<u32>(exponent + vec3<i32>(117)) << vec3<u32>(23u));
+    let inverse = bitcast<vec3<f32>>(vec3<u32>(vec3<i32>(137) - exponent) << vec3<u32>(23u));
+    let rounded = round(value * inverse) * quantum;
+    let sign = bitcast<vec3<u32>>(value) & vec3<u32>(0x80000000u);
+    let infinity = bitcast<vec3<f32>>(sign | vec3<u32>(0x7f800000u));
+    return select(rounded, infinity, abs(rounded) > vec3<f32>(65504.0));
+}
+
+// MO2 R13: the opaque Push backdrop samples `D0(x - q)` where that lands in
+// the raster and unshifted `D0(x)` elsewhere.
+fn push_backdrop(position: vec2<f32>) -> vec4<f32> {
+    let dimensions = vec2<f32>(textureDimensions(accumulator));
+    let screen = position / dimensions;
+    var shift = vec2<f32>(params.coverage_edge, 0.0);
+    if params.coverage_axis > 0.5 {
+        shift = vec2<f32>(0.0, params.coverage_edge);
+    }
+    let source = screen - shift;
+    let unshifted = textureLoad(accumulator, vec2<i32>(position), 0);
+    let shifted = textureSampleLevel(accumulator, accumulator_sampler, source, 0.0);
+    let inside = all(source >= vec2<f32>(0.0)) && all(source < vec2<f32>(1.0));
+    return vec4<f32>(select(unshifted.rgb, shifted.rgb, inside), 1.0);
+}
+
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let mode = u32(round(params.blend_mode));
+    if mode == 7u {
+        return push_backdrop(input.position.xy);
+    }
     var sample_uv = input.uv;
     if params.reframe_aspect > 0.0 {
         let dimensions = vec2<f32>(textureDimensions(layer_texture));
@@ -764,6 +848,11 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     let sampled = textureSample(layer_texture, layer_sampler, sample_uv);
+    // MO2 R10 (ME11): the sampled alpha's bits, before clamp, fade or mask
+    // can erase a NaN/±inf.
+    if non_finite(vec3<f32>(sampled.a)) {
+        atomicStore(&validity, 1u);
+    }
     var linear_rgb = vec3<f32>(
         decode_bt709(sampled.r),
         decode_bt709(sampled.g),
@@ -878,10 +967,13 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if params.fade_mix > 0.0 {
         alpha = 1.0;
     }
-    if input.uv.x < params.crop_left
-        || input.uv.x > 1.0 - params.crop_right
-        || input.uv.y < params.crop_top
-        || input.uv.y > 1.0 - params.crop_bottom {
+    // MO2 ME8: a rasterized centre on the quad edge interpolates uv a few
+    // ulps outside [0, 1]; the crop tests the uv the rasterizer meant.
+    let crop_uv = clamp(input.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    if crop_uv.x < params.crop_left
+        || crop_uv.x > 1.0 - params.crop_right
+        || crop_uv.y < params.crop_top
+        || crop_uv.y > 1.0 - params.crop_bottom {
         alpha = 0.0;
     }
     if params.mask_shape > 0.5 {
@@ -905,5 +997,48 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         alpha *= mask_alpha;
     }
-    return vec4<f32>(output_linear, alpha);
+    // MO2 R21: output-space coverage, alpha-multiplied, at the exact pixel
+    // centre against the host's pixel-centre edge (ME8).
+    if params.coverage_on > 0.5 {
+        var coord = input.position.x;
+        if params.coverage_axis > 0.5 {
+            coord = input.position.y;
+        }
+        var keep = coord >= params.coverage_edge;
+        if params.coverage_on < 1.5 {
+            keep = coord < params.coverage_edge;
+        }
+        alpha *= select(0.0, 1.0, keep);
+    }
+    if mode == 0u {
+        // MO2 R10 (ME11): every layer flags on write. Over a stored (finite,
+        // in-range) target, a finite in-range source stays in range, so a
+        // `Normal` layer flags a non-finite source or alpha, or an over-f16
+        // source the fixed-function over would blend (ME10).
+        if non_finite(output_linear) || non_finite(vec3<f32>(alpha))
+            || (alpha > 0.0 && any(abs(output_linear) > vec3<f32>(65504.0))) {
+            atomicStore(&validity, 1u);
+        }
+        return vec4<f32>(output_linear, alpha);
+    }
+    // MO2 R9/R9b (ME10): composite the over here and emit it opaque, so the
+    // fixed-function blend stores `stored` unchanged (8 blends `Normal`).
+    let below = textureLoad(accumulator, vec2<i32>(input.position.xy), 0).rgb;
+    let blended = vec3<f32>(
+        blend_channel(mode, output_linear.r, below.r),
+        blend_channel(mode, output_linear.g, below.g),
+        blend_channel(mode, output_linear.b, below.b),
+    );
+    // MO2 R10: operands and intermediates must be finite (checked before
+    // min/max can erase them); magnitude only on the value stored, which is
+    // rounded to f16 here (ME12) so the α = 1 store below is exact.
+    let composite = alpha * blended + (1.0 - alpha) * below;
+    let stored = f16_rte(composite);
+    if non_finite(output_linear) || non_finite(below)
+        || non_finite(blended)
+        || non_finite(vec3<f32>(alpha)) || non_finite(composite)
+        || any(abs(stored) > vec3<f32>(65504.0)) {
+        atomicStore(&validity, 1u);
+    }
+    return vec4<f32>(stored, 1.0);
 }

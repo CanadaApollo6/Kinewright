@@ -2003,6 +2003,7 @@ fn edit_plan_document() -> Document {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset],
@@ -2507,17 +2508,20 @@ async fn cc7_prepare_commit_and_compare(
 /// `COMPACT_TOOL_NAMES` and IN1 touches neither that list nor `Operation`.
 ///
 /// **Pin site 2 of 3 (`IN1b` §6.4 rules 7–8, erratum `IN1b`-R3).** The served
-/// quad does not move for the **twenty-first** measurement: `IN1b` added no
+/// quad does not move for the **twenty-second** measurement: `IN1b` added no
 /// served tool, no capability and no schema field, IN2 Part A adds one
 /// **registry-only** capability, `propose_fix`, which `served_tools()`'s
 /// `COMPACT_TOOL_NAMES` filter never publishes, IN2B Part B rewords two
 /// registry-only texts, which the filter never publishes either, and MO1 A4a
 /// adds two **registry-only** generated mutators, which the compact authority
 /// never serves either, MO1 A4b adds three more of the same shape,
-/// MO1 A4c adds the last one, and MO1 Part C adds one **registry-only**
-/// planner, `plan_motion`. The registry sextuple does move, to
-/// `148 / 60 / 88`,
-/// which is the two assertions below.
+/// MO1 A4c adds the last one, MO1 Part C adds one **registry-only**
+/// planner, `plan_motion`, MO2 Part A generates four more
+/// **registry-only** mutators, and MO2 Part B adds one **registry-only**
+/// inspector, `preview_solo`. The registry sextuple does move, to
+/// `153 / 64 / 89`, which is the count assertions below, and its three byte
+/// measures `2 002 954 / 1 848 392 / 129 437` are pinned beside the served
+/// quad.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2544,12 +2548,12 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
         kinewright_agent::compact_tool_names()
     );
 
-    // The internal registry: 148 tools, of which `INSPECTOR_TOOL_NAMES` is 88.
+    // The internal registry: 153 tools, of which `INSPECTOR_TOOL_NAMES` is 89.
     let registry = kinewright_agent::capability_tool_names().unwrap();
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        148,
+        153,
         "AU1 adds set_track_mix and get_audio_levels; AU2 Part A adds no tool; \
          AU2 Part B adds set_audio_master, set_pan_law and get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds none; \
@@ -2562,11 +2566,13 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          MO1 A4a generates upsert_effect_keyframe and remove_effect_keyframe; \
          MO1 A4b generates set_effect_enabled, set_clip_enabled and set_clip_enabled_curve; \
          MO1 A4c generates copy_clip_attributes; \
-         MO1 Part C adds plan_motion"
+         MO1 Part C adds plan_motion; \
+         MO2 Part A generates set_clip_blend_mode, add_adjustment_clip, add_solid_clip and set_solid_color; \
+         MO2 Part B adds preview_solo"
     );
     assert_eq!(
         operations.len(),
-        60,
+        64,
         "AU2 Part B generates two more mutators; neither part of AU3 generates one; \
          AU4 Part A generates two more; AU4 Part B generates none; \
          AU5 Part A generates none, because it adds no Operation variant; \
@@ -2574,7 +2580,8 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU6 adds no Operation variant; IN1 Part A adds none either; \
          MO1 A4a adds UpsertEffectKeyframe and RemoveEffectKeyframe; \
          MO1 A4b adds SetEffectEnabled, SetClipEnabled and SetClipEnabledCurve; \
-         MO1 A4c adds CopyClipAttributes"
+         MO1 A4c adds CopyClipAttributes; \
+         MO2 Part A adds SetClipBlendMode, AddAdjustmentClip, AddSolidClip and SetSolidColor"
     );
     for name in [
         "set_track_mix",
@@ -2596,7 +2603,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     assert_eq!(
         registry.len() - operations.len(),
-        88,
+        89,
         "AU1 adds get_audio_levels; AU2 Part B adds get_audio_spectrum; \
          AU3 Part A adds get_audio_qc; AU3 Part B adds no inspector; \
          AU4 Part A adds no inspector; AU4 Part B adds the two planners; \
@@ -2604,7 +2611,7 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
          AU6 §5.4 Part A and Part B add none; \
          IN1 Part A adds get_incidents and resolve_incident; \
          IN2 Part A adds propose_fix; \
-         MO1 Part C adds plan_motion"
+         MO1 Part C adds plan_motion; MO2 Part B adds preview_solo"
     );
     let spectrum = registry
         .iter()
@@ -2662,13 +2669,14 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     }
     for (before, after) in [
         ("plan_clip_fades", "plan_motion"),
-        ("plan_motion", "plan_dialogue_repair"),
+        ("plan_motion", "preview_solo"),
+        ("preview_solo", "plan_dialogue_repair"),
     ] {
         let index = registry.iter().position(|entry| entry == before).unwrap();
         assert_eq!(
             registry.get(index + 1).map(String::as_str),
             Some(after),
-            "MO1 R20: {after} is registered directly after {before}"
+            "MO1 R20 / MO2 R24: {after} is registered directly after {before}"
         );
     }
 
@@ -2677,6 +2685,20 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
     assert_eq!(metrics.input_schema_bytes, 3_510, "{metrics:?}");
     assert_eq!(metrics.description_bytes, 998, "{metrics:?}");
+
+    // MO2 R25/R30 (review 1 S1): the registry byte trio, so a registry-only
+    // description or schema change cannot pass this pin site unseen.
+    let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
+    assert_eq!(
+        (
+            registry_metrics.tool_count,
+            registry_metrics.serialized_bytes,
+            registry_metrics.input_schema_bytes,
+            registry_metrics.description_bytes
+        ),
+        (153, 2_002_954, 1_848_392, 129_437),
+        "registry={registry_metrics:?}"
+    );
 
     client.cancel().await.unwrap();
     server.shutdown();
@@ -2823,6 +2845,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }],
     });
     let duration = document.duration.0;
@@ -7537,6 +7560,7 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }],
     });
     let core = Core::spawn(document).unwrap();
@@ -7871,6 +7895,7 @@ fn au5_audio_document(asset: MediaAsset) -> Document {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset],
@@ -8358,6 +8383,7 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         tracks: vec![Track {
@@ -8608,6 +8634,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         fps: Rational::new(25, 1).unwrap(),
@@ -8758,6 +8785,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         fps: project_fps,
@@ -8895,6 +8923,7 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         fps: project_fps,
@@ -9013,6 +9042,7 @@ fn au6_agent_scene(engine: &FfmpegMediaEngine, scenario: Au6Scenario) -> Au6Agen
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 })
                 .collect(),
         })
@@ -10472,12 +10502,13 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 
 /// IN1 §6.6 and §9 clause 13, `IN1b` §6.4 rules 7–8 and §9 clause 17, and IN2
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
-/// served tool, for the **twenty-first** consecutive measurement.
+/// served tool, for the **twenty-third** consecutive measurement.
 ///
-/// The registry sextuple is `148 / 60 / 88 / 1 822 003 / 1 672 150 / 125 550`,
+/// The registry sextuple is `153 / 64 / 89 / 2 002 954 / 1 848 392 / 129 437`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
-/// this test pins the three counts and the served quad over the live endpoint.
+/// this test pins all six registry numbers and the served quad over the live
+/// endpoint.
 ///
 /// **Pin site 3 of 3, and the site that carries the counter** (`IN1b` §6.4
 /// rule 7). IN1 §6.6 rule 25 and §9 clause 13 say "both pin sites"; there are
@@ -10488,9 +10519,12 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 ///
 /// Renamed from `in1b_the_served_quad_does_not_move_for_the_seventeenth_measurement`
 /// to IN2 §9.1 item 33's name; every IN1 and `IN1b` assertion in it is
-/// unchanged except the two registry counts and the ceiling.
+/// unchanged except the two registry counts and the ceiling. MO2 R25 renames
+/// it again from `mo1_…_twenty_first_measurement`: Part A's four generated
+/// mutators are registry-only; and MO2 Part B from `…_twenty_second_…`:
+/// `preview_solo` is registry-only too.
 #[tokio::test(flavor = "multi_thread")]
-async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
+async fn mo2_the_served_quad_does_not_move_for_the_twenty_third_measurement() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let (_fixture, document) = in1_document(&media, In1Source::UntaggedMp4);
     let core = Core::spawn(document).unwrap();
@@ -10515,6 +10549,11 @@ async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
         "resolve_incident",
         "propose_fix",
         "plan_motion",
+        "set_clip_blend_mode",
+        "add_adjustment_clip",
+        "add_solid_clip",
+        "set_solid_color",
+        "preview_solo",
     ] {
         assert!(
             !tools.iter().any(|tool| tool.name == name),
@@ -10526,15 +10565,27 @@ async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
     let operations = kinewright_agent::operation_tools().unwrap();
     assert_eq!(
         registry.len(),
-        148,
-        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion"
+        153,
+        "IN1 adds two capabilities, IN2 Part A adds propose_fix, MO1 A4a/b/c add six mutators, MO1 Part C adds plan_motion, MO2 Part A adds four mutators, MO2 Part B adds preview_solo"
     );
     assert_eq!(
         operations.len(),
-        60,
-        "MO1 A4c adds the last Operation variant"
+        64,
+        "MO2 Part A adds four Operation variants"
     );
-    assert_eq!(registry.len() - operations.len(), 88);
+    assert_eq!(registry.len() - operations.len(), 89);
+    // MO2 R25/R30 (review 1 S1): the registry byte trio beside the counts.
+    let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
+    assert_eq!(
+        (
+            registry_metrics.tool_count,
+            registry_metrics.serialized_bytes,
+            registry_metrics.input_schema_bytes,
+            registry_metrics.description_bytes
+        ),
+        (153, 2_002_954, 1_848_392, 129_437),
+        "registry={registry_metrics:?}"
+    );
     let state = registry
         .iter()
         .position(|entry| entry == "get_timeline_state")
@@ -10563,7 +10614,7 @@ async fn mo1_the_served_quad_does_not_move_for_the_twenty_first_measurement() {
             metrics.description_bytes
         ),
         (7, 5_660, 3_510, 998),
-        "the served quad does not move for the twenty-first consecutive measurement: {metrics:?}"
+        "the served quad does not move for the twenty-third consecutive measurement: {metrics:?}"
     );
 
     // IN1 §6.2 rule 9, `IN1b` §3.11 rule 43 and IN2 §4.2 rule 11: the two
@@ -10716,4 +10767,1642 @@ async fn in2b_get_incidents_returns_the_observed_name() {
         "no schema change: the key is absent, not null"
     );
     server.shutdown();
+}
+
+// ------------------------------------------------------------ MO2 R24/R25
+
+fn mo2_solo_clip(id: u64, content: kinewright_core::ClipContent, span: i64) -> Clip {
+    Clip {
+        enabled: true,
+        enabled_curve: None,
+        id: ClipId(id),
+        asset: AssetId::default(),
+        source_range: TimeCode::ZERO..TimeCode(span),
+        content,
+        timeline_start: TimeCode::ZERO,
+        effects: Vec::new(),
+        transition_in: None,
+        link: None,
+        audio_gain_tenth_db: 0,
+        audio_fade_in_frames: TimeCode::ZERO,
+        audio_fade_out_frames: TimeCode::ZERO,
+        speed_percent: 100,
+        audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
+    }
+}
+
+fn mo2_solo_solid(id: u64, [r, g, b]: [u8; 3], span: i64) -> Clip {
+    let color = kinewright_core::SolidColor { r, g, b };
+    mo2_solo_clip(id, kinewright_core::ClipContent::Solid(color), span)
+}
+
+/// An adjustment lifting exposure by two stops over its below-stack.
+fn mo2_solo_adjustment(id: u64, span: i64) -> Clip {
+    let mut clip = mo2_solo_clip(id, kinewright_core::ClipContent::Adjustment, span);
+    clip.effects.push(Effect {
+        id: EffectId(id),
+        name: "primary_correction".to_owned(),
+        parameters: [(
+            "exposure_milli_stops".to_owned(),
+            ParamValue::Integer(2_000),
+        )]
+        .into(),
+        keyframes: std::collections::BTreeMap::new(),
+        enabled: true,
+        enabled_curve: None,
+    });
+    clip
+}
+
+/// Push `clips` as new video tracks above whatever `document` holds.
+fn mo2_solo_stack(mut document: Document, clips: Vec<Clip>) -> Document {
+    for clip in clips {
+        let id = TrackId(document.tracks.len() as u64 + 1);
+        document.tracks.push(Track {
+            id,
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![clip],
+        });
+    }
+    document.validate().unwrap();
+    document
+}
+
+async fn mo2_solo_start(document: Document) -> (McpServer, RunningService<RoleClient, ()>) {
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let server = McpServer::start(Core::spawn(document).unwrap(), media.clone(), media).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    (server, client)
+}
+
+/// One strip decoded from the response's `ContentBlock::image`.
+fn mo2_solo_png(result: &CallToolResult) -> image::RgbaImage {
+    let png = result.content[1]
+        .as_image()
+        .expect("the strip image")
+        .data
+        .clone();
+    image::load_from_memory(&BASE64.decode(png).unwrap())
+        .unwrap()
+        .to_rgba8()
+}
+
+/// The strip PNG, report and serialized response all inside R25, measured
+/// on what crossed the endpoint.
+fn mo2_assert_solo_budgets(result: &CallToolResult) {
+    let report = result.structured_content.as_ref().unwrap();
+    let png = BASE64
+        .decode(&result.content[1].as_image().unwrap().data)
+        .unwrap();
+    assert!(png.len() <= 768 * 1024, "png {} B", png.len());
+    assert_eq!(report["png_bytes"], png.len());
+    assert!(report.to_string().len() <= 4 * 1024, "{report}");
+    let wire = serde_json::to_vec(result).unwrap().len();
+    assert!(wire <= 1_056 * 1024, "response {wire} B");
+}
+
+/// §13 gate 8: soloing an adjustment returns BEFORE-over-AFTER pairs over
+/// its true below-stack, with the layer above hidden, and the report names
+/// provenance, counts, hashes and inactive cells.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn adjustment_solo_returns_pair() {
+    let red = [160, 40, 40];
+    let document = mo2_solo_stack(
+        Document {
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (160, 90),
+            duration: TimeCode(12),
+            ..Document::default()
+        },
+        vec![
+            mo2_solo_solid(1, red, 12),
+            mo2_solo_adjustment(2, 12),
+            mo2_solo_solid(3, [20, 220, 20], 12),
+        ],
+    );
+    let mut hidden = document.clone();
+    hidden.tracks[2].clips[0].enabled = false;
+    let (server, client) = mo2_solo_start(document).await;
+
+    let solo = |clip: u64, extra: serde_json::Value| {
+        let mut arguments = json!({"expected_revision": 0, "clip_id": clip});
+        arguments
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        invoke_capability(&client, "preview_solo", arguments)
+    };
+
+    // The pair, even when `isolated` is asked for: an adjustment is always `below`.
+    let result = solo(2, json!({"samples": 16, "context": "isolated"})).await;
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    mo2_assert_solo_budgets(&result);
+    let report = result.structured_content.clone().unwrap();
+    assert_eq!(report["pairs"], true);
+    assert_eq!(report["context"], "below");
+    assert_eq!(report["layout"], "before_row_over_after_row");
+    assert_eq!(
+        (report["requested"].clone(), report["emitted"].clone()),
+        (json!(16), json!(8))
+    );
+    assert_eq!(report["degraded"], serde_json::Value::Null);
+    assert_eq!(report["cell"], json!({"width": 160, "height": 90}));
+    assert_eq!(report["provenance"]["full_resolution"], true);
+    assert!(!report["provenance"]["backend"].as_str().unwrap().is_empty());
+    let frames: Vec<i64> = report["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|sample| {
+            let hashes = sample["hashes"].as_array().unwrap();
+            assert_eq!(hashes.len(), 2, "{sample}");
+            assert_ne!(hashes[0], hashes[1], "the adjustment changes the frame");
+            sample["frame"].as_i64().unwrap()
+        })
+        .collect();
+    assert_eq!(frames, [0, 1, 3, 4, 6, 7, 9, 11], "floor(i×11/7)");
+    let strip = mo2_solo_png(&result);
+    assert_eq!(strip.dimensions(), (8 * 160, 2 * 90));
+    let before = strip.get_pixel(80, 45).0;
+    let after = strip.get_pixel(80, 90 + 45).0;
+    assert!(
+        before[0] > before[1] + 60,
+        "BEFORE is the red below-stack: {before:?}"
+    );
+    assert!(
+        after[0] > before[0] + 30,
+        "AFTER is lifted two stops: {after:?} vs {before:?}"
+    );
+    assert!(
+        strip.pixels().all(|pixel| pixel.0[1] <= pixel.0[0]),
+        "the green solid above the adjustment is hidden"
+    );
+
+    // Full resolution: one midpoint floor((12−1)/2) = 5, still a pair.
+    let full = solo(2, json!({"full_res": true})).await;
+    assert_eq!(full.is_error, Some(false), "{full:?}");
+    let report = full.structured_content.clone().unwrap();
+    assert_eq!(report["samples"][0]["frame"], 5);
+    assert_eq!(
+        (report["requested"].clone(), report["emitted"].clone()),
+        (json!(1), json!(1))
+    );
+    assert_eq!(mo2_solo_png(&full).dimensions(), (160, 180));
+
+    // A `normal` solid defaults to isolated; k = min(16, L) samples with no duplicates.
+    let single = solo(1, json!({"samples": 16})).await;
+    let report = single.structured_content.clone().unwrap();
+    assert_eq!(
+        (report["context"].clone(), report["pairs"].clone()),
+        (json!("isolated"), json!(false))
+    );
+    assert_eq!(report["emitted"], 12);
+    let frames: Vec<_> = report["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["frame"].as_i64().unwrap())
+        .collect();
+    assert_eq!(frames, (0..12).collect::<Vec<_>>());
+
+    // Typed refusals: a missing clip, a sample count outside 2..16, a stale revision.
+    let missing = solo(99, json!({})).await;
+    assert_eq!(missing.is_error, Some(true));
+    assert_eq!(
+        missing.structured_content.unwrap()["code"],
+        "solo_clip_not_visible"
+    );
+    let invalid = solo(1, json!({"samples": 1})).await;
+    assert_eq!(
+        invalid.structured_content.unwrap()["code"],
+        "solo_invalid_samples"
+    );
+    let stale = invoke_capability(
+        &client,
+        "preview_solo",
+        json!({"expected_revision": 7, "clip_id": 1}),
+    )
+    .await;
+    assert_eq!(stale.is_error, Some(true));
+    assert!(
+        stale.content[0]
+            .as_text()
+            .unwrap()
+            .text
+            .contains("revision conflict")
+    );
+    client.cancel().await.unwrap();
+    server.shutdown();
+
+    // A disabled clip yields inactive cells with a reason, never a silent gap.
+    let (server, client) = mo2_solo_start(hidden).await;
+    let result = invoke_capability(
+        &client,
+        "preview_solo",
+        json!({"expected_revision": 0, "clip_id": 3, "samples": 2}),
+    )
+    .await;
+    assert_eq!(result.is_error, Some(false), "{result:?}");
+    let report = result.structured_content.clone().unwrap();
+    for sample in report["samples"].as_array().unwrap() {
+        assert_eq!(
+            (sample["active"].clone(), sample["reason"].clone()),
+            (json!(false), json!("clip_disabled"))
+        );
+    }
+    assert_eq!(mo2_solo_png(&result).dimensions(), (2 * 160, 90));
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// Uniform per-pixel noise, lossless managed BT.709, so the strip PNG cannot
+/// compress away.
+fn mo2_noise_media(width: u32, height: u32) -> GeneratedMedia {
+    let source = format!(
+        "nullsrc=s={width}x{height}:r=30,geq=lum='random(1)*255':cb='random(2)*255':cr='random(3)*255'"
+    );
+    let mut arguments = vec!["-f", "lavfi", "-i", &source, "-frames:v", "12", "-qp", "0"];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    GeneratedMedia::ffmpeg("mo2-solo-noise", &arguments, "mp4")
+}
+
+/// §13 gate 9: every strip stays inside R25 on the wire; noise that cannot
+/// fit degrades samples, then (for pairs) bounds, and full resolution
+/// that cannot fit refuses JSON-only.
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn solo_strip_inside_byte_budget() {
+    let probe = FfmpegMediaEngine::new().unwrap();
+    for (width, height) in [(1280_u32, 720_u32), (720, 1280)] {
+        let media = mo2_noise_media(width, height);
+        let asset = probe.probe(media.path()).unwrap();
+        let portrait = height > width;
+        let base = single_clip_document(asset);
+        let span = base.duration.0;
+        let document = if portrait {
+            mo2_solo_stack(base, vec![mo2_solo_adjustment(2, span)])
+        } else {
+            base
+        };
+        let target = if portrait { 2 } else { 1 };
+        let (server, client) = mo2_solo_start(document).await;
+        let result = invoke_capability(
+            &client,
+            "preview_solo",
+            json!({"expected_revision": 0, "clip_id": target, "samples": 16}),
+        )
+        .await;
+        assert_eq!(result.is_error, Some(false), "{width}x{height}: {result:?}");
+        mo2_assert_solo_budgets(&result);
+        let report = result.structured_content.clone().unwrap();
+        assert_eq!(report["emitted"], 2, "{report}");
+        let frames: Vec<_> = report["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["frame"].as_i64().unwrap())
+            .collect();
+        assert_eq!(frames, [0, span - 1]);
+        if portrait {
+            assert_eq!(report["degraded"], "samples_then_bounds", "{report}");
+            assert_eq!(report["cell"], json!({"width": 160, "height": 284}));
+            assert_eq!(
+                report["samples"][1]["hashes"].as_array().unwrap().len(),
+                2,
+                "pairs stay together"
+            );
+        } else {
+            assert_eq!(report["degraded"], "samples", "{report}");
+            assert_eq!(report["cell"], json!({"width": 320, "height": 180}));
+        }
+
+        // Full resolution is never downsampled: noise past 768 KiB refuses, JSON-only.
+        let full = invoke_capability(
+            &client,
+            "preview_solo",
+            json!({"expected_revision": 0, "clip_id": target, "full_res": true}),
+        )
+        .await;
+        assert_eq!(full.is_error, Some(true), "{full:?}");
+        assert!(full.content.iter().all(|block| block.as_image().is_none()));
+        let body = full.structured_content.unwrap();
+        assert_eq!(
+            (body["code"].clone(), body["applied"].clone()),
+            (json!("solo_over_budget"), json!(false))
+        );
+        client.cancel().await.unwrap();
+        server.shutdown();
+    }
+
+    // Flat solids fit at 16 samples with no degradation.
+    let document = mo2_solo_stack(
+        Document {
+            fps: Rational::new(30, 1).unwrap(),
+            resolution: (1920, 1080),
+            duration: TimeCode(40),
+            ..Document::default()
+        },
+        vec![mo2_solo_solid(1, [30, 60, 90], 40)],
+    );
+    let (server, client) = mo2_solo_start(document).await;
+    let result = invoke_capability(
+        &client,
+        "preview_solo",
+        json!({"expected_revision": 0, "clip_id": 1, "samples": 16}),
+    )
+    .await;
+    mo2_assert_solo_budgets(&result);
+    let report = result.structured_content.clone().unwrap();
+    assert_eq!(
+        (report["emitted"].clone(), report["degraded"].clone()),
+        (json!(16), serde_json::Value::Null)
+    );
+    assert_eq!(mo2_solo_png(&result).dimensions(), (16 * 320, 180));
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// MO2 R28: solo's peak compositor resources and elapsed time, reported (its
+/// budgets are gate 9's). A 1080p clip under an adjustment, the adjustment
+/// soloed at 16 samples and at full resolution, on the fallback adapter.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn r28_solo_peak_resources_and_elapsed() {
+    use kinewright_agent::{SoloArgs, preview_solo};
+    let gpu = kinewright_media::GpuContext::headless(true).unwrap();
+    let data = kinewright_media::test_support::TempDirectory::new("mo2-r28-solo");
+    let engine =
+        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), data.path("data")).unwrap();
+    let source = "testsrc2=size=1920x1080:rate=30";
+    let mut arguments = vec!["-f", "lavfi", "-i", source, "-frames:v", "60"];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    let media = GeneratedMedia::ffmpeg("mo2-r28-solo", &arguments, "mp4");
+    let base = single_clip_document(engine.probe(media.path()).unwrap());
+    let span = base.duration.0;
+    let document = mo2_solo_stack(base, vec![mo2_solo_adjustment(2, span)]);
+    let mut final_modes = Vec::new();
+    for full_res in [false, true] {
+        let args = SoloArgs {
+            expected_revision: kinewright_core::TimelineRevision(0),
+            clip_id: ClipId(2),
+            samples: 16,
+            context: None,
+            full_res,
+        };
+        let started = std::time::Instant::now();
+        let strip = preview_solo(&engine, args.expected_revision, &document, &args);
+        let elapsed = started.elapsed();
+        let peak = gpu.ledger().peak_bytes();
+        final_modes.push(full_res);
+        let verified = strip.as_ref().expect("R28 must measure a rendered strip");
+        assert_eq!(verified.report["pairs"], true);
+        assert_eq!(verified.report["requested"], if full_res { 1 } else { 16 });
+        assert_eq!(verified.report["emitted"], if full_res { 1 } else { 8 });
+        assert!(peak > 0);
+
+        println!(
+            "R28 solo full_res={full_res} ok={} elapsed_ms={} ledger_peak_mib={:.1} live_mib={:.1}",
+            strip.is_ok(),
+            elapsed.as_millis(),
+            peak as f64 / f64::from(1 << 20),
+            gpu.ledger().live_bytes() as f64 / f64::from(1 << 20)
+        );
+        assert!(peak <= 384 << 20, "solo at 1080p holds the R28 ceiling");
+    }
+    assert_eq!(final_modes, [false, true], "both R28 modes measured");
+}
+
+/// MO2 B2 fix round 1: review 1's controlled probes, kept as regressions.
+///
+/// A proof double stands in for the renderer so the arithmetic, temporal and
+/// boundary contract is exact and cheap: every call records the frame and the
+/// enabled clips it saw, and its pixels encode both. The real-endpoint gates
+/// above stay the renderer's evidence; these pin what they cannot reach.
+mod mo2_solo_review {
+    use std::sync::Mutex;
+
+    use kinewright_agent::{SoloArgs, SoloContext, SoloError, SoloStrip, preview_solo};
+    use kinewright_core::{
+        BlendMode, MonitorProof, MonitorProofMetadata, RgbaImage, SceneStatus, SilenceStatus,
+        TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+        TranscriptStatus, VisualAssetResult,
+    };
+
+    use super::*;
+
+    /// Records `(frame, enabled clip ids)` per proof; pixels are
+    /// `[frame, Σ ids, 91]`, or xorshift noise when `noise`; a nonzero
+    /// `panic_len` makes proofs and probes panic with that many payload
+    /// bytes instead.
+    #[derive(Default)]
+    struct ProofDouble {
+        calls: Mutex<Vec<(i64, Vec<u64>)>>,
+        noise: bool,
+        adapter_len: usize,
+        panic_len: usize,
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    impl Analysis for ProofDouble {
+        fn request_waveform(&self, _: MediaAsset, _: u64) -> bool {
+            false
+        }
+        fn request_thumbnail(&self, _: MediaAsset, _: TimeCode, _: u32, _: u64) -> bool {
+            false
+        }
+        fn visual_asset_results(&self) -> crossbeam_channel::Receiver<VisualAssetResult> {
+            crossbeam_channel::unbounded().1
+        }
+        fn probe(&self, _: &std::path::Path) -> Result<MediaAsset, MediaError> {
+            assert!(self.panic_len == 0, "{}", "p".repeat(self.panic_len));
+            Err(MediaError::NotImplemented)
+        }
+        fn thumbnail_at(&self, _: TimeCode, _: u32) -> Result<RgbaImage, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+        fn request_transcription(&self, _: MediaAsset) {}
+        fn transcript_status(&self, _: &MediaAsset) -> TranscriptStatus {
+            TranscriptStatus::NotRequested
+        }
+        fn timeline_transcript(
+            &self,
+            _: &Document,
+            _: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+            Ok(vec![])
+        }
+        fn request_silence_detection(&self, _: MediaAsset) {}
+        fn silence_status(&self, _: &MediaAsset) -> SilenceStatus {
+            SilenceStatus::NotRequested
+        }
+        fn timeline_silences(
+            &self,
+            _: &Document,
+            _: Option<std::ops::Range<TimeCode>>,
+            _: TimeCode,
+        ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
+            Ok(vec![])
+        }
+        fn request_scene_detection(&self, _: MediaAsset) {}
+        fn scene_status(&self, _: &MediaAsset) -> SceneStatus {
+            SceneStatus::NotRequested
+        }
+        fn timeline_scene_changes(
+            &self,
+            _: &Document,
+            _: Option<std::ops::Range<TimeCode>>,
+            _: u16,
+        ) -> Result<Vec<TimelineSceneChange>, MediaError> {
+            Ok(vec![])
+        }
+        fn monitor_proof_for_document(
+            &self,
+            doc: Arc<Document>,
+            at: TimeCode,
+        ) -> Result<MonitorProof, MediaError> {
+            assert!(self.panic_len == 0, "{}", "p".repeat(self.panic_len));
+            let active: Vec<_> = (doc.tracks.iter().flat_map(|t| &t.clips))
+                .filter(|c| c.is_enabled_at(TimeCode(at.0 - c.timeline_start.0)))
+                .map(|c| c.id.0)
+                .collect();
+            self.calls.lock().unwrap().push((at.0, active.clone()));
+            let (width, height) = doc.resolution;
+            assert!(
+                width <= 8192 && height <= 8192,
+                "proof must be refused before an unsafe raster allocation"
+            );
+            let count = width as usize * height as usize;
+            let sum = active.iter().sum::<u64>();
+            let mut pixels = Vec::with_capacity(count * 4);
+            let mut state = (at.0 as u64).wrapping_add(0x00ab_c123).wrapping_add(sum);
+            for _ in 0..count {
+                if self.noise {
+                    for _ in 0..3 {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        pixels.push(state as u8);
+                    }
+                } else {
+                    pixels.extend_from_slice(&[at.0 as u8, sum as u8, 91]);
+                }
+                pixels.push(255);
+            }
+            let mut metadata = MonitorProofMetadata::test_double();
+            if self.adapter_len > 0 {
+                metadata.adapter = "a".repeat(self.adapter_len);
+            }
+            Ok(MonitorProof {
+                image: RgbaImage {
+                    width,
+                    height,
+                    pixels,
+                },
+                metadata,
+            })
+        }
+    }
+
+    /// A solid (clip 1), and over it an adjustment (clip 2) when `paired`.
+    fn doc(width: u32, height: u32, length: i64, paired: bool) -> Document {
+        let mut clips = vec![mo2_solo_solid(1, [40, 70, 90], length)];
+        if paired {
+            clips.push(mo2_solo_adjustment(2, length));
+        }
+        let base = Document {
+            resolution: (width, height),
+            duration: TimeCode(length),
+            ..Document::default()
+        };
+        mo2_solo_stack(base, clips)
+    }
+
+    fn args(paired: bool) -> SoloArgs {
+        SoloArgs {
+            expected_revision: TimelineRevision(0),
+            clip_id: ClipId(if paired { 2 } else { 1 }),
+            samples: 16,
+            context: None,
+            full_res: false,
+        }
+    }
+
+    fn solo(
+        document: &Document,
+        args: &SoloArgs,
+        proof: &dyn Analysis,
+    ) -> Result<SoloStrip, SoloError> {
+        preview_solo(proof, TimelineRevision(0), document, args)
+    }
+
+    fn frames(strip: &SoloStrip) -> Vec<i64> {
+        (strip.report["samples"].as_array().unwrap().iter())
+            .map(|sample| sample["frame"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// A valid `i64::MAX`-frame span samples in wide arithmetic, not a panic.
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn huge_frame_span_is_safe() {
+        let mut document = doc(8, 8, i64::MAX, false);
+        document.tracks[0].clips[0].enabled = false;
+        document.validate().unwrap();
+        let proof = ProofDouble::default();
+        let outcome = std::panic::catch_unwind(|| solo(&document, &args(false), &proof));
+        let strip = outcome.expect("a valid i64 span must not panic").unwrap();
+        let expected: Vec<_> = (0..16_i128)
+            .map(|i| (i * (i128::from(i64::MAX) - 1) / 15) as i64)
+            .collect();
+        assert_eq!(frames(&strip), expected);
+    }
+
+    /// A `u32::MAX` square pair is refused typed before any multiplication
+    /// can overflow, and before a single proof.
+    #[test]
+    fn oversized_pair_refuses_before_multiplication() {
+        let document = doc(u32::MAX, u32::MAX, 1, true);
+        let proof = ProofDouble::default();
+        for full_res in [true, false] {
+            let args = SoloArgs {
+                full_res,
+                ..args(true)
+            };
+            let outcome = std::panic::catch_unwind(|| solo(&document, &args, &proof));
+            let outcome = outcome.expect("an oversized raster must refuse, not panic");
+            assert!(
+                matches!(outcome, Err(SoloError::SoloOverBudget { .. })),
+                "{outcome:?}"
+            );
+        }
+        assert!(proof.calls.lock().unwrap().is_empty());
+    }
+
+    /// The 8192 side and 16 Mpx decoded limits hold at their exact edges; a
+    /// one-frame span emits exactly one sample.
+    #[test]
+    fn dimension_limits_and_single_frame() {
+        let proof = ProofDouble::default();
+        let full = SoloArgs {
+            full_res: true,
+            ..args(true)
+        };
+        for (width, height) in [(8193, 1), (4096, 4096), (8192, 2049)] {
+            let outcome = solo(&doc(width, height, 1, true), &full, &proof);
+            assert!(
+                matches!(outcome, Err(SoloError::SoloOverBudget { .. })),
+                "{width}x{height}: {outcome:?}"
+            );
+        }
+        assert!(proof.calls.lock().unwrap().is_empty());
+        let edge = SoloArgs {
+            full_res: true,
+            ..args(false)
+        };
+        let strip = solo(&doc(8192, 1, 1, false), &edge, &proof).unwrap();
+        assert_eq!(strip.image.width, 8192);
+        let strip = solo(&doc(4096, 2048, 1, true), &full, &proof).unwrap();
+        assert_eq!((strip.image.width, strip.image.height), (4096, 4096));
+        for paired in [false, true] {
+            let strip = solo(&doc(17, 35, 1, paired), &args(paired), &proof).unwrap();
+            assert_eq!(strip.report["emitted"], 1);
+            assert_eq!(frames(&strip), [0]);
+            mo2_assert_solo_budgets(&strip.to_result());
+        }
+    }
+
+    /// An empty source span refuses typed; a shifted span samples its own
+    /// project frames.
+    #[test]
+    fn empty_and_outside_span() {
+        let proof = ProofDouble::default();
+        let mut document = doc(8, 8, 1, false);
+        document.tracks[0].clips[0].source_range.end = TimeCode(0);
+        let outcome = solo(&document, &args(false), &proof);
+        assert!(
+            matches!(outcome, Err(SoloError::SoloWindowEmpty { .. })),
+            "{outcome:?}"
+        );
+        let mut document = doc(8, 8, 5, false);
+        document.tracks[0].clips[0].timeline_start = TimeCode(10);
+        document.duration = TimeCode(15);
+        document.validate().unwrap();
+        let strip = solo(&document, &args(false), &proof).unwrap();
+        assert_eq!(frames(&strip), [10, 11, 12, 13, 14]);
+    }
+
+    /// Each sample renders at its own project frame, BEFORE then AFTER, over
+    /// the true below-stack with keyed upper layers hidden; the clip's local
+    /// enable curve yields inactive cells; blend picks the default context.
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn exact_context_pairs_and_local_enable() {
+        let mut document = doc(17, 31, 12, true);
+        document.tracks.push(Track {
+            id: TrackId(3),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![mo2_solo_solid(3, [0, 255, 0], 12)],
+        });
+        for track in &mut document.tracks {
+            track.clips[0].timeline_start = TimeCode(20);
+        }
+        document.duration = TimeCode(32);
+        let hold = |keys: serde_json::Value| Some(serde_json::from_value(keys).unwrap());
+        document.tracks[2].clips[0].enabled_curve =
+            hold(json!({"keyframes": [{"at": 0, "value": 1, "interpolation": "hold"}]}));
+        document.tracks[1].clips[0].enabled_curve = hold(json!({"keyframes": [
+            {"at": 0, "value": 1, "interpolation": "hold"},
+            {"at": 5, "value": 0, "interpolation": "hold"}
+        ]}));
+        document.validate().unwrap();
+        let original = document.clone();
+        let proof = ProofDouble::default();
+        let strip = solo(&document, &args(true), &proof).unwrap();
+        let expected = [20, 21, 23, 24, 26, 27, 29, 31];
+        assert_eq!(frames(&strip), expected);
+        for (column, frame) in expected.into_iter().enumerate() {
+            let sample = &strip.report["samples"][column];
+            assert_eq!(sample["active"], frame < 25, "{sample}");
+            if frame < 25 {
+                for (row, ids) in [(0, 1), (1, 3)] {
+                    let at = (row * 31 * strip.image.width as usize + column * 17) * 4;
+                    assert_eq!(&strip.image.pixels[at..at + 3], &[frame as u8, ids, 91]);
+                }
+            }
+        }
+        assert_eq!(
+            *proof.calls.lock().unwrap(),
+            [20, 21, 23, 24]
+                .into_iter()
+                .flat_map(|frame| [(frame, vec![1]), (frame, vec![1, 2])])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(document, original, "the snapshot is never mutated");
+
+        let mut screen = mo2_solo_solid(2, [20, 30, 40], 12);
+        (screen.timeline_start, screen.blend_mode) = (TimeCode(20), BlendMode::Screen);
+        document.tracks[1].clips[0] = screen;
+        let mut pair = SoloArgs {
+            samples: 2,
+            ..args(true)
+        };
+        let proof = ProofDouble::default();
+        solo(&document, &pair, &proof).unwrap();
+        assert_eq!(
+            proof.calls.lock().unwrap()[0],
+            (20, vec![1, 2]),
+            "non-normal: below"
+        );
+        pair.context = Some(SoloContext::Isolated);
+        let proof = ProofDouble::default();
+        solo(&document, &pair, &proof).unwrap();
+        assert_eq!(
+            proof.calls.lock().unwrap()[0],
+            (20, vec![2]),
+            "explicit isolation"
+        );
+    }
+
+    /// Incompressible odd sizes either fit every budget after degrading or
+    /// refuse typed; oversized report metadata refuses on `report_bytes`.
+    #[test]
+    fn adversarial_budgets() {
+        let mut refusals = 0;
+        for (width, height, paired) in [
+            (321, 639, false),
+            (321, 639, true),
+            (641, 1281, true),
+            (319, 641, false),
+            (1, 8192, true),
+        ] {
+            let proof = ProofDouble {
+                noise: true,
+                ..ProofDouble::default()
+            };
+            let strip = match solo(&doc(width, height, 17, paired), &args(paired), &proof) {
+                Ok(strip) => strip,
+                Err(SoloError::SoloOverBudget { .. }) => {
+                    refusals += 1;
+                    continue;
+                }
+                other => panic!("{other:?}"),
+            };
+            mo2_assert_solo_budgets(&strip.to_result());
+            let emitted = strip.report["emitted"].as_u64().unwrap();
+            assert!(emitted == 2 || emitted == if paired { 8 } else { 16 });
+            for sample in strip.report["samples"].as_array().unwrap() {
+                let hashes = sample["hashes"].as_array().unwrap().len();
+                assert_eq!(hashes, if paired { 2 } else { 1 });
+            }
+        }
+        assert_eq!(
+            refusals, 1,
+            "only the 321×639 noise pair exceeds the PNG cap"
+        );
+        let proof = ProofDouble {
+            noise: true,
+            ..ProofDouble::default()
+        };
+        let full = SoloArgs {
+            full_res: true,
+            ..args(false)
+        };
+        let outcome = solo(&doc(641, 481, 17, false), &full, &proof);
+        assert!(
+            matches!(outcome, Err(SoloError::SoloOverBudget { .. })),
+            "{outcome:?}"
+        );
+        let proof = ProofDouble {
+            adapter_len: 5000,
+            ..ProofDouble::default()
+        };
+        let outcome = solo(&doc(8, 8, 17, false), &args(false), &proof);
+        assert!(
+            matches!(
+                outcome,
+                Err(SoloError::SoloOverBudget {
+                    limit: "report_bytes",
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// Base64 rounding at the PNG cap still leaves envelope headroom.
+    #[test]
+    fn base64_rounding_and_envelope_headroom() {
+        for raw in [786_430, 786_431, 786_432] {
+            let strip = SoloStrip {
+                image: RgbaImage {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                },
+                png: vec![0; raw],
+                report: json!({"padding": "q".repeat(4000)}),
+            };
+            let result = strip.to_result();
+            let encoded = &result.content[1].as_image().unwrap().data;
+            assert_eq!(encoded.len(), 4 * raw.div_ceil(3));
+            let envelope = json!({"jsonrpc": "2.0", "id": u64::MAX, "result": result});
+            assert!(serde_json::to_vec(&envelope).unwrap().len() <= 1_056 * 1024);
+        }
+    }
+
+    /// An 8193-px thumbnail request refuses typed before the renderer's
+    /// 8192-px texture limit can panic.
+    #[test]
+    fn oversized_thumbnail_is_typed() {
+        let document = doc(8193, 1, 1, false);
+        let media = FfmpegMediaEngine::new().unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            solo(&document, &args(false), &media)
+        }));
+        let outcome = outcome.expect("an oversized thumbnail must refuse, not panic");
+        assert!(
+            matches!(
+                outcome,
+                Err(SoloError::SoloOverBudget {
+                    limit: "render_side",
+                    observed: 8193,
+                    allowed: 8192
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// A path-bearing render failure is bounded like a strip: the whole
+    /// refusal fits R25 and stays typed, JSON-only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn error_response_obeys_budgets() {
+        let fixture = GeneratedMedia::ffmpeg(
+            "mo2-solo-offline",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x32:r=30:d=0.1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            "mp4",
+        );
+        let media = FfmpegMediaEngine::new().unwrap();
+        let mut asset = media.probe(fixture.path()).unwrap();
+        asset.path = PathBuf::from(format!("/{}", "mo2-missing/".repeat(40_000)));
+        let document = single_clip_document(asset);
+        document.validate().unwrap();
+        let (server, client) = mo2_solo_start(document).await;
+        let arguments = json!({"expected_revision": 0, "clip_id": 1, "samples": 2});
+        let result = invoke_capability(&client, "preview_solo", arguments).await;
+        client.cancel().await.unwrap();
+        server.shutdown();
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result
+                .content
+                .iter()
+                .all(|block| block.as_image().is_none())
+        );
+        let body = result.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], "solo_over_budget", "{body}");
+        assert_eq!(body["applied"], false);
+        let report = body.to_string().len();
+        let wire = serde_json::to_vec(&result).unwrap().len();
+        assert!(
+            report <= 4 * 1024 && wire <= 1_056 * 1024,
+            "{report} / {wire}"
+        );
+    }
+
+    /// The registry serves `preview_solo` as an inspector with integer
+    /// sample and clip arguments, a revision `$ref` and a context enum, and
+    /// inspector-only discovery finds it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_semantics() {
+        let (server, client) = mo2_solo_start(Document::default()).await;
+        let call = |name: &'static str, arguments: serde_json::Value| {
+            let request = CallToolRequestParams::new(name)
+                .with_arguments(arguments.as_object().unwrap().clone());
+            client.call_tool(request)
+        };
+        let opened = call("get_capability", json!({"name": "preview_solo"}))
+            .await
+            .unwrap();
+        let found = call(
+            "search_capabilities",
+            json!({"query": "clip solo", "kinds": ["inspector"]}),
+        )
+        .await
+        .unwrap();
+        client.cancel().await.unwrap();
+        server.shutdown();
+
+        let body = opened.structured_content.unwrap();
+        assert_eq!(body["capability"]["kind"], "inspector", "{body}");
+        assert_eq!(body["invocation"], "invoke_capability");
+        let schema = &body["input_schema"];
+        let properties = &schema["properties"];
+        for (name, kind) in [
+            ("clip_id", "integer"),
+            ("samples", "integer"),
+            ("full_res", "boolean"),
+        ] {
+            assert_eq!(properties[name]["type"], kind, "{name}: {schema}");
+        }
+        assert_eq!(properties["clip_id"]["format"], "uint64");
+        assert_eq!(properties["samples"]["format"], "uint32");
+        assert_eq!(
+            properties["expected_revision"]["$ref"],
+            "#/$defs/TimelineRevision"
+        );
+        assert_eq!(schema["$defs"]["TimelineRevision"]["type"], "integer");
+        assert_eq!(
+            properties["context"]["anyOf"],
+            json!([{"$ref": "#/$defs/SoloContext"}, {"type": "null"}])
+        );
+        let variants: Vec<_> = (schema["$defs"]["SoloContext"]["oneOf"].as_array().unwrap())
+            .iter()
+            .map(|variant| (variant["type"].clone(), variant["const"].clone()))
+            .collect();
+        assert_eq!(
+            variants,
+            [
+                (json!("string"), json!("isolated")),
+                (json!("string"), json!("below"))
+            ]
+        );
+        let found = found.structured_content.unwrap();
+        let names: Vec<_> = (found["capabilities"].as_array().unwrap().iter())
+            .map(|capability| (capability["name"].clone(), capability["kind"].clone()))
+            .collect();
+        assert!(
+            names.contains(&(json!("preview_solo"), json!("inspector"))),
+            "{found}"
+        );
+    }
+
+    /// Review 3 (S1): an error body of exactly 4095/4096 bytes keeps its
+    /// code, 4097 becomes the bounded `solo_over_budget`; ASCII, escaped
+    /// and multi-byte UTF-8 bodies alike.
+    #[test]
+    fn new_refusal_exact_report_edges() {
+        for escaped in ["", "\"\\\n\r\t", "é界"] {
+            let base = SoloError::RenderFailed(escaped.repeat(20));
+            let empty_size = base.body().to_string().len();
+            for wanted in [4095, 4096, 4097] {
+                let padding = "x".repeat(wanted - empty_size);
+                let error = SoloError::RenderFailed(format!("{}{padding}", escaped.repeat(20)));
+                assert_eq!(error.body().to_string().len(), wanted);
+                let result = error.to_result();
+                let body = result.structured_content.as_ref().unwrap();
+                let code = if wanted > 4096 {
+                    "solo_over_budget"
+                } else {
+                    "solo_render_failed"
+                };
+                assert_eq!(body["code"], code, "edge {wanted}, escaped {escaped:?}");
+                assert!(body.to_string().len() <= 4096);
+                assert!(serde_json::to_vec(&result).unwrap().len() <= 1_056 * 1024);
+                assert_eq!(result.is_error, Some(true));
+                assert!(result.content.iter().all(|b| b.as_image().is_none()));
+            }
+        }
+    }
+
+    /// Review 3 (S1): both axes, every mode and context, and the u32
+    /// product edges refuse typed before the renderer is asked.
+    #[test]
+    fn new_render_side_all_modes_and_pair_products() {
+        let proof = ProofDouble::default();
+        let sides = [
+            (8192, 1),
+            (1, 8192),
+            (8193, 1),
+            (1, 8193),
+            (65_535, 65_537),
+            (65_536, 65_536),
+            (65_537, 65_536),
+            (u32::MAX, 1),
+            (u32::MAX, u32::MAX),
+        ];
+        let contexts = [None, Some(SoloContext::Below), Some(SoloContext::Isolated)];
+        for paired in [false, true] {
+            for full_res in [false, true] {
+                for context in contexts {
+                    for (width, height) in sides {
+                        let document = doc(width, height, 1, paired);
+                        document.validate().unwrap();
+                        let mut request = args(paired);
+                        (request.full_res, request.context) = (full_res, context);
+                        let before = proof.calls.lock().unwrap().len();
+                        let outcome = solo(&document, &request, &proof);
+                        if width.max(height) > 8192 {
+                            assert!(
+                                matches!(
+                                    outcome,
+                                    Err(SoloError::SoloOverBudget {
+                                        limit: "render_side",
+                                        ..
+                                    })
+                                ),
+                                "{width}x{height}: {outcome:?}"
+                            );
+                            assert_eq!(proof.calls.lock().unwrap().len(), before);
+                            continue;
+                        }
+                        let strip = outcome.unwrap();
+                        mo2_assert_solo_budgets(&strip.to_result());
+                        if full_res {
+                            let rows = if paired { 2 } else { 1 };
+                            assert_eq!(
+                                (strip.image.width, strip.image.height),
+                                (width, height * rows)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A raw streamable-HTTP session, so a test sees the complete reply
+    /// body and may choose the JSON-RPC request id.
+    struct RawSession {
+        client: reqwest::Client,
+        endpoint: String,
+        session: Option<reqwest::header::HeaderValue>,
+    }
+
+    impl RawSession {
+        async fn open(server: &McpServer) -> Self {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap();
+            let mut raw = Self {
+                client,
+                endpoint: server.endpoint().to_string(),
+                session: None,
+            };
+            let init = raw
+                .post(
+                    &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "mo2-raw", "version": "1"}
+                    }}),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert!(init.status().is_success(), "{init:?}");
+            raw.session = init.headers().get("mcp-session-id").cloned();
+            let _ = init.text().await.unwrap();
+            let notice = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+            assert!(
+                raw.post(&notice)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .is_success()
+            );
+            raw
+        }
+
+        fn post(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+            let mut request = (self.client.post(&self.endpoint))
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-06-18")
+                .json(body);
+            if let Some(session) = &self.session {
+                request = request.header("mcp-session-id", session.clone());
+            }
+            request
+        }
+
+        /// `preview_solo` through `invoke_capability` with request `id`:
+        /// the complete HTTP body and its JSON-RPC message.
+        async fn solo(
+            &self,
+            id: serde_json::Value,
+            arguments: serde_json::Value,
+        ) -> (usize, serde_json::Value) {
+            self.invoke(id, "preview_solo", arguments).await
+        }
+
+        /// Capability `name` through `invoke_capability`, as [`Self::solo`].
+        async fn invoke(
+            &self,
+            id: serde_json::Value,
+            name: &str,
+            arguments: serde_json::Value,
+        ) -> (usize, serde_json::Value) {
+            let params = json!({"name": "invoke_capability", "arguments": {
+                "name": name, "arguments": arguments
+            }});
+            let body =
+                json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params});
+            let response = self.post(&body).send().await.unwrap();
+            assert!(response.status().is_success(), "{response:?}");
+            let raw = response.text().await.unwrap();
+            let data = (raw.lines())
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim_start)
+                .find(|line| line.starts_with('{'))
+                .unwrap_or(raw.as_str());
+            (raw.len(), serde_json::from_str(data).unwrap())
+        }
+    }
+
+    /// Review 3 (B1): a malformed argument is refused with one fixed-size
+    /// typed `InvalidParams`, never an echo of the input; the three bodies
+    /// that used to land at 4095/4096/4097 bytes included.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_invalid_argument_errors_are_bounded() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let mut replies = Vec::new();
+        for (field, size) in [
+            ("samples", 1_100_000),
+            ("context", 1_100_000),
+            ("clip_id", 1_100_000),
+            ("full_res", 1_100_000),
+            ("unknown_field", 1_100_000),
+            ("samples", 4014),
+            ("samples", 4015),
+            ("samples", 4016),
+        ] {
+            let mut arguments = json!({"expected_revision": 0, "clip_id": 1, "samples": 2});
+            if field == "unknown_field" {
+                arguments[&"z".repeat(size)] = json!(1);
+            } else {
+                arguments[field] = json!("z".repeat(size));
+            }
+            let (bytes, message) = raw.solo(json!(replies.len() + 2), arguments).await;
+            replies.push((bytes, message["error"].clone()));
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        for (bytes, error) in &replies {
+            let json = error.to_string().len();
+            assert!(json <= 4096 && *bytes <= 1_056 * 1024, "{json} / {bytes}");
+        }
+        let (bytes, error) = &replies[0];
+        assert_eq!(error["code"], -32602, "{error}");
+        assert_eq!(error["data"]["code"], "solo_invalid_arguments", "{error}");
+        for (other_bytes, other) in &replies {
+            assert_eq!(
+                (other_bytes, other),
+                (bytes, error),
+                "one fixed-size refusal"
+            );
+        }
+    }
+
+    /// Review 3 (B2): the JSON-RPC envelope counts. A legal 60,000-byte
+    /// string request id pushes the near-cap strip over R25, so it becomes
+    /// the minimal typed refusal inside the budget; a numeric id still
+    /// receives the strip, and both complete bodies obey the budget.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_wire_budget_includes_string_request_id() {
+        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let proof = Arc::new(ProofDouble {
+            noise: true,
+            ..ProofDouble::default()
+        });
+        let core = Core::spawn(doc(440, 440, 1, false)).unwrap();
+        let server = McpServer::start(core, media, proof).unwrap();
+        let raw = RawSession::open(&server).await;
+        let arguments = json!({"expected_revision": 0, "clip_id": 1, "full_res": true});
+        let (numeric_bytes, numeric) = raw.solo(json!(7), arguments.clone()).await;
+        let long_id = json!("i".repeat(60_000));
+        let (string_bytes, string) = raw.solo(long_id.clone(), arguments).await;
+        server.shutdown();
+
+        let strip: CallToolResult = serde_json::from_value(numeric["result"].clone()).unwrap();
+        assert_eq!(
+            strip.is_error,
+            Some(false),
+            "{:?}",
+            strip.structured_content
+        );
+        assert!(
+            numeric_bytes + 60_000 > 1_056 * 1024,
+            "the id alone tips it over"
+        );
+        let refusal: CallToolResult = serde_json::from_value(string["result"].clone()).unwrap();
+        assert_eq!(string["id"], long_id);
+        assert_eq!(refusal.is_error, Some(true));
+        assert!(refusal.content.iter().all(|b| b.as_image().is_none()));
+        let body = refusal.structured_content.unwrap();
+        assert_eq!(body, json!({"code": "solo_over_budget"}));
+        for bytes in [numeric_bytes, string_bytes] {
+            assert!(bytes <= 1_056 * 1024, "complete body {bytes}");
+        }
+    }
+
+    const WIRE: usize = kinewright_agent::SOLO_WIRE_BUDGET_BYTES;
+
+    /// What the server's choke point measures for a reply that arrived as
+    /// `message`: rmcp's own JSON-RPC serialization with the `resultType`
+    /// a legacy session strips restored, plus the framing bound.
+    fn measured(message: &serde_json::Value) -> usize {
+        use rmcp::model::{ResultType, ServerJsonRpcMessage, ServerResult};
+        let id = serde_json::from_value(message["id"].clone()).unwrap();
+        let rebuilt = if message.get("error").is_some() {
+            let error = serde_json::from_value(message["error"].clone()).unwrap();
+            ServerJsonRpcMessage::error(error, Some(id))
+        } else {
+            let mut result: CallToolResult =
+                serde_json::from_value(message["result"].clone()).unwrap();
+            result.result_type = Some(ResultType::COMPLETE);
+            ServerJsonRpcMessage::response(ServerResult::CallToolResult(result), id)
+        };
+        serde_json::to_vec(&rebuilt).unwrap().len() + kinewright_agent::SOLO_FRAMING_BYTES
+    }
+
+    /// The outcome a reply carries.
+    fn outcome(message: &serde_json::Value) -> &'static str {
+        let result = &message["result"];
+        if message["error"]["data"]["code"] == "solo_invalid_arguments" {
+            "invalid"
+        } else if result["structuredContent"] == json!({"code": "solo_over_budget"}) {
+            "minimal"
+        } else if result["isError"] == false {
+            "success"
+        } else if result["structuredContent"]["code"] == "solo_clip_not_visible" {
+            "not_visible"
+        } else if (result["content"][0]["text"].as_str())
+            .is_some_and(|text| text.starts_with("timeline revision conflict"))
+        {
+            "stale"
+        } else {
+            panic!("unexpected reply {message}")
+        }
+    }
+
+    /// `preview_solo` arguments producing each outcome kind on `doc(2, 2, 1)`.
+    fn outcome_arguments(kind: &str) -> serde_json::Value {
+        let mut arguments = json!({"expected_revision": 0, "clip_id": 1, "samples": 2});
+        match kind {
+            "not_visible" => arguments["clip_id"] = json!(9),
+            "stale" => arguments["expected_revision"] = json!(1),
+            "invalid" => arguments["samples"] = json!("bad"),
+            _ => {}
+        }
+        arguments
+    }
+
+    /// A string id whose JSON is exactly `bytes` long: `unit` (two JSON
+    /// bytes each: two ASCII, escaped or two-byte UTF-8) padded with one
+    /// ASCII byte.
+    fn id_of(bytes: usize, unit: &str) -> serde_json::Value {
+        let body = bytes - 2;
+        let id = json!(format!("{}{}", unit.repeat(body / 2), "i".repeat(body % 2)));
+        assert_eq!(id.to_string().len(), bytes);
+        id
+    }
+
+    /// Final review (B1): every reply is measured as sent, and the only
+    /// overrun ME4 leaves is an id whose JSON alone passes the budget less
+    /// the minimal refusal: bytes on the wire never exceed the measure,
+    /// and the measure never exceeds R25 below that residual edge.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_request_id_residual_matrix() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let (_, small) = raw.solo(json!(""), outcome_arguments("stale")).await;
+        let minimal = SoloError::minimal_result();
+        let minimal_overhead = {
+            let message = json!({"jsonrpc": "2.0", "id": "", "result": minimal});
+            measured(&message) - 2
+        };
+        // ME4's arithmetic: a 175-byte message around the id, plus 128.
+        assert_eq!(minimal_overhead, 175 + 128);
+        assert!(minimal_overhead < measured(&small) - 2);
+        let residual = WIRE - minimal_overhead;
+        let mut violations = vec![];
+        for kind in ["success", "not_visible", "stale", "invalid"] {
+            for n in [
+                0,
+                1,
+                4096,
+                60_000,
+                WIRE - 1024,
+                WIRE - 512,
+                WIRE - 256,
+                residual - 3,
+                residual - 2,
+                residual - 1,
+                WIRE - 128,
+                WIRE - 2,
+                WIRE - 1,
+                WIRE,
+                WIRE + 1,
+            ] {
+                let id = json!("i".repeat(n));
+                let id_bytes = id.to_string().len();
+                let (bytes, message) = raw.solo(id.clone(), outcome_arguments(kind)).await;
+                assert_eq!(message["id"], id);
+                let size = measured(&message);
+                let sent = outcome(&message);
+                if bytes > size || (id_bytes <= residual && size > WIRE) {
+                    violations.push(format!("{kind} {sent}: id={id_bytes} {bytes}/{size}"));
+                }
+                if size > WIRE {
+                    assert!(
+                        size <= id_bytes + minimal_overhead,
+                        "{kind} kept a larger reply"
+                    );
+                }
+            }
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// N24 (B2): a panicking render reaches the client as fixed text with
+    /// no payload, through ME4's choke point: bounded at the residual edge
+    /// where the 2,000-byte payload used to pass R25.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_panic_reply_is_fixed_and_bounded() {
+        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let proof = Arc::new(ProofDouble {
+            panic_len: 2000,
+            ..ProofDouble::default()
+        });
+        let core = Core::spawn(doc(2, 2, 1, false)).unwrap();
+        let server = McpServer::start(core, media, proof).unwrap();
+        let raw = RawSession::open(&server).await;
+        let arguments = outcome_arguments("success");
+        let (_, small) = raw.solo(json!(1), arguments.clone()).await;
+        let error = small["error"].clone();
+        assert_eq!(error["code"], -32603, "{small}");
+        assert_eq!(error["message"], "tool call failed: handler panicked");
+        assert!(error.get("data").is_none());
+        for id_bytes in [2, WIRE - 304, WIRE - 303] {
+            let id = id_of(id_bytes, "ii");
+            let (bytes, message) = raw.solo(id.clone(), arguments.clone()).await;
+            assert_eq!(message["id"], id);
+            assert_eq!(message["error"], error, "id {id_bytes}");
+            let size = measured(&message);
+            assert!(
+                bytes <= size && size <= WIRE,
+                "id {id_bytes}: {bytes}/{size}"
+            );
+        }
+        server.shutdown();
+    }
+
+    /// N24 (B2), the "every tool" half: a panicking non-solo capability
+    /// (`import_media`'s probe) gets the same fixed text, never the payload.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_non_solo_panic_is_fixed_text() {
+        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let proof = Arc::new(ProofDouble {
+            panic_len: 2000,
+            ..ProofDouble::default()
+        });
+        let core = Core::spawn(doc(2, 2, 1, false)).unwrap();
+        let server = McpServer::start(core, media, proof).unwrap();
+        let raw = RawSession::open(&server).await;
+        let arguments = json!({"expected_revision": 0, "path": "/nonexistent/x.mp4"});
+        let (bytes, message) = raw.invoke(json!(5), "import_media", arguments).await;
+        server.shutdown();
+        assert_eq!(message["id"], 5);
+        assert_eq!(message["error"]["code"], -32603, "{message}");
+        assert_eq!(
+            message["error"]["message"],
+            "tool call failed: handler panicked"
+        );
+        assert!(message["error"].get("data").is_none());
+        assert!(bytes < 1024, "{bytes}");
+    }
+
+    /// A success reply's measure with its report's `elapsed_ms` (the one
+    /// timing field any `preview_solo` reply carries) cut to one digit: the
+    /// smallest this reply could have been.
+    fn measured_floor(message: &serde_json::Value) -> usize {
+        let mut message = message.clone();
+        let report = &mut message["result"]["structuredContent"];
+        if report.get("elapsed_ms").is_some() {
+            report["elapsed_ms"] = json!(0);
+        }
+        measured(&message)
+    }
+
+    /// Final review (B1): ±1 around both edges of every outcome kind: its
+    /// own reply at exactly R25, the minimal refusal one byte later, and
+    /// the residual edge where even that stops fitting; escaped and UTF-8
+    /// ids land on the same bytes. Each reply is judged by itself, with no
+    /// retry: the non-success kinds carry no timing field and are exact,
+    /// and both of their outcomes must be reached. A success reply's
+    /// `elapsed_ms` can only be bounded, below by one digit and above by the
+    /// digits of the request's own wall time, so success is judged per reply
+    /// but its edges need not be reached (N24); the exact success edge is
+    /// pinned without timing by `solo_bound_tests` in the server.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_exact_wire_limit_edges_and_escaped_ids() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let minimal = SoloError::minimal_result();
+        let minimal_overhead =
+            measured(&json!({"jsonrpc": "2.0", "id": "", "result": minimal})) - 2;
+        let mut cases = 0;
+        let mut outcomes = std::collections::BTreeSet::new();
+        for kind in ["success", "not_visible", "stale", "invalid"] {
+            let timed = kind == "success";
+            let (_, small) = raw.solo(json!(""), outcome_arguments(kind)).await;
+            assert_eq!(outcome(&small), kind);
+            // Exact for the untimed kinds; the one-digit floor for success.
+            let own = measured_floor(&small) - 2;
+            // `InvalidParams` is already smaller than the minimal refusal.
+            let smallest = own <= minimal_overhead;
+            assert_eq!(smallest, kind == "invalid", "{kind}");
+            let units: &[&str] = if timed {
+                &["ii", "é", "\"", "\n"]
+            } else {
+                &["ii"]
+            };
+            for (at, edge) in [WIRE - own, WIRE - minimal_overhead]
+                .into_iter()
+                .enumerate()
+            {
+                for id_bytes in [edge - 1, edge, edge + 1] {
+                    for unit in units {
+                        let id = id_of(id_bytes, unit);
+                        let label = format!("{kind} id={id_bytes} unit={unit:?}");
+                        let started = std::time::Instant::now();
+                        let (bytes, message) = raw.solo(id.clone(), outcome_arguments(kind)).await;
+                        let wall_ms = started.elapsed().as_millis();
+                        assert_eq!(message["id"], id, "{label}");
+                        let size = measured(&message);
+                        assert!(bytes <= size, "{label}: wire {bytes} > {size}");
+                        // The server's elapsed time nests inside the
+                        // request's, so its digits bound the timing field.
+                        let slack = if timed {
+                            wall_ms.to_string().len() - 1
+                        } else {
+                            0
+                        };
+                        let sent = outcome(&message);
+                        outcomes.insert((kind, at, id_bytes + 1 - edge, sent));
+                        if sent == kind {
+                            // Past R25 only in ME4's residual, when nothing
+                            // smaller exists or even the refusal cannot fit.
+                            let residual = smallest || id_bytes + minimal_overhead > WIRE;
+                            assert!(size <= WIRE || residual, "{label}: {size} passed R25");
+                            assert_eq!(measured_floor(&message), id_bytes + own, "{label}");
+                            if timed {
+                                let elapsed = message["result"]["structuredContent"]["elapsed_ms"]
+                                    .as_u64()
+                                    .unwrap();
+                                assert!(u128::from(elapsed) <= wall_ms, "{label}");
+                            } else {
+                                assert_eq!(size, id_bytes + own, "{label}");
+                            }
+                        } else {
+                            assert_eq!(sent, "minimal", "{label}");
+                            assert!(!smallest, "{label}: substituted a larger reply");
+                            assert_eq!(size, id_bytes + minimal_overhead, "{label}");
+                            assert!(
+                                id_bytes + own + slack > WIRE,
+                                "{label}: substituted a reply that fit (slack {slack})"
+                            );
+                        }
+                        cases += 1;
+                    }
+                }
+            }
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        // Both outcomes are reached at every untimed kind's own edge: its
+        // reply one byte below, the minimal refusal one byte past (`invalid`
+        // excepted, being smaller than that refusal).
+        for kind in ["not_visible", "stale", "invalid"] {
+            assert!(outcomes.contains(&(kind, 0, 0, kind)), "{kind} -1");
+            let past = if kind == "invalid" { kind } else { "minimal" };
+            assert!(outcomes.contains(&(kind, 0, 2, past)), "{kind} +1");
+            assert!(outcomes.contains(&(kind, 1, 2, past)), "{kind} residual +1");
+        }
+        assert_eq!(cases, 3 * 2 * (4 + 1 + 1 + 1));
+    }
+
+    /// Final review: every field's wrong type, a missing required field
+    /// and large unknown keys are all the one fixed-size typed refusal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_invalid_field_type_matrix() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let mut replies = vec![];
+        for field in [
+            "expected_revision",
+            "clip_id",
+            "samples",
+            "context",
+            "full_res",
+        ] {
+            let mut values = vec![
+                json!(null),
+                json!([]),
+                json!({}),
+                json!(-1),
+                json!(1.5),
+                json!(true),
+                json!("bad"),
+            ];
+            values.extend(
+                [4095, 4096, 4097, WIRE - 1, WIRE, WIRE + 1].map(|n| json!("é\\\"".repeat(n / 4))),
+            );
+            for value in values {
+                let valid = (field == "context" && value.is_null())
+                    || (field == "full_res" && value.is_boolean());
+                if !valid {
+                    let mut arguments = outcome_arguments("success");
+                    arguments[field] = value;
+                    replies.push(raw.solo(json!(1), arguments).await);
+                }
+            }
+        }
+        for field in ["expected_revision", "clip_id"] {
+            let mut arguments = outcome_arguments("success");
+            arguments.as_object_mut().unwrap().remove(field);
+            replies.push(raw.solo(json!(1), arguments).await);
+        }
+        for size in [4095, 4096, 4097, WIRE - 1, WIRE, WIRE + 1] {
+            let mut arguments = outcome_arguments("success");
+            arguments[&"z".repeat(size)] = json!(null);
+            replies.push(raw.solo(json!(1), arguments).await);
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        assert_eq!(replies.len(), 71);
+        for (bytes, message) in &replies {
+            assert_eq!(message["error"]["code"], -32602, "{message}");
+            assert_eq!(outcome(message), "invalid");
+            assert!(*bytes < 4096, "{bytes}");
+            assert_eq!(message, &replies[0].1, "one fixed-size refusal");
+        }
+    }
+
+    /// Final review (S3): the report carries the caller's revision and one
+    /// hash per row in before/after order, each the FNV-1a of exactly that
+    /// cell's pixels; an inactive clip's cells are opaque neutral grey with
+    /// no hashes.
+    #[test]
+    fn final_report_revision_hash_order_and_inactive_pixels() {
+        let proof = ProofDouble {
+            noise: true,
+            ..ProofDouble::default()
+        };
+        let document = doc(3, 2, 12, true);
+        let strip = preview_solo(&proof, TimelineRevision(1234), &document, &args(true)).unwrap();
+        assert_eq!(strip.report["revision"], 1234);
+        let hash = |bytes: &[u8]| {
+            let mut n = 0xcbf2_9ce4_8422_2325_u64;
+            for byte in bytes {
+                n ^= u64::from(*byte);
+                n = n.wrapping_mul(0x0100_0000_01b3);
+            }
+            format!("{n:016x}")
+        };
+        let width = strip.image.width as usize;
+        for (column, sample) in strip.report["samples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            for row in 0..2 {
+                let mut pixels = vec![];
+                for y in row * 2..row * 2 + 2 {
+                    let start = (y * width + column * 3) * 4;
+                    pixels.extend_from_slice(&strip.image.pixels[start..start + 12]);
+                }
+                assert_eq!(
+                    sample["hashes"][row],
+                    hash(&pixels),
+                    "sample {column} row {row}"
+                );
+            }
+        }
+        let mut hidden = document.clone();
+        hidden.tracks[1].clips[0].enabled = false;
+        let strip = preview_solo(&proof, TimelineRevision(1234), &hidden, &args(true)).unwrap();
+        assert!(
+            strip
+                .image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|[r, g, b, a]| r == g && g == b && *r > 0 && *r < 255 && *a == 255)
+        );
+        assert!(
+            strip.report["samples"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|sample| {
+                    sample["active"] == false
+                        && sample["reason"] == "clip_disabled"
+                        && sample.get("hashes").is_none()
+                })
+        );
+    }
 }

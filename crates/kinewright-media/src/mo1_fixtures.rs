@@ -23,7 +23,7 @@ use crate::cc1_fixtures::{
     DELIVERY_CODEC_MAX, DELIVERY_CODEC_MEAN, DELIVERY_CODEC_P99, abs_code_diff_rgb,
     delivery_frame_to_rgba8,
 };
-use crate::compositor::{Compositor, CompositorLayer};
+use crate::compositor::{Compositor, CompositorLayer, LayerMode};
 use crate::decode::probe_path;
 use crate::export::mix_audio;
 use crate::gpu_test_support::fixture_gpu_or_skip;
@@ -167,6 +167,7 @@ fn render_layer(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("the golden layer should render")
@@ -285,6 +286,7 @@ fn mo1_still_document(
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset.clone()],
@@ -944,6 +946,7 @@ fn assert_push_in_sampler_path(document: &Document) {
             frame: &dummy,
             effects: &[],
             transition: TransitionRenderParams::default(),
+            mode: LayerMode::NORMAL,
         };
         assert_eq!(
             BlitCompositor::is_pixel_exact_blit(&layer, &params, 320, 180),
@@ -1451,6 +1454,7 @@ fn still_alpha_composites_over_video() {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         },
     );
@@ -1873,6 +1877,7 @@ fn disabled_clip_matches_removal_on_lavapipe() {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         },
     );
@@ -1929,6 +1934,7 @@ fn disabled_clip_is_silent_in_the_mix() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         investigator: None,
@@ -2078,6 +2084,7 @@ fn mo1_export_document(video: &GeneratedMedia, still: &GeneratedMedia) -> Docume
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
                 Clip {
                     enabled: true,
@@ -2097,6 +2104,7 @@ fn mo1_export_document(video: &GeneratedMedia, still: &GeneratedMedia) -> Docume
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
             ],
         }],
@@ -2164,4 +2172,182 @@ fn export_round_trip_carries_motion() {
             "frame {at} delivery mean metric: {metric:?}"
         );
     }
+}
+
+/// MO2 R16 (discharges MO1 §11): every MO1 R26 golden's input — raster,
+/// output size and transform — re-gated against the MO2 CPU twin within
+/// the R27 working tolerances, so the goldens' probes are no longer the
+/// only witness of the vertex/sampling geometry.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn mo1_transform_r26_matches_twin() {
+    let Some(compositor) = fallback() else {
+        return;
+    };
+    let t = |parameters: &[(&str, i64)]| vec![transform_effect(1, parameters)];
+    let quarter = [
+        ("anchor_x_basis_points", 2_500),
+        ("anchor_y_basis_points", 2_500),
+    ];
+    let cases = [
+        ("default", quadrants(64, 36), (64, 36), t(&[])),
+        (
+            "gradient",
+            mo1_gradient(97, 53),
+            (192, 108),
+            t(&[("scale_percent", 100)]),
+        ),
+        (
+            "scale",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("scale_percent", 50)]),
+        ),
+        (
+            "per-axis",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("scale_x_percent", 50)]),
+        ),
+        (
+            "rotation",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("rotation_centidegrees", 9_000)]),
+        ),
+        (
+            "aspect",
+            l_raster(64, 36),
+            (64, 36),
+            t(&[("scale_percent", 50), ("rotation_centidegrees", 9_000)]),
+        ),
+        (
+            "scale-then-rotate",
+            centred_square(64, 40),
+            (64, 64),
+            t(&[("scale_x_percent", 50), ("rotation_centidegrees", 9_000)]),
+        ),
+        (
+            "anchor",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[
+                ("scale_percent", 50),
+                ("anchor_x_basis_points", 0),
+                ("anchor_y_basis_points", 0),
+            ]),
+        ),
+        (
+            "coarse+fine",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[("x_percent", 25), ("x_basis_points", 2_500)]),
+        ),
+        (
+            "fine nudge",
+            vertical_edge(1920, 1080),
+            (1920, 1080),
+            t(&[("x_basis_points", 5)]),
+        ),
+        (
+            "L order",
+            l_raster(64, 36),
+            (64, 36),
+            t(&[
+                ("scale_percent", 50),
+                ("rotation_centidegrees", 9_000),
+                ("x_percent", -50),
+            ]),
+        ),
+        (
+            "L about anchor",
+            quadrants(64, 36),
+            (64, 36),
+            t(&[
+                ("scale_percent", 50),
+                ("rotation_centidegrees", 9_000),
+                quarter[0],
+                quarter[1],
+            ]),
+        ),
+        (
+            "off-axis",
+            mo1_gradient(97, 53),
+            (64, 36),
+            t(&[
+                ("scale_percent", 73),
+                ("rotation_centidegrees", 1_234),
+                ("y_percent", 7),
+            ]),
+        ),
+    ];
+    for (label, source, resolution, effects) in cases {
+        // The production input type: display-coded rasters enter as linear
+        // f16 working frames (renders never composite 8-bit textures).
+        let source = crate::frame::WorkingFrame::from_display_frame(&source).unwrap();
+        let layers = [CompositorLayer {
+            frame: &source,
+            effects: &effects,
+            transition: TransitionRenderParams::default(),
+            mode: LayerMode::NORMAL,
+        }];
+        let gpu = compositor.render_working(resolution, &layers).unwrap();
+        let twin = crate::compositor::twin::render_working(resolution, &layers, None).unwrap();
+        // MO2 ME9: resampled values also get the 8-bit sub-texel envelope
+        // (zero where nothing is filtered), computed only on a miss.
+        let pairs = || gpu.pixels.iter().zip(&twin.pixels);
+        let slack = if pairs().all(|(a, e)| (a - e).abs() <= 1e-3) {
+            vec![0.0; twin.pixels.len()]
+        } else {
+            crate::compositor::twin::subtexel_envelope(resolution, &layers, None).unwrap()
+        };
+        for (index, (a, e)) in pairs().enumerate() {
+            assert!(
+                (a - e).abs() <= 1e-3 + slack[index],
+                "{label}: value {index} (pixel {}) GPU {a} vs twin {e}, slack {}",
+                index / 4,
+                slack[index]
+            );
+        }
+    }
+}
+
+/// MO2 ME9 (G4): the value Windows WARP produced on the R26 gradient
+/// (run 36222189672) lies outside the unit 1e-3 but inside the derived
+/// 8-bit sub-texel envelope, so the widening is what that adapter needs.
+#[test]
+fn mo2_warp_r26_departure_lies_within_the_subtexel_envelope() {
+    let source = crate::frame::WorkingFrame::from_display_frame(&mo1_gradient(97, 53)).unwrap();
+    let effects = vec![transform_effect(1, &[("scale_percent", 100)])];
+    let layers = [CompositorLayer {
+        frame: &source,
+        effects: &effects,
+        transition: TransitionRenderParams::default(),
+        mode: LayerMode::NORMAL,
+    }];
+    let twin = crate::compositor::twin::render_working((192, 108), &layers, None).unwrap();
+    let slack = crate::compositor::twin::subtexel_envelope((192, 108), &layers, None).unwrap();
+    let (warp, exact) = (0.848_144_53_f32, twin.pixels[290]);
+    println!("value 290: twin {exact} slack {} WARP {warp}", slack[290]);
+    assert!(
+        (warp - exact).abs() > 1e-3,
+        "WARP misses the unit tolerance"
+    );
+    assert!(
+        (warp - exact).abs() <= 1e-3 + slack[290],
+        "and lies in the envelope"
+    );
+    let unfiltered = slack.iter().filter(|v| **v == 0.0).count();
+    println!("{unfiltered} of {} values carry no slack", slack.len());
+    // A pixel-exact blit filters nothing: no value gets any slack.
+    let source = crate::frame::WorkingFrame::from_display_frame(&quadrants(64, 36)).unwrap();
+    let layers = [CompositorLayer {
+        frame: &source,
+        ..layers[0]
+    }];
+    let blit = crate::compositor::twin::subtexel_envelope((64, 36), &layers, None).unwrap();
+    assert!(
+        blit.iter().all(|v| *v == 0.0),
+        "unfiltered pixels keep 1e-3"
+    );
 }

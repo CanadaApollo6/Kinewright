@@ -1014,6 +1014,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 200,
                         audio_gain_curve: None,
+                        blend_mode: crate::BlendMode::Normal,
                     },
                     Clip {
                         enabled: true,
@@ -1035,6 +1036,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: crate::BlendMode::Normal,
                     },
                 ],
             }],
@@ -1085,6 +1087,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: crate::BlendMode::Normal,
         };
         let document = Document {
             tracks: vec![
@@ -1267,6 +1270,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: crate::BlendMode::Normal,
                 }],
             }],
             duration: TimeCode(30),
@@ -1663,6 +1667,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: crate::BlendMode::Normal,
                 }],
             }],
             duration: TimeCode(30),

@@ -703,7 +703,9 @@ pub fn document_for_delivery_variant(
         / u64::from(height);
     let aspect_basis_points = i64::try_from(aspect_basis_points).unwrap_or(i64::MAX);
     for clip in output.tracks.iter_mut().flat_map(|track| &mut track.clips) {
-        if matches!(clip.content, ClipContent::Title(_)) {
+        // Generated full-frame content (titles, MO2 adjustments and solids)
+        // is never auto-reframed.
+        if !clip.content.references_asset() {
             continue;
         }
         let authored_reframe = clip
@@ -1490,6 +1492,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: crate::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset],
@@ -2069,6 +2072,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: crate::BlendMode::Normal,
             }],
         });
 

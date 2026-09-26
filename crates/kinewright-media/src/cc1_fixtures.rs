@@ -44,7 +44,7 @@ use kinewright_core::{
 use serde_json::{Value, json};
 
 use crate::{
-    Compositor, CompositorLayer, GpuContext,
+    Compositor, CompositorLayer, GpuContext, LayerMode,
     color_pipeline::{
         DELIVERY_INTERMEDIATE_WHITE, PrimaryCorrection, PrimaryParameter,
         apply_primary_corrections, classify_source, classify_source_with_assumption, decode_bt709,
@@ -1305,6 +1305,7 @@ fn assert_gpu_control_case(
                 frame,
                 effects: std::slice::from_ref(&effect),
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production GPU compositor should render the CC1 fixture")
@@ -1317,6 +1318,7 @@ fn assert_gpu_control_case(
                 frame,
                 effects: std::slice::from_ref(&effect),
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production GPU working-surface readback")
@@ -1763,6 +1765,7 @@ fn cc1_core_migration_fixture_preserves_effect_order_and_parameters() {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }],
     });
     let wire = serde_json::to_value(&document).expect("migration document should serialize");
@@ -2811,6 +2814,7 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
                 frame: &frame,
                 effects: &[effect_positive, effect_negative],
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production WGSL no-intermediate-clamp readback")
@@ -2847,6 +2851,7 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
                 frame: &ramp_frame,
                 effects: &[correction_effect(3, minus_two_stops)],
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production WGSL over-range ramp readback")
@@ -3480,6 +3485,7 @@ pub(crate) fn simple_document(asset: MediaAsset, resolution: (u32, u32)) -> Docu
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset],

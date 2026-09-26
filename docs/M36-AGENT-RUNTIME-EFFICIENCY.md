@@ -138,6 +138,12 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-24, after MO1 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-24, after MO1 Part C plan_motion) | 148 | 1,822,003 B | 1,672,150 B | 125,550 B |
 | Served MCP runtime (2026-09-24, after MO1 Part C plan_motion) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-25, after MO2 Part A) | 152 | 2,000,521 B | 1,846,842 B | 128,713 B |
+| Served MCP runtime (2026-09-25, after MO2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-26, after the MO2 Part A fixes) | 152 | 2,000,542 B | 1,846,842 B | 128,734 B |
+| Served MCP runtime (2026-09-26, after the MO2 Part A fixes) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-26, after MO2 Part B preview_solo) | 153 | 2,002,954 B | 1,848,392 B | 129,437 B |
+| Served MCP runtime (2026-09-26, after MO2 Part B preview_solo) | 7 | 5,660 B | 3,510 B | 998 B |
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
@@ -200,6 +206,38 @@ replace), +802 B of description text, and +158 B fixed — the envelope
 rule again, 147 B plus the 11 bytes of `plan_motion`. The served quad is
 byte-identical for the twenty-first consecutive measurement at 7 /
 5,660 B / 3,510 B / 998 B (MO1 R21), asserted in three value sites.
+
+MO2 Part A grows the model and adds four operations, all registry-only.
+The model lands in shared `$defs`: the 61 tools that embed `Clip` grow by
+1,130 B of input schema each (the `BlendMode` def +212, the `SolidColor`
+def +335, the `Clip.blend_mode` property +129 and the `adjustment` /
+`solid` content branches +454), and `add_transition` / `remove_transition`
+list the twelve push/slide/wipe rows at +945 B of description each —
++70,820 B serialized after trimming the new schema docs (their first draft
+cost 14,213 B more). The four generated mutators (`set_clip_blend_mode`,
+`add_adjustment_clip`, `add_solid_clip`, `set_solid_color`) add
+105,946 B serialized — each carries the full shared `$defs` — plus their
+four `oneOf` branches in `apply_edit_plan` (+1,752 B). The registry lands
+at 2,000,521 B serialized (1,846,842 input schema, 128,713 description) at
+counts 152 / 64 / 88. The served quad is byte-identical for the
+twenty-second consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B
+(MO2 R25), asserted in three value sites.
+
+The MO2 Part A fixes name adjustments and solids in `set_clip_speed`'s
+speedless list, matching `SpeedOnNonMediaClip`: +21 B of description, so
+the registry moves to 2,000,542 B serialized (1,846,842 input schema,
+128,734 description) at unchanged counts 152 / 64 / 88. Both endpoint pin
+sites now assert the registry byte trio beside the counts. The served quad
+does not move.
+
+MO2 Part B adds one registry-only inspector, `preview_solo` (R24), and no
+operation. The registry grows by 2,412 B serialized (2,000,542 →
+2,002,954): +1,550 B of generated `SoloArgs` input schema (revision, clip,
+samples, two-way context enum, full_res), +703 B of description, and
++159 B fixed — 147 B plus the 12 bytes of `preview_solo`. Counts move to
+153 / 64 / 89 — Part B's `(1,0,1)`. The served quad is byte-identical for
+the twenty-third consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B
+(MO2 R25), asserted in three value sites.
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /

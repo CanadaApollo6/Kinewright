@@ -34,6 +34,9 @@ serde_json.workspace = true
 # seeing either.
 kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
 kinewright-media = { path = ".", features = ["test-util"] }
+# MO2 R28 (final-mo2-1): the ledger probes read wgpu's own allocation
+# counters as an independent witness.
+wgpu = { workspace = true, features = ["counters"] }
 
 [lints]
 workspace = true

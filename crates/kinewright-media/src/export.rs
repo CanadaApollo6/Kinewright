@@ -2164,7 +2164,7 @@ mod tests {
     use super::*;
     use crate::cc1_fixtures::{fallback_gpu, generate_delivery_source, simple_document};
     use crate::color_pipeline::{DELIVERY_INTERMEDIATE_WHITE, encode_delivery_rgba16};
-    use crate::compositor::{Compositor, CompositorLayer};
+    use crate::compositor::{Compositor, CompositorLayer, LayerMode};
     use crate::decode::probe_path;
     use crate::test_support::TempDirectory;
     use crate::timeline::TransitionRenderParams;
@@ -3056,6 +3056,7 @@ mod tests {
             frame: &white_source,
             effects: &[],
             transition: TransitionRenderParams::default(),
+            mode: LayerMode::NORMAL,
         };
         let delivery = ColorContext::sdr_rec709().delivery;
         let composed = compositor

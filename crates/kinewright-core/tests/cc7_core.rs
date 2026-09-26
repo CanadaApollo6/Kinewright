@@ -1487,6 +1487,7 @@ fn cc7_clip(id: u64, timeline_start: i64, frames: i64) -> Clip {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     }
 }
 

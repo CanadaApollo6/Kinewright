@@ -54,7 +54,7 @@ use crate::{
     COMPOSITOR_LEGACY_LUT_SLOT, COMPOSITOR_LUT_ATLAS_SLOTS, COMPOSITOR_LUT_SLOTS_PER_LAYER,
     COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
     COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D,
-    Compositor, CompositorLayer,
+    Compositor, CompositorLayer, LayerMode,
     builtin_looks::{BUILTIN_LOOK_SHA256, BuiltinLook},
     cc1_fixtures::{
         DiffMetrics, FixtureGpu, LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99,
@@ -820,6 +820,7 @@ fn gpu_linear(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             library,
         )
@@ -841,6 +842,7 @@ fn gpu_monitor(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             &kinewright_core::ColorContext::sdr_rec709().monitoring,
             library,
@@ -2603,7 +2605,8 @@ fn cc4_lut_slots_limits_and_abi_constants_hold() {
     assert_eq!(COMPOSITOR_LEGACY_LUT_SLOT, 4);
     assert_eq!(COMPOSITOR_LUT_ATLAS_SLOTS, 5);
     assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 32_768);
-    assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
+    // MO2 R14: the grade buffer plus the per-layer validity flags.
+    assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 2);
     assert_eq!(COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D, 512);
     assert!(
         COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D as usize
@@ -3296,6 +3299,7 @@ fn relocatable_document(assets: &[LutAsset], effects: Vec<Effect>) -> Document {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         ..Document::default()

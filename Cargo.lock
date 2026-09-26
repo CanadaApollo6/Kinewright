@@ -2271,6 +2271,7 @@ dependencies = [
  "image",
  "kinewright-core",
  "kinewright-media",
+ "kinewright-project",
  "reqwest",
  "rmcp",
  "schemars",
