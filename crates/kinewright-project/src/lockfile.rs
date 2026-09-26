@@ -18,7 +18,7 @@ use std::{
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 
-use crate::recovery::{fnv1a_64, pending_journal_for_project};
+use crate::recovery::{fnv1a_64, open_regular, pending_journal_for_project};
 
 /// The lockfile suffix: `<stem>.kinewright.lock` beside the project.
 pub const LOCKFILE_SUFFIX: &str = "kinewright.lock";
@@ -55,6 +55,9 @@ pub struct ReclaimedOwner {
     /// naming this handle (G9). Defaulted so pre-G9 claims still parse.
     #[serde(default)]
     pub started_at_unix: u64,
+    /// The owner's claim nonce (N-d): `release` compares it alone.
+    #[serde(default)]
+    pub claim_id: String,
 }
 
 /// The lockfile claim (AW1 §5): pid/host/endpoint, no secret.
@@ -73,6 +76,11 @@ pub struct LockfileClaim {
     pub kinewright_version: String,
     /// Owner start, unix seconds.
     pub started_at_unix: u64,
+    /// A random nonce per claim (N-d): unique even for two claims of one
+    /// process, endpoint and second. Defaulted so older claims still parse
+    /// (and never match a live handle's).
+    #[serde(default)]
+    pub claim_id: String,
     /// The reclaimed owner, `None` on a fresh acquire.
     pub reclaimed_from: Option<ReclaimedOwner>,
 }
@@ -105,10 +113,14 @@ const UNKNOWN_HOSTNAME: &str = "unknown";
 
 /// Hostname equality (G11/AF5): case-insensitive after trimming a
 /// trailing dot — `HOST.` and `host` name one machine; anything else
-/// (notably an FQDN) stays distinct and fail-closed.
+/// (notably an FQDN) stays distinct and fail-closed. An empty name is
+/// [`UNKNOWN_HOSTNAME`] (N-g).
 fn hostnames_equal(first: &str, second: &str) -> bool {
     fn normalise(host: &str) -> String {
-        host.trim_end_matches('.').to_ascii_lowercase()
+        match host.trim_end_matches('.') {
+            "" => UNKNOWN_HOSTNAME.to_owned(),
+            host => host.to_ascii_lowercase(),
+        }
     }
     normalise(first) == normalise(second)
 }
@@ -294,8 +306,9 @@ impl LockfileHandle {
     /// Release: remove the discovery while holding the flock, then drop —
     /// the drop unlocks explicitly, so the release lands even when a
     /// forked child still holds a duplicate of the open description.
-    /// The discovery is removed only if it still names this handle (pid,
-    /// claim second, endpoint — G9); otherwise it is left alone and the
+    /// The discovery is removed only if it still names this handle (its
+    /// random `claim_id` — N-d; G9's pid/second/endpoint triple was not
+    /// unique within one process); otherwise it is left alone and the
     /// skip is logged — another owner may have published after an
     /// external unlink. G10: release ends this handle's writer right — a
     /// journal for the identity may be created or renamed only under its
@@ -305,11 +318,7 @@ impl LockfileHandle {
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
         let mine = match read_owner(&self.discovery, &self.claim.hostname) {
-            DiscoveryRead::Owner(owner) => {
-                owner.pid == self.claim.pid
-                    && owner.started_at_unix == self.claim.started_at_unix
-                    && owner.endpoint == self.claim.endpoint
-            }
+            DiscoveryRead::Owner(owner) => owner.claim_id == self.claim.claim_id,
             DiscoveryRead::Absent => true,
             _ => false,
         };
@@ -411,10 +420,14 @@ fn read_owner(discovery_path: &Path, own_hostname: &str) -> DiscoveryRead {
         Ok(meta) if !meta.file_type().is_file() => return DiscoveryRead::Unreadable,
         Ok(_) => {}
     }
-    let file = match fs::File::open(discovery_path) {
-        Ok(file) => file,
+    #[cfg(any(test, feature = "test-util"))]
+    crate::test_hook("read_owner_after_meta");
+    // N-c: the path may have become a FIFO since the check — the open
+    // never blocks, and only a regular fd reads.
+    let file = match open_regular(discovery_path) {
+        Ok(Some(file)) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return DiscoveryRead::Absent,
-        Err(_) => return DiscoveryRead::Unreadable,
+        Ok(None) | Err(_) => return DiscoveryRead::Unreadable,
     };
     let mut bytes = Vec::new();
     if file
@@ -431,6 +444,7 @@ fn read_owner(discovery_path: &Path, own_hostname: &str) -> DiscoveryRead {
             hostname: claim.hostname,
             endpoint: claim.endpoint,
             started_at_unix: claim.started_at_unix,
+            claim_id: claim.claim_id,
         });
     }
     // Lenient (G7/AF5): a hostname string that is neither this host nor
@@ -545,6 +559,7 @@ fn decide_free_claim(
                 hostname: UNKNOWN_HOSTNAME.to_owned(),
                 endpoint: String::new(),
                 started_at_unix: 0,
+                claim_id: String::new(),
             }),
             true,
         )),
@@ -570,12 +585,16 @@ fn write_discovery_with_rename(
     };
     let parent = discovery_path.parent().unwrap_or_else(|| Path::new(""));
     for _ in 0..100 {
-        let temp = parent.join(format!(
-            ".{}.{}.{}.tmp",
-            name.to_string_lossy(),
+        // `.<name>.<pid>.<seq>.tmp`, built on the OsStr (N-a) so non-UTF-8
+        // names round-trip and the sweep can match them exactly.
+        let mut temp_name = std::ffi::OsString::from(".");
+        temp_name.push(name);
+        temp_name.push(format!(
+            ".{}.{}.tmp",
             std::process::id(),
             DISCOVERY_TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
+        let temp = parent.join(temp_name);
         let file = match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -592,10 +611,27 @@ fn write_discovery_with_rename(
             return Err(error);
         }
         drop(file);
-        let renamed = match rename {
-            Some(hook) => hook(&temp, discovery_path),
-            None => fs::rename(&temp, discovery_path),
-        };
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("publish_before_rename");
+        // N-h: a `PermissionDenied` rename (Windows AV/indexer holding the
+        // discovery) retries within the §5 acquire budget — the same
+        // atomic rename each time, never a non-atomic fallback.
+        let mut renamed = Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        for attempt in 1..=LOCK_ACQUIRE_ATTEMPTS {
+            renamed = match rename {
+                Some(hook) => hook(&temp, discovery_path),
+                None => fs::rename(&temp, discovery_path),
+            };
+            match &renamed {
+                Err(error)
+                    if error.kind() == io::ErrorKind::PermissionDenied
+                        && attempt < LOCK_ACQUIRE_ATTEMPTS =>
+                {
+                    std::thread::sleep(LOCK_ACQUIRE_RETRY_DELAY);
+                }
+                _ => break,
+            }
+        }
         if let Err(error) = renamed {
             let _ = fs::remove_file(&temp);
             return Err(error);
@@ -608,29 +644,43 @@ fn write_discovery_with_rename(
     )))
 }
 
-/// Sweep this writer's own stale temps (`write_discovery`'s `.<file>.*.tmp`
-/// siblings, left by a kill between temp-write and rename). Best-effort —
-/// never fails the acquire — and strictly patterned, so nothing else is
-/// touched. Call while holding the flock.
+/// Sweep this writer's own stale temps (`write_discovery`'s siblings, left
+/// by a kill between temp-write and rename). Best-effort — never fails the
+/// acquire — and exactly patterned (N-a): only `.<name>.<digits>.<digits>.tmp`,
+/// compared as `OsStr` bytes, so a sibling project whose discovery name
+/// extends this one's is never touched and non-UTF-8 names still sweep.
+/// Call while holding the flock.
 fn sweep_discovery_temps(discovery_path: &Path) {
     let Some(name) = discovery_path.file_name() else {
         return;
     };
-    let prefix = format!(".{}.", name.to_string_lossy());
     let parent = discovery_path.parent().unwrap_or_else(|| Path::new("."));
     let Ok(entries) = fs::read_dir(parent) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path
-            .file_name()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(|stem| stem.starts_with(&prefix) && stem.as_bytes().ends_with(b".tmp"))
-        {
-            let _ = fs::remove_file(&path);
+        if is_discovery_temp(&entry.file_name(), name) {
+            let _ = fs::remove_file(entry.path());
         }
     }
+}
+
+/// Whether `entry` is exactly `.<name>.<digits>.<digits>.tmp` (N-a).
+fn is_discovery_temp(entry: &std::ffi::OsStr, name: &std::ffi::OsStr) -> bool {
+    let digits = |part: Option<&[u8]>| {
+        part.is_some_and(|part| !part.is_empty() && part.iter().all(u8::is_ascii_digit))
+    };
+    let Some(rest) = entry
+        .as_encoded_bytes()
+        .strip_prefix(b".")
+        .and_then(|rest| rest.strip_prefix(name.as_encoded_bytes()))
+        .and_then(|rest| rest.strip_prefix(b"."))
+        .and_then(|rest| rest.strip_suffix(b".tmp"))
+    else {
+        return false;
+    };
+    let mut parts = rest.split(|byte| *byte == b'.');
+    digits(parts.next()) && digits(parts.next()) && parts.next().is_none()
 }
 
 /// Whether the opened lock fd still names the lock path (Unix): the fd's
@@ -678,6 +728,12 @@ fn build_claim(
         started_at_unix: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs()),
+        claim_id: format!(
+            "{:016x}",
+            getrandom::u64().map_err(|error| {
+                LockfileError::Io(format!("could not draw a claim nonce: {error}"))
+            })?
+        ),
         reclaimed_from,
     };
     Ok((lock_path, discovery_path, claim))
@@ -730,8 +786,14 @@ pub fn acquire_project_lock_with_policy(
         // Open-or-create on a never-unlinked object: create races share
         // one flock (F3/L1). Never truncate: it could fail against a live
         // Windows `LockFileEx` range, turning contention into IO errors.
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("before_lock_open");
         let mut options = File::options();
         options.read(true).write(true).create(true).truncate(false);
+        // N-b (Unix): a link planted after the check above is never
+        // followed — the open fails instead of creating the link's target.
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
         // H2 (Windows): share read+write, never DELETE — while any handle
         // lives nobody can rename or delete the object (contenders stay
         // share-compatible), which is what makes `verify` sound there.
@@ -909,6 +971,7 @@ mod tests {
             "token_ref",
             "kinewright_version",
             "started_at_unix",
+            "claim_id",
             "reclaimed_from",
         ] {
             assert!(
@@ -916,7 +979,7 @@ mod tests {
                 "the lock carries {expected}: {text}"
             );
         }
-        assert_eq!(keys.len(), 10, "and nothing else — no secret: {text}");
+        assert_eq!(keys.len(), 11, "and nothing else — no secret: {text}");
         assert!(
             !text.contains("bearer") && !text.contains("secret") && !text.contains("\"token\""),
             "no secret material (`token_ref` is a name, not bytes): {text}"
@@ -2120,5 +2183,125 @@ mod tests {
         assert_eq!(warning["code"], "lock_reclaimed");
         assert_eq!(warning["previous_unreadable"], true);
         got.handle.release().expect("the release lands");
+    }
+
+    /// H7 N-a: the sweep matches exactly `.<name>.<digits>.<digits>.tmp` —
+    /// a sibling project's temp (its discovery name extends this one's),
+    /// one-number or non-numeric shapes survive — and works on non-UTF-8
+    /// names (Unix leg), whose publish temps now round-trip exactly.
+    #[test]
+    fn h7_sweep_matches_exactly_and_non_utf8() {
+        let dir = TempDirectory::new("aw1-h7-sweep");
+        let discovery = dir.path("edit.kinewright.lock.json");
+        let own = dir.path(".edit.kinewright.lock.json.12.34.tmp");
+        let spared = [
+            ".edit.kinewright.lock.json.x.kinewright.lock.json.1.2.tmp",
+            ".edit.kinewright.lock.json.12.tmp",
+            ".edit.kinewright.lock.json.a.b.tmp",
+            ".edit.kinewright.lock.json.1.2.3.tmp",
+            ".edit.kinewright.lock.json..2.tmp",
+        ];
+        fs::write(&own, b"").expect("the own temp plants");
+        for name in spared {
+            fs::write(dir.path(name), b"").expect("a spared temp plants");
+        }
+        sweep_discovery_temps(&discovery);
+        assert!(!own.exists(), "the own stale temp sweeps");
+        for name in spared {
+            assert!(dir.path(name).exists(), "{name} survives");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+            fn raw() -> &'static std::ffi::OsStr {
+                std::ffi::OsStr::from_bytes(b"ed\xffit.kinewright.lock.json")
+            }
+            fn raw_temp(from: &Path, _: &Path) -> io::Result<()> {
+                let name = from.file_name().expect("a temp name");
+                assert!(is_discovery_temp(name, raw()), "the temp keeps raw bytes");
+                Err(io::Error::other("stop before the rename"))
+            }
+            let discovery = dir.root().join(raw());
+            let stale = dir.root().join(std::ffi::OsStr::from_bytes(
+                b".ed\xffit.kinewright.lock.json.7.8.tmp",
+            ));
+            fs::write(&stale, b"").expect("a non-UTF-8 temp plants");
+            sweep_discovery_temps(&discovery);
+            assert!(!stale.exists(), "a non-UTF-8 stale temp sweeps");
+            let (_, _, claim) = build_claim(&dir.path("edit.kinewright"), LockMode::Gui, "", None)
+                .expect("the claim builds");
+            assert!(write_discovery_with_rename(&discovery, &claim, Some(raw_temp)).is_err());
+        }
+    }
+
+    /// H7 N-g: an empty (or bare-dot) hostname is `unknown` — a stale
+    /// claim carrying it reclaims instead of refusing `ForeignHost("")`.
+    #[test]
+    fn h7_empty_hostname_is_unknown() {
+        assert!(hostnames_equal("", UNKNOWN_HOSTNAME));
+        assert!(hostnames_equal(".", "UNKNOWN."));
+        assert!(!hostnames_equal("", "some-host"));
+        let dir = TempDirectory::new("aw1-h7-empty-host");
+        let project = dir.path("edit.kinewright");
+        fs::write(&project, b"{}").expect("the project writes");
+        let recovery = recovery_dir(&dir);
+        let claim = |endpoint: &str| {
+            acquire_project_lock_with_policy(
+                &project,
+                LockMode::Headless,
+                endpoint,
+                &recovery,
+                1,
+                Duration::ZERO,
+            )
+        };
+        let stale = claim("http://127.0.0.1:9/mcp").expect("the first acquire lands");
+        let discovery = stale.handle.discovery.clone();
+        drop(stale); // The crash: a stale discovery, a free lock.
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&discovery).expect("the claim reads"))
+                .expect("the claim parses");
+        value["hostname"] = serde_json::Value::from("");
+        fs::write(&discovery, value.to_string()).expect("the blank-host claim writes");
+        let got = claim("http://127.0.0.1:10/mcp").expect("a blank host reclaims");
+        assert_eq!(
+            got.reclaimed.as_ref().map(|owner| owner.hostname.as_str()),
+            Some("")
+        );
+        got.handle.release().expect("the release lands");
+    }
+
+    /// H7 N-h: a `PermissionDenied` rename retries within the §5 budget
+    /// (3 attempts) — two refusals then success publishes; a persistent
+    /// refusal stops after exactly 3 attempts. Never a fallback write.
+    #[test]
+    fn h7_permission_denied_rename_retries_within_budget() {
+        static CALLS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        fn flaky(from: &Path, to: &Path) -> io::Result<()> {
+            if CALLS.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            fs::rename(from, to)
+        }
+        fn refused(_: &Path, _: &Path) -> io::Result<()> {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        }
+        let dir = TempDirectory::new("aw1-h7-rename-retry");
+        let project = dir.path("edit.kinewright");
+        let (_, discovery, claim) =
+            build_claim(&project, LockMode::Gui, "http://x", None).expect("the claim builds");
+        write_discovery_with_rename(&discovery, &claim, Some(flaky))
+            .expect("the third attempt publishes");
+        assert_eq!(CALLS.swap(0, Ordering::SeqCst), 3);
+        assert!(
+            fs::read_to_string(&discovery)
+                .expect("published")
+                .contains("http://x")
+        );
+        let error = write_discovery_with_rename(&discovery, &claim, Some(refused))
+            .expect_err("a persistent refusal reports");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 3, "exactly the budget");
     }
 }

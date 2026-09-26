@@ -2339,8 +2339,10 @@ dependencies = [
  "crossbeam-channel",
  "fs2",
  "gethostname",
+ "getrandom 0.3.4",
  "kinewright-core",
  "kinewright-media",
+ "libc",
  "serde",
  "serde_json",
 ]

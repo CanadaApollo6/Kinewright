@@ -1938,3 +1938,157 @@ fn guard_save_as_transfer_refuses_on_a_lost_lock() {
     );
     b.handle.release().unwrap();
 }
+
+// ───────── Round-2 race review, folded (fix round 3): fixed behaviour ─────────
+//
+// From rereview2-race-scenarios/aw1_race2_tests.rs (Opus, 2026-09-25). The
+// review's `r2_defect_*` were RED at 9487af0; rewritten here to assert the
+// fixed behaviour. Hooks: `before_lock_open`, `read_owner_after_meta`,
+// `publish_before_rename` (review2-hooks.diff, test-util only).
+
+/// N-a: P's sweep never reaches an in-flight publish temp of a sibling
+/// project whose discovery name extends P's
+/// (`edit.kinewright.lock.json.x.kinewright`): the sibling publishes.
+#[test]
+fn h7_sweep_spares_a_sibling_projects_inflight_temp() {
+    let fx = fixture("race-h7-sweep-sibling");
+    let sibling = fx.dir.path("edit.kinewright.lock.json.x.kinewright");
+    fs::write(&sibling, b"{}").unwrap();
+    let signals = fx.dir.path("sibling");
+    let mut owner = spawn(
+        "hold",
+        &sibling,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("publish_before_rename"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("paused"));
+    let p = claim(&fx.project, &fx.recovery, "http://p").expect("P owns");
+    fs::write(signals.join("resume"), "").unwrap();
+    let sibling_owned = wait_either(&signals.join("owned"), &signals.join("error"));
+    let error = fs::read_to_string(signals.join("error")).unwrap_or_default();
+    if sibling_owned {
+        fs::write(signals.join("release"), "").unwrap();
+    }
+    owner.0.wait().unwrap();
+    p.handle.release().unwrap();
+    assert!(
+        sibling_owned,
+        "P's sweep deleted a sibling's in-flight temp: {error}"
+    );
+}
+
+/// N-b: a link planted between the lock's symlink check and its open is
+/// never followed (`O_NOFOLLOW`): no ownership, and the link's target is
+/// never created.
+#[cfg(unix)]
+#[test]
+fn h7_lock_link_planted_after_the_check_creates_nothing() {
+    let fx = fixture("race-h7-lock-link");
+    let lock = lockfile_path_for_project(Some(&fx.project)).unwrap();
+    let target = fx.dir.path("created-through-link.txt");
+    let signals = fx.dir.path("owner");
+    let mut owner = spawn(
+        "hold",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("before_lock_open"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("paused"));
+    std::os::unix::fs::symlink(&target, &lock).unwrap();
+    fs::write(signals.join("resume"), "").unwrap();
+    let claimed = wait_either(&signals.join("owned"), &signals.join("error"));
+    if claimed {
+        fs::write(signals.join("release"), "").unwrap();
+    }
+    owner.0.wait().unwrap();
+    assert!(!claimed, "never owns through a link");
+    assert!(!target.exists(), "the open followed the late link");
+}
+
+/// N-c: the stale discovery is swapped for a FIFO after the pre-check; the
+/// claimant (holding the flock) never blocks in `open` — it reads the fd
+/// as non-regular, reclaims with the warning, and returns within 2 s.
+#[cfg(unix)]
+#[test]
+fn h7_fifo_swapped_in_after_the_precheck_never_blocks() {
+    let fx = fixture("race-h7-fifo-swap");
+    let discovery = plant_stale(&fx, "http://stale");
+    let signals = fx.dir.path("owner");
+    let mut owner = spawn(
+        "hold",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts {
+            hook: Some("read_owner_after_meta"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&signals.join("paused"));
+    fs::remove_file(&discovery).unwrap();
+    assert!(
+        Command::new("mkfifo")
+            .arg(&discovery)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(signals.join("resume"), "").unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    let mut returned = false;
+    while Instant::now() < until {
+        if signals.join("owned").exists() || signals.join("error").exists() {
+            returned = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if !returned {
+        // Unblock a regressed claimant: open the write end, close — EOF.
+        drop(fs::OpenOptions::new().write(true).open(&discovery));
+    }
+    let claimed = wait_either(&signals.join("owned"), &signals.join("error"));
+    if claimed {
+        fs::write(signals.join("release"), "").unwrap();
+    }
+    owner.0.wait().unwrap();
+    assert!(returned, "the claimant blocked on a FIFO under its flock");
+    assert!(claimed, "the unreadable stale discovery reclaims");
+}
+
+/// N-d: two handles of ONE process, same endpoint, same second (the object
+/// hand-deleted, then a same-process re-claim — the GUI's one endpoint):
+/// the stale handle's release compares `claim_id` and spares the live
+/// owner's discovery.
+#[cfg(unix)]
+#[test]
+fn h7_stale_same_endpoint_release_spares_the_successor() {
+    let mut spared = None;
+    for _ in 0..5 {
+        let fx = fixture("race-h7-same-endpoint");
+        let lock = lockfile_path_for_project(Some(&fx.project)).unwrap();
+        let a = claim(&fx.project, &fx.recovery, "http://gui").unwrap();
+        fs::remove_file(&lock).unwrap(); // The hand delete.
+        let b = claim(&fx.project, &fx.recovery, "http://gui").unwrap();
+        if a.handle.claim.started_at_unix != b.handle.claim.started_at_unix {
+            continue; // Crossed a second boundary; retry the same-second case.
+        }
+        a.handle.release().unwrap();
+        spared = Some(b.handle.discovery.exists());
+        b.handle.release().unwrap();
+        break;
+    }
+    assert_eq!(
+        spared,
+        Some(true),
+        "the stale handle's release removed the live owner's discovery"
+    );
+}

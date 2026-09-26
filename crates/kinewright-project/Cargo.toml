@@ -16,10 +16,16 @@ test-util = []
 crossbeam-channel.workspace = true
 fs2.workspace = true
 gethostname.workspace = true
+getrandom.workspace = true
 kinewright-core = { path = "../kinewright-core" }
 kinewright-media = { path = "../kinewright-media" }
 serde.workspace = true
 serde_json.workspace = true
+
+# Unix open flags (`O_NOFOLLOW`, `O_NONBLOCK`) for the lock/discovery/journal
+# opens (race N-b/N-c); already locked in Cargo.lock, no new download.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 # The sidecar round-trip tests persist through `TempDirectory`.

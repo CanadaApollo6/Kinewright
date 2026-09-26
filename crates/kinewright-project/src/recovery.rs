@@ -177,6 +177,20 @@ struct JournalIdentityHeader {
     project_path: Option<PathBuf>,
 }
 
+/// Open for reading without ever blocking (race N-c): Unix opens
+/// `O_NONBLOCK` (a FIFO opens at once; regular files ignore the flag), and
+/// the fd itself must be a regular file (`fstat`) — `None` otherwise.
+/// # Errors
+/// The open or `fstat` IO error.
+pub(crate) fn open_regular(path: &Path) -> io::Result<Option<fs::File>> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let file = options.open(path)?;
+    Ok(file.metadata()?.is_file().then_some(file))
+}
+
 /// The generous ceiling on one header value (H3). The parse streams, so
 /// memory stays O(path) whatever the header size; this only bounds the
 /// time one scan can take. A header reaching it is refused typed
@@ -191,8 +205,12 @@ const JOURNAL_HEADER_CEILING: u64 = 1 << 30;
 /// Name-matched journals refuse without consulting the header at all.
 /// Vanished reads as gone.
 fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Error> {
-    let file = match fs::File::open(journal) {
-        Ok(file) => file,
+    // N-c: an entry swapped to a FIFO (or anything non-regular) since the
+    // type check is skipped like any other non-regular entry, never opened
+    // blocking.
+    let file = match open_regular(journal) {
+        Ok(Some(file)) => file,
+        Ok(None) => return Ok(false),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };

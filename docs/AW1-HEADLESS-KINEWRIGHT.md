@@ -98,7 +98,26 @@ changes.
   H2: it opens with `share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)`, no
   DELETE, so no process can rename or delete it while any handle lives;
   contenders stay share-compatible and contend); only the `.lock.json`
-  discovery may be hand-deleted, never the `.lock` object.)
+  discovery may be hand-deleted, never the `.lock` object — if the object
+  is hand-deleted anyway (Unix), the next claimant B owns a new object and
+  its `lock_reclaimed` warning names the still-LIVE owner A; both hold a
+  flock until A's next save or re-publish, whose `verify` refuses
+  `LockLost` (race N-l). Fix round 3, H7: the Unix lock-object open adds
+  `O_NOFOLLOW`, so a link planted after the symlink check is never
+  followed (N-b); discovery and journal reads open `O_NONBLOCK` on Unix
+  and read only an fd that `fstat`s as a regular file, so a FIFO swapped
+  in after the pre-check never blocks a claimant holding the flock (N-c);
+  the claim carries a random `claim_id` (serde default for older claims)
+  and `release` compares it alone — G9's pid/second/endpoint triple is
+  not unique within one process (N-d); the stale-temp sweep matches
+  exactly `.<name>.<digits>.<digits>.tmp` as `OsStr` bytes, so a sibling
+  project whose discovery name extends this one's is never touched and
+  non-UTF-8 names sweep (N-a); a `PermissionDenied` publish rename
+  (Windows AV/indexer) retries within the §5 3 × 250 ms budget, the same
+  atomic rename each time, never a fallback (N-h). Recorded limit (N-k):
+  a local writer that plants directories at the next 100 predicted temp
+  names denies the publish with a typed `Io` — local-writer only, no
+  hang.)
 - AF2 → §5, §6: one canonical project identity — full canonical path
   when the target exists, else canonical parent dir plus file name
   (relative resolves at the cwd; raw path when nothing resolves). Lock,
@@ -173,9 +192,15 @@ changes.
   hostname string names a known foreign host. G11: hostnames compare
   case-insensitively after trimming a trailing dot; an FQDN stays
   distinct and refuses, and the refusal names the discovery to delete if
-  this machine was renamed.) Limit: flock liveness is host-local, so on
-  local-lock network filesystems a free lock proves nothing about a
-  foreign owner — AW1 claims no multi-host exclusion.
+  this machine was renamed. Fix round 3, H7/N-g: an empty hostname is
+  `unknown`, so a blank-host claim reclaims instead of refusing with a
+  blank name. N-e, recorded limit: the lenient pass reads at most the
+  64 KiB discovery bound and serde_json's 128 nesting levels — a known
+  foreign claim past either reads as unreadable and reclaims WITH the
+  `previous_unreadable` warning, not `ForeignHost`.) Limit: flock
+  liveness is host-local, so on local-lock network filesystems a free
+  lock proves nothing about a foreign owner — AW1 claims no multi-host
+  exclusion.
 - AF6 → §2 (S1-delta refinement, GUARD-B): the session tracks an
   established baseline per stem — a load, a successful flush, or
   adopting the saved path establishes that stem. The empty-flush guard
