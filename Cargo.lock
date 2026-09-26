@@ -2304,6 +2304,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "crossbeam-channel",
+ "half",
  "kinewright-core",
  "proptest",
  "schemars",

@@ -728,13 +728,84 @@ rev-2 display-linear figures are superseded): f16 ULP at w=1.0 is 0.0009765625
 codes; W=100 puts the 10 000-nit input at working 46.4159.
 
 - **PB1 storage boundary**: each f32→f16 store ≤ 0.5 ULP(w) (round-to-nearest);
-  each encode/decode stage-pair round trip ≤ 2 ULP.
+  each encode/decode stage-pair round trip ≤ 2 ULP (RGB triplets: ULP of the
+  triplet's max |channel|, erratum CE4).
 - **PB2 working domain**: w ≥ 2^-10: end-to-end relative error ≤ 0.3%,
-  absolute ≤ 4 ULP(w).
-- **PB3 display absolute** (post-render): white ±10% ≤ 1.0 nit; peak ≤ 2.0
-  nits; below 1 nit ≤ 0.05 nits.
+  absolute ≤ 4 ULP(w) (RGB triplets: relative ‖err‖∞/‖w‖∞ and ULP of the
+  triplet's max |channel|, erratum CE4).
+- **PB3 display absolute** (post-render): white ±10% ≤ 1.0 nit; peak ≤
+  max(2.0 nits, 0.2% × P) (errata CE3, CE5); below 1 nit ≤ 0.05 nits.
 - **PB4 final code**: 10-bit delivery anchors (black/18%/white/peak/saturated)
-  ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code.
+  ≤ 2 codes max, ≤ 0.5 mean; 8-bit SDR anchors ≤ 1 code. A triplet channel
+  outside 2 codes still passes if its display error ≤ 0.2% of the triplet's
+  max-channel display value (errata CE6, CE7; storage placement: CE9; scope: CE10).
+- **S1 precision errata (2026-09-25, lead ruling after the S1 reviews).**
+  CE3: the 2.0-nit peak bound was derived at P = 1000; one f16 store of the
+  W=100/P=10 000 working peak (≈14.96) alone costs 3.46 nits, so the peak bound
+  scales with P above 2000 nits (P ≤ 2000 unchanged). CE4: once a matrix mixes
+  channels, a small channel beside a large one inherits the large channel's
+  storage quantum ([1, 2^-10, 2^-10] 2020→709→f16→2020 errs 8.6 ULP of 2^-10
+  but < 0.01 ULP of 1.0), so triplet ULP/relative limits use the max |channel|.
+  f32 intermediates were rejected (memory). CE1 accepted: the HLG compressor
+  resolves Y into [0, P]. CE2 withdrawn: EETF identity/clip decide in nits.
+  CE5 (S1 re-review): a composed 2020→709→f16→2020 stage pair errs up to
+  0.170% of P at the peak (17.3 M primary chains, P 400–10 000, W 100–400,
+  one and three pairs; worst P = 9539, 16.2 nits), past CE3's one-store 0.1%;
+  the peak bound is 0.2% × P (≈ 15% margin), under a quarter of one 10-bit PQ
+  code (≈ 0.9% × L).
+  CE6: HLG's √(3E) toe maps a minor channel's display error — which inherits the
+  max channel's storage quantum (CE4) — to unbounded codes (2020 green at
+  400 nits: 0.084 nits = 8 codes). Minor channels (< 1% of the triplet max) are
+  bounded in nits by the max channel's PB3 limit; masked beside it.
+  CE7 (S1 closing verification) replaces CE6's 1% cutoff: every channel's
+  display error inherits the max channel's storage quantum, so a 4% channel
+  fails codes too ([16, 400, 16] at P = 400: 0.035 nits = 4 codes). A channel
+  passes PB4 by codes (≤ 2) or by display error ≤ 0.2% of the triplet's max
+  channel (CE5's composed budget, relative to the channel that sets the
+  quantum); the mean stays ≤ 0.5 codes over all channels.
+  CE8 withdrawn (S1 closing verification 2 disproved it: SDR failures at
+  P = 400–1000 and on the max channel). CE9 (S1 precision investigation,
+  supersedes CE8): working images are stored in f16 only in the Rec.2020 working
+  space. A stage or node that operates in another space (LUT wrapper authored in
+  709, gamut conversions, output transforms) converts at its boundary and keeps
+  foreign-space values in f32 within the same pass; it never stores them in f16.
+  Source frames may be stored in their decoded native space before conversion.
+  A foreign-space f16 store quantizes large opposite-sign components (2020 green
+  in 709 is [−0.588, 1.133, −0.101]·w); the return matrix sums those quanta into
+  the 2020 minor channels, which the per-component EETF does not compress, and
+  the 709 compressor spreads them into every channel (up to 83 % of the SDR max
+  measured). The CE4/CE5 2020→709→f16→2020 pair stays a conservative storage
+  model for PB1–PB3 only, not a delivery path, and is kept in the suite as a
+  control that must fail PB4. Under this rule (26.7 M channels; P 400–10 000;
+  W 100–400; 2020/709 hues and skin; one source store plus up to 16 identity-node
+  2020 stores) PB4 SDR and HLG meet CE7 on every channel at every peak; worst SDR
+  error 0.083 % of the SDR triplet max; the production BT.709 8-bit quantizer
+  stays ≤ 1 code. The rendered appearance of the pinned recipe is unchanged and
+  it costs no memory. CE9 is a prospective invariant of the Hdr2020 working
+  space, not a property of shipped code: today's compositor is SDR709-only (2020
+  and HLG input/output refuse), with f16 source and composite surfaces holding
+  709 values by design (the explicit SDR709 legacy exception), grade nodes fused
+  in-pass in f32, and f32 readback encoding. The Hdr2020 lanes (S3) must keep
+  that topology: f16 stores only at the source and composite boundaries of a
+  layer, a layer's grade nodes fused in one pass, no foreign-space intermediate
+  texture, pinned by an S3 test. (Two repeated-LUT witnesses with one source
+  store plus 16 non-identity 2020 node stores fail CE7 by 4 SDR / 3 HLG codes
+  and pass when fused; this is a witness, not a stress maximum — the same LUT's
+  16-node scan reaches 8 raw HLG codes, mostly accepted by CE7's display prong.)
+  f32 working storage stays rejected (memory).
+  CE10 (S1 closing verification 3, PB4 scope): PB1–PB4 bound the kernel plus the
+  declared storage topology on the §14/R35 anchor set (identity nodes and the
+  fused grade stack); they are not a guarantee for arbitrary grades. A grade whose
+  slope exceeds 1 amplifies the working-storage quantum exactly as it amplifies the
+  source's own quantization: 2× contrast about a pivot of 1 maps a value f16-rounded
+  from 0.5001 to 0.5 onto 0 instead of 0.06 nits (P = W = 400; 100 % of that
+  near-black channel, 10 SDR / 21 HLG codes). In working units, the source-store
+  error propagated through exact grade math is bounded by the grade's absolute
+  slope (for multi-channel grades, its Jacobian ∞-norm) times PB1's storage error.
+  f32 evaluation of the grade and later stores add their own error on top and are
+  not covered by that bound. The suite keeps this case as a control.
+  Kernel parameter domain (S1): γ ∈ [1, 3]; P, W, Cs, Ct ∈ [1, 100 000] nits;
+  outside it the kernel refuses `OutOfDomain`.
 - Non-finite/overflow in working values: typed render refusal with asset/frame
   identity (fail closed — never a quiet clamp).
 

@@ -19,6 +19,7 @@ mod captions;
 /// the same reason (R26); it set the ungated precedent AU6 followed.
 #[cfg(any(test, feature = "test-util"))]
 pub mod cc7_scenarios;
+mod cc8_kernel;
 mod color;
 mod color_qc;
 mod creator;
@@ -92,6 +93,14 @@ pub use cc7_scenarios::{
     cc7_canonical_operations, cc7_d2_canonical_operations, cc7_decode_display709, cc7_encode_bt709,
     cc7_grade709_decode, cc7_log_encode_code, cc7_log_inverse_display,
     cc7_lut_backed_canonical_operations, cc7_spec, cc7_tracking_sample_frames,
+};
+/// CC8 S1 numeric kernel: f32 production entry points for the S3 renderer plus
+/// the f64 `reference` conformance path (App. N) for the conformance suites.
+pub use cc8_kernel::{
+    BT709_TO_BT2020, BT709_TO_BT2020_F64, BT2020_TO_BT709, BT2020_TO_BT709_F64, Cc8KernelError,
+    CompressDest, EetfOutput, GamutOutput, HlgOutput, apply_matrix, display_to_scene,
+    eetf_to_target, gamut_compress, hlg_gamma, hlg_inverse_oetf, hlg_oetf, hlg_output, pq_eotf,
+    pq_oetf, reference, s_white, scene_to_display, scene_to_working,
 };
 pub use color::{
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, ColorBitDepth, ColorContext, ColorDescription, ColorMatrix,
