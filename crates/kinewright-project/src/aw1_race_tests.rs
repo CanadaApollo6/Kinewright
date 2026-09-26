@@ -5,10 +5,12 @@
 //! `Child::kill` (SIGKILL) and `process::exit` at `test_hook` points. No
 //! `LD_PRELOAD`, no syscall interposition.
 //!
-//! Naming: `guard_*` must pass (the protocol holds); `defect_*` assert the
-//! contract and were RED on 503d221 (each is a finding in
-//! rereview-aw1-s01-race.md) — they are green recorded regressions now, one
-//! added per fix commit. `RACE_ITERS` overrides the default 200 iterations.
+//! Naming: `guard_*` must pass (the protocol holds). `defect_*` keep the
+//! names of the findings in rereview-aw1-s01-race.md: each describes a
+//! defect of the 503d221 baseline (history, not current behaviour), asserts
+//! the fixed contract, and is a green regression pin since its fix commit.
+//! The one exception is the `#[ignore]`d S5 obligation, which is still open.
+//! `RACE_ITERS` overrides the default 200 iterations.
 //!
 //! Mounted from lockfile.rs as a child module (`#[path]`) so it can reach the
 //! private `file` of `LockfileHandle` for the forked-duplicate scenarios.
@@ -1247,10 +1249,11 @@ fn guard_unknown_host_stale_claim_exactly_one_reclaims() {
 // ───────────────────────── G1: strict discovery ─────────────────────────
 
 /// The discovery path is a symlink planted in the project folder (a cloned
-/// repo / unzipped share): the publish must not write THROUGH it. Ruled
-/// (G1): the strict writer renames over the link itself — the victim keeps
-/// its bytes, the discovery becomes a regular file, and the acquire
-/// succeeds (a refusal would `DoS` every acquire until manual cleanup).
+/// repo / unzipped share). Baseline 503d221 published THROUGH it,
+/// clobbering the target. Fixed by G1: the strict writer renames over the
+/// link itself — the victim keeps its bytes, the discovery becomes a
+/// regular file, and the acquire succeeds (a refusal would `DoS` every
+/// acquire until manual cleanup).
 #[cfg(unix)]
 #[test]
 fn defect_discovery_symlink_clobbers_its_target() {
@@ -1360,13 +1363,13 @@ fn fifo_discovery_does_not_hang_the_claim() {
 
 // ───────────────────────── G2: forked duplicates ─────────────────────────
 
-/// The `ForeignHost` refusal path closes its flocked file with a bare `drop`
-/// (lockfile.rs, `drop(file)` before `return Err(ForeignHost…)`) — not the
-/// explicit `unlock_attempt` every other held-refusal path uses. Under a
-/// concurrent spawn storm (every fork copies the fd table until exec), a
-/// refusal can leave the flock held by a forked duplicate, so an immediate
-/// second claimant reads `Contention` instead of `ForeignHost`. The release
-/// path (explicit unlock) is the control.
+/// Baseline 503d221: the `ForeignHost` refusal path closed its flocked file
+/// with a bare `drop` — not the explicit unlock every other held-refusal
+/// path used. Under a concurrent spawn storm (every fork copies the fd
+/// table until exec), a refusal could leave the flock held by a forked
+/// duplicate, so an immediate second claimant read `Contention` instead of
+/// `ForeignHost`. Fixed by G2 (every post-flock exit unlocks through an
+/// RAII guard); this pins zero leaks. The release path is the control.
 #[cfg(unix)]
 #[test]
 fn defect_foreign_refusal_leaks_its_flock_to_forked_children() {
@@ -1443,11 +1446,11 @@ fn defect_foreign_refusal_leaks_its_flock_to_forked_children() {
 
 // ───────────────────────── G7: unreadable discovery ─────────────────────────
 
-/// AF1: "Stale discovery with a free lock reclaims with a warning." A torn
-/// or unparseable stale discovery reclaims WITH the typed unreadable
-/// warning (G7) — except the pid-overflow shape, whose lenient hostname is
-/// a known foreign host and refuses under AF5 instead. Nothing reclaims
-/// silently.
+/// AF1: "Stale discovery with a free lock reclaims with a warning."
+/// Baseline 503d221 reclaimed a torn or unparseable stale discovery
+/// silently. Fixed by G7: it reclaims WITH the typed unreadable warning —
+/// except the pid-overflow shape, whose lenient hostname is a known foreign
+/// host and refuses under AF5 instead. Nothing reclaims silently.
 #[test]
 fn defect_garbage_stale_discovery_reclaims_without_warning() {
     let mut silent = Vec::new();
@@ -1476,9 +1479,11 @@ fn defect_garbage_stale_discovery_reclaims_without_warning() {
     );
 }
 
-/// AF5 fail-open: a stale claim from a KNOWN foreign host that this build
-/// cannot parse (a newer writer: new `mode` variant, or a field this build
-/// lacks) bypasses the foreign-host refusal and is reclaimed silently.
+/// AF5 fail-open at baseline 503d221: a stale claim from a KNOWN foreign
+/// host that the build could not parse (a newer writer: new `mode`
+/// variant, or a field of another type) bypassed the foreign-host refusal
+/// and was reclaimed silently. Fixed by G7 (lenient hostname read): it
+/// refuses `ForeignHost`.
 #[test]
 fn defect_unparseable_foreign_claim_bypasses_foreign_host() {
     for (name, patch) in [
@@ -1505,9 +1510,12 @@ fn defect_unparseable_foreign_claim_bypasses_foreign_host() {
 
 // ───────────────────────── G6: streaming scan ─────────────────────────
 
-/// Fail-closed is global: ONE unreadable entry anywhere in the shared
-/// recovery dir (here a directory named `*.journal`) refuses every
-/// project's acquisition with `RecoveryLookup`.
+/// Baseline 503d221 failed closed globally: ONE unreadable entry anywhere
+/// in the shared recovery dir (here a directory named `*.journal`) refused
+/// every project's acquisition with `RecoveryLookup`. Fixed by G6 (only
+/// regular files are header-read) and H4 (the name match comes first, so a
+/// non-matched entry of another type is skipped before any open): an
+/// unrelated entry never blocks this project.
 #[test]
 fn defect_unrelated_unreadable_journal_blocks_every_project() {
     let fx = fixture("race-junk-journal");
@@ -1703,9 +1711,11 @@ fn h3_big_alias_document_identifies_in_bounded_memory() {
 
 // ───────────────────────── G8: dangling alias ─────────────────────────
 
-/// AF2 hole: a DANGLING symlink alias (the target not yet saved) does not
-/// canonicalise, so its identity is `<link dir>/<link name>` — a different
-/// lock from the real target's. Two owners of one future file.
+/// AF2 hole at baseline 503d221: a DANGLING symlink alias (the target not
+/// yet saved) did not canonicalise, so its identity was
+/// `<link dir>/<link name>` — a different lock from the real target's, two
+/// owners of one future file. Fixed by G8 (and H5): the link chain is
+/// resolved first, so the alias unifies with its target.
 #[cfg(unix)]
 #[test]
 fn defect_dangling_symlink_alias_double_owns() {
