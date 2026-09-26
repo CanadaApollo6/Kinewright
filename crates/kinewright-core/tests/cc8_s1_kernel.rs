@@ -2248,6 +2248,54 @@ fn foreign_space_store(d: [f64; 3], white: f64, peak: f64, pairs: usize) -> [f32
     scene_to_display(w.map(|x| x * sw), as_f32(peak), g).unwrap()
 }
 
+/// CE10 minimal grade-node model (test-only): the serialized primary's
+/// contrast, `pivot + (x − pivot)·(1 + contrast)` as compositor.wgsl's
+/// primary evaluates it. Astra's `contrast_percent=100`,
+/// `contrast_pivot_basis_points=10000` is contrast 1.0 about pivot 1.0 in
+/// working units: slope 2. f64 reference form.
+fn primary_contrast(x: f64, contrast: f64, pivot: f64) -> f64 {
+    pivot + (x - pivot) * (1.0 + contrast)
+}
+
+/// f32 in-pass form of [`primary_contrast`] (the production node precision).
+fn primary_contrast_f32(x: f32, contrast: f32, pivot: f32) -> f32 {
+    pivot + (x - pivot) * (1.0 + contrast)
+}
+
+/// CE10 slope-bound acceptance (actual-vs-reference, like the PB helpers):
+/// a grade of slope `slope` after one f16 source store errs, in working
+/// units, by at most `slope` × PB1's store bound (0.5 ULP of the SOURCE
+/// triplet's max |channel|, same 1e-6 slack). Error and norm are computed
+/// inside; the caller passes values only.
+fn ce10_graded_ok(actual: [f64; 3], reference: [f64; 3], source: [f64; 3], slope: f64) -> bool {
+    err_inf(actual, reference) <= slope * 0.5 * f16_ulp_of(max_abs_3(source)) * (1.0 + 1e-6)
+}
+
+/// CE10 CONTROL topology (verify3 B1): neutral source working value `w` on
+/// all channels → [2020 f16 source store] → primary contrast 1.0 about 1.0
+/// in f32 in-pass → 2020 f16 composite store → render at P = W = 400. Only
+/// the source and composite stores; no foreign-space store. Returns the f32
+/// display, the f64 reference display (no stores), the f32 graded working
+/// value before the composite store, and its f64 reference.
+fn ce10_contrast_chain(w: f64, source_store: bool) -> ([f32; 3], [f64; 3], [f64; 3], [f64; 3]) {
+    let (peak, white) = (400.0, 400.0);
+    let g = hlg_gamma(as_f32(peak)).unwrap();
+    let sw = s_white(as_f32(white), as_f32(peak), g).unwrap();
+    let g64 = reference::hlg_gamma(peak).unwrap();
+    let sw64 = reference::s_white(white, peak, g64).unwrap();
+    let src = if source_store {
+        f16_store(as_f32(w))
+    } else {
+        as_f32(w)
+    };
+    let graded = primary_contrast_f32(src, 1.0, 1.0);
+    let composite = f16_store(graded);
+    let display = scene_to_display([composite * sw; 3], as_f32(peak), g).unwrap();
+    let graded64 = primary_contrast(w, 1.0, 1.0);
+    let expected = reference::scene_to_display([graded64 * sw64; 3], peak, g64).unwrap();
+    (display, expected, [f64::from(graded); 3], [graded64; 3])
+}
+
 /// PB4 working chain: anchor display → f64 scene → f32 working → three
 /// render/inverse pairs with f16 stores → final store → f32 display.
 fn pb4_chain_display(d: [f64; 3], white: f64, peak: f64) -> [f32; 3] {
@@ -2683,6 +2731,67 @@ fn pb4_leg_classification_real_triplets() {
     let refmax = sdr.iter().map(|c| c.reference.abs()).fold(0.0, f64::max);
     assert!(sdr.iter().all(|c| c.norm.to_bits() == refmax.to_bits()));
     assert!(refmax > 100.0 * c.reference.abs(), "red is not the max");
+}
+
+#[test]
+fn ce10_primary_contrast_control() {
+    // CE10 (verify3 B1): PB1–PB4 bound the kernel plus the declared storage
+    // topology (identity nodes and the fused grade stack), not arbitrary
+    // grades. Astra's `verify3_primary_contrast_gate`, kept as a control:
+    // source working [0.5001; 3], P = W = 400, 2× contrast about 1.0, only
+    // the source + composite 2020 f16 stores. The source store rounds
+    // 0.5001 to 0.5, which the grade maps onto 0 instead of 0.0002 working
+    // (0.0605 nits): every channel of both legs FAILS CE7 (Linux: 10 SDR /
+    // 21 HLG codes, 100% of the reference max).
+    let source = [0.5001; 3];
+    let (display, d, graded, graded64) = ce10_contrast_chain(0.5001, true);
+    let sdr = pb4_sdr_leg(display, d, 400.0);
+    let hlg = pb4_hlg_leg(display, d, 400.0);
+    println!("CE10 control: display={display:?} d={d:?} SDR={sdr:?} HLG={hlg:?}");
+    assert!(
+        sdr.iter().chain(&hlg).all(|c| !c.ok),
+        "CE10 control must fail CE7"
+    );
+    assert_eq!(pb4_ce7_failures(display, d, 400.0), 6);
+    // Without the source store the same grade passes CE7 on both legs.
+    let (display0, d0, _, _) = ce10_contrast_chain(0.5001, false);
+    assert_eq!(
+        pb4_ce7_failures(display0, d0, 400.0),
+        0,
+        "{display0:?} {d0:?}"
+    );
+    pb4_gate(&mut Pb4Acc::default(), display0, d0, 400.0, 400.0);
+    // What CE10 does bound: working error after the grade ≤ slope × PB1's
+    // store bound (2 × 0.5 ULP(0.5001) = 4.88e-4; here 2e-4).
+    assert!(ce10_graded_ok(graded, graded64, source, 2.0), "{graded:?}");
+    // Near-tight real source: 0.50024 stores to 0.5 (0.49 ULP); the grade
+    // doubles that to 0.98 of slope × PB1, beyond 1 × PB1 — the slope counts.
+    let near = [0.500_24; 3];
+    let (_, _, g_near, r_near) = ce10_contrast_chain(0.500_24, true);
+    assert!(ce10_graded_ok(g_near, r_near, near, 2.0), "{g_near:?}");
+    assert!(
+        !ce10_graded_ok(g_near, r_near, near, 1.0),
+        "slope must count"
+    );
+    // Just inside / outside the slope bound, each channel, both signs.
+    let bound = 2.0 * 0.5 * f16_ulp_of(0.5001);
+    for ch in 0..3 {
+        for sign in [1.0, -1.0] {
+            let at = |k: f64| {
+                let mut a = graded64;
+                a[ch] += sign * k * bound;
+                a
+            };
+            assert!(
+                ce10_graded_ok(at(0.999), graded64, source, 2.0),
+                "in {sign} ch{ch}"
+            );
+            assert!(
+                !ce10_graded_ok(at(1.001), graded64, source, 2.0),
+                "out {sign} ch{ch}"
+            );
+        }
+    }
 }
 
 #[test]
