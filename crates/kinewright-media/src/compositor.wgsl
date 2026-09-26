@@ -782,6 +782,25 @@ fn non_finite(value: vec3<f32>) -> bool {
     return any(bits == vec3<u32>(0x7f800000u));
 }
 
+// MO2 R10 (ME12): f32 → f16 round-to-nearest-even, returned as the exact
+// f32 of that f16, so the target's own store conversion (whose rounding
+// Vulkan and WGSL leave unspecified) has nothing left to round. Integer
+// bits only build exact powers of two: `value · 2^(10−e)` and the product
+// back are exact, and `round` ties to even. `e` is the f16 exponent,
+// floored at −14 so subnormals share the 2^−24 quantum; f32 zero and
+// subnormals round to a signed zero. Past 65504 the result is ±inf; NaN
+// and ±inf fall through (callers bit-check the unrounded value).
+fn f16_rte(value: vec3<f32>) -> vec3<f32> {
+    let biased = vec3<i32>((bitcast<vec3<u32>>(value) >> vec3<u32>(23u)) & vec3<u32>(0xffu));
+    let exponent = max(biased - vec3<i32>(127), vec3<i32>(-14));
+    let quantum = bitcast<vec3<f32>>(vec3<u32>(exponent + vec3<i32>(117)) << vec3<u32>(23u));
+    let inverse = bitcast<vec3<f32>>(vec3<u32>(vec3<i32>(137) - exponent) << vec3<u32>(23u));
+    let rounded = round(value * inverse) * quantum;
+    let sign = bitcast<vec3<u32>>(value) & vec3<u32>(0x80000000u);
+    let infinity = bitcast<vec3<f32>>(sign | vec3<u32>(0x7f800000u));
+    return select(rounded, infinity, abs(rounded) > vec3<f32>(65504.0));
+}
+
 // MO2 R13: the opaque Push backdrop samples `D0(x - q)` where that lands in
 // the raster and unshifted `D0(x)` elsewhere.
 fn push_backdrop(position: vec2<f32>) -> vec4<f32> {
@@ -1007,11 +1026,13 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         blend_channel(mode, output_linear.b, below.b),
     );
     // MO2 R10: operands and intermediates must be finite (checked before
-    // min/max can erase them); magnitude only where the target stores.
-    let stored = alpha * blended + (1.0 - alpha) * below;
+    // min/max can erase them); magnitude only on the value stored, which is
+    // rounded to f16 here (ME12) so the α = 1 store below is exact.
+    let composite = alpha * blended + (1.0 - alpha) * below;
+    let stored = f16_rte(composite);
     if source_alpha_invalid || non_finite(output_linear) || non_finite(below)
         || non_finite(blended)
-        || non_finite(vec3<f32>(alpha)) || non_finite(stored)
+        || non_finite(vec3<f32>(alpha)) || non_finite(composite)
         || any(abs(stored) > vec3<f32>(65504.0)) {
         atomicStore(&validity, 1u);
     }

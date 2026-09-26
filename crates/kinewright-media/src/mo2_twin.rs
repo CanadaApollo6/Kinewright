@@ -523,7 +523,8 @@ fn render_sampled<F: CompositorInput>(
                     ![r, g, b, alpha].iter().all(|v| v.is_finite())
                         || (alpha > 0.0 && [r, g, b].iter().any(|v| v.abs() > 65504.0))
                 } else {
-                    !finite || out.iter().any(|v| v.abs() > 65504.0)
+                    // ME12: magnitude on the RTE-rounded f16 the shader emits.
+                    !finite || out.iter().any(|v| !store(*v).is_finite())
                 };
             if flagged.is_none() && invalid {
                 flagged = Some(index);
