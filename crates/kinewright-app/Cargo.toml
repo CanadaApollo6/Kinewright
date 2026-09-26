@@ -15,6 +15,7 @@ image.workspace = true
 kinewright-agent = { path = "../kinewright-agent", default-features = false }
 kinewright-core = { path = "../kinewright-core" }
 kinewright-media = { path = "../kinewright-media" }
+kinewright-project = { path = "../kinewright-project" }
 rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,6 +26,7 @@ proptest.workspace = true
 # media through `test_support`; none of that is in a shipping path.
 kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
+kinewright-project = { path = "../kinewright-project", features = ["test-util"] }
 
 [lints]
 workspace = true

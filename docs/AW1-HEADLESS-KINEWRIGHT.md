@@ -58,6 +58,256 @@ and every rule owns at least one test.
   `compatibility.platforms`), §4 (`kinewright-eval` uses test-gated
   `test_engine` — production uses `FfmpegMediaEngine`).
 
+## 0.1 Implementation errata (S1 fix round)
+
+Review-1 (B1–B7, S1–S2, N1) and review-2 (L1–L4) findings against S1,
+ruled by the lead (F1–F8) and implemented on `aw1/impl`. Items AF1–AF8
+amend the sections cited; S2-D1 and S5-OBL are named deferrals, not
+changes.
+
+- AF1 → §5: the single lockfile is split. `<project>.lock` is a lock
+  OBJECT (created if absent, never unlinked, contents unused); liveness
+  is the held `try_lock_exclusive` alone. The claim (pid, hostname,
+  endpoint, token_ref, mode, version, started_at, reclaimed_from) lives
+  in `<project>.lock.json`, published atomically by the owner only while
+  holding the lock and readable at any time — the old read-through-the-
+  locked-file fails on Windows (`LockFileEx` denies second-handle reads,
+  OS error 33). Release removes the discovery while holding the lock,
+  then unlocks explicitly — never a last-close race against a forked
+  duplicate. Stale discovery with a free lock reclaims with a warning.
+  Backoff kept. (Fix round 2, G1: the publish uses a dedicated strict
+  writer — temp beside the unresolved path with `create_new`,
+  `write_all`+`sync_all` through one handle, `rename` over the discovery —
+  so a planted link is replaced, never followed; no fallback, failures
+  remove the temp and report `Io`. The holder sweeps its own stale publish
+  temps after the flock. A lock object that is a symlink refuses with typed
+  `Io` (Unix also re-checks the fd against the path after open), and
+  discovery reads only regular files, bounded at 64 KiB. G2: every
+  post-flock exit — all refusals and the success hand-off — goes through an
+  acquired-flock RAII guard whose drop unlocks explicitly before closing, so
+  the ForeignHost arm's former bare close is covered too. G7: "absent"
+  splits from "present but unreadable" — an unreadable stale discovery with
+  a free lock reclaims with a typed `lock_reclaimed` warning carrying
+  `previous_unreadable: true` (and a pid-0/`unknown` sentinel triple), while
+  absence reclaims silently. G9: `release` removes the discovery only if it
+  still names the handle (pid, claim second, endpoint), otherwise leaving
+  it and logging; `LockfileHandle::verify` detects an object deleted under
+  a live owner (Unix fd-vs-path, typed `LockLost`, no write — checked
+  before every headless save and every discovery re-publish) and is
+  trivially true on Windows, where the object pins itself (fix round 3,
+  H2: it opens with `share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)`, no
+  DELETE, so no process can rename or delete it while any handle lives;
+  contenders stay share-compatible and contend); only the `.lock.json`
+  discovery may be hand-deleted, never the `.lock` object — if the object
+  is hand-deleted anyway (Unix), the next claimant B owns a new object and
+  its `lock_reclaimed` warning names the still-LIVE owner A; both hold a
+  flock until A's next save or re-publish, whose `verify` refuses
+  `LockLost` (race N-l). Fix round 4, J3: on both OSes `verify` also
+  re-derives the canonical identity of the spelling the handle claimed
+  through and refuses `LockLost` when it no longer equals the claimed
+  identity — a link re-pointed after the acquire (`current` → v4) would
+  otherwise send a verified owner's writes into a file another owner
+  holds; a declared Save-As transfer re-establishes the claim first. A
+  claim made through a relative spelling therefore also refuses after a
+  cwd change, and one made through a dangling alias refuses once a save
+  has replaced the alias with a regular file (AF2 note). Fix round 3, H7: the Unix lock-object open adds
+  `O_NOFOLLOW`, so a link planted after the symlink check is never
+  followed (N-b); discovery and journal reads open `O_NONBLOCK` on Unix
+  and read only an fd that `fstat`s as a regular file, so a FIFO swapped
+  in after the pre-check never blocks a claimant holding the flock (N-c);
+  the claim carries a random `claim_id` (serde default for older claims)
+  and `release` compares it alone — G9's pid/second/endpoint triple is
+  not unique within one process (N-d); the stale-temp sweep matches
+  exactly `.<name>.<digits>.<digits>.tmp` as `OsStr` bytes, so a sibling
+  project whose discovery name extends this one's is never touched and
+  non-UTF-8 names sweep (N-a); a `PermissionDenied` publish rename
+  (Windows AV/indexer) retries within the §5 3 × 250 ms budget, the same
+  atomic rename each time, never a fallback (N-h). Recorded limit (N-k):
+  a local writer that plants directories at the next 100 predicted temp
+  names denies the publish with a typed `Io` — local-writer only, no
+  hang. Fix round 4, J6: the publish rename also retries Windows'
+  `ERROR_SHARING_VIOLATION` (32) and `ERROR_LOCK_VIOLATION` (33), which
+  std leaves uncategorised — the AV/indexer case N-h targets (N3);
+  `release` removes nothing when its discovery read is `Absent`, so a
+  successor publishing after a hand-delete keeps its discovery (N4); and
+  discovery reads add `O_NOFOLLOW` on Unix, so a link swapped in after
+  the type check reads unreadable (the pid-0 sentinel), never followed
+  (N5). Journal reads still follow links: a late link to a naming header
+  must refuse, not be skipped.)
+- AF2 → §5, §6: one canonical project identity — full canonical path
+  when the target exists, else canonical parent dir plus file name
+  (relative resolves at the cwd; raw path when nothing resolves). Lock,
+  discovery, claim, token_ref, and journal naming all derive from it, so
+  aliases share one lock and one journal name. (Fix round 2, G8: a
+  dangling symlink leaf resolves through `read_link` — relative to the
+  link's parent, depth-bounded at 40 — so dangling aliases share their
+  target's identity. Fix round 3, H5: the bound is Linux `MAXSYMLINKS`
+  (40 hops, what the kernel follows); after the 40th hop the reached path
+  is checked — a non-link terminal resolves normally, a link still there
+  (a longer chain or a cycle) or an unreadable link is a typed
+  `ProjectIdentityError`, never a fallback: the lock refuses with
+  `LockfileError::Identity`, the journal scan fails closed, and a journal
+  header naming such a path never claims. Fix round 4, J4 (narrows H5):
+  the 40-hop bound applies to the LEAF link chain; directory-component
+  links are not counted. A path whose full kernel traversal exceeds the
+  kernel's own limit may still unify to an identity, but it can never be
+  opened or written — the OS refuses with `ELOOP`, a typed IO error at
+  save — and it shares the unified identity's lock, so no two owners
+  arise (`rr3_mixed_directory_and_leaf_depth`). Fix round 4, J2: an acquire
+  resolves the identity exactly ONCE and derives the claim, lock,
+  discovery and pending-journal scan from that value, so a link
+  re-pointed mid-acquire cannot split the lock from the scan; an
+  identity that names no lock object is `Identity` — no raw-path
+  `<spelling>.kinewright.lock` fallback anywhere. Notes:
+  `write_file_atomic` replaces a dangling PROJECT symlink with a regular
+  file (pre-existing, unchanged); hard links are a known limitation —
+  two hard links to one file hold distinct identities and can
+  double-own (race N5); the AF5 network-FS limit still applies.)
+- AF3 → §5/S7: the takeover check scans the recovery dir once — base
+  journal, every allocator `-N` suffix, and alias-named journals via the
+  header's `project_path` — after obtaining the lock, on every ownership
+  path. Lookup IO errors fail closed (`RecoveryLookup`). §2's "journal
+  retire" pipeline step is a no-op for headless: it owns no journals —
+  only a session that replayed recovery data may retire it, so an
+  unreplayed pending journal always survives a headless save. (Fix round
+  2, G5: the scan also recognises legacy raw-path-hash names and their
+  `-N` suffixes — including the ordinary spelling behind a Windows
+  verbatim identity — and new journal headers persist the absolute
+  canonical identity. Exact header rule: a non-name-matched journal is
+  claimed by header only when `project_path` is absolute and
+  canonical-identical; a relative, missing, or unparseable header never
+  claims — ambiguous legacy identity is ignored, never rebound to the
+  current cwd, so it cannot block an unrelated project. G6: the scan
+  streams — `BufReader`, one magic read, one parsed header value; name-
+  matched journals refuse without any header read; non-regular entries
+  are skipped. Fix round 3, H3 (supersedes G6's 1 MiB header cut-off,
+  which ignored big projects' alias journals — fail-open): the header
+  value is parsed in full as a stream — `project_path` captured, every
+  other value (the embedded `initial_document`) skipped as `IgnoredAny`,
+  never buffered (a 64 MiB document adds < 2 MiB peak RSS) — and it
+  claims only when committed: the byte right after the value must be
+  `\n` (no newline, EOF, or trailing bytes = uncommitted, no claim).
+  Torn or malformed data is merely unmatched; any other IO error (magic
+  or header read) fails closed as `RecoveryLookup`. The only size guard
+  is a generous 1 GiB ceiling per header: a header reaching it refuses
+  typed (`FileTooLarge` → `RecoveryLookup`, fail closed), never ignored.
+  Residuals: the parse costs time linear in the header (debug build
+  ≈ 2.5 s per 64 MiB), and a hostile deeply nested skipped value costs
+  serde_json one byte of scratch per nesting level, bounded by the
+  ceiling (local recovery-dir writers only). Fix round 3, H4: the name match is evaluated first — a
+  name-matched entry of ANY type (symlink, FIFO, dir) refuses; only
+  non-matched non-regular entries are skipped, before any open. H5: a
+  project path with no canonical identity names its journal by its raw
+  spelling — a writer-side naming choice, not an identity fallback, since
+  the lock and the scan both refuse such a path typed. G10, journal-writer rule: a journal for an identity is
+  created or renamed only while holding that identity's lock, including
+  Save-As and first-save transitions. Fix round 4, J6: N1 — besides the
+  `read_dir` pass, the exact base and legacy names (and, on Windows, the
+  ordinary spelling) are probed directly with `symlink_metadata`, any
+  type refusing, since `read_dir` may miss an entry renamed in mid-scan.
+  N2 — the nesting residual stands, and its RSS bound is the ceiling.
+  Measured on a 64 MiB hostile header (debug / release): `[[[…` adds
+  65 MiB peak RSS (3.9 s / 0.44 s); an unterminated `project_path`
+  string, which the scan must buffer to read, adds the same 65 MiB
+  (2.5 s / 0.34 s); a skipped 64 MiB string adds 2 MiB. So peak RSS is
+  at most about one byte per header byte, up to the 1 GiB ceiling, for
+  either shape, and a depth limit alone would not lower that bound. A
+  recursive skip visitor (serde's 128-level limit) was not adopted:
+  serde_json's `deserialize_any` buffers every skipped string in scratch,
+  regressing the skipped-string case to the same one-to-one cost. N6 —
+  "committed" means the header's closing `}` immediately followed by
+  `\n`; the app's recovery parser tolerates whitespace between them. The
+  writer never emits any, so the two agree on every journal the app
+  writes; a hand-edited alias journal with `} \n` is merely unmatched by
+  the scan (local writer only).)
+- AF4 → §2: headless save shares the app's H12/J2/J3 transaction
+  machinery (`SidecarRollback` in `kinewright-project`): snapshot and
+  restore the destination sidecar and both generation baselines on
+  project-write failure, including unreadable-sidecar preservation. (Fix
+  round 2, G4: establishment membership rolls with the transaction too,
+  plus G3's `.bak` move — the `.bak` moves back exactly, else the bytes
+  plan runs; a `.bak` whose move-back fails is left beside the restore,
+  never deleted.)
+- AF5 → §5: claims carry the real OS hostname (new tiny `gethostname`
+  dependency — std has none and the crate forbids `unsafe`; already in
+  the lockfile). A stale claim from a KNOWN foreign host refuses
+  takeover (`ForeignHost` naming the host); `unknown`-host claims
+  predate real hostnames and still reclaim. (G7: the foreign check also
+  reads leniently — a claim this build cannot parse still refuses when its
+  hostname string names a known foreign host. G11: hostnames compare
+  case-insensitively after trimming a trailing dot; an FQDN stays
+  distinct and refuses, and the refusal names the discovery to delete if
+  this machine was renamed. Fix round 3, H7/N-g: an empty hostname is
+  `unknown`, so a blank-host claim reclaims instead of refusing with a
+  blank name. N-e, recorded limit: the lenient pass reads at most the
+  64 KiB discovery bound and serde_json's 128 nesting levels — a known
+  foreign claim past either reads as unreadable and reclaims WITH the
+  `previous_unreadable` warning, not `ForeignHost`.) Limit: flock
+  liveness is host-local, so on local-lock network filesystems a free
+  lock proves nothing about a foreign owner — AW1 claims no multi-host
+  exclusion.
+- AF6 → §2 (S1-delta refinement, GUARD-B): the session tracks an
+  established baseline per stem — a load, a successful flush, or
+  adopting the saved path establishes that stem. The empty-flush guard
+  applies only to stems this session never loaded or wrote, so a changed
+  project save to an established stem always pairs its sidecar. (Fix
+  round 2, G3: an empty flush against an occupied unestablished stem
+  reports `Occupied` instead of the benign `Skipped` — both save paths
+  then preserve-and-replace: the foreign sidecar moves aside with the
+  reopen path's `.bak` naming, a paired sidecar is written for the new
+  document, and the stem is established. Benign skips — no path,
+  suspended, unchanged generation — still report `Skipped`.)
+- AF7 → §15 (fix round 2, G13: re-measured, ceiling raised): the
+  production ceiling is now 1,500 lines (+300 for this round). The true
+  figure from 6c2bdec to HEAD is 1,708 (rs 1,672 + manifests 36;
+  method: `scripts/aw1-line-ledger.sh` — `git diff --no-renames`,
+  tests uncounted, visibility/indent normalisation, multiset
+  moved-span treatment; S1's 771 is unsupported and not used). The
+  honest figure exceeds the ceiling — STOP reported, nothing trimmed
+  to fit. Lead ruling (2026-09-25): 1,708 accepted for S0+S1 and the
+  S0+S1 ceiling set to 1,750. The overrun is the review-driven lock
+  and persistence hardening (AF1–AF6: object/discovery split, symlink-
+  safe publisher, legacy journals, rollback of establishment), not
+  scope growth. S2–S6 ceilings are unchanged; the ledger script is the
+  method for every later stage. Fix round 3 (review-driven hardening:
+  typed identity refusal, Windows share mode, streaming header parse,
+  race nits) — ceiling 1,900; the growth is error handling and docs, not
+  scope. Closing round 4 — single-resolution identity, verify re-check,
+  Windows retry codes — ceiling 1,950.
+- S2-D1 (deferred, not fixed): an unloaded session's NON-EMPTY flush
+  still replaces an occupied stem — pre-existing IN2B §2 rule-7
+  behaviour, kept deliberately. A changed project save pairs (AF6); a
+  first touch of a foreign stem still overwrites it when the log is
+  non-empty.
+- AF8 → §2 (fix round 2, G12: byte identity): AW1 sidecars are
+  byte-identical to main's writer except where a ruled behavior differs
+  from what main (or C) wrote. Exact cases from R2's byte table
+  (pre-fix2 snapshot): (1) the C/app buggy second save (stale `e063…`
+  vs main's paired `cbb2…`) — H matches main, not C (F1 repair); (2) an
+  empty first touch of an occupied stem, where pre-G3 H preserved the
+  foreign stem (`e063…`) and main overwrote with a pair (`4b75…`) —
+  post-G3 the stem pairs as main's does, and the foreign history
+  survives in a `.bak` main never wrote; (3) headless re-saving an
+  occupied stem differed from app (`e063…` vs `a5dd…`) — R2 B1, now
+  fixed (headless pairs like the app). Everything else in the table is
+  byte-identical (lengths, R1/M13/digest stability).
+- S5-OBL (gate obligation, not fixed): when S5 wires the GUI lock, port
+  `defect_journal_appearing_after_the_scan_is_missed` to the GUI journal
+  path — a journal appearing after the scan must be impossible once all
+  writers hold the lock. The reproducer stays ignored in the tree until
+  then.
+- S4-OBL (gate obligation, not fixed; closing race re-check SR1): before S4
+  wires `Some(lock)` into production saves, `save_headless` writes through the
+  handle's single resolved identity (and derives the sidecar stem from it), and
+  refuses a save whose path does not resolve to `handle.identity` unless it is a
+  declared transfer. Today a link re-pointed between `verify` and the write still
+  sends the save to the new target; until S4 only tests pass a lock. Also at S4:
+  `release` skips removing the discovery unless the lock fd still matches the
+  path (an externally deleted lock object otherwise lets A's release delete a
+  successor's discovery, the G9 `LockLost` case), and the direct journal probe
+  covers allocator-suffixed `-N.journal` names, not only the exact base and
+  legacy names.
+
 ## 1. Goal and non-goals
 
 A `kinewright` CLI plus a `kinewright mcp` stdio mode serving the same
@@ -255,16 +505,25 @@ see the secret.
 (TCP connect + authed `initialize`) → proxy every MCP call over
 loopback with the bearer token (the already-enabled
 `transport-streamable-http-client-reqwest` feature), forwarding the
-session root set per request (§9). No live owner → own the lock
+session root set per request (§9). A proxy candidate with an absent
+`endpoint` is a lock-check attempt target, not a proxy target: on
+`endpoint: None` the startup sequence attempts the lock itself rather
+than exiting 4. No live owner → own the lock
 (`mode: "headless"`, fresh token), BIND its own authenticated endpoint
 (B4 — Desktop + Code proxy to the headless owner instead of double
-writing), and serve in-process against a local `Core`.
+writing), and serve in-process against a local `Core`. The lock-check
+answers exactly one question — "is this identity live?" — never a
+four-valued shape; a `Proxy` outcome is not a degraded approval.
 
 Reclaim/takeover: only when the lockfile is gone or re-owned
 (different owner identity), with backoff (3 attempts, 250 ms apart);
 a held flock is never stolen. A flock-free lockfile means the owner
 died without cleanup → reclaim with a typed JSON warning on stderr
 (the AW3 decision log consumes this shape) and `reclaimed_from` set.
+(G11, hostname rule: two spellings name the same machine iff they agree
+case-insensitively after ignoring one trailing dot, so `HOST` and
+`host.` match; an unknown or unreadable local hostname is never a
+live-match.)
 Takeover first checks `journal_file_name` for a pending journal →
 refuse `pending_recovery` naming GUI restore (S7); else reload
 last-saved bytes, announce `base_revision_reset`, invalidate prepared

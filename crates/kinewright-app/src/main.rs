@@ -27,7 +27,6 @@ mod recording;
 mod recovery;
 mod screenshot;
 mod settings_ui;
-mod sidecar;
 mod slash;
 mod theme;
 mod timeline_ui;

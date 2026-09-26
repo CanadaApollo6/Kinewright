@@ -1,3 +1,6 @@
 # Rust sources are read back by tests through include_str! and compared
 # against LF-written patterns; keep them LF on every platform.
 *.rs text eol=lf
+# AW1 F8: the ledger script must stay LF (bash), and the errata doc with it.
+*.sh text eol=lf
+*.md text eol=lf

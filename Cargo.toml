@@ -4,6 +4,7 @@ members = [
     "crates/kinewright-media",
     "crates/kinewright-agent",
     "crates/kinewright-app",
+    "crates/kinewright-project",
 ]
 resolver = "3"
 
@@ -26,11 +27,15 @@ eframe = "=0.35.0"
 egui_extras = { version = "=0.35.0", default-features = false, features = ["svg"] }
 half = "=2.7.1"
 ffmpeg-next = { version = "=8.0.0", default-features = false, features = ["codec", "filter", "format", "software-resampling", "software-scaling"] }
+fs2 = "=0.4.3"
+gethostname = "=1.1.0"
+getrandom = "=0.3.4"
 image = { version = "=0.25.9", default-features = false, features = ["png"] }
+libc = "=0.2.189"
 proptest = "=1.11.0"
 pollster = "=0.4.0"
 rfd = "=0.17.2"
-rmcp = { version = "=3.1.2", default-features = false, features = ["client", "server", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
+rmcp = { version = "=3.1.2", default-features = false, features = ["client", "elicitation", "server", "transport-io", "transport-streamable-http-client-reqwest", "transport-streamable-http-server"] }
 reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "rustls"] }
 rtrb = "=0.3.4"
 schemars = "=1.2.2"

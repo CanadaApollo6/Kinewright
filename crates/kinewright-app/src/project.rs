@@ -1,201 +1,30 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
-    fs,
+    ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Instant, SystemTime},
 };
 
-use serde::{Deserialize, Serialize};
-
 use kinewright_core::{
-    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, Export, IncidentCode,
-    IncidentEvidence, IncidentId, IncidentLog, IncidentObservation, IncidentState, IncidentSubject,
-    LabelIncident, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus, MarkerId, MediaKind,
-    Operation, PROJECT_FORMAT_VERSION, Playback, RejectionIncident, RestoreReport,
-    RunningInvestigation, TimeCode, TimelineRevision, TrackId, TrackKind, should_flush,
+    Analysis, AssetId, AudioChain, ClipId, Core, Document, Event, Export, IncidentId, IncidentLog,
+    IncidentState, IncidentSubject, LutAssetId, LutAvailabilityKind, LutAvailabilityStatus,
+    MarkerId, MediaKind, Operation, Playback, RunningInvestigation, TimeCode, TimelineRevision,
+    TrackId, TrackKind,
 };
 use kinewright_media::{LutLibrary, LutStore};
+use kinewright_project::{
+    FlushOutcome, RefuseRename, SidecarMode, SidecarSession, SidecarWriter, derive_lut_store,
+    sidecar_write_failed_observation,
+};
 
 use crate::{
     chat_ui::{AgentHarnessChoice, AgentThread, ChatEntry},
     investigator::InvestigatorSession,
     recovery::Recovery,
-    sidecar::{
-        FlushOutcome, RefuseRename, SidecarLoad, SidecarMode, SidecarWriter, build_sidecar_bytes,
-        digest_bytes, load_sidecar, refuse_sidecar, refuse_sidecar_with, sidecar_matches_project,
-        sidecar_path_for_project, sidecar_refused_observation, sidecar_write_failed_observation,
-    },
     transcript_ui::TranscriptSelection,
 };
-
-/// What one dialog-free project write did (CC4 §2.2).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProjectSaveReport {
-    /// Where the project JSON was written.
-    pub(crate) path: PathBuf,
-    /// The store root derived from `path`, absent only when the path yields no
-    /// usable root.
-    pub(crate) lut_store_root: Option<PathBuf>,
-    /// Whether the store root moved, which is what makes a write a Save As for
-    /// the purposes of the asset copy.
-    pub(crate) store_root_changed: bool,
-    /// One entry per asset the Save As copy could not place at the new root.
-    /// A project with an unavailable asset is still saved; the asset is simply
-    /// `missing` there, with the ordinary recovery path (CC4 §2.2).
-    pub(crate) lut_store_copy_failed: Vec<(LutAssetId, String)>,
-    /// The typed `lut_store_root_invalid` refusal when the derived root exists
-    /// but is unusable — a symlink, or something that is not a directory.
-    ///
-    /// Kept rather than discarded so the caller can say *why* the just-saved
-    /// project still cannot own LUT bytes: reporting `project_not_saved` on a
-    /// project that was saved a second ago is a lie (CC4 §2.2).
-    pub(crate) lut_store_error: Option<String>,
-    /// The FNV-1a pairing digest over the exact bytes written (`IN2B` §4
-    /// rule 2, §2 rule 9): the save path hands it to the sidecar flush, so
-    /// one serialisation serves both files.
-    pub(crate) digest: String,
-}
-
-impl ProjectSaveReport {
-    /// The human summary of any per-asset copy failure, or `None` when the
-    /// whole store followed the project.
-    pub(crate) fn copy_failure_summary(&self) -> Option<String> {
-        if self.lut_store_copy_failed.is_empty() {
-            return None;
-        }
-        Some(format!(
-            "lut_store_copy_failed: {}",
-            self.lut_store_copy_failed
-                .iter()
-                .map(|(asset, reason)| format!("asset {asset}: {reason}"))
-                .collect::<Vec<_>>()
-                .join("; ")
-        ))
-    }
-}
-
-/// Why a dialog-free project write failed.
-///
-/// Serialization and the JSON write are fatal; a store-root failure is not
-/// reported here, because a project whose path yields no store root is still a
-/// valid project — its imported looks are simply unavailable until it is saved
-/// somewhere usable.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ProjectSaveError {
-    Serialize(String),
-    Write(String),
-    /// Overwrite-save refused: the session read a newer file (`IN2B` §4
-    /// rule 3). The save path re-surfaces the rule-4 card instead of noting,
-    /// so this variant never opens a second incident.
-    NewerFormat {
-        read_version: u32,
-    },
-    /// Overwrite-save refused: route to Save As (N6/H2 — a suspended
-    /// session, or a path open in another session, cannot overwrite its
-    /// file). The save path posts the notice to the status line instead of
-    /// noting: a refusal, not an incident.
-    SaveAsRequired {
-        notice: String,
-    },
-    /// Save As refused: the target path is open in another session (N6/H5).
-    /// Same status-line treatment as [`Self::SaveAsRequired`].
-    PathOpenElsewhere {
-        notice: String,
-    },
-}
-
-impl std::fmt::Display for ProjectSaveError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Serialize(reason) => {
-                write!(formatter, "could not serialize the project: {reason}")
-            }
-            Self::Write(reason) => write!(formatter, "could not write the project file: {reason}"),
-            Self::NewerFormat { read_version } => write!(
-                formatter,
-                "saving over this project is disabled: it was written by a newer Kinewright \
-                 (format_version {read_version}) — use Save As"
-            ),
-            Self::SaveAsRequired { notice } | Self::PathOpenElsewhere { notice } => {
-                write!(formatter, "{notice}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ProjectSaveError {}
-
-impl ProjectSaveError {
-    /// The incident code a failed project write carries
-    /// (`IN1b` §2.2 rule 8).
-    ///
-    /// Declared in the app crate, which owns the trigger; core owns the code
-    /// and the policy class (IN1 §2.1 rule 2).
-    pub(crate) const fn incident_code(&self) -> IncidentCode {
-        match self {
-            // The refusal variants are unreachable in practice: the save path
-            // intercepts them before noting (belt and braces, as for
-            // `NewerFormat`). A refusal must never open an incident — they
-            // share the save-failure code only so the type stays total.
-            Self::Serialize(_)
-            | Self::Write(_)
-            | Self::SaveAsRequired { .. }
-            | Self::PathOpenElsewhere { .. } => {
-                IncidentCode::Rejection(RejectionIncident::ProjectSave)
-            }
-            Self::NewerFormat { .. } => IncidentCode::Label(LabelIncident::ProjectNewerFormat),
-        }
-    }
-
-    /// An observation from this refusal, with the caller's subject.
-    ///
-    /// `ProjectSave { reason }` evidence keeps which half failed —
-    /// serialising or writing — which is what the written body tells the
-    /// person to act on. The newer-format arm builds the shared rule-4
-    /// observation instead (same text as the open-time note, so even a
-    /// double-note dedups) — the save path intercepts the variant before it
-    /// can note, so this arm is belt and braces.
-    pub(crate) fn incident_observation(
-        &self,
-        subject: IncidentSubject,
-        revision: TimelineRevision,
-    ) -> IncidentObservation {
-        if let Self::NewerFormat { read_version } = self {
-            let mut observation = project_newer_format_observation(*read_version, revision);
-            observation.subject = subject;
-            return observation;
-        }
-        IncidentObservation {
-            code: self.incident_code(),
-            subject,
-            observed: self.to_string(),
-            allowed: None,
-            evidence: IncidentEvidence::ProjectSave {
-                reason: self.to_string(),
-            },
-            revision,
-            name: None,
-            transient: false,
-        }
-    }
-}
-
-/// Derive a project's LUT store root (CC4 §2.2).
-///
-/// A project that has never been saved has no root at all, which is the
-/// `project_not_saved` shape. A saved project whose derived root is a symlink
-/// or a non-directory is a typed refusal, reported here as `Err` so the caller
-/// can surface it rather than silently importing nowhere.
-pub(crate) fn derive_lut_store(project_path: Option<&Path>) -> Result<Option<LutStore>, String> {
-    match project_path {
-        None => Ok(None),
-        Some(path) => LutStore::for_project(path)
-            .map(Some)
-            .map_err(|error| error.to_string()),
-    }
-}
 
 /// Why a project's look controls are disabled, or `None` when it can own LUT
 /// bytes (CC4 §2.2).
@@ -231,234 +60,6 @@ pub(crate) const fn focus_publishes_lut_library(
     force_rebind: bool,
 ) -> bool {
     index < len && (force_rebind || index != focused)
-}
-
-/// Serialize one document to `path`, derive the new store, and copy every
-/// referenced asset across when the store root moved (CC4 §2.2, §10.3.11).
-///
-/// This is the dialog-free half of Save/Save As. It is deliberately a free
-/// function over borrowed state rather than a method on the app so the
-/// relocatability fixture can drive the exact code the UI runs without an
-/// eframe render state, a GPU adapter, or a window.
-/// The default `format_version`: every legacy file without the key reads as 1
-/// (`IN2B` §4 rule 1). A named fn, so the default is greppable, not magic.
-fn v1() -> u32 {
-    1
-}
-
-/// Whether a version serialises away: v1 writes are byte-identical to the
-/// pre-envelope shape, so the key appears only after the first real bump.
-/// Takes the reference because `skip_serializing_if` mandates `fn(&u32)`.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_v1(version: &u32) -> bool {
-    *version == 1
-}
-
-/// A project file on disk: the app-side envelope over the core-owned version
-/// const (`IN2B` §4 rule 1).
-///
-/// `#[serde(flatten)]` keeps the document's fields at top level with the
-/// version key first; missing parses as 1 (every legacy file) and a v1 write
-/// skips the key entirely. No `Document` field, no struct-level serde
-/// attribute on `Document`, no 55-site pass.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ProjectFile {
-    #[serde(default = "v1", skip_serializing_if = "is_v1")]
-    pub format_version: u32,
-    #[serde(flatten)]
-    pub document: Document,
-}
-
-/// Whether the session that read `read_version` may save over its own file
-/// (`IN2B` §4 rule 3).
-///
-/// Newer files open (rule 4) but never overwrite: the in-memory document has
-/// already lost the newer writer's fields at parse, and overwriting would
-/// launder that loss into the original. Save As stays enabled — the loss goes
-/// into a new file the person chose, with the card explaining.
-#[must_use]
-pub(crate) fn can_overwrite_save(read_version: u32) -> bool {
-    read_version <= PROJECT_FORMAT_VERSION
-}
-
-/// The observation a newer-format encounter notes: exactly one
-/// `project_newer_format` per file (`IN2B` §4 rules 4–5, §5 rule 1 #4).
-///
-/// One constructor for the newer-file open, the cross-version recovery
-/// refusal, and the refused overwrite-save — same code, same subject, same
-/// text for the same version, so even a double-note dedups instead of
-/// doubling. Transient, like every §5 note.
-#[must_use]
-pub(crate) fn project_newer_format_observation(
-    read_version: u32,
-    revision: TimelineRevision,
-) -> IncidentObservation {
-    let mut observation = IncidentObservation::plain(
-        IncidentCode::Label(LabelIncident::ProjectNewerFormat),
-        IncidentSubject::Project,
-        format!(
-            "this project was written by a newer Kinewright (format_version {read_version}); \
-             saving over it is disabled — use Save As"
-        ),
-        revision,
-    );
-    observation.transient = true;
-    observation
-}
-
-/// The canonical key two project paths share iff they name one file (N2/S-13).
-///
-/// `canonicalize` resolves symlinks, `.`/`..` and (on Windows) case; when the
-/// file is gone the raw path is the key, which still matches itself.
-#[must_use]
-pub(crate) fn canonical_session_key(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// Serialise a document inside the file envelope (`IN2B` §4 rules 1–2).
-///
-/// The writer stamps its own `PROJECT_FORMAT_VERSION` const — never the
-/// session's read version: the bytes are this build's, whatever it opened.
-pub(crate) fn serialize_project_document(document: &Document) -> Result<String, ProjectSaveError> {
-    let file = ProjectFile {
-        format_version: PROJECT_FORMAT_VERSION,
-        document: document.clone(),
-    };
-    serde_json::to_string_pretty(&file)
-        .map_err(|error| ProjectSaveError::Serialize(error.to_string()))
-}
-
-/// Compose the halves: serialize, then write (`IN2B` §4 rule 2).
-///
-/// The fixture-writing tests use this; production `write_project` calls the
-/// halves directly so the sidecar flush (which needs the digest) lands
-/// between them.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn write_project_document(
-    document: &Document,
-    path: &Path,
-    previous_store: Option<&LutStore>,
-) -> Result<ProjectSaveReport, ProjectSaveError> {
-    let json = serialize_project_document(document)?;
-    write_project_bytes(&json, document, path, previous_store)
-}
-
-/// Write bytes atomically: temp beside the target, then rename (N6/H12).
-/// A failed rename removes its temp, best-effort, so failures do not
-/// litter the project directory. The temp carries the process id; project
-/// writes are synchronous, so no sequence is needed.
-///
-/// N6.1/J6: the write targets the symlink's resolved path, the temp
-/// inherits the existing file's permissions and syncs before the rename,
-/// and a permission/sharing rename failure falls back to the pre-H12
-/// in-place write — never worse than before H12.
-pub(crate) fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    write_file_atomic_with_rename(path, contents, None)
-}
-
-/// Whether a rename failure is the permission/sharing kind the atomic
-/// write falls back from (N6.1/J6).
-fn is_permission_or_sharing(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::PermissionDenied || raw_sharing_violation(error)
-}
-
-/// Windows' sharing-violation code, which some builds report under a
-/// non-permission kind (N6.1/J6). No code elsewhere.
-#[cfg(windows)]
-fn raw_sharing_violation(error: &std::io::Error) -> bool {
-    // ERROR_SHARING_VIOLATION.
-    error.raw_os_error() == Some(32)
-}
-
-/// Windows' sharing-violation code, which some builds report under a
-/// non-permission kind (N6.1/J6). No code elsewhere.
-#[cfg(not(windows))]
-fn raw_sharing_violation(_error: &std::io::Error) -> bool {
-    false
-}
-
-/// [`write_file_atomic`] with the rename injected (N6.1/J6): `None`
-/// renames for real. The seam exists so the permission-failure fallback
-/// has a portable test — no portable fixture fails a real rename.
-fn write_file_atomic_with_rename(
-    path: &Path,
-    contents: &[u8],
-    rename: Option<&RefuseRename>,
-) -> std::io::Result<()> {
-    // The write targets the symlink's resolved path — the temp lands
-    // beside the real file and the rename replaces it, so the link
-    // itself survives the save. An unresolvable path writes as given.
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    // The temp inherits the existing file's permissions, so the mode
-    // survives the inode swap. A first save keeps fresh-file perms.
-    let permissions = fs::metadata(&target).ok().map(|file| file.permissions());
-    let mut temp = target.as_os_str().to_owned();
-    temp.push(format!(".{}.tmp", std::process::id()));
-    let temp = PathBuf::from(temp);
-    // The temp's bytes reach the disk before the rename does, so a crash
-    // between the two cannot surface torn bytes (the H9 shape).
-    crate::sidecar::write_synced(&temp, contents)?;
-    if let Some(permissions) = permissions
-        && let Err(error) = fs::set_permissions(&temp, permissions)
-    {
-        let _ = fs::remove_file(&temp);
-        return Err(error);
-    }
-    let renamed = match rename {
-        Some(hook) => hook(&temp, &target),
-        None => fs::rename(&temp, &target),
-    };
-    if let Err(error) = renamed {
-        let _ = fs::remove_file(&temp);
-        if is_permission_or_sharing(&error) {
-            return fs::write(path, contents);
-        }
-        return Err(error);
-    }
-    Ok(())
-}
-
-/// [`write_project_document`], split so the save path can flush the sidecar
-/// (which needs the digest) between serialising and writing, with one
-/// serialisation total (`IN2B` §4 rule 2, §2 rule 9).
-///
-/// The digest in the report is over these exact bytes. `document` rides along
-/// for the Save As asset copy only — the bytes on disk come from `json`.
-pub(crate) fn write_project_bytes(
-    json: &str,
-    document: &Document,
-    path: &Path,
-    previous_store: Option<&LutStore>,
-) -> Result<ProjectSaveReport, ProjectSaveError> {
-    write_file_atomic(path, json.as_bytes())
-        .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
-    let (next_store, lut_store_error) = match derive_lut_store(Some(path)) {
-        Ok(store) => (store, None),
-        Err(reason) => (None, Some(reason)),
-    };
-    let store_root_changed = match (previous_store, next_store.as_ref()) {
-        (Some(previous), Some(next)) => previous.root() != next.root(),
-        (None, Some(_)) => true,
-        _ => false,
-    };
-    let mut lut_store_copy_failed = Vec::new();
-    if let (Some(previous), Some(next)) = (previous_store, next_store.as_ref())
-        && store_root_changed
-    {
-        for (asset, result) in previous.copy_to(next, &document.lut_assets) {
-            if let Err(error) = result {
-                lut_store_copy_failed.push((asset, error.to_string()));
-            }
-        }
-    }
-    Ok(ProjectSaveReport {
-        path: path.to_path_buf(),
-        lut_store_root: next_store.map(|store| store.root().to_path_buf()),
-        store_root_changed,
-        lut_store_copy_failed,
-        lut_store_error,
-        digest: digest_bytes(json.as_bytes()),
-    })
 }
 
 /// Every LUT asset that is not `verified`, in document order, for the
@@ -529,24 +130,8 @@ pub(crate) struct ProjectSession {
     /// resolves exactly the store the live server does, with no window in
     /// which its look tools report `project_not_saved` on a saved project.
     pub(crate) agent_project_path: ProjectPathHandle,
-    /// The incident log every MCP server in this session shares, in the shape
-    /// `agent_project_path` already uses (CC4 §2.2).
-    pub(crate) incidents: IncidentLogHandle,
-    /// The digest of the project bytes on disk as this session last saw them
-    /// (`IN2B` §2 rule 9). Recovery restores seed it from the file on disk
-    /// (N6/H1); `""` means no save is known (unsaved projects, refused
-    /// loads, file-less recoveries). Updated on every save.
-    pub(crate) saved_digest: String,
-    /// The app's ONE sidecar writer thread, shared by every session (N2/B-5).
-    /// Headless tests that pass `None` get a private writer for isolation.
-    pub(crate) sidecar_writer: Arc<SidecarWriter>,
-    /// Raw sidecar record texts carried verbatim across this run (`IN2B` §2
-    /// rule 8b, N4/F3): re-emitted byte-equal on every write, never pruned.
-    pub(crate) carried_sidecar_records: Vec<String>,
-    /// Refused opening-context operations by incident id (`IN2B` §3 rule 13):
-    /// filled from `RestoreReport.refused` at load; the queue drain fills it
-    /// at write, and the first session for the incident consumes it (C5).
-    pub(crate) refused_by_id: BTreeMap<IncidentId, Operation>,
+    /// The UI-free sidecar half (AW1 S1); this session derefs to it.
+    pub(crate) sidecar: SidecarSession,
     /// Every incident id this session's open-time restore loaded (`IN2B`
     /// §3 rule 9): feeds the card's "from an earlier session" marker.
     /// Display membership never expires.
@@ -564,34 +149,13 @@ pub(crate) struct ProjectSession {
     /// app-side, so core's `loaded_wall` stays private. A `None` stamp
     /// shows no recency rather than a lie.
     pub(crate) loaded_walls: BTreeMap<IncidentId, Option<i64>>,
-    /// The log generation the last flush wrote, for [`should_flush`].
-    pub(crate) last_written_gen: u64,
-    /// The log generation the writer confirmed (N6/H6): advanced on a
-    /// joined success, never on submit. Close/exit write-and-wait whenever
-    /// this trails the log, so a failed background flush retries at close
-    /// instead of reading as done.
-    pub(crate) confirmed_written_gen: u64,
-    /// What the open-time sidecar load did, when one ran. `None` for new
-    /// projects and refused loads; the report's `carried`/`refused` halves
-    /// move into the fields above, the counts stay here for the gate.
-    ///
-    /// Read by the gate (item 14) and by nothing else: production consumes
-    /// the halves, not the counts.
-    #[allow(dead_code)]
-    pub(crate) last_restore_report: Option<RestoreReport>,
     /// The `format_version` this session read (`IN2B` §4 rule 3): the
     /// envelope's version at open, or the journal's writer version after a
-    /// recovery restore. Gates overwrite-save via [`can_overwrite_save`];
-    /// Save As resets it to [`PROJECT_FORMAT_VERSION`] — the bytes on the
-    /// new path are this build's.
+    /// recovery restore. Gates overwrite-save via
+    /// [`can_overwrite_save`](kinewright_project::can_overwrite_save);
+    /// Save As resets it — the bytes on the new path are this build's.
     pub(crate) format_version: u32,
-    /// Sidecar writes suspended: a recovery restore onto an already-open
-    /// path must not clobber the open session's history (`IN2B` §2 rule 10,
-    /// N2/S-13), and a refused sidecar the load could not move aside must
-    /// never be overwritten (N6/H3). Loads still run; every flush reports
-    /// `Skipped` until Save As clears this on the new path.
-    pub(crate) sidecar_suspended: bool,
-    /// The recovery cause of [`Self::sidecar_suspended`] (N6.1/J5): only a
+    /// The recovery cause of the sidecar suspension (N6.1/J5): only a
     /// recovered copy routes overwrite-save to Save As — an H3 suspension
     /// blocks sidecar writes, never the project save.
     pub(crate) recovery_suspended: bool,
@@ -664,6 +228,20 @@ pub(crate) struct ProjectSession {
     pub(crate) investigator: Option<InvestigatorSession>,
 }
 
+// AW1 S1: the session derefs to its sidecar half (cutover compatibility).
+impl Deref for ProjectSession {
+    type Target = SidecarSession;
+    fn deref(&self) -> &SidecarSession {
+        &self.sidecar
+    }
+}
+
+impl DerefMut for ProjectSession {
+    fn deref_mut(&mut self) -> &mut SidecarSession {
+        &mut self.sidecar
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SourceMonitorState {
     selected_asset: Option<AssetId>,
@@ -672,165 +250,6 @@ struct SourceMonitorState {
     source_out: TimeCode,
     source_video_target: Option<TrackId>,
     source_audio_target: Option<TrackId>,
-}
-
-/// What the open-time sidecar load hands the new session (`IN2B` §2 rule 5).
-struct LoadedSessionSidecar {
-    saved_digest: String,
-    carried: Vec<String>,
-    refused: BTreeMap<IncidentId, Operation>,
-    walls: BTreeMap<IncidentId, Option<i64>>,
-    last_written_gen: u64,
-    report: Option<RestoreReport>,
-    /// A refused sidecar the load could not move aside (N6/H3): the session
-    /// suspends sidecar writes, so the still-at-the-stem file is never
-    /// overwritten.
-    suspended: bool,
-}
-
-impl LoadedSessionSidecar {
-    fn empty() -> Self {
-        Self {
-            saved_digest: String::new(),
-            carried: Vec::new(),
-            refused: BTreeMap::new(),
-            walls: BTreeMap::new(),
-            last_written_gen: 0,
-            report: None,
-            suspended: false,
-        }
-    }
-}
-
-/// Load a session's history at creation: parse, gate, restore or refuse.
-///
-/// Every arm opens the project — incidents are recoverable state, the
-/// timeline is not — and no arm deletes a sidecar it cannot read (rule 8).
-/// Refusals rename to first-free `.bak` and note exactly one
-/// `sidecar_refused` directly into the still-private log (the router is not
-/// running yet; the code is off-allowlist, so no session could start
-/// anyway). Restore runs before any note (N4.1).
-///
-/// `Load` carries the digest `load_document` read — single read, no TOCTOU
-/// (§4 rule 2). `RecoveryNoDigest` skips the gate by rule; version arms
-/// still apply.
-fn load_session_sidecar(
-    mode: &SidecarMode,
-    project_path: Option<&Path>,
-    incidents: &IncidentLogHandle,
-    opening: TimelineRevision,
-    rename: Option<&RefuseRename>,
-) -> LoadedSessionSidecar {
-    let (gate_digest, seed) = match mode {
-        SidecarMode::Load { project_digest } => {
-            (Some(project_digest.clone()), Some(project_digest.clone()))
-        }
-        // N6/H1: recovery skips the gate (the recovered document is newer
-        // than the last save), but the seed still comes from the file on
-        // disk — the first flush pairs instead of writing `{"",""}`.
-        SidecarMode::RecoveryNoDigest => (
-            None,
-            project_path
-                .and_then(|path| fs::read(path).ok())
-                .map(|bytes| digest_bytes(&bytes)),
-        ),
-        SidecarMode::None => return LoadedSessionSidecar::empty(),
-    };
-    let Some(project_path) = project_path else {
-        return LoadedSessionSidecar::empty();
-    };
-    let Some(sidecar_path) = sidecar_path_for_project(Some(project_path)) else {
-        return LoadedSessionSidecar::empty();
-    };
-    let mut loaded = LoadedSessionSidecar::empty();
-    if let Some(digest) = &seed {
-        loaded.saved_digest.clone_from(digest);
-    }
-    // N6/H3: a failed `.bak` rename suspends the session — the refused
-    // file stays at the stem and must never be overwritten — and the note
-    // carries the IO error. Returns whether the rename failed.
-    let refused = |reason: String| -> bool {
-        let renamed = match rename {
-            Some(injected) => refuse_sidecar_with(&sidecar_path, injected),
-            None => refuse_sidecar(&sidecar_path),
-        };
-        let (reason, failed) = match renamed {
-            Ok(_) => (reason, false),
-            Err(error) => (
-                format!(
-                    "{reason}; the refused file could not be moved aside ({error}), so the \
-                     incidents file is set aside and sidecar writes are suspended for this session"
-                ),
-                true,
-            ),
-        };
-        let mut log = incidents
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let _ = log.observe(sidecar_refused_observation(reason, opening));
-        failed
-    };
-    let mut refuse_failed = false;
-    match load_sidecar(&sidecar_path) {
-        SidecarLoad::Absent => {}
-        SidecarLoad::Newer(version) => {
-            refuse_failed |= refused(format!(
-                "the sidecar was written by a newer Kinewright (format_version {version}); \
-                 the project opens with an empty history and the file is kept beside it"
-            ));
-        }
-        SidecarLoad::Corrupt(reason) => {
-            refuse_failed |= refused(format!(
-                "the sidecar could not be read ({reason}); \
-                 the project opens with an empty history and the file is kept beside it"
-            ));
-        }
-        SidecarLoad::Current(current) => {
-            let gated = match &gate_digest {
-                Some(digest) => sidecar_matches_project(&current, digest),
-                None => true,
-            };
-            if !gated {
-                refuse_failed |= refused(
-                    "the sidecar belongs to a different project file (neither digest matches); \
-                     the project opens with an empty history and the file is kept beside it"
-                        .to_owned(),
-                );
-                loaded.suspended = refuse_failed;
-                return loaded;
-            }
-            // N6/H1 fallback: no file on disk (an unsaved recovery target)
-            // seeds from the loaded sidecar's own digest instead of `""`.
-            // The `gate_digest.is_none()` guard restricts this to recovery
-            // mode — a gated Load keeps whatever its read seeded, so the
-            // fallback cannot mask a refusal.
-            if loaded.saved_digest.is_empty() && gate_digest.is_none() {
-                loaded.saved_digest.clone_from(&current.project_digest);
-            }
-            // The loaded wall stamps snapshot before the records move into
-            // restore (`IN2B` §3 rule 14): the card's recency derives from
-            // them app-side.
-            loaded.walls = current
-                .records
-                .iter()
-                .map(|record| (record.id, record.opened_wall_millis))
-                .collect();
-            let mut log = incidents
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let report = log.restore(current.records, current.carried, opening, current.id_floor);
-            // The disk now matches memory (carried bytes included — a
-            // carried-only restore moves no generation, and must not force a
-            // rewrite of bytes already on disk), so the flush baseline is the
-            // post-restore generation, whatever it is.
-            loaded.last_written_gen = log.generation();
-            loaded.carried.clone_from(&report.carried);
-            loaded.refused.clone_from(&report.refused);
-            loaded.report = Some(report);
-        }
-    }
-    loaded.suspended = refuse_failed;
-    loaded
 }
 
 /// Snapshot the loaded sets after the open-time restore (`IN2B` §3 rules 9,
@@ -956,12 +375,12 @@ impl ProjectSession {
         // The open-time history load runs here, before any note and before
         // the log handle is shared with the first agent thread below (N4.1):
         // restore requires an empty log and no id may collide with it.
-        let sidecar_writer = sidecar_writer.unwrap_or_else(SidecarWriter::new);
-        let loaded = load_session_sidecar(
+        let loaded = SidecarSession::load(
             sidecar_mode,
             project_path.as_deref(),
-            &incidents,
+            std::sync::Arc::clone(&incidents),
             TimelineRevision::default(),
+            sidecar_writer,
             refuse_rename,
         );
         // Restored ids snapshot before the session exists (`IN2B` §3 rules 9,
@@ -980,20 +399,12 @@ impl ProjectSession {
             lut_store,
             lut_store_error,
             agent_project_path: std::sync::Arc::clone(&agent_project_path),
-            incidents: std::sync::Arc::clone(&incidents),
-            saved_digest: loaded.saved_digest,
-            sidecar_writer,
-            carried_sidecar_records: loaded.carried,
-            refused_by_id: loaded.refused,
+            sidecar: loaded.session,
             loaded_ids,
             loaded_open_ids,
             subject_missing,
-            loaded_walls: loaded.walls,
-            last_written_gen: loaded.last_written_gen,
-            confirmed_written_gen: loaded.last_written_gen,
-            last_restore_report: loaded.report,
+            loaded_walls: loaded.loaded_walls,
             format_version,
-            sidecar_suspended: loaded.suspended,
             // The load only ever suspends for H3 — the recovery cause is
             // set by `apply_restore_request` (N6.1/J5).
             recovery_suspended: false,
@@ -1148,138 +559,51 @@ impl ProjectSession {
         }
     }
 
-    /// Build this session's sidecar bytes without writing them (`IN2B` §2
-    /// rule 5).
-    ///
-    /// Records are built on the caller under a read lock; the running
-    /// session's turns and visible counters flush into an `Investigating`
-    /// entry exactly as a live end would (§3 rule 4), the restored stash
-    /// rides by id (rule 13), and carried texts re-emit verbatim (rule 8b).
-    /// Both the joining flush and the background submit build through here,
-    /// so one builder means one bytes shape.
+    /// Build this session's sidecar bytes (test-only; production builds
+    /// through the joining flush).
+    #[cfg(test)]
     pub(crate) fn sidecar_bytes_for_save(
         &mut self,
         project_digest: &str,
         previous_digest: &str,
     ) -> Result<(Vec<u8>, kinewright_core::WriteReport), String> {
-        let running: Option<RunningInvestigation> = self
-            .investigator
-            .as_ref()
-            .and_then(InvestigatorSession::running_investigation);
-        // The queue drain fills the stash at write (`IN2B` §3 rule 13):
-        // queued refused ops ride by id, and entries whose incidents are no
-        // longer open drop — the stash round-trips only until its incident
-        // resolves or its entry is consumed.
-        if let Some(session) = self.investigator.as_ref() {
-            session.copy_queued_refused_into(&mut self.refused_by_id);
-        }
-        let log = self
-            .incidents
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let open: BTreeSet<IncidentId> = log.open().map(|incident| incident.id).collect();
-        self.refused_by_id.retain(|id, _| open.contains(id));
-        let (records, report) = log.records(running.as_ref(), &self.refused_by_id);
-        let bytes = build_sidecar_bytes(
-            &records,
-            &self.carried_sidecar_records,
+        self.sidecar.sidecar_bytes_for_save(
             project_digest,
             previous_digest,
-        )?;
-        Ok((bytes, report))
+            prepare_investigator_context(self.investigator.as_ref()),
+        )
     }
 
-    /// The one synchronous sidecar seam: build every write and land it
-    /// through the writer thread, joining (`IN2B` §2 rules 4–5).
-    ///
-    /// `Ok` after a successful temp + rename (report populated), `Err` after
-    /// a failed one — the caller notes `sidecar_write_failed` per rule 6 and
-    /// carries on. Unsaved projects report `Skipped` and attempt no IO
-    /// (rule 10, N-5), as do sidecar-suspended recovery restores (§2
-    /// rule 10).
+    /// The one synchronous sidecar seam, through the session.
     pub(crate) fn flush_incidents(
         &mut self,
         project_digest: &str,
         previous_digest: &str,
     ) -> std::io::Result<FlushOutcome> {
-        if self.sidecar_suspended {
-            return Ok(FlushOutcome::Skipped);
-        }
-        let Some(sidecar_path) = sidecar_path_for_project(self.project_path.as_deref()) else {
-            return Ok(FlushOutcome::Skipped);
-        };
-        let (bytes, report) = self
-            .sidecar_bytes_for_save(project_digest, previous_digest)
-            .map_err(std::io::Error::other)?;
-        self.sidecar_writer.submit_and_join(sidecar_path, bytes)?;
-        let generation = self
-            .incidents
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .generation();
-        self.last_written_gen = generation;
-        // N6/H6: a joined success confirms; a failure propagates before
-        // either baseline moves, so close retries it.
-        self.confirmed_written_gen = generation;
-        Ok(FlushOutcome::Written(report))
+        self.sidecar.flush_incidents(
+            self.project_path.as_deref(),
+            project_digest,
+            previous_digest,
+            prepare_investigator_context(self.investigator.as_ref()),
+        )
     }
 
     /// [`Self::flush_incidents`] when the writer has not confirmed the
-    /// current generation, `Skipped` otherwise — the close/exit shape
-    /// (`IN2B` §2 rule 4).
-    ///
-    /// Close write-and-waits whenever `confirmed_written_gen` trails the
-    /// log (N6/H6): a failed background flush advanced the submit baseline
-    /// but never confirmed, so it retries here instead of reading as done.
-    /// A successful background flush still lands one redundant identical
-    /// rewrite at close — async jobs carry no ack, and one idempotent write
-    /// per close is cheaper than success tracking. Saves do not call this —
-    /// a save always rewrites the pair over new bytes.
+    /// current generation, through the session.
     pub(crate) fn flush_incidents_if_changed(&mut self) -> std::io::Result<FlushOutcome> {
-        if self.sidecar_suspended || self.project_path.is_none() {
-            return Ok(FlushOutcome::Skipped);
-        }
-        let generation = self
-            .incidents
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .generation();
-        if generation == self.confirmed_written_gen {
-            return Ok(FlushOutcome::Skipped);
-        }
-        let digest = self.saved_digest.clone();
-        self.flush_incidents(&digest, &digest)
+        self.sidecar.flush_incidents_if_changed(
+            self.project_path.as_deref(),
+            prepare_investigator_context(self.investigator.as_ref()),
+        )
     }
 
-    /// Queue a debounced background flush without joining (`IN2B` §2 rule 4).
-    ///
-    /// Unchanged logs and unsaved projects queue nothing. Failures surface
-    /// through [`SidecarWriter::take_errors`], which the frame thread drains
-    /// into `sidecar_write_failed` notes. The submit baseline advances
-    /// optimistically at submit — a failed submit's incident is the retry
-    /// signal, not a 2 s resubmit churn — while `confirmed_written_gen`
-    /// waits for a joined success, so close retries what the background
-    /// could not land (N6/H6).
+    /// Queue a debounced background flush without joining, through the
+    /// session.
     pub(crate) fn queue_incidents_flush(&mut self) {
-        if self.sidecar_suspended {
-            return;
-        }
-        let Some(sidecar_path) = sidecar_path_for_project(self.project_path.as_deref()) else {
-            return;
-        };
-        let generation = self
-            .incidents
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .generation();
-        if !should_flush(generation, self.last_written_gen, Instant::now()) {
-            return;
-        }
-        let digest = self.saved_digest.clone();
-        if let Ok((bytes, _)) = self.sidecar_bytes_for_save(&digest, &digest) {
-            self.sidecar_writer.submit(sidecar_path, bytes);
-            self.last_written_gen = generation;
-        }
+        self.sidecar.queue_incidents_flush(
+            self.project_path.as_deref(),
+            prepare_investigator_context(self.investigator.as_ref()),
+        );
     }
 
     /// Cue an asset in the Source viewer without changing the Program
@@ -1325,8 +649,10 @@ impl ProjectSession {
     }
 
     pub(crate) fn stop_threads(&mut self, reason: &str) {
+        // Cloned before the investigator borrow: `incidents` now resolves
+        // through the sidecar deref, which borrows the whole session.
+        let incidents = std::sync::Arc::clone(&self.incidents);
         if let Some(investigator) = self.investigator.as_mut() {
-            let incidents = std::sync::Arc::clone(&self.incidents);
             investigator.shutdown_for_close(reason, &incidents);
         }
         // `IN2B` §2 rule 4 (N2/B-5): the sidecar flushes after
@@ -1357,6 +683,19 @@ impl ProjectSession {
             }
             thread.pending_confirmations.clear();
         }
+    }
+}
+
+/// Investigator context for a flush (F2): base order; skips never run it.
+fn prepare_investigator_context(
+    investigator: Option<&InvestigatorSession>,
+) -> impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation> + '_ {
+    move |stash| {
+        let running = investigator.and_then(InvestigatorSession::running_investigation);
+        if let Some(session) = investigator {
+            session.copy_queued_refused_into(stash);
+        }
+        running
     }
 }
 
@@ -1520,15 +859,23 @@ pub(crate) fn project_display_name(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, fs};
 
     use super::*;
     use kinewright_core::{
-        Clip, ClipContent, ColorDescription, Document, Effect, EffectId, LUT_ASSET_ID_PARAMETER,
-        LabelIncident, LutAsset, MediaAsset, MediaSourceFingerprint, Operation, ParamValue,
+        Clip, ClipContent, ColorDescription, Document, Effect, EffectId, IncidentCode,
+        IncidentEvidence, IncidentObservation, LUT_ASSET_ID_PARAMETER, LabelIncident, LutAsset,
+        MediaAsset, MediaSourceFingerprint, Operation, PROJECT_FORMAT_VERSION, ParamValue,
         Rational, Track, apply_batch,
     };
     use kinewright_media::{BuiltinLook, LutAssetImport, test_support::TempDirectory};
+    #[cfg(unix)]
+    use kinewright_project::write_file_atomic;
+    use kinewright_project::{
+        ProjectFile, build_sidecar_bytes, can_overwrite_save, canonical_session_key,
+        derive_lut_store, digest_bytes, load_sidecar, serialize_project_document,
+        sidecar_matches_project, sidecar_path_for_project, write_project_document,
+    };
 
     /// A media backend that does nothing, so the real `AgentThread` seam can
     /// be driven without a GPU adapter, a decoder, or a window.
@@ -2787,7 +2134,7 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn in2b_each_sidecar_arm_behaves() {
-        use crate::sidecar::SidecarLoad;
+        use kinewright_project::SidecarLoad;
 
         // Missing → `Absent`: empty log, silent.
         let missing_dir = TempDirectory::new("in2b-arm-missing");
@@ -3319,50 +2666,6 @@ mod tests {
         assert_eq!(mode, 0o755, "the mode survives the save");
     }
 
-    /// N6.1/J6: a permission/sharing rename failure falls back to the
-    /// pre-H12 in-place write — never worse than before H12 — while any
-    /// other rename error still propagates. The failure is injected: no
-    /// portable fixture fails a real rename.
-    #[test]
-    fn project_atomic_write_falls_back_when_rename_is_refused() {
-        let dir = TempDirectory::new("in2b-j6-fallback");
-        let file = dir.path("edit.kinewright");
-        fs::write(&file, b"old").expect("the file writes");
-        let refused = |_: &Path, _: &Path| -> std::io::Result<()> {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected sharing violation",
-            ))
-        };
-        write_file_atomic_with_rename(&file, b"new", Some(&refused))
-            .expect("the fallback lands the bytes");
-        assert_eq!(
-            fs::read(&file).expect("the file reads"),
-            b"new",
-            "the in-place fallback lands the bytes"
-        );
-        let torn = |_: &Path, _: &Path| -> std::io::Result<()> {
-            Err(std::io::Error::other("injected unsplittable failure"))
-        };
-        assert!(
-            write_file_atomic_with_rename(&file, b"third", Some(&torn)).is_err(),
-            "a non-permission rename error still propagates"
-        );
-        assert_eq!(
-            fs::read(&file).expect("the file re-reads"),
-            b"new",
-            "the propagated failure writes nothing"
-        );
-        for entry in fs::read_dir(dir.root()).expect("the dir reads") {
-            let entry = entry.expect("a readable entry");
-            assert!(
-                entry.path().extension().is_none_or(|ext| ext != "tmp"),
-                "no temp litter: {}",
-                entry.file_name().to_string_lossy()
-            );
-        }
-    }
-
     /// N6/H3: a failed `.bak` rename suspends sidecar writes for the
     /// session and carries the IO error in the note — the refused file is
     /// never overwritten. The failure is injected: no portable fixture
@@ -3530,7 +2833,7 @@ mod tests {
     /// write-and-wait whenever the confirmed generation trails the log.
     #[test]
     fn in2b_a_failed_background_flush_retries_at_close() {
-        use crate::sidecar::SidecarLoad;
+        use kinewright_project::SidecarLoad;
 
         let dir = TempDirectory::new("in2b-h6-retry");
         let project = sidecar_project_file(&dir, "edit.kinewright");

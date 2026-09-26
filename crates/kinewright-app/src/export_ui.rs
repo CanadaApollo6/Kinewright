@@ -2545,7 +2545,7 @@ mod tests {
 
         std::fs::write(temporary.path("edit.kinewright-assets"), b"not a directory")
             .expect("the blocking file writes");
-        let refusal = crate::project::derive_lut_store(Some(&project))
+        let refusal = kinewright_project::derive_lut_store(Some(&project))
             .expect_err("a file is not a store root");
         assert!(refusal.contains("lut_store_root_invalid: "), "{refusal}");
 
