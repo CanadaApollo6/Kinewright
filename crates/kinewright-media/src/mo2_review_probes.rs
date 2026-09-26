@@ -1052,6 +1052,49 @@ fn rereview_special_nonfinite_source_alpha_on(context: GpuContext) {
     }
 }
 
+fn raw_frame(width: u32, values: impl Iterator<Item = f32>) -> WorkingFrame {
+    let pixels = values.flat_map(|v| [v, v, v, 1.0]).map(f16::from_f32);
+    WorkingFrame {
+        width,
+        height: 1,
+        pixels: Arc::new(pixels.collect()),
+    }
+}
+
+/// Re-review S1 (N17.3, ME11): the sub-texel envelope is proved for one
+/// resampled layer only. Two opposing shifted ramps (`Add`) admit a
+/// per-sample 8-bit rounding the four shared corners miss (Δ 0.0039 at
+/// source 2, output 17, x = 1%, value 4), so the helper refuses there, and
+/// still serves the single resampled top layer.
+#[test]
+fn rereview_me9_envelope_refuses_unproved_stacks() {
+    for source in [2, 3, 5] {
+        let span = (source - 1) as f32;
+        let rising = raw_frame(source, (0..source).map(|i| i as f32 / span));
+        let falling = raw_frame(source, (0..source).map(|i| 1.0 - i as f32 / span));
+        for (out, shift) in [(17, 1), (31, 2), (97, 3), (129, 5)] {
+            let moved = vec![effect(1, "transform", &[("x_percent", shift)])];
+            let top = |blend| CompositorLayer {
+                frame: &falling,
+                effects: &moved,
+                transition: TransitionRenderParams::default(),
+                mode: LayerMode {
+                    blend,
+                    role: LayerRole::Pixels,
+                },
+            };
+            let two = [
+                pixels_layer(&rising, BlendMode::Normal),
+                top(BlendMode::Add),
+            ];
+            let envelope = twin::subtexel_envelope((out, 1), &two, None);
+            assert!(envelope.is_err(), "{source}→{out} x={shift}: {envelope:?}");
+            let one = [top(BlendMode::Normal)];
+            twin::subtexel_envelope((out, 1), &one, None).unwrap();
+        }
+    }
+}
+
 fn cube_effect(id: u64, path: &std::path::Path, intensity: i64) -> Effect {
     let mut lut = effect(id, "cube_lut", &[("intensity_percent", intensity)]);
     let path = ParamValue::Text(path.to_string_lossy().into_owned());

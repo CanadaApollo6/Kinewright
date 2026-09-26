@@ -140,9 +140,10 @@
   `(fx, fy)` to 2⁻⁸ lies between the four floor/ceil corners. The twin
   renders those four corners, and the per-value slack is the largest
   `|corner − exact|` (≤ 2⁻⁸ × the local neighbour contrast per axis),
-  carried through the rest of the pipeline. The slack is exactly zero
-  wherever nothing filters between distinct texels, so unfiltered pixels
-  keep the unit 1e-3 (pinned on a blit). It is computed only when a value
+  carried through the rest of the pipeline. The slack is zero for
+  unfiltered values, so they keep the unit 1e-3 (pinned on a blit); a
+  filtered value's slack is not necessarily nonzero (corners can cancel).
+  *(ME11 restricts the envelope to a proved subset.)* It is computed only when a value
   misses the exact R27. Evidence (emulated, CPU): WARP's R26 gradient
   value 290 departs by 0.00146 against a slack of 0.00244. The
   `slide_right` title at frame 3, pixel 6708, departs by 0.00122 against
@@ -219,6 +220,23 @@
     erase them, stickily and on both lanes (pinned by
     `rereview_special_nonfinite_source_alpha`: Darken/Screen/Add × NaN/±inf,
     red on both lanes before the fix).
+  - *ME9 restricted to a proved subset* (re-review S1). Four shared
+    corners bound every rounding only where the output is multilinear in
+    one sampling's weights. With two resampled layers (two opposing
+    shifted ramps, `Add`), each sample may round independently, and a
+    conformant nearest-8-bit result departs by 0.0039 where the shared
+    corners give zero slack. The twin helper now applies the envelope only
+    when at most one layer resamples distinct texels. That layer must be
+    the topmost, a `Normal` pixel layer with uniform source alpha and only
+    `transform`/`opacity`/`crop`/`mask` effects, with no Push backdrop
+    anywhere. Anything else returns an error rather than a widening (a
+    uniform source, such as a solid, never counts as resampled). Pinned by
+    `rereview_me9_envelope_refuses_unproved_stacks` (sources 2/3/5,
+    outputs 17/31/97/129). The WARP title evidence is outside the subset
+    (non-uniform alpha), so its test now asserts the refusal. The gate
+    fixture moves the title by whole pixels only (x = 20% is 32 px; the
+    slide/push offsets at frames 1/3/4 are integral), so no lane needs
+    slack there. The solid keeps its scale and rotation.
 
 ## Changes in revision 2
 
@@ -704,7 +722,7 @@ differentials and contract tests; no SHA-256 frame pins (N4 G5). Pinned
 tolerances per domain (B8): unit-domain working-linear max abs ≤ 1e-3/
 channel; over-range relative ≤ 2^-10 and ≤ 4 f16 ULP; monitor bytes max ≤
 2 codes, p99 ≤ 1, mean ≤ 0.25 (the CC1 `abs_code_diff_rgb` method).
-Resampled GPU≡twin values add the ME9 sub-texel envelope. R27's tolerances are MO2-specific; the future CC8 column additionally
+Resampled GPU≡twin values add the ME9 sub-texel envelope (ME11: only on its proved subset). R27's tolerances are MO2-specific; the future CC8 column additionally
 satisfies PB1–PB4. Fixtures are production-flavoured:
 PiP-over-presenter (`Normal`), `Screen` light leak, `Multiply` callout,
 adjustment look, solid title card, push/slide/wipe midpoints, and the §3
