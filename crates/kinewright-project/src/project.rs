@@ -1140,4 +1140,52 @@ mod tests {
             "opening leaves the source bytes untouched"
         );
     }
+
+    /// The head half of `scripts/mo2-old-reader-check.sh` (review 2 S5, lead
+    /// ruling N10): this build's shared writer emits the gate-11 corpus into
+    /// `MO2_OLD_READER_CORPUS` for the frozen f241aa5 reader to consume — the
+    /// three v1 controls, the four MO2 features, and `blend-dropped`, the
+    /// blend document with only its blend removed (the exact bytes an old
+    /// re-save must produce). A manual pre-land check, never a CI job.
+    #[test]
+    #[ignore = "manual pre-land check: scripts/mo2-old-reader-check.sh"]
+    fn mo2_old_reader_corpus() {
+        let out = PathBuf::from(
+            std::env::var_os("MO2_OLD_READER_CORPUS")
+                .expect("MO2_OLD_READER_CORPUS names the corpus directory"),
+        );
+        fs::create_dir_all(&out).expect("the corpus directory exists");
+        let fixture: ProjectFile = serde_json::from_slice(include_bytes!(
+            "../../kinewright-core/tests/fixtures/pre_m13_project.json"
+        ))
+        .expect("the fixture parses");
+        let mut files = vec![
+            ("v1-default", Document::default(), 1),
+            ("v1-fixture", fixture.document, 1),
+            ("v1-m20", mo2_v1_document(), 1),
+        ];
+        for (name, doc, carrier) in mo2_feature_documents() {
+            if name == "blend" {
+                let mut dropped = doc.clone();
+                dropped
+                    .tracks
+                    .iter_mut()
+                    .flat_map(|track| &mut track.clips)
+                    .find(|clip| clip.id == carrier)
+                    .expect("carrier")
+                    .blend_mode = kinewright_core::BlendMode::Normal;
+                files.push(("blend-dropped", dropped, 1));
+            }
+            files.push((name, doc, 2));
+        }
+        for (name, doc, version) in files {
+            doc.validate().expect("the corpus document is valid");
+            assert_eq!(min_required_format_version(&doc), version, "{name}");
+            let path = out.join(format!("{name}.kinewright"));
+            write_project_document(&doc, &path, None).expect("the shared writer writes");
+            let (reopened, read_version, _) = load_document(&path).expect("head reopens");
+            assert_eq!((reopened, read_version), (doc, version), "{name}");
+            println!("head wrote {name}.kinewright as v{version}");
+        }
+    }
 }
