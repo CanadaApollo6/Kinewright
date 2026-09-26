@@ -124,6 +124,7 @@ fn seam_document(fps: Rational, assets: &[MediaAsset], pieces: Vec<Piece>) -> Do
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         })
         .collect();
     let duration = clips

@@ -285,6 +285,7 @@ fn mo1_still_document(
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset.clone()],
@@ -1451,6 +1452,7 @@ fn still_alpha_composites_over_video() {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         },
     );
@@ -1873,6 +1875,7 @@ fn disabled_clip_matches_removal_on_lavapipe() {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         },
     );
@@ -1929,6 +1932,7 @@ fn disabled_clip_is_silent_in_the_mix() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         investigator: None,
@@ -2078,6 +2082,7 @@ fn mo1_export_document(video: &GeneratedMedia, still: &GeneratedMedia) -> Docume
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
                 Clip {
                     enabled: true,
@@ -2097,6 +2102,7 @@ fn mo1_export_document(video: &GeneratedMedia, still: &GeneratedMedia) -> Docume
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
             ],
         }],

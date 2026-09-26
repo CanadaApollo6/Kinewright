@@ -1755,6 +1755,7 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         })
         .collect();

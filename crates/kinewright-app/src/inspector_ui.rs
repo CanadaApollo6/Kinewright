@@ -970,6 +970,8 @@ impl KinewrightApp {
                 ClipContent::Media => self.media_clip_inspector(ui, &clip),
                 ClipContent::Title(title) => self.title_inspector(ui, &clip, title),
                 ClipContent::Freeze(freeze) => self.freeze_clip_inspector(ui, &clip, freeze),
+                // MO2 Part B adds the adjustment and solid inspectors.
+                ClipContent::Adjustment | ClipContent::Solid(_) => {}
             }
         } else if let Some(marker) = self
             .focused()
@@ -5572,6 +5574,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         assert_eq!(
@@ -5625,6 +5628,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         assert_eq!(
             add_effect_operation(&clip, &descriptor),
@@ -5664,6 +5668,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
 
         let Operation::InsertEffect { effect, index, .. } = add_effect_operation(&clip, descriptor)
@@ -5981,6 +5986,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         let Operation::AddEffect { effect, .. } = add_effect_operation(&clip, descriptor) else {
             panic!("expected add effect operation");
@@ -6011,6 +6017,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         let mut freeze = media.clone();
         freeze.content = ClipContent::Freeze(kinewright_core::FreezeFrame {
@@ -7473,6 +7480,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }
     }
 
@@ -9582,6 +9590,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             });
         }
         Document {
@@ -12153,6 +12162,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             fps: Rational::new(30, 1).expect("valid fps"),

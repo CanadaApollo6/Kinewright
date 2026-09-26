@@ -1746,6 +1746,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }];
         document.duration = TimeCode(timeline_start.0 + 30);
         document.validate().expect("the fixture is a legal project");

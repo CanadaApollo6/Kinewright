@@ -1954,6 +1954,7 @@ impl KinewrightApp {
                     ClipContent::Media | ClipContent::Freeze(_) => {
                         document.asset(clip.asset).map(|asset| asset.name.clone())
                     }
+                    ClipContent::Adjustment | ClipContent::Solid(_) => None,
                 }
             }
             IncidentSubject::Chain(AudioChain::Bus(id)) => {
@@ -4987,6 +4988,7 @@ mod tests {
                     audio_fade_out_frames: super::TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             fps: Rational::new(30, 1).unwrap(),

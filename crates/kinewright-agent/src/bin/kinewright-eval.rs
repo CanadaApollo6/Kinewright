@@ -2442,6 +2442,7 @@ fn cc7_timeline_document(assets: Vec<MediaAsset>) -> Result<Document, EvalError>
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         });
         timeline_start = timeline_start
             .checked_add(duration)
@@ -2913,6 +2914,7 @@ fn au6_fixture_from_sources(
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 })
                 .collect(),
         })
@@ -3921,6 +3923,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             },
             Track {
@@ -3944,6 +3947,7 @@ fn fixture_real_event_multicam() -> Result<PreparedFixture, EvalError> {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             },
         ],
@@ -4911,6 +4915,7 @@ fn timeline_document(
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         });
         timeline_start = timeline_start
             .checked_add(duration)
@@ -8491,6 +8496,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: kinewright_core::BlendMode::Normal,
                     })
                     .collect(),
             })

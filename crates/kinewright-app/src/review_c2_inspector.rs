@@ -40,6 +40,7 @@ fn clip(id: u64, start: i64, source: std::ops::Range<i64>, effects: Vec<Effect>)
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     }
 }
 

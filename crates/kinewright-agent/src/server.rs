@@ -3772,11 +3772,11 @@ impl KinewrightMcp {
             let content = match &timeline_clip.content {
                 ClipContent::Media => "media",
                 ClipContent::Freeze(_) => "freeze",
-                ClipContent::Title(_) => {
+                ClipContent::Title(_) | ClipContent::Adjustment | ClipContent::Solid(_) => {
                     return Ok(color_proof_error_result(ColorProofError::RenderFailed {
                         stage: "visual_layer_resolution",
                         message: format!(
-                            "production visual resolver returned a source-backed layer for title clip {clip_id} on track {track_id}"
+                            "production visual resolver returned a source-backed layer for generated clip {clip_id} on track {track_id}"
                         ),
                     }));
                 }
@@ -4170,6 +4170,8 @@ impl KinewrightMcp {
                         ClipContent::Media => "media",
                         ClipContent::Freeze(_) => "freeze",
                         ClipContent::Title(_) => "title",
+                        ClipContent::Adjustment => "adjustment",
+                        ClipContent::Solid(_) => "solid",
                     },
                     "asset_id": active_asset.id.0,
                     "source": {
@@ -6574,6 +6576,7 @@ impl KinewrightMcp {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset.clone()],
@@ -7167,6 +7170,7 @@ impl KinewrightMcp {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset.clone()],
@@ -10712,6 +10716,7 @@ fn room_tone_fill_clip(
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     }
 }
 
@@ -18483,6 +18488,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset],
@@ -18540,6 +18546,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
                 Clip {
                     enabled: true,
@@ -18557,6 +18564,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
             ],
         });
@@ -18738,6 +18746,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: kinewright_core::BlendMode::Normal,
                     }],
                 },
             ],
@@ -18796,6 +18805,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         let document = Document {
             tracks: vec![
@@ -23022,6 +23032,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![asset],
@@ -24106,6 +24117,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         Document {
             catalog: kinewright_core::MediaCatalog::default(),
@@ -24568,6 +24580,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }];
         document.duration = TimeCode(300);
         document
@@ -26020,6 +26033,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         document.validate().unwrap();
@@ -28604,6 +28618,18 @@ mod tests {
     ///   unchanged (`7 / 5 660 / 3 510 / 998`) — the twenty-first
     ///   consecutive measurement, and the first whose counter moves for a
     ///   Part C addition.
+    ///
+    /// - **MO2 A1 (R1–R4 model): +70 820 / +68 930 / +1 890.** No tool, no
+    ///   operation; the 61 tools that embed the `Clip` `$defs` grow by
+    ///   1 130 B of input schema each — the `BlendMode` def +212, the
+    ///   `SolidColor` def +335, the `Clip.blend_mode` property +129 and the
+    ///   `adjustment` / `solid` `ClipContent` branches +454 (61 × 1 130 =
+    ///   68 930) — and `add_transition` / `remove_transition` each list the
+    ///   twelve push/slide/wipe rows at +945 B of description (2 × 945 =
+    ///   1 890), isolated by deleting each piece from the dumped registry.
+    ///   The arithmetic: 1 822 003 + 70 820 = **1 892 823**,
+    ///   1 672 150 + 68 930 = **1 741 080**, 125 550 + 1 890 = **127 440**.
+    ///   Counts `148 / 60 / 88`. Served quad unchanged.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28629,15 +28655,15 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (1_822_003, 5_660),
+            (1_892_823, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.input_schema_bytes, 1_672_150,
+            registry_metrics.input_schema_bytes, 1_741_080,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 125_550,
+            registry_metrics.description_bytes, 127_440,
             "registry={registry_metrics:?}"
         );
         assert_eq!(
@@ -31755,6 +31781,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             });
         }
@@ -32283,6 +32310,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         Document {
             investigator: None,
@@ -33125,6 +33153,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         let analysis = NoopMedia {
@@ -33238,6 +33267,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         document.tracks[1].clips.push(short(3, 60, 6));
         document.tracks[1].clips.push(short(4, 66, 4));
@@ -33401,6 +33431,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         });
         let calls = Arc::new(Mutex::new(Vec::new()));
         let analysis = NoopMedia {
@@ -33575,6 +33606,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             }],
             media_pool: vec![MediaAsset {

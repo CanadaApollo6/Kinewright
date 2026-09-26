@@ -2003,6 +2003,7 @@ fn edit_plan_document() -> Document {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset],
@@ -2823,6 +2824,7 @@ async fn au1_get_audio_levels_measures_the_real_mix() {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }],
     });
     let duration = document.duration.0;
@@ -7537,6 +7539,7 @@ async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         }],
     });
     let core = Core::spawn(document).unwrap();
@@ -7871,6 +7874,7 @@ fn au5_audio_document(asset: MediaAsset) -> Document {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         }],
         media_pool: vec![asset],
@@ -8358,6 +8362,7 @@ async fn au5_capture_room_tone_and_fill_a_gap_through_the_real_store() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         tracks: vec![Track {
@@ -8608,6 +8613,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_25_fps() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         fps: Rational::new(25, 1).unwrap(),
@@ -8758,6 +8764,7 @@ async fn au5_plan_room_tone_fill_commits_a_covering_tile_at_29_97_fps() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         fps: project_fps,
@@ -8895,6 +8902,7 @@ async fn au5_plan_room_tone_fill_tiles_a_1200_frame_asset_at_29_97_fps() {
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: kinewright_core::BlendMode::Normal,
     };
     let document = Document {
         fps: project_fps,
@@ -9013,6 +9021,7 @@ fn au6_agent_scene(engine: &FfmpegMediaEngine, scenario: Au6Scenario) -> Au6Agen
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 })
                 .collect(),
         })
@@ -10474,7 +10483,7 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// §6.4 rules 12–13 and §9 clause 19: **three** registry-only capabilities, no
 /// served tool, for the **twenty-first** consecutive measurement.
 ///
-/// The registry sextuple is `148 / 60 / 88 / 1 822 003 / 1 672 150 / 125 550`,
+/// The registry sextuple is `148 / 60 / 88 / 1 892 823 / 1 741 080 / 127 440`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
 /// this test pins the three counts and the served quad over the live endpoint.

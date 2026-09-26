@@ -133,7 +133,7 @@ pub fn render_timeline_state(document: &Document) -> String {
                 let asset_name = asset.map_or("<missing>", |asset| asset.name.as_str());
                 let _ = writeln!(
                     output,
-                    "  clip {} freeze asset={} {:?} source_frame={} timeline={}..{} duration={} effects={} transition_in={}",
+                    "  clip {} freeze asset={} {:?} source_frame={} timeline={}..{} duration={} effects={} transition_in={}{}",
                     clip.id,
                     clip.asset,
                     asset_name,
@@ -143,6 +143,7 @@ pub fn render_timeline_state(document: &Document) -> String {
                     frame_and_seconds(duration, document.fps),
                     render_effects(&clip.effects),
                     render_transition(clip.transition_in.as_ref()),
+                    render_clip_blend(clip),
                 );
                 continue;
             }
@@ -157,7 +158,7 @@ pub fn render_timeline_state(document: &Document) -> String {
                     .unwrap_or(clip.timeline_start);
                 let _ = writeln!(
                     output,
-                    "  clip {} title={} timeline={}..{} duration={} params={} effects={} transition_in={}",
+                    "  clip {} title={} timeline={}..{} duration={} params={} effects={} transition_in={}{}",
                     clip.id,
                     title.text.escape_debug(),
                     frame_and_seconds(clip.timeline_start, document.fps),
@@ -166,6 +167,26 @@ pub fn render_timeline_state(document: &Document) -> String {
                     render_title(title),
                     render_effects(&clip.effects),
                     render_transition(clip.transition_in.as_ref()),
+                    render_clip_blend(clip),
+                );
+                continue;
+            }
+            if let Some(kind) = render_generated_kind(&clip.content) {
+                let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+                let end = clip
+                    .timeline_start
+                    .checked_add(duration)
+                    .unwrap_or(clip.timeline_start);
+                let _ = writeln!(
+                    output,
+                    "  clip {} {kind} timeline={}..{} duration={} effects={} transition_in={}{}",
+                    clip.id,
+                    frame_and_seconds(clip.timeline_start, document.fps),
+                    frame_and_seconds(end, document.fps),
+                    frame_and_seconds(duration, document.fps),
+                    render_effects(&clip.effects),
+                    render_transition(clip.transition_in.as_ref()),
+                    render_clip_blend(clip),
                 );
                 continue;
             }
@@ -184,7 +205,7 @@ pub fn render_timeline_state(document: &Document) -> String {
             let asset_name = asset.map_or("<missing>", |asset| asset.name.as_str());
             let _ = writeln!(
                 output,
-                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{} effects={} transition_in={}{}{}",
+                "  clip {} asset={} {:?} timeline={}..{} duration={} source={}..{} effects={} transition_in={}{}{}{}",
                 clip.id,
                 clip.asset,
                 asset_name,
@@ -197,6 +218,7 @@ pub fn render_timeline_state(document: &Document) -> String {
                 render_transition(clip.transition_in.as_ref()),
                 render_clip_audio(clip),
                 render_clip_speed(clip),
+                render_clip_blend(clip),
             );
         }
     }
@@ -309,7 +331,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             .checked_add(duration)
             .ok_or_else(|| "time calculation overflowed".to_owned())?;
         return Ok(format!(
-            "clip {}\ntrack={} kind={:?}\ncontent=title\nlink={}\ntimeline={}..{} duration={}\ntitle={}\neffects={}\ntransition_in={}{}",
+            "clip {}\ntrack={} kind={:?}\ncontent=title\nlink={}\ntimeline={}..{} duration={}\ntitle={}\neffects={}\ntransition_in={}{}{}",
             clip.id,
             track.id,
             track.kind,
@@ -321,6 +343,31 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             render_title(title),
             render_effects(&clip.effects),
             render_transition(clip.transition_in.as_ref()),
+            render_clip_blend(clip),
+            render_clip_info_track_mix(document, track),
+        ));
+    }
+    if let Some(kind) = render_generated_kind(&clip.content) {
+        let duration = document
+            .clip_duration(clip)
+            .map_err(|error| error.to_string())?;
+        let end = clip
+            .timeline_start
+            .checked_add(duration)
+            .ok_or_else(|| "time calculation overflowed".to_owned())?;
+        return Ok(format!(
+            "clip {}\ntrack={} kind={:?}\ncontent={kind}\nlink={}\ntimeline={}..{} duration={}\neffects={}\ntransition_in={}{}{}",
+            clip.id,
+            track.id,
+            track.kind,
+            clip.link
+                .map_or_else(|| "none".to_owned(), |link| link.to_string()),
+            frame_and_seconds(clip.timeline_start, document.fps),
+            frame_and_seconds(end, document.fps),
+            frame_and_seconds(duration, document.fps),
+            render_effects(&clip.effects),
+            render_transition(clip.transition_in.as_ref()),
+            render_clip_blend(clip),
             render_clip_info_track_mix(document, track),
         ));
     }
@@ -336,7 +383,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             .checked_add(duration)
             .ok_or_else(|| "time calculation overflowed".to_owned())?;
         return Ok(format!(
-            "clip {}\ntrack={} kind={:?}\ncontent=freeze\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource_frame={}\neffects={}\ntransition_in={}{}",
+            "clip {}\ntrack={} kind={:?}\ncontent=freeze\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource_frame={}\neffects={}\ntransition_in={}{}{}",
             clip.id,
             track.id,
             track.kind,
@@ -350,6 +397,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
             frame_and_seconds(freeze.source_frame, asset.fps),
             render_effects(&clip.effects),
             render_transition(clip.transition_in.as_ref()),
+            render_clip_blend(clip),
             render_clip_info_track_mix(document, track),
         ));
     }
@@ -366,7 +414,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         .checked_add(duration)
         .ok_or_else(|| "time calculation overflowed".to_owned())?;
     Ok(format!(
-        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}{}{}",
+        "clip {}\ntrack={} kind={:?}\nasset={} {:?}\nlink={}\ntimeline={}..{} duration={}\nsource={}..{} duration={}\neffects={}\ntransition_in={}{}{}{}",
         clip.id,
         track.id,
         track.kind,
@@ -389,6 +437,7 @@ pub fn render_clip_info(document: &Document, clip_id: ClipId) -> Result<String, 
         render_effects(&clip.effects),
         render_transition(clip.transition_in.as_ref()),
         render_clip_speed(clip),
+        render_clip_blend(clip),
         render_clip_info_track_mix(document, track),
     ))
 }
@@ -521,6 +570,28 @@ fn render_clip_speed(clip: &kinewright_core::Clip) -> String {
         String::new()
     } else {
         format!(" speed={}% (audio muted)", clip.speed_percent)
+    }
+}
+
+/// MO2 R1: a non-`Normal` blend joins the clip line; `Normal` renders the
+/// pre-MO2 bytes.
+fn render_clip_blend(clip: &kinewright_core::Clip) -> String {
+    if clip.blend_mode.is_normal() {
+        String::new()
+    } else {
+        format!(" blend={:?}", clip.blend_mode).to_lowercase()
+    }
+}
+
+/// MO2 R2/R3: the generated kinds' label, `None` for the other kinds.
+fn render_generated_kind(content: &ClipContent) -> Option<String> {
+    match content {
+        ClipContent::Adjustment => Some("adjustment".to_owned()),
+        ClipContent::Solid(color) => Some(format!(
+            "solid=#{:02x}{:02x}{:02x}",
+            color.r, color.g, color.b
+        )),
+        ClipContent::Media | ClipContent::Title(_) | ClipContent::Freeze(_) => None,
     }
 }
 
@@ -1186,6 +1257,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: kinewright_core::BlendMode::Normal,
                     },
                     Clip {
                         enabled: true,
@@ -1203,6 +1275,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: kinewright_core::BlendMode::Normal,
                     },
                 ],
             }],
@@ -1861,6 +1934,7 @@ assets:
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         document.tracks.push(Track {
@@ -1885,6 +1959,7 @@ assets:
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         let non_neutral = |track| kinewright_core::TrackMix {
@@ -1951,6 +2026,45 @@ assets:
         assert!(info.contains("speed=200% (audio muted)"));
     }
 
+    /// MO2 A1: a non-normal blend appends ` blend=<mode>` (nothing for
+    /// `normal`, so the golden above is untouched) and the generated kinds
+    /// render as their kind rather than as a missing asset.
+    #[test]
+    fn mo2_timeline_state_and_clip_info_render_blend_and_generated_kinds() {
+        let mut document = fixture();
+        let clips = &mut document.tracks[0].clips;
+        clips[0].content = ClipContent::Adjustment;
+        clips[0].source_range = TimeCode(0)..TimeCode(90);
+        clips[0].blend_mode = kinewright_core::BlendMode::Screen;
+        clips[1].content = ClipContent::Solid(kinewright_core::SolidColor {
+            r: 255,
+            g: 16,
+            b: 0,
+        });
+        clips[1].source_range = TimeCode(0)..TimeCode(60);
+        let rendered = render_timeline_state(&document);
+        assert!(
+            rendered.contains(
+                "  clip 10 adjustment timeline=0f/0.000s..90f/3.000s duration=90f/3.000s \
+                 effects=[3:brightness(percent=25)] transition_in=crossfade:15f blend=screen\n"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "  clip 11 solid=#ff1000 timeline=120f/4.000s..180f/6.000s duration=60f/2.000s \
+                 effects=none transition_in=none\n"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("<missing>"), "{rendered}");
+        let info = render_clip_info(&document, ClipId(11)).unwrap();
+        assert!(info.contains("content=solid=#ff1000\n"), "{info}");
+        let info = render_clip_info(&document, ClipId(10)).unwrap();
+        assert!(info.contains("content=adjustment\n"), "{info}");
+        assert!(info.contains("blend=screen"), "{info}");
+    }
+
     #[test]
     fn timeline_state_and_clip_info_include_declarative_title_parameters() {
         let mut document = fixture();
@@ -1983,6 +2097,7 @@ assets:
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
         let timeline = render_timeline_state(&document);
@@ -2036,6 +2151,7 @@ assets:
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: kinewright_core::BlendMode::Normal,
             }],
         });
 

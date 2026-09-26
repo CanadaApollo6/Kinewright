@@ -1517,13 +1517,12 @@ impl KinewrightApp {
                             let Ok(duration) = document.clip_duration(clip) else {
                                 continue;
                             };
-                            let asset = match &clip.content {
-                                ClipContent::Media | ClipContent::Freeze(_) => {
-                                    document.asset(clip.asset)
-                                }
-                                ClipContent::Title(_) => None,
+                            let asset = if clip.content.references_asset() {
+                                document.asset(clip.asset)
+                            } else {
+                                None
                             };
-                            if !matches!(&clip.content, ClipContent::Title(_)) && asset.is_none() {
+                            if clip.content.references_asset() && asset.is_none() {
                                 continue;
                             }
                             let (source_fps, maximum_source_end) = match &clip.content {
@@ -1536,9 +1535,7 @@ impl KinewrightApp {
                                         )
                                     })
                                 }
-                                ClipContent::Title(_) | ClipContent::Freeze(_) => {
-                                    (document.fps, TimeCode(i64::MAX))
-                                }
+                                _ => (document.fps, TimeCode(i64::MAX)),
                             };
                             let x = rect.left() + clip.timeline_start.0 as f32 * pixels_per_frame;
                             let clip_width = (duration.0 as f32 * pixels_per_frame).max(24.0);
@@ -1592,7 +1589,7 @@ impl KinewrightApp {
 
                             let envelope_kind = match &clip.content {
                                 ClipContent::Media => asset.map(|asset| asset.kind),
-                                ClipContent::Title(_) | ClipContent::Freeze(_) => None,
+                                _ => None,
                             };
                             let envelope_shown =
                                 envelope_is_offered(duration, pixels_per_frame, show_envelopes);
@@ -2184,7 +2181,9 @@ impl KinewrightApp {
                                         .map(|transition| transition.duration),
                                     pixels_per_frame,
                                 ),
-                                (ClipContent::Media | ClipContent::Freeze(_), None) => {}
+                                // MO2 Part B paints adjustment and solid clips.
+                                (ClipContent::Media | ClipContent::Freeze(_), None)
+                                | (ClipContent::Adjustment | ClipContent::Solid(_), _) => {}
                             }
                             if clip.content.is_media() && clip.speed_percent != 100 {
                                 paint_speed_badge(&painter, draw_rect, clip.speed_percent);
@@ -3352,7 +3351,7 @@ fn linked_trim_operations(
             kinewright_core::clip_effective_fps(asset.fps, primary_clip)
                 .map_err(|error| error.to_string())?
         }
-        ClipContent::Title(_) | ClipContent::Freeze(_) => document.fps,
+        _ => document.fps,
     };
     let (old_boundary, new_boundary) = match edge {
         TrimEdge::Left => (primary_clip.source_range.start, new_source.start),
@@ -3373,7 +3372,7 @@ fn linked_trim_operations(
                     asset.duration.0,
                 )
             }
-            ClipContent::Title(_) | ClipContent::Freeze(_) => (document.fps, i64::MAX),
+            _ => (document.fps, i64::MAX),
         };
         let linked_source = if clip.id == primary {
             new_source.clone()
@@ -4347,6 +4346,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         Document {
             investigator: None,
@@ -4650,6 +4650,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
                 Clip {
                     enabled: true,
@@ -4667,6 +4668,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 },
             ],
         });
@@ -6406,6 +6408,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             speed_percent: 100,
             audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
         };
         let second =
             map_project_duration_to_source(TimeCode::ZERO, TimeCode(30), asset_fps, project_fps)
@@ -6722,6 +6725,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: kinewright_core::BlendMode::Normal,
                     }],
                 },
             ],

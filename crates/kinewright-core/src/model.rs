@@ -339,6 +339,55 @@ pub enum ClipContent {
     Media,
     Title(Title),
     Freeze(FreezeFrame),
+    /// MO2 R2: an adjustment layer. No asset (`asset` is ignored, as for
+    /// titles), a project-frame span, no audio; its look is its own effect
+    /// stack applied to the composite of strictly lower tracks (R17).
+    Adjustment,
+    /// MO2 R3: an opaque solid-colour fill over a project-frame span.
+    Solid(SolidColor),
+}
+
+/// MO2 R3: a solid clip's display-coded sRGB colour.
+// The fill enters working space through the same generated-content
+// conversion titles use (kept out of the doc: it is embedded in every tool).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SolidColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+/// MO2 R1: how a visual layer blends onto the composite below it
+/// (scene-linear working space).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    Add,
+}
+
+impl BlendMode {
+    /// Every mode, `Normal` first, in declaration order.
+    pub const ALL: [Self; 7] = [
+        Self::Normal,
+        Self::Multiply,
+        Self::Screen,
+        Self::Overlay,
+        Self::Darken,
+        Self::Lighten,
+        Self::Add,
+    ];
+
+    #[must_use]
+    pub const fn is_normal(&self) -> bool {
+        matches!(self, Self::Normal)
+    }
 }
 
 /// A project-local clip that repeatedly displays one frame from a real asset.
@@ -357,9 +406,22 @@ impl ClipContent {
     #[must_use]
     pub const fn title(&self) -> Option<&Title> {
         match self {
-            Self::Media | Self::Freeze(_) => None,
+            Self::Media | Self::Freeze(_) | Self::Adjustment | Self::Solid(_) => None,
             Self::Title(title) => Some(title),
         }
+    }
+
+    /// Whether `source_range` is a project-frame span rather than a source
+    /// range (every kind but `Media`, MO1 R9 / MO2 R5).
+    #[must_use]
+    pub const fn is_span(&self) -> bool {
+        !self.is_media()
+    }
+
+    /// Whether the clip references a real asset (`Media` and `Freeze`).
+    #[must_use]
+    pub const fn references_asset(&self) -> bool {
+        matches!(self, Self::Media | Self::Freeze(_))
     }
 }
 
@@ -432,6 +494,10 @@ pub struct Clip {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(default)]
     pub enabled_curve: Option<crate::AutomationCurve>,
+    /// MO2 R1: default `normal`, skipped when `normal`; inert on audio clips.
+    #[serde(default, skip_serializing_if = "BlendMode::is_normal")]
+    #[schemars(default)]
+    pub blend_mode: BlendMode,
 }
 
 const fn default_clip_speed() -> u32 {
@@ -1448,7 +1514,7 @@ impl Document {
             .tracks
             .iter()
             .flat_map(|track| &track.clips)
-            .filter(|clip| matches!(clip.content, ClipContent::Media | ClipContent::Freeze(_)))
+            .filter(|clip| clip.content.references_asset())
             .map(|clip| clip.asset)
             .collect();
         self.media_pool
@@ -1582,7 +1648,7 @@ impl Document {
     ///
     /// Returns an error for a missing media asset or an unrepresentable frame-rate mapping.
     pub fn clip_duration(&self, clip: &Clip) -> Result<TimeCode, OpError> {
-        if matches!(clip.content, ClipContent::Title(_) | ClipContent::Freeze(_)) {
+        if clip.content.is_span() {
             return clip
                 .source_range
                 .end
@@ -1686,6 +1752,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: crate::BlendMode::Normal,
             }],
         });
         document
@@ -2008,6 +2075,7 @@ mod tests {
             audio_fade_out_frames: TimeCode::ZERO,
             audio_gain_curve: None,
             speed_percent: 100,
+            blend_mode: crate::BlendMode::Normal,
         }
     }
 

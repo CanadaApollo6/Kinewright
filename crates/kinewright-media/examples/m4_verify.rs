@@ -69,6 +69,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             },
             Track {
@@ -91,6 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
                 }],
             },
         ],

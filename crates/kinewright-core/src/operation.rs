@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     AUDIO_BUS_GAIN_MAX, AUDIO_BUS_GAIN_MIN, AUDIO_MASTER_GAIN_MAX, AUDIO_MASTER_GAIN_MIN, AssetId,
-    AudioBus, AudioBusId, AudioChain, AudioMaster, AutomationCurve, BinId,
+    AudioBus, AudioBusId, AudioChain, AudioMaster, AutomationCurve, BinId, BlendMode,
     COLOR_CONFIDENCE_MAX_BASIS_POINTS, CaptionPreset, Clip, ClipContent, ClipId, ColorContext,
     ColorDescription, ColorProvenance, Document, Effect, EffectId, FreezeFrame, IncidentCode,
     IncidentSubject, Keyframe, KeyframeInterpolation, LinkId, LutAsset, LutAssetId,
@@ -712,6 +712,12 @@ pub enum OpError {
     TitleOnAudioTrack(TrackId),
     #[error("freeze clips can only be placed on video track {0}")]
     FreezeOnAudioTrack(TrackId),
+    /// MO2 R8: adjustment clips live on video tracks only.
+    #[error("adjustment clips can only be placed on video track {0}")]
+    AdjustmentOnAudioTrack(TrackId),
+    /// MO2 R8: solid clips live on video tracks only.
+    #[error("solid clips can only be placed on video track {0}")]
+    SolidOnAudioTrack(TrackId),
     #[error("source range must be non-empty and non-negative: {start}..{end}")]
     InvalidSourceRange { start: i64, end: i64 },
     #[error("source range ends at {end}, beyond asset {asset}'s duration {duration}")]
@@ -1054,6 +1060,23 @@ pub enum OpError {
     TitleClipHasNoAudio(ClipId),
     #[error("freeze clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
     FreezeClipHasNoAudio(ClipId),
+    /// MO2 R8: the audio setters refuse adjustment clips.
+    #[error("adjustment clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
+    AdjustmentClipHasNoAudio(ClipId),
+    /// MO2 R8: the audio setters refuse solid clips.
+    #[error("solid clip {0} has no audio contribution; SetClipAudio accepts media clips only")]
+    SolidClipHasNoAudio(ClipId),
+    /// MO2 R8: `SetSolidColor` addresses solid clips only.
+    #[error("clip {0} is not a solid clip; SetSolidColor accepts solid clips only")]
+    SolidColorOnNonSolidClip(ClipId),
+    /// MO2 R18: an effect an adjustment clip cannot carry (`chroma_key`),
+    /// refused even when disabled.
+    #[error("adjustment clip {clip} cannot carry effect {effect:?}")]
+    EffectUnsupportedOnAdjustment { clip: ClipId, effect: String },
+    /// MO2 R18: a colour-fade transition would occlude the below-stack an
+    /// adjustment grades.
+    #[error("adjustment clip {clip} cannot carry transition {transition:?}")]
+    TransitionUnsupportedOnAdjustment { clip: ClipId, transition: String },
     /// AU4 §2.6: a clip gain envelope violates [`AutomationCurve::validate`].
     #[error("clip {clip} gain envelope is invalid: {reason}")]
     InvalidClipGainEnvelope { clip: ClipId, reason: String },
@@ -1623,6 +1646,8 @@ fn set_clip_gain_envelope(
     match clip.content {
         ClipContent::Title(_) => return Err(OpError::TitleClipHasNoAudio(clip_id)),
         ClipContent::Freeze(_) => return Err(OpError::FreezeClipHasNoAudio(clip_id)),
+        ClipContent::Adjustment => return Err(OpError::AdjustmentClipHasNoAudio(clip_id)),
+        ClipContent::Solid(_) => return Err(OpError::SolidClipHasNoAudio(clip_id)),
         ClipContent::Media => {}
     }
     let clip_duration = doc.clip_duration(clip)?;
@@ -2026,6 +2051,7 @@ fn add_clip(
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: BlendMode::Normal,
     };
     doc.tracks[track_index].clips.push(clip);
     doc.tracks[track_index]
@@ -2073,6 +2099,7 @@ fn add_title(
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: BlendMode::Normal,
     });
     doc.tracks[track_index]
         .clips
@@ -2122,6 +2149,7 @@ fn add_freeze_frame(
         audio_fade_out_frames: TimeCode::ZERO,
         speed_percent: 100,
         audio_gain_curve: None,
+        blend_mode: BlendMode::Normal,
     });
     doc.tracks[track_index]
         .clips
@@ -2150,7 +2178,10 @@ fn split_clip(doc: &mut Document, clip_id: ClipId, at: TimeCode) -> Result<(), O
             find_source_boundary(original.source_range.clone(), offset, effective, doc.fps)
                 .ok_or(OpError::UnrepresentableSplit { clip: clip_id, at })?
         }
-        ClipContent::Title(_) | ClipContent::Freeze(_) => original
+        ClipContent::Title(_)
+        | ClipContent::Freeze(_)
+        | ClipContent::Adjustment
+        | ClipContent::Solid(_) => original
             .source_range
             .start
             .checked_add(offset)
@@ -2206,7 +2237,10 @@ fn trim_clip(
             validate_source_range(asset, &new_source)?;
             crate::clip_effective_fps(asset.fps, &original).map_err(OpError::TimeMapping)?
         }
-        ClipContent::Title(_) | ClipContent::Freeze(_) => {
+        ClipContent::Title(_)
+        | ClipContent::Freeze(_)
+        | ClipContent::Adjustment
+        | ClipContent::Solid(_) => {
             validate_title_range(&new_source)?;
             doc.fps
         }
@@ -2283,6 +2317,16 @@ fn move_clip(
         ClipContent::Freeze(_) => {
             if doc.tracks[target_track_index].kind != TrackKind::Video {
                 return Err(OpError::FreezeOnAudioTrack(target_track_id));
+            }
+        }
+        ClipContent::Adjustment => {
+            if doc.tracks[target_track_index].kind != TrackKind::Video {
+                return Err(OpError::AdjustmentOnAudioTrack(target_track_id));
+            }
+        }
+        ClipContent::Solid(_) => {
+            if doc.tracks[target_track_index].kind != TrackKind::Video {
+                return Err(OpError::SolidOnAudioTrack(target_track_id));
             }
         }
     }
@@ -2681,9 +2725,10 @@ fn roll_edit(
         }
         // MO1 R9: spans carry project frames, so the shared point moves the
         // span edge with no fps mapping; the held frame is untouched.
-        ClipContent::Title(_) | ClipContent::Freeze(_) => {
-            left.source_range.start.checked_add(left_duration)
-        }
+        ClipContent::Title(_)
+        | ClipContent::Freeze(_)
+        | ClipContent::Adjustment
+        | ClipContent::Solid(_) => left.source_range.start.checked_add(left_duration),
     }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: left_id,
@@ -2707,7 +2752,10 @@ fn roll_edit(
         }
         // MO1 R9: spans have no earlier source and must stay non-negative,
         // so the origin never moves — the window resizes around it below.
-        ClipContent::Title(_) | ClipContent::Freeze(_) => Some(right.source_range.start),
+        ClipContent::Title(_)
+        | ClipContent::Freeze(_)
+        | ClipContent::Adjustment
+        | ClipContent::Solid(_) => Some(right.source_range.start),
     }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: right_id,
@@ -2781,9 +2829,10 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
                 left_duration,
             )
         }
-        ClipContent::Title(_) | ClipContent::Freeze(_) => {
-            left.source_range.start.checked_add(left_duration)
-        }
+        ClipContent::Title(_)
+        | ClipContent::Freeze(_)
+        | ClipContent::Adjustment
+        | ClipContent::Solid(_) => left.source_range.start.checked_add(left_duration),
     }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: left.id,
@@ -2807,9 +2856,10 @@ fn slide_clip(doc: &mut Document, clip_id: ClipId, to: TimeCode) -> Result<(), O
                 right_duration,
             )
         }
-        ClipContent::Title(_) | ClipContent::Freeze(_) => {
-            right.source_range.end.checked_sub(right_duration)
-        }
+        ClipContent::Title(_)
+        | ClipContent::Freeze(_)
+        | ClipContent::Adjustment
+        | ClipContent::Solid(_) => right.source_range.end.checked_sub(right_duration),
     }
     .ok_or(OpError::UnrepresentableEditBoundary {
         clip: right.id,
@@ -4203,6 +4253,8 @@ fn set_clip_audio(
     match clip.content {
         ClipContent::Title(_) => return Err(OpError::TitleClipHasNoAudio(clip_id)),
         ClipContent::Freeze(_) => return Err(OpError::FreezeClipHasNoAudio(clip_id)),
+        ClipContent::Adjustment => return Err(OpError::AdjustmentClipHasNoAudio(clip_id)),
+        ClipContent::Solid(_) => return Err(OpError::SolidClipHasNoAudio(clip_id)),
         ClipContent::Media => {}
     }
     let clip_duration = doc.clip_duration(clip)?;
@@ -4692,6 +4744,8 @@ fn validate_clip_audio(doc: &Document, clip: &Clip) -> Result<(), OpError> {
         return match clip.content {
             ClipContent::Title(_) => Err(OpError::TitleClipHasNoAudio(clip.id)),
             ClipContent::Freeze(_) => Err(OpError::FreezeClipHasNoAudio(clip.id)),
+            ClipContent::Adjustment => Err(OpError::AdjustmentClipHasNoAudio(clip.id)),
+            ClipContent::Solid(_) => Err(OpError::SolidClipHasNoAudio(clip.id)),
             ClipContent::Media => Ok(()),
         };
     }
@@ -4951,6 +5005,18 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                         .ok_or(OpError::MissingAsset(clip.asset))?;
                     validate_track_compatibility(asset, track)?;
                     validate_freeze_source_frame(asset, freeze.source_frame)?;
+                    validate_title_range(&clip.source_range)?;
+                }
+                ClipContent::Adjustment => {
+                    if track.kind != TrackKind::Video {
+                        return Err(OpError::AdjustmentOnAudioTrack(track.id));
+                    }
+                    validate_title_range(&clip.source_range)?;
+                }
+                ClipContent::Solid(_) => {
+                    if track.kind != TrackKind::Video {
+                        return Err(OpError::SolidOnAudioTrack(track.id));
+                    }
                     validate_title_range(&clip.source_range)?;
                 }
             }
@@ -5602,7 +5668,12 @@ impl OpError {
             | Self::InvalidTrackAutomation { .. }
             | Self::TooFewLinkedClips { .. }
             | Self::NonHoldKeyframeParameter { .. }
-            | Self::DisabledEffectOnAudioChain { .. } => IncidentFamily::Malformed,
+            | Self::DisabledEffectOnAudioChain { .. }
+            | Self::AdjustmentClipHasNoAudio { .. }
+            | Self::SolidClipHasNoAudio { .. }
+            | Self::SolidColorOnNonSolidClip { .. }
+            | Self::EffectUnsupportedOnAdjustment { .. }
+            | Self::TransitionUnsupportedOnAdjustment { .. } => IncidentFamily::Malformed,
             Self::DuplicateAsset { .. }
             | Self::DuplicateBin { .. }
             | Self::DuplicateBinAsset { .. }
@@ -5629,6 +5700,8 @@ impl OpError {
             | Self::IncompatibleTrack { .. }
             | Self::TitleOnAudioTrack { .. }
             | Self::FreezeOnAudioTrack { .. }
+            | Self::AdjustmentOnAudioTrack { .. }
+            | Self::SolidOnAudioTrack { .. }
             | Self::EditorialRequiresMedia { .. }
             | Self::InvalidSourcePatchRouteKind { .. }
             | Self::NotTitleClip { .. }
@@ -5943,14 +6016,14 @@ mod tests {
         grouped
     }
 
-    /// Appendix A, normative, **per variant**: all 155 `OpError` variant names
+    /// Appendix A, normative, **per variant**: all 162 `OpError` variant names
     /// with the family the contract assigns each one.
     ///
     /// Written out rather than counted, so a variant moved from one family to
     /// another fails here instead of cancelling out against another move
     /// (review-2 S4, review-1 N2). It is transcribed from
     /// `docs/IN1B-ERROR-MIGRATION.md`'s Appendix A, not from the accessor.
-    const APPENDIX_A: [(&str, &str); 155] = [
+    const APPENDIX_A: [(&str, &str); 162] = [
         ("AudioBusLookaheadExceeded", "Bounds"),
         ("AudioBusKeyframeOutsideProject", "Bounds"),
         ("AudioBusGainOutOfRange", "Bounds"),
@@ -6106,6 +6179,14 @@ mod tests {
         ("ZeroConfidenceColorOverride", "ColorPolicy"),
         ("InvalidColorOverrideProvenance", "ColorPolicy"),
         ("AssumedFromNotSuppliable", "ColorPolicy"),
+        // MO2 R29: two on-audio-track placements, five semantic refusals.
+        ("AdjustmentOnAudioTrack", "Placement"),
+        ("SolidOnAudioTrack", "Placement"),
+        ("AdjustmentClipHasNoAudio", "Malformed"),
+        ("SolidClipHasNoAudio", "Malformed"),
+        ("SolidColorOnNonSolidClip", "Malformed"),
+        ("EffectUnsupportedOnAdjustment", "Malformed"),
+        ("TransitionUnsupportedOnAdjustment", "Malformed"),
     ];
 
     /// §3.3 rule 20's precedence applied **per variant**: all 63 `Operation`
@@ -6180,7 +6261,7 @@ mod tests {
         ("SetClipSpeed", "Clip"),
     ];
 
-    /// `IN1b` §9 clause 1: the match is exhaustive over all **154** `OpError`
+    /// `IN1b` §9 clause 1: the match is exhaustive over all **162** `OpError`
     /// variants with no wildcard, every family is non-empty, and **every
     /// variant** is in the family Appendix A gives it.
     #[test]
@@ -6206,10 +6287,10 @@ mod tests {
             .collect();
         assert_eq!(
             declared.len(),
-            155,
-            "Appendix A names 155 distinct variants"
+            162,
+            "Appendix A names 162 distinct variants"
         );
-        assert_eq!(implemented.len(), 155, "the accessor names 155 variants");
+        assert_eq!(implemented.len(), 162, "the accessor names 162 variants");
         for (variant, family) in &declared {
             assert_eq!(
                 implemented.get(variant),

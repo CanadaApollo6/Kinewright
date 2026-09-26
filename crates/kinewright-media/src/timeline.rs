@@ -125,6 +125,7 @@ pub fn video_layers_at(
                 .ok_or_else(|| {
                     MediaError::Backend("active timeline clip disappeared".to_owned())
                 })?;
+            refuse_unrendered_mo2(clip)?;
             layers.push(TimelineVideoLayer {
                 source,
                 effects: evaluated_effects(clip, project_at),
@@ -156,6 +157,7 @@ pub fn visual_layers_at(
         let Some(clip) = active_clip_on_track(document, track, project_at)? else {
             continue;
         };
+        refuse_unrendered_mo2(clip)?;
         match &clip.content {
             ClipContent::Media => {
                 let source = media_source_for_clip(document, track.id, clip, project_at)?;
@@ -200,9 +202,40 @@ pub fn visual_layers_at(
                     transition: transition_render_params(clip, project_at),
                 }));
             }
+            ClipContent::Adjustment | ClipContent::Solid(_) => {
+                unreachable!("refuse_unrendered_mo2 refused MO2 content above")
+            }
         }
     }
     Ok(layers)
+}
+
+/// MO2 §12: until the Part B render lands, a resolved layer carrying MO2
+/// content — an adjustment or solid clip, a non-`Normal` blend mode, or a
+/// push/slide/wipe transition — fails closed with a typed refusal instead of
+/// rendering as something it is not.
+fn refuse_unrendered_mo2(clip: &Clip) -> Result<(), MediaError> {
+    let geometric = clip
+        .transition_in
+        .as_ref()
+        .and_then(|transition| transition_descriptor(&transition.name))
+        .is_some_and(|descriptor| {
+            matches!(
+                descriptor.shading,
+                TransitionShading::Push { .. }
+                    | TransitionShading::Slide { .. }
+                    | TransitionShading::Wipe { .. }
+            )
+        });
+    if matches!(
+        clip.content,
+        ClipContent::Adjustment | ClipContent::Solid(_)
+    ) || !clip.blend_mode.is_normal()
+        || geometric
+    {
+        return Err(MediaError::NotImplemented);
+    }
+    Ok(())
 }
 
 fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
@@ -472,6 +505,11 @@ fn transition_render_params(clip: &Clip, project_at: TimeCode) -> TransitionRend
             fade_white: if white { 1.0 } else { 0.0 },
             ..TransitionRenderParams::default()
         },
+        TransitionShading::Push { .. }
+        | TransitionShading::Slide { .. }
+        | TransitionShading::Wipe { .. } => {
+            unreachable!("refuse_unrendered_mo2 refused geometric transitions above")
+        }
     }
 }
 
@@ -505,9 +543,9 @@ mod tests {
     use std::path::PathBuf;
 
     use kinewright_core::{
-        AssetId, AutomationCurve, Clip, ClipId, Document, Effect, EffectId, FreezeFrame, Keyframe,
-        KeyframeInterpolation, MediaAsset, MediaKind, ParamValue, Rational, TimeCode, Track,
-        TrackId, TrackKind, Transition,
+        AssetId, AutomationCurve, BlendMode, Clip, ClipId, Document, Effect, EffectId, FreezeFrame,
+        Keyframe, KeyframeInterpolation, MediaAsset, MediaKind, ParamValue, Rational, TimeCode,
+        Track, TrackId, TrackKind, Transition,
     };
 
     use super::*;
@@ -540,6 +578,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: BlendMode::Normal,
                     },
                     Clip {
                         enabled: true,
@@ -557,6 +596,7 @@ mod tests {
                         audio_fade_out_frames: TimeCode::ZERO,
                         speed_percent: 100,
                         audio_gain_curve: None,
+                        blend_mode: BlendMode::Normal,
                     },
                 ],
             }],
@@ -704,6 +744,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: BlendMode::Normal,
             }],
         });
 
@@ -798,6 +839,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: BlendMode::Normal,
             }],
         });
         document.validate().unwrap();
@@ -861,6 +903,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: BlendMode::Normal,
             }],
         }];
         document.duration = TimeCode(10);
@@ -910,6 +953,7 @@ mod tests {
                 audio_fade_out_frames: TimeCode::ZERO,
                 speed_percent: 100,
                 audio_gain_curve: None,
+                blend_mode: BlendMode::Normal,
             }],
         }];
         document.duration = TimeCode(10);
@@ -922,6 +966,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn enumerates_audio_from_every_track_and_maps_the_requested_portions() {
         let mut document = fixture();
         document.media_pool.extend([
@@ -971,6 +1016,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: BlendMode::Normal,
                 }],
             },
             Track {
@@ -993,6 +1039,7 @@ mod tests {
                     audio_fade_out_frames: TimeCode::ZERO,
                     speed_percent: 100,
                     audio_gain_curve: None,
+                    blend_mode: BlendMode::Normal,
                 }],
             },
         ]);
@@ -1414,5 +1461,73 @@ mod tests {
         document.validate().unwrap();
         let actual = timeline_audio_segments(&document, TimeCode(0)..TimeCode(25)).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    /// MO2 §12: until Part B renders them, every MO2 layer refuses typed —
+    /// adjustment and solid content, a non-`Normal` blend, and each of the
+    /// 12 geometric transitions — in both resolvers, while an MO2-free frame
+    /// on the same document still resolves.
+    #[test]
+    fn mo2_layers_fail_closed_until_part_b() {
+        let refused = |document: &Document| {
+            assert!(matches!(
+                visual_layers_at(document, TimeCode(0)),
+                Err(MediaError::NotImplemented)
+            ));
+            assert!(matches!(
+                video_layers_at(document, TimeCode(0)),
+                Err(MediaError::NotImplemented)
+            ));
+            assert!(visual_layers_at(document, TimeCode(20)).is_ok());
+        };
+        for mode in &BlendMode::ALL[1..] {
+            let mut document = fixture();
+            document.tracks[0].clips[0].blend_mode = *mode;
+            refused(&document);
+        }
+        for descriptor in &kinewright_core::TRANSITION_DESCRIPTORS[3..] {
+            let mut document = fixture();
+            document.tracks[0].clips[0].transition_in = Some(Transition {
+                name: descriptor.name.to_owned(),
+                duration: TimeCode(3),
+            });
+            refused(&document);
+        }
+        for content in [
+            ClipContent::Adjustment,
+            ClipContent::Solid(kinewright_core::SolidColor { r: 1, g: 2, b: 3 }),
+        ] {
+            let mut document = fixture();
+            let clip = &mut document.tracks[0].clips[0];
+            clip.content = content;
+            clip.source_range = TimeCode(0)..TimeCode(10);
+            document.validate().unwrap();
+            assert!(matches!(
+                visual_layers_at(&document, TimeCode(0)),
+                Err(MediaError::NotImplemented)
+            ));
+            assert!(visual_layers_at(&document, TimeCode(20)).is_ok());
+        }
+    }
+
+    /// MO2 R1/R2/R3: blend is inert on audio — segments are identical
+    /// whatever the mode — and the generated kinds contribute no audio.
+    #[test]
+    fn mo2_blend_is_inert_on_audio_and_generated_kinds_are_silent() {
+        let expected = timeline_audio_segments(&fixture(), TimeCode(0)..TimeCode(25)).unwrap();
+        for mode in BlendMode::ALL {
+            let mut document = fixture();
+            document.tracks[0].clips[0].blend_mode = mode;
+            document.tracks[0].clips[1].blend_mode = mode;
+            let actual = timeline_audio_segments(&document, TimeCode(0)..TimeCode(25)).unwrap();
+            assert_eq!(actual, expected, "{mode:?}");
+        }
+        let mut document = fixture();
+        let clip = &mut document.tracks[0].clips[0];
+        clip.content = ClipContent::Adjustment;
+        clip.source_range = TimeCode(0)..TimeCode(10);
+        document.validate().unwrap();
+        let segments = timeline_audio_segments(&document, TimeCode(0)..TimeCode(25)).unwrap();
+        assert!(segments.iter().all(|segment| segment.clip != ClipId(1)));
     }
 }
