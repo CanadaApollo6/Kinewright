@@ -5249,10 +5249,17 @@ fn solid_color_row(
         ui.label("Colour");
         let picker = ui.color_edit_button_srgb(&mut rgb);
         let (mut started, mut changed) = (picker.clicked(), picker.changed());
-        for (channel, id) in rgb.iter_mut().zip(["solid_r", "solid_g", "solid_b"]) {
-            let field = ui.add(egui::DragValue::new(channel).range(0..=255));
+        let channels = [
+            ("solid_r", "R ", "Red"),
+            ("solid_g", "G ", "Green"),
+            ("solid_b", "B ", "Blue"),
+        ];
+        for (channel, (id, prefix, name)) in rgb.iter_mut().zip(channels) {
+            let field = egui::DragValue::new(channel).range(0..=255).prefix(prefix);
+            let field = ui.add(field).on_hover_text(format!("{name}, 0–255"));
             crate::mixer_ui::record_strip_rect(id, field.rect);
-            started |= field.drag_started();
+            // A drag, or a typed-entry session (focus), is its own undo step.
+            started |= field.drag_started() || field.gained_focus();
             changed |= field.changed();
         }
         if started {
@@ -12945,7 +12952,7 @@ mod rr_probe {
 /// MO2 sender is driven through its real widget or menu seam; every GUI
 /// gesture's operations resolve in the agent's registry.
 #[cfg(test)]
-mod mo2_parity {
+pub(crate) mod mo2_parity {
     use std::path::PathBuf;
 
     use kinewright_core::{
@@ -13277,114 +13284,132 @@ mod mo2_parity {
             .collect()
     }
 
-    /// (variant, GUI sender, what driving the sender produced). Widgets are
-    /// pressed or dragged for real; the "+ Layer" and viewer rows drive the
-    /// exact seam the menu and overlay call (their full app paths are driven
-    /// in `timeline_ui`'s and `preview_ui`'s MO2 tests).
-    fn mo2_sender_drivers() -> Vec<(&'static str, &'static str, Vec<String>)> {
-        let core = Core::spawn(mo2_document(solid_clip())).expect("the core starts");
-        let mut layered = mo2_document(media_clip(ClipId(2), AssetId(1), None));
-        layered.tracks.push(Track {
-            id: TrackId(2),
-            kind: TrackKind::Video,
-            sync_lock: true,
-            clips: Vec::new(),
-        });
-        let place = |adjustment| {
-            let placed = crate::timeline_ui::generated_clip_placement(
-                &layered,
-                adjustment,
-                None,
-                TimeCode::ZERO,
-                None,
-            );
-            variants(&[placed.expect("track 2 is free and above")])
+    /// The operations `app`'s Core has applied (its op log) — what a GUI
+    /// sender actually delivered, not what a helper would have built.
+    pub(crate) fn mo2_applied(app: &KinewrightApp) -> Vec<Operation> {
+        let query = kinewright_core::Command::Query(kinewright_core::Query::OpLog);
+        let answer = app.focused().core.request(query).expect("the core answers");
+        let kinewright_core::Event::QueryResult(kinewright_core::QueryResult::OpLog(log)) = answer
+        else {
+            panic!("an op log: {answer:?}");
         };
-        let transform = |keyed: bool| {
-            let mut clip = media_clip(ClipId(2), AssetId(1), None);
-            let mut effect = Effect {
-                enabled: true,
-                enabled_curve: None,
-                id: EffectId(4),
-                name: "transform".to_owned(),
-                parameters: BTreeMap::new(),
-                keyframes: BTreeMap::new(),
-            };
-            if keyed {
-                effect.keyframes.insert(
-                    "x_percent".to_owned(),
-                    AutomationCurve {
-                        keyframes: vec![Keyframe {
-                            at: TimeCode(0),
-                            value: 0,
-                            interpolation: KeyframeInterpolation::Linear,
-                            tangent_in: 0,
-                            tangent_out: 0,
-                        }],
-                    },
-                );
-            }
-            clip.effects = vec![effect];
-            let image_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 225.0));
-            let drag = crate::preview_ui::TransformDrag {
-                origin: image_rect.center(),
-                pointer: image_rect.center() + egui::vec2(40.0, 0.0),
-                image_rect,
-                center: image_rect.center(),
-                scaling: false,
-            };
-            variants(&crate::preview_ui::transform_drag_operations(
-                &clip,
-                EffectId(4),
-                TimeCode(9),
-                [0, 0, 100],
-                drag,
-            ))
+        log.to_vec()
+    }
+
+    /// Click the inspector widget recorded as `name` in the real app.
+    fn inspector_press(ctx: &egui::Context, app: &mut KinewrightApp, time: &mut f64, name: &str) {
+        reviewer2_inspector_frame(ctx, app, time, vec![]);
+        let (_, rects) = reviewer2_inspector_frame(ctx, app, time, vec![]);
+        let at = (rects.iter().find(|(id, _)| id == name))
+            .unwrap_or_else(|| panic!("the inspector draws {name}: {rects:?}"))
+            .1
+            .center();
+        reviewer2_click(ctx, app, time, at);
+    }
+
+    /// Drive `presses` in the real inspector of `document` (clip 2
+    /// selected); returns what the Core applied and the settled app.
+    fn inspector_sends(document: Document, presses: &[&str]) -> (Vec<Operation>, KinewrightApp) {
+        let (mut app, _engine) = crate::app::in1_tests::in1_harness(document);
+        app.focused_mut().selected_clip = Some(ClipId(2));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut time = 0.0;
+        for name in presses {
+            inspector_press(&ctx, &mut app, &mut time, name);
+        }
+        (mo2_applied(&app), app)
+    }
+
+    /// The generated inspector's green channel dragged in the real app.
+    fn solid_channel_sends() -> Vec<Operation> {
+        let (mut app, ctx) = reviewer2_solid_app();
+        let mut time = 0.0;
+        let (_, rects) = reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![]);
+        let from = rects
+            .iter()
+            .find(|(n, _)| n == "solid_g")
+            .unwrap()
+            .1
+            .center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
         };
-        vec![
+        let press = vec![egui::Event::PointerMoved(from), button(from, true)];
+        reviewer2_inspector_frame(&ctx, &mut app, &mut time, press);
+        for dx in [15.0, 30.0] {
+            let to = egui::Event::PointerMoved(from + egui::vec2(dx, 0.0));
+            reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![to]);
+        }
+        let release = vec![button(from + egui::vec2(30.0, 0.0), false)];
+        reviewer2_inspector_frame(&ctx, &mut app, &mut time, release);
+        let applied = mo2_applied(&app);
+        crate::app::in1_tests::in1_shutdown(&mut app);
+        applied
+    }
+
+    /// §8 parity checklist as a production-sender gate: every MO2 operation
+    /// row is driven through the real surface — inspector, toolbar menu,
+    /// Program viewer — and read back from the Core's op log, so a surface
+    /// disconnected anywhere between widget and Core fails its row. Every
+    /// delivered operation is a registry operation (the agent's path);
+    /// `preview_solo` is a registry capability whose Solo sender renders it.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn mo2_parity_checklist_is_complete() {
+        let registry = kinewright_agent::operation_tools().expect("the registry builds");
+        let registered = |variant: &str| registry.iter().any(|tool| tool.variant == variant);
+        let media = || mo2_document(media_clip(ClipId(2), AssetId(1), None));
+        let inspector = |presses: &[&str]| {
+            let (applied, mut app) = inspector_sends(media(), presses);
+            crate::app::in1_tests::in1_shutdown(&mut app);
+            applied
+        };
+        let rows = [
             (
                 "SetClipBlendMode",
                 "clip header blend dropdown",
-                variants(pick_blend(BlendMode::Normal, BlendMode::Multiply).operations()),
+                inspector(&["clip_blend_mode", "multiply"]),
             ),
             (
                 "SetSolidColor",
                 "solid colour editor (channel drag)",
-                variants(&drag_solid_channel(&core, "solid_g", &[20.0, 40.0]).0),
+                solid_channel_sends(),
             ),
-            ("AddSolidClip", "+ Layer ▸ New solid", place(false)),
+            (
+                "AddSolidClip",
+                "+ Layer ▸ New solid",
+                crate::timeline_ui::mo2_tests::mo2_layer_menu_sends(false),
+            ),
             (
                 "AddAdjustmentClip",
                 "+ Layer ▸ New adjustment clip",
-                place(true),
+                crate::timeline_ui::mo2_tests::mo2_layer_menu_sends(true),
             ),
             (
                 "AddTransition",
                 "+ Transition ▸ push/slide/wipe",
-                variants(&press_transition(None, "transition_add", "slide_up")),
+                inspector(&["transition_add", "slide_up"]),
             ),
-            ("SetEffectParam", "viewer transform drag", transform(false)),
+            (
+                "SetEffectParam",
+                "Program viewer transform drag",
+                crate::preview_ui::mo2_tests::mo2_program_viewer_drag(false).1,
+            ),
             (
                 "UpsertEffectKeyframe",
-                "viewer transform drag (keyed)",
-                transform(true),
+                "Program viewer transform drag (keyed)",
+                crate::preview_ui::mo2_tests::mo2_program_viewer_drag(true).1,
             ),
-        ]
-    }
-
-    /// §8 parity checklist: every MO2 operation has a GUI sender driven for
-    /// real; every GUI gesture's operations are registry operations (the
-    /// agent's path); `preview_solo` is a registry capability with the Solo
-    /// button as its sender; the seams are wired into production.
-    #[test]
-    fn mo2_parity_checklist_is_complete() {
-        let registry = kinewright_agent::operation_tools().expect("the registry builds");
-        let registered = |variant: &str| registry.iter().any(|tool| tool.variant == variant);
-        let drivers = mo2_sender_drivers();
-        for (variant, sender, produced) in &drivers {
+        ];
+        for (variant, sender, applied) in &rows {
+            let produced = variants(applied);
             assert!(
                 produced.iter().any(|name| name == variant),
-                "{sender} yields {variant}: {produced:?}"
+                "{sender} delivers {variant} to the Core: {produced:?}"
             );
             assert!(
                 produced.iter().all(|name| registered(name)),
@@ -13394,38 +13419,55 @@ mod mo2_parity {
         for operation in MO2_OPERATIONS {
             assert!(registered(operation), "{operation} is in the registry");
             assert!(
-                drivers.iter().any(|(variant, ..)| *variant == operation),
+                rows.iter().any(|(variant, ..)| *variant == operation),
                 "{operation} has a GUI sender"
             );
         }
+
+        // preview_solo: the header's Solo button opens the dialog, which runs
+        // the capability with R24's defaults and shows its strip.
         let capabilities =
             kinewright_agent::capability_tool_names().expect("capabilities enumerate");
         assert!(capabilities.iter().any(|name| name == "preview_solo"));
-        let document = mo2_document(media_clip(ClipId(2), AssetId(1), None));
-        let solo = header_surface(&document).press("clip_solo");
-        assert_eq!(solo.solo_request, Some((ClipId(2), false)));
-        for (source, needle) in [
-            (
-                include_str!("timeline_ui.rs"),
-                "self.generated_layer_menu(ui);",
-            ),
-            (include_str!("timeline_ui.rs"), "paint_transition_glyph("),
-            (include_str!("preview_ui.rs"), "self.handle_transform_drag("),
-            (include_str!("app.rs"), "self.show_solo_dialog(ui.ctx());"),
-            (
-                include_str!("inspector_ui.rs"),
-                "self.open_solo_dialog(clip, full_res);",
-            ),
-            (
-                include_str!("inspector_ui.rs"),
-                "solid_color_row(ui, clip.id, color",
-            ),
-        ] {
-            let production = source
-                .split_once("#[cfg(test)]\nmod ")
-                .map_or(source, |(before, _)| before);
-            assert!(production.contains(needle), "production wires {needle}");
-        }
+        let (applied, mut app) = inspector_sends(mo2_document(solid_clip()), &["clip_solo"]);
+        assert!(applied.is_empty(), "Solo applies nothing: {applied:?}");
+        let dialog = app
+            .solo_dialog
+            .as_ref()
+            .expect("the Solo button opens the dialog");
+        let sent = (dialog.clip, dialog.full_res, dialog.samples, dialog.context);
+        assert_eq!(sent, (ClipId(2), false, 8, None));
+        // Whole app frames (`eframe::App::ui`), so the dialog's call site is
+        // on the path too, until the capability's report line is painted.
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut frame = eframe::Frame::_new_kittest();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let painted = loop {
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                eframe::App::ui(&mut app, ui, &mut frame);
+            });
+            let painted = crate::theme::painted_text(&output);
+            if painted
+                .iter()
+                .any(|text| text.starts_with("isolated · 8 of 8 samples"))
+            {
+                break painted;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no strip: {painted:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let dialog = app.solo_dialog.as_ref().expect("still open");
+        assert!(
+            dialog
+                .strip()
+                .is_some_and(|strip| strip.report["clip_id"] == 2),
+            "the capability's strip is shown: {painted:?}"
+        );
+        crate::app::in1_tests::in1_shutdown(&mut app);
     }
 
     /// R26: a solo request opens the strip dialog, which runs the agent's
@@ -13448,6 +13490,293 @@ mod mo2_parity {
                 .any(|text| text.starts_with("solo_render_failed")),
             "the typed refusal is shown: {painted:?}"
         );
+        crate::app::in1_tests::in1_shutdown(&mut app);
+    }
+
+    // Injected inside inspector_ui::mo2_parity; experiments only.
+    fn reviewer2_barrier(app: &mut KinewrightApp) {
+        app.focused()
+            .core
+            .request(kinewright_core::Command::Query(
+                kinewright_core::Query::Snapshot,
+            ))
+            .unwrap();
+        crate::app::in1_tests::in1_drain_core(app, 0);
+    }
+    fn reviewer2_inspector_frame(
+        ctx: &egui::Context,
+        app: &mut KinewrightApp,
+        time: &mut f64,
+        events: Vec<egui::Event>,
+    ) -> (egui::FullOutput, Rects) {
+        *time += 0.05;
+        let out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 1400.0),
+                )),
+                time: Some(*time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let _ = crate::mixer_ui::take_strip_rects();
+                app.inspector(ui);
+            },
+        );
+        reviewer2_barrier(app);
+        (out, crate::mixer_ui::take_strip_rects())
+    }
+    fn reviewer2_click(
+        ctx: &egui::Context,
+        app: &mut KinewrightApp,
+        time: &mut f64,
+        at: egui::Pos2,
+    ) {
+        for pressed in [true, false] {
+            reviewer2_inspector_frame(
+                ctx,
+                app,
+                time,
+                vec![
+                    egui::Event::PointerMoved(at),
+                    egui::Event::PointerButton {
+                        pos: at,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+    }
+    fn reviewer2_solid_app() -> (KinewrightApp, egui::Context) {
+        let (mut app, _engine) = crate::app::in1_tests::in1_harness(mo2_document(solid_clip()));
+        app.focused_mut().selected_clip = Some(ClipId(2));
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        (app, ctx)
+    }
+    fn reviewer2_rgb(app: &KinewrightApp) -> SolidColor {
+        let ClipContent::Solid(c) = app.focused().document.clip(ClipId(2)).unwrap().content else {
+            panic!("solid")
+        };
+        c
+    }
+    #[test]
+    fn reviewer2_mo2_generated_inspector_channel_drags_reach_core_separately() {
+        let (mut app, ctx) = reviewer2_solid_app();
+        let mut time = 0.0;
+        let original = app.focused().document.clone();
+        let mut after = vec![];
+        for (field, index) in [("solid_r", 0), ("solid_g", 1), ("solid_b", 2)] {
+            let (_, rects) = reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![]);
+            let from = rects
+                .iter()
+                .find(|(n, _)| n == field)
+                .expect("real generated inspector exposes field")
+                .1
+                .center();
+            let before = reviewer2_rgb(&app);
+            reviewer2_inspector_frame(
+                &ctx,
+                &mut app,
+                &mut time,
+                vec![
+                    egui::Event::PointerMoved(from),
+                    egui::Event::PointerButton {
+                        pos: from,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            for dx in [15.0, 30.0, 45.0] {
+                reviewer2_inspector_frame(
+                    &ctx,
+                    &mut app,
+                    &mut time,
+                    vec![egui::Event::PointerMoved(from + egui::vec2(dx, 0.0))],
+                );
+            }
+            reviewer2_inspector_frame(
+                &ctx,
+                &mut app,
+                &mut time,
+                vec![egui::Event::PointerButton {
+                    pos: from + egui::vec2(45.0, 0.0),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            let got = reviewer2_rgb(&app);
+            let old = [before.r, before.g, before.b];
+            let new = [got.r, got.g, got.b];
+            assert!(new[index] > old[index]);
+            for k in 0..3 {
+                if k != index {
+                    assert_eq!(new[k], old[k]);
+                }
+            }
+            after.push(app.focused().document.clone());
+        }
+        for expected in [after[1].clone(), after[0].clone(), original] {
+            app.undo();
+            reviewer2_barrier(&mut app);
+            assert_eq!(app.focused().document, expected);
+        }
+        crate::app::in1_tests::in1_shutdown(&mut app);
+    }
+
+    fn reviewer2_key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    #[test]
+    fn reviewer2_mo2_separate_typed_channel_edits_are_separate_undo_steps() {
+        let (mut app, ctx) = reviewer2_solid_app();
+        let mut time = 0.0;
+        for number in [150, 170] {
+            let (_, rects) = reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![]);
+            let at = rects
+                .iter()
+                .find(|(n, _)| n == "solid_r")
+                .unwrap()
+                .1
+                .center();
+            reviewer2_click(&ctx, &mut app, &mut time, at);
+            reviewer2_inspector_frame(
+                &ctx,
+                &mut app,
+                &mut time,
+                vec![
+                    egui::Event::Text(number.to_string()),
+                    reviewer2_key(egui::Key::Enter),
+                ],
+            );
+            reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![]);
+            assert_eq!(reviewer2_rgb(&app).r, number);
+            time += 0.6;
+        }
+        app.undo();
+        reviewer2_barrier(&mut app);
+        let restored = reviewer2_rgb(&app).r;
+        crate::app::in1_tests::in1_shutdown(&mut app);
+        assert_eq!(
+            restored, 150,
+            "two separately committed text edits must not merge"
+        );
+    }
+
+    #[test]
+    fn reviewer2_mo2_picker_sessions_each_undo_once() {
+        let (mut app, ctx) = reviewer2_solid_app();
+        let mut time = 0.0;
+        let mut after = vec![];
+        let initial = app.focused().document.clone();
+        for session in 0..2_u8 {
+            let (out, rects) = reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![]);
+            let label = super::review_c2_inspector::texts(&out)
+                .into_iter()
+                .find(|(t, _)| t == "Colour")
+                .unwrap()
+                .1;
+            let field = rects.iter().find(|(n, _)| n == "solid_r").unwrap().1;
+            let at = egui::pos2(f32::midpoint(label.right(), field.left()), field.center().y);
+            reviewer2_click(&ctx, &mut app, &mut time, at);
+            reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![]);
+            let (out, _) = reviewer2_inspector_frame(&ctx, &mut app, &mut time, vec![]);
+            let square = out
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::epaint::Shape::Mesh(m)
+                        if m.calc_bounds().width() > 200.0 && m.calc_bounds().height() > 150.0 =>
+                    {
+                        Some(m.calc_bounds())
+                    }
+                    _ => None,
+                })
+                .expect("the actual picker popup's saturation/value plane");
+            for fraction in [
+                0.3 + f32::from(session) * 0.2,
+                0.4 + f32::from(session) * 0.2,
+            ] {
+                reviewer2_click(
+                    &ctx,
+                    &mut app,
+                    &mut time,
+                    square.min + square.size() * egui::vec2(fraction, 0.3),
+                );
+            }
+            reviewer2_inspector_frame(
+                &ctx,
+                &mut app,
+                &mut time,
+                vec![reviewer2_key(egui::Key::Escape)],
+            );
+            after.push(app.focused().document.clone());
+            time += 0.6;
+        }
+        assert_ne!(after[0], initial);
+        assert_ne!(after[0], after[1]);
+        for expected in [after[0].clone(), initial] {
+            app.undo();
+            reviewer2_barrier(&mut app);
+            assert_eq!(app.focused().document, expected);
+        }
+        crate::app::in1_tests::in1_shutdown(&mut app);
+    }
+
+    #[test]
+    fn reviewer2_mo2_unsupported_adjustment_transition_is_atomic_and_typed() {
+        let mut clip = solid_clip();
+        clip.content = ClipContent::Adjustment;
+        clip.transition_in = Some(Transition {
+            name: "push_left".into(),
+            duration: TimeCode(6),
+        });
+        let initial = mo2_document(clip.clone());
+        let (mut app, _engine) = crate::app::in1_tests::in1_harness(initial.clone());
+        app.send_operation(Operation::SetClipBlendMode {
+            clip: clip.id,
+            blend_mode: BlendMode::Screen,
+        });
+        reviewer2_barrier(&mut app);
+        let stable = app.focused().document.clone();
+        let revision = app.focused().revision;
+        let mut surface =
+            Surface::new(|ui, pending| transition_section(ui, &stable, &clip, pending));
+        surface.press("transition_type");
+        let edits = surface.pick(TRANSITION_DESCRIPTORS[0].name, "fade_from_black");
+        assert!(
+            edits.operations().len() >= 2,
+            "the real replacement removes then adds atomically"
+        );
+        // Assert the exact typed error through the same Core, then drive the app route.
+        let response = app
+            .focused()
+            .core
+            .request(kinewright_core::Command::DoBatch(
+                edits.operations().to_vec(),
+            ))
+            .unwrap();
+        assert!(format!("{response:?}").contains("TransitionUnsupportedOnAdjustment"));
+        app.submit_inspector_edits(edits);
+        reviewer2_barrier(&mut app);
+        assert_eq!(app.focused().revision, revision);
+        assert_eq!(app.focused().document, stable);
+        app.undo();
+        reviewer2_barrier(&mut app);
+        assert_eq!(*app.focused().document, initial);
         crate::app::in1_tests::in1_shutdown(&mut app);
     }
 }

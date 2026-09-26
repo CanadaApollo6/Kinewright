@@ -78,23 +78,32 @@
   the render hot path.
 - ME6 → §8 R26 (Part B3), readings the rule leaves open:
   - Solids:
-    - The colour editor is egui's picker plus R/G/B fields. A picker
-      session or a channel drag is one undo step.
+    - The colour editor is egui's picker plus labelled R/G/B fields. A
+      picker session, a channel drag or one typed-entry session (from the
+      field taking focus) is one undo step.
     - A new solid is mid-grey `#808080`.
   - Adjustments:
     - A new adjustment carries an empty look.
     - Its "intended affected tracks" are the selected clip's track.
       Without a selection, they are every video track with content in the
       span.
-  - Placement refusals go to the Operations incident log as the typed
-    `PlacementRefusal`, which carries span, kind and the track to sit above.
+  - A placement refusal is a formatted typed refusal: the pure
+    `PlacementRefusal` (span, kind, the track to sit above, or a default
+    span past the last frame) is rendered as text into the Operations
+    incident log; the struct itself is not retained there.
   - The viewer's transform overlay:
     - It yields to an expanded matte section (CC5 owns that pointer).
     - It writes through MO1's auto-key rule: keyed params get a key at the
       playhead, others a static.
-  - The solo dialog downscales a strip that outgrows the GPU's texture
-    side, rather than failing. A default 8-sample single strip is 2,560 px
-    wide, which is over egui's 2,048 default.
+    - Its outline, corner handles and scale pivot are the rendered layer:
+      the enabled effects' master, per-axis and fine scale, coarse and fine
+      offsets, rotation and anchor, as the compositor resolves them.
+  - The solo dialog never downscales: a strip past the GPU's texture side
+    (a default 8-sample strip is 2,560 px; egui's default side is 2,048) is
+    held as native-size tiles. Full-res opens at 1:1 (scroll to pan); a
+    fitted view says "shown at N%". The dialog also sends R24's context
+    (by blend, isolated, over below-stack) and sample count (2–16) — GUI
+    parity with the agent's arguments, not an exception (fix round 1).
 
 ## Changes in revision 2
 

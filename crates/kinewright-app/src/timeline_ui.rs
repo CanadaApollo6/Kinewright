@@ -3140,11 +3140,20 @@ pub(crate) struct PlacementRefusal {
     pub(crate) span: std::ops::Range<TimeCode>,
     /// The highest intended affected track an adjustment must sit above.
     pub(crate) above: Option<TrackId>,
+    /// The default span would end past the last representable frame.
+    pub(crate) overflow: bool,
 }
 
 impl std::fmt::Display for PlacementRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (start, end) = (self.span.start.0, self.span.end.0);
+        if self.overflow {
+            let kind = self.kind;
+            return write!(
+                formatter,
+                "A new {kind} from frame {start} would end past the last frame; move the playhead earlier"
+            );
+        }
         let above = self.above.map(|track| format!(" above track {track}"));
         let above = above.unwrap_or_default();
         write!(
@@ -3180,10 +3189,25 @@ pub(crate) fn generated_clip_placement(
     let fps = document.fps;
     let two_seconds = (2 * i64::from(fps.numerator()) + i64::from(fps.denominator()) / 2)
         / i64::from(fps.denominator()).max(1);
-    let span = selection.map_or(
-        playhead..TimeCode(playhead.0 + two_seconds.max(1)),
-        |(_, c)| c.timeline_start..clip_end(c),
-    );
+    let kind = if adjustment {
+        "adjustment clip"
+    } else {
+        "solid"
+    };
+    let refusal = |span, above, overflow| PlacementRefusal {
+        kind,
+        span,
+        above,
+        overflow,
+    };
+    // Lazy and checked: a selection never computes the default span.
+    let span = match selection {
+        Some((_, c)) => c.timeline_start..clip_end(c),
+        None => match playhead.0.checked_add(two_seconds.max(1)) {
+            Some(end) => playhead..TimeCode(end),
+            None => return Err(refusal(playhead..playhead, None, true)),
+        },
+    };
     let overlaps = |clip: &Clip| clip.timeline_start < span.end && clip_end(clip) > span.start;
     let floor = selection.map(|(index, _)| index).or_else(|| {
         (tracks.iter().enumerate())
@@ -3205,13 +3229,8 @@ pub(crate) fn generated_clip_placement(
         .or_else(|| (0..tracks.len()).find(|index| eligible(*index)));
     let (timeline_start, duration) = (span.start, TimeCode(span.end.0 - span.start.0));
     let Some(index) = chosen else {
-        let kind = if adjustment {
-            "adjustment clip"
-        } else {
-            "solid"
-        };
         let above = floor.map(|floor| tracks[floor].id);
-        return Err(PlacementRefusal { kind, span, above });
+        return Err(refusal(span, above, false));
     };
     let track = tracks[index].id;
     Ok(if adjustment {
@@ -7472,7 +7491,7 @@ mod review_c2_timeline;
 /// MO2 R26: the generated-clip placement rule, the "+ Layer" menu through a
 /// real app, and the wedge direction glyphs.
 #[cfg(test)]
-mod mo2_tests {
+pub(crate) mod mo2_tests {
     use std::time::Duration;
 
     use kinewright_core::{AssetId, Rational, SolidColor, TRANSITION_DESCRIPTORS, Track};
@@ -7656,6 +7675,7 @@ mod mo2_tests {
             kind: "adjustment clip",
             span: TimeCode(10)..TimeCode(70),
             above: Some(TrackId(1)),
+            overflow: false,
         };
         assert_eq!(refused, Err(expected.clone()));
         let message = expected.to_string();
@@ -7670,6 +7690,7 @@ mod mo2_tests {
                 kind: "solid",
                 span: TimeCode(10)..TimeCode(70),
                 above: None,
+                overflow: false,
             })
         );
     }
@@ -7727,6 +7748,92 @@ mod mo2_tests {
             }
             let _ = layer_menu_frame(ctx, app, events, *time);
         }
+    }
+
+    /// Fix round 1 (review 2 B3): the wedge glyph is painted by the real
+    /// timeline, not only by its helper — a directional transition shows its
+    /// family letter on the clip, a crossfade shows none.
+    #[test]
+    fn mo2_the_timeline_paints_directional_wedge_glyphs() {
+        use crate::app::in1_tests::{in1_harness, in1_shutdown};
+        let painted = |name: &str| {
+            let mut document = layered((30, 1), &[(V, &[(1, 0, 60), (2, 60, 120)])]);
+            document.duration = TimeCode(120);
+            document.tracks[0].clips[1].transition_in = Some(Transition {
+                name: name.to_owned(),
+                duration: TimeCode(30),
+            });
+            let (mut app, _engine) = in1_harness(document);
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 500.0));
+            let input = || egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input(), |ui| app.timeline(ui));
+            let output = ctx.run_ui(input(), |ui| app.timeline(ui));
+            in1_shutdown(&mut app);
+            crate::theme::painted_text(&output)
+        };
+        let push = painted("push_left");
+        assert!(push.iter().any(|text| text == "P"), "{push:?}");
+        let fade = painted("crossfade");
+        assert!(!fade.iter().any(|text| text == "P"), "{fade:?}");
+    }
+
+    /// The §8 parity gate's "+ Layer" rows: the real toolbar menu through the
+    /// app to the Core; returns the operations the Core applied.
+    pub(crate) fn mo2_layer_menu_sends(adjustment: bool) -> Vec<Operation> {
+        use crate::app::in1_tests::{in1_drain_until_revision, in1_harness, in1_shutdown};
+        let mut document = layered((30, 1), &[(V, &[(1, 10, 40)]), (V, &[])]);
+        (document.resolution, document.duration) = ((320, 180), TimeCode(40));
+        let selected = document.tracks[0].clips[0].id;
+        let (mut app, _engine) = in1_harness(document);
+        app.focused_mut().selected_clip = Some(selected);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let (mut time, from) = (0.0, app.focused().revision);
+        let entry = if adjustment {
+            "New adjustment clip"
+        } else {
+            "New solid"
+        };
+        // The whole timeline, toolbar included — not the menu function alone.
+        let mut frame = |app: &mut KinewrightApp, events: Vec<egui::Event>| {
+            time += 0.05;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 500.0));
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let _ = crate::mixer_ui::take_strip_rects();
+            let _ = ctx.run_ui(input, |ui| app.timeline(ui));
+            crate::mixer_ui::take_strip_rects()
+        };
+        for name in ["timeline_add_layer", entry] {
+            frame(&mut app, Vec::new());
+            let rects = frame(&mut app, Vec::new());
+            let at = (rects.iter().find(|(id, _)| id == name))
+                .unwrap_or_else(|| panic!("the timeline draws {name}: {rects:?}"))
+                .1
+                .center();
+            for pressed in [true, false] {
+                let button = egui::Event::PointerButton {
+                    pos: at,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                };
+                frame(&mut app, vec![egui::Event::PointerMoved(at), button]);
+            }
+        }
+        in1_drain_until_revision(&mut app, 0, from);
+        let applied = crate::inspector_ui::mo2_parity::mo2_applied(&app);
+        in1_shutdown(&mut app);
+        applied
     }
 
     /// R26: "+ Layer ▸ New solid" lands a solid through the real app and
@@ -7837,5 +7944,77 @@ mod mo2_tests {
             paint("push_left", 2).is_empty(),
             "too narrow a wedge stays bare"
         );
+    }
+
+    // Injected inside timeline_ui::mo2_tests; experiments only.
+    #[test]
+    fn reviewer2_mo2_successful_adjustment_menu_and_refusal_preserve_history() {
+        use crate::app::in1_tests::{
+            in1_drain_core, in1_drain_until_revision, in1_harness, in1_shutdown,
+        };
+        let mut document = layered((30, 1), &[(V, &[(1, 10, 40)]), (V, &[])]);
+        (document.resolution, document.duration) = ((320, 180), TimeCode(40));
+        let original = document.clone();
+        let selected = document.tracks[0].clips[0].id;
+        let (mut app, _engine) = in1_harness(document);
+        app.focused_mut().selected_clip = Some(selected);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut time = 0.0;
+        let from = app.focused().revision;
+        press_layer_menu(&ctx, &mut app, &mut time, "timeline_add_layer");
+        press_layer_menu(&ctx, &mut app, &mut time, "New adjustment clip");
+        in1_drain_until_revision(&mut app, 0, from);
+        let stable = app.focused().document.clone();
+        let placed = app.focused().revision;
+        let clip = &stable.tracks[1].clips[0];
+        assert_eq!(clip.content, ClipContent::Adjustment);
+        assert_eq!(clip.timeline_start, TimeCode(10));
+        assert_eq!(stable.clip_duration(clip), Ok(TimeCode(30)));
+        // Same menu now has no room above the selected clip.
+        press_layer_menu(&ctx, &mut app, &mut time, "timeline_add_layer");
+        press_layer_menu(&ctx, &mut app, &mut time, "New adjustment clip");
+        std::thread::sleep(Duration::from_millis(100));
+        in1_drain_core(&mut app, 0);
+        assert_eq!(app.focused().revision, placed);
+        assert_eq!(app.focused().document, stable);
+        app.undo();
+        in1_drain_until_revision(&mut app, 0, placed);
+        assert_eq!(
+            *app.focused().document,
+            original,
+            "refusal adds no undo entry"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    #[test]
+    fn reviewer2_mo2_selected_span_does_not_eagerly_overflow_unused_default() {
+        let mut document = layered((30, 1), &[(V, &[(1, 0, 60)]), (V, &[])]);
+        document.tracks[0].clips[0].timeline_start = TimeCode(i64::MAX - 100);
+        document.duration = TimeCode(i64::MAX - 40);
+        document.validate().unwrap();
+        let selected = document.tracks[0].clips[0].id;
+        let op = generated_clip_placement(
+            &document,
+            true,
+            Some(selected),
+            TimeCode(i64::MAX - 45),
+            None,
+        )
+        .expect("selected span is representable");
+        assert!(
+            matches!(op,Operation::AddAdjustmentClip{timeline_start:TimeCode(start),duration:TimeCode(60),..} if start==i64::MAX-100)
+        );
+        // Without a selection the default two-second span is unrepresentable:
+        // a typed refusal, not an overflow.
+        for adjustment in [true, false] {
+            let playhead = TimeCode(i64::MAX - 45);
+            let refused = generated_clip_placement(&document, adjustment, None, playhead, None);
+            let refusal = refused.expect_err("the default span passes i64::MAX");
+            assert!(refusal.overflow, "{refusal:?}");
+            let message = refusal.to_string();
+            assert!(message.contains("past the last frame"), "{message}");
+        }
     }
 }
