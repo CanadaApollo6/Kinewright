@@ -11128,6 +11128,47 @@ async fn solo_strip_inside_byte_budget() {
     server.shutdown();
 }
 
+/// MO2 R28: solo's peak compositor resources and elapsed time, reported (its
+/// budgets are gate 9's). A 1080p clip under an adjustment, the adjustment
+/// soloed at 16 samples and at full resolution, on the fallback adapter.
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn r28_solo_peak_resources_and_elapsed() {
+    use kinewright_agent::{SoloArgs, preview_solo};
+    let gpu = kinewright_media::GpuContext::headless(true).unwrap();
+    let data = kinewright_media::test_support::TempDirectory::new("mo2-r28-solo");
+    let engine =
+        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), data.path("data")).unwrap();
+    let source = "testsrc2=size=1920x1080:rate=30";
+    let mut arguments = vec!["-f", "lavfi", "-i", source, "-frames:v", "60"];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    let media = GeneratedMedia::ffmpeg("mo2-r28-solo", &arguments, "mp4");
+    let base = single_clip_document(engine.probe(media.path()).unwrap());
+    let span = base.duration.0;
+    let document = mo2_solo_stack(base, vec![mo2_solo_adjustment(2, span)]);
+    for full_res in [false, true] {
+        let args = SoloArgs {
+            expected_revision: kinewright_core::TimelineRevision(0),
+            clip_id: ClipId(2),
+            samples: 16,
+            context: None,
+            full_res,
+        };
+        let started = std::time::Instant::now();
+        let strip = preview_solo(&engine, args.expected_revision, &document, &args);
+        let elapsed = started.elapsed();
+        let peak = gpu.ledger().peak_bytes();
+        println!(
+            "R28 solo full_res={full_res} ok={} elapsed_ms={} ledger_peak_mib={:.1} live_mib={:.1}",
+            strip.is_ok(),
+            elapsed.as_millis(),
+            peak as f64 / f64::from(1 << 20),
+            gpu.ledger().live_bytes() as f64 / f64::from(1 << 20)
+        );
+        assert!(peak <= 384 << 20, "solo at 1080p holds the R28 ceiling");
+    }
+}
+
 /// MO2 B2 fix round 1: review 1's controlled probes, kept as regressions.
 ///
 /// A proof double stands in for the renderer so the arithmetic, temporal and

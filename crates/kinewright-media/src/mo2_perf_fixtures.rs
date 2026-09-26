@@ -182,9 +182,13 @@ fn within_ceiling(peak: u64, document: &Document) -> Result<(), String> {
         .ok_or(format!("ledger peak {peak} B > ceiling {limit} B"))
 }
 
-/// Pre-MO2 `Normal` baselines (mean ms over three runs, same protocol),
-/// measured at f241aa5 on this machine's adapters. R28's 5% rule.
-const BASELINES: &[(&str, &str, f64)] = &[];
+/// Pre-MO2 end-to-end `Normal` baselines (adapter, workload, mean ms over
+/// three runs), measured at f241aa5 on the RTX 3090 workstation with the
+/// same protocol and `FFmpeg` build. R28's 5% rule (ME13).
+const BASELINES: &[(&str, &str, f64)] = &[
+    ("llvmpipe", "typical_1080p", 497.86),
+    ("RTX 3090", "typical_1080p", 494.39),
+];
 
 fn workloads(only: Option<&str>) -> Vec<(&'static str, Workload, bool)> {
     let all: [(_, fn() -> Workload, _); 3] = [
@@ -192,7 +196,7 @@ fn workloads(only: Option<&str>) -> Vec<(&'static str, Workload, bool)> {
         ("blend_heavy_1080p", || blend_heavy(330), true),
         ("heavy_4k", || cuts((3840, 2160), 300, 4, 200, 12), false),
     ];
-    let wanted = |key: &str| only.is_none_or(|only| only == key);
+    let wanted = |key: &str| only.is_none_or(|only| only.split(',').any(|k| k == key));
     all.into_iter()
         .filter(|(key, ..)| wanted(key))
         .map(|(key, make, floored)| (key, make(), floored))
@@ -208,7 +212,11 @@ fn validate_us(document: &Document) -> f64 {
     started.elapsed().as_secs_f64() * 1e6 / 200.0
 }
 
-fn gate(acquire: fn() -> GpuContext) {
+/// Three runs of each selected workload (`R28_ONLY=a,b` narrows a lane):
+/// compositor frames (`resident`) hold the floors, end-to-end frames the 5%
+/// rule; every run holds its ledger ceiling. Returns the adapter's floor and
+/// every failure.
+fn lane(acquire: fn() -> GpuContext, resident: bool) -> (f64, Vec<String>) {
     let release = !cfg!(debug_assertions);
     assert!(
         release,
@@ -217,29 +225,32 @@ fn gate(acquire: fn() -> GpuContext) {
     let probe = acquire();
     let (floor, adapter) = (floor_fps(&probe), probe.monitor_proof_metadata().adapter);
     drop(probe);
-    // Diagnostics only: `R28_ONLY=<workload>` narrows a local run.
-    let only = std::env::var("R28_ONLY").ok();
+    // End to end defaults to the pinned typical lane; others on request (ME13).
+    let end_to_end = (!resident).then(|| "typical_1080p".to_owned());
+    let only = std::env::var("R28_ONLY").ok().or(end_to_end);
     let mut failures = Vec::new();
     for (key, Workload(document, _media), floored) in workloads(only.as_deref()) {
         let mut means = Vec::new();
         for index in 0..3 {
-            let result = run(&acquire(), &document, Duration::ZERO);
+            let gpu = acquire();
+            let result = run(&gpu, &document, Duration::ZERO, resident);
+            let ledger_peak = gpu.ledger().peak_bytes();
             println!(
-                "R28 adapter={adapter} workload={key} run={index} dims={:?} mean_ms={:.2} fps={:.1} p95_ms={:.2} ledger_peak_mib={:.1} validate_us={:.1}",
+                "R28 adapter={adapter} resident={resident} workload={key} run={index} dims={:?} mean_ms={:.2} fps={:.1} p95_ms={:.2} ledger_peak_mib={:.1} validate_us={:.1}",
                 result.dims,
                 result.mean_ms,
                 1e3 / result.mean_ms,
                 result.p95_ms,
-                result.ledger_peak as f64 / MIB as f64,
+                ledger_peak as f64 / MIB as f64,
                 validate_us(&document)
             );
             let verdicts = [
-                if floored {
+                if floored && resident {
                     throughput(&result, floor)
                 } else {
                     Ok(())
                 },
-                within_ceiling(result.ledger_peak, &document),
+                within_ceiling(ledger_peak, &document),
             ];
             failures.extend(
                 verdicts
@@ -252,7 +263,7 @@ fn gate(acquire: fn() -> GpuContext) {
         let mean = means.iter().sum::<f64>() / 3.0;
         let pinned = BASELINES
             .iter()
-            .filter(|(a, k, _)| adapter.contains(a) && *k == key);
+            .filter(|(a, k, _)| !resident && adapter.contains(a) && *k == key);
         for (_, _, baseline) in pinned {
             let delta = (mean / baseline - 1.0) * 100.0;
             println!(
@@ -265,14 +276,22 @@ fn gate(acquire: fn() -> GpuContext) {
             }
         }
     }
-    // The slowdown control: a per-frame delay of 2.5× the frame-time floor.
+    (floor, failures)
+}
+
+/// Gate 10 on compositor frames (ME13), then the slowdown control: a
+/// per-frame delay of 2.5× the frame-time floor must fail throughput.
+fn gate(acquire: fn() -> GpuContext) {
+    let (floor, failures) = lane(acquire, true);
     let Workload(document, _media) = blend_heavy(330);
     let delay = Duration::from_secs_f64(2.5 / floor);
-    let slowed = run(&acquire(), &document, delay);
+    let slowed = run(&acquire(), &document, delay, true);
     let verdict = throughput(&slowed, floor);
     println!(
-        "R28 adapter={adapter} control=slowdown delay_ms={:.0} verdict={verdict:?}",
-        delay.as_secs_f64() * 1e3
+        "R28 control=slowdown delay_ms={:.1} mean_ms={:.2} p95_ms={:.2} verdict={verdict:?}",
+        delay.as_secs_f64() * 1e3,
+        slowed.mean_ms,
+        slowed.p95_ms
     );
     assert!(
         verdict.is_err(),
@@ -287,10 +306,27 @@ fn blend_heavy_holds_floors_on_the_fallback_adapter() {
     gate(|| GpuContext::headless(true).expect("a lavapipe/WARP adapter"));
 }
 
+/// ME13: red on the RTX 3090 until PF1 — the pre-existing CPU monitor
+/// encode and layer upload exceed the 60 fps frame time on their own.
 #[test]
 #[ignore = "R28 hardware lane (the RTX 3090)"]
 fn blend_heavy_holds_floors_on_hardware() {
     gate(|| GpuContext::headless(false).expect("a hardware adapter"));
+}
+
+/// ME13: the end-to-end preview (decode included) is a tracked, non-gating
+/// baseline; only the 5% no-regression rule against f241aa5 gates it.
+#[test]
+#[ignore = "R28 end-to-end tracked lane (decode-bound until PF1)"]
+fn r28_end_to_end_tracked() {
+    let hardware = std::env::var("R28_HARDWARE").is_ok();
+    let acquire = if hardware {
+        || GpuContext::headless(false).expect("a hardware adapter")
+    } else {
+        || GpuContext::headless(true).expect("a lavapipe/WARP adapter")
+    };
+    let (_, failures) = lane(acquire, false);
+    assert!(failures.is_empty(), "R28 end-to-end failed: {failures:#?}");
 }
 
 /// Full-resolution frames of each workload stay inside their ceilings, and

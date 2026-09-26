@@ -49,6 +49,20 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw "cargo clippy --workspace --all-targets exited $LASTEXITCODE" }
 
+      # MO2 §13 gate 10, WARP leg (R28, ME13): compositor-frame floors
+      # (20 fps, p95 <= 3x mean), the ledger ceilings and the slowdown
+      # control on the fallback adapter, in release. The 4K lane (ceiling
+      # only) is local; its decode is too slow for CI.
+      - name: MO2 R28 perf gate (WARP)
+        shell: pwsh
+        env:
+          R28_ONLY: typical_1080p,blend_heavy_1080p
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\setup-ffmpeg.ps1 -SkipBuildCachePrune
+          cargo test --release -p kinewright-media --lib blend_heavy_holds_floors_on_the_fallback_adapter -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "R28 WARP gate exited $LASTEXITCODE" }
+
   linux:
     name: Linux workspace
     runs-on: ubuntu-latest

@@ -325,8 +325,23 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<FrameTexture, MediaError> {
+        let rendered = self.render_timed(document, project_at, resolution, scale, strategy);
+        rendered.map(|(frame, _)| frame)
+    }
+
+    /// MO2 R28 (ME13): [`Self::render`] and its compositor frame time —
+    /// render, readback and monitor encode, the decoded layers resident.
+    pub(crate) fn render_timed(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<(FrameTexture, std::time::Duration), MediaError> {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let started = std::time::Instant::now();
         let layers = compositor_layers(&decoded_layers);
         self.compositor
             .render_monitor_with_luts(
@@ -336,6 +351,13 @@ impl FrameRenderer {
                 Some(&self.lut_library),
             )
             .map_err(attribute_layer(&decoded_layers, project_at))
+            .map(|frame| (frame, started.elapsed()))
+    }
+
+    /// MO2 R28 (ME13): hold decoded sources resident for compositor frames.
+    #[cfg(test)]
+    pub(crate) fn set_cache_budget(&mut self, bytes: usize) {
+        self.cache_budget = bytes;
     }
 
     /// Composite one project frame for the document's delivery target.

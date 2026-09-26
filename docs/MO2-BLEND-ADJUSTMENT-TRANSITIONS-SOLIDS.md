@@ -271,6 +271,85 @@
   65519.98 → 65504, and 65520 refused, on both lanes. The G7 probe and
   the bit-exact probe were red with the target's conversion.
 
+- ME13 → §9 R28, §13 gate 10 (R28 worker stop, lead ruling N19):
+  **the floors bound compositor frames; decode is tracked.** R28 put
+  decode inside the floor protocol. Decode is outside MO2 and pre-dates
+  it, so the floors could not be met by optimising copies on any backend.
+  - *Evidence (release, 1280×720 proxy output from 1920×1080 documents,
+    `FrameRenderer` playback path, sequential decode).* End to end,
+    typical 1080p ran at ≈ 2 fps on both lavapipe and the RTX 3090, the
+    same as at f241aa5 (494–498 ms per frame). A probe with continuous
+    whole-clip tracks on the 3090 gave the cause:
+
+    | media tracks | mean ms | pattern |
+    |---|---|---|
+    | 1 | 64 | 21–22 ms cached frames; ~610 ms every 16th (prefetch) |
+    | 2 | 1,227 | ~1.2 s every frame |
+    | 3 | 1,909 | ~1.9 s every frame |
+
+    Mechanism: sequential prefetch holds 16 frames per source at
+    1280×720×8 B (7.37 MB). Two sources need 236 MB, over
+    `FRAME_CACHE_BYTE_BUDGET` (224 MiB). `reserve_cache_bytes` then evicts
+    by insertion order, which throws away the other source's
+    soonest-needed frames. The next frame misses, the decoder's
+    continuation no longer matches, and `decode_window` seeks from the
+    keyframe and re-decodes — every frame, for every source. A decode
+    plus convert costs ≈ 38 ms per 1080p source frame.
+  - *Amended protocol.* The absolute floors (lavapipe 8, WARP 20,
+    RTX 3090 60 fps) and p95 ≤ 3× mean apply to **compositor frames with
+    resident, pre-decoded sources**: render + readback + monitor encode,
+    measured by `FrameRenderer::render_timed` with the renderer's frame
+    cache raised to 1 GiB. Everything else is unchanged: 30 + 300 frames,
+    three runs, one frame in flight, preview proxy output, and the
+    ledger ceilings on every run. End-to-end preview frames (decode
+    included) are a **tracked, non-gating** baseline, and so is their
+    p95. The end-to-end **5% no-regression rule against f241aa5 still
+    gates** (`r28_end_to_end_tracked`, pinned typical baselines). Decode,
+    the cache policy and prefetch go to PF1.
+  - *Pins (compositor frames, three-run mean / worst p95).*
+
+    | backend | typical 1080p | blend_heavy 1080p | heavy 4K | floor |
+    |---|---|---|---|---|
+    | lavapipe (llvmpipe, LLVM 22.1.8) | 33.1 / 36.8 ms, 30.2 fps | 44.4 / 49.0 ms, 22.5 fps | 38.8 / 43.6 ms | 8 fps: holds |
+    | RTX 3090 (driver 615.71.09) | 28.9 / 36.8 ms, 34.6 fps | 36.5 / 46.1 ms, 27.4 fps | 31.9 / 42.0 ms | 60 fps: **missed, pre-existing** |
+    | WARP (Windows CI) | CI lane | CI lane | — (local only) | 20 fps |
+
+    The 3090 miss is recorded, not loosened. Its breakdown (blend_heavy
+    per frame, instrumented probe): CPU monitor encode 25.8 ms (CC1's
+    per-pixel f16 → BT.709 OETF in f32), layer upload `write_texture`
+    7.8 ms (three 1280×720 RGBA16F frames), GPU passes + snapshot copies
+    1.7 ms, readback copy + map 0.8 ms (a scratch build split the submit
+    to time these). Everything MO2's render path touches — passes,
+    snapshot copies, flag readback — totals ≈ 2.5 ms. The pre-existing
+    encode and upload alone, ≈ 34 ms, exceed the 16.7 ms frame time, so
+    no copy optimisation can meet the floor; the fix goes to PF1.
+    The slowdown control fails on both local lanes: lavapipe with a
+    312.5 ms delay (2.8 fps), the 3090 with 41.7 ms (12.6 fps).
+  - *End to end (tracked; typical 1080p, three-run mean / worst p95).*
+
+    | backend | f241aa5 | MO2 tip | Δ (5% rule) |
+    |---|---|---|---|
+    | lavapipe | 497.9 / 1,587 ms | 489.1 / 1,548 ms | −1.8%: holds |
+    | RTX 3090 | 494.4 / 1,576 ms | 485.2 / 1,554 ms | −1.9%: holds |
+
+    Both trees ran the same protocol code against the same pinned FFmpeg
+    build (`BASELINES` in `mo2_perf_fixtures`). A decode-bound frame
+    moves with code layout: on identical sources, the tip binary's mean
+    ranged from −10% to +3% across three rebuilds. The pins are the
+    committed build. blend_heavy end to end: 1,709 ms (3090, one run),
+    tracked only, because it has no pre-MO2 equivalent.
+  - *Solo (lavapipe, release).* A 1080p clip under an adjustment, with
+    the adjustment soloed. The 16-sample strip took 3.8 s and the
+    full-resolution pair 0.47 s. The ledger peaked at 79.1 MiB and
+    returned to 0 (`r28_solo_peak_resources_and_elapsed`).
+  - *Ledger peaks.* Preview-proxy runs: typical 56.3 MiB, blend_heavy
+    63.3 MiB, heavy 4K 70.3 MiB. Full-resolution frames: 126.6, 142.4
+    and 632.8 MiB. Ceilings are 384 / 384 / 1,536 MiB. Not charged: the
+    LUT-atlas upload staging, which exists only on an atlas-cache miss
+    and is bounded by the charged atlas.
+  - *`validate()` per frame (N11-4):* 1.1–1.8 µs at 1080p, 10 µs for the
+    200-clip 4K document. No revision-keyed cache is needed.
+
 ## Changes in revision 2
 
 | Finding | Change → section |
@@ -790,7 +869,7 @@ fail throughput. The ledger control submits four 4096×4096 RGBA16F
 reservations, totalling 512 MiB, and must reject the 1080p budget. Extra
 copies and an unspecified 8K texture alone are not guaranteed failing
 controls. Report solo peak resources and elapsed time. Part B measures on
-all three backends and pins; a miss optimises copies, never tolerances.
+all three backends and pins; a miss optimises copies, never tolerances. *(ME13: the floors bind compositor frames with resident sources; end-to-end is tracked, its 5% rule gates.)*
 
 ## 10 Incidents
 
@@ -911,7 +990,8 @@ Each names its lane; "no regressions" alone gates nothing (MO0 §0).
     control (per-frame delay greater than twice the backend's frame-time
     floor) fails throughput and the ledger control (four 4096×4096
     RGBA16F reservations, 512 MiB) rejects the 1080p budget (fails: no
-    floors). Backend + ledger tests.
+    floors). Backend + ledger tests. *(ME13: compositor frames; RTX 3090
+    floor missed, pre-existing, PF1.)*
 11. `v2_stamps_only_when_used` — MO2-feature files stamp 2 and reopen;
     the v1 corpus writes byte-identical and stays 1. Actual old-reader
     tests distinguish unknown-content parse failure,
