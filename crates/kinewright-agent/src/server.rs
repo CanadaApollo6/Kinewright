@@ -17233,6 +17233,18 @@ fn state_delta(
 
 /// IN1 §8 rule 5: mirror one `AgentEvent::Cost` into an incident's telemetry.
 ///
+/// The internal registry's half of the R25 sextuple: tool count and the
+/// serialized, input-schema and description bytes of every generated mutator
+/// and inspector — the numbers each endpoint pin site asserts beside the
+/// served quad (MO2 R25/R30).
+///
+/// # Errors
+///
+/// Returns a schema error when operation tool generation fails.
+pub fn capability_tool_metrics() -> Result<ToolSurfaceMetrics, SchemaError> {
+    KinewrightMcp::capability_tools().map(|tools| ToolSurfaceMetrics::measure(&tools))
+}
+
 /// The six token categories are the same six the event reports, each
 /// `Option`-wrapped here because IN1 records no session: a category nobody
 /// reported stays honestly absent rather than silently zero. They are *not* a

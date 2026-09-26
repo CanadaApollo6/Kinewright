@@ -2518,8 +2518,9 @@ async fn cc7_prepare_commit_and_compare(
 /// MO1 A4c adds the last one, MO1 Part C adds one **registry-only**
 /// planner, `plan_motion`, and MO2 Part A generates four more
 /// **registry-only** mutators. The registry sextuple does move, to
-/// `152 / 64 / 88`,
-/// which is the two assertions below.
+/// `152 / 64 / 88`, which is the count assertions below, and its three byte
+/// measures `2 000 521 / 1 846 842 / 128 713` are pinned beside the served
+/// quad.
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)]
 async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
@@ -2681,6 +2682,20 @@ async fn cc7_the_agent_surface_is_unchanged_by_this_slice() {
     assert_eq!(metrics.serialized_bytes, 5_660, "{metrics:?}");
     assert_eq!(metrics.input_schema_bytes, 3_510, "{metrics:?}");
     assert_eq!(metrics.description_bytes, 998, "{metrics:?}");
+
+    // MO2 R25/R30 (review 1 S1): the registry byte trio, so a registry-only
+    // description or schema change cannot pass this pin site unseen.
+    let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
+    assert_eq!(
+        (
+            registry_metrics.tool_count,
+            registry_metrics.serialized_bytes,
+            registry_metrics.input_schema_bytes,
+            registry_metrics.description_bytes
+        ),
+        (152, 2_000_521, 1_846_842, 128_713),
+        "registry={registry_metrics:?}"
+    );
 
     client.cancel().await.unwrap();
     server.shutdown();
@@ -10489,7 +10504,8 @@ async fn in1_neither_capability_is_callable_as_a_tool() {
 /// The registry sextuple is `152 / 64 / 88 / 2 000 521 / 1 846 842 / 128 713`,
 /// pinned byte for byte with its decomposition in
 /// `server::tests::served_surface_is_small_and_keeps_the_internal_registry_discoverable`;
-/// this test pins the three counts and the served quad over the live endpoint.
+/// this test pins all six registry numbers and the served quad over the live
+/// endpoint.
 ///
 /// **Pin site 3 of 3, and the site that carries the counter** (`IN1b` §6.4
 /// rule 7). IN1 §6.6 rule 25 and §9 clause 13 say "both pin sites"; there are
@@ -10553,6 +10569,18 @@ async fn mo2_the_served_quad_does_not_move_for_the_twenty_second_measurement() {
         "MO2 Part A adds four Operation variants"
     );
     assert_eq!(registry.len() - operations.len(), 88);
+    // MO2 R25/R30 (review 1 S1): the registry byte trio beside the counts.
+    let registry_metrics = kinewright_agent::capability_tool_metrics().unwrap();
+    assert_eq!(
+        (
+            registry_metrics.tool_count,
+            registry_metrics.serialized_bytes,
+            registry_metrics.input_schema_bytes,
+            registry_metrics.description_bytes
+        ),
+        (152, 2_000_521, 1_846_842, 128_713),
+        "registry={registry_metrics:?}"
+    );
     let state = registry
         .iter()
         .position(|entry| entry == "get_timeline_state")

@@ -75,7 +75,7 @@ pub use server::{
     IN1_INCIDENT_SERIALIZED_CEILING_BYTES, INVESTIGATOR_BROKER_TIMEOUT,
     INVESTIGATOR_CAPABILITY_DENYLIST, INVESTIGATOR_WORKER_THREADS, IncidentLogHandle,
     InvestigatorSessionContext, MIX_MEASUREMENT_SAMPLE_RATE, McpServer, McpServerError,
-    mirror_agent_cost,
+    capability_tool_metrics, mirror_agent_cost,
 };
 pub use session::{
     BudgetKind, CANCELLED_BY_OWNER, ConfirmationPolicy, INVESTIGATOR_CONFIRMATION_REFUSAL,
