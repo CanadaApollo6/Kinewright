@@ -22,7 +22,9 @@ pub const SOLO_REPORT_BUDGET_BYTES: usize = 4 * 1024;
 pub const SOLO_PNG_BUDGET_BYTES: usize = 768 * 1024;
 pub const SOLO_WIRE_BUDGET_BYTES: usize = 1_056 * 1024;
 const MAX_THUMB_PIXELS: usize = 3_276_800;
-const MAX_FULL_SIDE: usize = 8_192;
+/// Every proof renders at working resolution on a device that requires
+/// `wgpu::Limits::default()`: 8192-px 2D textures, on every lane.
+const MAX_RENDER_SIDE: usize = 8_192;
 const MAX_FULL_PIXELS: usize = 16_777_216;
 
 /// MO2 R24: what the soloed layer is drawn over.
@@ -93,6 +95,31 @@ impl SoloError {
     #[must_use]
     pub fn body(&self) -> Value {
         json!({"code": self.code(), "message": self.to_string(), "applied": false})
+    }
+
+    /// The MCP refusal, bounded like a strip (R25): one whose report or
+    /// complete serialization is over budget (a path-bearing render failure)
+    /// becomes a typed, fixed-size `solo_over_budget`.
+    #[must_use]
+    pub fn to_result(&self) -> CallToolResult {
+        let refusal = |error: &Self| {
+            let text = format!("preview_solo rejected: {error}");
+            let mut result = CallToolResult::error(vec![ContentBlock::text(text)]);
+            result.structured_content = Some(error.body());
+            result
+        };
+        let result = refusal(self);
+        let report = self.body().to_string().len();
+        let wire = serde_json::to_vec(&result).map_or(usize::MAX, |wire| wire.len());
+        for (limit, observed, allowed) in [
+            ("report_bytes", report, SOLO_REPORT_BUDGET_BYTES),
+            ("response_bytes", wire, SOLO_WIRE_BUDGET_BYTES),
+        ] {
+            if observed > allowed {
+                return refusal(&over(limit, observed, allowed));
+            }
+        }
+        result
     }
 }
 
@@ -176,10 +203,12 @@ pub fn preview_solo(
         document.resolution.0 as usize,
         document.resolution.1 as usize,
     );
-    let full_pixels = width * height * rows;
-    if args.full_res && width.max(height) > MAX_FULL_SIDE {
-        return Err(over("full_res_side", width.max(height), MAX_FULL_SIDE));
+    // Before any product: a side past the device limit would panic in the
+    // renderer, and `u32::MAX` squared overflows.
+    if width.max(height) > MAX_RENDER_SIDE {
+        return Err(over("render_side", width.max(height), MAX_RENDER_SIDE));
     }
+    let full_pixels = width * height * rows;
     if args.full_res && full_pixels > MAX_FULL_PIXELS {
         return Err(over(
             "full_res_decoded_pixels",
@@ -331,14 +360,18 @@ const fn over(limit: &'static str, observed: usize, allowed: usize) -> SoloError
     }
 }
 
-/// R24: `floor(i×(L−1)/(k−1))`, or `[0]` for `k = 1`.
+/// R24: `floor(i×(L−1)/(k−1))`, or `[0]` for `k = 1`; in `i128`, so any
+/// valid `i64` span samples without overflow.
 #[must_use]
 pub fn sample_offsets(length: i64, count: usize) -> Vec<i64> {
-    let count = i64::try_from(count).unwrap_or(i64::MAX);
+    let count = i128::try_from(count).unwrap_or(i128::MAX);
     if count <= 1 {
         return vec![0];
     }
-    (0..count).map(|i| i * (length - 1) / (count - 1)).collect()
+    let last = i128::from(length) - 1;
+    (0..count)
+        .map(|i| i64::try_from(i * last / (count - 1)).unwrap_or(i64::MAX))
+        .collect()
 }
 
 /// Aspect-preserving fit inside `bound × 2·bound`, never upscaling.

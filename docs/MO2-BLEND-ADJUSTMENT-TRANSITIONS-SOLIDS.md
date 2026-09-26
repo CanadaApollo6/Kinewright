@@ -53,8 +53,14 @@
   that way, and a lone `clip` would be the registry's only exception.
   `SoloError` carries two variants beyond the three R24 names:
   `InvalidSamples` (`samples` outside 2..16, which the schema cannot bound)
-  and `RenderFailed` (the proof path's own `MediaError`, kept typed rather
-  than folded into `SoloClipNotVisible`). A `context: isolated` sent for an
+  and `RenderFailed` (a typed outer variant kept apart from
+  `SoloClipNotVisible`; the proof path's inner `MediaError` is carried
+  stringified, not as a typed payload). Refusals are budgeted like strips:
+  one whose JSON body passes 4 KiB or whose serialized response passes
+  1,056 KiB (a path-bearing render failure) is answered as a fixed-size
+  `solo_over_budget` instead, and a working raster past the device's 8192-px
+  texture side is refused `solo_over_budget` (`render_side`) in every mode
+  before any product or allocation (fix round 1). A `context: isolated` sent for an
   adjustment is answered as `below` — the report says so — rather than
   refused, since R24 says "no override". Codes are `solo_clip_not_visible`,
   `solo_window_empty`, `solo_over_budget`, `solo_invalid_samples`,

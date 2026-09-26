@@ -143,7 +143,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     engine.set_document(Arc::new(document.clone()));
     for at in [TimeCode(0), TimeCode(7), TimeCode(30)] {
         engine.request_frame(at);
-        let frame = receive_frame(&frames, at)?;
+        let frame = receive_frame(&frames, &events, at)?;
         let center = usize::try_from(frame.width * (frame.height / 2) + frame.width / 2)? * 4;
         println!(
             "preview frame {} center={:?}",
@@ -259,16 +259,26 @@ fn generate_source(
     Ok(())
 }
 
+/// The frame at `requested`, or the engine's own error rather than a bare
+/// `Timeout` when the preview path fails.
 fn receive_frame(
     frames: &crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    events: &crossbeam_channel::Receiver<MediaEvent>,
     requested: TimeCode,
 ) -> Result<kinewright_core::FrameTexture, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        while let Ok(event) = events.try_recv() {
+            if let MediaEvent::Error(error) = event {
+                return Err(format!("preview frame {}: {error}", requested.0).into());
+            }
+        }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let (at, frame) = frames.recv_timeout(remaining)?;
-        if at == requested {
-            return Ok(frame);
+        match frames.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok((at, frame)) if at == requested => return Ok(frame),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) if !remaining.is_zero() => {}
+            Ok(_) => {}
+            Err(error) => return Err(error.into()),
         }
     }
 }

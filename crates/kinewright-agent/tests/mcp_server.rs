@@ -11127,3 +11127,554 @@ async fn solo_strip_inside_byte_budget() {
     client.cancel().await.unwrap();
     server.shutdown();
 }
+
+/// MO2 B2 fix round 1: review 1's controlled probes, kept as regressions.
+///
+/// A proof double stands in for the renderer so the arithmetic, temporal and
+/// boundary contract is exact and cheap: every call records the frame and the
+/// enabled clips it saw, and its pixels encode both. The real-endpoint gates
+/// above stay the renderer's evidence; these pin what they cannot reach.
+mod mo2_solo_review {
+    use std::sync::Mutex;
+
+    use kinewright_agent::{SoloArgs, SoloContext, SoloError, SoloStrip, preview_solo};
+    use kinewright_core::{
+        BlendMode, MonitorProof, MonitorProofMetadata, RgbaImage, SceneStatus, SilenceStatus,
+        TimelineRevision, TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord,
+        TranscriptStatus, VisualAssetResult,
+    };
+
+    use super::*;
+
+    /// Records `(frame, enabled clip ids)` per proof; pixels are
+    /// `[frame, Σ ids, 91]`, or xorshift noise when `noise`.
+    #[derive(Default)]
+    struct ProofDouble {
+        calls: Mutex<Vec<(i64, Vec<u64>)>>,
+        noise: bool,
+        adapter_len: usize,
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    impl Analysis for ProofDouble {
+        fn request_waveform(&self, _: MediaAsset, _: u64) -> bool {
+            false
+        }
+        fn request_thumbnail(&self, _: MediaAsset, _: TimeCode, _: u32, _: u64) -> bool {
+            false
+        }
+        fn visual_asset_results(&self) -> crossbeam_channel::Receiver<VisualAssetResult> {
+            crossbeam_channel::unbounded().1
+        }
+        fn probe(&self, _: &std::path::Path) -> Result<MediaAsset, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+        fn thumbnail_at(&self, _: TimeCode, _: u32) -> Result<RgbaImage, MediaError> {
+            Err(MediaError::NotImplemented)
+        }
+        fn request_transcription(&self, _: MediaAsset) {}
+        fn transcript_status(&self, _: &MediaAsset) -> TranscriptStatus {
+            TranscriptStatus::NotRequested
+        }
+        fn timeline_transcript(
+            &self,
+            _: &Document,
+            _: Option<std::ops::Range<TimeCode>>,
+        ) -> Result<Vec<TimelineTranscriptWord>, MediaError> {
+            Ok(vec![])
+        }
+        fn request_silence_detection(&self, _: MediaAsset) {}
+        fn silence_status(&self, _: &MediaAsset) -> SilenceStatus {
+            SilenceStatus::NotRequested
+        }
+        fn timeline_silences(
+            &self,
+            _: &Document,
+            _: Option<std::ops::Range<TimeCode>>,
+            _: TimeCode,
+        ) -> Result<Vec<TimelineSilenceSpan>, MediaError> {
+            Ok(vec![])
+        }
+        fn request_scene_detection(&self, _: MediaAsset) {}
+        fn scene_status(&self, _: &MediaAsset) -> SceneStatus {
+            SceneStatus::NotRequested
+        }
+        fn timeline_scene_changes(
+            &self,
+            _: &Document,
+            _: Option<std::ops::Range<TimeCode>>,
+            _: u16,
+        ) -> Result<Vec<TimelineSceneChange>, MediaError> {
+            Ok(vec![])
+        }
+        fn monitor_proof_for_document(
+            &self,
+            doc: Arc<Document>,
+            at: TimeCode,
+        ) -> Result<MonitorProof, MediaError> {
+            let active: Vec<_> = (doc.tracks.iter().flat_map(|t| &t.clips))
+                .filter(|c| c.is_enabled_at(TimeCode(at.0 - c.timeline_start.0)))
+                .map(|c| c.id.0)
+                .collect();
+            self.calls.lock().unwrap().push((at.0, active.clone()));
+            let (width, height) = doc.resolution;
+            assert!(
+                width <= 8192 && height <= 8192,
+                "proof must be refused before an unsafe raster allocation"
+            );
+            let count = width as usize * height as usize;
+            let sum = active.iter().sum::<u64>();
+            let mut pixels = Vec::with_capacity(count * 4);
+            let mut state = (at.0 as u64).wrapping_add(0x00ab_c123).wrapping_add(sum);
+            for _ in 0..count {
+                if self.noise {
+                    for _ in 0..3 {
+                        state ^= state << 13;
+                        state ^= state >> 7;
+                        state ^= state << 17;
+                        pixels.push(state as u8);
+                    }
+                } else {
+                    pixels.extend_from_slice(&[at.0 as u8, sum as u8, 91]);
+                }
+                pixels.push(255);
+            }
+            let mut metadata = MonitorProofMetadata::test_double();
+            if self.adapter_len > 0 {
+                metadata.adapter = "a".repeat(self.adapter_len);
+            }
+            Ok(MonitorProof {
+                image: RgbaImage {
+                    width,
+                    height,
+                    pixels,
+                },
+                metadata,
+            })
+        }
+    }
+
+    /// A solid (clip 1), and over it an adjustment (clip 2) when `paired`.
+    fn doc(width: u32, height: u32, length: i64, paired: bool) -> Document {
+        let mut clips = vec![mo2_solo_solid(1, [40, 70, 90], length)];
+        if paired {
+            clips.push(mo2_solo_adjustment(2, length));
+        }
+        let base = Document {
+            resolution: (width, height),
+            duration: TimeCode(length),
+            ..Document::default()
+        };
+        mo2_solo_stack(base, clips)
+    }
+
+    fn args(paired: bool) -> SoloArgs {
+        SoloArgs {
+            expected_revision: TimelineRevision(0),
+            clip_id: ClipId(if paired { 2 } else { 1 }),
+            samples: 16,
+            context: None,
+            full_res: false,
+        }
+    }
+
+    fn solo(
+        document: &Document,
+        args: &SoloArgs,
+        proof: &dyn Analysis,
+    ) -> Result<SoloStrip, SoloError> {
+        preview_solo(proof, TimelineRevision(0), document, args)
+    }
+
+    fn frames(strip: &SoloStrip) -> Vec<i64> {
+        (strip.report["samples"].as_array().unwrap().iter())
+            .map(|sample| sample["frame"].as_i64().unwrap())
+            .collect()
+    }
+
+    /// A valid `i64::MAX`-frame span samples in wide arithmetic, not a panic.
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn huge_frame_span_is_safe() {
+        let mut document = doc(8, 8, i64::MAX, false);
+        document.tracks[0].clips[0].enabled = false;
+        document.validate().unwrap();
+        let proof = ProofDouble::default();
+        let outcome = std::panic::catch_unwind(|| solo(&document, &args(false), &proof));
+        let strip = outcome.expect("a valid i64 span must not panic").unwrap();
+        let expected: Vec<_> = (0..16_i128)
+            .map(|i| (i * (i128::from(i64::MAX) - 1) / 15) as i64)
+            .collect();
+        assert_eq!(frames(&strip), expected);
+    }
+
+    /// A `u32::MAX` square pair is refused typed before any multiplication
+    /// can overflow, and before a single proof.
+    #[test]
+    fn oversized_pair_refuses_before_multiplication() {
+        let document = doc(u32::MAX, u32::MAX, 1, true);
+        let proof = ProofDouble::default();
+        for full_res in [true, false] {
+            let args = SoloArgs {
+                full_res,
+                ..args(true)
+            };
+            let outcome = std::panic::catch_unwind(|| solo(&document, &args, &proof));
+            let outcome = outcome.expect("an oversized raster must refuse, not panic");
+            assert!(
+                matches!(outcome, Err(SoloError::SoloOverBudget { .. })),
+                "{outcome:?}"
+            );
+        }
+        assert!(proof.calls.lock().unwrap().is_empty());
+    }
+
+    /// The 8192 side and 16 Mpx decoded limits hold at their exact edges; a
+    /// one-frame span emits exactly one sample.
+    #[test]
+    fn dimension_limits_and_single_frame() {
+        let proof = ProofDouble::default();
+        let full = SoloArgs {
+            full_res: true,
+            ..args(true)
+        };
+        for (width, height) in [(8193, 1), (4096, 4096), (8192, 2049)] {
+            let outcome = solo(&doc(width, height, 1, true), &full, &proof);
+            assert!(
+                matches!(outcome, Err(SoloError::SoloOverBudget { .. })),
+                "{width}x{height}: {outcome:?}"
+            );
+        }
+        assert!(proof.calls.lock().unwrap().is_empty());
+        let edge = SoloArgs {
+            full_res: true,
+            ..args(false)
+        };
+        let strip = solo(&doc(8192, 1, 1, false), &edge, &proof).unwrap();
+        assert_eq!(strip.image.width, 8192);
+        let strip = solo(&doc(4096, 2048, 1, true), &full, &proof).unwrap();
+        assert_eq!((strip.image.width, strip.image.height), (4096, 4096));
+        for paired in [false, true] {
+            let strip = solo(&doc(17, 35, 1, paired), &args(paired), &proof).unwrap();
+            assert_eq!(strip.report["emitted"], 1);
+            assert_eq!(frames(&strip), [0]);
+            mo2_assert_solo_budgets(&strip.to_result());
+        }
+    }
+
+    /// An empty source span refuses typed; a shifted span samples its own
+    /// project frames.
+    #[test]
+    fn empty_and_outside_span() {
+        let proof = ProofDouble::default();
+        let mut document = doc(8, 8, 1, false);
+        document.tracks[0].clips[0].source_range.end = TimeCode(0);
+        let outcome = solo(&document, &args(false), &proof);
+        assert!(
+            matches!(outcome, Err(SoloError::SoloWindowEmpty { .. })),
+            "{outcome:?}"
+        );
+        let mut document = doc(8, 8, 5, false);
+        document.tracks[0].clips[0].timeline_start = TimeCode(10);
+        document.duration = TimeCode(15);
+        document.validate().unwrap();
+        let strip = solo(&document, &args(false), &proof).unwrap();
+        assert_eq!(frames(&strip), [10, 11, 12, 13, 14]);
+    }
+
+    /// Each sample renders at its own project frame, BEFORE then AFTER, over
+    /// the true below-stack with keyed upper layers hidden; the clip's local
+    /// enable curve yields inactive cells; blend picks the default context.
+    #[test]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn exact_context_pairs_and_local_enable() {
+        let mut document = doc(17, 31, 12, true);
+        document.tracks.push(Track {
+            id: TrackId(3),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![mo2_solo_solid(3, [0, 255, 0], 12)],
+        });
+        for track in &mut document.tracks {
+            track.clips[0].timeline_start = TimeCode(20);
+        }
+        document.duration = TimeCode(32);
+        let hold = |keys: serde_json::Value| Some(serde_json::from_value(keys).unwrap());
+        document.tracks[2].clips[0].enabled_curve =
+            hold(json!({"keyframes": [{"at": 0, "value": 1, "interpolation": "hold"}]}));
+        document.tracks[1].clips[0].enabled_curve = hold(json!({"keyframes": [
+            {"at": 0, "value": 1, "interpolation": "hold"},
+            {"at": 5, "value": 0, "interpolation": "hold"}
+        ]}));
+        document.validate().unwrap();
+        let original = document.clone();
+        let proof = ProofDouble::default();
+        let strip = solo(&document, &args(true), &proof).unwrap();
+        let expected = [20, 21, 23, 24, 26, 27, 29, 31];
+        assert_eq!(frames(&strip), expected);
+        for (column, frame) in expected.into_iter().enumerate() {
+            let sample = &strip.report["samples"][column];
+            assert_eq!(sample["active"], frame < 25, "{sample}");
+            if frame < 25 {
+                for (row, ids) in [(0, 1), (1, 3)] {
+                    let at = (row * 31 * strip.image.width as usize + column * 17) * 4;
+                    assert_eq!(&strip.image.pixels[at..at + 3], &[frame as u8, ids, 91]);
+                }
+            }
+        }
+        assert_eq!(
+            *proof.calls.lock().unwrap(),
+            [20, 21, 23, 24]
+                .into_iter()
+                .flat_map(|frame| [(frame, vec![1]), (frame, vec![1, 2])])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(document, original, "the snapshot is never mutated");
+
+        let mut screen = mo2_solo_solid(2, [20, 30, 40], 12);
+        (screen.timeline_start, screen.blend_mode) = (TimeCode(20), BlendMode::Screen);
+        document.tracks[1].clips[0] = screen;
+        let mut pair = SoloArgs {
+            samples: 2,
+            ..args(true)
+        };
+        let proof = ProofDouble::default();
+        solo(&document, &pair, &proof).unwrap();
+        assert_eq!(
+            proof.calls.lock().unwrap()[0],
+            (20, vec![1, 2]),
+            "non-normal: below"
+        );
+        pair.context = Some(SoloContext::Isolated);
+        let proof = ProofDouble::default();
+        solo(&document, &pair, &proof).unwrap();
+        assert_eq!(
+            proof.calls.lock().unwrap()[0],
+            (20, vec![2]),
+            "explicit isolation"
+        );
+    }
+
+    /// Incompressible odd sizes either fit every budget after degrading or
+    /// refuse typed; oversized report metadata refuses on `report_bytes`.
+    #[test]
+    fn adversarial_budgets() {
+        let mut refusals = 0;
+        for (width, height, paired) in [
+            (321, 639, false),
+            (321, 639, true),
+            (641, 1281, true),
+            (319, 641, false),
+            (1, 8192, true),
+        ] {
+            let proof = ProofDouble {
+                noise: true,
+                ..ProofDouble::default()
+            };
+            let strip = match solo(&doc(width, height, 17, paired), &args(paired), &proof) {
+                Ok(strip) => strip,
+                Err(SoloError::SoloOverBudget { .. }) => {
+                    refusals += 1;
+                    continue;
+                }
+                other => panic!("{other:?}"),
+            };
+            mo2_assert_solo_budgets(&strip.to_result());
+            let emitted = strip.report["emitted"].as_u64().unwrap();
+            assert!(emitted == 2 || emitted == if paired { 8 } else { 16 });
+            for sample in strip.report["samples"].as_array().unwrap() {
+                let hashes = sample["hashes"].as_array().unwrap().len();
+                assert_eq!(hashes, if paired { 2 } else { 1 });
+            }
+        }
+        assert_eq!(
+            refusals, 1,
+            "only the 321×639 noise pair exceeds the PNG cap"
+        );
+        let proof = ProofDouble {
+            noise: true,
+            ..ProofDouble::default()
+        };
+        let full = SoloArgs {
+            full_res: true,
+            ..args(false)
+        };
+        let outcome = solo(&doc(641, 481, 17, false), &full, &proof);
+        assert!(
+            matches!(outcome, Err(SoloError::SoloOverBudget { .. })),
+            "{outcome:?}"
+        );
+        let proof = ProofDouble {
+            adapter_len: 5000,
+            ..ProofDouble::default()
+        };
+        let outcome = solo(&doc(8, 8, 17, false), &args(false), &proof);
+        assert!(
+            matches!(
+                outcome,
+                Err(SoloError::SoloOverBudget {
+                    limit: "report_bytes",
+                    ..
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// Base64 rounding at the PNG cap still leaves envelope headroom.
+    #[test]
+    fn base64_rounding_and_envelope_headroom() {
+        for raw in [786_430, 786_431, 786_432] {
+            let strip = SoloStrip {
+                image: RgbaImage {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0; 4],
+                },
+                png: vec![0; raw],
+                report: json!({"padding": "q".repeat(4000)}),
+            };
+            let result = strip.to_result();
+            let encoded = &result.content[1].as_image().unwrap().data;
+            assert_eq!(encoded.len(), 4 * raw.div_ceil(3));
+            let envelope = json!({"jsonrpc": "2.0", "id": u64::MAX, "result": result});
+            assert!(serde_json::to_vec(&envelope).unwrap().len() <= 1_056 * 1024);
+        }
+    }
+
+    /// An 8193-px thumbnail request refuses typed before the renderer's
+    /// 8192-px texture limit can panic.
+    #[test]
+    fn oversized_thumbnail_is_typed() {
+        let document = doc(8193, 1, 1, false);
+        let media = FfmpegMediaEngine::new().unwrap();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            solo(&document, &args(false), &media)
+        }));
+        let outcome = outcome.expect("an oversized thumbnail must refuse, not panic");
+        assert!(
+            matches!(
+                outcome,
+                Err(SoloError::SoloOverBudget {
+                    limit: "render_side",
+                    observed: 8193,
+                    allowed: 8192
+                })
+            ),
+            "{outcome:?}"
+        );
+    }
+
+    /// A path-bearing render failure is bounded like a strip: the whole
+    /// refusal fits R25 and stays typed, JSON-only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn error_response_obeys_budgets() {
+        let fixture = GeneratedMedia::ffmpeg(
+            "mo2-solo-offline",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x32:r=30:d=0.1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            "mp4",
+        );
+        let media = FfmpegMediaEngine::new().unwrap();
+        let mut asset = media.probe(fixture.path()).unwrap();
+        asset.path = PathBuf::from(format!("/{}", "mo2-missing/".repeat(40_000)));
+        let document = single_clip_document(asset);
+        document.validate().unwrap();
+        let (server, client) = mo2_solo_start(document).await;
+        let arguments = json!({"expected_revision": 0, "clip_id": 1, "samples": 2});
+        let result = invoke_capability(&client, "preview_solo", arguments).await;
+        client.cancel().await.unwrap();
+        server.shutdown();
+        assert_eq!(result.is_error, Some(true));
+        assert!(
+            result
+                .content
+                .iter()
+                .all(|block| block.as_image().is_none())
+        );
+        let body = result.structured_content.as_ref().unwrap();
+        assert_eq!(body["code"], "solo_over_budget", "{body}");
+        assert_eq!(body["applied"], false);
+        let report = body.to_string().len();
+        let wire = serde_json::to_vec(&result).unwrap().len();
+        assert!(
+            report <= 4 * 1024 && wire <= 1_056 * 1024,
+            "{report} / {wire}"
+        );
+    }
+
+    /// The registry serves `preview_solo` as an inspector with integer
+    /// sample and clip arguments, a revision `$ref` and a context enum, and
+    /// inspector-only discovery finds it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registry_semantics() {
+        let (server, client) = mo2_solo_start(Document::default()).await;
+        let call = |name: &'static str, arguments: serde_json::Value| {
+            let request = CallToolRequestParams::new(name)
+                .with_arguments(arguments.as_object().unwrap().clone());
+            client.call_tool(request)
+        };
+        let opened = call("get_capability", json!({"name": "preview_solo"}))
+            .await
+            .unwrap();
+        let found = call(
+            "search_capabilities",
+            json!({"query": "clip solo", "kinds": ["inspector"]}),
+        )
+        .await
+        .unwrap();
+        client.cancel().await.unwrap();
+        server.shutdown();
+
+        let body = opened.structured_content.unwrap();
+        assert_eq!(body["capability"]["kind"], "inspector", "{body}");
+        assert_eq!(body["invocation"], "invoke_capability");
+        let schema = &body["input_schema"];
+        let properties = &schema["properties"];
+        for (name, kind) in [
+            ("clip_id", "integer"),
+            ("samples", "integer"),
+            ("full_res", "boolean"),
+        ] {
+            assert_eq!(properties[name]["type"], kind, "{name}: {schema}");
+        }
+        assert_eq!(properties["clip_id"]["format"], "uint64");
+        assert_eq!(properties["samples"]["format"], "uint32");
+        assert_eq!(
+            properties["expected_revision"]["$ref"],
+            "#/$defs/TimelineRevision"
+        );
+        assert_eq!(schema["$defs"]["TimelineRevision"]["type"], "integer");
+        assert_eq!(
+            properties["context"]["anyOf"],
+            json!([{"$ref": "#/$defs/SoloContext"}, {"type": "null"}])
+        );
+        let variants: Vec<_> = (schema["$defs"]["SoloContext"]["oneOf"].as_array().unwrap())
+            .iter()
+            .map(|variant| (variant["type"].clone(), variant["const"].clone()))
+            .collect();
+        assert_eq!(
+            variants,
+            [
+                (json!("string"), json!("isolated")),
+                (json!("string"), json!("below"))
+            ]
+        );
+        let found = found.structured_content.unwrap();
+        let names: Vec<_> = (found["capabilities"].as_array().unwrap().iter())
+            .map(|capability| (capability["name"].clone(), capability["kind"].clone()))
+            .collect();
+        assert!(
+            names.contains(&(json!("preview_solo"), json!("inspector"))),
+            "{found}"
+        );
+    }
+}

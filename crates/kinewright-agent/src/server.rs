@@ -1586,10 +1586,7 @@ impl KinewrightMcp {
                 Ok(
                     match crate::solo::preview_solo(&*self.analysis, revision, &document, &args) {
                         Ok(strip) => strip.to_result(),
-                        Err(error) => error_structured(
-                            format!("preview_solo rejected: {error}"),
-                            error.body(),
-                        ),
+                        Err(error) => error.to_result(),
                     },
                 )
             }
