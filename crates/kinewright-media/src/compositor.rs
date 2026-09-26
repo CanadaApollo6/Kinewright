@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     num::NonZeroU64,
+    ops::Deref,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -180,6 +181,51 @@ pub struct GpuContext {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     provenance: GpuProvenance,
+    ledger: Arc<GpuLedger>,
+}
+
+/// MO2 R28: the compositors' live + idle GPU bytes — textures (pooled ones
+/// included), buffers, upload staging, readback and validity flags — each
+/// allocation charged once, from creation until its handle drops.
+#[derive(Default)]
+pub struct GpuLedger {
+    live: AtomicU64,
+    peak: AtomicU64,
+}
+
+impl GpuLedger {
+    /// Bytes currently allocated.
+    pub fn live_bytes(&self) -> u64 {
+        self.live.load(Ordering::Relaxed)
+    }
+
+    /// The high-water mark.
+    pub fn peak_bytes(&self) -> u64 {
+        self.peak.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn charge<T>(self: &Arc<Self>, inner: T, bytes: u64) -> Ledgered<T> {
+        let live = self.live.fetch_add(bytes, Ordering::Relaxed) + bytes;
+        self.peak.fetch_max(live, Ordering::Relaxed);
+        Ledgered(inner, bytes, Arc::clone(self))
+    }
+}
+
+/// One charged allocation; dropping it releases the charge.
+pub(crate) struct Ledgered<T>(T, u64, Arc<GpuLedger>);
+pub(crate) type HeldTexture = Ledgered<wgpu::Texture>;
+
+impl<T> Deref for Ledgered<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T> Drop for Ledgered<T> {
+    fn drop(&mut self) {
+        self.2.live.fetch_sub(self.1, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone)]
@@ -202,6 +248,7 @@ impl GpuContext {
                 software_fallback: false,
                 gpu_claim: false,
             },
+            ledger: Arc::default(),
         }
     }
 
@@ -228,7 +275,27 @@ impl GpuContext {
                 software_fallback,
                 gpu_claim: !software_fallback,
             },
+            ledger: Arc::default(),
         }
+    }
+
+    /// MO2 R28: the GPU bytes every compositor on this context holds.
+    #[must_use]
+    pub fn ledger(&self) -> &GpuLedger {
+        &self.ledger
+    }
+
+    /// A texture charged at its bytes (uncompressed formats, one mip).
+    pub(crate) fn charge_texture(&self, texture: wgpu::Texture) -> HeldTexture {
+        let (size, texel) = (texture.size(), texture.format().block_copy_size(None));
+        let texels = u64::from(size.width * size.height * size.depth_or_array_layers);
+        self.ledger
+            .charge(texture, texels * u64::from(texel.unwrap_or(16)))
+    }
+
+    pub(crate) fn charge_buffer(&self, buffer: wgpu::Buffer) -> Ledgered<wgpu::Buffer> {
+        let bytes = buffer.size();
+        self.ledger.charge(buffer, bytes)
     }
 
     /// Acquire a headless adapter and device for rendering.
@@ -525,13 +592,13 @@ pub struct Compositor {
     /// replaces the full contents, so no stale pixels can survive.
     texture_pool: Mutex<TexturePool>,
     /// MO2 R12/R14: the cached 1x1 accumulator every fast-path draw binds.
-    dummy_accumulator: wgpu::TextureView,
+    dummy_accumulator: (wgpu::TextureView, Ledgered<()>),
     /// MO2 R14: the validity slot the Push backdrop binds; never written.
-    dummy_validity: wgpu::Buffer,
+    dummy_validity: Ledgered<wgpu::Buffer>,
     /// MO2 R10: per-layer validity slot stride (the storage offset alignment).
     validity_stride: u64,
     /// MO2 R10 (ME11): an all-`Normal` frame's flag slots, recycled (B8).
-    flag_pool: Mutex<Option<wgpu::Buffer>>,
+    flag_pool: Mutex<Option<Ledgered<wgpu::Buffer>>>,
     /// MO2 R12/R13: accumulator snapshots taken, for the copy-count probes.
     accumulator_copies: AtomicU64,
 }
@@ -575,7 +642,7 @@ fn texture_pool_bytes(key: TexturePoolKey) -> u64 {
 /// depth, and total bytes, and evicted least-recently-used shape first.
 #[derive(Default)]
 struct TexturePool {
-    shapes: HashMap<TexturePoolKey, Vec<wgpu::Texture>>,
+    shapes: HashMap<TexturePoolKey, Vec<HeldTexture>>,
     /// Every retained shape, least recently used first.
     recency: Vec<TexturePoolKey>,
     bytes: u64,
@@ -589,14 +656,14 @@ impl TexturePool {
         self.recency.push(key);
     }
 
-    fn take(&mut self, key: TexturePoolKey) -> Option<wgpu::Texture> {
+    fn take(&mut self, key: TexturePoolKey) -> Option<HeldTexture> {
         let texture = self.shapes.get_mut(&key)?.pop()?;
         self.bytes = self.bytes.saturating_sub(texture_pool_bytes(key));
         self.touch(key);
         Some(texture)
     }
 
-    fn store(&mut self, key: TexturePoolKey, texture: wgpu::Texture) {
+    fn store(&mut self, key: TexturePoolKey, texture: HeldTexture) {
         self.touch(key);
         let textures = self.shapes.entry(key).or_default();
         if textures.len() >= TEXTURE_POOL_MAX_PER_SHAPE {
@@ -652,12 +719,14 @@ impl TexturePool {
 struct LayerResources {
     /// The uploaded source texture; `None` for an adjustment or a backdrop,
     /// which sample an accumulator snapshot instead.
-    source: Option<(TexturePoolKey, wgpu::Texture)>,
+    source: Option<(TexturePoolKey, HeldTexture)>,
     /// The atlas this layer's bind group reads; held so the texture outlives
     /// the queue submission even if the cache evicts it meanwhile.
     _lut_atlas: Arc<LutAtlas>,
-    _uniform: wgpu::Buffer,
-    _grade: wgpu::Buffer,
+    _uniform: Ledgered<wgpu::Buffer>,
+    _grade: Ledgered<wgpu::Buffer>,
+    /// MO2 R28: this draw's queue-write staging, in flight until readback.
+    _staging: Ledgered<()>,
     bind_group: wgpu::BindGroup,
 }
 
@@ -667,11 +736,11 @@ struct LayerResources {
 struct FrameResources {
     layers: Vec<LayerResources>,
     /// MO2 R13: pooled accumulator snapshots A (and B).
-    snapshots: Vec<(TexturePoolKey, wgpu::Texture)>,
+    snapshots: Vec<(TexturePoolKey, HeldTexture)>,
     /// MO2 R10: a split frame's sticky validity flags, slot = layer.
-    validity: Option<wgpu::Buffer>,
+    validity: Option<Ledgered<wgpu::Buffer>>,
     /// MO2 R10 (ME11): an all-`Normal` frame's pooled flags, slot = layer.
-    pooled_flags: Option<wgpu::Buffer>,
+    pooled_flags: Option<Ledgered<wgpu::Buffer>>,
 }
 
 /// One entry of a frame's schedule.
@@ -1002,12 +1071,14 @@ impl Compositor {
                 view_formats: &[],
             })
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let dummy_accumulator = (dummy_accumulator, gpu.ledger.charge((), 8));
         let dummy_validity = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor unchecked validity slot"),
             size: 4,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        let dummy_validity = gpu.charge_buffer(dummy_validity);
         let validity_stride = u64::from(device.limits().min_storage_buffer_offset_alignment).max(4);
         Self {
             gpu,
@@ -1239,7 +1310,7 @@ impl Compositor {
         layers: &[CompositorLayer<'_, F>],
         library: Option<&LutLibrary>,
         matte_debug: Option<MatteDebugSelection>,
-    ) -> Result<(wgpu::Texture, FrameResources, wgpu::CommandEncoder), MediaError> {
+    ) -> Result<(HeldTexture, FrameResources, wgpu::CommandEncoder), MediaError> {
         if width == 0 || height == 0 {
             return Err(MediaError::Backend(
                 "compositor output resolution must be non-zero".to_owned(),
@@ -1259,6 +1330,7 @@ impl Compositor {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
+        let output = self.gpu.charge_texture(output);
         let mut frame = FrameResources::default();
         let steps = match self.stage_layers(width, height, layers, library, matte_debug, &mut frame)
         {
@@ -1403,7 +1475,7 @@ impl Compositor {
             let mut accumulator = if layer.mode.is_special() {
                 &views[0]
             } else {
-                &self.dummy_accumulator
+                &self.dummy_accumulator.0
             };
             if let Some(shift) = layer.transition.backdrop {
                 frame
@@ -1421,7 +1493,7 @@ impl Compositor {
             let bindings = LayerBindings {
                 source: adjustment(layer).then(|| &views[0]),
                 accumulator,
-                validity: flags.map_or((&self.dummy_validity, 0), |buffer| {
+                validity: flags.map_or((&*self.dummy_validity, 0), |buffer| {
                     (buffer, self.validity_stride * index as u64)
                 }),
             };
@@ -1437,15 +1509,16 @@ impl Compositor {
         Ok(steps)
     }
 
-    fn flags_buffer(&self, size: u64) -> wgpu::Buffer {
-        self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+    fn flags_buffer(&self, size: u64) -> Ledgered<wgpu::Buffer> {
+        let flags = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor validity flags"),
             size: size.max(self.validity_stride),
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        })
+        });
+        self.gpu.charge_buffer(flags)
     }
 
     /// MO2 R13: the full-raster opaque Push backdrop, sampling snapshot `D0`
@@ -1473,7 +1546,7 @@ impl Compositor {
         let bindings = LayerBindings {
             source: Some(snapshot),
             accumulator: snapshot,
-            validity: (&self.dummy_validity, 0),
+            validity: (&*self.dummy_validity, 0),
         };
         Ok(self.bind_layer(
             None,
@@ -1488,13 +1561,13 @@ impl Compositor {
 
     /// Take a source texture of the requested shape from the recycling pool,
     /// creating one when the pool has none.
-    fn acquire_layer_texture(&self, key: TexturePoolKey) -> wgpu::Texture {
+    fn acquire_layer_texture(&self, key: TexturePoolKey) -> HeldTexture {
         if let Ok(mut pool) = self.texture_pool.lock()
             && let Some(texture) = pool.take(key)
         {
             return texture;
         }
-        self.gpu.device.create_texture(&wgpu::TextureDescriptor {
+        let texture = self.gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Kinewright compositor source"),
             size: wgpu::Extent3d {
                 width: key.width,
@@ -1507,7 +1580,8 @@ impl Compositor {
             format: key.format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
-        })
+        });
+        self.gpu.charge_texture(texture)
     }
 
     /// Return this frame's source textures to the recycling pool.
@@ -1667,7 +1741,7 @@ impl Compositor {
     fn upload_layer<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
-    ) -> Result<(TexturePoolKey, wgpu::Texture), MediaError> {
+    ) -> Result<(TexturePoolKey, HeldTexture), MediaError> {
         let expected_len = usize::try_from(layer.frame.width())
             .unwrap_or_default()
             .saturating_mul(usize::try_from(layer.frame.height()).unwrap_or_default())
@@ -1710,7 +1784,7 @@ impl Compositor {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn bind_layer(
         &self,
-        source: Option<(TexturePoolKey, wgpu::Texture)>,
+        source: Option<(TexturePoolKey, HeldTexture)>,
         view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         params: &LayerParams,
@@ -1724,6 +1798,7 @@ impl Compositor {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let grade = self.gpu.charge_buffer(grade);
         self.gpu.queue.write_buffer(&grade, 0, grade_bytes);
         let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor layer parameters"),
@@ -1731,7 +1806,10 @@ impl Compositor {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let uniform = self.gpu.charge_buffer(uniform);
         self.gpu.queue.write_buffer(&uniform, 0, &params.as_bytes());
+        let upload = source.as_ref().map_or(0, |(_, texture)| texture.1);
+        let staging = upload + grade.size() + UNIFORM_SIZE;
         let (validity, offset) = bindings.validity;
         let bind_group = self
             .gpu
@@ -1783,6 +1861,7 @@ impl Compositor {
             _lut_atlas: atlas,
             _uniform: uniform,
             _grade: grade,
+            _staging: self.gpu.ledger.charge((), staging),
             bind_group,
         }
     }
@@ -1917,7 +1996,7 @@ impl Compositor {
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         Ok(LutAtlas {
-            texture,
+            texture: self.gpu.charge_texture(texture),
             view,
             slots: slots
                 .iter()
@@ -2019,13 +2098,14 @@ impl Compositor {
         let pixel_bytes = u64::from(padded_row_bytes).saturating_mul(u64::from(height));
         // MO2 R10: the validity flags ride the same readback, after the pixels.
         let flags = frame.validity.as_ref().or(frame.pooled_flags.as_ref());
-        let flag_bytes = flags.map_or(0, wgpu::Buffer::size);
+        let flag_bytes = flags.map_or(0, |flags| flags.size());
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor readback"),
             size: pixel_bytes + flag_bytes,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let buffer = self.gpu.charge_buffer(buffer);
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: output,
@@ -2379,7 +2459,7 @@ impl CachedLutSlot {
 pub(crate) struct LutAtlas {
     /// The owning handle for `view`, and the source of the cache's size
     /// accounting.
-    texture: wgpu::Texture,
+    texture: HeldTexture,
     view: wgpu::TextureView,
     /// The bound slots in slot order: managed slots `0..n`, then the legacy
     /// `cube_lut` slot. This vector *is* the cache key, and it holds a strong
@@ -5991,7 +6071,7 @@ mod tests {
         let Some(compositor) = fallback() else {
             return;
         };
-        let placeholder = || {
+        let raw = || {
             compositor
                 .gpu
                 .device
@@ -6010,6 +6090,7 @@ mod tests {
                     view_formats: &[],
                 })
         };
+        let placeholder = || compositor.gpu.charge_texture(raw());
         let shape = |index: u32| TexturePoolKey {
             width: 3_840 - index,
             height: 2_160,

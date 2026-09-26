@@ -50,7 +50,12 @@ const ACCENT: [u8; 3] = [0x42, 0xC7, 0xC9];
 
 // ---------------------------------------------------------------- documents
 
-fn clip(id: u64, content: ClipContent, blend_mode: BlendMode, effects: Vec<Effect>) -> Clip {
+pub(crate) fn clip(
+    id: u64,
+    content: ClipContent,
+    blend_mode: BlendMode,
+    effects: Vec<Effect>,
+) -> Clip {
     Clip {
         enabled: true,
         enabled_curve: None,
@@ -91,7 +96,7 @@ fn title_clip(id: u64, position: TitlePosition, effects: Vec<Effect>) -> Clip {
     clip(id, ClipContent::Title(title), BlendMode::Normal, effects)
 }
 
-fn effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
+pub(crate) fn effect(id: u64, name: &str, parameters: &[(&str, i64)]) -> Effect {
     Effect {
         id: EffectId(id),
         name: name.to_owned(),
@@ -138,7 +143,7 @@ fn document(clips: Vec<Clip>) -> Document {
     document_sized((W, H), clips)
 }
 
-fn with_transition(mut clip: Clip, name: &str, duration: i64) -> Clip {
+pub(crate) fn with_transition(mut clip: Clip, name: &str, duration: i64) -> Clip {
     clip.transition_in = Some(Transition {
         name: name.to_owned(),
         duration: TimeCode(duration),

@@ -103,6 +103,9 @@ mod gpu_test_support;
 #[cfg(test)]
 mod mo1_fixtures;
 
+/// MO2 R28: the preview benchmark behind gate 10 (budgeted as production).
+#[cfg(test)]
+mod mo2_bench;
 /// MO2 Part B1's render gates (§13 gates 1–7 and pins). In `src/` for the
 /// reason every `ccN_fixtures.rs` is: they drive `FrameRenderer` and the
 /// `pub(crate)` compositor seams.
@@ -112,6 +115,9 @@ mod mo2_fixtures;
 /// pre-MO2 tree that recorded its baselines.
 #[cfg(test)]
 mod mo2_identity_corpus;
+/// MO2 §13 gate 10: the floors, the ledger ceilings and their controls.
+#[cfg(test)]
+mod mo2_perf_fixtures;
 mod still_orientation;
 
 use ffmpeg_next as ffmpeg;
@@ -129,7 +135,7 @@ pub use compositor::{
     COMPOSITOR_LEGACY_LUT_SLOT, COMPOSITOR_LUT_ATLAS_SLOTS, COMPOSITOR_LUT_SLOTS_PER_LAYER,
     COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
     COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, COMPOSITOR_REQUIRED_TEXTURE_DIMENSION_3D,
-    Compositor, CompositorLayer, DeliveryFrame, GpuContext, LayerMode, LayerRole,
+    Compositor, CompositorLayer, DeliveryFrame, GpuContext, GpuLedger, LayerMode, LayerRole,
     MatteRenderTarget, compositor_required_limits,
 };
 pub use derived::{
