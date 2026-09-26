@@ -1148,6 +1148,41 @@ impl KinewrightApp {
         ]);
     }
 
+    /// MO2 R26: place a new adjustment clip or solid per the placement rule,
+    /// or log the typed refusal — never inventing or creating a track.
+    pub(crate) fn add_generated_clip(&mut self, adjustment: bool) {
+        let session = self.focused();
+        match generated_clip_placement(
+            &session.document,
+            adjustment,
+            session.selected_clip,
+            session.position,
+            session.source_video_target,
+        ) {
+            Ok(operation) => self.send_operation(operation),
+            Err(refusal) => self.note_label(
+                LabelIncident::Operations,
+                IncidentSubject::Project,
+                refusal.to_string(),
+            ),
+        }
+    }
+
+    /// MO2 R26: the toolbar's "+ Layer" menu of generated clips.
+    pub(crate) fn generated_layer_menu(&mut self, ui: &mut egui::Ui) {
+        let menu = ui.menu_button("+ Layer", |ui| {
+            for (label, adjustment) in [("New adjustment clip", true), ("New solid", false)] {
+                let item = ui.button(label);
+                crate::mixer_ui::record_strip_rect(label, item.rect);
+                if item.clicked() {
+                    self.add_generated_clip(adjustment);
+                    ui.close();
+                }
+            }
+        });
+        crate::mixer_ui::record_strip_rect("timeline_add_layer", menu.response.rect);
+    }
+
     pub(crate) fn freeze_frame_at_playhead(&mut self) {
         let position = self.focused().position;
         match freeze_frame_operations(&self.focused().document, position) {
@@ -1315,6 +1350,7 @@ impl KinewrightApp {
                 {
                     self.freeze_frame_at_playhead();
                 }
+                self.generated_layer_menu(ui);
                 let ripple = ui
                     .add(
                         egui::Button::new("Ripple")
@@ -2181,9 +2217,25 @@ impl KinewrightApp {
                                         .map(|transition| transition.duration),
                                     pixels_per_frame,
                                 ),
-                                // MO2 Part B paints adjustment and solid clips.
-                                (ClipContent::Media | ClipContent::Freeze(_), None)
-                                | (ClipContent::Adjustment | ClipContent::Solid(_), _) => {}
+                                (ClipContent::Adjustment | ClipContent::Solid(_), _) => {
+                                    paint_generated_clip(
+                                        &painter,
+                                        &clip.content,
+                                        draw_rect,
+                                        body.hovered() || left.hovered() || right.hovered(),
+                                        selected,
+                                        dragging,
+                                    );
+                                }
+                                (ClipContent::Media | ClipContent::Freeze(_), None) => {}
+                            }
+                            if let Some(transition) = &clip.transition_in {
+                                paint_transition_glyph(
+                                    &painter,
+                                    draw_rect,
+                                    transition,
+                                    pixels_per_frame,
+                                );
                             }
                             if clip.content.is_media() && clip.speed_percent != 100 {
                                 paint_speed_badge(&painter, draw_rect, clip.speed_percent);
@@ -3000,6 +3052,189 @@ fn paint_title_clip(
         painter.rect_filled(rect, radius::SM, color::ACCENT_WASH);
     }
     paint_clip_chrome(painter, rect, hovered, selected, dragging);
+}
+
+/// MO2 R26: an adjustment (labelled wash) or a solid (its own colour).
+fn paint_generated_clip(
+    painter: &egui::Painter,
+    content: &ClipContent,
+    rect: egui::Rect,
+    hovered: bool,
+    selected: bool,
+    dragging: bool,
+) {
+    let (fill, label) = match content {
+        ClipContent::Solid(color) => (egui::Color32::from_rgb(color.r, color.g, color.b), "Solid"),
+        _ if dragging || hovered => (color::SURFACE_ACTIVE, "Adjustment"),
+        _ => (color::SURFACE_RAISED, "Adjustment"),
+    };
+    painter.rect_filled(rect, radius::SM, fill);
+    let text_color = if fill.intensity() > 0.5 {
+        egui::Color32::BLACK
+    } else {
+        color::TEXT_PRIMARY
+    };
+    let font = egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional);
+    let at = egui::pos2(rect.left() + space::TWO, rect.center().y);
+    painter.text(at, egui::Align2::LEFT_CENTER, label, font, text_color);
+    if selected {
+        painter.rect_filled(rect, radius::SM, color::ACCENT_WASH);
+    }
+    paint_clip_chrome(painter, rect, hovered, selected, dragging);
+}
+
+/// MO2 R26: the push/slide/wipe letter and motion arrow inside the wedge.
+/// The descriptor's sign names the entry edge (−1 = left/top), so the
+/// content moves the other way.
+#[allow(clippy::cast_precision_loss)]
+fn paint_transition_glyph(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    transition: &Transition,
+    pixels_per_frame: f32,
+) {
+    let Some((letter, direction)) = transition_glyph(&transition.name) else {
+        return;
+    };
+    let width = (transition.duration.0 as f32 * pixels_per_frame).min(rect.width());
+    if width < 18.0 {
+        return;
+    }
+    let center = egui::pos2(
+        rect.left() + EDGE_HANDLE_WIDTH + width / 2.0,
+        rect.center().y,
+    );
+    let stroke = egui::Stroke::new(1.5, color::TEXT_PRIMARY);
+    painter.arrow(center - direction * 6.0, direction * 12.0, stroke);
+    let font = egui::FontId::new(type_size::CAPTION, egui::FontFamily::Proportional);
+    let at = center + egui::vec2(0.0, -8.0);
+    painter.text(
+        at,
+        egui::Align2::CENTER_BOTTOM,
+        letter,
+        font,
+        color::TEXT_PRIMARY,
+    );
+}
+
+/// MO2 R26: a directional transition's letter and on-screen motion. Pure.
+pub(crate) fn transition_glyph(name: &str) -> Option<(&'static str, egui::Vec2)> {
+    use kinewright_core::{TransitionAxis, TransitionShading};
+    let (letter, axis, sign) = match kinewright_core::transition_descriptor(name)?.shading {
+        TransitionShading::Push { axis, sign } => ("P", axis, sign),
+        TransitionShading::Slide { axis, sign } => ("S", axis, sign),
+        TransitionShading::Wipe { axis, sign } => ("W", axis, sign),
+        _ => return None,
+    };
+    let toward = -f32::from(sign);
+    Some(match axis {
+        TransitionAxis::Horizontal => (letter, egui::vec2(toward, 0.0)),
+        TransitionAxis::Vertical => (letter, egui::vec2(0.0, toward)),
+    })
+}
+
+/// MO2 R26: why a generated clip found no track.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PlacementRefusal {
+    pub(crate) kind: &'static str,
+    pub(crate) span: std::ops::Range<TimeCode>,
+    /// The highest intended affected track an adjustment must sit above.
+    pub(crate) above: Option<TrackId>,
+}
+
+impl std::fmt::Display for PlacementRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (start, end) = (self.span.start.0, self.span.end.0);
+        let above = self.above.map(|track| format!(" above track {track}"));
+        let above = above.unwrap_or_default();
+        write!(
+            formatter,
+            "No video track{above} is free across frames {start}..{end} for the new {}; \
+             add a video track{above} or clear that span",
+            self.kind
+        )
+    }
+}
+
+/// MO2 R26 placement. Span: the selection's range for an adjustment, else
+/// `max(1, round(2×fps))` frames from the playhead. An adjustment sits above
+/// every intended affected track (the selection's, else every video track
+/// with content in the span); a solid needs only a free video track. An
+/// eligible `target` wins, else the lowest-index eligible track. Pure.
+pub(crate) fn generated_clip_placement(
+    document: &Document,
+    adjustment: bool,
+    selected: Option<ClipId>,
+    playhead: TimeCode,
+    target: Option<TrackId>,
+) -> Result<Operation, PlacementRefusal> {
+    let clip_end = |clip: &Clip| {
+        let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+        TimeCode(clip.timeline_start.0.saturating_add(duration.0))
+    };
+    let tracks = &document.tracks;
+    let selection = selected.filter(|_| adjustment).and_then(|id| {
+        (tracks.iter().enumerate())
+            .find_map(|(index, track)| Some((index, track.clips.iter().find(|c| c.id == id)?)))
+    });
+    let fps = document.fps;
+    let two_seconds = (2 * i64::from(fps.numerator()) + i64::from(fps.denominator()) / 2)
+        / i64::from(fps.denominator()).max(1);
+    let span = selection.map_or(
+        playhead..TimeCode(playhead.0 + two_seconds.max(1)),
+        |(_, c)| c.timeline_start..clip_end(c),
+    );
+    let overlaps = |clip: &Clip| clip.timeline_start < span.end && clip_end(clip) > span.start;
+    let floor = selection.map(|(index, _)| index).or_else(|| {
+        (tracks.iter().enumerate())
+            .filter(|(_, t)| {
+                adjustment && t.kind == TrackKind::Video && t.clips.iter().any(overlaps)
+            })
+            .map(|(index, _)| index)
+            .max()
+    });
+    let eligible = |index: usize| {
+        let track = &tracks[index];
+        track.kind == TrackKind::Video
+            && floor.is_none_or(|floor| index > floor)
+            && !track.clips.iter().any(overlaps)
+    };
+    let chosen = target
+        .and_then(|id| tracks.iter().position(|track| track.id == id))
+        .filter(|index| eligible(*index))
+        .or_else(|| (0..tracks.len()).find(|index| eligible(*index)));
+    let (timeline_start, duration) = (span.start, TimeCode(span.end.0 - span.start.0));
+    let Some(index) = chosen else {
+        let kind = if adjustment {
+            "adjustment clip"
+        } else {
+            "solid"
+        };
+        let above = floor.map(|floor| tracks[floor].id);
+        return Err(PlacementRefusal { kind, span, above });
+    };
+    let track = tracks[index].id;
+    Ok(if adjustment {
+        let effects = Vec::new();
+        Operation::AddAdjustmentClip {
+            track,
+            timeline_start,
+            duration,
+            effects,
+        }
+    } else {
+        let color = kinewright_core::SolidColor {
+            r: 128,
+            g: 128,
+            b: 128,
+        };
+        Operation::AddSolidClip {
+            track,
+            timeline_start,
+            duration,
+            color,
+        }
+    })
 }
 
 fn paint_clip_chrome(
@@ -7233,3 +7468,374 @@ pub(crate) fn tests_paste_operations(clipboard: Option<ClipId>, clip: ClipId) ->
 #[cfg(test)]
 #[path = "review_c2_timeline.rs"]
 mod review_c2_timeline;
+
+/// MO2 R26: the generated-clip placement rule, the "+ Layer" menu through a
+/// real app, and the wedge direction glyphs.
+#[cfg(test)]
+mod mo2_tests {
+    use std::time::Duration;
+
+    use kinewright_core::{AssetId, Rational, SolidColor, TRANSITION_DESCRIPTORS, Track};
+
+    use super::*;
+
+    const GREY: SolidColor = SolidColor {
+        r: 128,
+        g: 128,
+        b: 128,
+    };
+
+    fn solid(id: u64, start: i64, end: i64) -> Clip {
+        Clip {
+            enabled: true,
+            enabled_curve: None,
+            id: ClipId(id),
+            asset: AssetId(0),
+            source_range: TimeCode(0)..TimeCode(end - start),
+            content: ClipContent::Solid(GREY),
+            timeline_start: TimeCode(start),
+            effects: Vec::new(),
+            transition_in: None,
+            link: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode::ZERO,
+            audio_fade_out_frames: TimeCode::ZERO,
+            speed_percent: 100,
+            audio_gain_curve: None,
+            blend_mode: kinewright_core::BlendMode::Normal,
+        }
+    }
+
+    /// Tracks numbered 1.. bottom-up (`tracks[0]` is the bottom track), each
+    /// holding solids at `(clip id, start, end)`.
+    /// One track: its kind and its solids at `(clip id, start, end)`.
+    type Lane<'a> = (TrackKind, &'a [(u64, i64, i64)]);
+
+    fn layered(fps: (u32, u32), tracks: &[Lane]) -> Document {
+        Document {
+            tracks: (tracks.iter().zip(1..))
+                .map(|((kind, clips), id)| Track {
+                    id: TrackId(id),
+                    kind: *kind,
+                    sync_lock: true,
+                    clips: (clips.iter())
+                        .map(|(clip, start, end)| solid(*clip, *start, *end))
+                        .collect(),
+                })
+                .collect(),
+            fps: Rational::new(fps.0, fps.1).expect("valid fps"),
+            duration: TimeCode(1_000),
+            ..Document::default()
+        }
+    }
+
+    fn solid_at(track: u64, start: i64, duration: i64) -> Operation {
+        Operation::AddSolidClip {
+            track: TrackId(track),
+            timeline_start: TimeCode(start),
+            duration: TimeCode(duration),
+            color: GREY,
+        }
+    }
+
+    fn adjustment_at(track: u64, start: i64, duration: i64) -> Operation {
+        Operation::AddAdjustmentClip {
+            track: TrackId(track),
+            timeline_start: TimeCode(start),
+            duration: TimeCode(duration),
+            effects: Vec::new(),
+        }
+    }
+
+    const V: TrackKind = TrackKind::Video;
+
+    /// R26: with no selection both kinds span `max(1, round(2×fps))` frames
+    /// from the playhead.
+    #[test]
+    fn mo2_the_default_span_is_two_seconds_from_the_playhead() {
+        for (fps, frames) in [
+            ((30, 1), 60),
+            ((30_000, 1_001), 60),
+            ((24_000, 1_001), 48),
+            ((25, 1), 50),
+            ((1, 5), 1),
+        ] {
+            let document = layered(fps, &[(V, &[])]);
+            for adjustment in [false, true] {
+                let placed =
+                    generated_clip_placement(&document, adjustment, None, TimeCode(10), None);
+                let expected = if adjustment {
+                    adjustment_at(1, 10, frames)
+                } else {
+                    solid_at(1, 10, frames)
+                };
+                assert_eq!(placed, Ok(expected), "{fps:?}");
+            }
+        }
+    }
+
+    /// R26: an adjustment spans the selected clip and takes the lowest free
+    /// video track above it; a solid ignores the selection's span.
+    #[test]
+    fn mo2_an_adjustment_spans_the_selection_and_sits_above_it() {
+        let document = layered(
+            (30, 1),
+            &[
+                (V, &[(1, 20, 50)]),
+                (V, &[(2, 30, 40)]),
+                (V, &[]),
+                (TrackKind::Audio, &[]),
+            ],
+        );
+        let selected = Some(ClipId(1));
+        assert_eq!(
+            generated_clip_placement(&document, true, selected, TimeCode(0), None),
+            Ok(adjustment_at(3, 20, 30))
+        );
+        assert_eq!(
+            generated_clip_placement(&document, false, selected, TimeCode(100), None),
+            Ok(solid_at(1, 100, 60)),
+            "a solid needs only a free video track, from the playhead"
+        );
+    }
+
+    /// R26: with no selection an adjustment sits above every video track
+    /// with content in its span; a solid takes the lowest free track.
+    #[test]
+    fn mo2_without_a_selection_an_adjustment_clears_every_affected_track() {
+        let document = layered(
+            (30, 1),
+            &[(V, &[(1, 0, 100)]), (V, &[]), (V, &[(2, 0, 100)]), (V, &[])],
+        );
+        assert_eq!(
+            generated_clip_placement(&document, true, None, TimeCode(10), None),
+            Ok(adjustment_at(4, 10, 60))
+        );
+        assert_eq!(
+            generated_clip_placement(&document, false, None, TimeCode(10), None),
+            Ok(solid_at(2, 10, 60))
+        );
+    }
+
+    /// R26: an explicit eligible target track wins; an ineligible one (below
+    /// the affected tracks, busy, or audio) falls back to the lowest eligible.
+    #[test]
+    fn mo2_an_eligible_target_wins_and_an_ineligible_one_falls_back() {
+        let document = layered(
+            (30, 1),
+            &[
+                (V, &[(1, 0, 100)]),
+                (V, &[]),
+                (V, &[]),
+                (TrackKind::Audio, &[]),
+            ],
+        );
+        let place = |adjustment, target| {
+            generated_clip_placement(
+                &document,
+                adjustment,
+                None,
+                TimeCode(10),
+                Some(TrackId(target)),
+            )
+        };
+        assert_eq!(place(true, 3), Ok(adjustment_at(3, 10, 60)));
+        assert_eq!(place(true, 1), Ok(adjustment_at(2, 10, 60)), "below");
+        assert_eq!(place(true, 4), Ok(adjustment_at(2, 10, 60)), "audio");
+        assert_eq!(place(false, 3), Ok(solid_at(3, 10, 60)));
+        assert_eq!(place(false, 1), Ok(solid_at(2, 10, 60)), "busy");
+    }
+
+    /// R26: with no eligible track the refusal is typed — span and required
+    /// position — and names no invented track.
+    #[test]
+    fn mo2_no_eligible_track_is_a_typed_refusal() {
+        let document = layered((30, 1), &[(V, &[(1, 0, 100)]), (TrackKind::Audio, &[])]);
+        let refused = generated_clip_placement(&document, true, None, TimeCode(10), None);
+        let expected = PlacementRefusal {
+            kind: "adjustment clip",
+            span: TimeCode(10)..TimeCode(70),
+            above: Some(TrackId(1)),
+        };
+        assert_eq!(refused, Err(expected.clone()));
+        let message = expected.to_string();
+        assert!(
+            message.contains("frames 10..70") && message.contains("above track"),
+            "{message}"
+        );
+        let refused = generated_clip_placement(&document, false, None, TimeCode(10), None);
+        assert_eq!(
+            refused,
+            Err(PlacementRefusal {
+                kind: "solid",
+                span: TimeCode(10)..TimeCode(70),
+                above: None,
+            })
+        );
+    }
+
+    /// One frame of the toolbar's "+ Layer" menu on `ctx`.
+    fn layer_menu_frame(
+        ctx: &egui::Context,
+        app: &mut KinewrightApp,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) -> Vec<(String, egui::Rect)> {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 400.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let _ = crate::mixer_ui::take_strip_rects();
+                app.generated_layer_menu(ui);
+            },
+        );
+        crate::mixer_ui::take_strip_rects()
+    }
+
+    fn press_layer_menu(
+        ctx: &egui::Context,
+        app: &mut KinewrightApp,
+        time: &mut f64,
+        button: &str,
+    ) {
+        for _ in 0..2 {
+            *time += 0.02;
+            let _ = layer_menu_frame(ctx, app, Vec::new(), *time);
+        }
+        let rects = layer_menu_frame(ctx, app, Vec::new(), *time + 0.01);
+        let target = (rects.iter().find(|(name, _)| name == button))
+            .unwrap_or_else(|| panic!("the menu lays out `{button}`: {rects:?}"))
+            .1
+            .center();
+        for pressed in [true, false] {
+            *time += 0.02;
+            let mut events = vec![egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }];
+            if pressed {
+                events.insert(0, egui::Event::PointerMoved(target));
+            }
+            let _ = layer_menu_frame(ctx, app, events, *time);
+        }
+    }
+
+    /// R26: "+ Layer ▸ New solid" lands a solid through the real app and
+    /// core; "New adjustment clip" with nowhere above it is refused typed —
+    /// no operation, no track created.
+    #[test]
+    fn mo2_the_layer_menu_places_a_solid_and_refuses_an_unplaceable_adjustment() {
+        use crate::app::in1_tests::{
+            in1_drain_core, in1_drain_until_revision, in1_harness, in1_shutdown,
+        };
+        let mut document = layered((30, 1), &[(V, &[])]);
+        (document.resolution, document.duration) = ((320, 180), TimeCode::ZERO);
+        let (mut app, _engine) = in1_harness(document);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut time = 0.0;
+        let from = app.focused().revision;
+        press_layer_menu(&ctx, &mut app, &mut time, "timeline_add_layer");
+        press_layer_menu(&ctx, &mut app, &mut time, "New solid");
+        in1_drain_until_revision(&mut app, 0, from);
+        let landed = &app.focused().document.tracks[0].clips;
+        assert_eq!(landed.len(), 1);
+        assert_eq!(landed[0].content, ClipContent::Solid(GREY));
+        assert_eq!(
+            (
+                landed[0].timeline_start,
+                app.focused().document.clip_duration(&landed[0])
+            ),
+            (TimeCode(0), Ok(TimeCode(60)))
+        );
+
+        let placed = app.focused().revision;
+        let noted = app.pending_observations.len();
+        press_layer_menu(&ctx, &mut app, &mut time, "timeline_add_layer");
+        press_layer_menu(&ctx, &mut app, &mut time, "New adjustment clip");
+        std::thread::sleep(Duration::from_millis(100));
+        in1_drain_core(&mut app, 0);
+        assert_eq!(app.focused().revision, placed, "no operation was sent");
+        assert_eq!(
+            app.focused().document.tracks.len(),
+            1,
+            "no track was created"
+        );
+        let refusal = &app.pending_observations[noted..];
+        assert!(
+            refusal.iter().any(
+                |observation| observation.observed.contains("new adjustment clip")
+                    && observation.observed.contains("above track")
+            ),
+            "the typed refusal is noted: {refusal:?}"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// R26: the twelve directional transitions carry a letter and the
+    /// on-screen motion (the name is the entry edge, so `_left` moves
+    /// right); the three fades carry none.
+    #[test]
+    fn mo2_wedge_glyphs_name_each_directional_transition() {
+        let mut directional = 0;
+        for descriptor in TRANSITION_DESCRIPTORS {
+            let (family, edge) = descriptor.name.split_once('_').unwrap_or_default();
+            let letter = match family {
+                "push" => "P",
+                "slide" => "S",
+                "wipe" => "W",
+                _ => {
+                    assert_eq!(
+                        transition_glyph(descriptor.name),
+                        None,
+                        "{}",
+                        descriptor.name
+                    );
+                    continue;
+                }
+            };
+            let motion = match edge {
+                "left" => egui::vec2(1.0, 0.0),
+                "right" => egui::vec2(-1.0, 0.0),
+                "up" => egui::vec2(0.0, 1.0),
+                "down" => egui::vec2(0.0, -1.0),
+                other => panic!("unknown edge {other}"),
+            };
+            assert_eq!(
+                transition_glyph(descriptor.name),
+                Some((letter, motion)),
+                "{}",
+                descriptor.name
+            );
+            directional += 1;
+        }
+        assert_eq!(directional, 12);
+        let paint = |name: &str, duration| {
+            let ctx = egui::Context::default();
+            let output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 40.0));
+                let transition = Transition {
+                    name: name.to_owned(),
+                    duration: TimeCode(duration),
+                };
+                paint_transition_glyph(ui.painter(), rect, &transition, 4.0);
+            });
+            crate::theme::painted_text(&output)
+        };
+        assert_eq!(paint("slide_down", 10), ["S"]);
+        assert!(paint("crossfade", 10).is_empty());
+        assert!(
+            paint("push_left", 2).is_empty(),
+            "too narrow a wedge stays bare"
+        );
+    }
+}

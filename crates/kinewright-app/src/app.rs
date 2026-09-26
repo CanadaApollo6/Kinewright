@@ -350,6 +350,8 @@ pub(crate) struct KinewrightApp {
     pub(crate) clip_attributes_clipboard: Option<ClipId>,
     /// MO1 R25: the open plan-a-move dialog, if any.
     pub(crate) motion_plan_dialog: Option<MotionPlanDialog>,
+    /// MO2 R26: the open solo-strip dialog, if any.
+    pub(crate) solo_dialog: Option<crate::solo_ui::SoloDialog>,
     /// IN1 §5.2: playback observations waiting for the next `route_incidents`
     /// tick, which attributes them to the focused project.
     pub(crate) pending_observations: Vec<IncidentObservation>,
@@ -634,6 +636,7 @@ impl KinewrightApp {
             pending_legacy_relink: None,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
+            solo_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
@@ -3021,6 +3024,7 @@ impl eframe::App for KinewrightApp {
         crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
         self.show_motion_plan_dialog(ui.ctx());
+        self.show_solo_dialog(ui.ctx());
         self.screenshot.update(ui.ctx());
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
             && probe.frame(ui.ctx(), began, self.texture.is_some())
@@ -5525,7 +5529,7 @@ pub(crate) mod in1_tests {
     /// state everywhere else. There is deliberately no window, no model, and
     /// no audio device — the same terms §9 lays down.
     #[allow(clippy::too_many_lines)]
-    fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
+    pub(crate) fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
         let playback: Arc<dyn Playback> = engine.clone();
         let analysis: Arc<dyn Analysis> = engine.clone();
@@ -5590,6 +5594,7 @@ pub(crate) mod in1_tests {
             pending_legacy_relink: None,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
+            solo_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,
@@ -5826,7 +5831,7 @@ pub(crate) mod in1_tests {
     ///
     /// Two router tests drive `poll_background` itself rather than this
     /// mirror, so the production tick is pinned as well as the decision.
-    fn in1_drain_core(app: &mut KinewrightApp, project_index: usize) {
+    pub(crate) fn in1_drain_core(app: &mut KinewrightApp, project_index: usize) {
         let events: Vec<Event> = app.projects[project_index].core_events.try_iter().collect();
         for event in events {
             app.note_core_event_for_router(project_index, &event);
@@ -5883,7 +5888,7 @@ pub(crate) mod in1_tests {
 
     /// Drain until the session revision moves past `from`, or panic on a
     /// hang. Returns after adopting the newest document.
-    fn in1_drain_until_revision(
+    pub(crate) fn in1_drain_until_revision(
         app: &mut KinewrightApp,
         project_index: usize,
         from: TimelineRevision,
@@ -10239,6 +10244,7 @@ mod in2b_tests {
             pending_legacy_relink: None,
             clip_attributes_clipboard: None,
             motion_plan_dialog: None,
+            solo_dialog: None,
             pending_observations: Vec::new(),
             transcript_noted: BTreeSet::new(),
             recovery_damage_noted: false,

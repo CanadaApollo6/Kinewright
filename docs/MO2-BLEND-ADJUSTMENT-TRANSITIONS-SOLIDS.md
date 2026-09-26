@@ -59,6 +59,36 @@
   refused, since R24 says "no override". Codes are `solo_clip_not_visible`,
   `solo_window_empty`, `solo_over_budget`, `solo_invalid_samples`,
   `solo_render_failed`.
+- ME5 → §12 staging (N13): Part B2 split under §12's > 20% rule. B2 is now the
+  solo transport, the registry re-pin and the R28 floors/ledger; a new
+  **B3** carries the R26 person GUI and the §8 parity checklist (budget
+  ≤ 700, stop at > 840). Evidence: B2 stopped at 423 landed lines plus a
+  634-line GUI, projecting 1,140–1,210 against ≤ 800. Thinning (moving the
+  viewer drag and wedge glyphs to MO6) was rejected as a change to R26. B3
+  landed at 690 production lines, over S7's ≤ 400 for GUI gestures + menus,
+  because it also holds the solo strip dialog and the parity seams. The
+  projected MO2 total is ≈ 3,400 against 3,200 (~6% over, inside 20%),
+  accepted per N13. R28 runs after the B1 review fixes, since those change
+  the render hot path.
+- ME6 → §8 R26 (Part B3), readings the rule leaves open:
+  - Solids:
+    - The colour editor is egui's picker plus R/G/B fields. A picker
+      session or a channel drag is one undo step.
+    - A new solid is mid-grey `#808080`.
+  - Adjustments:
+    - A new adjustment carries an empty look.
+    - Its "intended affected tracks" are the selected clip's track.
+      Without a selection, they are every video track with content in the
+      span.
+  - Placement refusals go to the Operations incident log as the typed
+    `PlacementRefusal`, which carries span, kind and the track to sit above.
+  - The viewer's transform overlay:
+    - It yields to an expanded matte section (CC5 owns that pointer).
+    - It writes through MO1's auto-key rule: keyed params get a key at the
+      playhead, others a static.
+  - The solo dialog downscales a strip that outgrows the GPU's texture
+    side, rather than failing. A default 8-sample single strip is 2,560 px
+    wide, which is over egui's 2,048 default.
 
 ## Changes in revision 2
 

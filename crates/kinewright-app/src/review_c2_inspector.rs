@@ -296,7 +296,7 @@ pub(crate) fn drag_frames(
 
 /// Route frames exactly as `submit_inspector_edits` does (gesture counter,
 /// `{key}#{gesture}` coalescing) into a real Core; return the final doc.
-fn route(core: &Core, frames: Vec<InspectorEdits>) -> Document {
+pub(crate) fn route(core: &Core, frames: Vec<InspectorEdits>) -> Document {
     let mut gesture = 0u64;
     let mut last = None;
     for edits in frames {
@@ -321,7 +321,7 @@ fn route(core: &Core, frames: Vec<InspectorEdits>) -> Document {
     last.expect("the gesture wrote something")
 }
 
-fn undo(core: &Core) -> Document {
+pub(crate) fn undo(core: &Core) -> Document {
     match core.request(Command::Undo).unwrap() {
         Event::DocumentChanged { doc, .. } => doc.as_ref().clone(),
         other => panic!("undo failed: {other:?}"),

@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use eframe::egui;
 use kinewright_core::{
-    AutomationCurve, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
+    AutomationCurve, BlendMode, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
     COLOR_CURVE_MAX_POINTS, COLOR_CURVE_MIN_POINTS, COLOR_CURVE_WHITE_BASIS_POINTS,
     COLOR_NODE_BYPASS_PARAMETER, Clip, ClipContent, ClipId, ColorCurveChannel, ColorNodeKind,
     ColorStage, ColorWheelChannel, ColorWheelControl, ColorWheelControlSet, ColorWheelsParams,
@@ -89,6 +89,8 @@ pub(crate) struct InspectorEdits {
     playhead_request: Option<TimeCode>,
     /// The clip a MOTION "Plan move…" button targeted this frame (MO1 R25).
     motion_plan_request: Option<ClipId>,
+    /// The clip (and full-res flag) a header "Solo" button targeted (MO2 R26).
+    solo_request: Option<(ClipId, bool)>,
     /// Refusals a card produced while building a batch, for the app's error
     /// log.
     ///
@@ -843,6 +845,9 @@ impl KinewrightApp {
             let session = self.focused().id;
             self.motion_plan_dialog = Some(crate::app::MotionPlanDialog::open(clip, session));
         }
+        if let Some((clip, full_res)) = edits.solo_request {
+            self.open_solo_dialog(clip, full_res);
+        }
         if !edits.operations.is_empty() {
             match edits.coalesce_key {
                 Some(key) => {
@@ -970,8 +975,9 @@ impl KinewrightApp {
                 ClipContent::Media => self.media_clip_inspector(ui, &clip),
                 ClipContent::Title(title) => self.title_inspector(ui, &clip, title),
                 ClipContent::Freeze(freeze) => self.freeze_clip_inspector(ui, &clip, freeze),
-                // MO2 Part B adds the adjustment and solid inspectors.
-                ClipContent::Adjustment | ClipContent::Solid(_) => {}
+                ClipContent::Adjustment | ClipContent::Solid(_) => {
+                    self.generated_clip_inspector(ui, &clip);
+                }
             }
         } else if let Some(marker) = self
             .focused()
@@ -1259,6 +1265,50 @@ impl KinewrightApp {
                 document.duration,
                 clip_duration,
                 clip_keeps_still_fit(&document, clip),
+                &mut pending,
+            );
+        }
+        effects_section(ui, clip, &looks, &mut pending);
+        transition_section(ui, &document, clip, &mut pending);
+        self.submit_inspector_edits(pending);
+    }
+
+    /// MO2 R26: the adjustment / solid inspector — the freeze card's shape
+    /// plus the solid colour editor.
+    fn generated_clip_inspector(&mut self, ui: &mut egui::Ui, clip: &Clip) {
+        let document = Arc::clone(&self.focused().document);
+        let solid = match clip.content {
+            ClipContent::Solid(color) => Some(color),
+            _ => None,
+        };
+        let kind = solid.map_or("Adjustment", |_| "Solid");
+        ui.label(egui::RichText::new(kind).font(theme::semibold(type_size::BODY)));
+        let duration = document.clip_duration(clip).unwrap_or(TimeCode::ZERO);
+        data_row(ui, "Duration", &frame_readout(duration, document.fps));
+        let mut pending = InspectorEdits::default();
+        let playhead_local = clip_playhead_local(clip, self.focused().position);
+        clip_enable_header(ui, &document, clip, playhead_local, &mut pending);
+        if let Some(color) = solid {
+            solid_color_row(ui, clip.id, color, &mut pending);
+        }
+        let availability = self.focused().lut_availability.clone();
+        let qc_clipping = self.color_qc.node_clipping();
+        let looks = LookInspectorContext {
+            document: &document,
+            availability: &availability,
+            qc_clipping: &qc_clipping,
+            store_unavailable: self.focused().lut_store_unavailable_reason(),
+        };
+        if clip_shows_motion(&document, clip) {
+            let keep_fit = clip_keeps_still_fit(&document, clip);
+            let span = document.duration;
+            motion_section(
+                ui,
+                clip,
+                playhead_local,
+                span,
+                duration,
+                keep_fit,
                 &mut pending,
             );
         }
@@ -4380,7 +4430,7 @@ fn motion_plus_key(
 /// person chose, keeping an existing key's interpolation there — instead of
 /// writing a shadowed static (Premiere behaviour); a curve-free param writes
 /// its static. Pure.
-fn motion_static_operation(
+pub(crate) fn motion_static_operation(
     clip: ClipId,
     effect: EffectId,
     name: &str,
@@ -5057,6 +5107,9 @@ fn clip_enable_header(
             }
         }
     });
+    if on_video_track(document, clip.id) {
+        blend_and_solo_row(ui, clip, pending);
+    }
     let row_key = format!("clip_enable:{}", clip.id.0);
     let mut next: Option<CurveWrite> = None;
     let mut live = false;
@@ -5129,6 +5182,89 @@ fn clip_enable_header(
             pending.push(operation);
         }
     }
+}
+
+/// MO2 R26: the clip-header blend dropdown (all seven modes) and the two
+/// solo buttons, which request the `preview_solo` strip dialog.
+fn blend_and_solo_row(ui: &mut egui::Ui, clip: &Clip, pending: &mut InspectorEdits) {
+    ui.horizontal(|ui| {
+        let mut blend = clip.blend_mode;
+        let combo = egui::ComboBox::from_id_salt(("clip-blend", clip.id.0))
+            .selected_text(blend_label(blend))
+            .height(f32::INFINITY)
+            .show_ui(ui, |ui| {
+                for mode in BlendMode::ALL {
+                    let item = ui.selectable_value(&mut blend, mode, blend_label(mode));
+                    crate::mixer_ui::record_strip_rect(blend_label(mode), item.rect);
+                }
+            });
+        crate::mixer_ui::record_strip_rect("clip_blend_mode", combo.response.rect);
+        if blend != clip.blend_mode {
+            let (clip, blend_mode) = (clip.id, blend);
+            pending.push(Operation::SetClipBlendMode { clip, blend_mode });
+        }
+        for (label, full_res, id) in [
+            ("Solo…", false, "clip_solo"),
+            ("Solo full-res…", true, "clip_solo_full"),
+        ] {
+            let button = ui.small_button(label).on_hover_text(
+                "Render this clip on its own (adjustments as before/after pairs) — preview_solo",
+            );
+            crate::mixer_ui::record_strip_rect(id, button.rect);
+            if button.clicked() {
+                pending.solo_request = Some((clip.id, full_res));
+            }
+        }
+    });
+}
+
+/// MO2 R26: the wire spelling of one blend mode, for the dropdown.
+pub(crate) const fn blend_label(mode: BlendMode) -> &'static str {
+    match mode {
+        BlendMode::Normal => "normal",
+        BlendMode::Multiply => "multiply",
+        BlendMode::Screen => "screen",
+        BlendMode::Overlay => "overlay",
+        BlendMode::Darken => "darken",
+        BlendMode::Lighten => "lighten",
+        BlendMode::Add => "add",
+    }
+}
+
+fn on_video_track(document: &kinewright_core::Document, clip: ClipId) -> bool {
+    (document.tracks.iter())
+        .any(|track| track.kind == TrackKind::Video && track.clips.iter().any(|c| c.id == clip))
+}
+
+/// MO2 R26: the solid colour editor — picker plus R/G/B fields, each drag or
+/// picker session one undo step.
+fn solid_color_row(
+    ui: &mut egui::Ui,
+    clip: ClipId,
+    color: kinewright_core::SolidColor,
+    pending: &mut InspectorEdits,
+) {
+    let mut rgb = [color.r, color.g, color.b];
+    ui.horizontal(|ui| {
+        ui.label("Colour");
+        let picker = ui.color_edit_button_srgb(&mut rgb);
+        let (mut started, mut changed) = (picker.clicked(), picker.changed());
+        for (channel, id) in rgb.iter_mut().zip(["solid_r", "solid_g", "solid_b"]) {
+            let field = ui.add(egui::DragValue::new(channel).range(0..=255));
+            crate::mixer_ui::record_strip_rect(id, field.rect);
+            started |= field.drag_started();
+            changed |= field.changed();
+        }
+        if started {
+            pending.begin_gesture();
+        }
+        if changed {
+            let [r, g, b] = rgb;
+            let color = kinewright_core::SolidColor { r, g, b };
+            let operation = Operation::SetSolidColor { clip, color };
+            pending.push_live(operation, format!("solid_color:{}", clip.0));
+        }
+    });
 }
 
 /// One keyframed control's badge and its one-click clear.
@@ -5286,20 +5422,22 @@ fn transition_section(
         let mut changed = false;
         ui.horizontal(|ui| {
             ui.label("Type");
-            egui::ComboBox::from_id_salt(("transition-type", clip.id.0))
+            // Grow to the popup cap, not 200 px: most of the fifteen show.
+            let combo = egui::ComboBox::from_id_salt(("transition-type", clip.id.0))
                 .selected_text(&name)
+                .height(f32::INFINITY)
                 .show_ui(ui, |ui| {
                     for descriptor in TRANSITION_DESCRIPTORS {
-                        changed |= ui
-                            .selectable_value(
-                                &mut name,
-                                descriptor.name.to_owned(),
-                                descriptor.name,
-                            )
-                            .on_hover_text(descriptor.description)
-                            .changed();
+                        let item = ui.selectable_value(
+                            &mut name,
+                            descriptor.name.to_owned(),
+                            descriptor.name,
+                        );
+                        crate::mixer_ui::record_strip_rect(descriptor.name, item.rect);
+                        changed |= item.on_hover_text(descriptor.description).changed();
                     }
                 });
+            crate::mixer_ui::record_strip_rect("transition_type", combo.response.rect);
         });
         let mut duration = transition.duration.0;
         changed |= ui
@@ -5321,13 +5459,11 @@ fn transition_section(
         let duration = document
             .clip_duration(clip)
             .map_or(1, |value| value.0.clamp(1, 15));
-        ui.menu_button("+ Transition", |ui| {
+        let menu = ui.menu_button("+ Transition", |ui| {
             for descriptor in TRANSITION_DESCRIPTORS {
-                if ui
-                    .button(descriptor.name)
-                    .on_hover_text(descriptor.description)
-                    .clicked()
-                {
+                let item = ui.button(descriptor.name);
+                crate::mixer_ui::record_strip_rect(descriptor.name, item.rect);
+                if item.on_hover_text(descriptor.description).clicked() {
                     let transition = Transition {
                         name: descriptor.name.to_owned(),
                         duration: TimeCode(duration),
@@ -5341,6 +5477,7 @@ fn transition_section(
                 }
             }
         });
+        crate::mixer_ui::record_strip_rect("transition_add", menu.response.rect);
     }
 }
 
@@ -12801,5 +12938,516 @@ mod rr_probe {
             !wrote.is_empty(),
             "static param outside clip must still be editable: {wrote:?}"
         );
+    }
+}
+
+/// MO2 R26 / §8: the person GUI's parity checklist in the N5 L4 style. Every
+/// MO2 sender is driven through its real widget or menu seam; every GUI
+/// gesture's operations resolve in the agent's registry.
+#[cfg(test)]
+mod mo2_parity {
+    use std::path::PathBuf;
+
+    use kinewright_core::{
+        AssetId, Core, MediaAsset, Rational, SolidColor, Track, TrackId, TrackKind,
+    };
+
+    use super::review_c2_inspector::{drag_frames, undo};
+    use super::tests::media_clip;
+    use super::*;
+
+    type Rects = Vec<(String, egui::Rect)>;
+    type Draw<'a> = Box<dyn FnMut(&mut egui::Ui, &mut InspectorEdits) + 'a>;
+
+    /// One headless inspector surface on its own context, with a clock that
+    /// only moves forward so presses on the same context stay single clicks.
+    struct Surface<'a> {
+        ctx: egui::Context,
+        time: f64,
+        draw: Draw<'a>,
+    }
+
+    impl<'a> Surface<'a> {
+        fn new(draw: impl FnMut(&mut egui::Ui, &mut InspectorEdits) + 'a) -> Self {
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx);
+            Self {
+                ctx,
+                time: 0.0,
+                draw: Box::new(draw),
+            }
+        }
+
+        fn frame_at(&mut self, events: Vec<egui::Event>, time: f64) -> (Rects, InspectorEdits) {
+            let mut pending = InspectorEdits::default();
+            let draw = &mut self.draw;
+            let _ = self.ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(500.0, 1_400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = crate::mixer_ui::take_strip_rects();
+                    draw(ui, &mut pending);
+                },
+            );
+            (crate::mixer_ui::take_strip_rects(), pending)
+        }
+
+        fn frame(&mut self, events: Vec<egui::Event>) -> (Rects, InspectorEdits) {
+            self.time += 0.02;
+            self.frame_at(events, self.time)
+        }
+
+        /// Settle (popups size on their first frame), then press and release
+        /// `button` where it was laid out; the release frame's edits.
+        fn press(&mut self, button: &str) -> InspectorEdits {
+            let _ = self.frame(Vec::new());
+            let (rects, _) = self.frame(Vec::new());
+            let target = (rects.iter().find(|(name, _)| name == button))
+                .unwrap_or_else(|| panic!("the surface lays out `{button}`: {rects:?}"))
+                .1
+                .center();
+            let pressed = |pressed| egui::Event::PointerButton {
+                pos: target,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let _ = self.frame(vec![egui::Event::PointerMoved(target), pressed(true)]);
+            self.frame(vec![pressed(false)]).1
+        }
+
+        /// A person's pick from an open dropdown list: wheel the list (from
+        /// over its `first` row) until `button` is in view, then press it.
+        /// egui caps a popup at its default area height, so long lists scroll.
+        fn pick(&mut self, first: &str, button: &str) -> InspectorEdits {
+            let _ = self.frame(Vec::new());
+            let (rects, _) = self.frame(Vec::new());
+            let at = |name: &str| {
+                (rects.iter().find(|(recorded, _)| recorded == name))
+                    .unwrap_or_else(|| panic!("the list lays out `{name}`: {rects:?}"))
+                    .1
+            };
+            let (top, target) = (at(first), at(button));
+            let wheel = egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, top.top() - target.top()),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let _ = self.frame(vec![egui::Event::PointerMoved(top.center()), wheel]);
+            self.press(button)
+        }
+    }
+
+    /// One 30 fps document: a 1920 × 1080 video asset and `clip` on video
+    /// track 1.
+    pub(super) fn mo2_document(clip: Clip) -> Document {
+        let document = Document {
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: PathBuf::from("picture.mov"),
+                name: "Picture".to_owned(),
+                duration: TimeCode(30),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![clip],
+            }],
+            fps: Rational::new(30, 1).expect("valid fps"),
+            resolution: (1920, 1080),
+            duration: TimeCode(30),
+            ..Document::default()
+        };
+        document.validate().expect("the fixture is a legal project");
+        document
+    }
+
+    const GREY: SolidColor = SolidColor {
+        r: 128,
+        g: 128,
+        b: 128,
+    };
+
+    fn header_surface(document: &Document) -> Surface<'_> {
+        let clip = document.tracks[0].clips[0].clone();
+        Surface::new(move |ui, pending| clip_enable_header(ui, document, &clip, 9, pending))
+    }
+
+    /// The dropdown, opened then picked — what the blend sender yields.
+    fn pick_blend(current: BlendMode, mode: BlendMode) -> InspectorEdits {
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.blend_mode = current;
+        let document = mo2_document(clip);
+        let mut surface = header_surface(&document);
+        let opened = surface.press("clip_blend_mode");
+        assert!(opened.operations().is_empty(), "opening sends nothing");
+        surface.pick(blend_label(BlendMode::ALL[0]), blend_label(mode))
+    }
+
+    /// R26: the clip-header dropdown offers all seven modes and each pick
+    /// sends one `SetClipBlendMode`, one discrete undo step.
+    #[test]
+    fn mo2_blend_dropdown_sends_each_of_the_seven_modes() {
+        assert_eq!(BlendMode::ALL.len(), 7);
+        for mode in BlendMode::ALL {
+            let current = if mode == BlendMode::Normal {
+                BlendMode::Screen
+            } else {
+                BlendMode::Normal
+            };
+            let picked = pick_blend(current, mode);
+            assert_eq!(
+                picked.operations(),
+                [Operation::SetClipBlendMode {
+                    clip: ClipId(2),
+                    blend_mode: mode,
+                }],
+                "picking {mode:?}"
+            );
+            assert_eq!(picked.coalesce_key(), None, "one discrete undo step");
+        }
+    }
+
+    /// R26: the header's two Solo buttons request the strip dialog (plain
+    /// and full-res) and send nothing; an audio-track clip has no blend or
+    /// solo row.
+    #[test]
+    fn mo2_solo_buttons_request_the_strip_dialog() {
+        let document = mo2_document(media_clip(ClipId(2), AssetId(1), None));
+        for (button, full_res) in [("clip_solo", false), ("clip_solo_full", true)] {
+            let pressed = header_surface(&document).press(button);
+            assert_eq!(pressed.solo_request, Some((ClipId(2), full_res)));
+            assert!(pressed.operations().is_empty());
+        }
+        let mut audio = document.clone();
+        audio.tracks[0].kind = TrackKind::Audio;
+        audio.media_pool[0].kind = MediaKind::Audio;
+        let (rects, _) = header_surface(&audio).frame(Vec::new());
+        assert!(
+            rects
+                .iter()
+                .all(|(name, _)| !["clip_blend_mode", "clip_solo"].contains(&name.as_str())),
+            "no blend/solo row off a video track: {rects:?}"
+        );
+    }
+
+    /// Drag one solid channel field, routing each frame into `core` the way
+    /// `submit_inspector_edits` does and redrawing from the live document.
+    fn drag_solid_channel(core: &Core, field: &str, steps: &[f32]) -> (Vec<Operation>, Document) {
+        let current = std::cell::RefCell::new(mo2_document(solid_clip()));
+        let mut surface = Surface::new(|ui, pending| {
+            let clip = current.borrow().tracks[0].clips[0].clone();
+            let ClipContent::Solid(color) = clip.content else {
+                panic!("a solid")
+            };
+            solid_color_row(ui, clip.id, color, pending);
+        });
+        let (rects, _) = surface.frame(Vec::new());
+        let from = (rects.iter().find(|(name, _)| name == field))
+            .unwrap_or_else(|| panic!("the row lays out `{field}`: {rects:?}"))
+            .1
+            .center();
+        let (mut sent, mut gesture) = (Vec::new(), 0u64);
+        drag_frames(
+            |events, time| {
+                let edits = surface.frame_at(events, time).1;
+                gesture += u64::from(edits.gesture_started());
+                if let (Some(key), false) = (edits.coalesce_key(), edits.operations().is_empty()) {
+                    let command = kinewright_core::Command::DoBatchCoalesced {
+                        operations: edits.operations().to_vec(),
+                        coalesce_key: format!("{key}#{gesture}"),
+                    };
+                    let kinewright_core::Event::DocumentChanged { doc, .. } =
+                        core.request(command).expect("the actor answers")
+                    else {
+                        panic!("the live edit lands");
+                    };
+                    *current.borrow_mut() = doc.as_ref().clone();
+                    sent.extend(edits.operations().iter().cloned());
+                }
+                edits
+            },
+            from,
+            steps,
+        );
+        drop(surface);
+        (sent, current.into_inner())
+    }
+
+    fn solid_clip() -> Clip {
+        Clip {
+            content: ClipContent::Solid(GREY),
+            ..media_clip(ClipId(2), AssetId(1), None)
+        }
+    }
+
+    /// R26: the solid colour editor's channel drag sends `SetSolidColor`
+    /// live and the whole drag is one undo step.
+    #[test]
+    fn mo2_solid_colour_drag_is_one_undo_step() {
+        let core = Core::spawn(mo2_document(solid_clip())).expect("the core starts");
+        let (sent, after) = drag_solid_channel(&core, "solid_r", &[20.0, 40.0, 60.0]);
+        assert!(sent.len() > 1, "a live drag sends every frame: {sent:?}");
+        assert!(
+            sent.iter()
+                .all(|operation| matches!(operation, Operation::SetSolidColor { clip, .. } if *clip == ClipId(2)))
+        );
+        let ClipContent::Solid(color) = after.tracks[0].clips[0].content else {
+            panic!("still a solid");
+        };
+        assert!(
+            color.r > GREY.r && (color.g, color.b) == (GREY.g, GREY.b),
+            "{color:?}"
+        );
+        let undone = undo(&core);
+        assert_eq!(undone.tracks[0].clips[0].content, ClipContent::Solid(GREY));
+    }
+
+    /// The transition surface for `clip` (with or without a transition in).
+    fn press_transition(transition: Option<&str>, opener: &str, name: &str) -> Vec<Operation> {
+        let mut clip = media_clip(ClipId(2), AssetId(1), None);
+        clip.transition_in = transition.map(|name| Transition {
+            name: name.to_owned(),
+            duration: TimeCode(6),
+        });
+        let document = mo2_document(clip.clone());
+        let mut surface =
+            Surface::new(|ui, pending| transition_section(ui, &document, &clip, pending));
+        assert!(surface.press(opener).operations().is_empty());
+        surface
+            .pick(TRANSITION_DESCRIPTORS[0].name, name)
+            .operations()
+            .to_vec()
+    }
+
+    /// R26: both transition menus offer all fifteen names, and each pick
+    /// sends that transition.
+    #[test]
+    fn mo2_transition_menus_offer_all_fifteen_names() {
+        assert_eq!(TRANSITION_DESCRIPTORS.len(), 15);
+        for descriptor in TRANSITION_DESCRIPTORS {
+            let other = TRANSITION_DESCRIPTORS
+                .iter()
+                .find(|other| other.name != descriptor.name)
+                .expect("fifteen names")
+                .name;
+            for (existing, opener) in [(None, "transition_add"), (Some(other), "transition_type")] {
+                let operations = press_transition(existing, opener, descriptor.name);
+                assert!(
+                    operations.iter().any(|operation| matches!(
+                        operation,
+                        Operation::AddTransition { clip, transition }
+                            if *clip == ClipId(2) && transition.name == descriptor.name
+                    )),
+                    "{opener} ▸ {}: {operations:?}",
+                    descriptor.name
+                );
+            }
+        }
+    }
+
+    /// The four MO2 R8 operations — the agent-reachable set every person
+    /// sender must cover.
+    const MO2_OPERATIONS: [&str; 4] = [
+        "SetClipBlendMode",
+        "AddAdjustmentClip",
+        "AddSolidClip",
+        "SetSolidColor",
+    ];
+
+    fn variants(operations: &[Operation]) -> Vec<String> {
+        operations
+            .iter()
+            .map(crate::app::operation_variant_name)
+            .collect()
+    }
+
+    /// (variant, GUI sender, what driving the sender produced). Widgets are
+    /// pressed or dragged for real; the "+ Layer" and viewer rows drive the
+    /// exact seam the menu and overlay call (their full app paths are driven
+    /// in `timeline_ui`'s and `preview_ui`'s MO2 tests).
+    fn mo2_sender_drivers() -> Vec<(&'static str, &'static str, Vec<String>)> {
+        let core = Core::spawn(mo2_document(solid_clip())).expect("the core starts");
+        let mut layered = mo2_document(media_clip(ClipId(2), AssetId(1), None));
+        layered.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: Vec::new(),
+        });
+        let place = |adjustment| {
+            let placed = crate::timeline_ui::generated_clip_placement(
+                &layered,
+                adjustment,
+                None,
+                TimeCode::ZERO,
+                None,
+            );
+            variants(&[placed.expect("track 2 is free and above")])
+        };
+        let transform = |keyed: bool| {
+            let mut clip = media_clip(ClipId(2), AssetId(1), None);
+            let mut effect = Effect {
+                enabled: true,
+                enabled_curve: None,
+                id: EffectId(4),
+                name: "transform".to_owned(),
+                parameters: BTreeMap::new(),
+                keyframes: BTreeMap::new(),
+            };
+            if keyed {
+                effect.keyframes.insert(
+                    "x_percent".to_owned(),
+                    AutomationCurve {
+                        keyframes: vec![Keyframe {
+                            at: TimeCode(0),
+                            value: 0,
+                            interpolation: KeyframeInterpolation::Linear,
+                            tangent_in: 0,
+                            tangent_out: 0,
+                        }],
+                    },
+                );
+            }
+            clip.effects = vec![effect];
+            let image_rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 225.0));
+            let drag = crate::preview_ui::TransformDrag {
+                origin: image_rect.center(),
+                pointer: image_rect.center() + egui::vec2(40.0, 0.0),
+                image_rect,
+                center: image_rect.center(),
+                scaling: false,
+            };
+            variants(&crate::preview_ui::transform_drag_operations(
+                &clip,
+                EffectId(4),
+                TimeCode(9),
+                [0, 0, 100],
+                drag,
+            ))
+        };
+        vec![
+            (
+                "SetClipBlendMode",
+                "clip header blend dropdown",
+                variants(pick_blend(BlendMode::Normal, BlendMode::Multiply).operations()),
+            ),
+            (
+                "SetSolidColor",
+                "solid colour editor (channel drag)",
+                variants(&drag_solid_channel(&core, "solid_g", &[20.0, 40.0]).0),
+            ),
+            ("AddSolidClip", "+ Layer ▸ New solid", place(false)),
+            (
+                "AddAdjustmentClip",
+                "+ Layer ▸ New adjustment clip",
+                place(true),
+            ),
+            (
+                "AddTransition",
+                "+ Transition ▸ push/slide/wipe",
+                variants(&press_transition(None, "transition_add", "slide_up")),
+            ),
+            ("SetEffectParam", "viewer transform drag", transform(false)),
+            (
+                "UpsertEffectKeyframe",
+                "viewer transform drag (keyed)",
+                transform(true),
+            ),
+        ]
+    }
+
+    /// §8 parity checklist: every MO2 operation has a GUI sender driven for
+    /// real; every GUI gesture's operations are registry operations (the
+    /// agent's path); `preview_solo` is a registry capability with the Solo
+    /// button as its sender; the seams are wired into production.
+    #[test]
+    fn mo2_parity_checklist_is_complete() {
+        let registry = kinewright_agent::operation_tools().expect("the registry builds");
+        let registered = |variant: &str| registry.iter().any(|tool| tool.variant == variant);
+        let drivers = mo2_sender_drivers();
+        for (variant, sender, produced) in &drivers {
+            assert!(
+                produced.iter().any(|name| name == variant),
+                "{sender} yields {variant}: {produced:?}"
+            );
+            assert!(
+                produced.iter().all(|name| registered(name)),
+                "{sender}'s operations are all agent-reachable: {produced:?}"
+            );
+        }
+        for operation in MO2_OPERATIONS {
+            assert!(registered(operation), "{operation} is in the registry");
+            assert!(
+                drivers.iter().any(|(variant, ..)| *variant == operation),
+                "{operation} has a GUI sender"
+            );
+        }
+        let capabilities =
+            kinewright_agent::capability_tool_names().expect("capabilities enumerate");
+        assert!(capabilities.iter().any(|name| name == "preview_solo"));
+        let document = mo2_document(media_clip(ClipId(2), AssetId(1), None));
+        let solo = header_surface(&document).press("clip_solo");
+        assert_eq!(solo.solo_request, Some((ClipId(2), false)));
+        for (source, needle) in [
+            (
+                include_str!("timeline_ui.rs"),
+                "self.generated_layer_menu(ui);",
+            ),
+            (include_str!("timeline_ui.rs"), "paint_transition_glyph("),
+            (include_str!("preview_ui.rs"), "self.handle_transform_drag("),
+            (include_str!("app.rs"), "self.show_solo_dialog(ui.ctx());"),
+            (
+                include_str!("inspector_ui.rs"),
+                "self.open_solo_dialog(clip, full_res);",
+            ),
+            (
+                include_str!("inspector_ui.rs"),
+                "solid_color_row(ui, clip.id, color",
+            ),
+        ] {
+            let production = source
+                .split_once("#[cfg(test)]\nmod ")
+                .map_or(source, |(before, _)| before);
+            assert!(production.contains(needle), "production wires {needle}");
+        }
+    }
+
+    /// R26: a solo request opens the strip dialog, which runs the agent's
+    /// own `preview_solo` and shows its typed refusal — the untagged fixture
+    /// is refused by managed decode.
+    #[test]
+    fn mo2_a_solo_request_opens_the_dialog_and_shows_the_typed_refusal() {
+        let (_fixture, mut app) = crate::app::in1_tests::in1b_app();
+        let clip = app.focused().document.tracks[0].clips[0].id;
+        app.submit_inspector_edits(InspectorEdits {
+            solo_request: Some((clip, true)),
+            ..Default::default()
+        });
+        let dialog = app.solo_dialog.as_ref().expect("the dialog opens");
+        assert_eq!((dialog.clip, dialog.full_res), (clip, true));
+        let painted = crate::solo_ui::tests::settle_solo_dialog(&mut app);
+        assert!(
+            painted
+                .iter()
+                .any(|text| text.starts_with("solo_render_failed")),
+            "the typed refusal is shown: {painted:?}"
+        );
+        crate::app::in1_tests::in1_shutdown(&mut app);
     }
 }

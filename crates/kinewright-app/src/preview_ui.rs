@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 use kinewright_core::{
-    Clip, EffectUniform, IncidentObservation, IncidentSubject, LabelIncident, MatteParams,
-    MediaKind, ThreePointMode, TimeCode, TimelineRevision, TrackId, TrackKind,
+    Clip, EffectId, EffectUniform, IncidentObservation, IncidentSubject, LabelIncident,
+    MatteParams, MediaKind, Operation, ThreePointMode, TimeCode, TimelineRevision, TrackId,
+    TrackKind,
 };
 
 use crate::{
@@ -11,7 +12,10 @@ use crate::{
     color_qc_ui::{AnalysisColorQcSource, ColorQcSource, WorkingProofCache, WorkingProofKey},
     error_ui::{WorkerError, worker_error_observation},
     icons::Icon,
-    inspector_ui::{InspectorEdits, matte_gesture_coalesce_key, matte_window_drag_operations},
+    inspector_ui::{
+        InspectorEdits, matte_gesture_coalesce_key, matte_window_drag_operations,
+        motion_static_operation,
+    },
     matte_overlay_ui::{
         AnalysisMatteProofSource, LayerTransform, MatteDrag, MatteFrame, MatteTarget, MatteViewKey,
         MatteViewStatus, coverage_color_image, matte_hit_test, paint_matte_overlay,
@@ -103,6 +107,62 @@ fn resolved_layer_transform(clip: &Clip, local_at: TimeCode) -> LayerTransform {
         }
     }
     transform
+}
+
+/// MO2 R26: one transform drag's pointer geometry in viewer pixels.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TransformDrag {
+    pub(crate) origin: egui::Pos2,
+    pub(crate) pointer: egui::Pos2,
+    pub(crate) image_rect: egui::Rect,
+    /// The layer's centre, the pivot a corner drag scales about.
+    pub(crate) center: egui::Pos2,
+    pub(crate) scaling: bool,
+}
+
+/// MO2 R26: the coarse `transform` writes one drag makes from its start
+/// values `[x, y, scale]` — auto-keying where the param is keyed. Pure.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+pub(crate) fn transform_drag_operations(
+    clip: &Clip,
+    effect: EffectId,
+    at: TimeCode,
+    [x, y, scale]: [i64; 3],
+    drag: TransformDrag,
+) -> Vec<Operation> {
+    let Some(fx) = clip.effects.iter().find(|candidate| candidate.id == effect) else {
+        return Vec::new();
+    };
+    let delta = drag.pointer - drag.origin;
+    let percent = |pixels: f32, extent: f32| (pixels / extent.max(1.0) * 100.0).round() as i64;
+    let writes = if drag.scaling {
+        let ratio = drag.pointer.distance(drag.center) / drag.origin.distance(drag.center).max(1.0);
+        vec![(
+            "scale_percent",
+            (scale as f32 * ratio).round() as i64,
+            1..=400,
+        )]
+    } else {
+        vec![
+            (
+                "x_percent",
+                x + percent(delta.x, drag.image_rect.width()),
+                -100..=100,
+            ),
+            (
+                "y_percent",
+                y + percent(delta.y, drag.image_rect.height()),
+                -100..=100,
+            ),
+        ]
+    };
+    (writes.into_iter())
+        .map(|(name, value, range)| {
+            let value = value.clamp(*range.start(), *range.end());
+            let curve = fx.keyframes.get(name);
+            motion_static_operation(clip.id, effect, name, value, curve, at, range)
+        })
+        .collect()
 }
 
 /// Which texture the Program viewer shows.
@@ -850,6 +910,11 @@ impl KinewrightApp {
             self.note_observation(observation);
         }
         let overlay = self.matte_overlay_context();
+        // MO2 R26: the transform overlay yields to an open matte section.
+        let transform_target = overlay
+            .is_none()
+            .then(|| self.transform_drag_target())
+            .flatten();
         let matte_texture = overlay
             .as_ref()
             .and_then(|context| self.matte_view_texture(ui.ctx(), blocked, context));
@@ -882,8 +947,11 @@ impl KinewrightApp {
             } else {
                 color::TEXT_MUTED
             },
-            viewer_sense(overlay.is_some()),
+            viewer_sense(overlay.is_some() || transform_target.is_some()),
         );
+        if let (Some(target), Some(image_rect)) = (&transform_target, frame.image_rect) {
+            self.handle_transform_drag(ui, &frame.response, image_rect, target);
+        }
         if let Some(context) = overlay {
             if let Some(image_rect) = frame.image_rect {
                 paint_matte_overlay(
@@ -897,6 +965,90 @@ impl KinewrightApp {
             self.matte_viewer_controls(ui, &context);
         }
         self.qc_mask_controls(ui, qc_mask_conditions);
+    }
+
+    /// MO2 R26: the selected video clip's first enabled `transform`, when the
+    /// clip is active at the playhead.
+    fn transform_drag_target(&self) -> Option<(Clip, EffectId, TimeCode)> {
+        let session = self.focused();
+        let document = &session.document;
+        let clip = session.selected_clip.and_then(|id| document.clip(id))?;
+        let local = TimeCode(session.position.0 - clip.timeline_start.0);
+        let duration = document.clip_duration(clip).ok()?;
+        let on_video = (document.tracks.iter())
+            .any(|t| t.kind == TrackKind::Video && t.clips.iter().any(|c| c.id == clip.id));
+        let active = on_video && (0..duration.0).contains(&local.0) && clip.is_enabled_at(local);
+        let effect = (clip.effects.iter())
+            .find(|effect| effect.name == "transform" && effect.is_enabled_at(local))?;
+        active.then(|| (clip.clone(), effect.id, local))
+    }
+
+    /// MO2 R26 (CC5 precedent): drag the layer body to move, a corner to
+    /// scale — one undo step per drag via the MO1 R22 gesture pattern.
+    fn handle_transform_drag(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        image_rect: egui::Rect,
+        (clip, effect, local): &(Clip, EffectId, TimeCode),
+    ) {
+        let transform = resolved_layer_transform(clip, *local);
+        #[allow(clippy::cast_possible_truncation)]
+        let (scale, offset) = (
+            transform.scale as f32,
+            egui::vec2(transform.offset_x as f32, transform.offset_y as f32),
+        );
+        let center = image_rect.center() + offset * image_rect.size() / 2.0;
+        let layer = egui::Rect::from_center_size(center, image_rect.size() * scale);
+        let painter = ui.painter_at(response.rect);
+        let stroke = egui::Stroke::new(1.0, color::ACCENT);
+        painter.rect_stroke(layer, 0.0, stroke, egui::StrokeKind::Middle);
+        let corners = [
+            layer.left_top(),
+            layer.right_top(),
+            layer.left_bottom(),
+            layer.right_bottom(),
+        ];
+        for corner in corners {
+            painter.rect_filled(
+                egui::Rect::from_center_size(corner, egui::vec2(7.0, 7.0)),
+                0.0,
+                color::ACCENT,
+            );
+        }
+        let memory = egui::Id::new(("mo2-transform-drag", clip.id.0));
+        let mut pending = InspectorEdits::default();
+        if response.drag_started()
+            && let (Some(origin), Some(fx)) = (
+                ui.input(|input| input.pointer.press_origin()),
+                clip.effects.iter().find(|e| e.id == *effect),
+            )
+        {
+            let value = |name, neutral| fx.integer_parameter_at(name, *local).unwrap_or(neutral);
+            let start = [
+                value("x_percent", 0),
+                value("y_percent", 0),
+                value("scale_percent", 100),
+            ];
+            let scaling = corners.iter().any(|corner| corner.distance(origin) <= 10.0);
+            ui.data_mut(|data| data.insert_temp(memory, (origin, start, scaling)));
+            pending.begin_gesture();
+        }
+        if crate::inspector_ui::is_live_drag(response)
+            && let Some(pointer) = response.interact_pointer_pos()
+            && let Some((origin, start, scaling)) = ui.data(|data| data.get_temp(memory))
+        {
+            let drag = TransformDrag {
+                origin,
+                pointer,
+                image_rect,
+                center,
+                scaling,
+            };
+            let operations = transform_drag_operations(clip, *effect, *local, start, drag);
+            pending.extend_live(operations, format!("transform_drag:{}", clip.id.0));
+        }
+        self.submit_inspector_edits(pending);
     }
 
     /// The CC6 §8.2 QC mask toggle, its status, and its legend.
@@ -2393,5 +2545,245 @@ mod tests {
                 "step {step} disagrees with the hand-transcribed transfer"
             );
         }
+    }
+}
+
+/// MO2 R26: the viewer's transform overlay — its target and its drag, one
+/// undo step per gesture, through a real app and core.
+#[cfg(test)]
+mod mo2_tests {
+    use std::{
+        collections::BTreeMap,
+        time::{Duration, Instant},
+    };
+
+    use kinewright_core::{
+        AssetId, ClipContent, ClipId, Document, Effect, MediaAsset, ParamValue, Rational, Track,
+    };
+
+    use super::*;
+    use crate::app::in1_tests::{in1_drain_core, in1_harness, in1_shutdown};
+
+    const CLIP: ClipId = ClipId(10);
+    const TRANSFORM: EffectId = EffectId(2);
+
+    fn transform_document(enabled: bool) -> Document {
+        let transform = Effect {
+            enabled,
+            enabled_curve: None,
+            id: TRANSFORM,
+            name: "transform".to_owned(),
+            parameters: BTreeMap::from([
+                ("x_percent".to_owned(), ParamValue::Integer(0)),
+                ("y_percent".to_owned(), ParamValue::Integer(0)),
+                ("scale_percent".to_owned(), ParamValue::Integer(100)),
+            ]),
+            keyframes: BTreeMap::new(),
+        };
+        let document = Document {
+            media_pool: vec![MediaAsset {
+                id: AssetId(1),
+                path: std::path::PathBuf::from("picture.mov"),
+                name: "Picture".to_owned(),
+                duration: TimeCode(120),
+                fps: Rational::new(30, 1).expect("valid fps"),
+                kind: MediaKind::Video,
+                resolution: Some((1920, 1080)),
+                source_fingerprint: kinewright_core::MediaSourceFingerprint::unknown(),
+                color_description: kinewright_core::ColorDescription::default(),
+                assumed_from: None,
+            }],
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![Clip {
+                    enabled: true,
+                    enabled_curve: None,
+                    id: CLIP,
+                    asset: AssetId(1),
+                    source_range: TimeCode(0)..TimeCode(30),
+                    content: ClipContent::Media,
+                    timeline_start: TimeCode(20),
+                    effects: vec![transform],
+                    transition_in: None,
+                    link: None,
+                    audio_gain_tenth_db: 0,
+                    audio_fade_in_frames: TimeCode::ZERO,
+                    audio_fade_out_frames: TimeCode::ZERO,
+                    speed_percent: 100,
+                    audio_gain_curve: None,
+                    blend_mode: kinewright_core::BlendMode::Normal,
+                }],
+            }],
+            fps: Rational::new(30, 1).expect("valid fps"),
+            resolution: (1920, 1080),
+            duration: TimeCode(50),
+            ..Document::default()
+        };
+        document.validate().expect("the fixture is a legal project");
+        document
+    }
+
+    fn select(app: &mut KinewrightApp, document: Document, clip: Option<ClipId>, at: i64) {
+        app.projects[0].document = Arc::new(document);
+        app.projects[0].selected_clip = clip;
+        app.projects[0].position = TimeCode(at);
+    }
+
+    /// R26: the overlay targets the selected video clip's enabled
+    /// `transform` only while the playhead is on that clip.
+    #[test]
+    fn mo2_the_transform_overlay_targets_the_selected_clip_under_the_playhead() {
+        let (mut app, _engine) = in1_harness(transform_document(true));
+        select(&mut app, transform_document(true), Some(CLIP), 25);
+        let (clip, effect, local) = app.transform_drag_target().expect("a target");
+        assert_eq!((clip.id, effect, local), (CLIP, TRANSFORM, TimeCode(5)));
+        select(&mut app, transform_document(true), None, 25);
+        assert!(app.transform_drag_target().is_none(), "nothing selected");
+        select(&mut app, transform_document(true), Some(CLIP), 50);
+        assert!(
+            app.transform_drag_target().is_none(),
+            "playhead off the clip"
+        );
+        select(&mut app, transform_document(false), Some(CLIP), 25);
+        assert!(app.transform_drag_target().is_none(), "transform disabled");
+        let production = include_str!("preview_ui.rs");
+        assert!(
+            production.contains("viewer_sense(overlay.is_some() || transform_target.is_some())"),
+            "the viewer senses drags while a transform target exists"
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// One viewer frame: a 700 × 500 drag surface around `IMAGE`.
+    fn viewer_frame(
+        ctx: &egui::Context,
+        app: &mut KinewrightApp,
+        events: Vec<egui::Event>,
+        time: f64,
+    ) {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 500.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let viewer = ui.max_rect();
+                let response = ui.allocate_rect(viewer, viewer_sense(true));
+                if let Some(target) = app.transform_drag_target() {
+                    app.handle_transform_drag(ui, &response, image(), &target);
+                }
+            },
+        );
+    }
+
+    fn image() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(100.0, 100.0), egui::vec2(400.0, 225.0))
+    }
+
+    /// Press at `from`, move through `path`, release; drain the core as the
+    /// app's frame loop does. Returns how many revisions the gesture made.
+    fn drag(
+        ctx: &egui::Context,
+        app: &mut KinewrightApp,
+        time: &mut f64,
+        from: egui::Pos2,
+        path: &[egui::Pos2],
+    ) -> u64 {
+        let before = app.focused().revision.0;
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut frames = vec![vec![egui::Event::PointerMoved(from), button(from, true)]];
+        frames.extend(path.iter().map(|to| vec![egui::Event::PointerMoved(*to)]));
+        frames.push(vec![button(*path.last().expect("a path"), false)]);
+        for events in frames {
+            *time += 0.05;
+            viewer_frame(ctx, app, events, *time);
+            in1_drain_core(app, 0);
+        }
+        settle(app);
+        app.focused().revision.0 - before
+    }
+
+    /// Drain until the core has been quiet for a while.
+    fn settle(app: &mut KinewrightApp) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut last = app.focused().revision;
+        let mut quiet = 0;
+        while quiet < 10 {
+            std::thread::sleep(Duration::from_millis(10));
+            in1_drain_core(app, 0);
+            quiet = if app.focused().revision == last {
+                quiet + 1
+            } else {
+                0
+            };
+            last = app.focused().revision;
+            assert!(Instant::now() < deadline, "the core never settled");
+        }
+    }
+
+    fn transform_values(app: &KinewrightApp) -> [i64; 3] {
+        let clip = app.focused().document.clip(CLIP).expect("the clip").clone();
+        let effect = (clip.effects.iter())
+            .find(|effect| effect.id == TRANSFORM)
+            .expect("transform");
+        ["x_percent", "y_percent", "scale_percent"]
+            .map(|name| effect.integer_parameter_at(name, TimeCode(5)).expect(name))
+    }
+
+    /// R26 (CC5 precedent, MO1 R22 gesture pattern): dragging the layer body
+    /// moves it and a corner scales it about its centre; each drag lands as
+    /// several live revisions yet undoes in one step.
+    #[test]
+    fn mo2_a_transform_overlay_drag_is_one_undo_step() {
+        let (mut app, _engine) = in1_harness(transform_document(true));
+        select(&mut app, transform_document(true), Some(CLIP), 25);
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let mut time = 0.0;
+        viewer_frame(&ctx, &mut app, Vec::new(), time);
+        let body = image().center();
+        let path = [10.0, 20.0, 40.0].map(|dx| body + egui::vec2(dx, 0.0));
+        let moved = drag(&ctx, &mut app, &mut time, body, &path);
+        assert!(
+            moved > 1,
+            "a live drag writes as it goes: {moved} revisions"
+        );
+        assert_eq!(transform_values(&app), [10, 0, 100], "40 px of 400 is 10 %");
+
+        // The layer now sits 40 px right; its bottom-right corner scales.
+        let corner = image().right_bottom() + egui::vec2(40.0, 0.0);
+        let centre = image().center() + egui::vec2(40.0, 0.0);
+        let out = |ratio: f32| centre + (corner - centre) * ratio;
+        let scaled = drag(&ctx, &mut app, &mut time, corner, &[out(1.2), out(1.5)]);
+        assert!(scaled > 1, "{scaled} revisions");
+        assert_eq!(transform_values(&app), [10, 0, 150]);
+
+        app.undo();
+        settle(&mut app);
+        assert_eq!(
+            transform_values(&app),
+            [10, 0, 100],
+            "one undo, one scale gesture"
+        );
+        app.undo();
+        settle(&mut app);
+        assert_eq!(
+            transform_values(&app),
+            [0, 0, 100],
+            "one undo, one move gesture"
+        );
+        in1_shutdown(&mut app);
     }
 }
