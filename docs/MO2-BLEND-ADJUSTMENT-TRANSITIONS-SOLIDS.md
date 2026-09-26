@@ -70,6 +70,23 @@
   isolated down Push/Slide mismatch). The crop now tests uv clamped to
   [0, 1]. Pinned by the odd/even transition grid and the exact-centre
   probe (M22/M25 and both fixes' reversals killed).
+- ME6 → §9 R27 (B1 fix round 1, Windows CI run 36222189672, WARP): a
+  GPU≡twin working value may also differ by a **derived sub-texel
+  envelope**. D3D requires only 8 bits of sub-texel filter precision
+  (Vulkan's `subTexelPrecisionBits`; lavapipe and NVIDIA report 8). The
+  bilinear value is multilinear in its weights, so every rounding of
+  `(fx, fy)` to 2⁻⁸ lies between the four floor/ceil corners. The twin
+  renders those four corners, and the per-value slack is the largest
+  `|corner − exact|` (≤ 2⁻⁸ × the local neighbour contrast per axis),
+  carried through the rest of the pipeline. The slack is exactly zero
+  wherever nothing filters between distinct texels, so unfiltered pixels
+  keep the unit 1e-3 (pinned on a blit). It is computed only when a value
+  misses the exact R27. Evidence (emulated, CPU): WARP's R26 gradient
+  value 290 departs by 0.00146 against a slack of 0.00244. The
+  `slide_right` title at frame 3, pixel 6708, departs by 0.00122 against
+  a slack of 0.00171; the twin reproduces CI's exact value there. Neither
+  failure was a coverage tie. Adapters with fewer than 8 bits are out of
+  scope.
 
 ## Changes in revision 2
 
@@ -553,7 +570,7 @@ differentials and contract tests; no SHA-256 frame pins (N4 G5). Pinned
 tolerances per domain (B8): unit-domain working-linear max abs ≤ 1e-3/
 channel; over-range relative ≤ 2^-10 and ≤ 4 f16 ULP; monitor bytes max ≤
 2 codes, p99 ≤ 1, mean ≤ 0.25 (the CC1 `abs_code_diff_rgb` method).
-R27's tolerances are MO2-specific; the future CC8 column additionally
+Resampled GPU≡twin values add the ME6 sub-texel envelope. R27's tolerances are MO2-specific; the future CC8 column additionally
 satisfies PB1–PB4. Fixtures are production-flavoured:
 PiP-over-presenter (`Normal`), `Screen` light leak, `Multiply` callout,
 adjustment look, solid title card, push/slide/wipe midpoints, and the §3

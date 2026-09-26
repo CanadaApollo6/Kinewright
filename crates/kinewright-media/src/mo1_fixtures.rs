@@ -2293,12 +2293,61 @@ fn mo1_transform_r26_matches_twin() {
         }];
         let gpu = compositor.render_working(resolution, &layers).unwrap();
         let twin = crate::compositor::twin::render_working(resolution, &layers, None).unwrap();
-        for (index, (a, e)) in gpu.pixels.iter().zip(&twin.pixels).enumerate() {
+        // MO2 ME6: resampled values also get the 8-bit sub-texel envelope
+        // (zero where nothing is filtered), computed only on a miss.
+        let pairs = || gpu.pixels.iter().zip(&twin.pixels);
+        let slack = if pairs().all(|(a, e)| (a - e).abs() <= 1e-3) {
+            vec![0.0; twin.pixels.len()]
+        } else {
+            crate::compositor::twin::subtexel_envelope(resolution, &layers, None).unwrap()
+        };
+        for (index, (a, e)) in pairs().enumerate() {
             assert!(
-                (a - e).abs() <= 1e-3,
-                "{label}: value {index} (pixel {}) GPU {a} vs twin {e}",
-                index / 4
+                (a - e).abs() <= 1e-3 + slack[index],
+                "{label}: value {index} (pixel {}) GPU {a} vs twin {e}, slack {}",
+                index / 4,
+                slack[index]
             );
         }
     }
+}
+
+/// MO2 ME6 (G4): the value Windows WARP produced on the R26 gradient
+/// (run 36222189672) lies outside the unit 1e-3 but inside the derived
+/// 8-bit sub-texel envelope, so the widening is what that adapter needs.
+#[test]
+fn mo2_warp_r26_departure_lies_within_the_subtexel_envelope() {
+    let source = crate::frame::WorkingFrame::from_display_frame(&mo1_gradient(97, 53)).unwrap();
+    let effects = vec![transform_effect(1, &[("scale_percent", 100)])];
+    let layers = [CompositorLayer {
+        frame: &source,
+        effects: &effects,
+        transition: TransitionRenderParams::default(),
+        mode: LayerMode::NORMAL,
+    }];
+    let twin = crate::compositor::twin::render_working((192, 108), &layers, None).unwrap();
+    let slack = crate::compositor::twin::subtexel_envelope((192, 108), &layers, None).unwrap();
+    let (warp, exact) = (0.848_144_53_f32, twin.pixels[290]);
+    println!("value 290: twin {exact} slack {} WARP {warp}", slack[290]);
+    assert!(
+        (warp - exact).abs() > 1e-3,
+        "WARP misses the unit tolerance"
+    );
+    assert!(
+        (warp - exact).abs() <= 1e-3 + slack[290],
+        "and lies in the envelope"
+    );
+    let unfiltered = slack.iter().filter(|v| **v == 0.0).count();
+    println!("{unfiltered} of {} values carry no slack", slack.len());
+    // A pixel-exact blit filters nothing: no value gets any slack.
+    let source = crate::frame::WorkingFrame::from_display_frame(&quadrants(64, 36)).unwrap();
+    let layers = [CompositorLayer {
+        frame: &source,
+        ..layers[0]
+    }];
+    let blit = crate::compositor::twin::subtexel_envelope((64, 36), &layers, None).unwrap();
+    assert!(
+        blit.iter().all(|v| *v == 0.0),
+        "unfiltered pixels keep 1e-3"
+    );
 }

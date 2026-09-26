@@ -35,6 +35,11 @@ struct Texture {
     texels: Vec<Rgba>,
 }
 
+/// ME6: bilinear weights exact (`None`), or quantized to 2⁻⁸ per axis with
+/// floor (`false`) or ceil (`true`), the corners of the box containing any
+/// 8-bit sub-texel rounding a conformant adapter may apply.
+type Subtexel = Option<[bool; 2]>;
+
 impl Texture {
     fn of<F: CompositorInput>(frame: &F) -> Self {
         let bytes = frame.upload_bytes();
@@ -69,14 +74,24 @@ impl Texture {
     /// The point sampler (nearest) or the filtering sampler (bilinear), both
     /// clamp-to-edge, at a texture coordinate.
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn sample(&self, uv: [f32; 2], filtering: bool) -> Rgba {
+    fn sample(&self, uv: [f32; 2], filtering: bool, subtexel: Subtexel) -> Rgba {
         let (x, y) = (uv[0] * self.width as f32, uv[1] * self.height as f32);
         if !filtering {
             return self.texel(x.floor() as i64, y.floor() as i64);
         }
         let (x, y) = (x - 0.5, y - 0.5);
         let (x0, y0) = (x.floor(), y.floor());
-        let (fx, fy) = (x - x0, y - y0);
+        let (mut fx, mut fy) = (x - x0, y - y0);
+        if let Some(up) = subtexel {
+            let steps = |f: f32, up: bool| {
+                if up {
+                    (f * 256.0).ceil()
+                } else {
+                    (f * 256.0).floor()
+                }
+            };
+            (fx, fy) = (steps(fx, up[0]) / 256.0, steps(fy, up[1]) / 256.0);
+        }
         let t = |dx: i64, dy: i64| self.texel(x0 as i64 + dx, y0 as i64 + dy);
         let (a, b, c, d) = (t(0, 0), t(1, 0), t(0, 1), t(1, 1));
         std::array::from_fn(|i| {
@@ -281,11 +296,39 @@ fn shade(
 /// # Panics
 ///
 /// On an active legacy `cube_lut`, which the twin does not reproduce.
-#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 pub(crate) fn render_working<F: CompositorInput>(
     resolution: (u32, u32),
     layers: &[CompositorLayer<'_, F>],
     library: Option<&LutLibrary>,
+) -> Result<LinearRgbaImage, MediaError> {
+    render_sampled(resolution, layers, library, None)
+}
+
+/// ME6: per value, the largest departure from the exact twin over the four
+/// 8-bit sub-texel weight corners. Zero wherever nothing is filtered between
+/// distinct texels, so it widens R27 only on resampled pixels.
+pub(crate) fn subtexel_envelope<F: CompositorInput>(
+    resolution: (u32, u32),
+    layers: &[CompositorLayer<'_, F>],
+    library: Option<&LutLibrary>,
+) -> Result<Vec<f32>, MediaError> {
+    let exact = render_sampled(resolution, layers, library, None)?.pixels;
+    let mut envelope = vec![0.0_f32; exact.len()];
+    for corner in [[false, false], [false, true], [true, false], [true, true]] {
+        let quantized = render_sampled(resolution, layers, library, Some(corner))?.pixels;
+        for ((slack, q), e) in envelope.iter_mut().zip(quantized).zip(&exact) {
+            *slack = slack.max((q - e).abs());
+        }
+    }
+    Ok(envelope)
+}
+
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+fn render_sampled<F: CompositorInput>(
+    resolution: (u32, u32),
+    layers: &[CompositorLayer<'_, F>],
+    library: Option<&LutLibrary>,
+    subtexel: Subtexel,
 ) -> Result<LinearRgbaImage, MediaError> {
     let (width, height) = (resolution.0 as usize, resolution.1 as usize);
     let (w, h) = (width as f32, height as f32);
@@ -317,7 +360,7 @@ pub(crate) fn render_working<F: CompositorInput>(
                 let [x, y] = centre(i);
                 let source = [x - shift[0], y - shift[1]];
                 if source.iter().all(|v| (0.0..1.0).contains(v)) {
-                    let [r, g, b, _] = d0.sample(source, true);
+                    let [r, g, b, _] = d0.sample(source, true, subtexel);
                     *texel = [store(r), store(g), store(b), 1.0];
                 }
             }
@@ -358,7 +401,7 @@ pub(crate) fn render_working<F: CompositorInput>(
                     sample_uv[axis] = start + uv[axis] * visible;
                 }
             }
-            let [r, g, b, a] = source.sample(sample_uv, filtering);
+            let [r, g, b, a] = source.sample(sample_uv, filtering, subtexel);
             let mut rgb = [r, g, b];
             if p.input_linear < 0.5 {
                 rgb = rgb.map(decode_bt709);
