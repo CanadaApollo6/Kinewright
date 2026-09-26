@@ -11,6 +11,7 @@
 
 use super::*;
 use crate::timeline::{TimelineVisualLayer, visual_layers_at};
+use kinewright_core::{AutomationCurve, Keyframe, KeyframeInterpolation};
 
 fn full() -> (RenderScale, DecodeStrategy) {
     (RenderScale::FullResolution, DecodeStrategy::Seek)
@@ -691,6 +692,184 @@ fn review1_all_geometric_frames_independent_oracle_on(context: GpuContext) {
     }
 }
 
+// ---------------------------------------------------------------- R18/R19
+
+/// Review-1 (G9): masked adjustments at zero/half/full strength, Normal and
+/// Multiply; an exact order swap (double-then-square = 0.25 vs
+/// square-then-double = 0.125) and exact upper-track invariance.
+fn review1_adjustment_mask_and_exact_order_on(context: GpuContext) {
+    let mut r = FrameRenderer::new(context);
+    let plate = || solid(1, GREY, BlendMode::Normal, vec![]);
+    for strength in [0, 50, 100] {
+        let mask = [
+            ("shape_token", 1),
+            ("width_percent", 50),
+            ("height_percent", 50),
+        ];
+        let fx = vec![
+            primary(1, &[("exposure_milli_stops", 1_000)]),
+            opacity(2, strength),
+            effect(3, "mask", &mask),
+        ];
+        for mode in [BlendMode::Normal, BlendMode::Multiply] {
+            let doc = document(vec![plate(), adjustment(2, mode, fx.clone())]);
+            let out = matched(&mut r, &doc, 0, "adjustment strength mask");
+            let d = working(GREY);
+            let a = strength as f32 / 100.0;
+            let expected = std::array::from_fn::<_, 3, _>(|c| {
+                let graded = if mode == BlendMode::Normal {
+                    2.0 * d[c]
+                } else {
+                    2.0 * d[c] * d[c]
+                };
+                store(a * graded + (1.0 - a) * d[c])
+            });
+            assert_r27(&px(&out, 80, 44), &expected, "masked centre");
+            assert_eq!(
+                px(&out, 1, 1),
+                d,
+                "the mask exterior is exactly the below-stack"
+            );
+        }
+    }
+    // A doubles; B is Multiply with an identity grade, so it squares.
+    let base = solid(
+        1,
+        [255; 3],
+        BlendMode::Normal,
+        vec![primary(1, &[("exposure_milli_stops", -2_000)])],
+    );
+    let a = adjustment(
+        2,
+        BlendMode::Normal,
+        vec![primary(1, &[("exposure_milli_stops", 1_000)])],
+    );
+    let b = adjustment(3, BlendMode::Multiply, vec![]);
+    let upper = gpu(
+        &mut r,
+        &document(vec![solid(4, BLUE, BlendMode::Normal, vec![])]),
+        0,
+    )
+    .unwrap();
+    for (stack, expected) in [
+        (vec![base.clone(), a.clone(), b.clone()], 0.25),
+        (vec![base.clone(), b.clone(), a.clone()], 0.125),
+    ] {
+        let out = matched(
+            &mut r,
+            &document(stack.clone()),
+            0,
+            "exact adjustment order",
+        );
+        let exact = [expected, expected, expected, 1.0];
+        assert!(out.pixels.chunks(4).all(|p| p == exact), "{expected}");
+        let mut covered = stack;
+        covered.push(solid(4, BLUE, BlendMode::Normal, vec![]));
+        let with_upper = matched(&mut r, &document(covered), 0, "upper invariant");
+        assert_eq!(with_upper.pixels, upper.pixels);
+    }
+}
+
+fn curve(points: &[(i64, i64)], hold: bool) -> AutomationCurve {
+    let interpolation = if hold {
+        KeyframeInterpolation::Hold
+    } else {
+        KeyframeInterpolation::Linear
+    };
+    AutomationCurve {
+        keyframes: points
+            .iter()
+            .map(|&(at, value)| Keyframe {
+                at: TimeCode(at),
+                value,
+                interpolation,
+                tangent_in: 0,
+                tangent_out: 0,
+            })
+            .collect(),
+    }
+}
+
+/// Review-1 (G9): clip-local value and enable keys on solids and
+/// adjustments, including keys outside the clip, equal the static result.
+fn review1_generated_keep_outside_enable_keys_on(context: GpuContext) {
+    let mut r = FrameRenderer::new(context);
+    for adjust in [false, true] {
+        let fx = vec![
+            primary(1, &[("exposure_milli_stops", 1_000)]),
+            opacity(2, 0),
+        ];
+        let mut keyed = if adjust {
+            adjustment(2, BlendMode::Normal, fx)
+        } else {
+            solid(2, BLUE, BlendMode::Normal, fx)
+        };
+        keyed.timeline_start = TimeCode(10);
+        let percent = curve(&[(-2, 0), (10, 100)], false);
+        keyed.effects[1].keyframes.insert("percent".into(), percent);
+        keyed.enabled_curve = Some(curve(&[(-3, 1), (3, 0), (5, 1), (12, 0)], true));
+        keyed.effects[0].enabled_curve = Some(curve(&[(-5, 0), (2, 1), (20, 0)], true));
+        let mut doc = document(vec![solid(1, GREY, BlendMode::Normal, vec![])]);
+        doc.tracks[0].clips[0].source_range.end = TimeCode(19);
+        doc.duration = TimeCode(19);
+        doc.tracks.push(Track {
+            id: TrackId(2),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![keyed.clone()],
+        });
+        doc.validate().unwrap();
+        for local in [0, 2, 3, 4, 5, 8] {
+            let out = matched(&mut r, &doc, 10 + local, "keep-outside clip-local keys");
+            let mut static_doc = doc.clone();
+            let plain = &mut static_doc.tracks[1].clips[0];
+            plain.enabled = !(3..5).contains(&local);
+            plain.enabled_curve = None;
+            plain.effects[0].enabled = local >= 2;
+            plain.effects[0].enabled_curve = None;
+            let percent = ParamValue::Integer(((local + 2) * 100 + 6) / 12);
+            plain.effects[1]
+                .parameters
+                .insert("percent".into(), percent);
+            plain.effects[1].keyframes.clear();
+            let expected = gpu(&mut r, &static_doc, 10 + local).unwrap();
+            assert_eq!(
+                out.pixels, expected.pixels,
+                "adjustment={adjust} local={local}"
+            );
+        }
+    }
+}
+
+/// Review-1: every renderer root and the twin refuse an invalid document
+/// (a disabled adjustment with an unsupported transition) identically.
+fn review1_validate_all_renderer_roots_on(context: GpuContext) {
+    let mut r = FrameRenderer::new(context);
+    let mut doc = document(vec![adjustment(1, BlendMode::Normal, vec![])]);
+    let clip = &mut doc.tracks[0].clips[0];
+    clip.enabled = false;
+    clip.transition_in = Some(Transition {
+        name: "fade_from_black".into(),
+        duration: TimeCode(5),
+    });
+    let expected = Some(MediaError::InvalidDocument(Box::new(
+        doc.validate().unwrap_err(),
+    )));
+    let (at, size, (scale, seek)) = (TimeCode(0), doc.resolution, full());
+    assert_eq!(r.render(&doc, at, size, scale, seek).err(), expected);
+    assert_eq!(
+        r.render_working(&doc, at, size, scale, seek).err(),
+        expected
+    );
+    assert_eq!(
+        r.render_delivery(&doc, at, size, scale, seek).err(),
+        expected
+    );
+    let matte = r.render_matte(&doc, at, size, scale, seek, ClipId(1), EffectId(1));
+    assert_eq!(matte.err(), expected);
+    assert_eq!(r.twin_working(&doc, at, size).err(), expected);
+}
+
 // ---------------------------------------------------------------- proofs
 
 /// Review-1 B3: the public proof of an adjustment's luma qualifier over grey
@@ -821,6 +1000,9 @@ gpu_lanes! {
     review2_independent_transition_grid => review2_independent_transition_grid_on,
     review2_exact_pixel_centre_coverage => review2_exact_pixel_centre_coverage_on,
     review1_all_geometric_frames_independent_oracle => review1_all_geometric_frames_independent_oracle_on,
+    review1_adjustment_mask_and_exact_order => review1_adjustment_mask_and_exact_order_on,
+    review1_generated_keep_outside_enable_keys => review1_generated_keep_outside_enable_keys_on,
+    review1_validate_all_renderer_roots => review1_validate_all_renderer_roots_on,
     review1_public_matte_adjustment_qualifier_keeps_below => review1_public_matte_adjustment_qualifier_keeps_below_on,
     review1_public_matte_shorter_clip_remains_valid => review1_public_matte_shorter_clip_remains_valid_on,
     review1_twin_covers_supported_legacy_cube => review1_twin_covers_supported_legacy_cube_on,
