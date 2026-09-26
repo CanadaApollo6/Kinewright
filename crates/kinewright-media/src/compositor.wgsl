@@ -985,6 +985,14 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         alpha *= select(0.0, 1.0, keep);
     }
     if mode == 0u {
+        // MO2 R10 (ME11): every layer flags on write. Over a stored (finite,
+        // in-range) target, a finite in-range source stays in range, so a
+        // `Normal` layer flags a non-finite source or alpha, or an over-f16
+        // source the fixed-function over would blend (ME10).
+        if non_finite(output_linear) || non_finite(vec3<f32>(alpha))
+            || (alpha > 0.0 && any(abs(output_linear) > vec3<f32>(65504.0))) {
+            atomicStore(&validity, 1u);
+        }
         return vec4<f32>(output_linear, alpha);
     }
     // MO2 R9/R9b (ME10): composite the over here and emit it opaque, so the

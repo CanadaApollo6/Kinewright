@@ -123,7 +123,8 @@
   below value, the blend result and alpha must be finite, tested on the
   bits before `min`/`max` can erase them; magnitude is checked only on the
   value the target stores (`α·B + (1−α)·D`), so `Add(40000,40000)` at
-  α=0.25 stores 49,984 instead of refusing. **Scope (lead ruling N15.3):**
+  α=0.25 stores 49,984 instead of refusing. **Scope (lead ruling N15.3,
+  reversed by N17.1 — see ME11):**
   `Normal` *pixel* layers stay unchecked in MO2. Three things rule it: the
   CC3 overflow contract (`cc3_boundary_controls_…overflows_to_infinity`),
   R12's untouched all-`Normal` fast path, and CC8 R35. Review-2's
@@ -191,6 +192,38 @@
     one monitor code on every pixel. The review's 60% legacy-cube Screen
     probe fails the mean gate on both lanes for that reason, so it runs
     at 70%.
+- ME11 → §3 R10 (B1 fix round 3, re-review B1/B2/S1, lead ruling N17):
+  - *R10 is universal.* Every layer flags on write when it would store a
+    non-finite or over-f16 value, `Normal` pixel layers included; ME7's
+    N15.3 scope is withdrawn. A `Normal` layer's store is the
+    fixed-function over of its `(S, α)` onto a representable `D`, so it
+    flags exactly when `S` or `α` is non-finite, or `α > 0` and some
+    `|S| > 65504` — the cases whose over is non-finite or
+    implementation-defined (the RTX 3090 clamps). The flag write is
+    conditional: finite bytes, copies and the R12 fast path are unchanged
+    (no schedule, no snapshot). An all-`Normal` frame binds a per-layer
+    flag buffer recycled across frames (cleared in the frame's encoder,
+    read back after the pixels), so it adds no per-frame allocation.
+    Attribution stays sticky and names the clip and frame (pinned by
+    `rereview_me7_valid_normal_solid_overflow`, covered and uncovered, on
+    the working, twin, monitor and delivery paths).
+  - *Amended pins (R10: "never accepts adapter saturation as success").*
+    Each stored value was checked first; every one is non-finite or past
+    f16, so each now expects `NonFiniteRender { layer: 0 }`:
+    `cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_infinity`
+    (slope = power = 16 at linear 4.0: f32 +inf; the CPU monitor clamp
+    to 255 is unchanged, the GPU working and monitor renders refuse);
+    `cc3_monotone_nodes_never_descend_on_the_neutral_ramps`, GPU case
+    `master_lift-2000_gamma4000_gain4000` (stores 115,538 at white on
+    both ramps; the CPU monotone check and the other seven GPU cases are
+    unchanged); `cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu`
+    §9.2.1 over-range GPU renders (slope = power = 16 inside the matte
+    and at the unmatted 4.0 sample; the GPU over-range containment now
+    runs on the finite gain grade); `zero_coverage_is_an_exact_identity`
+    (non-finite inside the matte; the outside identity is read off a
+    finite grade); and MO2's own `r10_refusal_names_clip_and_frame…`
+    (2²⁰ now refuses at layer 0) and `review1_r10_nan_extrema…` (a NaN
+    below refuses at its own layer, 0).
 
 ## Changes in revision 2
 
@@ -407,7 +440,8 @@ no-intermediate-clamp invariant survives MO2). MO2 refuses non-finite
 working values and overflow at an f16 storage boundary; it never accepts
 adapter saturation as success. Detect invalid values before storage and
 retain a sticky per-layer failure indication until readback, including
-failures subsequently covered by another layer. Return a typed `MediaError`
+failures subsequently covered by another layer (ME11: every layer,
+`Normal` pixel layers included). Return a typed `MediaError`
 carrying offending clip and project frame through working, monitor,
 delivery and proof paths; map it through the existing incident family
 without adding an investigator code. Representable values use

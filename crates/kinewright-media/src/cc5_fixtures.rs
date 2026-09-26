@@ -46,7 +46,7 @@ use half::f16;
 use kinewright_core::{
     Analysis, AutomationCurve, ClipId, ColorNodeInactiveReason, Document, Effect, EffectId,
     Keyframe, KeyframeInterpolation, LutAsset, LutAssetId, LutAvailabilityKind,
-    MATTE_PARAMETER_COUNT, MATTE_WINDOW_LIMIT, MatteParams, ParamValue, TimeCode,
+    MATTE_PARAMETER_COUNT, MATTE_WINDOW_LIMIT, MatteParams, MediaError, ParamValue, TimeCode,
     color_node_inactive_reason, effect_descriptor, is_matte_parameter, matte_parameter_names,
     matte_window_parameter_names,
 };
@@ -1558,10 +1558,30 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
         0.0_f32.to_bits(),
         "measured: the GPU upload/sample path normalises −0.0 to +0.0 before the node stack"
     );
+    // MO2 ME11 (R10: "never accepts adapter saturation as success"): slope =
+    // power = 16 overflows f16 inside the matte and at the unmatted 4.0
+    // sample, so both GPU renders now refuse typed. The GPU half of the
+    // over-range containment clause runs on the finite gain grade instead.
+    for (label, stack) in [("matted", &overflow), ("unmatted", &overflow_unmatted)] {
+        let result = compositor.render_working_with_luts(
+            CC5_RESOLUTION,
+            &[CompositorLayer {
+                frame: &over_range_frame,
+                effects: std::slice::from_ref(stack),
+                transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
+            }],
+            None,
+        );
+        assert!(
+            matches!(result, Err(MediaError::NonFiniteRender { layer: 0, .. })),
+            "the {label} over-range overflow must refuse typed on the GPU"
+        );
+    }
     let gpu_over_range = gpu_linear(
         &compositor,
         &over_range_frame,
-        std::slice::from_ref(&overflow),
+        std::slice::from_ref(&graded),
         None,
     );
     assert_matte_containment(
@@ -1574,15 +1594,10 @@ fn cc5_affected_pixel_containment_is_exact_on_cpu_and_gpu() {
         gpu_over_range[negative_index * 4] < 0.0,
         "a genuine negative outside the matte must survive the GPU node stack"
     );
-    let gpu_over_range_unmatted = gpu_linear(
-        &compositor,
-        &over_range_frame,
-        std::slice::from_ref(&overflow_unmatted),
-        None,
-    );
-    assert!(
-        !gpu_over_range_unmatted[over_range_index * 4].is_finite(),
-        "without the matte the GPU node output at the over-range sample must be non-finite"
+    assert_eq!(
+        gpu_over_range[over_range_index * 4],
+        4.0,
+        "the over-range sample outside the matte must keep its value on the GPU"
     );
 
     emit_cc5_evidence(

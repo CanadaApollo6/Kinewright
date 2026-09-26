@@ -513,7 +513,7 @@ fn r10_non_finite_blends_refuse_typed_and_sticky_on(gpu_context: GpuContext) {
 
 /// R10 / N6 R-C: through every document render entry the refusal names the
 /// offending clip and project frame; a real `Normal` pixel-layer overflow
-/// keeps the CC3 contract (unchecked fast path, no refusal).
+/// refuses too (ME11: R10 is universal), named the same way.
 fn r10_refusal_names_clip_and_frame_on_every_path_on(context: GpuContext) {
     let mut r = FrameRenderer::new(context);
     let boost = |id| primary(id, &[("exposure_milli_stops", 5_000)]);
@@ -540,12 +540,13 @@ fn r10_refusal_names_clip_and_frame_on_every_path_on(context: GpuContext) {
     assert_eq!(r.twin_working(&document, at, size).err(), Some(expected));
     let boosts = (1..=4).map(boost).collect();
     let normal = self::document(vec![solid(1, [255; 3], BlendMode::Normal, boosts)]);
-    let saturated = gpu(&mut r, &normal, 3).expect("a Normal pixel overflow is not refused");
-    assert!(
-        saturated.pixels[0] >= 65_504.0 || !saturated.pixels[0].is_finite(),
-        "2^20 really leaves the f16 range: {}",
-        saturated.pixels[0]
-    );
+    let expected = MediaError::NonFiniteRender {
+        layer: 0,
+        clip: Some(ClipId(1)),
+        at: Some(TimeCode(3)),
+    };
+    assert_eq!(gpu(&mut r, &normal, 3).err(), Some(expected.clone()));
+    assert_eq!(r.twin_working(&normal, at, size).err(), Some(expected));
 }
 
 // ---------------------------------------------------------------- gate 4

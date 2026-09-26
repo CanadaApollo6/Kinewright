@@ -35,8 +35,8 @@ use kinewright_core::{
     Analysis, AssetId, AutomationCurve, COLOR_CURVE_COORDINATE_MAX, COLOR_CURVE_COORDINATE_MIN,
     COLOR_CURVE_MAX_POINTS, COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorCurveChannel,
     ColorNodeInactiveReason, ColorNodeKind, ColorSourceProfile, Command, Core, Document, Effect,
-    EffectId, Event, JournalCommand, Keyframe, KeyframeInterpolation, OpError, Operation,
-    ParamValue, ResolvedCurves, TimeCode, active_color_nodes, classify_color_node,
+    EffectId, Event, JournalCommand, Keyframe, KeyframeInterpolation, MediaError, OpError,
+    Operation, ParamValue, ResolvedCurves, TimeCode, active_color_nodes, classify_color_node,
     color_node_inactive_reason, effect_descriptor,
 };
 use serde_json::{Value, json};
@@ -1325,7 +1325,26 @@ fn cc3_monotone_nodes_never_descend_on_the_neutral_ramps() {
                 "CPU reference descended {cpu_descending} times for {name} on the {ramp_name} ramp"
             );
             checked += 1;
-            if gpu_case_names.contains(&name.as_str()) {
+            // MO2 ME11: `master_lift-2000_gamma4000_gain4000` stores 115,538
+            // at white, beyond f16, so its GPU render refuses typed (R10).
+            let overflows = frame.pixels.as_chunks::<4>().0.iter().any(|p| {
+                let rgb = [p[0].to_f32(), p[1].to_f32(), p[2].to_f32()];
+                apply_stack(&nodes, rgb).iter().any(|c| c.abs() > 65_504.0)
+            });
+            if gpu_case_names.contains(&name.as_str()) && overflows {
+                let layers = [CompositorLayer {
+                    frame,
+                    effects: &stack,
+                    transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
+                }];
+                let result = compositor.render((*width, *height), &layers);
+                assert!(
+                    matches!(result, Err(MediaError::NonFiniteRender { layer: 0, .. })),
+                    "{name} overflows f16 and must refuse typed"
+                );
+                gpu_checked += 1;
+            } else if gpu_case_names.contains(&name.as_str()) {
                 let rendered = gpu_monitor(&compositor, (*width, *height), frame, &stack);
                 let gpu_descending = descending_pairs(&rendered, *width, *height);
                 assert_eq!(
@@ -1696,8 +1715,6 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
     let (width, height, frame) = boundary_frame();
     let extreme_stack = [extreme.clone()];
     let cpu_monitor = cpu_reference_monitor(&frame, &extreme_nodes);
-    let gpu_monitor_codes = gpu_monitor(&compositor, (width, height), &frame, &extreme_stack);
-    let gpu_overflow_linear = gpu_linear(&compositor, (width, height), &frame, &extreme_stack);
     // The 4.0 block is the last of the four blocks in `boundary_frame`.
     let overflow_column = (width - CC3_RASTER_BLOCK_WIDTH / 2) as usize;
     assert_eq!(
@@ -1705,24 +1722,27 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
         255,
         "the CPU monitor encode must clamp the +inf red channel to 255"
     );
-    let gpu_overflow_value = gpu_overflow_linear[overflow_column * 4];
-    assert!(
-        !gpu_overflow_value.is_finite() || gpu_overflow_value.abs() >= 65_504.0,
-        "the production shader must not clamp the documented overflow early; it produced {gpu_overflow_value}"
+    // MO2 ME11 (R10: "never accepts adapter saturation as success"): the
+    // shader still does not clamp early, but the +inf it stores is now a
+    // typed refusal on both GPU outputs instead of a saturated frame.
+    let layers = [CompositorLayer {
+        frame: &frame,
+        effects: &extreme_stack,
+        transition: TransitionRenderParams::default(),
+        mode: LayerMode::NORMAL,
+    }];
+    let refusal = |result: Result<(), MediaError>| {
+        assert!(
+            matches!(result, Err(MediaError::NonFiniteRender { layer: 0, .. })),
+            "the documented overflow must refuse typed, got {result:?}"
+        );
+    };
+    refusal(
+        compositor
+            .render_working((width, height), &layers)
+            .map(|_| ()),
     );
-    let gpu_overflow_code = gpu_monitor_codes[overflow_column * 4];
-    assert!(
-        gpu_overflow_code == 0 || gpu_overflow_code == 255,
-        "the production monitor encode must resolve the documented overflow at a clamp extreme, not at {gpu_overflow_code}"
-    );
-    assert!(
-        gpu_monitor_codes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .all(|pixel| pixel[3] == 255),
-        "alpha must survive the overflow case"
-    );
+    refusal(compositor.render((width, height), &layers).map(|_| ()));
 
     // Over-range input survives every stage: a mild node keeps 4.0 above 1.0.
     let mild = representative_wheels(4);
@@ -1809,9 +1829,7 @@ fn cc3_boundary_controls_stay_finite_and_the_documented_extreme_overflows_to_inf
             "nan_observed": false,
             "infinite_raster_channels": extreme_infinities,
             "cpu_monitor_code_after_clamp": 255,
-            "gpu_working_linear": gpu_overflow_value.to_string(),
-            "gpu_monitor_code_after_clamp": gpu_overflow_code,
-            "gpu_half_float_note": "the Rgba16Float working surface saturates an out-of-range f32 on store and maps a true f32 infinity to NaN on this adapter; half::f16::from_f32 rounds to +/-inf instead",
+            "gpu_working_and_monitor": "NonFiniteRender { layer: 0 } (MO2 ME11, R10)",
         },
         "wide_diagonal_max_error": worst_diagonal,
         "wide_diagonal_gate": LINEAR_CPU_GPU_MAX,
