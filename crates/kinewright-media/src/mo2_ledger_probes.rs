@@ -858,3 +858,179 @@ fn rev3_concurrent_readbacks_never_refuse() {
         .sum::<usize>();
     assert_eq!(refused, 0, "completed readbacks refused");
 }
+
+// Reviewer-only callback scheduling seam: production send/result/receive are unchanged.
+type ReviewCallback = Box<dyn FnOnce(Result<(), wgpu::BufferAsyncError>) + Send + 'static>;
+type ReviewWrapper = Box<dyn FnOnce(ReviewCallback) -> ReviewCallback>;
+thread_local! {
+    static REVIEW4_CALLBACK: RefCell<Option<ReviewWrapper>> = const { RefCell::new(None) };
+}
+pub(super) fn review4_callback(
+    callback: impl FnOnce(Result<(), wgpu::BufferAsyncError>) + Send + 'static,
+) -> ReviewCallback {
+    let callback: ReviewCallback = Box::new(callback);
+    REVIEW4_CALLBACK.with_borrow_mut(|wrapper| match wrapper.take() {
+        Some(wrapper) => wrapper(callback),
+        None => callback,
+    })
+}
+
+// The GPU really completes on a second polling thread, which is stopped inside
+// the map callback before the production send. A second real successful poll
+// returns while that callback is held. Normalize that success to either allowed
+// success discriminant to cover both match arms deterministically.
+fn review4_delayed_callback(queue_empty: bool, poll_error: bool) {
+    for which in 0..4 {
+        let gpu = fixture_gpu_or_skip().unwrap();
+        let check = gpu.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let render = std::thread::spawn(move || {
+            let c = Compositor::new(gpu.clone());
+            let f = frame(17, 3);
+            entry(&c, &f, which, true).unwrap();
+            let baseline = gpu.ledger().live_bytes();
+            REVIEW4_CALLBACK.set(Some(Box::new(move |callback| {
+                Box::new(move |result| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    callback(result);
+                })
+            })));
+            let mut entered = Some(entered_rx);
+            let worker = std::rc::Rc::new(RefCell::new(None));
+            let worker_in_hook = worker.clone();
+            let expected = std::rc::Rc::new(Cell::new(0));
+            let expected_in_hook = expected.clone();
+            let ledger = gpu.clone();
+            let result = with_hook(
+                move |device, wait| {
+                    let device_for_worker = device.clone();
+                    let wait_for_worker = wait.clone();
+                    let poller =
+                        std::thread::spawn(move || device_for_worker.poll(wait_for_worker));
+                    entered
+                        .take()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                    *worker_in_hook.borrow_mut() = Some(poller);
+                    let actual = device.poll(wait.clone()).unwrap();
+                    assert!(matches!(
+                        actual,
+                        wgpu::PollStatus::QueueEmpty | wgpu::PollStatus::WaitSucceeded
+                    ));
+                    expected_in_hook.set(ledger.ledger().live_bytes());
+                    ready_tx.send(()).unwrap();
+                    Some(if poll_error {
+                        Err(wgpu::PollError::Timeout)
+                    } else if queue_empty {
+                        Ok(wgpu::PollStatus::QueueEmpty)
+                    } else {
+                        Ok(wgpu::PollStatus::WaitSucceeded)
+                    })
+                },
+                || entry(&c, &f, which, true),
+            );
+            let message = result.as_ref().err().map(ToString::to_string);
+            if poll_error {
+                assert!(result.is_err());
+                assert_eq!(
+                    gpu.ledger().live_bytes(),
+                    expected.get(),
+                    "pending callback retains every byte"
+                );
+                assert_eq!(retired(&c), 1);
+                assert_eq!(inventory(&c), gpu.ledger().live_bytes());
+            }
+            result_tx.send(message).unwrap();
+            worker.borrow_mut().take().unwrap().join().unwrap().unwrap();
+            c.sweep_retired();
+            c.sweep_retired();
+            assert_eq!(retired(&c), 0);
+            entry(&c, &f, which, true).unwrap();
+            assert_eq!(gpu.ledger().live_bytes(), baseline);
+            drop(c);
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let early = result_rx.recv_timeout(Duration::from_millis(100));
+        release_tx.send(()).unwrap();
+        let returned = match early.clone() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                result_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+            }
+            Err(error) => panic!("render disconnected: {error}"),
+        };
+        render.join().unwrap();
+        assert_eq!(check.ledger().live_bytes(), 0);
+        if poll_error {
+            assert!(
+                early.is_ok(),
+                "a poll error must not block on an outstanding callback"
+            );
+            assert!(returned.unwrap().contains("readback poll failed"));
+        } else {
+            assert!(
+                matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+                "completed wait refused before delayed callback: {early:?}"
+            );
+            assert!(returned.is_none(), "{returned:?}");
+        }
+    }
+}
+#[test]
+fn review4_queue_empty_waits_for_delayed_callback() {
+    review4_delayed_callback(true, false);
+}
+#[test]
+fn review4_wait_succeeded_waits_for_delayed_callback() {
+    review4_delayed_callback(false, false);
+}
+#[test]
+fn review4_poll_error_with_delayed_callback_retains_until_completion() {
+    review4_delayed_callback(false, true);
+}
+
+fn review4_disconnect(before_poll: bool) {
+    let gpu = fixture_gpu_or_skip().unwrap();
+    let c = Compositor::new(gpu.clone());
+    let f = frame(17, 3);
+    entry(&c, &f, 0, true).unwrap();
+    let base = gpu.ledger().live_bytes();
+    REVIEW4_CALLBACK.set(Some(Box::new(move |callback| {
+        if before_poll {
+            drop(callback);
+            Box::new(|_| {})
+        } else {
+            Box::new(move |_| drop(callback))
+        }
+    })));
+    let result = entry(&c, &f, 0, true);
+    assert!(
+        matches!(result, Err(MediaError::Backend(ref s)) if s.contains("callback stopped")),
+        "{result:?}"
+    );
+    c.sweep_retired();
+    c.sweep_retired();
+    assert_eq!(
+        retired(&c),
+        0,
+        "real completed poll reclaims disconnected frame"
+    );
+    assert_eq!(inventory(&c), gpu.ledger().live_bytes());
+    entry(&c, &f, 0, true).unwrap();
+    assert_eq!(gpu.ledger().live_bytes(), base);
+    drop(c);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+#[test]
+fn review4_callback_dropped_disconnects_receiver() {
+    review4_disconnect(false);
+}
+#[test]
+fn review4_sender_dropped_before_wait_disconnects_receiver() {
+    review4_disconnect(true);
+}

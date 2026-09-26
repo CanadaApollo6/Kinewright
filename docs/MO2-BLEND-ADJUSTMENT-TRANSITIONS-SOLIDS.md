@@ -539,7 +539,11 @@
     frame's own submission with **no deadline**. An application
     deadline cannot tell a slow adapter from a hung one. Hang detection
     belongs to the driver watchdog (Windows TDR, Linux GPU reset), which
-    wgpu surfaces as device loss or a poll error. The map callback, not
+    wgpu surfaces as device loss or a poll error. Pinned native wgpu
+    29.0.4 may instead panic on a core device error. The injected
+    timeouts in the tests exercise charge ownership; they are not
+    watchdog evidence, and no real watchdog reset has been exercised
+    (rereview-4). The map callback, not
     the poll status, decides completion:
     - After a completed wait the frame blocks on the callback, which
       another thread's submit may have collected and still be running.

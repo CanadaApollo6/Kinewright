@@ -2293,11 +2293,12 @@ impl Compositor {
         }
         let (index, done) = self.submit_tracked([encoder.finish()]);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        buffer
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, move |result| {
-                let _ = sender.send(result);
-            });
+        let callback = move |result| {
+            let _ = sender.send(result);
+        };
+        #[cfg(test)]
+        let callback = ledger_probes::review4_callback(callback);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, callback);
         // MO2 R28 (ME16, N26): wait for completion; hang detection is the
         // driver watchdog's, surfacing as device loss or a poll error. The
         // map callback, not the poll status, says done. After a completed
