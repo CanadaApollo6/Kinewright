@@ -22,6 +22,15 @@
 | P12 | §11 R32 |
 | P13 | §8 R26 |
 
+## 0.2 Implementation errata (Part A)
+
+- ME1 → §12 Part A scope: the agent read-back (`render_timeline_state`,
+  clip info) names the new kinds (`adjustment`, `solid=#rrggbb`) and a
+  non-`normal` blend (` blend=<mode>`) in Part A, not Part B. Evidence:
+  otherwise the four R8 mutators' results read back as `asset=0
+  <missing>`, a false missing-media claim. `Normal` output stays
+  byte-identical (existing goldens unchanged); +83 production lines.
+
 ## Changes in revision 2
 
 | Finding | Change → section |
