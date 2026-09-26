@@ -4714,8 +4714,21 @@ fn validate_transition(
     clip: &Clip,
     transition: &Transition,
 ) -> Result<(), OpError> {
-    if crate::transition_descriptor(&transition.name).is_none() {
+    let Some(descriptor) = crate::transition_descriptor(&transition.name) else {
         return Err(OpError::UnknownTransition(transition.name.clone()));
+    };
+    // MO2 R18: an opaque colour fade would occlude the below-stack the
+    // adjustment's look needs.
+    if clip.content == ClipContent::Adjustment
+        && matches!(
+            descriptor.shading,
+            crate::TransitionShading::FadeFromColor { .. }
+        )
+    {
+        return Err(OpError::TransitionUnsupportedOnAdjustment {
+            clip: clip.id,
+            transition: transition.name.clone(),
+        });
     }
     if transition.duration <= TimeCode::ZERO {
         return Err(OpError::InvalidTransitionDuration {
@@ -5041,6 +5054,15 @@ pub(crate) fn validate_document(doc: &Document) -> Result<(), OpError> {
                 }
                 if is_audio_effect(&effect.name) {
                     return Err(OpError::AudioEffectOnClip {
+                        clip: clip.id,
+                        effect: effect.name.clone(),
+                    });
+                }
+                // MO2 R8/R18: a document invariant, so initial effects,
+                // Add/InsertEffect, CopyClipAttributes, load and replay all
+                // refuse it — disabled or not.
+                if clip.content == ClipContent::Adjustment && effect.name == "chroma_key" {
+                    return Err(OpError::EffectUnsupportedOnAdjustment {
                         clip: clip.id,
                         effect: effect.name.clone(),
                     });
