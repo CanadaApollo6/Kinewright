@@ -352,10 +352,10 @@ below-stack at completion; never translate the backdrop quad or clamp edge
 samples. A non-Normal entering layer then re-snapshots this shifted
 backdrop and blends against it. An adjustment's source remains the
 original `D0`, with its colour stack evaluated once; for non-Normal
-adjustment Push, preserve `D0` in a second pooled texture before
-overwriting the destination snapshot. Copy counts are ordinary special 1,
-Normal Push 1, non-Normal Push 2, and non-Normal adjustment Push 3. Ledger
-the extra preserved source. Pin transparent/masked/transformed endpoints,
+adjustment Push, the shifted backdrop is re-snapshotted into a second
+pooled texture so `D0` stays in the first (ME2). Copy counts are ordinary
+special 1, Normal Push 1, non-Normal Push 2, and non-Normal adjustment
+Push 2. Ledger the second pooled snapshot. Pin transparent/masked/transformed endpoints,
 OOB fallback, adjustment Push, and exact completion equality with ordinary
 composition.
 
@@ -611,7 +611,9 @@ allowlist stays at 54. The seven R8 variants join the compile-forced
 Reused: `UnknownTransition` / `InvalidTransitionDuration`,
 `SpeedOnNonMediaClip`, `EditorialRequiresMedia`, keep-outside/enable
 machinery, v1/v2 refusal. Solo failures are `SoloError` (R24), not
-incidents. Pinned by table tests + one render test per reused arm.
+incidents. The render entry's `MediaError::InvalidDocument` delegates
+its code and evidence to the wrapped `OpError` (B1 fix G10). Pinned by
+table tests + one render test per reused arm.
 
 ## 11 Concurrency (AW1 / CC8 / AW2)
 
@@ -753,7 +755,7 @@ MO2 window.
 - Bezier evaluation/handles, transparent export, presets → MO6.
 - Ping-pong accumulator, below-stack motion blur → future perf work (the
   R13 copy counts — ordinary special 1, Normal Push 1, non-Normal Push 2,
-  non-Normal adjustment Push 3 — stand until a floor says otherwise).
+  non-Normal adjustment Push 2 (ME2) — stand until a floor says otherwise).
 - Multi-turn rotation, off-layer pivots, >8192 px stills, image
   sequences → unchanged from MO1 §11.
 

@@ -1690,14 +1690,30 @@ impl IncidentObservation {
                     transient: false,
                 }
             }
+            // MO2 R8: the render entry's document rejection delegates its code
+            // and evidence to the wrapped `OpError`, exactly as
+            // `DeliveryVariantError::InvalidDocument` does; it mints no code.
+            MediaError::InvalidDocument(inner) => Self {
+                code: inner.incident_code(),
+                subject,
+                observed: error.to_string(),
+                allowed: None,
+                evidence: IncidentEvidence::OpError {
+                    family: inner.incident_family(),
+                    op_number: None,
+                    message: inner.to_string(),
+                },
+                revision,
+                name: None,
+                transient: false,
+            },
             // The two matte enums and the two stores mint **no** `IncidentCode`
             // (`IN1b` §0.2/e, §3.9 rule 37, and the code table of §3.2 rule 12,
             // which declares none of their 21 + 10 strings), so they share the
-            // unclassified media code with the eight code-less variants — the
+            // unclassified media code with the seven code-less variants — the
             // five `IN1b` ones, `Scope`, whose `recovery_code` is `None`
-            // (`IN2B` §6 rule 2, d16), and MO2's `NonFiniteRender` (R10) and
-            // `InvalidDocument` (R8) — and so does their evidence, because one
-            // incident carries one code. Their own code is not lost: it is the
+            // (`IN2B` §6 rule 2, d16), and MO2's `NonFiniteRender` (R10) — and
+            // so does their evidence, because one incident carries one code. Their own code is not lost: it is the
             // first token of every one of their rendered refusals and therefore
             // the first word of `observed`.
             MediaError::MatteProof(_)
@@ -1709,7 +1725,6 @@ impl IncidentObservation {
             | MediaError::MixSpectrumRangeTooShort { .. }
             | MediaError::MixLoudnessRangeTooShort { .. }
             | MediaError::NonFiniteRender { .. }
-            | MediaError::InvalidDocument(_)
             | MediaError::Backend(_) => {
                 let code = IncidentCode::Media(MediaIncident::BackendUnclassified);
                 Self {
@@ -5497,10 +5512,6 @@ mod tests {
                 },
                 IncidentCode::Media(MediaIncident::BackendUnclassified),
             ),
-            (
-                MediaError::InvalidDocument(Box::new(crate::OpError::InvalidResolution)),
-                IncidentCode::Media(MediaIncident::BackendUnclassified),
-            ),
         ] {
             let observation = IncidentObservation::from_media_error(
                 &other,
@@ -5541,6 +5552,26 @@ mod tests {
         assert_eq!(
             MediaError::MatteProof(crate::MatteProofError::NoMatte).recovery_code(),
             Some("matte_proof_no_matte")
+        );
+        // MO2 R8 (B1 fix G10): `InvalidDocument` delegates its code and its
+        // evidence to the document rejection it wraps, as
+        // `DeliveryVariantError::InvalidDocument` does; it mints no code.
+        let inner = crate::OpError::InvalidResolution;
+        let delegating = MediaError::InvalidDocument(Box::new(inner.clone()));
+        let observation = IncidentObservation::from_media_error(
+            &delegating,
+            IncidentSubject::ExportJob,
+            TimelineRevision(3),
+        );
+        assert_eq!(observation.code, inner.incident_code());
+        assert_eq!(observation.subject, IncidentSubject::ExportJob);
+        assert_eq!(
+            observation.evidence,
+            IncidentEvidence::OpError {
+                family: inner.incident_family(),
+                op_number: None,
+                message: inner.to_string(),
+            }
         );
     }
 

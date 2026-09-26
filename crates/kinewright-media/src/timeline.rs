@@ -176,9 +176,9 @@ pub fn timeline_source_at(
 /// Resolve the active **media-backed** clip on every video track at a
 /// project frame, bottom-to-top.
 ///
-/// Generated and non-pixel content — titles, freeze frames, and the MO2
-/// solids and adjustment clips — is omitted by contract (MO2 review-1 S2):
-/// an empty result does not mean an empty picture. The rendered stack is
+/// Every non-Media clip variant — titles, freeze frames, and the MO2 solids
+/// and adjustment clips — is omitted by contract (MO2 review-1 S2): an
+/// empty result does not mean an empty picture. The rendered stack is
 /// [`visual_layers_at`]; use it for anything that composites.
 ///
 /// # Errors

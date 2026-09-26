@@ -1902,7 +1902,8 @@ pub enum MediaError {
     },
     /// MO2 R8 (review-1 B1): the render entry refused a document that
     /// violates a document invariant, disabled clips included. Boxed to keep
-    /// `MediaError` small; code-less like [`Self::NonFiniteRender`].
+    /// `MediaError` small. It has no recovery code of its own: its incident
+    /// delegates code and evidence to the wrapped `OpError`.
     #[error("invalid_document: {0}")]
     InvalidDocument(Box<crate::OpError>),
     #[error("{0}")]
