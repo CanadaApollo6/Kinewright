@@ -12100,10 +12100,25 @@ mod mo2_solo_review {
         assert!(violations.is_empty(), "{violations:?}");
     }
 
+    /// A success reply's measure with its report's `elapsed_ms` (the one
+    /// timing field any `preview_solo` reply carries) cut to one digit: the
+    /// smallest this reply could have been.
+    fn measured_floor(message: &serde_json::Value) -> usize {
+        let mut message = message.clone();
+        let report = &mut message["result"]["structuredContent"];
+        if report.get("elapsed_ms").is_some() {
+            report["elapsed_ms"] = json!(0);
+        }
+        measured(&message)
+    }
+
     /// Final review (B1): ±1 around both edges of every outcome kind: its
     /// own reply at exactly R25, the minimal refusal one byte later, and
     /// the residual edge where even that stops fitting; escaped and UTF-8
-    /// ids land on the same bytes.
+    /// ids land on the same bytes. Each reply is judged by itself, with no
+    /// retry: the non-success kinds carry no timing field and are exact;
+    /// a success reply's `elapsed_ms` can only be bounded, below by one
+    /// digit and above by the digits of the request's own wall time.
     #[tokio::test(flavor = "multi_thread")]
     async fn final_exact_wire_limit_edges_and_escaped_ids() {
         let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
@@ -12112,49 +12127,67 @@ mod mo2_solo_review {
         let minimal_overhead =
             measured(&json!({"jsonrpc": "2.0", "id": "", "result": minimal})) - 2;
         let mut cases = 0;
+        let mut outcomes = std::collections::BTreeSet::new();
         for kind in ["success", "not_visible", "stale", "invalid"] {
+            let timed = kind == "success";
             let (_, small) = raw.solo(json!(""), outcome_arguments(kind)).await;
             assert_eq!(outcome(&small), kind);
-            let own = measured(&small) - 2;
-            let units: &[&str] = if kind == "success" {
+            // Exact for the untimed kinds; the one-digit floor for success.
+            let own = measured_floor(&small) - 2;
+            // `InvalidParams` is already smaller than the minimal refusal.
+            let smallest = own <= minimal_overhead;
+            assert_eq!(smallest, kind == "invalid", "{kind}");
+            let units: &[&str] = if timed {
                 &["ii", "é", "\"", "\n"]
             } else {
                 &["ii"]
             };
-            for edge in [WIRE - own, WIRE - minimal_overhead] {
+            for (at, edge) in [WIRE - own, WIRE - minimal_overhead]
+                .into_iter()
+                .enumerate()
+            {
                 for id_bytes in [edge - 1, edge, edge + 1] {
                     for unit in units {
                         let id = id_of(id_bytes, unit);
-                        let (expected, overhead) =
-                            if id_bytes + own <= WIRE || own <= minimal_overhead {
-                                (kind, own)
-                            } else {
-                                ("minimal", minimal_overhead)
-                            };
                         let label = format!("{kind} id={id_bytes} unit={unit:?}");
-                        // A success report carries `elapsed_ms`, whose digit
-                        // count can change under load and move `own` by a byte
-                        // or two; retry until the reply matches the baseline.
-                        let mut seen = Vec::new();
-                        let exact = 'attempts: {
-                            for _ in 0..8 {
-                                let (bytes, message) =
-                                    raw.solo(id.clone(), outcome_arguments(kind)).await;
-                                assert_eq!(message["id"], id, "{label}");
-                                let size = measured(&message);
-                                assert!(bytes <= size, "{label}: wire {bytes} > {size}");
-                                if outcome(&message) == expected && size == id_bytes + overhead {
-                                    break 'attempts true;
-                                }
-                                seen.push((outcome(&message), size));
-                            }
-                            false
+                        let started = std::time::Instant::now();
+                        let (bytes, message) = raw.solo(id.clone(), outcome_arguments(kind)).await;
+                        let wall_ms = started.elapsed().as_millis();
+                        assert_eq!(message["id"], id, "{label}");
+                        let size = measured(&message);
+                        assert!(bytes <= size, "{label}: wire {bytes} > {size}");
+                        // The server's elapsed time nests inside the
+                        // request's, so its digits bound the timing field.
+                        let slack = if timed {
+                            wall_ms.to_string().len() - 1
+                        } else {
+                            0
                         };
-                        assert!(
-                            exact,
-                            "{label}: expected {expected} at {}, saw {seen:?}",
-                            id_bytes + overhead
-                        );
+                        let sent = outcome(&message);
+                        outcomes.insert((kind, at, id_bytes + 1 - edge, sent));
+                        if sent == kind {
+                            // Past R25 only in ME4's residual, when nothing
+                            // smaller exists or even the refusal cannot fit.
+                            let residual = smallest || id_bytes + minimal_overhead > WIRE;
+                            assert!(size <= WIRE || residual, "{label}: {size} passed R25");
+                            assert_eq!(measured_floor(&message), id_bytes + own, "{label}");
+                            if timed {
+                                let elapsed = message["result"]["structuredContent"]["elapsed_ms"]
+                                    .as_u64()
+                                    .unwrap();
+                                assert!(u128::from(elapsed) <= wall_ms, "{label}");
+                            } else {
+                                assert_eq!(size, id_bytes + own, "{label}");
+                            }
+                        } else {
+                            assert_eq!(sent, "minimal", "{label}");
+                            assert!(!smallest, "{label}: substituted a larger reply");
+                            assert_eq!(size, id_bytes + minimal_overhead, "{label}");
+                            assert!(
+                                id_bytes + own + slack > WIRE,
+                                "{label}: substituted a reply that fit (slack {slack})"
+                            );
+                        }
                         cases += 1;
                     }
                 }
@@ -12162,6 +12195,14 @@ mod mo2_solo_review {
         }
         service.cancel().await.unwrap();
         server.shutdown();
+        // Both outcomes are reached at every kind's own edge: its reply one
+        // byte below, the minimal refusal one byte past (`invalid` excepted).
+        for kind in ["success", "not_visible", "stale", "invalid"] {
+            assert!(outcomes.contains(&(kind, 0, 0, kind)), "{kind} -1");
+            let past = if kind == "invalid" { kind } else { "minimal" };
+            assert!(outcomes.contains(&(kind, 0, 2, past)), "{kind} +1");
+            assert!(outcomes.contains(&(kind, 1, 2, past)), "{kind} residual +1");
+        }
         assert_eq!(cases, 3 * 2 * (4 + 1 + 1 + 1));
     }
 
