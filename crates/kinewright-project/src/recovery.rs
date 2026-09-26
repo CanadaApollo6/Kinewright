@@ -566,7 +566,6 @@ mod tests {
         );
     }
 
-    /// H3 (R1 S2 / R2 S1): only a committed header line claims — the value
     /// J5 (Astra R2 S2): the production journal entry point opens through
     /// `open_regular` — a directory at the journal name is rejected as a
     /// non-regular fd, never read (a plain `File::open` reads it as
@@ -616,6 +615,7 @@ mod tests {
         );
     }
 
+    /// H3 (R1 S2 / R2 S1): only a committed header line claims — the value
     /// followed immediately by `\n`. No newline, or trailing garbage before
     /// it, is uncommitted and never blocks.
     #[test]

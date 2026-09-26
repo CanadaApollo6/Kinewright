@@ -296,6 +296,17 @@ changes.
   path — a journal appearing after the scan must be impossible once all
   writers hold the lock. The reproducer stays ignored in the tree until
   then.
+- S4-OBL (gate obligation, not fixed; closing race re-check SR1): before S4
+  wires `Some(lock)` into production saves, `save_headless` writes through the
+  handle's single resolved identity (and derives the sidecar stem from it), and
+  refuses a save whose path does not resolve to `handle.identity` unless it is a
+  declared transfer. Today a link re-pointed between `verify` and the write still
+  sends the save to the new target; until S4 only tests pass a lock. Also at S4:
+  `release` skips removing the discovery unless the lock fd still matches the
+  path (an externally deleted lock object otherwise lets A's release delete a
+  successor's discovery, the G9 `LockLost` case), and the direct journal probe
+  covers allocator-suffixed `-N.journal` names, not only the exact base and
+  legacy names.
 
 ## 1. Goal and non-goals
 
