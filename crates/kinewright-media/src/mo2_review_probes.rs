@@ -975,13 +975,15 @@ fn review1_twin_covers_supported_legacy_cube_on(context: GpuContext) {
         let plate = solid(1, ORANGE, BlendMode::Normal, vec![]);
         for top in [
             adjustment(2, BlendMode::Normal, vec![lut.clone()]),
-            // 70%, not the review's 60% (ME10): at 60% the exact BLUE Screen
-            // over ORANGE lies just above an f16 rounding midpoint. Both
-            // lanes' f32→f16 target store rounds it down, even with the
-            // opaque emission and no LUT (lavapipe 0.87353516 vs the twin's
-            // 0.87402344). That is one monitor code on every pixel of this
-            // uniform frame, so the mean ≤ 0.25 gate fails. The LUT's
-            // coverage is unchanged.
+            // 60% (the review's): the exact BLUE Screen over ORANGE lies
+            // just above an f16 midpoint, which the target's own store
+            // conversion rounded down before ME12's in-shader RTE.
+            solid(
+                2,
+                BLUE,
+                BlendMode::Screen,
+                vec![lut.clone(), opacity(2, 60)],
+            ),
             solid(
                 2,
                 BLUE,
@@ -1093,6 +1095,53 @@ fn rereview_me9_envelope_refuses_unproved_stacks() {
             twin::subtexel_envelope((out, 1), &one, None).unwrap();
         }
     }
+}
+
+/// Re-review S2 (N17.4, ME12): the 60% `Screen` over ORANGE whose exact
+/// value lies just above an f16 midpoint, without a LUT (see the cube probe).
+fn rereview_g7_sixty_percent_on(context: GpuContext) {
+    let mut r = FrameRenderer::new(context);
+    let top = solid(2, BLUE, BlendMode::Screen, vec![opacity(2, 60)]);
+    let doc = document(vec![solid(1, ORANGE, BlendMode::Normal, vec![]), top]);
+    matched(&mut r, &doc, 0, "G7 60% without a LUT");
+}
+
+/// ME12: a special layer's store is f16 round-to-nearest-even, bit-exact on
+/// both lanes: ties to even at 1 and 2048, the largest finite sums, signed
+/// ties and subnormal ties (α = ½), and 65520 (the overflow tie) refused.
+fn rte_special_store_is_bit_exact_on(context: GpuContext) {
+    let c = Compositor::new(context);
+    let tiny = 2_f32.powi(-24);
+    let cases = [
+        (1.0, 2_f32.powi(-11), 1.0),
+        (1.0 + 2_f32.powi(-10), 2_f32.powi(-11), 1.0),
+        (-1.0, -(2_f32.powi(-11)), 1.0),
+        (2048.0, 1.0, 1.0),
+        (2050.0, 1.0, 1.0),
+        (65_504.0, 8.0, 1.0),
+        (65_504.0, 15.984_375, 1.0),
+        (0.0, tiny, 0.5),
+        (0.0, 3.0 * tiny, 0.5),
+    ];
+    for (d, s, alpha) in cases {
+        let (gpu, twin) = pair_lanes(&c, BlendMode::Add, grey4(d), [s, s, s, alpha]);
+        let exact = f64::from(alpha) * (f64::from(s) + f64::from(d))
+            + (1.0 - f64::from(alpha)) * f64::from(d);
+        let expected = f16::from_f64(exact).to_f32();
+        for (lane, image) in [("GPU", gpu), ("twin", twin)] {
+            let value = image
+                .unwrap_or_else(|e| panic!("{lane} {d}+{s}: {e}"))
+                .pixels[0];
+            assert_eq!(
+                value.to_bits(),
+                expected.to_bits(),
+                "{lane} {d}+{s} α={alpha}"
+            );
+        }
+    }
+    let (gpu, twin) = pair_lanes(&c, BlendMode::Add, grey4(65_504.0), grey4(16.0));
+    refused(gpu, 1, "GPU 65520");
+    refused(twin, 1, "twin 65520");
 }
 
 fn cube_effect(id: u64, path: &std::path::Path, intensity: i64) -> Effect {
@@ -1219,6 +1268,8 @@ gpu_lanes! {
     review1_twin_covers_supported_legacy_cube => review1_twin_covers_supported_legacy_cube_on,
     rereview_me7_valid_normal_solid_overflow => rereview_me7_valid_normal_solid_overflow_on,
     rereview_special_nonfinite_source_alpha => rereview_special_nonfinite_source_alpha_on,
+    rereview_g7_sixty_percent => rereview_g7_sixty_percent_on,
+    rte_special_store_is_bit_exact => rte_special_store_is_bit_exact_on,
     rereview_cube_domains_and_last_lattice => rereview_cube_domains_and_last_lattice_on,
     rereview_projection_enabled_curve => rereview_projection_enabled_curve_on,
 }

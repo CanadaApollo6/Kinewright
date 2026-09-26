@@ -177,9 +177,9 @@
     in-raster test runs on the f32 fraction `x/n − q` while coverage uses
     the host's pixel edge, and near-ties can disagree. It is noted for
     R28 perf.
-  - *Residual.* Both lanes' f32→f16 target store can round a value just
-    above an f16 midpoint down by one ulp, where the twin rounds to
-    nearest. This is within R27's 1e-3, but a uniform frame turns it into
+  - *Residual (superseded by ME12).* Both lanes' f32→f16 target store can
+    round a value just above an f16 midpoint down by one ulp, where the
+    twin rounds to nearest. This is within R27's 1e-3, but a uniform frame turns it into
     one monitor code on every pixel. The review's 60% legacy-cube Screen
     probe fails the mean gate on both lanes for that reason, so it runs
     at 70%.
@@ -237,6 +237,25 @@
     fixture moves the title by whole pixels only (x = 20% is 32 px; the
     slide/push offsets at frames 1/3/4 are integral), so no lane needs
     slack there. The solid keeps its scale and rotation.
+- ME12 → §3 R9b/R10 (B1 fix round 3, re-review S2, lead ruling N17.4):
+  **one storage rule.** A special layer (selectors 1–6 and 8) rounds its
+  composite `α·B + (1−α)·D` to f16 round-to-nearest-even **in the shader**
+  and emits that exactly representable value with alpha 1 (ME10). The
+  α = 1 fixed-function store is therefore exact on every backend. The
+  rounding is integer bit manipulation (exact power-of-two scaling built
+  from the exponent bits, WGSL `round`, which ties to even). It does not
+  rely on the target's conversion or `pack2x16float`, whose rounding
+  Vulkan and WGSL leave unspecified. Subnormals share the 2⁻²⁴ quantum;
+  a result past 65504 (a composite ≥ 65520) is ±inf and refuses, and
+  R10's magnitude check reads the rounded value. The twin's
+  `f16::from_f32` is the same RTE. `Normal` pixel stores (selector 0) and
+  the Push backdrop (selector 7) keep the target's own conversion, so
+  their bytes are the pre-MO2 bytes (B8; `normal_pre_post_identity`,
+  `cc8_g2_sdr_identity` re-run). The G7 probe runs at the review's 60%
+  again (70% kept), with and without the legacy cube. A bit-exact probe
+  pins ties to even at 1 and 2048, a signed tie, subnormal ties at α = ½,
+  65519.98 → 65504, and 65520 refused, on both lanes. The G7 probe and
+  the bit-exact probe were red with the target's conversion.
 
 ## Changes in revision 2
 
@@ -444,7 +463,9 @@ alpha twice (B2). Composite: `out = αs·B + (1−αs)·D`, `out_a = 1`
 B=0.875, out=0.6875, alpha 1. Any future transparent accumulator needs an
 explicit premultiplied contract and an alpha-aware equation — forbidden
 without a new design. *(ME10: the over is now composited in-shader and
-emitted opaque; the composite and `out_a = 1` are unchanged.)* Pinned by an opaque-accumulator assert (every
+emitted opaque; the composite and `out_a = 1` are unchanged. ME12: the
+emitted composite is already f16 round-to-nearest-even, so the store is
+exact.)* Pinned by an opaque-accumulator assert (every
 accumulator readback alpha ≡ 1) plus the vector. Pin a partially
 transparent colour-fade source with mask and non-Normal blending.
 
@@ -458,7 +479,10 @@ failures subsequently covered by another layer (ME11: every layer,
 carrying offending clip and project frame through working, monitor,
 delivery and proof paths; map it through the existing incident family
 without adding an investigator code. Representable values use
-round-to-nearest f16 storage. Pin `Add(40000,40000)` and
+round-to-nearest f16 storage: *(ME12)* a special layer rounds to f16
+round-to-nearest-even in its shader and the store is exact; `Normal`
+pixel stores and the Push backdrop keep the target's conversion
+(pre-MO2 bytes). Pin `Add(40000,40000)` and
 `Multiply(256,256)` at full alpha as overflow refusals, forced NaN/inf
 refusals, and representable `Add(2,2)=4` preservation on every backend.
 
