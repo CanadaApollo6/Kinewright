@@ -781,20 +781,21 @@ fn push_midpoint_splits_frame_on(context: GpuContext) {
         );
     }
     // R13/R23: an adjustment Push grades the unshifted `D0`, Normal and not.
+    // ME10: moved left, its quad also rasterizes pixels coverage rejects,
+    // which must keep the shifted backdrop, not the `D0` it samples.
     let look = vec![primary(1, &[("saturation_percent", -100)])];
+    let moved = effect(2, "transform", &[("x_percent", -30)]);
     for blend in [BlendMode::Normal, BlendMode::Multiply] {
-        let mut clips = quartered();
-        clips.push(with_transition(
-            adjustment(4, blend, look.clone()),
-            "push_right",
-            5,
-        ));
-        matched(
-            &mut r,
-            &document(clips),
-            2,
-            &format!("{blend:?} adjustment push"),
-        );
+        for effects in [look.clone(), vec![look[0].clone(), moved.clone()]] {
+            let mut clips = quartered();
+            let label = format!("{blend:?} adjustment push, {} effects", effects.len());
+            clips.push(with_transition(
+                adjustment(4, blend, effects),
+                "push_right",
+                5,
+            ));
+            matched(&mut r, &document(clips), 2, &label);
+        }
     }
 }
 
@@ -953,8 +954,8 @@ fn warp_midpoint_departure_lies_within_the_envelope_on(context: GpuContext) {
 }
 
 /// R12/R13/B8 copy counts per frame: Normal-only stacks (Slide/Wipe too) 0;
-/// an ordinary special layer 1; a Normal Push 1; a non-`Normal` Push 2; a
-/// non-`Normal` adjustment Push 2 (erratum ME2).
+/// an ordinary special layer 1; a Normal Push 1; a non-`Normal` Push 2;
+/// any adjustment Push 2 (errata ME2, ME10).
 fn accumulator_copy_counts_on(context: GpuContext) {
     let mut r = FrameRenderer::new(context);
     let top = |blend, transition: Option<&str>, adjust: bool| {
@@ -976,7 +977,7 @@ fn accumulator_copy_counts_on(context: GpuContext) {
         (top(BlendMode::Screen, None, false), 1, 1),
         (top(BlendMode::Normal, None, true), 1, 1),
         (top(BlendMode::Normal, Some("push_left"), false), 1, 0),
-        (top(BlendMode::Normal, Some("push_left"), true), 1, 1),
+        (top(BlendMode::Normal, Some("push_left"), true), 2, 1),
         (top(BlendMode::Add, Some("push_up"), false), 2, 1),
         (top(BlendMode::Overlay, Some("push_up"), true), 2, 1),
     ];

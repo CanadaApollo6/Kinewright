@@ -973,11 +973,13 @@ fn review1_twin_covers_supported_legacy_cube_on(context: GpuContext) {
         let plate = solid(1, ORANGE, BlendMode::Normal, vec![]);
         for top in [
             adjustment(2, BlendMode::Normal, vec![lut.clone()]),
-            // 70%, not the review's 60%: at 60% the exact BLUE Screen over
-            // ORANGE lies just above an f16 rounding midpoint and lavapipe's
-            // blend store rounds it down with no LUT at all (0.87353516 vs
-            // 0.87402344), one monitor code on every pixel of this uniform
-            // frame. The LUT's coverage is unchanged.
+            // 70%, not the review's 60% (ME10): at 60% the exact BLUE Screen
+            // over ORANGE lies just above an f16 rounding midpoint. Both
+            // lanes' f32→f16 target store rounds it down, even with the
+            // opaque emission and no LUT (lavapipe 0.87353516 vs the twin's
+            // 0.87402344). That is one monitor code on every pixel of this
+            // uniform frame, so the mean ≤ 0.25 gate fails. The LUT's
+            // coverage is unchanged.
             solid(
                 2,
                 BLUE,
