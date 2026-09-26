@@ -11198,7 +11198,8 @@ mod mo2_solo_review {
 
     /// Records `(frame, enabled clip ids)` per proof; pixels are
     /// `[frame, Σ ids, 91]`, or xorshift noise when `noise`; a nonzero
-    /// `panic_len` panics with that many payload bytes instead.
+    /// `panic_len` makes proofs and probes panic with that many payload
+    /// bytes instead.
     #[derive(Default)]
     struct ProofDouble {
         calls: Mutex<Vec<(i64, Vec<u64>)>>,
@@ -11219,6 +11220,7 @@ mod mo2_solo_review {
             crossbeam_channel::unbounded().1
         }
         fn probe(&self, _: &std::path::Path) -> Result<MediaAsset, MediaError> {
+            assert!(self.panic_len == 0, "{}", "p".repeat(self.panic_len));
             Err(MediaError::NotImplemented)
         }
         fn thumbnail_at(&self, _: TimeCode, _: u32) -> Result<RgbaImage, MediaError> {
@@ -11878,8 +11880,18 @@ mod mo2_solo_review {
             id: serde_json::Value,
             arguments: serde_json::Value,
         ) -> (usize, serde_json::Value) {
+            self.invoke(id, "preview_solo", arguments).await
+        }
+
+        /// Capability `name` through `invoke_capability`, as [`Self::solo`].
+        async fn invoke(
+            &self,
+            id: serde_json::Value,
+            name: &str,
+            arguments: serde_json::Value,
+        ) -> (usize, serde_json::Value) {
             let params = json!({"name": "invoke_capability", "arguments": {
-                "name": "preview_solo", "arguments": arguments
+                "name": name, "arguments": arguments
             }});
             let body =
                 json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params});
@@ -12134,6 +12146,31 @@ mod mo2_solo_review {
             );
         }
         server.shutdown();
+    }
+
+    /// N24 (B2), the "every tool" half: a panicking non-solo capability
+    /// (`import_media`'s probe) gets the same fixed text, never the payload.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_non_solo_panic_is_fixed_text() {
+        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let proof = Arc::new(ProofDouble {
+            panic_len: 2000,
+            ..ProofDouble::default()
+        });
+        let core = Core::spawn(doc(2, 2, 1, false)).unwrap();
+        let server = McpServer::start(core, media, proof).unwrap();
+        let raw = RawSession::open(&server).await;
+        let arguments = json!({"expected_revision": 0, "path": "/nonexistent/x.mp4"});
+        let (bytes, message) = raw.invoke(json!(5), "import_media", arguments).await;
+        server.shutdown();
+        assert_eq!(message["id"], 5);
+        assert_eq!(message["error"]["code"], -32603, "{message}");
+        assert_eq!(
+            message["error"]["message"],
+            "tool call failed: handler panicked"
+        );
+        assert!(message["error"].get("data").is_none());
+        assert!(bytes < 1024, "{bytes}");
     }
 
     /// A success reply's measure with its report's `elapsed_ms` (the one
