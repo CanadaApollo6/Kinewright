@@ -132,11 +132,23 @@ changes.
   canonical-identical; a relative, missing, or unparseable header never
   claims — ambiguous legacy identity is ignored, never rebound to the
   current cwd, so it cannot block an unrelated project. G6: the scan
-  streams — `BufReader`, one magic read, one parsed header value — bounded
-  at 1 MiB of header per alias candidate (over-limit headers are ignored
-  as unverifiable); name-matched journals refuse without any header read;
-  non-regular entries are skipped; only a read error on a regular file
-  fails closed. Fix round 3, H4: the name match is evaluated first — a
+  streams — `BufReader`, one magic read, one parsed header value; name-
+  matched journals refuse without any header read; non-regular entries
+  are skipped. Fix round 3, H3 (supersedes G6's 1 MiB header cut-off,
+  which ignored big projects' alias journals — fail-open): the header
+  value is parsed in full as a stream — `project_path` captured, every
+  other value (the embedded `initial_document`) skipped as `IgnoredAny`,
+  never buffered (a 64 MiB document adds < 2 MiB peak RSS) — and it
+  claims only when committed: the byte right after the value must be
+  `\n` (no newline, EOF, or trailing bytes = uncommitted, no claim).
+  Torn or malformed data is merely unmatched; any other IO error (magic
+  or header read) fails closed as `RecoveryLookup`. The only size guard
+  is a generous 1 GiB ceiling per header: a header reaching it refuses
+  typed (`FileTooLarge` → `RecoveryLookup`, fail closed), never ignored.
+  Residuals: the parse costs time linear in the header (debug build
+  ≈ 2.5 s per 64 MiB), and a hostile deeply nested skipped value costs
+  serde_json one byte of scratch per nesting level, bounded by the
+  ceiling (local recovery-dir writers only). Fix round 3, H4: the name match is evaluated first — a
   name-matched entry of ANY type (symlink, FIFO, dir) refuses; only
   non-matched non-regular entries are skipped, before any open. H5: a
   project path with no canonical identity names its journal by its raw

@@ -177,43 +177,71 @@ struct JournalIdentityHeader {
     project_path: Option<PathBuf>,
 }
 
-/// The most a header scan reads past the magic (G6): headers embed the
-/// initial document but stay small, and name-matched journals refuse
-/// without any header read — so a non-name-matched journal whose header
-/// exceeds this is ignored as unverifiable, never blocking a project, and
-/// the limit can never weaken a name match into a pass.
-const JOURNAL_HEADER_LIMIT: u64 = 1024 * 1024;
+/// The generous ceiling on one header value (H3). The parse streams, so
+/// memory stays O(path) whatever the header size; this only bounds the
+/// time one scan can take. A header reaching it is refused typed
+/// (`FileTooLarge`, fail closed) — never ignored.
+const JOURNAL_HEADER_CEILING: u64 = 1 << 30;
 
 /// Whether a journal's header names the project (F5's alias arm). Only an
 /// absolute header path claims, by canonical identity (G5): a relative
 /// header is ambiguous — never rebound to the current cwd — and torn,
-/// missing, or over-limit headers never match, so a non-name-matched
+/// missing, or uncommitted headers never match, so a non-name-matched
 /// journal with one is ignored, never blocking an unrelated project.
 /// Name-matched journals refuse without consulting the header at all.
-/// The scan streams (`BufReader`, one magic read, one parsed header value)
-/// so unrelated journals cost kilobytes, not their full bodies (G6/RS3);
-/// only a read error on a regular file fails closed. Vanished reads as gone.
+/// Vanished reads as gone.
 fn journal_header_names(journal: &Path, identity: &Path) -> Result<bool, io::Error> {
-    use std::io::{BufReader, Read as _};
     let file = match fs::File::open(journal) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    let mut file = BufReader::new(file);
+    header_names_from(file, identity, JOURNAL_HEADER_CEILING)
+}
+
+/// The streaming header parse (H3), over any reader (the IO tests inject
+/// one): one magic read, then a single JSON value parsed in place —
+/// `project_path` is captured and every other value (the embedded
+/// `initial_document`) skipped as `IgnoredAny`, never buffered — then the
+/// byte right after the value must be `\n`, the writer's commit mark
+/// (anything else, or EOF, is uncommitted: no claim). Torn or malformed
+/// data is merely unmatched; any other IO error propagates (fail closed).
+fn header_names_from(
+    reader: impl io::Read,
+    identity: &Path,
+    ceiling: u64,
+) -> Result<bool, io::Error> {
+    use std::io::{BufReader, Read as _};
+    let mut reader = BufReader::new(reader);
     let mut magic = [0u8; JOURNAL_MAGIC.len()];
-    if file.read_exact(&mut magic).is_err() || magic.as_slice() != JOURNAL_MAGIC {
-        return Ok(false);
+    match reader.read_exact(&mut magic) {
+        Ok(()) if magic.as_slice() == JOURNAL_MAGIC => {}
+        Err(error) if error.kind() != io::ErrorKind::UnexpectedEof => return Err(error),
+        _ => return Ok(false),
     }
-    let mut values = serde_json::Deserializer::from_reader(file.take(JOURNAL_HEADER_LIMIT))
-        .into_iter::<JournalIdentityHeader>();
-    let Some(header) = values.next() else {
-        return Ok(false);
+    let mut body = reader.take(ceiling);
+    let parsed =
+        JournalIdentityHeader::deserialize(&mut serde_json::Deserializer::from_reader(&mut body));
+    let mut next = [0u8; 1];
+    let committed = match parsed {
+        Err(error) if error.is_io() => return Err(error.into()),
+        Err(_) => None,
+        Ok(header) => match body.read_exact(&mut next) {
+            Ok(()) => (next == *b"\n").then_some(header),
+            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => None,
+            Err(error) => return Err(error),
+        },
     };
-    let Ok(header) = header else {
-        return Ok(false);
-    };
-    let Some(project) = header.project_path else {
+    if body.limit() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::FileTooLarge,
+            format!("a recovery journal header reaches the {ceiling}-byte ceiling"),
+        ));
+    }
+    let Some(JournalIdentityHeader {
+        project_path: Some(project),
+    }) = committed
+    else {
         return Ok(false);
     };
     if !project.is_absolute() {
@@ -412,11 +440,13 @@ mod tests {
         );
     }
 
-    /// G6: a header past the byte limit is unverifiable — ignored when
-    /// unmatched, and never weakening a name match.
+    /// H3 (race SW2): a big alias header is parsed in full and IDENTIFIED
+    /// — no 1 MiB cut-off ignores big projects — while a header reaching
+    /// the ceiling refuses typed (fail closed) and a name match still
+    /// refuses without any header read.
     #[test]
-    fn g6_over_limit_header_ignores_unmatched_but_not_a_match() {
-        let dir = TempDirectory::new("aw1-g6-over-limit");
+    fn h3_big_header_identifies_and_the_ceiling_refuses() {
+        let dir = TempDirectory::new("aw1-h3-big-header");
         let recovery = dir.path("recovery");
         fs::create_dir(&recovery).expect("the recovery dir creates");
         let project = dir.path("edit.kinewright");
@@ -424,28 +454,100 @@ mod tests {
         let big = "x".repeat(2 * 1024 * 1024);
         let header = format!(
             "KINEWRIGHT-JOURNAL 1\n{{\"format_version\":1,\"writer_format_version\":1,\
-             \"project_path\":{},\"initial_document\":{}}}\n",
-            serde_json::to_string(&project).expect("the path serialises"),
-            serde_json::to_string(&big).expect("the body serialises")
-        );
-        assert!(
-            header.len() as u64 > JOURNAL_HEADER_LIMIT,
-            "the fixture exceeds the limit"
+             \"initial_document\":{},\"project_path\":{}}}\n",
+            serde_json::to_string(&big).expect("the body serialises"),
+            serde_json::to_string(&project).expect("the path serialises")
         );
         let alias = recovery.join("elsewhere-0123456789abcdef.journal");
         fs::write(&alias, &header).expect("the alias journal writes");
         assert_eq!(
             pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
-            None,
-            "an over-limit header is ignored when unmatched"
+            Some(alias.clone()),
+            "a 2 MiB alias header identifies its project"
         );
+        let identity = canonical_project_identity(&project).expect("the identity");
+        let refused = header_names_from(header.as_bytes(), &identity, 1024)
+            .expect_err("a header reaching the ceiling refuses");
+        assert_eq!(refused.kind(), io::ErrorKind::FileTooLarge);
+        fs::remove_file(&alias).expect("the alias goes");
         let matched = recovery.join(journal_file_name(&project));
-        fs::write(&matched, &header).expect("the matched journal writes");
+        fs::write(&matched, b"KINEWRIGHT-JOURNAL 1\n{ torn").expect("the matched journal writes");
         assert_eq!(
             pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
             Some(matched),
-            "the limit never weakens a name match"
+            "a name match refuses without a header read"
         );
+    }
+
+    /// A reader that fails (not EOF) once its bytes run out: an in-process
+    /// IO seam, no interposition (R2 B1's probe).
+    struct FailingReader(std::io::Cursor<Vec<u8>>);
+
+    impl io::Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match io::Read::read(&mut self.0, buf)? {
+                0 => Err(io::Error::other("injected reader failure")),
+                read => Ok(read),
+            }
+        }
+    }
+
+    /// H3 (R1 S1 / R2 B1): an IO error during the magic read propagates —
+    /// never "no journal".
+    #[test]
+    fn rr2_g6_magic_io_fails_closed() {
+        let failing = FailingReader(std::io::Cursor::new(b"KINEWRIGHT".to_vec()));
+        assert!(
+            header_names_from(failing, Path::new("/p"), JOURNAL_HEADER_CEILING).is_err(),
+            "magic read IO must propagate"
+        );
+    }
+
+    /// H3: an IO error inside the header value propagates too.
+    #[test]
+    fn rr2_g6_json_io_fails_closed() {
+        let mut bytes = JOURNAL_MAGIC.to_vec();
+        bytes.extend_from_slice(b"{\"project_path\":");
+        let failing = FailingReader(std::io::Cursor::new(bytes));
+        assert!(
+            header_names_from(failing, Path::new("/p"), JOURNAL_HEADER_CEILING).is_err(),
+            "JSON read IO must propagate"
+        );
+    }
+
+    /// H3 (R1 S2 / R2 S1): only a committed header line claims — the value
+    /// followed immediately by `\n`. No newline, or trailing garbage before
+    /// it, is uncommitted and never blocks.
+    #[test]
+    fn rr2_g6_committed_header() {
+        let dir = TempDirectory::new("aw1-rr2-committed");
+        let recovery = dir.path("recovery");
+        fs::create_dir(&recovery).expect("the recovery dir creates");
+        let project = dir.path("p.kinewright");
+        let value = serde_json::json!({
+            "format_version": 1,
+            "writer_format_version": 1,
+            "project_path": project,
+            "initial_document": kinewright_core::Document::default(),
+        });
+        let journal = recovery.join("alias.journal");
+        for (tail, claims) in [
+            ("\n", true),
+            ("", false),
+            ("garbage\n", false),
+            (" \n", false),
+        ] {
+            let text = format!(
+                "{}{value}{tail}",
+                std::str::from_utf8(JOURNAL_MAGIC).expect("the magic is text")
+            );
+            fs::write(&journal, text).expect("the journal writes");
+            assert_eq!(
+                pending_journal_for_project(&recovery, &project).expect("the lookup lands"),
+                claims.then(|| journal.clone()),
+                "tail {tail:?}"
+            );
+        }
     }
 
     /// G5: the verbatim→ordinary spelling map is unit-pinned on every OS.

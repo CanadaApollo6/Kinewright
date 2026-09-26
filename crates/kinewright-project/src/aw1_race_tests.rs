@@ -1641,6 +1641,66 @@ fn journal_scan_bounds_unrelated_reads() {
     );
 }
 
+/// H3 (race SW2): an alias journal whose `initial_document` is 64 MiB —
+/// written BEFORE `project_path`, so the whole body must be skipped to
+/// reach it — is IDENTIFIED (pending), and the streaming parse adds
+/// < 16 MiB peak RSS (child-measured `VmHWM`): the body is never buffered.
+#[cfg(target_os = "linux")]
+#[test]
+fn h3_big_alias_document_identifies_in_bounded_memory() {
+    let fx = fixture("race-h3-big-document");
+    let alias = fx.recovery.join("renamed-0123456789abcdef.journal");
+    {
+        let mut file = std::io::BufWriter::new(fs::File::create(&alias).unwrap());
+        file.write_all(JOURNAL_MAGIC).unwrap();
+        file.write_all(br#"{"format_version":1,"initial_document":{"clips":["#)
+            .unwrap();
+        let clip = format!(r#"{{"id":1,"label":"{}"}}"#, "x".repeat(1024));
+        for index in 0..64 * 1024 {
+            if index > 0 {
+                file.write_all(b",").unwrap();
+            }
+            file.write_all(clip.as_bytes()).unwrap();
+        }
+        let path = crate::project::canonical_project_identity(&fx.project).unwrap();
+        write!(
+            file,
+            r#"]}},"project_path":{},"writer_format_version":1}}"#,
+            serde_json::to_string(&path).unwrap()
+        )
+        .unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    assert!(
+        fs::metadata(&alias).unwrap().len() > 64 << 20,
+        "a 64 MiB body"
+    );
+    let signals = fx.dir.path("measured");
+    let mut kid = spawn(
+        "measure",
+        &fx.project,
+        &fx.recovery,
+        &signals,
+        Opts::default(),
+    );
+    kid.0.wait().unwrap();
+    let measured = fs::read_to_string(signals.join("measured")).unwrap();
+    let field = |key: &str| -> u64 {
+        let value = measured.split(key).nth(1).unwrap().split_whitespace();
+        value.take(1).collect::<String>().parse().unwrap()
+    };
+    let (before, after) = (field("hwm_before_kib="), field("hwm_after_kib="));
+    eprintln!("RACE3: 64 MiB alias document: {measured}");
+    assert!(
+        measured.contains("verdict=Err(PendingRecovery"),
+        "the big alias journal is identified: {measured}"
+    );
+    assert!(
+        after.saturating_sub(before) < 16 * 1024,
+        "the 64 MiB body adds < 16 MB peak RSS: {before} -> {after} KiB"
+    );
+}
+
 // ───────────────────────── G8: dangling alias ─────────────────────────
 
 /// AF2 hole: a DANGLING symlink alias (the target not yet saved) does not
