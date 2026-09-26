@@ -58,6 +58,18 @@
   value the target stores (`α·B + (1−α)·D`), so `Add(40000,40000)` at
   α=0.25 stores 49,984 instead of refusing. `Normal` pixel layers stay
   unchecked (the CC3 overflow contract and R12's untouched fast path).
+- ME5 → §4 R14 / §6 R21 (B1 fix round 1, review-2 B1 + S2): no NDC
+  varying. The GPU decides coverage on the exact fragment position `i + ½`
+  against an edge the host moves into output pixels, rounded up to the
+  next pixel centre (`⌈e·n − ½⌉ + ½`), and the twin compares `(i + ½) <
+  e·n` in f64. Keep-`<`-edge therefore holds exactly when the centre
+  fraction is `< e`. Evidence: the interpolated NDC misplaced tie centres
+  on odd rasters (17×11 at `p = ½`: up to 195 bad channels per direction).
+  Separately, a centre that is rasterized on a quad's top/left edge
+  interpolates uv a few ulps below 0, and the crop test zeroed it (the
+  isolated down Push/Slide mismatch). The crop now tests uv clamped to
+  [0, 1]. Pinned by the odd/even transition grid and the exact-centre
+  probe (M22/M25 and both fixes' reversals killed).
 
 ## Changes in revision 2
 
@@ -334,8 +346,8 @@ composition.
 bytes asserted by an exact layout/size test: `blend_mode` selector (0 =
 `Normal`, accumulator sample under guard) plus transition-coverage words
 (edge, axis, on) shared by wipe/slide/push; `Push`/`Slide` offsets fold
-host-side into the offset arms; the vertex stage passes NDC position as a
-second varying for output-space coverage. One pipeline, one bind-group
+host-side into the offset arms; output-space coverage uses the fragment's
+pixel position (ME5). One pipeline, one bind-group
 layout. Budget one additional writable storage binding for per-layer
 validity flags: three sampled textures, two samplers, one uniform, two
 storage buffers. Identity is recovered from the layer-to-clip mapping; the

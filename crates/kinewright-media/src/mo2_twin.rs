@@ -197,7 +197,17 @@ fn legacy(p: &LayerParams, linear: [f32; 3]) -> [f32; 3] {
 }
 
 /// Shade one fragment: straight working RGB and processed alpha.
-fn shade(p: &LayerParams, rgb: [f32; 3], a: f32, uv: [f32; 2], screen: [f32; 2]) -> Rgba {
+///
+/// `pixel` is the output pixel and `extent` the raster size: R21 coverage is
+/// decided exactly, `(i + 0.5) / n` against the edge in f64 (ME5).
+fn shade(
+    p: &LayerParams,
+    rgb: [f32; 3],
+    a: f32,
+    uv: [f32; 2],
+    pixel: [usize; 2],
+    extent: [f32; 2],
+) -> Rgba {
     let (mut rgb, mut alpha) = (rgb, (a * p.opacity).clamp(0.0, 1.0));
     if p.legacy_stage_active > 0.5 {
         rgb = legacy(p, rgb);
@@ -256,12 +266,11 @@ fn shade(p: &LayerParams, rgb: [f32; 3], a: f32, uv: [f32; 2], screen: [f32; 2])
         alpha *= if p.mask_invert > 0.5 { 1.0 - m } else { m };
     }
     if p.coverage_on > 0.5 {
-        let coord = screen[usize::from(p.coverage_axis > 0.5)];
-        let keep = if p.coverage_on < 1.5 {
-            coord < p.coverage_edge
-        } else {
-            coord >= p.coverage_edge
-        };
+        let axis = usize::from(p.coverage_axis > 0.5);
+        #[allow(clippy::cast_precision_loss)]
+        let centre = pixel[axis] as f64 + 0.5;
+        let below = centre < f64::from(p.coverage_edge) * f64::from(extent[axis]);
+        let keep = below == (p.coverage_on < 1.5);
         alpha *= f32::from(u8::from(keep));
     }
     [rgb[0], rgb[1], rgb[2], alpha]
@@ -355,7 +364,7 @@ pub(crate) fn render_working<F: CompositorInput>(
                 rgb = rgb.map(decode_bt709);
             }
             rgb = apply_color_nodes_at(&nodes, rgb, uv, w / h);
-            let [r, g, b, alpha] = shade(&p, rgb, a, uv, screen);
+            let [r, g, b, alpha] = shade(&p, rgb, a, uv, [i % width, i / width], [w, h]);
             let below = *texel;
             let over = |s: f32, d: f32| alpha * s + (1.0 - alpha) * d;
             let blended = if mode == 0 {
