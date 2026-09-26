@@ -539,7 +539,7 @@ fn operation_tool(
             " Freeze clips hold one source frame from a real video-capable asset for a project-frame duration. They are video-track clips and remain silent.",
         ),
         "SetClipSpeed" => description.push_str(
-            " speed_percent is an integer percentage in 10..=1000; 100 is real time. Speed scales the media clip's effective source rate, so 50 doubles its project duration and 200 halves it. The operation fails if the new duration would overlap a later clip - ripple-insert a gap first when slowing a clip down. Audio is muted at any speed other than 100. Titles and freeze frames have no speed.",
+            " speed_percent is an integer percentage in 10..=1000; 100 is real time. Speed scales the media clip's effective source rate, so 50 doubles its project duration and 200 halves it. The operation fails if the new duration would overlap a later clip - ripple-insert a gap first when slowing a clip down. Audio is muted at any speed other than 100. Titles, freeze frames, adjustments and solids have no speed.",
         ),
         // MO2 R8: the load-bearing rules first; the equations live in the
         // design, not in every request.

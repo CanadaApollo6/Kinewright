@@ -28756,6 +28756,14 @@ mod tests {
     ///   1 273 = **128 713**. Counts `152 / 64 / 88` — Part A's `(4,4,0)`.
     ///   Served quad unchanged (`7 / 5 660 / 3 510 / 998`) — the
     ///   twenty-second consecutive measurement.
+    ///
+    /// - **MO2 A-fix (review 1 nit): +21 / 0 / +21.** `set_clip_speed`'s
+    ///   speedless list names adjustments and solids beside titles and
+    ///   freeze frames, matching `SpeedOnNonMediaClip` (`"Titles and freeze
+    ///   frames"` → `"Titles, freeze frames, adjustments and solids"`, +21 B
+    ///   of description). The arithmetic: 2 000 521 + 21 = **2 000 542**,
+    ///   input schema unchanged at **1 846 842**, 128 713 + 21 =
+    ///   **128 734**. Counts `152 / 64 / 88`; served quad unchanged.
     #[test]
     fn served_surface_is_small_and_keeps_the_internal_registry_discoverable() {
         let registry = KinewrightMcp::capability_tools().unwrap();
@@ -28781,7 +28789,7 @@ mod tests {
                 registry_metrics.serialized_bytes,
                 served_metrics.serialized_bytes
             ),
-            (2_000_521, 5_660),
+            (2_000_542, 5_660),
             "registry={registry_metrics:?} served={served_metrics:?}"
         );
         assert_eq!(
@@ -28789,7 +28797,7 @@ mod tests {
             "registry={registry_metrics:?}"
         );
         assert_eq!(
-            registry_metrics.description_bytes, 128_713,
+            registry_metrics.description_bytes, 128_734,
             "registry={registry_metrics:?}"
         );
         assert_eq!(

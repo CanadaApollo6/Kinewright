@@ -140,6 +140,8 @@ served by the runtime. The M36 regression test records:
 | Served MCP runtime (2026-09-24, after MO1 Part C plan_motion) | 7 | 5,660 B | 3,510 B | 998 B |
 | Internal capability registry (2026-09-25, after MO2 Part A) | 152 | 2,000,521 B | 1,846,842 B | 128,713 B |
 | Served MCP runtime (2026-09-25, after MO2 Part A) | 7 | 5,660 B | 3,510 B | 998 B |
+| Internal capability registry (2026-09-26, after the MO2 Part A fixes) | 152 | 2,000,542 B | 1,846,842 B | 128,734 B |
+| Served MCP runtime (2026-09-26, after the MO2 Part A fixes) | 7 | 5,660 B | 3,510 B | 998 B |
 
 IN1 Part A adds two capabilities, `get_incidents` and `resolve_incident`,
 reached through `invoke_capability` and served as no tool: the registry grows
@@ -218,6 +220,13 @@ at 2,000,521 B serialized (1,846,842 input schema, 128,713 description) at
 counts 152 / 64 / 88. The served quad is byte-identical for the
 twenty-second consecutive measurement at 7 / 5,660 B / 3,510 B / 998 B
 (MO2 R25), asserted in three value sites.
+
+The MO2 Part A fixes name adjustments and solids in `set_clip_speed`'s
+speedless list, matching `SpeedOnNonMediaClip`: +21 B of description, so
+the registry moves to 2,000,542 B serialized (1,846,842 input schema,
+128,734 description) at unchanged counts 152 / 64 / 88. Both endpoint pin
+sites now assert the registry byte trio beside the counts. The served quad
+does not move.
 
 AU6 Part A adds no capability and no operation; the registry is
 unchanged and the served quad is byte-identical at 7 / 5,660 B /
