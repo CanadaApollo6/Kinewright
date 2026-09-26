@@ -822,24 +822,97 @@ fn guard_two_waiters_one_reclaims_after_a_kill() {
         }
         // Let the loser spin a little against the winner, then stop it.
         std::thread::sleep(Duration::from_millis(5));
-        for s in [&a, &b] {
-            fs::write(s.join("stop"), "").unwrap();
-        }
-        let winners = [&a, &b].iter().filter(|s| s.join("owned").exists()).count();
-        assert_eq!(winners, 1, "round {round}: exactly one waiter reclaims");
-        for s in [&a, &b] {
-            fs::write(s.join("done"), "").unwrap();
-        }
-        assert!(wa.0.wait().unwrap().success());
-        assert!(wb.0.wait().unwrap().success());
-        let winner = if a.join("owned").exists() { &a } else { &b };
-        let verdict = fs::read_to_string(winner.join("owned")).unwrap();
+        let verdict = settle_two_waiters(round, &a, &b, || {
+            assert!(wa.0.wait().unwrap().success());
+            assert!(wb.0.wait().unwrap().success());
+        });
         assert_eq!(
             field(&verdict, "reclaimed"),
             owner.0.id().to_string(),
             "round {round}: the winner reclaims the killed owner"
         );
     }
+}
+
+/// Stop both waiters, then read the winner's verdict while it still holds
+/// (J1) — only then write `done` and `reap` the children. A loser whose
+/// claim began before `stop` may own once the winner releases; reading
+/// after `done` could pick that late, fresh verdict (the round-3 B1
+/// harness race). A late loser must own fresh: the winner released
+/// cleanly, so it never reclaims the killed owner a second time.
+fn settle_two_waiters(round: usize, a: &Path, b: &Path, reap: impl FnOnce()) -> String {
+    for s in [a, b] {
+        fs::write(s.join("stop"), "").unwrap();
+    }
+    let owners: Vec<&Path> = [a, b]
+        .into_iter()
+        .filter(|s| s.join("owned").exists())
+        .collect();
+    assert_eq!(
+        owners.len(),
+        1,
+        "round {round}: exactly one waiter owns while the winner holds"
+    );
+    let winner = owners[0];
+    let verdict = fs::read_to_string(winner.join("owned")).unwrap();
+    for s in [a, b] {
+        fs::write(s.join("done"), "").unwrap();
+    }
+    reap();
+    let loser = if winner == a { b } else { a };
+    if let Ok(late) = fs::read_to_string(loser.join("owned")) {
+        assert_eq!(
+            field(&late, "reclaimed"),
+            "none",
+            "round {round}: a late loser owns fresh, after the winner's release"
+        );
+    }
+    verdict
+}
+
+/// J1 regression of the harness (the round-3 race review's deterministic
+/// reproducer of CI 36205653408's Windows red): waiter `a` pauses inside
+/// a claim it began before `stop`; `b` wins and reclaims the killed owner;
+/// `a` resumes only after `done` and `b`'s release, so it owns FRESH. The
+/// harness must still report `b`'s verdict — at 9a14698 it picked the
+/// verdict after `done`, checking `a` first, and read `reclaimed=none`.
+#[test]
+fn j1_two_waiters_harness_reports_the_real_winner() {
+    let fx = fixture("j1-two-waiters-harness");
+    let signals = fx.dir.path("owner");
+    let mut owner = spawn("hold", &fx.project, &fx.recovery, &signals, Opts::default());
+    wait_for(&signals.join("owned"));
+    let a = fx.dir.path("a");
+    let b = fx.dir.path("b");
+    let mut wa = spawn(
+        "waiter",
+        &fx.project,
+        &fx.recovery,
+        &a,
+        Opts {
+            hook: Some("before_lock_open"),
+            ..Opts::default()
+        },
+    );
+    wait_for(&a.join("paused"));
+    let mut wb = spawn("waiter", &fx.project, &fx.recovery, &b, Opts::default());
+    owner.0.kill().unwrap();
+    owner.0.wait().unwrap();
+    wait_for(&b.join("owned"));
+    let verdict = settle_two_waiters(0, &a, &b, || {
+        assert!(wb.0.wait().unwrap().success());
+        fs::write(a.join("resume"), "").unwrap();
+        assert!(wa.0.wait().unwrap().success());
+    });
+    assert!(
+        a.join("owned").exists(),
+        "the paused loser owned late (the race was exercised)"
+    );
+    assert_eq!(
+        field(&verdict, "reclaimed"),
+        owner.0.id().to_string(),
+        "the harness reports the real winner's reclaim"
+    );
 }
 
 // ───────────────────────── Discovery file states ─────────────────────────
