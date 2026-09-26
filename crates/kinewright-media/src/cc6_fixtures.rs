@@ -1770,12 +1770,7 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
     let production: Vec<(u64, u64)> = layers
         .iter()
         .flat_map(|layer| {
-            let (clip, effects) = match layer {
-                crate::timeline::TimelineVisualLayer::Video(video) => {
-                    (video.source.clip, &video.effects)
-                }
-                crate::timeline::TimelineVisualLayer::Title(title) => (title.clip, &title.effects),
-            };
+            let (clip, effects) = (layer.clip(), layer.effects());
             effects
                 .iter()
                 .map(move |effect| (clip.0, effect.id.0))
@@ -1821,10 +1816,7 @@ fn cc6_per_node_contribution_order_matches_production_z_order() {
         crate::timeline::visual_layers_at(&reversed, TimeCode::ZERO)
             .expect("the production z-order resolves")
             .iter()
-            .map(|layer| match layer {
-                crate::timeline::TimelineVisualLayer::Video(video) => video.source.clip.0,
-                crate::timeline::TimelineVisualLayer::Title(title) => title.clip.0,
-            })
+            .map(|layer| layer.clip().0)
             .collect();
     assert_eq!(reversed_production, vec![3, 2, 1]);
     let reversed_core = kinewright_core::nodes::measure_node_contributions(

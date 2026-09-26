@@ -23,7 +23,7 @@ use crate::cc1_fixtures::{
     DELIVERY_CODEC_MAX, DELIVERY_CODEC_MEAN, DELIVERY_CODEC_P99, abs_code_diff_rgb,
     delivery_frame_to_rgba8,
 };
-use crate::compositor::{Compositor, CompositorLayer};
+use crate::compositor::{Compositor, CompositorLayer, LayerMode};
 use crate::decode::probe_path;
 use crate::export::mix_audio;
 use crate::gpu_test_support::fixture_gpu_or_skip;
@@ -167,6 +167,7 @@ fn render_layer(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("the golden layer should render")
@@ -945,6 +946,7 @@ fn assert_push_in_sampler_path(document: &Document) {
             frame: &dummy,
             effects: &[],
             transition: TransitionRenderParams::default(),
+            mode: LayerMode::NORMAL,
         };
         assert_eq!(
             BlitCompositor::is_pixel_exact_blit(&layer, &params, 320, 180),

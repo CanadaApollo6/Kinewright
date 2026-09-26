@@ -57,6 +57,14 @@ struct LayerParams {
     frame_aspect: f32,
     anchor_x: f32,
     anchor_y: f32,
+    // MO2 R14: 0 = `Normal` (fixed-function over only), 1..6 = Multiply,
+    // Screen, Overlay, Darken, Lighten, Add against the accumulator
+    // snapshot, 7 = the R13 Push backdrop. Coverage keeps screen `< edge`
+    // (on = 1) or `>= edge` (on = 2) along x (axis 0) or y (axis 1).
+    blend_mode: f32,
+    coverage_edge: f32,
+    coverage_axis: f32,
+    coverage_on: f32,
 };
 
 // CC3 3.2: ONE read-only storage buffer carries the whole ordered managed
@@ -104,10 +112,17 @@ var<private> matte_debug_coverage: f32 = 0.0;
 @group(0) @binding(2) var<uniform> params: LayerParams;
 @group(0) @binding(3) var lut_texture: texture_3d<f32>;
 @group(0) @binding(4) var<storage, read> grade_buffer: GradeBuffer;
+// MO2 R13/R14: the below-stack snapshot (a cached 1x1 dummy on the fast
+// path) and this layer's sticky R10 validity flag.
+@group(0) @binding(5) var accumulator: texture_2d<f32>;
+@group(0) @binding(6) var accumulator_sampler: sampler;
+@group(0) @binding(7) var<storage, read_write> validity: atomic<u32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    // MO2 R14: output-space NDC for transition coverage.
+    @location(1) ndc: vec2<f32>,
 };
 
 @vertex
@@ -150,6 +165,7 @@ fn vertex_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     let translated = rotated + anchor + vec2<f32>(params.offset_x, -params.offset_y);
     output.position = vec4<f32>(translated, 0.0, 1.0);
     output.uv = uvs[vertex_index];
+    output.ndc = translated;
     return output;
 }
 
@@ -739,8 +755,55 @@ fn apply_color_nodes(input_rgb: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return corrected;
 }
 
+// MO2 R9: extended-domain Screen/Overlay keep excursions as residuals.
+fn blend_channel(mode: u32, s: f32, d: f32) -> f32 {
+    let cs = clamp(s, 0.0, 1.0);
+    let cd = clamp(d, 0.0, 1.0);
+    let residual = (s - cs) + (d - cd);
+    switch mode {
+        case 1u: { return s * d; }
+        case 2u: { return 1.0 - (1.0 - cs) * (1.0 - cd) + residual; }
+        case 3u: {
+            if cd <= 0.5 {
+                return 2.0 * cs * cd + residual;
+            }
+            return 1.0 - 2.0 * (1.0 - cs) * (1.0 - cd) + residual;
+        }
+        case 4u: { return min(s, d); }
+        case 5u: { return max(s, d); }
+        case 6u: { return s + d; }
+        default: { return s; }
+    }
+}
+
+// MO2 R10: non-finite (exponent all ones) or beyond the f16 maximum.
+fn unstorable(value: vec3<f32>) -> bool {
+    let bits = bitcast<vec3<u32>>(value) & vec3<u32>(0x7f800000u);
+    return any(bits == vec3<u32>(0x7f800000u)) || any(abs(value) > vec3<f32>(65504.0));
+}
+
+// MO2 R13: the opaque Push backdrop samples `D0(x - q)` where that lands in
+// the raster and unshifted `D0(x)` elsewhere.
+fn push_backdrop(position: vec2<f32>) -> vec4<f32> {
+    let dimensions = vec2<f32>(textureDimensions(accumulator));
+    let screen = position / dimensions;
+    var shift = vec2<f32>(params.coverage_edge, 0.0);
+    if params.coverage_axis > 0.5 {
+        shift = vec2<f32>(0.0, params.coverage_edge);
+    }
+    let source = screen - shift;
+    let unshifted = textureLoad(accumulator, vec2<i32>(position), 0);
+    let shifted = textureSampleLevel(accumulator, accumulator_sampler, source, 0.0);
+    let inside = all(source >= vec2<f32>(0.0)) && all(source < vec2<f32>(1.0));
+    return vec4<f32>(select(unshifted.rgb, shifted.rgb, inside), 1.0);
+}
+
 @fragment
 fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let mode = u32(round(params.blend_mode));
+    if mode == 7u {
+        return push_backdrop(input.position.xy);
+    }
     var sample_uv = input.uv;
     if params.reframe_aspect > 0.0 {
         let dimensions = vec2<f32>(textureDimensions(layer_texture));
@@ -905,5 +968,32 @@ fn fragment_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
         alpha *= mask_alpha;
     }
-    return vec4<f32>(output_linear, alpha);
+    // MO2 R21: output-space coverage, alpha-multiplied, pixel centres.
+    if params.coverage_on > 0.5 {
+        let screen = vec2<f32>(input.ndc.x + 1.0, 1.0 - input.ndc.y) * 0.5;
+        var coord = screen.x;
+        if params.coverage_axis > 0.5 {
+            coord = screen.y;
+        }
+        var keep = coord >= params.coverage_edge;
+        if params.coverage_on < 1.5 {
+            keep = coord < params.coverage_edge;
+        }
+        alpha *= select(0.0, 1.0, keep);
+    }
+    if mode == 0u {
+        return vec4<f32>(output_linear, alpha);
+    }
+    // MO2 R9/R9b: emit `(B, alpha)` into the fixed-function over.
+    let below = textureLoad(accumulator, vec2<i32>(input.position.xy), 0).rgb;
+    let blended = vec3<f32>(
+        blend_channel(mode, output_linear.r, below.r),
+        blend_channel(mode, output_linear.g, below.g),
+        blend_channel(mode, output_linear.b, below.b),
+    );
+    if unstorable(blended) || unstorable(vec3<f32>(alpha))
+        || unstorable(alpha * blended + (1.0 - alpha) * below) {
+        atomicStore(&validity, 1u);
+    }
+    return vec4<f32>(blended, alpha);
 }

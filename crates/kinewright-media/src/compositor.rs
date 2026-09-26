@@ -3,18 +3,21 @@ use std::{
     fs,
     num::NonZeroU64,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::SystemTime,
 };
 
 use half::f16;
 use kinewright_core::{
-    COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorContext, ColorCurveChannel, ColorDescription,
-    ColorNodeKind, ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect, EffectId,
-    EffectParameterDescriptor, EffectUniform, FrameTexture, LinearRgbaImage, LutNodeParams,
-    MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError, MonitorProofMetadata,
-    MonitorProofRenderKind, ParamValue, ResolvedCurves, classify_color_node,
-    color_node_inactive_reason, effect_descriptor, managed_color_node_count,
+    BlendMode, COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorContext, ColorCurveChannel,
+    ColorDescription, ColorNodeKind, ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect,
+    EffectId, EffectParameterDescriptor, EffectUniform, FrameTexture, LinearRgbaImage,
+    LutNodeParams, MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError,
+    MonitorProofMetadata, MonitorProofRenderKind, ParamValue, ResolvedCurves, TransitionAxis,
+    classify_color_node, color_node_inactive_reason, effect_descriptor, managed_color_node_count,
 };
 
 use crate::{
@@ -41,7 +44,7 @@ const OUTPUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 // pre-MO1 word keeps its offset. (The constant used to read 48 with only 46
 // words on either side — two trailing zero words from the CC4 reclaim era;
 // the `as_bytes` length assert below pins the constant to the layout now.)
-const UNIFORM_FLOATS: usize = 52;
+const UNIFORM_FLOATS: usize = 56;
 const UNIFORM_SIZE: u64 = UNIFORM_FLOATS as u64 * 4;
 const UNIFORM_BYTES: usize = UNIFORM_FLOATS * 4;
 /// `vec4<u32>` header of the CC3 grade buffer: active node count, curve
@@ -135,12 +138,11 @@ const LUT_ATLAS_CACHE_ENTRIES: usize = 8;
 /// [`LutLibrary`], so the retention usually costs nothing beyond the `Arc`.
 const LUT_ATLAS_CACHE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The compositor's managed colour-node ABI uses one read-only storage buffer
-/// in the fragment stage.  Keep this requirement next to the bind-group
-/// layout so native device setup cannot accidentally negotiate it away.
-/// CC3 3.2 keeps this at `1` deliberately: a second fragment-stage storage
-/// binding is not available on every supported downlevel backend.
-pub const COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 1;
+/// The compositor's fragment stage binds two storage buffers: the read-only
+/// managed colour-node stack (CC3 3.2) and MO2 R14's writable per-layer
+/// validity flag (R10).  Keep this requirement next to the bind-group layout
+/// so native device setup cannot accidentally negotiate it away.
+pub const COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE: u32 = 2;
 
 /// CC5 3.1's worst case is sixteen curve nodes that each carry a matte:
 /// `16 + 16 * 64 + 16 * 4 * 49 * 4 + 16 * 64 * 4 = 17680` bytes, which no
@@ -323,7 +325,57 @@ pub struct CompositorLayer<'a, F = FrameTexture> {
     pub frame: &'a F,
     pub effects: &'a [Effect],
     pub transition: TransitionRenderParams,
+    /// MO2 R1/R18: the layer's blend and role.
+    pub mode: LayerMode,
 }
+
+/// MO2 R1/R18/R32: how one resolved layer enters the composite.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerMode {
+    /// The blend onto the composite below the layer (R9).
+    pub blend: BlendMode,
+    /// Whether the layer draws its own pixels or grades the composite below.
+    pub role: LayerRole,
+}
+
+/// MO2 R32: distinguishes adjustment instructions from pixel sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerRole {
+    /// The layer's `frame` is its source (media, title, solid).
+    Pixels,
+    /// R18: the layer's `frame` is ignored; its source is the composite of
+    /// the layers below it.
+    Adjustment,
+}
+
+impl LayerMode {
+    /// A `Normal` pixel layer: exactly the pre-MO2 layer.
+    pub const NORMAL: Self = Self {
+        blend: BlendMode::Normal,
+        role: LayerRole::Pixels,
+    };
+
+    /// R12: the layer reads the accumulator, so the pass must split for it.
+    const fn is_special(self) -> bool {
+        !self.blend.is_normal() || matches!(self.role, LayerRole::Adjustment)
+    }
+}
+
+/// MO2 R14: the blend selector word (0 = `Normal`, fixed-function only).
+const fn blend_word(blend: BlendMode) -> f32 {
+    match blend {
+        BlendMode::Normal => 0.0,
+        BlendMode::Multiply => 1.0,
+        BlendMode::Screen => 2.0,
+        BlendMode::Overlay => 3.0,
+        BlendMode::Darken => 4.0,
+        BlendMode::Lighten => 5.0,
+        BlendMode::Add => 6.0,
+    }
+}
+
+/// MO2 R13: the selector of the full-raster Push backdrop draw.
+const PUSH_BACKDROP_WORD: f32 = 7.0;
 
 /// Which layer's grade buffer carries the CC5 3.2 matte-debug selector.
 ///
@@ -469,6 +521,14 @@ pub struct Compositor {
     /// texture per layer per frame is pure overhead; `write_texture` still
     /// replaces the full contents, so no stale pixels can survive.
     texture_pool: Mutex<TexturePool>,
+    /// MO2 R12/R14: the cached 1x1 accumulator every fast-path draw binds.
+    dummy_accumulator: wgpu::TextureView,
+    /// MO2 R14: the validity slot every unchecked draw binds; never written.
+    dummy_validity: wgpu::Buffer,
+    /// MO2 R10: per-layer validity slot stride (the storage offset alignment).
+    validity_stride: u64,
+    /// MO2 R12/R13: accumulator snapshots taken, for the copy-count probes.
+    accumulator_copies: AtomicU64,
 }
 
 /// The number of distinct (width, height, format) shapes the pool retains.
@@ -585,14 +645,44 @@ impl TexturePool {
 }
 
 struct LayerResources {
-    texture: wgpu::Texture,
-    pool_key: TexturePoolKey,
+    /// The uploaded source texture; `None` for an adjustment or a backdrop,
+    /// which sample an accumulator snapshot instead.
+    source: Option<(TexturePoolKey, wgpu::Texture)>,
     /// The atlas this layer's bind group reads; held so the texture outlives
     /// the queue submission even if the cache evicts it meanwhile.
     _lut_atlas: Arc<LutAtlas>,
     _uniform: wgpu::Buffer,
     _grade: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+/// Everything one composite binds, kept until its readback has been
+/// submitted, then recycled.
+#[derive(Default)]
+struct FrameResources {
+    layers: Vec<LayerResources>,
+    /// MO2 R13: pooled accumulator snapshots A (and B).
+    snapshots: Vec<(TexturePoolKey, wgpu::Texture)>,
+    /// MO2 R10: the sticky validity flags and the layer each slot checks.
+    validity: Option<(wgpu::Buffer, Vec<usize>)>,
+}
+
+/// One entry of a frame's schedule.
+enum Step {
+    /// Draw `FrameResources::layers[index]` into the accumulator.
+    Draw(usize),
+    /// End the pass and copy the accumulator into snapshot `index`.
+    Snapshot(usize),
+}
+
+/// What one draw reads besides its own uniforms.
+struct LayerBindings<'a> {
+    /// MO2 R18: an adjustment's source, the snapshot of the layers below it.
+    source: Option<&'a wgpu::TextureView>,
+    /// The accumulator snapshot a special blend reads, else the placeholder.
+    accumulator: &'a wgpu::TextureView,
+    /// The validity slot and its byte offset.
+    validity: (&'a wgpu::Buffer, u64),
 }
 
 struct CachedCubeLut {
@@ -667,6 +757,15 @@ pub(crate) struct LayerParams {
     /// (Premiere: `(0, 0)` is the layer's top-left, `(0.5, 0.5)` its centre).
     pub(crate) anchor_x: f32,
     pub(crate) anchor_y: f32,
+    /// MO2 R14: blend selector, see [`blend_word`]; 7 draws a Push backdrop.
+    pub(crate) blend_mode: f32,
+    /// MO2 R14/R21: output-space coverage — the edge in screen fractions,
+    /// the axis (0 = x, 1 = y), and on (0 = off, 1 = keep `< edge`,
+    /// 2 = keep `>= edge`). The backdrop draw carries its displacement in
+    /// `coverage_edge` along `coverage_axis`.
+    pub(crate) coverage_edge: f32,
+    pub(crate) coverage_axis: f32,
+    pub(crate) coverage_on: f32,
 }
 
 impl Default for LayerParams {
@@ -726,6 +825,10 @@ impl Default for LayerParams {
             frame_aspect: 1.0,
             anchor_x: 0.5,
             anchor_y: 0.5,
+            blend_mode: 0.0,
+            coverage_edge: 0.0,
+            coverage_axis: 0.0,
+            coverage_on: 0.0,
         }
     }
 }
@@ -781,6 +884,34 @@ impl Compositor {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // MO2 R14: the accumulator snapshot, its sampler, and the
+                // sticky validity flag.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: NonZeroU64::new(4),
                     },
                     count: None,
                 },
@@ -847,6 +978,29 @@ impl Compositor {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        let dummy_accumulator = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("Kinewright compositor 1x1 accumulator placeholder"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: OUTPUT_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let dummy_validity = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Kinewright compositor unchecked validity slot"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let validity_stride = u64::from(device.limits().min_storage_buffer_offset_alignment).max(4);
         Self {
             gpu,
             bind_group_layout,
@@ -857,6 +1011,10 @@ impl Compositor {
             identity_lut: Arc::new(CubeLut::identity()),
             lut_atlas_cache: Mutex::new(Vec::new()),
             texture_pool: Mutex::new(TexturePool::default()),
+            dummy_accumulator,
+            dummy_validity,
+            validity_stride,
+            accumulator_copies: AtomicU64::new(0),
         }
     }
 
@@ -914,9 +1072,9 @@ impl Compositor {
         library: Option<&LutLibrary>,
     ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
-        let readback = self.readback_for(width, height, &output, encoder, monitoring);
-        self.release_layer_textures(resources);
+        let (output, frame, encoder) = self.composite(width, height, layers, library, None)?;
+        let readback = self.readback_for(width, height, &output, encoder, &frame, monitoring);
+        self.release_layer_textures(frame);
         readback
     }
 
@@ -957,9 +1115,9 @@ impl Compositor {
         library: Option<&LutLibrary>,
     ) -> Result<DeliveryFrame, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
-        let readback = self.readback_rgba16(width, height, &output, encoder, delivery);
-        self.release_layer_textures(resources);
+        let (output, frame, encoder) = self.composite(width, height, layers, library, None)?;
+        let readback = self.readback_rgba16(width, height, &output, encoder, &frame, delivery);
+        self.release_layer_textures(frame);
         readback
     }
 
@@ -997,23 +1155,36 @@ impl Compositor {
         })?;
         let active_node = matte_debug_active_index(layer.effects, target.clip, target.effect)?;
         let (width, height) = resolution;
-        let isolated = [CompositorLayer {
-            frame: layer.frame,
-            effects: layer.effects,
-            transition: layer.transition,
-        }];
-        let (output, resources, encoder) = self.composite(
+        // The coverage replaces the colour, so the target draws `Normal`. A
+        // pixel layer is isolated; an adjustment's qualifier reads the
+        // composite below it (MO2 R18), so that composite stays.
+        let below = match layer.mode.role {
+            LayerRole::Pixels => &[][..],
+            LayerRole::Adjustment => &layers[..target.layer_index],
+        };
+        let isolated = below
+            .iter()
+            .map(|below| CompositorLayer { ..*below })
+            .chain([CompositorLayer {
+                mode: LayerMode {
+                    blend: BlendMode::Normal,
+                    ..layer.mode
+                },
+                ..*layer
+            }])
+            .collect::<Vec<_>>();
+        let (output, frame, encoder) = self.composite(
             width,
             height,
             &isolated,
             library,
             Some(MatteDebugSelection {
-                layer_index: 0,
+                layer_index: below.len(),
                 active_node,
             }),
         )?;
-        let readback = self.readback_matte(width, height, &output, encoder);
-        self.release_layer_textures(resources);
+        let readback = self.readback_matte(width, height, &output, encoder, &frame);
+        self.release_layer_textures(frame);
         readback
     }
 
@@ -1028,13 +1199,14 @@ impl Compositor {
         height: u32,
         output: &wgpu::Texture,
         encoder: wgpu::CommandEncoder,
+        frame: &FrameResources,
     ) -> Result<Vec<u8>, MediaError> {
         let mut coverage = Vec::with_capacity(
             usize::try_from(width)
                 .unwrap_or_default()
                 .saturating_mul(usize::try_from(height).unwrap_or_default()),
         );
-        self.for_each_linear_pixel(width, height, output, encoder, |linear| {
+        self.for_each_linear_pixel(width, height, output, encoder, frame, |linear| {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             coverage.push((linear[0].clamp(0.0, 1.0) * 255.0).round() as u8);
             Ok(())
@@ -1042,9 +1214,13 @@ impl Compositor {
         Ok(coverage)
     }
 
-    /// Record one composite pass into an `Rgba16Float` render target.
+    /// Record one composite into an `Rgba16Float` render target.
     ///
-    /// The layer resources are returned alongside the encoder because the
+    /// MO2 R12: a frame of `Normal` pixel layers without an active Push is
+    /// one pass, exactly today's draw sequence. Otherwise the pass splits at
+    /// each accumulator snapshot (R13).
+    ///
+    /// The frame resources are returned alongside the encoder because the
     /// bind groups they own must outlive the queue submission performed by
     /// the readback, and their pooled textures are recycled afterwards.
     fn composite<F: CompositorInput>(
@@ -1054,7 +1230,7 @@ impl Compositor {
         layers: &[CompositorLayer<'_, F>],
         library: Option<&LutLibrary>,
         matte_debug: Option<MatteDebugSelection>,
-    ) -> Result<(wgpu::Texture, Vec<LayerResources>, wgpu::CommandEncoder), MediaError> {
+    ) -> Result<(wgpu::Texture, FrameResources, wgpu::CommandEncoder), MediaError> {
         if width == 0 || height == 0 {
             return Err(MediaError::Backend(
                 "compositor output resolution must be non-zero".to_owned(),
@@ -1074,19 +1250,15 @@ impl Compositor {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let mut resources = Vec::with_capacity(layers.len());
-        for (index, layer) in layers.iter().enumerate() {
-            let debug_node = matte_debug
-                .filter(|selection| selection.layer_index == index)
-                .map(|selection| selection.active_node);
-            match self.layer_resources(layer, width, height, library, debug_node) {
-                Ok(resource) => resources.push(resource),
-                Err(error) => {
-                    self.release_layer_textures(resources);
-                    return Err(error);
-                }
+        let mut frame = FrameResources::default();
+        let steps = match self.stage_layers(width, height, layers, library, matte_debug, &mut frame)
+        {
+            Ok(steps) => steps,
+            Err(error) => {
+                self.release_layer_textures(frame);
+                return Err(error);
             }
-        }
+        };
         let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .gpu
@@ -1094,30 +1266,182 @@ impl Compositor {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Kinewright compositor commands"),
             });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Kinewright composite pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &output_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            for resource in &resources {
-                pass.set_bind_group(0, &resource.bind_group, &[]);
-                pass.draw(0..4, 0..1);
+        let mut load = wgpu::LoadOp::Clear(wgpu::Color::BLACK);
+        let mut steps = steps.into_iter().peekable();
+        loop {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Kinewright composite pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &output_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.pipeline);
+                while let Some(Step::Draw(index)) =
+                    steps.next_if(|step| matches!(step, Step::Draw(_)))
+                {
+                    pass.set_bind_group(0, &frame.layers[index].bind_group, &[]);
+                    pass.draw(0..4, 0..1);
+                }
             }
+            load = wgpu::LoadOp::Load;
+            let Some(Step::Snapshot(target)) = steps.next() else {
+                break;
+            };
+            encoder.copy_texture_to_texture(
+                output.as_image_copy(),
+                frame.snapshots[target].1.as_image_copy(),
+                output.size(),
+            );
+            self.accumulator_copies.fetch_add(1, Ordering::Relaxed);
         }
-        Ok((output, resources, encoder))
+        Ok((output, frame, encoder))
+    }
+
+    /// Accumulator snapshots taken so far (MO2 R12/R13 copy-count probes).
+    #[cfg(test)]
+    pub(crate) fn accumulator_copies(&self) -> u64 {
+        self.accumulator_copies.load(Ordering::Relaxed)
+    }
+
+    /// Upload and bind every layer, returning the draw/snapshot schedule.
+    ///
+    /// MO2 R13: snapshot A holds `D0` before each special layer; a Push draws
+    /// the full-raster backdrop from it; a non-`Normal` entering layer then
+    /// re-snapshots the shifted backdrop (into B for an adjustment, whose
+    /// source stays `D0` in A).
+    fn stage_layers<F: CompositorInput>(
+        &self,
+        width: u32,
+        height: u32,
+        layers: &[CompositorLayer<'_, F>],
+        library: Option<&LutLibrary>,
+        matte_debug: Option<MatteDebugSelection>,
+        frame: &mut FrameResources,
+    ) -> Result<Vec<Step>, MediaError> {
+        let splits = |layer: &CompositorLayer<'_, F>| {
+            layer.mode.is_special() || layer.transition.backdrop.is_some()
+        };
+        let adjustment =
+            |layer: &CompositorLayer<'_, F>| matches!(layer.mode.role, LayerRole::Adjustment);
+        let snapshots = if layers.iter().any(|layer| {
+            layer.transition.backdrop.is_some()
+                && adjustment(layer)
+                && !layer.mode.blend.is_normal()
+        }) {
+            2
+        } else {
+            usize::from(layers.iter().any(splits))
+        };
+        let key = TexturePoolKey {
+            width,
+            height,
+            format: OUTPUT_FORMAT,
+        };
+        let mut views = Vec::with_capacity(snapshots);
+        for _ in 0..snapshots {
+            let texture = self.acquire_layer_texture(key);
+            views.push(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+            frame.snapshots.push((key, texture));
+        }
+        // MO2 R10: one sticky flag slot per checked (non-`Normal`) layer.
+        let checked = (0..layers.len())
+            .filter(|index| !layers[*index].mode.blend.is_normal())
+            .collect::<Vec<_>>();
+        let validity = (!checked.is_empty()).then(|| {
+            self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Kinewright compositor validity flags"),
+                size: self.validity_stride * checked.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            })
+        });
+        let mut steps = Vec::with_capacity(layers.len());
+        for (index, layer) in layers.iter().enumerate() {
+            if splits(layer) {
+                steps.push(Step::Snapshot(0));
+            }
+            let mut accumulator = &self.dummy_accumulator;
+            if let Some(shift) = layer.transition.backdrop {
+                frame
+                    .layers
+                    .push(self.backdrop_resources(&views[0], shift, width, height)?);
+                steps.push(Step::Draw(frame.layers.len() - 1));
+                if !layer.mode.blend.is_normal() {
+                    let target = usize::from(adjustment(layer));
+                    steps.push(Step::Snapshot(target));
+                    accumulator = &views[target];
+                }
+            } else if !layer.mode.blend.is_normal() {
+                accumulator = &views[0];
+            }
+            let slot = checked.iter().position(|checked| *checked == index);
+            let bindings = LayerBindings {
+                source: adjustment(layer).then(|| &views[0]),
+                accumulator,
+                validity: match (&validity, slot) {
+                    (Some(buffer), Some(slot)) => (buffer, self.validity_stride * slot as u64),
+                    _ => (&self.dummy_validity, 0),
+                },
+            };
+            let debug_node = matte_debug
+                .filter(|selection| selection.layer_index == index)
+                .map(|selection| selection.active_node);
+            frame
+                .layers
+                .push(self.layer_resources(layer, width, height, library, debug_node, &bindings)?);
+            steps.push(Step::Draw(frame.layers.len() - 1));
+        }
+        frame.validity = validity.map(|buffer| (buffer, checked));
+        Ok(steps)
+    }
+
+    /// MO2 R13: the full-raster opaque Push backdrop, sampling snapshot `D0`
+    /// displaced by `shift` where that lands inside the raster and unshifted
+    /// `D0` elsewhere. Never a translated quad, never a clamped edge sample.
+    #[allow(clippy::cast_precision_loss)]
+    fn backdrop_resources(
+        &self,
+        snapshot: &wgpu::TextureView,
+        shift: [f32; 2],
+        width: u32,
+        height: u32,
+    ) -> Result<LayerResources, MediaError> {
+        let vertical = shift[0] == 0.0 && shift[1] != 0.0;
+        let params = LayerParams {
+            input_linear: 1.0,
+            frame_aspect: height as f32 / width as f32,
+            blend_mode: PUSH_BACKDROP_WORD,
+            coverage_edge: if vertical { shift[1] } else { shift[0] },
+            coverage_axis: f32::from(u8::from(vertical)),
+            ..LayerParams::default()
+        };
+        let atlas = self.lut_binding(&[], None)?.atlas;
+        let grade = grade_buffer_bytes_for(&[], None, (width, height), None)?;
+        let bindings = LayerBindings {
+            source: Some(snapshot),
+            accumulator: snapshot,
+            validity: (&self.dummy_validity, 0),
+        };
+        Ok(self.bind_layer(
+            None,
+            snapshot,
+            &self.sampler,
+            &params,
+            atlas,
+            &grade,
+            &bindings,
+        ))
     }
 
     /// Take a source texture of the requested shape from the recycling pool,
@@ -1148,17 +1472,17 @@ impl Compositor {
     ///
     /// A poisoned lock or a full pool simply destroys the textures; recycling
     /// is an optimization and must never change rendered output.
-    fn release_layer_textures(&self, resources: Vec<LayerResources>) {
+    fn release_layer_textures(&self, frame: FrameResources) {
         let Ok(mut pool) = self.texture_pool.lock() else {
             return;
         };
         let mut hot = Vec::new();
-        for resource in resources {
-            let key = resource.pool_key;
+        let sources = frame.layers.into_iter().filter_map(|layer| layer.source);
+        for (key, texture) in sources.chain(frame.snapshots) {
             if !hot.contains(&key) {
                 hot.push(key);
             }
-            pool.store(key, resource.texture);
+            pool.store(key, texture);
         }
         pool.evict(&hot);
     }
@@ -1201,8 +1525,15 @@ impl Compositor {
         width: u32,
         height: u32,
     ) -> bool {
-        layer.frame.width() == width
-            && layer.frame.height() == height
+        // MO2 R18: an adjustment samples the output-sized snapshot.
+        let source = match layer.mode.role {
+            LayerRole::Pixels => (layer.frame.width(), layer.frame.height()),
+            LayerRole::Adjustment => (width, height),
+        };
+        source == (width, height)
+            // MO2 R14: coverage forces the filtering sampler (a transition
+            // offset already fails the offset tests below).
+            && params.coverage_on == 0.0
             && params.scale == 1.0
             && params.offset_x == 0.0
             && params.offset_y == 0.0
@@ -1218,7 +1549,6 @@ impl Compositor {
             && params.rotation == 0.0
     }
 
-    #[allow(clippy::too_many_lines)]
     fn layer_resources<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
@@ -1226,7 +1556,68 @@ impl Compositor {
         height: u32,
         library: Option<&LutLibrary>,
         matte_debug_node: Option<usize>,
+        bindings: &LayerBindings<'_>,
     ) -> Result<LayerResources, MediaError> {
+        let binding = self.lut_binding(layer.effects, library)?;
+        let cube_lut = &binding.legacy_lut;
+        let mut params = params_for(layer.effects, layer.transition);
+        params.external_lut_enabled = if binding.legacy_enabled { 1.0 } else { 0.0 };
+        params.external_domain_min_r = cube_lut.domain_min[0];
+        params.external_domain_min_g = cube_lut.domain_min[1];
+        params.external_domain_min_b = cube_lut.domain_min[2];
+        params.external_domain_max_r = cube_lut.domain_max[0];
+        params.external_domain_max_g = cube_lut.domain_max[1];
+        params.external_domain_max_b = cube_lut.domain_max[2];
+        #[allow(clippy::cast_precision_loss)]
+        {
+            params.external_lut_z_origin = binding.legacy_z_origin as f32;
+            params.external_lut_size = cube_lut.size as f32;
+        }
+        // MO2 R18: an adjustment re-enters the linear snapshot below it.
+        params.input_linear = f32::from(F::LINEAR || bindings.source.is_some());
+        params.legacy_stage_active = if legacy_stage_active(layer.effects) {
+            1.0
+        } else {
+            0.0
+        };
+        // MO1 R2/R3: the rotation correction needs the render aspect. All
+        // `render_*` entries funnel through here with the output resolution,
+        // and zero resolutions are refused above, so the quotient is exact.
+        #[allow(clippy::cast_precision_loss)]
+        {
+            params.frame_aspect = height as f32 / width as f32;
+        }
+        params.blend_mode = blend_word(layer.mode.blend);
+        let grade_bytes =
+            grade_buffer_bytes_for(layer.effects, library, (width, height), matte_debug_node)?;
+        let sampler = if Self::is_pixel_exact_blit(layer, &params, width, height) {
+            &self.point_sampler
+        } else {
+            &self.sampler
+        };
+        let (source, view) = if let Some(snapshot) = bindings.source {
+            (None, snapshot.clone())
+        } else {
+            let (key, texture) = self.upload_layer(layer)?;
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (Some((key, texture)), view)
+        };
+        Ok(self.bind_layer(
+            source,
+            &view,
+            sampler,
+            &params,
+            binding.atlas,
+            &grade_bytes,
+            bindings,
+        ))
+    }
+
+    /// Upload one pixel layer into a pooled source texture.
+    fn upload_layer<F: CompositorInput>(
+        &self,
+        layer: &CompositorLayer<'_, F>,
+    ) -> Result<(TexturePoolKey, wgpu::Texture), MediaError> {
         let expected_len = usize::try_from(layer.frame.width())
             .unwrap_or_default()
             .saturating_mul(usize::try_from(layer.frame.height()).unwrap_or_default())
@@ -1262,43 +1653,28 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
-        let binding = self.lut_binding(layer.effects, library)?;
-        let cube_lut = &binding.legacy_lut;
-        let mut params = params_for(layer.effects, layer.transition);
-        params.external_lut_enabled = if binding.legacy_enabled { 1.0 } else { 0.0 };
-        params.external_domain_min_r = cube_lut.domain_min[0];
-        params.external_domain_min_g = cube_lut.domain_min[1];
-        params.external_domain_min_b = cube_lut.domain_min[2];
-        params.external_domain_max_r = cube_lut.domain_max[0];
-        params.external_domain_max_g = cube_lut.domain_max[1];
-        params.external_domain_max_b = cube_lut.domain_max[2];
-        #[allow(clippy::cast_precision_loss)]
-        {
-            params.external_lut_z_origin = binding.legacy_z_origin as f32;
-            params.external_lut_size = cube_lut.size as f32;
-        }
-        params.input_linear = f32::from(F::LINEAR);
-        params.legacy_stage_active = if legacy_stage_active(layer.effects) {
-            1.0
-        } else {
-            0.0
-        };
-        // MO1 R2/R3: the rotation correction needs the render aspect. All
-        // `render_*` entries funnel through here with the output resolution,
-        // and zero resolutions are refused above, so the quotient is exact.
-        #[allow(clippy::cast_precision_loss)]
-        {
-            params.frame_aspect = height as f32 / width as f32;
-        }
-        let grade_bytes =
-            grade_buffer_bytes_for(layer.effects, library, (width, height), matte_debug_node)?;
+        Ok((pool_key, texture))
+    }
+
+    /// Create one draw's uniform, grade buffer and bind group.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn bind_layer(
+        &self,
+        source: Option<(TexturePoolKey, wgpu::Texture)>,
+        view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        params: &LayerParams,
+        atlas: Arc<LutAtlas>,
+        grade_bytes: &[u8],
+        bindings: &LayerBindings<'_>,
+    ) -> LayerResources {
         let grade = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright managed colour nodes"),
             size: u64::try_from(grade_bytes.len()).unwrap_or(u64::MAX),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        self.gpu.queue.write_buffer(&grade, 0, &grade_bytes);
+        self.gpu.queue.write_buffer(&grade, 0, grade_bytes);
         let uniform = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor layer parameters"),
             size: UNIFORM_SIZE,
@@ -1306,12 +1682,7 @@ impl Compositor {
             mapped_at_creation: false,
         });
         self.gpu.queue.write_buffer(&uniform, 0, &params.as_bytes());
-        let sampler = if Self::is_pixel_exact_blit(layer, &params, width, height) {
-            &self.point_sampler
-        } else {
-            &self.sampler
-        };
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let (validity, offset) = bindings.validity;
         let bind_group = self
             .gpu
             .device
@@ -1321,7 +1692,7 @@ impl Compositor {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
+                        resource: wgpu::BindingResource::TextureView(view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -1333,22 +1704,37 @@ impl Compositor {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&binding.atlas.view),
+                        resource: wgpu::BindingResource::TextureView(&atlas.view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: grade.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(bindings.accumulator),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: validity,
+                            offset,
+                            size: NonZeroU64::new(4),
+                        }),
+                    },
                 ],
             });
-        Ok(LayerResources {
-            texture,
-            pool_key,
-            _lut_atlas: binding.atlas,
+        LayerResources {
+            source,
+            _lut_atlas: atlas,
             _uniform: uniform,
             _grade: grade,
             bind_group,
-        })
+        }
     }
 
     /// Resolve one layer's LUT atlas (CC4 4.1), reusing a cached one whenever
@@ -1574,15 +1960,21 @@ impl Compositor {
         height: u32,
         output: &wgpu::Texture,
         mut encoder: wgpu::CommandEncoder,
+        frame: &FrameResources,
         mut visit: impl FnMut([f32; 4]) -> Result<(), MediaError>,
     ) -> Result<(), MediaError> {
         let row_bytes = width.saturating_mul(8);
         let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let buffer_size = u64::from(padded_row_bytes).saturating_mul(u64::from(height));
+        let pixel_bytes = u64::from(padded_row_bytes).saturating_mul(u64::from(height));
+        // MO2 R10: the validity flags ride the same readback, after the pixels.
+        let flag_bytes = frame
+            .validity
+            .as_ref()
+            .map_or(0, |(buffer, _)| buffer.size());
         let buffer = self.gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Kinewright compositor readback"),
-            size: buffer_size,
+            size: pixel_bytes + flag_bytes,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -1607,6 +1999,9 @@ impl Compositor {
                 depth_or_array_layers: 1,
             },
         );
+        if let Some((flags, _)) = &frame.validity {
+            encoder.copy_buffer_to_buffer(flags, 0, &buffer, pixel_bytes, flag_bytes);
+        }
         self.gpu.queue.submit([encoder.finish()]);
         let slice = buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -1623,7 +2018,21 @@ impl Compositor {
             .map_err(|error| MediaError::Backend(format!("wgpu readback map failed: {error}")))?;
         let mapped = slice.get_mapped_range();
         let mut outcome = Ok(());
-        'rows: for row in 0..usize::try_from(height).unwrap_or_default() {
+        if let Some((_, checked)) = &frame.validity {
+            let stride = usize::try_from(self.validity_stride).unwrap_or(usize::MAX);
+            let flags = &mapped[usize::try_from(pixel_bytes).unwrap_or_default()..];
+            if let Some(slot) =
+                (0..checked.len()).find(|slot| flags[slot * stride..slot * stride + 4] != [0; 4])
+            {
+                outcome = Err(MediaError::NonFiniteRender {
+                    layer: checked[slot],
+                    clip: None,
+                    at: None,
+                });
+            }
+        }
+        let rows = if outcome.is_ok() { height } else { 0 };
+        'rows: for row in 0..usize::try_from(rows).unwrap_or_default() {
             let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
             let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
             for pixel in mapped[start..end].as_chunks::<8>().0 {
@@ -1660,6 +2069,7 @@ impl Compositor {
         height: u32,
         output: &wgpu::Texture,
         encoder: wgpu::CommandEncoder,
+        frame: &FrameResources,
         monitoring: &ColorDescription,
     ) -> Result<FrameTexture, MediaError> {
         let mut rgba = Vec::with_capacity(
@@ -1668,7 +2078,7 @@ impl Compositor {
                 .saturating_mul(usize::try_from(height).unwrap_or_default())
                 .saturating_mul(4),
         );
-        self.for_each_linear_pixel(width, height, output, encoder, |linear| {
+        self.for_each_linear_pixel(width, height, output, encoder, frame, |linear| {
             let monitor_code =
                 encode_monitor_rgba8_for_description(linear, monitoring).map_err(|error| {
                     MediaError::Backend(format!(
@@ -1699,6 +2109,7 @@ impl Compositor {
         height: u32,
         output: &wgpu::Texture,
         encoder: wgpu::CommandEncoder,
+        frame: &FrameResources,
         delivery: &ColorDescription,
     ) -> Result<DeliveryFrame, MediaError> {
         let mut rgba64le = Vec::with_capacity(
@@ -1707,7 +2118,7 @@ impl Compositor {
                 .saturating_mul(usize::try_from(height).unwrap_or_default())
                 .saturating_mul(8),
         );
-        self.for_each_linear_pixel(width, height, output, encoder, |linear| {
+        self.for_each_linear_pixel(width, height, output, encoder, frame, |linear| {
             let delivery_code =
                 encode_delivery_for_description(linear, delivery).map_err(|error| {
                     MediaError::Backend(format!(
@@ -1758,7 +2169,7 @@ impl Compositor {
         library: Option<&LutLibrary>,
     ) -> Result<LinearRgbaImage, MediaError> {
         let (width, height) = resolution;
-        let (output, resources, encoder) = self.composite(width, height, layers, library, None)?;
+        let (output, frame, encoder) = self.composite(width, height, layers, library, None)?;
         let mut values = Vec::with_capacity(
             usize::try_from(width)
                 .unwrap_or_default()
@@ -1766,7 +2177,7 @@ impl Compositor {
                 .saturating_mul(4),
         );
         let readback = self
-            .for_each_linear_pixel(width, height, &output, encoder, |linear| {
+            .for_each_linear_pixel(width, height, &output, encoder, &frame, |linear| {
                 values.extend(linear);
                 Ok(())
             })
@@ -1775,7 +2186,7 @@ impl Compositor {
                 height,
                 pixels: values,
             });
-        self.release_layer_textures(resources);
+        self.release_layer_textures(frame);
         readback
     }
 }
@@ -1835,6 +2246,10 @@ impl LayerParams {
             self.frame_aspect,
             self.anchor_x,
             self.anchor_y,
+            self.blend_mode,
+            self.coverage_edge,
+            self.coverage_axis,
+            self.coverage_on,
         ];
         // Compile-forced: the word list and the uniform size agree, so a
         // field added to one side cannot silently desync the other.
@@ -2767,6 +3182,15 @@ pub(crate) fn params_for(effects: &[Effect], transition: TransitionRenderParams)
     params.mask_width = params.mask_width.clamp(0.01, 2.0);
     params.mask_height = params.mask_height.clamp(0.01, 2.0);
     params.mask_feather = params.mask_feather.clamp(0.0, 1.0);
+    // MO2 R20/R21: the entering offset is a screen fraction (y down), which
+    // is two NDC units per raster; coverage keeps one side of the edge.
+    params.offset_x += 2.0 * transition.offset[0];
+    params.offset_y += 2.0 * transition.offset[1];
+    if let Some(coverage) = transition.coverage {
+        params.coverage_on = if coverage.below_edge { 1.0 } else { 2.0 };
+        params.coverage_edge = coverage.edge;
+        params.coverage_axis = f32::from(u8::from(coverage.axis == TransitionAxis::Vertical));
+    }
     params
 }
 
@@ -2777,6 +3201,10 @@ fn parameter_value(effect: &Effect, descriptor: &EffectParameterDescriptor) -> f
         _ => descriptor.neutral as f32,
     }
 }
+
+#[cfg(test)]
+#[path = "mo2_twin.rs"]
+pub(crate) mod twin;
 
 #[cfg(test)]
 mod tests {
@@ -2824,7 +3252,8 @@ mod tests {
             limits.max_storage_buffers_per_shader_stage,
             COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE
         );
-        assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
+        // MO2 R14: the grade buffer plus the per-layer validity flags.
+        assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 2);
         assert_eq!(
             limits.max_storage_buffer_binding_size,
             COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE
@@ -3317,6 +3746,7 @@ mod tests {
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             None,
             MatteRenderTarget {
@@ -3378,6 +3808,7 @@ mod tests {
                     frame,
                     effects,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .expect("production GPU working-surface readback")
@@ -3639,6 +4070,7 @@ mod tests {
                     frame: &input,
                     effects: &effects,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .expect("primary nodes should render");
@@ -3660,6 +4092,7 @@ mod tests {
                     frame: &input,
                     effects: &[brightness],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -3681,6 +4114,7 @@ mod tests {
                     frame: &contrast_input,
                     effects: &[contrast],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -3695,6 +4129,7 @@ mod tests {
                     frame: &saturated_input,
                     effects: &[saturation],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -3709,6 +4144,7 @@ mod tests {
                     frame: &red,
                     effects: &[opacity],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -3722,6 +4158,7 @@ mod tests {
                     frame: &red,
                     effects: &[transform],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -3743,6 +4180,7 @@ mod tests {
                     frame: &red,
                     effects: &[crop(1, 0, 0, 25, 0)],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -3788,6 +4226,7 @@ mod tests {
                         frame: &input,
                         effects: std::slice::from_ref(effect),
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     }],
                 )
                 .unwrap()
@@ -3855,6 +4294,7 @@ mod tests {
                     frame: &red,
                     effects: &[crop(1, 25, 25, 25, 25)],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -3887,6 +4327,7 @@ mod tests {
                         frame: &green,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                     CompositorLayer {
                         frame: &blue,
@@ -3895,7 +4336,9 @@ mod tests {
                             alpha: 1.0,
                             fade_mix: 0.5,
                             fade_white: 0.0,
+                            ..TransitionRenderParams::default()
                         },
+                        mode: LayerMode::NORMAL,
                     },
                 ],
             )
@@ -3922,6 +4365,7 @@ mod tests {
                     frame: &red,
                     effects: &effects,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -4107,6 +4551,41 @@ mod tests {
         }
     }
 
+    /// MO2 R14: exactly four words follow MO1's 52 (208 → 224 bytes), in
+    /// this order on both sides of the ABI.
+    #[test]
+    fn mo2_uniform_appends_blend_and_coverage_words_exactly() {
+        let params = LayerParams {
+            blend_mode: 52.0,
+            coverage_edge: 53.0,
+            coverage_axis: 54.0,
+            coverage_on: 55.0,
+            ..LayerParams::default()
+        };
+        let bytes = params.as_bytes();
+        assert_eq!((UNIFORM_BYTES, bytes.len()), (224, 224));
+        for (word, value) in bytes.as_chunks::<4>().0.iter().enumerate().skip(52) {
+            assert_eq!(
+                f32::from_le_bytes(*value).to_bits(),
+                f32::from(u16::try_from(word).unwrap()).to_bits()
+            );
+        }
+        let block = COMPOSITOR_SHADER_SOURCE.replace("\r\n", "\n");
+        let block = block.split_once("struct LayerParams {").unwrap().1;
+        let lines = block.split_once("};").unwrap().0.lines();
+        let fields: Vec<_> = lines
+            .filter_map(|line| line.trim().strip_suffix(": f32,"))
+            .collect();
+        assert_eq!(fields.len(), 56);
+        let tail = [
+            "blend_mode",
+            "coverage_edge",
+            "coverage_axis",
+            "coverage_on",
+        ];
+        assert_eq!(fields[52..], tail);
+    }
+
     #[test]
     fn legacy_color_grade_name_has_no_compositor_branch_of_its_own() {
         let legacy = effect_with(1, "color_grade", &[("exposure_milli_stops", 1_000)]);
@@ -4143,6 +4622,7 @@ mod tests {
                     frame: &gray,
                     effects: &[exposure],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -4161,6 +4641,7 @@ mod tests {
                     frame: &red,
                     effects: &[monochrome],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -4215,6 +4696,7 @@ mod tests {
                     frame: &red,
                     effects: &[cube_lut],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -4375,6 +4857,7 @@ mod tests {
                     frame,
                     effects,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
                 Some(luts.library()),
             )
@@ -5122,11 +5605,13 @@ mod tests {
                         frame: &blue,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                     CompositorLayer {
                         frame: &red,
                         effects: &[mask],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                 ],
             )
@@ -5145,11 +5630,13 @@ mod tests {
                         frame: &blue,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                     CompositorLayer {
                         frame: &green,
                         effects: &[key],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                 ],
             )
@@ -5188,6 +5675,7 @@ mod tests {
                     frame: &over_range,
                     effects: std::slice::from_ref(&key),
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .expect("chroma-key working-surface readback")
@@ -5199,6 +5687,7 @@ mod tests {
                     frame: &over_range,
                     effects: &[],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .expect("neutral working-surface readback")
@@ -5272,6 +5761,7 @@ mod tests {
                     frame: &negative_green,
                     effects: std::slice::from_ref(&key),
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .expect("chroma-key working-surface readback")
@@ -5283,6 +5773,7 @@ mod tests {
                     frame: &negative_green,
                     effects: &[],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .expect("neutral working-surface readback")
@@ -5342,6 +5833,7 @@ mod tests {
                     frame: &edge,
                     effects: std::slice::from_ref(&key),
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .expect("chroma-key edge working-surface readback")
@@ -5493,6 +5985,7 @@ mod tests {
                     frame: &red,
                     effects: &[],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -5508,6 +6001,7 @@ mod tests {
                     frame: &blue,
                     effects: &[],
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
             )
             .unwrap();
@@ -5523,11 +6017,13 @@ mod tests {
                         frame: &red,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                     CompositorLayer {
                         frame: &blue,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                 ],
             )
@@ -5544,6 +6040,7 @@ mod tests {
                         frame: &frame,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     }],
                 )
                 .unwrap();
@@ -5580,11 +6077,13 @@ mod tests {
                         frame: &blue,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                     CompositorLayer {
                         frame: &green,
                         effects: &effects,
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                 ],
             )
@@ -5607,6 +6106,7 @@ mod tests {
                         frame: &red,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                     CompositorLayer {
                         frame: &blue,
@@ -5615,6 +6115,7 @@ mod tests {
                             alpha: 0.5,
                             ..TransitionRenderParams::default()
                         },
+                        mode: LayerMode::NORMAL,
                     },
                 ],
             )
@@ -5633,6 +6134,7 @@ mod tests {
                             frame: &red,
                             effects: &[],
                             transition: TransitionRenderParams::default(),
+                            mode: LayerMode::NORMAL,
                         },
                         CompositorLayer {
                             frame: &blue,
@@ -5641,7 +6143,9 @@ mod tests {
                                 alpha: 1.0,
                                 fade_mix: 0.5,
                                 fade_white,
+                                ..TransitionRenderParams::default()
                             },
+                            mode: LayerMode::NORMAL,
                         },
                     ],
                 )
@@ -5674,11 +6178,13 @@ mod tests {
                         frame: &background,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                     CompositorLayer {
                         frame: &title,
                         effects: &[],
                         transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
                     },
                 ],
             )
@@ -6769,6 +7275,7 @@ mod tests {
                     frame: &frame,
                     effects: &effects,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
                 Some(luts.library()),
             )

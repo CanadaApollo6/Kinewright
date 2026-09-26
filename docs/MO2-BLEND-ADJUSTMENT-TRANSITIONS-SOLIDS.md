@@ -30,6 +30,16 @@
   otherwise the four R8 mutators' results read back as `asset=0
   <missing>`, a false missing-media claim. `Normal` output stays
   byte-identical (existing goldens unchanged); +83 production lines.
+- ME2 → §4 R13 (Part B1): non-`Normal` adjustment Push costs **2** copies,
+  not 3. `D0` is snapshotted into A before the backdrop draw and nothing
+  overwrites A afterwards; the shifted backdrop is re-snapshotted into a
+  second pooled texture B, so the adjustment samples `D0` from A and blends
+  against B. The "preserve `D0` before overwriting the destination
+  snapshot" copy only exists if the re-snapshot reuses A. Semantics are
+  unchanged (gate 5's adjustment-Push cases, GPU ≡ twin); the copy-count
+  probe pins 0/0/0/1/1/1/1/2/2 across Normal, Slide, Wipe, blend,
+  adjustment, Normal Push, Normal adjustment Push, blend Push and blend
+  adjustment Push. Ledger two pooled snapshots, not three.
 
 ## Changes in revision 2
 

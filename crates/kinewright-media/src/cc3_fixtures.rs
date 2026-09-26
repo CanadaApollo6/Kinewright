@@ -42,7 +42,7 @@ use kinewright_core::{
 use serde_json::{Value, json};
 
 use crate::{
-    Compositor, CompositorLayer,
+    Compositor, CompositorLayer, LayerMode,
     cc1_fixtures::{
         DiffMetrics, FixtureGpu, IDENTITY_RAMP_MONITOR_MAX, IDENTITY_RAMP_MONITOR_MEAN,
         IDENTITY_RAMP_MONITOR_P99, LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99,
@@ -432,6 +432,7 @@ fn gpu_linear(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production GPU working-surface readback")
@@ -451,6 +452,7 @@ fn gpu_monitor(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production GPU compositor should render the CC3 fixture")

@@ -3681,6 +3681,12 @@ impl KinewrightMcp {
                 kinewright_media::TimelineVisualLayer::Title(layer) => {
                     (layer.track, layer.clip, None)
                 }
+                kinewright_media::TimelineVisualLayer::Solid(layer) => {
+                    (layer.track, layer.clip, None)
+                }
+                kinewright_media::TimelineVisualLayer::Adjustment(layer) => {
+                    (layer.track, layer.clip, None)
+                }
             };
             let Some(timeline_clip) = Self::document_clip_on_track(&document, track_id, clip_id)
             else {
@@ -3696,7 +3702,27 @@ impl KinewrightMcp {
             }
             let Some(asset_id) = asset_id else {
                 let kinewright_media::TimelineVisualLayer::Title(title_layer) = &layer else {
-                    unreachable!("only title layers omit an asset id")
+                    // MO2 R3/R18: solids and adjustments are generated layers
+                    // with no source to classify; the proof names their kind
+                    // and the stack the render runs.
+                    let content = match &timeline_clip.content {
+                        ClipContent::Solid(_) => "solid",
+                        _ => "adjustment",
+                    };
+                    active_rendered_layers.push(serde_json::json!({
+                        "track_id": track_id.0,
+                        "clip_id": clip_id.0,
+                        "content": content,
+                        "effects": proof_effect_manifest(layer.effects()),
+                        "color_nodes": proof_color_node_manifest(layer.effects(), &looks),
+                        "legacy_stage_warnings": legacy_stage_warnings(timeline_clip),
+                    }));
+                    unsupported_layer_warnings.extend(Self::layer_compatibility_warnings(
+                        track_id,
+                        timeline_clip,
+                        None,
+                    ));
+                    continue;
                 };
                 let ClipContent::Title(document_title) = &timeline_clip.content else {
                     return Ok(color_proof_error_result(ColorProofError::RenderFailed {

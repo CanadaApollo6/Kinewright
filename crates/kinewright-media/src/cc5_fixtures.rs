@@ -54,7 +54,7 @@ use serde_json::{Value, json};
 
 use crate::{
     COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE,
-    COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, Compositor, CompositorLayer,
+    COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, Compositor, CompositorLayer, LayerMode,
     MatteRenderTarget,
     cc1_fixtures::{
         FixtureGpu, LINEAR_CPU_GPU_MAX, LINEAR_CPU_GPU_MEAN, LINEAR_CPU_GPU_P99,
@@ -985,6 +985,7 @@ fn gpu_linear(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             library,
         )
@@ -1005,6 +1006,7 @@ fn gpu_monitor(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             &kinewright_core::ColorContext::sdr_rec709().monitoring,
             library,
@@ -1029,6 +1031,7 @@ fn gpu_coverage(
                 frame,
                 effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             None,
             MatteRenderTarget {
@@ -3432,13 +3435,14 @@ fn curves_effect(id: u64, points: &[(i64, i64)], matte: Option<&MatteSpec>) -> E
 
 /// CC5 §9.2.13. The worst-case buffer is exactly 17 680 bytes with
 /// non-overlapping payload and matte regions, the negotiated binding holds it,
-/// the binding count is still one, the ABI is 3, `technical_lut` never carries
+/// the binding count is two since MO2 R14, the ABI is 3, `technical_lut` never carries
 /// a matte offset, and the layer quad's pixel aspect is the output raster
 /// aspect at every scale.
 #[test]
 fn cc5_buffer_layout_limits_and_abi_constants_hold() {
     assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFER_BINDING_SIZE, 32_768);
-    assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 1);
+    // MO2 R14: the grade buffer plus the per-layer validity flags.
+    assert_eq!(COMPOSITOR_REQUIRED_STORAGE_BUFFERS_PER_SHADER_STAGE, 2);
     assert_eq!(
         16 + 16 * 64 + 16 * (4 * 49 * 4) + 16 * (64 * 4),
         GRADE_BUFFER_WORST_CASE_BYTES,
@@ -4155,6 +4159,7 @@ fn cc5_matte_proof_matches_the_cpu_reference_coverage() {
                     frame: &frame,
                     effects: &stack,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
                 None,
                 MatteRenderTarget {
@@ -4677,6 +4682,7 @@ fn record_cc5_performance(gpu: &FixtureGpu) {
                     frame: &frame,
                     effects,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
                 &kinewright_core::ColorContext::sdr_rec709().monitoring,
                 None,
@@ -5369,6 +5375,7 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
                     frame: &frames[*frame as usize],
                     effects: std::slice::from_ref(&evaluated),
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
                 None,
                 MatteRenderTarget {
@@ -5406,6 +5413,7 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
                 frame: &frames[50],
                 effects: std::slice::from_ref(&probe),
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             None,
             MatteRenderTarget {
@@ -5426,6 +5434,7 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
                 frame: &frames[50],
                 effects: &scaled_effects,
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
             None,
             MatteRenderTarget {
@@ -5493,6 +5502,7 @@ fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
                     frame: &frames[0],
                     effects: &effects,
                     transition: TransitionRenderParams::default(),
+                    mode: LayerMode::NORMAL,
                 }],
                 None,
                 MatteRenderTarget {

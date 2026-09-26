@@ -1,9 +1,10 @@
 use std::ops::Range;
 
 use kinewright_core::{
-    AssetId, Clip, ClipContent, ClipId, Document, Effect, FrameRounding, MediaError, MediaKind,
-    TimeCode, Title, Track, TrackId, TrackKind, TransitionShading, map_frames_with_rounding,
-    map_source_range_to_project, transition_descriptor,
+    AssetId, BlendMode, Clip, ClipContent, ClipId, Document, Effect, FrameRounding, MediaError,
+    MediaKind, SolidColor, TimeCode, Title, Track, TrackId, TrackKind, TransitionAxis,
+    TransitionShading, map_frames_with_rounding, map_source_range_to_project,
+    transition_descriptor,
 };
 
 /// The source frame selected by a project-frame position on the first video track.
@@ -24,6 +25,8 @@ pub struct TimelineVideoLayer {
     pub source: TimelineSource,
     pub effects: Vec<Effect>,
     pub transition: TransitionRenderParams,
+    /// MO2 R1: how the layer blends onto the composite below it.
+    pub blend_mode: BlendMode,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +36,30 @@ pub struct TimelineTitleLayer {
     pub title: Title,
     pub effects: Vec<Effect>,
     pub transition: TransitionRenderParams,
+    pub blend_mode: BlendMode,
+}
+
+/// MO2 R3: a solid-colour clip. Generated content, like a title: the fill
+/// enters working space through the shared display-frame conversion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineSolidLayer {
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub color: SolidColor,
+    pub effects: Vec<Effect>,
+    pub transition: TransitionRenderParams,
+    pub blend_mode: BlendMode,
+}
+
+/// MO2 R18: an adjustment instruction. It has no pixels of its own: the
+/// compositor grades the composite of the layers below it (R17).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimelineAdjustmentLayer {
+    pub track: TrackId,
+    pub clip: ClipId,
+    pub effects: Vec<Effect>,
+    pub transition: TransitionRenderParams,
+    pub blend_mode: BlendMode,
 }
 
 /// Per-layer transition shading evaluated for one project frame.
@@ -41,6 +68,24 @@ pub struct TransitionRenderParams {
     pub alpha: f32,
     pub fade_mix: f32,
     pub fade_white: f32,
+    /// MO2 R21: the entering layer's displacement in screen fractions,
+    /// positive right/down (Push, Slide).
+    pub offset: [f32; 2],
+    /// MO2 R21: output-space coverage while a geometric transition is active.
+    pub coverage: Option<TransitionCoverage>,
+    /// MO2 R13: the Push backdrop displacement `q` in screen fractions;
+    /// `Some` only while a Push is active.
+    pub backdrop: Option<[f32; 2]>,
+}
+
+/// MO2 R21: the revealed region, tested at output pixel centres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransitionCoverage {
+    pub axis: TransitionAxis,
+    /// Keep `coordinate < edge` (entering from the left/top); otherwise keep
+    /// `coordinate >= edge`.
+    pub below_edge: bool,
+    pub edge: f32,
 }
 
 impl Default for TransitionRenderParams {
@@ -49,6 +94,9 @@ impl Default for TransitionRenderParams {
             alpha: 1.0,
             fade_mix: 0.0,
             fade_white: 0.0,
+            offset: [0.0; 2],
+            coverage: None,
+            backdrop: None,
         }
     }
 }
@@ -57,6 +105,32 @@ impl Default for TransitionRenderParams {
 pub enum TimelineVisualLayer {
     Video(TimelineVideoLayer),
     Title(TimelineTitleLayer),
+    Solid(TimelineSolidLayer),
+    Adjustment(TimelineAdjustmentLayer),
+}
+
+impl TimelineVisualLayer {
+    /// MO2 R32: the clip this layer was resolved from, whatever its kind.
+    #[must_use]
+    pub const fn clip(&self) -> ClipId {
+        match self {
+            Self::Video(layer) => layer.source.clip,
+            Self::Title(layer) => layer.clip,
+            Self::Solid(layer) => layer.clip,
+            Self::Adjustment(layer) => layer.clip,
+        }
+    }
+
+    /// The keyframe-evaluated, enabled effects of this layer.
+    #[must_use]
+    pub fn effects(&self) -> &[Effect] {
+        match self {
+            Self::Video(layer) => &layer.effects,
+            Self::Title(layer) => &layer.effects,
+            Self::Solid(layer) => &layer.effects,
+            Self::Adjustment(layer) => &layer.effects,
+        }
+    }
 }
 
 /// One audio-bearing portion of a timeline clip within a requested project range.
@@ -125,11 +199,11 @@ pub fn video_layers_at(
                 .ok_or_else(|| {
                     MediaError::Backend("active timeline clip disappeared".to_owned())
                 })?;
-            refuse_unrendered_mo2(clip)?;
             layers.push(TimelineVideoLayer {
                 source,
                 effects: evaluated_effects(clip, project_at),
                 transition: transition_render_params(clip, project_at),
+                blend_mode: clip.blend_mode,
             });
         }
     }
@@ -157,25 +231,29 @@ pub fn visual_layers_at(
         let Some(clip) = active_clip_on_track(document, track, project_at)? else {
             continue;
         };
-        refuse_unrendered_mo2(clip)?;
+        let effects = evaluated_effects(clip, project_at);
+        let transition = transition_render_params(clip, project_at);
+        let blend_mode = clip.blend_mode;
         match &clip.content {
             ClipContent::Media => {
                 let source = media_source_for_clip(document, track.id, clip, project_at)?;
                 layers.push(TimelineVisualLayer::Video(TimelineVideoLayer {
                     source,
-                    effects: evaluated_effects(clip, project_at),
-                    transition: transition_render_params(clip, project_at),
+                    effects,
+                    transition,
+                    blend_mode,
                 }));
             }
             ClipContent::Title(title) => {
-                let mut transition = transition_render_params(clip, project_at);
+                let mut transition = transition;
                 transition.alpha *= title_alpha(document, clip, title, project_at)?;
                 layers.push(TimelineVisualLayer::Title(TimelineTitleLayer {
                     track: track.id,
                     clip: clip.id,
                     title: title.clone(),
-                    effects: evaluated_effects(clip, project_at),
+                    effects,
                     transition,
+                    blend_mode,
                 }));
             }
             ClipContent::Freeze(freeze) => {
@@ -198,44 +276,33 @@ pub fn visual_layers_at(
                         source_end,
                         timeline_end,
                     },
-                    effects: evaluated_effects(clip, project_at),
-                    transition: transition_render_params(clip, project_at),
+                    effects,
+                    transition,
+                    blend_mode,
                 }));
             }
-            ClipContent::Adjustment | ClipContent::Solid(_) => {
-                unreachable!("refuse_unrendered_mo2 refused MO2 content above")
+            ClipContent::Solid(color) => {
+                layers.push(TimelineVisualLayer::Solid(TimelineSolidLayer {
+                    track: track.id,
+                    clip: clip.id,
+                    color: *color,
+                    effects,
+                    transition,
+                    blend_mode,
+                }));
+            }
+            ClipContent::Adjustment => {
+                layers.push(TimelineVisualLayer::Adjustment(TimelineAdjustmentLayer {
+                    track: track.id,
+                    clip: clip.id,
+                    effects,
+                    transition,
+                    blend_mode,
+                }));
             }
         }
     }
     Ok(layers)
-}
-
-/// MO2 §12: until the Part B render lands, a resolved layer carrying MO2
-/// content — an adjustment or solid clip, a non-`Normal` blend mode, or a
-/// push/slide/wipe transition — fails closed with a typed refusal instead of
-/// rendering as something it is not.
-fn refuse_unrendered_mo2(clip: &Clip) -> Result<(), MediaError> {
-    let geometric = clip
-        .transition_in
-        .as_ref()
-        .and_then(|transition| transition_descriptor(&transition.name))
-        .is_some_and(|descriptor| {
-            matches!(
-                descriptor.shading,
-                TransitionShading::Push { .. }
-                    | TransitionShading::Slide { .. }
-                    | TransitionShading::Wipe { .. }
-            )
-        });
-    if matches!(
-        clip.content,
-        ClipContent::Adjustment | ClipContent::Solid(_)
-    ) || !clip.blend_mode.is_normal()
-        || geometric
-    {
-        return Err(MediaError::NotImplemented);
-    }
-    Ok(())
 }
 
 fn evaluated_effects(clip: &Clip, project_at: TimeCode) -> Vec<Effect> {
@@ -505,10 +572,37 @@ fn transition_render_params(clip: &Clip, project_at: TimeCode) -> TransitionRend
             fade_white: if white { 1.0 } else { 0.0 },
             ..TransitionRenderParams::default()
         },
-        TransitionShading::Push { .. }
-        | TransitionShading::Slide { .. }
-        | TransitionShading::Wipe { .. } => {
-            unreachable!("refuse_unrendered_mo2 refused geometric transitions above")
+        TransitionShading::Push { axis, sign }
+        | TransitionShading::Slide { axis, sign }
+        | TransitionShading::Wipe { axis, sign } => {
+            // MO2 R20: active only before `offset = d − 1`; from there on the
+            // layer is its ordinary authored contribution.
+            if offset >= transition.duration.0 - 1 {
+                return TransitionRenderParams::default();
+            }
+            let sign = f32::from(sign);
+            let along = |value: f32| match axis {
+                TransitionAxis::Horizontal => [value, 0.0],
+                TransitionAxis::Vertical => [0.0, value],
+            };
+            let push = matches!(descriptor.shading, TransitionShading::Push { .. });
+            let wipe = matches!(descriptor.shading, TransitionShading::Wipe { .. });
+            // MO2 R21: entering `sign·(1−p)`, backdrop `−sign·p`; coverage
+            // keeps `x < p` from the left/top, `x ≥ 1 − p` from the right/bottom.
+            TransitionRenderParams {
+                offset: if wipe {
+                    [0.0; 2]
+                } else {
+                    along(sign * (1.0 - progress))
+                },
+                coverage: Some(TransitionCoverage {
+                    axis,
+                    below_edge: sign < 0.0,
+                    edge: if sign < 0.0 { progress } else { 1.0 - progress },
+                }),
+                backdrop: push.then(|| along(-sign * progress)),
+                ..TransitionRenderParams::default()
+            }
         }
     }
 }
@@ -1188,10 +1282,7 @@ mod tests {
             let gone = visual_layers_at(&removed, TimeCode(at)).unwrap();
             assert_eq!(off, gone, "disabled must equal removed at frame {at}");
             assert!(
-                off.iter().all(|layer| match layer {
-                    TimelineVisualLayer::Video(layer) => layer.effects.is_empty(),
-                    TimelineVisualLayer::Title(layer) => layer.effects.is_empty(),
-                }),
+                off.iter().all(|layer| layer.effects().is_empty()),
                 "no resolved layer may carry the disabled effect at frame {at}"
             );
             assert_eq!(
@@ -1463,50 +1554,127 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    /// MO2 §12: until Part B renders them, every MO2 layer refuses typed —
-    /// adjustment and solid content, a non-`Normal` blend, and each of the
-    /// 12 geometric transitions — in both resolvers, while an MO2-free frame
-    /// on the same document still resolves.
+    /// MO2 R1–R4, R20, R21 (Part B1 replaces Part A's fail-closed seam):
+    /// every MO2 layer resolves in both resolvers with its blend, its role,
+    /// and the R21 geometry — entering/backdrop offsets and coverage at the
+    /// exact midpoint of an odd duration, an invisible start, and the
+    /// ordinary layer from `offset = d − 1` on.
     #[test]
-    fn mo2_layers_fail_closed_until_part_b() {
-        let refused = |document: &Document| {
-            assert!(matches!(
-                visual_layers_at(document, TimeCode(0)),
-                Err(MediaError::NotImplemented)
-            ));
-            assert!(matches!(
-                video_layers_at(document, TimeCode(0)),
-                Err(MediaError::NotImplemented)
-            ));
-            assert!(visual_layers_at(document, TimeCode(20)).is_ok());
-        };
-        for mode in &BlendMode::ALL[1..] {
+    #[allow(clippy::float_cmp, clippy::too_many_lines)]
+    fn mo2_layers_resolve_with_blend_role_and_geometry() {
+        for mode in BlendMode::ALL {
             let mut document = fixture();
-            document.tracks[0].clips[0].blend_mode = *mode;
-            refused(&document);
+            document.tracks[0].clips[0].blend_mode = mode;
+            let TimelineVisualLayer::Video(layer) =
+                &visual_layers_at(&document, TimeCode(0)).unwrap()[0]
+            else {
+                panic!("a media clip resolves as video");
+            };
+            assert_eq!(layer.blend_mode, mode);
+            assert_eq!(
+                video_layers_at(&document, TimeCode(0)).unwrap()[0].blend_mode,
+                mode
+            );
         }
+        // R21's table, in screen fractions (positive right/down).
+        let directions = [
+            ("left", [-1.0_f32, 0.0], true),
+            ("right", [1.0, 0.0], false),
+            ("up", [0.0, -1.0], true),
+            ("down", [0.0, 1.0], false),
+        ];
         for descriptor in &kinewright_core::TRANSITION_DESCRIPTORS[3..] {
             let mut document = fixture();
             document.tracks[0].clips[0].transition_in = Some(Transition {
                 name: descriptor.name.to_owned(),
-                duration: TimeCode(3),
+                duration: TimeCode(5),
             });
-            refused(&document);
+            let (_, direction, below) = directions
+                .iter()
+                .find(|(suffix, _, _)| descriptor.name.ends_with(suffix))
+                .copied()
+                .unwrap();
+            let kind = descriptor.name.split('_').next().unwrap();
+            let at = |document: &Document, frame: i64| {
+                video_layers_at(document, TimeCode(frame)).unwrap()[0].transition
+            };
+            for (frame, progress) in [(0_i64, 0.0_f32), (2, 0.5)] {
+                let params = at(&document, frame);
+                let coverage = params.coverage.expect("geometric coverage is active");
+                assert_eq!(coverage.below_edge, below, "{}", descriptor.name);
+                assert_eq!(
+                    coverage.edge,
+                    if below { progress } else { 1.0 - progress },
+                    "{}",
+                    descriptor.name
+                );
+                let entering = direction.map(|value| value * (1.0 - progress));
+                assert_eq!(
+                    params.offset,
+                    if kind == "wipe" { [0.0; 2] } else { entering },
+                    "{} at {frame}",
+                    descriptor.name
+                );
+                let backdrop = direction.map(|value| -value * progress);
+                assert_eq!(
+                    params.backdrop,
+                    (kind == "push").then_some(backdrop),
+                    "{} at {frame}",
+                    descriptor.name
+                );
+                assert_eq!(params.alpha, 1.0);
+            }
+            for frame in [4, 5] {
+                let ordinary = at(&document, frame);
+                assert_eq!(
+                    ordinary,
+                    TransitionRenderParams::default(),
+                    "{}",
+                    descriptor.name
+                );
+            }
+            document.tracks[0].clips[0]
+                .transition_in
+                .as_mut()
+                .unwrap()
+                .duration = TimeCode(1);
+            let identity = at(&document, 0);
+            assert_eq!(
+                identity,
+                TransitionRenderParams::default(),
+                "duration 1 is an identity"
+            );
         }
-        for content in [
-            ClipContent::Adjustment,
-            ClipContent::Solid(kinewright_core::SolidColor { r: 1, g: 2, b: 3 }),
+        for (content, solid) in [
+            (ClipContent::Adjustment, false),
+            (
+                ClipContent::Solid(kinewright_core::SolidColor { r: 1, g: 2, b: 3 }),
+                true,
+            ),
         ] {
             let mut document = fixture();
             let clip = &mut document.tracks[0].clips[0];
             clip.content = content;
             clip.source_range = TimeCode(0)..TimeCode(10);
+            clip.blend_mode = BlendMode::Screen;
             document.validate().unwrap();
-            assert!(matches!(
-                visual_layers_at(&document, TimeCode(0)),
-                Err(MediaError::NotImplemented)
-            ));
-            assert!(visual_layers_at(&document, TimeCode(20)).is_ok());
+            let layers = visual_layers_at(&document, TimeCode(0)).unwrap();
+            match (&layers[0], solid) {
+                (TimelineVisualLayer::Solid(layer), true) => {
+                    assert_eq!(
+                        layer.color,
+                        kinewright_core::SolidColor { r: 1, g: 2, b: 3 }
+                    );
+                    assert_eq!(layer.blend_mode, BlendMode::Screen);
+                }
+                (TimelineVisualLayer::Adjustment(layer), false) => {
+                    assert_eq!(layer.clip, ClipId(1));
+                    assert_eq!(layer.blend_mode, BlendMode::Screen);
+                }
+                (other, _) => panic!("unexpected layer {other:?}"),
+            }
+            // `video_layers_at` resolves media only.
+            assert!(video_layers_at(&document, TimeCode(0)).unwrap().is_empty());
         }
     }
 

@@ -44,7 +44,7 @@ use kinewright_core::{
 use serde_json::{Value, json};
 
 use crate::{
-    Compositor, CompositorLayer, GpuContext,
+    Compositor, CompositorLayer, GpuContext, LayerMode,
     color_pipeline::{
         DELIVERY_INTERMEDIATE_WHITE, PrimaryCorrection, PrimaryParameter,
         apply_primary_corrections, classify_source, classify_source_with_assumption, decode_bt709,
@@ -1305,6 +1305,7 @@ fn assert_gpu_control_case(
                 frame,
                 effects: std::slice::from_ref(&effect),
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production GPU compositor should render the CC1 fixture")
@@ -1317,6 +1318,7 @@ fn assert_gpu_control_case(
                 frame,
                 effects: std::slice::from_ref(&effect),
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production GPU working-surface readback")
@@ -2812,6 +2814,7 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
                 frame: &frame,
                 effects: &[effect_positive, effect_negative],
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production WGSL no-intermediate-clamp readback")
@@ -2848,6 +2851,7 @@ fn cc1_no_intermediate_clamp_preserves_recoverable_over_range_values() {
                 frame: &ramp_frame,
                 effects: &[correction_effect(3, minus_two_stops)],
                 transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
             }],
         )
         .expect("production WGSL over-range ramp readback")
