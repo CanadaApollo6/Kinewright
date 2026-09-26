@@ -2102,3 +2102,305 @@ fn h7_stale_same_endpoint_release_spares_the_successor() {
         "the stale handle's release removed the live owner's discovery"
     );
 }
+
+/// The publish temps of `discovery` present in its folder (exact AF1 shape).
+fn temps_of(discovery: &Path) -> Vec<PathBuf> {
+    let name = discovery.file_name().unwrap();
+    let mut found: Vec<PathBuf> = fs::read_dir(discovery.parent().unwrap())
+        .unwrap()
+        .flatten()
+        .filter(|entry| is_discovery_temp(&entry.file_name(), name))
+        .map(|entry| entry.path())
+        .collect();
+    found.sort();
+    found
+}
+
+/// N-a (review guard, pinned against the exact matcher): a publisher dies
+/// (SIGKILL or exit) between the synced temp write and the rename. Exactly
+/// one temp is left, the prior discovery is untouched, and the next holder
+/// sweeps the crashed process's temp and reclaims the RIGHT predecessor.
+#[test]
+fn h7_crash_between_temp_write_and_rename_is_swept() {
+    for round in 0..iterations().min(60) {
+        let fx = fixture("h7-crash-rename");
+        let stale = round % 2 == 1;
+        let before = stale.then(|| fs::read(plant_stale(&fx, "http://stale")).unwrap());
+        let discovery = discovery_path_for_project(Some(&fx.project)).unwrap();
+        let signals = fx.dir.path("owner");
+        let kill = round % 4 < 2;
+        let mut owner = spawn(
+            "hold",
+            &fx.project,
+            &fx.recovery,
+            &signals,
+            Opts {
+                hook: Some("publish_before_rename"),
+                exit_at_hook: !kill,
+                ..Opts::default()
+            },
+        );
+        wait_for(&signals.join("paused"));
+        if kill {
+            owner.0.kill().unwrap();
+        }
+        owner.0.wait().unwrap();
+        let temps = temps_of(&discovery);
+        assert_eq!(temps.len(), 1, "round {round}: one temp left: {temps:?}");
+        match &before {
+            Some(bytes) => assert_eq!(&fs::read(&discovery).unwrap(), bytes, "round {round}"),
+            None => assert!(!discovery.exists(), "round {round}"),
+        }
+        let next = claim(&fx.project, &fx.recovery, "http://next").expect("the next claim owns");
+        assert!(temps_of(&discovery).is_empty(), "round {round}: swept");
+        match before {
+            Some(_) => assert_eq!(
+                next.reclaimed.as_ref().map(|r| r.endpoint.as_str()),
+                Some("http://stale"),
+                "round {round}: reclaims the pre-crash claim, not the crashed publisher"
+            ),
+            None => assert!(next.reclaimed.is_none(), "round {round}"),
+        }
+        next.handle.release().unwrap();
+    }
+}
+
+/// N-a (review guard): symlinks planted at the next 300 temp names, aimed
+/// at a victim, are swept after the flock (removed, never followed) — the
+/// victim keeps its bytes and the discovery is a fresh regular file.
+#[cfg(unix)]
+#[test]
+fn h7_planted_temp_links_are_swept_not_followed() {
+    let fx = fixture("h7-planted-temp-links");
+    let discovery = discovery_path_for_project(Some(&fx.project)).unwrap();
+    let victim = fx.dir.path("victim.txt");
+    fs::write(&victim, b"precious").unwrap();
+    let name = discovery
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let seq = DISCOVERY_TEMP_SEQ.load(Ordering::SeqCst);
+    for n in seq..seq + 300 {
+        std::os::unix::fs::symlink(
+            &victim,
+            fx.dir
+                .path(&format!(".{name}.{}.{n}.tmp", std::process::id())),
+        )
+        .unwrap();
+    }
+    let got = claim(&fx.project, &fx.recovery, "http://a").expect("links swept, fresh temp");
+    assert_eq!(fs::read(&victim).unwrap(), b"precious");
+    assert!(
+        fs::symlink_metadata(&discovery)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+    assert!(temps_of(&discovery).is_empty());
+    got.handle.release().unwrap();
+}
+
+/// One claim's verdict, as text: a reclaim (with its warning flag and the
+/// reclaimed host), a `ForeignHost` refusal, or any other error.
+fn verdict_of(fx: &Fx) -> String {
+    match claim(&fx.project, &fx.recovery, "http://new") {
+        Ok(acquired) => {
+            let text = format!(
+                "reclaim(unreadable={}, host={:?})",
+                acquired.reclaimed_unreadable,
+                acquired.reclaimed.as_ref().map(|r| r.hostname.clone())
+            );
+            acquired.handle.release().unwrap();
+            text
+        }
+        Err(LockfileError::ForeignHost { host, .. }) => format!("ForeignHost({host:?})"),
+        Err(error) => format!("{error:?}"),
+    }
+}
+
+fn stale_with(tag: &str, bytes: &[u8]) -> Fx {
+    let fx = fixture(tag);
+    let discovery = plant_stale(&fx, "http://stale");
+    fs::write(&discovery, bytes).unwrap();
+    fx
+}
+
+/// N-g + G7 (review guard, tightened): hostile unreadable claims inside the
+/// lenient bound — deep nesting, type-confused hostnames, duplicate keys,
+/// blank or `UNKNOWN.` hosts — each get a typed verdict, never a silent
+/// reclaim; an empty or `UNKNOWN.` hostname is the unknown host, so it
+/// reclaims with the warning rather than refusing as a foreign host "".
+#[test]
+fn h7_lenient_parse_hostile_shapes_are_typed() {
+    let own = current_hostname();
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        ("deep-open-60k", "[".repeat(60_000).into_bytes()),
+        ("deep-object-60k", r#"{"a":"#.repeat(12_000).into_bytes()),
+        (
+            "flat-array-60k",
+            format!("[{}0]", "0,".repeat(30_000)).into_bytes(),
+        ),
+        ("host-number", br#"{"hostname":5}"#.to_vec()),
+        (
+            "host-array",
+            br#"{"hostname":["other-machine.invalid"]}"#.to_vec(),
+        ),
+        (
+            "host-object",
+            br#"{"hostname":{"name":"other-machine.invalid"}}"#.to_vec(),
+        ),
+        ("host-null", br#"{"hostname":null}"#.to_vec()),
+        ("host-UNKNOWN.", br#"{"hostname":"UNKNOWN."}"#.to_vec()),
+        ("host-empty", br#"{"hostname":""}"#.to_vec()),
+        (
+            "host-own-upper-lenient",
+            format!(r#"{{"hostname":"{}"}}"#, own.to_uppercase()).into_bytes(),
+        ),
+        (
+            "dup-own-then-foreign",
+            format!(r#"{{"hostname":"{own}","hostname":"other-machine.invalid"}}"#).into_bytes(),
+        ),
+        (
+            "dup-foreign-then-own",
+            format!(r#"{{"hostname":"other-machine.invalid","hostname":"{own}"}}"#).into_bytes(),
+        ),
+        (
+            "utf8-bom",
+            b"\xef\xbb\xbf{\"hostname\":\"other-machine.invalid\"}".to_vec(),
+        ),
+    ];
+    for (name, bytes) in cases {
+        let fx = stale_with("h7-lenient", &bytes);
+        let verdict = verdict_of(&fx);
+        eprintln!("RACE3: lenient {name}: {verdict}");
+        assert!(
+            verdict.starts_with("reclaim(unreadable=true") || verdict.starts_with("ForeignHost("),
+            "{name}: typed, never silent: {verdict}"
+        );
+        if matches!(name, "host-empty" | "host-UNKNOWN.") {
+            assert!(
+                verdict.starts_with("reclaim(unreadable=true"),
+                "{name}: the unknown host reclaims with the warning: {verdict}"
+            );
+        }
+    }
+}
+
+/// N-e (documented in AF5, not a defect): a known foreign claim past the
+/// lenient bounds (> 64 KiB, or nesting deeper than 128) is unreadable and
+/// reclaims — always WITH the unreadable warning, never silently.
+#[test]
+fn h7_foreign_claim_past_the_lenient_bounds_reclaims_with_the_warning() {
+    let deep = format!(
+        r#"{{"hostname":"other-machine.invalid","future":{}1{}}}"#,
+        "[".repeat(200),
+        "]".repeat(200)
+    );
+    let big = format!(
+        r#"{{"hostname":"other-machine.invalid","future":"{}"}}"#,
+        "x".repeat(70_000)
+    );
+    for (name, bytes) in [("deep-200", deep), ("big-70k", big)] {
+        let fx = stale_with("h7-lenient-bounds", bytes.as_bytes());
+        let verdict = verdict_of(&fx);
+        eprintln!("RACE3: foreign past lenient bounds {name}: {verdict}");
+        assert!(
+            verdict.starts_with("reclaim(unreadable=true"),
+            "{name}: the AF5-documented limit reclaims with the warning: {verdict}"
+        );
+    }
+}
+
+/// H5 (review probe, now asserted): a relative chain through a symlinked
+/// directory with `..` (which the kernel resolves physically) unifies with
+/// its target, and writing through it reaches exactly that target.
+#[cfg(unix)]
+#[test]
+fn h5_relative_chain_through_a_symlinked_dir_matches_the_kernel() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDirectory::new("h5-relative-chain");
+    fs::create_dir_all(dir.path("x/y")).unwrap();
+    fs::create_dir_all(dir.path("x/real")).unwrap();
+    symlink(dir.path("x/y"), dir.path("sub")).unwrap();
+    symlink(
+        "../real/target.kinewright",
+        dir.path("x/y/link2.kinewright"),
+    )
+    .unwrap();
+    symlink("sub/link2.kinewright", dir.path("link1.kinewright")).unwrap();
+    let head = dir.path("link1.kinewright");
+    let target = dir.path("x/real/target.kinewright");
+    let identity = |path: &Path| crate::project::canonical_project_identity(path);
+    assert_eq!(
+        identity(&head),
+        identity(&target),
+        "the relative chain resolves like the kernel"
+    );
+    let recovery = dir.path("recovery");
+    fs::create_dir(&recovery).unwrap();
+    let real = claim(&target, &recovery, "http://real").expect("the target spelling owns");
+    let alias = claim(&head, &recovery, "http://alias");
+    assert!(
+        matches!(alias, Err(LockfileError::Contention { .. })),
+        "the relative alias contends with its target: {:?}",
+        alias.map(|_| ())
+    );
+    real.handle.release().unwrap();
+    fs::write(&head, b"{}").unwrap();
+    assert!(
+        target.exists(),
+        "the kernel resolved the chain to the same file"
+    );
+}
+
+/// H5 (review probe, now asserted): the identity bound agrees with the
+/// kernel's (Linux `MAXSYMLINKS` = 40). A 40-link dangling chain unifies and
+/// the kernel writes through it to the target; a 41-link chain refuses
+/// typed and the kernel refuses the write too — no chain the kernel follows
+/// gets a second identity.
+#[cfg(target_os = "linux")]
+#[test]
+fn h5_link_bound_agrees_with_the_kernel() {
+    let dir = TempDirectory::new("h5-kernel-bound");
+    let root = fs::canonicalize(dir.root()).unwrap();
+    let recovery = root.join("recovery");
+    fs::create_dir(&recovery).unwrap();
+    for hops in [40_usize, 41] {
+        let base = root.join(format!("chain{hops}"));
+        fs::create_dir(&base).unwrap();
+        for index in 0..hops {
+            let to = if index + 1 == hops {
+                "end.kinewright".to_owned()
+            } else {
+                format!("l{}.kinewright", index + 1)
+            };
+            std::os::unix::fs::symlink(to, base.join(format!("l{index}.kinewright"))).unwrap();
+        }
+        let head = base.join("l0.kinewright");
+        let end = base.join("end.kinewright");
+        let identity = crate::project::canonical_project_identity(&head);
+        let alias = claim(&head, &recovery, "http://head");
+        let alias_verdict = format!("{:?}", alias.as_ref().map(|_| ()));
+        drop(alias);
+        let kernel_follows = fs::write(&head, b"{}").is_ok() && end.exists();
+        eprintln!(
+            "RACE3: {hops}-link chain: identity={identity:?} alias={alias_verdict} kernel_follows={kernel_follows}"
+        );
+        if hops == 40 {
+            assert!(kernel_follows, "the kernel follows 40 links");
+            assert_eq!(
+                identity.as_deref().ok(),
+                Some(end.as_path()),
+                "40 links unify"
+            );
+        } else {
+            assert!(!kernel_follows, "the kernel refuses 41 links");
+            assert!(identity.is_err(), "41 links refuse typed");
+            assert!(
+                alias_verdict.contains("Identity("),
+                "the acquire refuses typed: {alias_verdict}"
+            );
+        }
+    }
+}
