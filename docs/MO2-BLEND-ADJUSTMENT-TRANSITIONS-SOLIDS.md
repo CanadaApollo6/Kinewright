@@ -67,19 +67,29 @@
   which echoes the input; other tools keep their decoder messages (fix
   round 2). The budget is the whole reply on the wire (final fix): every
   `preview_solo` reply — strip, solo refusal, stale-revision text,
-  InvalidParams or any other error — crosses one choke point in
+  InvalidParams or any other error, a panicked handler included (answered
+  with the fixed text `tool call failed: handler panicked`, never its
+  payload, as for every tool; N24) — crosses one choke point in
   `call_tool`, which measures it as rmcp serializes the JSON-RPC message
   (echoed request id and `resultType` included) plus
   `SOLO_FRAMING_BYTES` = 128, a bound on rmcp 3.1.2's SSE framing (priming
-  event 25 B + reply event 13 B + two event ids of at most 41 B = 120 B;
-  SSE keep-alive comments, sent only while a render passes 15 s, are
-  transport liveness, not reply bytes). A reply measuring over
+  event 25 B + reply event 13 B + two event ids of at most 41 B = 120 B).
+  Outside the measure by definition: HTTP headers, HTTP chunk framing and
+  SSE keep-alive comments (sent only while a render passes 15 s; transport
+  liveness, not reply bytes). A reply measuring over
   1,081,344 B is replaced by the minimal typed refusal —
   `{"resultType":"complete","content":[{"type":"text","text":"solo_over_budget"}],"structuredContent":{"code":"solo_over_budget"},"isError":true}`
   (142 B), a 175-B message around the id, 303 B with framing — whenever
   that is smaller (an InvalidParams already is, and stays). **Residual:** a
-  reply can pass the budget only when the request id's JSON is longer than
-  1,081,344 − 303 = 1,081,041 B, since the protocol must echo the id. A `context: isolated` sent for an
+  dispatched reply — one the transport hands to `call_tool` — can pass the
+  budget only when the request id's JSON is longer than
+  1,081,344 − 303 = 1,081,041 B, since the protocol must echo the id.
+  rmcp's pre-dispatch refusals are outside it: they predate MO2, cover
+  every tool and never reach the choke point (−32020 quotes the
+  request's `_meta` protocolVersion; a malformed id gets a silent HTTP
+  202). They belong to AW2 under AW2-OBL-1, which requires every
+  transport refusal to be bounded and echo-free and a malformed id to get
+  −32600 (N21, N24). A `context: isolated` sent for an
   adjustment is answered as `below` — the report says so — rather than
   refused, since R24 says "no override". Codes are `solo_clip_not_visible`,
   `solo_window_empty`, `solo_over_budget`, `solo_invalid_samples`,
@@ -109,9 +119,13 @@
   call site). R28 therefore stands at **297 added / 60 removed** (net
   237), counted like the re-review's `current-line-count.json`:
   `compositor.rs` production code, blank lines included, `#[cfg(test)]`
-  items excluded. B2 is then ≈ 821 and the total ≈ 4,055, about 27%
-  over 3,200. The ME15 growth was
-  lead-ordered (N23) and is carried by that override.
+  items excluded. The solo/registry 524 also moves: the final fix
+  (af96c8e) added 71 production lines and removed 59 (net +12), and the
+  N24 fix adds 9 and removes 1 (net +8), giving 544. B2 is then
+  ≈ 544 + 297 = 841 and the total ≈ 691 + 1,713 + 841 + 830 = 4,075,
+  about 27% over 3,200. The ME15 growth was lead-ordered (N23) and the
+  choke-point fixes review-ordered (N21, N24); those overrides carry
+  them.
 - ME6 → §8 R26 (Part B3), readings the rule leaves open:
   - Solids:
     - The colour editor is egui's picker plus labelled R/G/B fields. A

@@ -11197,12 +11197,14 @@ mod mo2_solo_review {
     use super::*;
 
     /// Records `(frame, enabled clip ids)` per proof; pixels are
-    /// `[frame, Σ ids, 91]`, or xorshift noise when `noise`.
+    /// `[frame, Σ ids, 91]`, or xorshift noise when `noise`; a nonzero
+    /// `panic_len` panics with that many payload bytes instead.
     #[derive(Default)]
     struct ProofDouble {
         calls: Mutex<Vec<(i64, Vec<u64>)>>,
         noise: bool,
         adapter_len: usize,
+        panic_len: usize,
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -11262,6 +11264,7 @@ mod mo2_solo_review {
             doc: Arc<Document>,
             at: TimeCode,
         ) -> Result<MonitorProof, MediaError> {
+            assert!(self.panic_len == 0, "{}", "p".repeat(self.panic_len));
             let active: Vec<_> = (doc.tracks.iter().flat_map(|t| &t.clips))
                 .filter(|c| c.is_enabled_at(TimeCode(at.0 - c.timeline_start.0)))
                 .map(|c| c.id.0)
@@ -12100,6 +12103,39 @@ mod mo2_solo_review {
         assert!(violations.is_empty(), "{violations:?}");
     }
 
+    /// N24 (B2): a panicking render reaches the client as fixed text with
+    /// no payload, through ME4's choke point: bounded at the residual edge
+    /// where the 2,000-byte payload used to pass R25.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn final_panic_reply_is_fixed_and_bounded() {
+        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let proof = Arc::new(ProofDouble {
+            panic_len: 2000,
+            ..ProofDouble::default()
+        });
+        let core = Core::spawn(doc(2, 2, 1, false)).unwrap();
+        let server = McpServer::start(core, media, proof).unwrap();
+        let raw = RawSession::open(&server).await;
+        let arguments = outcome_arguments("success");
+        let (_, small) = raw.solo(json!(1), arguments.clone()).await;
+        let error = small["error"].clone();
+        assert_eq!(error["code"], -32603, "{small}");
+        assert_eq!(error["message"], "tool call failed: handler panicked");
+        assert!(error.get("data").is_none());
+        for id_bytes in [2, WIRE - 304, WIRE - 303] {
+            let id = id_of(id_bytes, "ii");
+            let (bytes, message) = raw.solo(id.clone(), arguments.clone()).await;
+            assert_eq!(message["id"], id);
+            assert_eq!(message["error"], error, "id {id_bytes}");
+            let size = measured(&message);
+            assert!(
+                bytes <= size && size <= WIRE,
+                "id {id_bytes}: {bytes}/{size}"
+            );
+        }
+        server.shutdown();
+    }
+
     /// A success reply's measure with its report's `elapsed_ms` (the one
     /// timing field any `preview_solo` reply carries) cut to one digit: the
     /// smallest this reply could have been.
@@ -12116,9 +12152,12 @@ mod mo2_solo_review {
     /// own reply at exactly R25, the minimal refusal one byte later, and
     /// the residual edge where even that stops fitting; escaped and UTF-8
     /// ids land on the same bytes. Each reply is judged by itself, with no
-    /// retry: the non-success kinds carry no timing field and are exact;
-    /// a success reply's `elapsed_ms` can only be bounded, below by one
-    /// digit and above by the digits of the request's own wall time.
+    /// retry: the non-success kinds carry no timing field and are exact,
+    /// and both of their outcomes must be reached. A success reply's
+    /// `elapsed_ms` can only be bounded, below by one digit and above by the
+    /// digits of the request's own wall time, so success is judged per reply
+    /// but its edges need not be reached (N24); the exact success edge is
+    /// pinned without timing by `solo_bound_tests` in the server.
     #[tokio::test(flavor = "multi_thread")]
     async fn final_exact_wire_limit_edges_and_escaped_ids() {
         let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
@@ -12195,9 +12234,10 @@ mod mo2_solo_review {
         }
         service.cancel().await.unwrap();
         server.shutdown();
-        // Both outcomes are reached at every kind's own edge: its reply one
-        // byte below, the minimal refusal one byte past (`invalid` excepted).
-        for kind in ["success", "not_visible", "stale", "invalid"] {
+        // Both outcomes are reached at every untimed kind's own edge: its
+        // reply one byte below, the minimal refusal one byte past (`invalid`
+        // excepted, being smaller than that refusal).
+        for kind in ["not_visible", "stale", "invalid"] {
             assert!(outcomes.contains(&(kind, 0, 0, kind)), "{kind} -1");
             let past = if kind == "invalid" { kind } else { "minimal" };
             assert!(outcomes.contains(&(kind, 0, 2, past)), "{kind} +1");

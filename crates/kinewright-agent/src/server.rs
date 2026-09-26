@@ -11877,9 +11877,17 @@ impl ServerHandler for KinewrightMcp {
             .flatten()
             == Some("preview_solo");
         async move {
+            // A panicked or cancelled handler becomes fixed text: its payload
+            // may be unbounded or carry paths, and it still crosses ME4's
+            // choke point below.
             let reply = tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
                 .await
-                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+                .unwrap_or_else(|_| {
+                    Err(McpError::internal_error(
+                        "tool call failed: handler panicked",
+                        None,
+                    ))
+                });
             let reply = if solo {
                 bound_solo_reply(context.id, reply)
             } else {
@@ -14083,6 +14091,104 @@ fn bound_solo_reply(
         }) => Ok(result),
         JsonRpcMessage::Error(JsonRpcError { error, .. }) => Err(error),
         _ => unreachable!("built above as a tool result or an error"),
+    }
+}
+
+#[cfg(test)]
+mod solo_bound_tests {
+    use super::*;
+    use crate::solo::{SOLO_FRAMING_BYTES, SOLO_WIRE_BUDGET_BYTES as WIRE, SoloError};
+
+    /// What the choke point measures for `reply` sent with `id`.
+    fn measure(id: &RequestId, reply: &Result<CallToolResult, McpError>) -> usize {
+        let message = match reply.clone() {
+            Ok(result) => {
+                ServerJsonRpcMessage::response(ServerResult::CallToolResult(result), id.clone())
+            }
+            Err(error) => ServerJsonRpcMessage::error(error, Some(id.clone())),
+        };
+        serde_json::to_vec(&message).unwrap().len() + SOLO_FRAMING_BYTES
+    }
+
+    fn id_of(bytes: usize) -> RequestId {
+        RequestId::String("i".repeat(bytes - 2).into())
+    }
+
+    fn is_minimal(reply: &Result<CallToolResult, McpError>) -> bool {
+        reply.as_ref().is_ok_and(|result| {
+            result.structured_content == Some(serde_json::json!({"code": "solo_over_budget"}))
+        })
+    }
+
+    /// N24 (B1): a success reply at R25−1 and R25 is kept and at R25+1 is
+    /// the minimal refusal, pinned without the render's timing field.
+    #[test]
+    fn success_boundary_exact() {
+        let id = RequestId::Number(7);
+        let success = |n| {
+            Ok(CallToolResult::success(vec![ContentBlock::text(
+                "x".repeat(n),
+            )]))
+        };
+        let overhead = measure(&id, &success(0));
+        for delta in [-1_isize, 0, 1] {
+            let reply = success((WIRE - overhead).saturating_add_signed(delta));
+            assert_eq!(measure(&id, &reply), WIRE.saturating_add_signed(delta));
+            let bounded = bound_solo_reply(id.clone(), reply.clone());
+            if delta > 0 {
+                assert!(is_minimal(&bounded), "success at R25{delta:+}");
+            } else {
+                assert_eq!(bounded, reply, "success at R25{delta:+}");
+            }
+        }
+    }
+
+    /// N24 (S2): an error larger than the minimal refusal is measured with
+    /// its id: kept at exactly R25, substituted at id + 303 one byte later
+    /// and in the residual.
+    #[test]
+    fn error_reply_bound_with_its_id() {
+        let error = || Err(McpError::internal_error("e".repeat(2000), None));
+        let overhead = measure(&id_of(2), &error()) - 2;
+        let minimal = measure(&id_of(2), &Ok(SoloError::minimal_result())) - 2;
+        assert_eq!(minimal, 303);
+        assert!(overhead > minimal);
+        for id_bytes in [WIRE - overhead, WIRE - overhead + 1, WIRE - minimal + 1] {
+            let bounded = bound_solo_reply(id_of(id_bytes), error());
+            if id_bytes + overhead <= WIRE {
+                assert_eq!(bounded, error(), "id {id_bytes}");
+            } else {
+                assert!(is_minimal(&bounded), "id {id_bytes}");
+                assert_eq!(measure(&id_of(id_bytes), &bounded), id_bytes + minimal);
+            }
+        }
+    }
+
+    /// Every typed solo refusal, a 2,000-byte render failure included,
+    /// becomes the minimal refusal at id + 303 around the residual edge.
+    #[test]
+    fn every_solo_error_exact_bound() {
+        use kinewright_core::ClipId;
+        for error in [
+            SoloError::SoloClipNotVisible {
+                clip: ClipId(1),
+                reason: "missing",
+            },
+            SoloError::SoloWindowEmpty { clip: ClipId(1) },
+            SoloError::InvalidSamples(0),
+            SoloError::RenderFailed("x".repeat(2000)),
+            SoloError::SoloOverBudget {
+                limit: "pixels",
+                observed: 9,
+                allowed: 8,
+            },
+        ] {
+            for id_bytes in [WIRE - 304, WIRE - 303, WIRE - 302] {
+                let bounded = bound_solo_reply(id_of(id_bytes), Ok(error.to_result()));
+                assert!(is_minimal(&bounded), "{error:?} id {id_bytes}");
+                assert_eq!(measure(&id_of(id_bytes), &bounded), id_bytes + 303);
+            }
+        }
     }
 }
 
