@@ -39,7 +39,8 @@
   unchanged (gate 5's adjustment-Push cases, GPU ≡ twin); the copy-count
   probe pins 0/0/0/1/1/1/1/2/2 across Normal, Slide, Wipe, blend,
   adjustment, Normal Push, Normal adjustment Push, blend Push and blend
-  adjustment Push. Ledger two pooled snapshots, not three.
+  adjustment Push. Ledger two pooled snapshots, not three. (ME10 makes a
+  `Normal` adjustment Push 2 as well.)
 - ME3 → §4 R16 (Part B1): the MO1 R26 re-gate runs each golden's raster,
   size and transform through `WorkingFrame::from_display_frame`, the input
   type every render composites, not the goldens' 8-bit `FrameTexture`.
@@ -104,6 +105,82 @@
     fitted view says "shown at N%". The dialog also sends R24's context
     (by blend, isolated, over below-stack) and sample count (2–16) — GUI
     parity with the agent's arguments, not an exception (fix round 1).
+- ME7 → §3 R10 (B1 fix round 1, review-1 B1 / review-2 B2 + S1): R10's
+  checked set is every *special* layer — non-`Normal` blends **and every
+  adjustment, `Normal` included** (selector word 8: a `Normal` adjustment
+  validated against its snapshot; under Push, against the re-snapshotted
+  shifted backdrop, per ME10). The source, the
+  below value, the blend result and alpha must be finite, tested on the
+  bits before `min`/`max` can erase them; magnitude is checked only on the
+  value the target stores (`α·B + (1−α)·D`), so `Add(40000,40000)` at
+  α=0.25 stores 49,984 instead of refusing. **Scope (lead ruling N15.3):**
+  `Normal` *pixel* layers stay unchecked in MO2. Three things rule it: the
+  CC3 overflow contract (`cc3_boundary_controls_…overflows_to_infinity`),
+  R12's untouched all-`Normal` fast path, and CC8 R35. Review-2's
+  `(Normal, +inf)` pair-lanes case was therefore ruled out, not dropped
+  silently.
+- ME8 → §4 R14 / §6 R21 (B1 fix round 1, review-2 B1 + S2): no NDC
+  varying. The GPU decides coverage on the exact fragment position `i + ½`
+  against an edge the host moves into output pixels, rounded up to the
+  next pixel centre (`⌈e·n − ½⌉ + ½`), and the twin compares `(i + ½) <
+  e·n` in f64. Keep-`<`-edge therefore holds exactly when the centre
+  fraction is `< e`. Evidence: the interpolated NDC misplaced tie centres
+  on odd rasters (17×11 at `p = ½`: up to 195 bad channels per direction).
+  Separately, a centre that is rasterized on a quad's top/left edge
+  interpolates uv a few ulps below 0, and the crop test zeroed it (the
+  isolated down Push/Slide mismatch). The crop now tests uv clamped to
+  [0, 1]. Pinned by the odd/even transition grid and the exact-centre
+  probe (M22/M25 and both fixes' reversals killed).
+- ME9 → §9 R27 (B1 fix round 1, Windows CI run 36222189672, WARP): a
+  GPU≡twin working value may also differ by a **derived sub-texel
+  envelope**. D3D requires only 8 bits of sub-texel filter precision
+  (Vulkan's `subTexelPrecisionBits`; lavapipe and NVIDIA report 8). The
+  bilinear value is multilinear in its weights, so every rounding of
+  `(fx, fy)` to 2⁻⁸ lies between the four floor/ceil corners. The twin
+  renders those four corners, and the per-value slack is the largest
+  `|corner − exact|` (≤ 2⁻⁸ × the local neighbour contrast per axis),
+  carried through the rest of the pipeline. The slack is exactly zero
+  wherever nothing filters between distinct texels, so unfiltered pixels
+  keep the unit 1e-3 (pinned on a blit). It is computed only when a value
+  misses the exact R27. Evidence (emulated, CPU): WARP's R26 gradient
+  value 290 departs by 0.00146 against a slack of 0.00244. The
+  `slide_right` title at frame 3, pixel 6708, departs by 0.00122 against
+  a slack of 0.00171; the twin reproduces CI's exact value there. Neither
+  failure was a coverage tie. Adapters with fewer than 8 bits are out of
+  scope.
+- ME10 → §3 R9b (B1 fix round 2, lead ruling N15.1): a special layer
+  (selectors 1–6 and 8) **composites the over in its shader and emits
+  `(α·B + (1−α)·D, 1)`**, where D is the snapshot it already samples. It
+  no longer emits `(B, αs)`. The fixed-function state is unchanged, so it
+  stores the emitted value: `1·out + 0·D`, alpha `1·1 + 0·1`. `Normal`
+  pixel layers (selector 0) and the R12 fast path are untouched; their
+  pre/post identity and CC8 G2 SDR identity are re-run on both lanes.
+  - *Evidence.* ME7 checks magnitude only on the stored value. On the
+    RTX 3090, `Add(40000,40000)` at α=0.25 over D=40000 stored **46,368**,
+    not 49,984. The fixed-function unit clamped the source B=80,000 to
+    65,504 before blending: `0.25·65504 + 0.75·40000 = 46,376 → 46,368`.
+    That silently stored a wrong value (lavapipe stored 49,984).
+  - *Why this is portable.* Blending an out-of-range f16 source is
+    implementation-defined. The shader already holds `B`, `D` and `α` in
+    f32, so the only value crossing the blend unit is the representable
+    result R10 has already checked.
+  - *Consequence for Push.* The opaque emission overwrites every
+    rasterized pixel, including pixels whose coverage α is 0. So `D` must
+    be the true target. Every special entering layer under Push
+    re-snapshots the shifted backdrop. A `Normal` adjustment Push
+    therefore costs 2 copies, not 1: its quad can rasterize pixels
+    coverage rejects (pinned by a moved adjustment in gate 5, which went
+    red on the emission alone). The non-`Normal` Push re-snapshot is kept.
+    R21 does not make it provably redundant, because the backdrop's
+    in-raster test runs on the f32 fraction `x/n − q` while coverage uses
+    the host's pixel edge, and near-ties can disagree. It is noted for
+    R28 perf.
+  - *Residual.* Both lanes' f32→f16 target store can round a value just
+    above an f16 midpoint down by one ulp, where the twin rounds to
+    nearest. This is within R27's 1e-3, but a uniform frame turns it into
+    one monitor code on every pixel. The review's 60% legacy-cube Screen
+    probe fails the mean gate on both lanes for that reason, so it runs
+    at 70%.
 
 ## Changes in revision 2
 
@@ -310,7 +387,8 @@ alpha twice (B2). Composite: `out = αs·B + (1−αs)·D`, `out_a = 1`
 (provably: `αs + 1·(1−αs)`). Vector: `Screen` S=0.75 D=0.5 αs=0.5 →
 B=0.875, out=0.6875, alpha 1. Any future transparent accumulator needs an
 explicit premultiplied contract and an alpha-aware equation — forbidden
-without a new design. Pinned by an opaque-accumulator assert (every
+without a new design. *(ME10: the over is now composited in-shader and
+emitted opaque; the composite and `out_a = 1` are unchanged.)* Pinned by an opaque-accumulator assert (every
 accumulator readback alpha ≡ 1) plus the vector. Pin a partially
 transparent colour-fade source with mask and non-Normal blending.
 
@@ -371,8 +449,8 @@ backdrop and blends against it. An adjustment's source remains the
 original `D0`, with its colour stack evaluated once; for non-Normal
 adjustment Push, the shifted backdrop is re-snapshotted into a second
 pooled texture so `D0` stays in the first (ME2). Copy counts are ordinary
-special 1, Normal Push 1, non-Normal Push 2, and non-Normal adjustment
-Push 2. Ledger the second pooled snapshot. Pin transparent/masked/transformed endpoints,
+special 1, Normal Push 1, non-Normal Push 2, and any adjustment Push 2
+(ME10). Ledger the second pooled snapshot. Pin transparent/masked/transformed endpoints,
 OOB fallback, adjustment Push, and exact completion equality with ordinary
 composition.
 
@@ -380,8 +458,8 @@ composition.
 bytes asserted by an exact layout/size test: `blend_mode` selector (0 =
 `Normal`, accumulator sample under guard) plus transition-coverage words
 (edge, axis, on) shared by wipe/slide/push; `Push`/`Slide` offsets fold
-host-side into the offset arms; the vertex stage passes NDC position as a
-second varying for output-space coverage. One pipeline, one bind-group
+host-side into the offset arms; output-space coverage uses the fragment's
+pixel position (ME8). One pipeline, one bind-group
 layout. Budget one additional writable storage binding for per-layer
 validity flags: three sampled textures, two samplers, one uniform, two
 storage buffers. Identity is recovered from the layer-to-clip mapping; the
@@ -587,7 +665,7 @@ differentials and contract tests; no SHA-256 frame pins (N4 G5). Pinned
 tolerances per domain (B8): unit-domain working-linear max abs ≤ 1e-3/
 channel; over-range relative ≤ 2^-10 and ≤ 4 f16 ULP; monitor bytes max ≤
 2 codes, p99 ≤ 1, mean ≤ 0.25 (the CC1 `abs_code_diff_rgb` method).
-R27's tolerances are MO2-specific; the future CC8 column additionally
+Resampled GPU≡twin values add the ME9 sub-texel envelope. R27's tolerances are MO2-specific; the future CC8 column additionally
 satisfies PB1–PB4. Fixtures are production-flavoured:
 PiP-over-presenter (`Normal`), `Screen` light leak, `Multiply` callout,
 adjustment look, solid title card, push/slide/wipe midpoints, and the §3
@@ -772,7 +850,7 @@ MO2 window.
 - Bezier evaluation/handles, transparent export, presets → MO6.
 - Ping-pong accumulator, below-stack motion blur → future perf work (the
   R13 copy counts — ordinary special 1, Normal Push 1, non-Normal Push 2,
-  non-Normal adjustment Push 2 (ME2) — stand until a floor says otherwise).
+  any adjustment Push 2 (ME2, ME10) — stand until a floor says otherwise).
 - Multi-turn rotation, off-layer pivots, >8192 px stills, image
   sequences → unchanged from MO1 §11.
 
