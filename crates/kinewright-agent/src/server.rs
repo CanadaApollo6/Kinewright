@@ -1166,9 +1166,12 @@ impl KinewrightMcp {
         Self::capability_tools()
     }
 
+    /// `envelope`: the transport bytes around this reply (request id plus
+    /// framing); only `preview_solo` counts them against its R25 budget.
     fn call_exposed_blocking(
         &self,
         request: CallToolRequestParams,
+        envelope: usize,
     ) -> Result<CallToolResult, McpError> {
         if !crate::runtime::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
             return Ok(error_text(format!(
@@ -1176,11 +1179,20 @@ impl KinewrightMcp {
                 request.name
             )));
         }
-        self.call_blocking(request)
+        self.call_within(request, envelope)
+    }
+
+    #[cfg(test)]
+    fn call_blocking(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+        self.call_within(request, 0)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn call_blocking(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+    fn call_within(
+        &self,
+        request: CallToolRequestParams,
+        envelope: usize,
+    ) -> Result<CallToolResult, McpError> {
         let arguments = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
             "search_capabilities" => {
@@ -1222,7 +1234,8 @@ impl KinewrightMcp {
                 let serde_json::Value::Object(arguments) = args.arguments else {
                     return Ok(error_text("capability arguments must be a JSON object"));
                 };
-                self.call_blocking(CallToolRequestParams::new(args.name).with_arguments(arguments))
+                let request = CallToolRequestParams::new(args.name).with_arguments(arguments);
+                self.call_within(request, envelope)
             }
             "prepare_edit_plan" => {
                 let args: PrepareEditPlanArgs = decode_args("prepare_edit_plan", arguments)?;
@@ -1578,15 +1591,26 @@ impl KinewrightMcp {
                 self.motion_plan(&args)
             }
             "preview_solo" => {
-                let args: crate::solo::SoloArgs = decode_args("preview_solo", arguments)?;
+                // R25: a fixed-size refusal, never an echo of the input.
+                let args: crate::solo::SoloArgs =
+                    decode_args("preview_solo", arguments).map_err(|_| {
+                        let data = serde_json::json!({"code": "solo_invalid_arguments"});
+                        McpError::invalid_params("preview_solo: invalid arguments", Some(data))
+                    })?;
                 let (revision, document) = self.snapshot()?;
                 if args.expected_revision != revision {
                     return Ok(revision_conflict_text(args.expected_revision, revision));
                 }
                 Ok(
-                    match crate::solo::preview_solo(&*self.analysis, revision, &document, &args) {
+                    match crate::solo::preview_solo_within(
+                        &*self.analysis,
+                        revision,
+                        &document,
+                        &args,
+                        envelope,
+                    ) {
                         Ok(strip) => strip.to_result(),
-                        Err(error) => error.to_result(),
+                        Err(error) => error.to_result_within(envelope),
                     },
                 )
             }
@@ -11863,11 +11887,13 @@ impl ServerHandler for KinewrightMcp {
     fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let service = self.clone();
+        let id = serde_json::to_vec(&context.id).map_or(usize::MAX, |id| id.len());
+        let envelope = id.saturating_add(crate::solo::SOLO_FRAMING_BYTES);
         async move {
-            tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
+            tokio::task::spawn_blocking(move || service.call_exposed_blocking(request, envelope))
                 .await
                 .map_err(|error| McpError::internal_error(error.to_string(), None))?
                 .map(Into::into)
@@ -19932,6 +19958,7 @@ mod tests {
                     .unwrap()
                     .clone(),
                 ),
+                0,
             )
             .unwrap();
         assert_eq!(invoked.is_error, Some(false));
@@ -20272,6 +20299,7 @@ mod tests {
                     .unwrap()
                     .clone(),
                 ),
+                0,
             )
             .unwrap();
         assert_eq!(invoked.is_error, Some(false));
@@ -34924,6 +34952,7 @@ mod tests {
                         .unwrap()
                         .clone(),
                 ),
+                0,
             )
             .unwrap();
         assert_eq!(direct.is_error, Some(true));

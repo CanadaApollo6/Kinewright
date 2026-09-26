@@ -11677,4 +11677,272 @@ mod mo2_solo_review {
             "{found}"
         );
     }
+
+    /// Review 3 (S1): an error body of exactly 4095/4096 bytes keeps its
+    /// code, 4097 becomes the bounded `solo_over_budget`; ASCII, escaped
+    /// and multi-byte UTF-8 bodies alike.
+    #[test]
+    fn new_refusal_exact_report_edges() {
+        for escaped in ["", "\"\\\n\r\t", "é界"] {
+            let base = SoloError::RenderFailed(escaped.repeat(20));
+            let empty_size = base.body().to_string().len();
+            for wanted in [4095, 4096, 4097] {
+                let padding = "x".repeat(wanted - empty_size);
+                let error = SoloError::RenderFailed(format!("{}{padding}", escaped.repeat(20)));
+                assert_eq!(error.body().to_string().len(), wanted);
+                let result = error.to_result();
+                let body = result.structured_content.as_ref().unwrap();
+                let code = if wanted > 4096 {
+                    "solo_over_budget"
+                } else {
+                    "solo_render_failed"
+                };
+                assert_eq!(body["code"], code, "edge {wanted}, escaped {escaped:?}");
+                assert!(body.to_string().len() <= 4096);
+                assert!(serde_json::to_vec(&result).unwrap().len() <= 1_056 * 1024);
+                assert_eq!(result.is_error, Some(true));
+                assert!(result.content.iter().all(|b| b.as_image().is_none()));
+            }
+        }
+        // The transport envelope counts too: a refusal that fits alone but
+        // not beside a long request id shrinks to the fixed-size one.
+        let error = SoloError::RenderFailed("x".repeat(3000));
+        let alone = serde_json::to_vec(&error.to_result()).unwrap().len();
+        for (envelope, code) in [
+            (1_056 * 1024 - alone, "solo_render_failed"),
+            (1_056 * 1024 - alone + 1, "solo_over_budget"),
+        ] {
+            let result = error.to_result_within(envelope);
+            let body = result.structured_content.as_ref().unwrap();
+            assert_eq!(body["code"], code, "envelope {envelope}");
+            assert!(serde_json::to_vec(&result).unwrap().len() + envelope <= 1_056 * 1024);
+        }
+    }
+
+    /// Review 3 (S1): both axes, every mode and context, and the u32
+    /// product edges refuse typed before the renderer is asked.
+    #[test]
+    fn new_render_side_all_modes_and_pair_products() {
+        let proof = ProofDouble::default();
+        let sides = [
+            (8192, 1),
+            (1, 8192),
+            (8193, 1),
+            (1, 8193),
+            (65_535, 65_537),
+            (65_536, 65_536),
+            (65_537, 65_536),
+            (u32::MAX, 1),
+            (u32::MAX, u32::MAX),
+        ];
+        let contexts = [None, Some(SoloContext::Below), Some(SoloContext::Isolated)];
+        for paired in [false, true] {
+            for full_res in [false, true] {
+                for context in contexts {
+                    for (width, height) in sides {
+                        let document = doc(width, height, 1, paired);
+                        document.validate().unwrap();
+                        let mut request = args(paired);
+                        (request.full_res, request.context) = (full_res, context);
+                        let before = proof.calls.lock().unwrap().len();
+                        let outcome = solo(&document, &request, &proof);
+                        if width.max(height) > 8192 {
+                            assert!(
+                                matches!(
+                                    outcome,
+                                    Err(SoloError::SoloOverBudget {
+                                        limit: "render_side",
+                                        ..
+                                    })
+                                ),
+                                "{width}x{height}: {outcome:?}"
+                            );
+                            assert_eq!(proof.calls.lock().unwrap().len(), before);
+                            continue;
+                        }
+                        let strip = outcome.unwrap();
+                        mo2_assert_solo_budgets(&strip.to_result());
+                        if full_res {
+                            let rows = if paired { 2 } else { 1 };
+                            assert_eq!(
+                                (strip.image.width, strip.image.height),
+                                (width, height * rows)
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A raw streamable-HTTP session, so a test sees the complete reply
+    /// body and may choose the JSON-RPC request id.
+    struct RawSession {
+        client: reqwest::Client,
+        endpoint: String,
+        session: Option<reqwest::header::HeaderValue>,
+    }
+
+    impl RawSession {
+        async fn open(server: &McpServer) -> Self {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap();
+            let mut raw = Self {
+                client,
+                endpoint: server.endpoint().to_string(),
+                session: None,
+            };
+            let init = raw
+                .post(
+                    &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "mo2-raw", "version": "1"}
+                    }}),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert!(init.status().is_success(), "{init:?}");
+            raw.session = init.headers().get("mcp-session-id").cloned();
+            let _ = init.text().await.unwrap();
+            let notice = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+            assert!(
+                raw.post(&notice)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status()
+                    .is_success()
+            );
+            raw
+        }
+
+        fn post(&self, body: &serde_json::Value) -> reqwest::RequestBuilder {
+            let mut request = (self.client.post(&self.endpoint))
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-protocol-version", "2025-06-18")
+                .json(body);
+            if let Some(session) = &self.session {
+                request = request.header("mcp-session-id", session.clone());
+            }
+            request
+        }
+
+        /// `preview_solo` through `invoke_capability` with request `id`:
+        /// the complete HTTP body and its JSON-RPC message.
+        async fn solo(
+            &self,
+            id: serde_json::Value,
+            arguments: serde_json::Value,
+        ) -> (usize, serde_json::Value) {
+            let params = json!({"name": "invoke_capability", "arguments": {
+                "name": "preview_solo", "arguments": arguments
+            }});
+            let body =
+                json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params});
+            let response = self.post(&body).send().await.unwrap();
+            assert!(response.status().is_success(), "{response:?}");
+            let raw = response.text().await.unwrap();
+            let data = (raw.lines())
+                .filter_map(|line| line.strip_prefix("data:"))
+                .map(str::trim_start)
+                .find(|line| line.starts_with('{'))
+                .unwrap_or(raw.as_str());
+            (raw.len(), serde_json::from_str(data).unwrap())
+        }
+    }
+
+    /// Review 3 (B1): a malformed argument is refused with one fixed-size
+    /// typed `InvalidParams`, never an echo of the input; the three bodies
+    /// that used to land at 4095/4096/4097 bytes included.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_invalid_argument_errors_are_bounded() {
+        let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
+        let raw = RawSession::open(&server).await;
+        let mut replies = Vec::new();
+        for (field, size) in [
+            ("samples", 1_100_000),
+            ("context", 1_100_000),
+            ("clip_id", 1_100_000),
+            ("full_res", 1_100_000),
+            ("unknown_field", 1_100_000),
+            ("samples", 4014),
+            ("samples", 4015),
+            ("samples", 4016),
+        ] {
+            let mut arguments = json!({"expected_revision": 0, "clip_id": 1, "samples": 2});
+            if field == "unknown_field" {
+                arguments[&"z".repeat(size)] = json!(1);
+            } else {
+                arguments[field] = json!("z".repeat(size));
+            }
+            let (bytes, message) = raw.solo(json!(replies.len() + 2), arguments).await;
+            replies.push((bytes, message["error"].clone()));
+        }
+        service.cancel().await.unwrap();
+        server.shutdown();
+        for (bytes, error) in &replies {
+            let json = error.to_string().len();
+            assert!(json <= 4096 && *bytes <= 1_056 * 1024, "{json} / {bytes}");
+        }
+        let (bytes, error) = &replies[0];
+        assert_eq!(error["code"], -32602, "{error}");
+        assert_eq!(error["data"]["code"], "solo_invalid_arguments", "{error}");
+        for (other_bytes, other) in &replies {
+            assert_eq!(
+                (other_bytes, other),
+                (bytes, error),
+                "one fixed-size refusal"
+            );
+        }
+    }
+
+    /// Review 3 (B2): admission counts the JSON-RPC envelope. A legal
+    /// 60,000-byte string request id pushes the near-cap strip over R25,
+    /// so it is refused typed inside the budget; a numeric id still
+    /// receives the strip, and both complete bodies obey the budget.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn new_wire_budget_includes_string_request_id() {
+        let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+        let proof = Arc::new(ProofDouble {
+            noise: true,
+            ..ProofDouble::default()
+        });
+        let core = Core::spawn(doc(440, 440, 1, false)).unwrap();
+        let server = McpServer::start(core, media, proof).unwrap();
+        let raw = RawSession::open(&server).await;
+        let arguments = json!({"expected_revision": 0, "clip_id": 1, "full_res": true});
+        let (numeric_bytes, numeric) = raw.solo(json!(7), arguments.clone()).await;
+        let long_id = json!("i".repeat(60_000));
+        let (string_bytes, string) = raw.solo(long_id.clone(), arguments).await;
+        server.shutdown();
+
+        let strip: CallToolResult = serde_json::from_value(numeric["result"].clone()).unwrap();
+        assert_eq!(
+            strip.is_error,
+            Some(false),
+            "{:?}",
+            strip.structured_content
+        );
+        assert!(
+            numeric_bytes + 60_000 > 1_056 * 1024,
+            "the id alone tips it over"
+        );
+        let refusal: CallToolResult = serde_json::from_value(string["result"].clone()).unwrap();
+        assert_eq!(string["id"], long_id);
+        assert_eq!(refusal.is_error, Some(true));
+        assert!(refusal.content.iter().all(|b| b.as_image().is_none()));
+        let body = refusal.structured_content.unwrap();
+        assert_eq!(body["code"], "solo_over_budget", "{body}");
+        assert!(
+            body["message"].as_str().unwrap().contains("response_bytes"),
+            "{body}"
+        );
+        for bytes in [numeric_bytes, string_bytes] {
+            assert!(bytes <= 1_056 * 1024, "complete body {bytes}");
+        }
+    }
 }

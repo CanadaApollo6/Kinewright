@@ -61,7 +61,15 @@
   1,056 KiB (a path-bearing render failure) is answered as a fixed-size
   `solo_over_budget` instead, and a working raster past the device's 8192-px
   texture side is refused `solo_over_budget` (`render_side`) in every mode
-  before any product or allocation (fix round 1). A `context: isolated` sent for an
+  before any product or allocation (fix round 1). The budget is the whole
+  reply on the wire (fix round 2): admission counts the echoed JSON-RPC
+  request id plus 512 B of framing, so a long string id makes a near-cap
+  strip a typed `solo_over_budget` (`response_bytes`) rather than an
+  over-budget reply; only an id that alone exceeds the budget can still
+  overrun, since the protocol must echo it. Malformed arguments get one
+  fixed-size JSON-RPC InvalidParams (`preview_solo: invalid arguments`, data
+  code `solo_invalid_arguments`) instead of the decoder's message, which
+  echoes the input; other tools keep their decoder messages. A `context: isolated` sent for an
   adjustment is answered as `below` — the report says so — rather than
   refused, since R24 says "no override". Codes are `solo_clip_not_visible`,
   `solo_window_empty`, `solo_over_budget`, `solo_invalid_samples`,
@@ -72,8 +80,10 @@
   ≤ 700, stop at > 840). Evidence: B2 stopped at 423 landed lines plus a
   634-line GUI, projecting 1,140–1,210 against ≤ 800. Thinning (moving the
   viewer drag and wedge glyphs to MO6) was rejected as a change to R26. B3
-  landed at 690 production lines, over S7's ≤ 400 for GUI gestures + menus,
-  because it also holds the solo strip dialog and the parity seams. The
+  landed at 688 production lines and stands at 830 after fix round 1 (inside
+  the 840 stop), over S7's ≤ 400 for GUI gestures + menus, because it also
+  holds the solo strip dialog, its context/sample controls and the parity
+  seams. The
   projected MO2 total is ≈ 3,400 against 3,200 (~6% over, inside 20%),
   accepted per N13. R28 runs after the B1 review fixes, since those change
   the render hot path.
