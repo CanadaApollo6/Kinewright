@@ -31,6 +31,15 @@ where
     evictions: usize,
 }
 
+/// PF1 K-5: steps ordered smallest first, a forward step before an equal
+/// backward one (re-review D3: both where each point's nearest previous
+/// point is chosen and across points), so the order of the points never
+/// decides the direction.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn forward_first(step: &i64) -> (u64, bool) {
+    (step.unsigned_abs(), *step < 0)
+}
+
 /// PF1 K-5: the direction the demand on one source travels in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Travel {
@@ -71,10 +80,10 @@ where
             .iter()
             .filter_map(|point| {
                 let steps = self.last_demand.iter().map(|last| point.0 - last.0);
-                steps.min_by_key(|step| step.unsigned_abs())
+                steps.min_by_key(forward_first)
             })
             .filter(|step| *step != 0)
-            .min_by_key(|step| (step.unsigned_abs(), *step < 0));
+            .min_by_key(forward_first);
         if let Some(step) = step {
             self.travel = if step > 0 {
                 Travel::Forward
@@ -470,6 +479,28 @@ mod tests {
         assert_eq!(cache.travel(), Travel::Backward, "clearing keeps it");
         cache.set_demand(&[TimeCode(4)]);
         assert_eq!(cache.travel(), Travel::Forward, "stepped from 3");
+    }
+
+    /// PF1 K-5 (re-review D3): equidistant previous points and equal
+    /// opposite moves resolve forward whatever the order of the points.
+    #[test]
+    fn travel_ties_resolve_forward_in_any_order() {
+        let travel = |previous: &[i64], now: &[i64]| {
+            let mut cache = cache_of(&[]);
+            let points = |at: &[i64]| at.iter().copied().map(TimeCode).collect::<Vec<_>>();
+            cache.set_demand(&points(&[1000]));
+            cache.set_demand(&points(&[999]));
+            assert_eq!(cache.travel(), Travel::Backward, "the start");
+            cache.set_demand(&points(previous));
+            cache.set_demand(&points(now));
+            cache.travel()
+        };
+        // 5 is 5 from both previous points, in either order.
+        assert_eq!(travel(&[10, 0], &[5]), Travel::Forward);
+        assert_eq!(travel(&[0, 10], &[5]), Travel::Forward);
+        // One point moves +1, the other -1, in either order.
+        assert_eq!(travel(&[10, 20], &[11, 19]), Travel::Forward);
+        assert_eq!(travel(&[20, 10], &[19, 11]), Travel::Forward);
     }
 
     /// PF1 K-5 (review B F3): capacity eviction skips pinned frames, which

@@ -222,6 +222,26 @@ impl PreviewDemand {
     }
 }
 
+/// PF1 K-6 (re-review nit): the preview demand set aside for a thumbnail,
+/// restored when this drops, on return or while unwinding.
+struct PreviewAside<'a> {
+    renderer: &'a mut FrameRenderer,
+    preview: Option<PreviewDemand>,
+}
+
+impl<'a> PreviewAside<'a> {
+    fn new(renderer: &'a mut FrameRenderer) -> Self {
+        let preview = renderer.preview.take();
+        Self { renderer, preview }
+    }
+}
+
+impl Drop for PreviewAside<'_> {
+    fn drop(&mut self) {
+        self.renderer.preview = self.preview.take();
+    }
+}
+
 /// The single frame-rendering path used by both playback preview and export.
 pub(crate) struct FrameRenderer {
     video_sources: HashMap<VideoSourceKey, VideoSource>,
@@ -391,16 +411,11 @@ impl FrameRenderer {
         resolution: (u32, u32),
         scale: RenderScale,
     ) -> Result<FrameTexture, MediaError> {
-        let preview = self.preview.take();
-        let rendered = self.render(
-            document,
-            project_at,
-            resolution,
-            scale,
-            DecodeStrategy::Seek,
-        );
-        self.preview = preview;
-        rendered
+        let aside = PreviewAside::new(self);
+        let strategy = DecodeStrategy::Seek;
+        aside
+            .renderer
+            .render(document, project_at, resolution, scale, strategy)
     }
 
     /// MO2 R28 (ME13): [`Self::render`] and its compositor frame time —
@@ -1925,6 +1940,43 @@ mod tests {
         }
     }
 
+    /// PF1 K-6 (re-review D4): documents S1's bound across sources, not a
+    /// fix. C = 4f; source A demands 0/100/200 (three pins), B demands 0.
+    /// Each share is 2f: A cannot evict a pin and B, at exactly its share,
+    /// is not over it, so 5f stay resident: over C and over max(C, P·f) =
+    /// 4f, and equal to the sum over sources of max(share, pinned) =
+    /// 3f + 2f. S2b-3's I12 must close this.
+    #[test]
+    fn mixed_sources_hold_their_shares_and_pins_over_the_budget() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_a, a) = small_source("pf1-mixed-a", "testsrc2", 1, 8);
+        let (_b, b) = small_source("pf1-mixed-b", "smptebars", 2, 8);
+        let mut document = three_demands_on_one_source(a);
+        let mut track = document.tracks[0].clone();
+        (track.id, track.clips[0].id, track.clips[0].asset) = (TrackId(4), ClipId(4), b.id);
+        track.clips[0].source_range = TimeCode(0)..TimeCode(40);
+        document.tracks.push(track);
+        document.media_pool.push(b);
+        let frame = working_bytes((64, 36));
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        renderer.set_cache_budget(4 * frame);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let strategy = DecodeStrategy::Sequential;
+        let shown = renderer.render_live(&document, TimeCode(0), (64, 36), scale, strategy);
+        shown.expect("a frame renders");
+        let mut held = renderer
+            .video_sources
+            .values()
+            .map(|source| source.cache.byte_len() / frame)
+            .collect::<Vec<_>>();
+        held.sort_unstable();
+        assert_eq!(held, [2, 3], "B its 2f share, A its three pins");
+        assert_eq!(renderer.total_cache_bytes(), 5 * frame);
+    }
+
     /// A 64×36 ffv1 BT.709 source of `seconds` at 30 fps.
     fn small_source(
         label: &str,
@@ -1975,6 +2027,22 @@ mod tests {
         let thumbnail = renderer.render_thumbnail(&document, TimeCode(40), (64, 36), scale);
         thumbnail.expect("a thumbnail");
         assert_eq!(demand(&renderer), before);
+
+        // An error return restores the demand too (re-review nit).
+        let mut missing = document.clone();
+        missing.media_pool[0].path = "/nonexistent/pf1-thumbnail.mkv".into();
+        let failed = renderer.render_thumbnail(&missing, TimeCode(40), (64, 36), scale);
+        assert!(failed.is_err(), "the source is missing");
+        assert_eq!(demand(&renderer), before, "restored after an error");
+
+        // And so does unwinding: the restoration is scoped.
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let aside = PreviewAside::new(&mut renderer);
+            assert!(aside.renderer.preview.is_none(), "set aside");
+            panic!("a thumbnail render unwinds");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(demand(&renderer), before, "restored while unwinding");
     }
 
     /// PF1 G5 (K-6): two continuous sources under a binding budget decode
