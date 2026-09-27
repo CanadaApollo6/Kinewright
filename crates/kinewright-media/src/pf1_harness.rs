@@ -627,7 +627,8 @@ fn pf1_rss_baseline() {
             .output()
             .expect("the P-rss child runs");
         let stdout = String::from_utf8_lossy(&child.stdout);
-        let line = stdout.lines().find(|line| line.starts_with("PF1 rss "));
+        // libtest prints `test … ... ` on the same line before the output.
+        let line = (stdout.lines()).find_map(|line| Some(&line[line.find("PF1 rss ")?..]));
         let stderr = String::from_utf8_lossy(&child.stderr);
         let line = line.unwrap_or_else(|| panic!("the P-rss child failed: {stderr}"));
         println!("{line} lane={lane} workload={key}");
