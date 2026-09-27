@@ -1175,6 +1175,8 @@ impl KinewrightApp {
                     [frame.width as usize, frame.height as usize],
                     &frame.pixels,
                 );
+                // A branch thumbnail, not a transport frame: never acked.
+                self.presenter.clear();
                 if let Some(texture) = &mut self.texture {
                     texture.set(image, egui::TextureOptions::LINEAR);
                 } else {

@@ -1318,7 +1318,7 @@ impl KinewrightApp {
             && project_index == self.focused_project
             && self.playhead_media_asset_id() == Some(response.asset_id)
         {
-            self.texture = None;
+            self.clear_preview();
             self.playback.pause();
             self.playing = false;
         }

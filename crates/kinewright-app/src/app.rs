@@ -401,6 +401,8 @@ pub(crate) struct KinewrightApp {
     pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
     pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
+    /// PF1 R-2/R-5: frame candidates, the display cell and paint marks.
+    pub(crate) presenter: crate::presenter::Presenter,
     pub(crate) color_scopes: crate::color_scopes_ui::ColorScopesState,
     /// CC6 §8.1 Colour QC: the read-only measurement window and its single
     /// worker. Nothing in it can reach the document.
@@ -653,6 +655,7 @@ impl KinewrightApp {
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
             noise_learn: NoiseLearnState::default(),
@@ -886,7 +889,7 @@ impl KinewrightApp {
         self.meter_levels = [0.0; 2];
         self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
         self.mixer_selection = None;
-        self.texture = None;
+        self.clear_preview();
         self.focused_project = index;
         let document = Arc::clone(&self.focused().document);
         let position = self.focused().position;
@@ -2668,7 +2671,7 @@ impl KinewrightApp {
                     }
                     if project_index == self.focused_project {
                         if !media_changed_assets.is_empty() {
-                            self.texture = None;
+                            self.clear_preview();
                         }
                         let position = self.projects[project_index].position;
                         if !apply_live_audio_change(
@@ -2793,13 +2796,31 @@ impl KinewrightApp {
         // so the generations it compares have settled for this tick.
         self.poll_sidecar_flush();
 
-        let mut newest_frame = None;
         while let Ok(frame) = self.frames.try_recv() {
-            newest_frame = Some(frame);
+            self.presenter.collect(frame);
         }
+
+        if self.playing {
+            let position = self.playback.position();
+            self.focused_mut().position = position;
+            ctx.request_repaint_after(Duration::from_millis(10));
+        }
+    }
+
+    /// The preview texture is gone: nothing describes or marks it (R-2).
+    pub(crate) fn clear_preview(&mut self) {
+        self.texture = None;
+        self.presenter.clear();
+    }
+
+    /// PF1 R-2: the last step of `ui`, after every transport call in the
+    /// pass, binds the newest valid candidate and writes the display cell.
+    fn finalize_preview(&mut self, ctx: &egui::Context) {
+        let latest = self.playback.stamp();
+        let playing = self.playing.then(|| self.playback.position());
         if let Some(PreviewFrame {
             at, texture: frame, ..
-        }) = newest_frame
+        }) = self.presenter.finalize(latest, playing)
         {
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [
@@ -2817,15 +2838,9 @@ impl KinewrightApp {
                     egui::TextureOptions::LINEAR,
                 ));
             }
-            if !self.resume_after_scrub {
+            if !self.resume_after_scrub && !self.playing {
                 self.focused_mut().position = at;
             }
-        }
-
-        if self.playing {
-            let position = self.playback.position();
-            self.focused_mut().position = position;
-            ctx.request_repaint_after(Duration::from_millis(10));
         }
     }
 
@@ -2978,6 +2993,15 @@ impl KinewrightApp {
 }
 
 impl eframe::App for KinewrightApp {
+    /// PF1 R-5 (R17): a paint mark from an earlier root epoch is acked once
+    /// per bound image.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        if let Some((stamp, at)) = self.presenter.take_ack(epoch) {
+            self.playback.ack_presented(stamp, at);
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let measured_frame = self.performance.as_ref().map(|_| std::time::Instant::now());
         self.update_window_title(ui.ctx());
@@ -3030,6 +3054,7 @@ impl eframe::App for KinewrightApp {
         self.show_motion_plan_dialog(ui.ctx());
         self.show_solo_dialog(ui.ctx());
         self.screenshot.update(ui.ctx());
+        self.finalize_preview(ui.ctx());
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
             && probe.frame(ui.ctx(), began, self.texture.is_some())
         {
@@ -5610,6 +5635,7 @@ pub(crate) mod in1_tests {
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
             noise_learn: NoiseLearnState::default(),
@@ -10260,6 +10286,7 @@ mod in2b_tests {
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
             noise_learn: NoiseLearnState::default(),

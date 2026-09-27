@@ -1003,6 +1003,25 @@ impl KinewrightApp {
             },
             viewer_sense(overlay.is_some() || transform_target.is_some()),
         );
+        // PF1 R-5: the Program picture is the bound preview frame: mark its
+        // paint (over the image rect, clipped to the viewer) for the ack.
+        let program = picture.is_some() && picture == texture.as_ref();
+        if let (true, Some(image_rect)) = (program, frame.image_rect) {
+            let epoch = ui.ctx().cumulative_frame_nr_for(egui::ViewportId::ROOT);
+            let playback = Arc::clone(&self.playback);
+            let marker = (self.presenter).marker(epoch, Box::new(move || playback.stamp()));
+            ui.painter_at(frame.response.rect)
+                .add(marker.shape(image_rect));
+            if self.presenter.stale() {
+                theme::paint_caps(
+                    &ui.painter_at(image_rect),
+                    image_rect.left_bottom() + egui::vec2(space::TWO, -space::TWO),
+                    egui::Align2::LEFT_BOTTOM,
+                    "STALE",
+                    color::STATUS_WARNING,
+                );
+            }
+        }
         if let (Some(target), Some(image_rect)) = (&transform_target, frame.image_rect) {
             self.handle_transform_drag(ui, &frame.response, image_rect, target);
         }
