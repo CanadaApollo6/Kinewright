@@ -858,6 +858,25 @@ resident sources (ME13). The new standalone slice **PF1, playback
 performance**, owns the fix. It blocks the production session and is
 proposed next, ahead of AW2. The WARP 20 fps floor is measured on a local
 Windows VM, not in hosted CI (ME14).
+**PF1 design promoted 2026-09-27** (`docs/PF1-PLAYBACK-PERFORMANCE.md`,
+evidence in `docs/PF1-EVIDENCE.md`; Riel confirmed PF1 ahead of AW2).
+- *Diagnosis.* Typical two-source 1080p previews at 1.8 fps on both
+  lanes. The causes are:
+  - a 36 ms per-pixel CPU transfer decode;
+  - cross-source cache thrash;
+  - a 19–26 ms CPU monitor encode;
+  - synchronous rendering on the audio worker;
+  - an audio clock that advances through underruns.
+- *Fix, in stages.* The work lands in eight stages: S0, S1, S2a, S2b,
+  S2c, S3a, S3b and S4 (about 5,560 lines, harness included).
+  - Exact 16-bit SDR conversion tables, bit-identical to today.
+  - A preview-only scheduler with budgeted readers and decoder-thread
+    permits. Export and proofs keep today's path.
+  - Scrub continuation, used only where it provably matches a seek.
+  - A GPU display encode with paint-confirmed display slots.
+  - An audio clock that counts only the samples it actually played.
+- *Order and deferrals.* PF1 lands before CC8 S2, then CC8 S3.
+  Hardware decode and GPU YUV conversion are deferred with evidence.
 
 Each slice writes its design doc (≤ ~600 lines) before implementation
 and records deferrals explicitly, as the colour and audio slices did.

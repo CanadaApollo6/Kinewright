@@ -1,0 +1,758 @@
+# PF1 — Playback performance
+
+> Status: **promoted 2026-09-27** (revision 4 plus the rev-4 closure edits,
+> after an Astra critic and three closure checks). Recipe v2. Binding: MO2 ME13–ME16,
+> N19–N26, P3 (R1–R9), P5 (R11–R14), P7 (R15–R18; R15 supersedes R10), P8 (R19
+> amends R16), the roadmap motion section, AW0 A1, `docs/PERFORMANCE.md`.
+> Pinned: eframe/egui/egui-wgpu 0.35.0, wgpu 29.0.4, FFmpeg n8.0. Non-normative
+> material (diagnosis, T1–T9, commands, provenance, checklist, rev-2/rev-3
+> mappings, cache arithmetic): `docs/PF1-EVIDENCE.md`, `scripts/pf1-probe-replay.sh`.
+> Symbols, not `file:line`; every rule has an ID and an owning stage (§13).
+
+## Revision 4 changelog
+
+| Finding (rev-3 closure edit) | Where it is resolved |
+|---|---|
+| R15; RB3 (edit 3); streaming deadlock | §5: the scheduler serves the preview raster only; K-3 synchronous fallback for sets > C or > R sources, counted, G17; streaming, banding and lazy `decoded_layers` deleted and deferred (D11); K-2 atomic admission kept, with a drain flag and headroom sized from actual frame bytes; K-6 proofs/export/thumbnails keep today's renderer |
+| R16 (as amended by R19); RB2 (edit 2) | §6 H-5: only readers hold permits (pool = P); synchronous decoders keep min(P, 16), outside the pool, oversubscription stated; acquire at open, release at close; `shrink` only in inactive states; strict FIFO; P = 1/2/3/20; 10 + 10 with transitions; H-1 synchronous decoders closed before the preview parks |
+| RB1 (edit 1) | §6 H-2 5 s quiescence deadline for every inactive reader state; H-3 failures matched by plan version, obsolete ones dropped before any stamp is attached |
+| RB4 (edit 4) | §7 R-2: ordered drag images kept; superseded-seq errors suppressed; expired playback candidates never newly published; held vs stale images distinguished |
+| R17; RB5 (edit 5); slot exhaustion; terminal retirement | §10 G-4 one rebind per epoch, bounded slot wait, retirement repaint; G-4/G-7 terminal "no future paint" handoff in `on_exit`/`Drop` |
+| R17; RB8 (edit 7); false paint success; ineffective control | §7 R-5 marker from the egui-wgpu `paint` callback, acked once at a later root epoch; §2 Q-3 and §11 G16 clock-progress gate the freeze control fails |
+| R18; RB6 (edit 6) | §8 S-2 indexed recovery anchor verified at the run's seek, valid decoded timestamps, fallback when unknown; reordered-timestamp and edit-list witnesses |
+| RS5 (edit 8) | replay: exact anchor counts for every patch, including both `sed` substitutions; phases kept |
+| RS7 (edit 9) | §7 R-4: agent jobs render synchronously (R15); bound counts intervening transport attempts; cancellation notifies; arrival suspends a paused FrameWait |
+| RS8 (edit 10) | §4 X-5: `8 + R` reader bound from S2b-2 (permits before construction); live counter reports actual holders, synchronous ones included, throughout |
+| RS6 (edit 11) | §13: S2b split into S2b-1…S2b-4, each with its own must-pass; budgets re-estimated (≈ 5,560 after closure edits, was 5,830) |
+| rev-4 closure edits | (1) R19: header, H-5, I11, G13, G18, §13; (2) H-2/H-5 PermitWait, tickets, close-before-growth, prompt retirement; (3) S-2 shadow-seek anchor; (4) R-2/R-5/I18 finalised display cell; (5) X-5 bound at S2b-2 |
+
+## 0 Goal and scope
+
+**Goal.** Real-time preview playback and interactive seek/scrub on the three
+production timelines (§3), without changing rendered bytes (CC1–CC8 S1, MO2
+pins) and within stated memory ceilings. Today typical two-source 1080p plays at
+1.8 fps on lavapipe and the RTX 3090 (evidence T4). **In scope:** exact SDR
+conversion tables (§4), a hard-budget preview cache (§5), a preview thread and
+readers under thread permits for the preview raster only (§6), stamped
+presentation (§7), seek/scrub (§8), a clock that cannot drift (§9), a GPU SDR
+display path without full-frame readback (§10). Proofs, export and thumbnails
+keep today's synchronous renderer plus the exact tables (R15). **Out of
+scope:** §15; HDR display paths belong to CC8 S3 (§12).
+
+## 1 Diagnosis (summary; table and boundaries in evidence E0/E1)
+
+Conversion costs 36 ms per 720p source frame; two sources thrash the cache;
+rendering starves `fill_audio`; CPU monitor encode costs 19–26 ms; seeks always
+reseek; the clock advances through underruns. The post-S1 model (≈ 4 ms per
+source frame plus decode) is **provisional** until S1 re-measures it.
+
+## 2 Measurement protocols, lanes and pins
+
+**Q-1 [S0] Lanes.** CI-L (Linux, lavapipe) and CI-W (Windows, WARP) run only
+deterministic tests (correctness, parity, cancellation, stepped audio, ledger,
+counters, models). Timing runs only on LL (local lavapipe) and LH (local RTX
+3090), `--ignored` release, and by hand on the Win11 WARP VM (ME14).
+
+**Q-2 [S0] Protocols.** *P-comp* is ME13's compositor protocol, unchanged.
+- *P-play:* three runs per workload after a 2 s warm-up, pinned seeds, the
+  real-time simulated audio driver (V-5). The denominator is fixed by the
+  timeline: duration × fps due frames (1,800 for 60 s; 7,200 for `talk_recut`).
+  A run is valid only if the clock reaches the duration and the wall clock
+  elapsed ≤ 1.02 × duration + 0.5 s; due frames the clock never passed count as
+  dropped. Each run is reported and must pass alone. Metrics: due-frame
+  outcomes (R-5), present-interval distribution, max held age, A/V offset at
+  ack, max clock stall (longest span, sampled every 5 ms, with `position()`
+  unchanged while playing), `underrun_frames`, peak RSS, ledger peak.
+- *P-seek:* three runs of 200 random seeks, 200 forward steps (+1…+12), 200
+  backward steps, then a 5 s drag of `request_frame` at 30 Hz, pinned seeds.
+  Each latency runs from the transport call on the caller thread to the
+  consumer's receipt of the first frame whose stamp is that call's or newer
+  (harness), or to its ack (app). p95 per run, worst run reported.
+- *P-rss:* a fresh process per measurement via `process_memory()`: Linux
+  VmRSS/VmHWM and `/proc/self/task`; Windows `GetProcessMemoryInfo` and Toolhelp.
+
+**Q-3 [S0] Controls** (each must fail its metric): *slowdown* (+50 ms per
+preview render fails G1); *freeze* (publication stopped 1 s with the clock
+running fails G14); *clock freeze* (clock stopped 1 s while playing fails
+G16, whatever the validity allowance); *stall* (2 s `fill_audio` stall
+registers `underrun_frames` > 0).
+
+**Q-4 [S4] Pins (R5).** ME13 `BASELINES` and `r28_end_to_end_tracked`'s 5%
+rule stay untouched and gating. `PF1_PINS` records workload, path, protocol,
+machine (CPU, GPU, driver), build (commit, rustc, FFmpeg build) and metrics; a
+paced pin never replaces an unpaced render baseline.
+
+## 3 Workloads
+
+**W-0 [S0] Fixtures.** `mo2_perf_fixtures`' builders move to a shared
+`pub(crate) perf_fixtures` module (MO2 tests unchanged). Video comes from the
+pinned tool with MO2's x264 arguments plus `size`, `-g` and optional
+`noise=alls=10:allf=t`; audio uses `test_support::tone`/`wav_f32`, never lavfi
+(AU6 11.0.1), and a music track keeps the ring live.
+
+**W-1 [S0] Workloads** (30 fps), plus MO2's `typical_1080p` and
+`blend_heavy_1080p` unchanged:
+
+| Name | Document | Sources | Timeline | Mirrors |
+|---|---|---|---|---|
+| `explainer_16x9` | 1920×1080, 60 s | noisy 1080p GOP 250 presenter (60 s); three GOP 60 cutaways (testsrc2, smptebars, gradients; 8 s) | V1 presenter; V2 cutaway every 6 s for 3 s; PiP at 35%; two callouts, a title card; music | Firestore explainer |
+| `reel_9x16` | 1080×1920, 60 s | two noisy 1080×1920 GOP 60; one 1080p scaled to fill | three video tracks, a cut every 1.5 s; four keyframed titles (Scale, OffsetX/Y, Rotation); one Screen blend; one adjustment clip; music | MockingBoard Reel |
+| `feed_4x5` | 1080×1350, 60 s | as `reel_9x16` at 1080×1350 | same edit | MockingBoard feed |
+| `talk_recut` | 1920×1080, 240 s | noisy 1080p GOP 250, 600 s, AAC tone | 120 spans of 2 s; span *i* starts at Σ jumps, jumps cycling 0.5/2/5 s (extent ≈ 540 s; same-GOP jumps included); one lower third | talk → essay |
+
+**W-2 [S0] Coverage limits (AW0 A1).** *Native SVG code clips* re-rasterise
+per frame; with none in the fixtures, their raster and cache gates are owed by
+AW2 (D10); static ones hit U-2. *External-render clips* (Remotion first) are
+cached, hash-addressed project media played by PF1's ordinary path; a fixture
+joins W-1 once AW2 fixes the format (D10). AW2 owns external rendering,
+invalidation, pending states and process cleanup; PF1 prescribes no live
+producer. The PERFORMANCE heavy-4K, agent and desktop lanes are rerun at S4.
+
+## 4 Exact conversion tables (SDR only)
+
+**X-1 [S1] Input tables keyed by the conversion-determining fields.**
+`ConversionKey` = matrix, range, bit depth and transfer: every field that
+determines `rgba64_normalization_max`, the `expand_native_range` branch and
+`decode_transfer`. `TransferTable` (65,536 u16 → f16-bit entries, 128 KiB) is
+filled by running the **existing** per-pixel arithmetic for each code. Alpha uses
+one static table (code / 65,535). Error behaviour is kept exactly: the
+pre-loop checks ("managed source depth rejected", "…frame is too large", the
+RGBA64 length mismatch) stay before any lookup and still fire for empty images;
+the per-pixel errors ("…RGB range expansion failed…", "…colour decode failed…")
+are descriptor-determined and value-independent, so a table build failure
+returns the same text at the first pixel and empty images still raise none.
+
+**X-2 [S1] Parity through the production dispatch (R1).**
+`input_tables_match_every_accepted_descriptor` enumerates `ColorPrimaries` ×
+`ColorWhitePoint` × `ColorMatrix` × `ColorRange` × `ColorBitDepth` (incl.
+`Integer(8..=16)`) × `ColorTransfer` × assumption. That includes a
+representative of every rejected class: `Unknown` in each field, and the
+unsupported combinations. Each tuple goes through `select_conversion`, which is
+`classify_source_with_assumption`, then `rgba64_normalization_max`, then the
+`Conversion` choice. `Separable` tuples must be bit-identical to
+`from_rgba64_le` for all 65,536 codes, `PerPixel` tuples must route to today's
+f32 path, and rejected tuples must return today's error. CC8 S2's widened
+acceptance is thereby exercised automatically (§12).
+
+**X-3 [S1] One-pass fill.** `read_plane` + flip + rotate + lookup write the f16
+buffer directly; equal to the unfused path for 4 rotations × flip.
+
+**X-4 [S1] SDR only (R2).** Only `Conversion::Separable` reaches tables; the HDR
+input adapter and any cross-channel transform select `Conversion::PerPixel`
+(today's exact f32 path) by exhaustive `match`. No f16 foreign-space store (CE9).
+
+**X-5 [S1] Table inventory** (computed at runtime; invalidation is by key).
+
+| Table | Size | Instances | Owner, lifetime |
+|---|---|---|---|
+| Input alpha | 128 KiB | 1 | process `LazyLock` |
+| Input RGB | 128 KiB | ≤ 8 in registry + one per live decoder holding an evicted key | registry `Mutex<HashMap<ConversionKey, Arc<_>>>` (leaf), `OnceLock` per key, so one build per key at a time; LRU drops membership only. The live-byte counter (build +, `Drop` −) reports the actual holders in stats from S1, synchronous decoders included throughout. From S2b-2, readers acquire permits before constructing decoders, so reader-held tables ≤ R; synchronous decoders (H-5) add one each |
+| Monitor RGB, alpha (BT.709 SDR) | 64 KiB each | 1 | process `LazyLock`; CPU encode (G-1) |
+| egui premultiply | 64 KiB | 1 per app | built by the app (G-3, S3a) |
+| GPU monitor + premultiply | 192 KiB | 1 per device | `DisplayEncoder` storage buffer, ledger-charged, staged by ME16's atlas pattern, rebuilt on device recreation |
+
+## 5 Preview cache budget and admission (R3, R15)
+
+**K-1 [S2b-3] Accounting.** `PreviewBytes` counts every unique `WorkingFrame`
+allocation (`shared_buffer_id`) owned by the scheduler path: source rings,
+`title_cache` rasters, reader handoffs, in-flight conversions (by reservation)
+and frames pinned by the current render. A `Reservation` is taken before
+converting and travels into the frame's drop guard; it releases when the last
+`Arc` drops, never under `Sched` (H-4). C = `FRAME_CACHE_BYTE_BUDGET` = 224 MiB
+is hard for this path: **I12**, scheduler live bytes ≤ C at all times.
+Synchronous renderers (K-6) report their live bytes through the same counter
+type, in stats, under today's policy.
+
+**K-2 [S2b-3] Atomic admission (preview path).** A job's required set is its
+distinct required source frames at the proxy raster plus generated rasters, of
+q bytes not yet resident. (1) If the whole set exceeds C, the frame takes K-3
+at once. (2) Otherwise the reservation is atomic under `Sched`: if live + q >
+C, the preview sets `draining` (no lookahead is admitted), evicts unpinned
+lookahead (victims dropped after unlock) and cancels outstanding lookahead
+conversions, whose readers check the cancel flag per row band and release.
+(3) Only then does it wait on `ready`, and only for live ownership (pinned
+frames, cancelled conversions draining), never on evictable work. `draining`
+clears when the reservation is taken.
+
+*Lookahead* for source *s* is admitted while ¬`draining`, live + f ≤ C − H and
+*s*'s lookahead < share, where H = n_active · f is one full required set at the
+actual frame size, share = (C − G − H) / n_active, and G is the generated
+rasters. The ≥ 8-frame target is best-effort: a smaller share shrinks the
+horizon, down to just in time, and counts `lookahead_starved`.
+
+**K-3 [S2b-3] Synchronous fallback (R15).** A frame whose required set exceeds
+C, or needs more distinct sources than R readers (H-5), is rendered as today by
+the preview's synchronous `FrameRenderer` (its own cache, the S1d window), after
+the preview drops all unpinned lookahead; the result carries the job's stamp
+(R-2). Each counts `sync_fallback_frames{reason}`; G17 requires it rare on
+every W workload (the largest W set, 4 sources + 4 titles, is ≈ 80 MiB at
+1024×1280, so expected 0). Bounded streaming, banding and a lazy
+`decoded_layers` are deferred (D11).
+
+**K-4 [S2b-3] Arithmetic** (evidence E8): lookahead 13 frames for typical, 8
+for `reel_9x16`, 5 for `feed_4x5` and 2 for 8 sources (the last two starved).
+
+**K-5 [S2b-3] Eviction by distance.** Within a ring the victim is the frame
+farthest from every demand region on that source (two readers → two regions),
+behind-travel first. Across rings, inactive sources go first, then sources over
+share. Pinned frames are never evicted. On a job change the preview drops
+obsolete lookahead **before** it waits.
+
+**K-6 [S1] Proofs, export, thumbnails (R15).** `monitor_proof_for_document`,
+export and agent thumbnails keep today's synchronous `FrameRenderer`, cache and
+policy, gaining only X-1…X-5 and live-byte reporting. S1d makes the *preview*
+renderer's Sequential window clamp(⌊(C − G) / (n·f)⌋, 1, `PREFETCH_FRAMES` +
+1), fixing the thrash (G5) before readers exist; that renderer later serves K-3.
+Thumbnails use `DecodeStrategy::Seek` (no window). S1 claims no I12.
+
+## 6 Preview thread, readers, permits, shutdown
+
+**H-1 [S2a/S2b-1] Threads.** The *media worker* keeps `Control` handling,
+`fill_audio`, the cpal stream (not `Send`), `SharedClock` and transport, and
+never renders (S2a). The *preview* (`kinewright-preview`) owns the scheduler
+compositor, the display slots and one synchronous `FrameRenderer`, which serves
+every preview render in S2a and only agent jobs (R-4) and K-3 from S2b.
+*Readers* (`kinewright-decode-{n}`, S2b-1) each own one `VideoDecoder` (≤ R,
+≤ 2 per `VideoSourceKey`) and follow the preview's `DecodePlan` (required times,
+then lookahead; clips starting inside the horizon are pre-rolled).
+*Synchronous decoders* belong to export, proofs and the preview's renderer; the
+preview clears its renderer's `video_sources` after a synchronous job unless
+another is queued, so none outlives a park (G15).
+
+**H-2 [S2b-1] `Sched`: shared state and participant states.** A
+`Mutex<SchedState>` with condvars `work` (readers) and `ready` (preview) holds
+`shutdown`; the single-slot `transport: Option<Job>` + `version`; `agent:
+VecDeque<AgentJob>` (≤ 8); per reader `plan {version, required, lookahead}`,
+`state`, `shrink`, `inactive_since`; the ring index; `failures: Map<(SourceKey,
+time), Failure{plan_version, error}>`; `PreviewBytes`, reservations and
+`draining`; and `preview_failure: Option<(FrameStamp, MediaError)>`.
+Predicates are evaluated under the lock (spurious wakeups are harmless); each
+participant is in exactly one state. The *inactive* reader states (Idle,
+BudgetWait) time out at `inactive_since` + 5 s into Retiring (the quiescence
+deadline); PermitWait retires only once its demand is obsolete (H-5), so a
+required request is never lost:
+
+| Who | State | Waits on | Leaves when |
+|---|---|---|---|
+| Reader | Idle | `work`, timed | plan version changes; `shrink` (→ close, reopen); `shutdown`; timeout |
+| Reader | Runnable → Decoding | nothing (outside the lock) | frame done (insert per H-3), cancel flag, `shutdown` at a packet boundary |
+| Reader | BudgetWait (lookahead only) | `work`, timed | admissible (K-2); plan change; `shrink`; `shutdown`; timeout |
+| Reader | PermitWait (holds 0 permits, no decoder) | `Permits` cv | granted at the FIFO head; demand obsolete (ticket removed, notify); `shutdown` |
+| Reader | Retiring | nothing | closes its decoder outside all locks, returns permits, exits |
+| Preview | Parked | `ready`: untimed if paused, timed to the next due time if playing | new `version`; agent push; `shutdown`; due time |
+| Preview | Rendering / Staging / SyncRender | nothing (outside the lock) | done |
+| Preview | FrameWait(job) | `ready`: untimed for paused jobs, timed to the deadline for playback | each required (source, time) has a result or matching failure; superseded; agent push (paused only, R-4); `shutdown` |
+| Preview | Holding(frame) | `ready`, timed to `at` | due; superseded; `shutdown` |
+| Preview | ReservationWait | `ready` | a live-owned reservation released (K-2); superseded; `shutdown` |
+
+The worker never waits on `Sched`: it locks only to post a job or read
+`preview_failure`, O(1) each.
+
+**H-3 [S2b-1] Versioned results and failures; notifications.** A reader result
+carries (`VideoSourceKey`, time, plan version, reservation). Frame bytes are
+determined by (key, time), so a result from an older plan version is inserted
+pinned if the current job requires it, as lookahead if admissible, and
+otherwise dropped after unlock. A failure carries its plan version. It is
+recorded only if that version is the reader's current plan version and (key,
+time) is currently required; any other failure is dropped (the time is
+re-demanded if still needed). An obsolete failure can therefore never acquire a
+current job's stamp. A job consumes only failures for its own keys and plan
+version, surfaced with its own stamp (R-2). *Notify:* job posted, agent pushed or
+cancelled → `ready` (and `work` for jobs); plan changed or `shrink` → `work`;
+result or failure → `ready`; eviction, reservation release, cancel drain,
+`draining` cleared → both; `shutdown` → `notify_all` on both. Required frames
+never wait on speculative work (K-2), so no capacity/frame wait cycle persists.
+
+**H-4 [S2a+] Lock order.** No thread holds two of {`Sched`, `Permits`,
+`Coalesced`, `DisplaySlots`, the table registry, the ledger}. Nothing that could
+lock is dropped under `Sched`: evicted `Arc`s, reservations, reply `Sender`s
+and decoders move into a local `Vec` dropped after unlock, and the drop guard
+debug-asserts that a thread-local "holding `Sched`" flag is clear. No lock is
+held across FFmpeg calls, wgpu submit/poll/map, channel sends or conversion.
+
+**H-5 [S2b-2] Thread permits (R4, R16, R19).** Only readers hold permits.
+- *Synchronous decoders* (export, proofs, thumbnails, K-3) keep today's min(P,
+  16) frame threads outside the pool, never revoked or waited on. **I11**:
+  reader frame threads ≤ P (`available_parallelism`). Export or a proof during
+  playback oversubscribes by min(P, 16) per synchronous decoder: allowed,
+  stated, not a deadlock risk, counted as `sync_decoders`; G18 guards export.
+- *Readers.* At most R = clamp(P, 1, 8). A reader acquires at open and releases
+  at close, its thread count fixed for its decoder's life. It wants w =
+  clamp(⌊P / n⌋, 1, 16), n being the readers the current plan needs (the
+  preview opens a plan's readers together).
+- *FIFO grants.* `Permits` is a monitor with a FIFO of tickets; only the head is
+  granted, min(w, free) if ≥ 1, and new requests never bypass waiters. A
+  retired or cancelled request removes its ticket and notifies the `Permits`
+  cv, so the next head is re-evaluated.
+- *Rebalancing only at open, close and idle retirement.* While a ticket waits
+  or a reader is short (granted < w), every reader holding more than the
+  current w gets `shrink`, acted on only in an inactive state, never while
+  Decoding: it closes and releases, then queues a new ticket at w and reopens
+  (one seek from its cursor; frames exact). A short reader likewise closes and
+  releases at an inactive boundary *before* queuing for growth, so no ticket is
+  held with permits. While a ticket waits, inactive readers whose demand is
+  obsolete retire at once instead of at the 5 s deadline. Readers go inactive
+  whenever their plan is satisfied or budget-blocked, so these land within one
+  decode run. No reader waits holding permits and synchronous decoders never
+  wait, so there is no deadlock; FIFO prevents starvation.
+- *Small P:* P = 1: R = 1, one thread; P = 2: R = 2, 1 + 1; P = 3: R = 3, 1 + 1
+  + 1 or 3 alone. A plan needing more than R readers renders by K-3.
+- *Arithmetic (P = 20, R = 8).* One source gets 16 (the cap). A second source
+  wants w = 10 with 4 free: granted 4, short. Reader 1 gets `shrink`; at its
+  next inactive point it closes (16 free), re-queues and is granted 10; reader
+  2 closes at its inactive point and is granted 10: 10 + 10 after one reopen
+  each. Three sources: 6 + 6 + 6 (2 spare); four: 5 × 4 = 20 (today 64); a
+  same-source jump cut: 10 + 10. Export runs beside them at 16 per decoder.
+
+**H-6 [S2a/S2b-1] Shutdown** (the control channel disconnects). (1) The
+worker locks `Sched`, sets `shutdown`, moves the agent queue out, notifies all,
+unlocks, then replies `Backend("media worker stopped")` to each moved job and
+wakes `Permits` waiters. (2) It stops audio, as today. (3) Readers leave any
+state at their next check, close decoders, return permits and exit. (4) The
+preview replies "media worker stopped" to an active unreplied agent job,
+finishes any ME16 deadline-free wait, runs G-7 teardown (no epoch needed, G-4)
+and exits. (5) The worker joins readers, then the preview, without timeout; it
+stays detached from the app, as today, so the UI never blocks, and a GPU wait
+that never completes keeps its thread and charges (ME16's stance).
+
+**H-7 [S2b-4] Idle.** Engine constructed, no document: +0 threads. First render
+(`set_document` → `present(0)` → a paused job): +1 preview, plus readers of the
+visible sources. Settled: readers retire 5 s after going inactive, closing their
+decoders; the preview stays parked (+1 thread) with no synchronous decoder.
+**I10** checks this on CI with an injected clock; RSS is a pinned local gate
+(G15). AW1 B5 proxy mode still constructs no engine.
+
+**H-8 [S2b-1…4] Scheduler tests.** Each S2b commit extends an exhaustive
+(event × state) model of `SchedState` + `Permits`: quiescence timeout in every
+inactive state; stale result and stale failure; `shrink` while Idle,
+BudgetWait and Decoding (deferred); a short grant; a request behind waiters;
+shutdown in every state; agent push, cancel and suspend in a paused FrameWait; a
+fallback frame; P ∈ {1, 2, 3, 20} with an idle retained reader, two concurrent
+synchronous jobs and a plan growing 1 → 2 → 4 sources. A seeded 10,000-sequence
+stress test runs under a watchdog; race and kill tests run on Opus.
+
+## 7 Stamps, jobs and presentation
+
+**R-1 [S2a] Stamps at issue (RB4).** Core adds `FrameStamp { epoch, seq }`.
+Every `FfmpegMediaEngine` transport call takes a stamp on the caller's thread:
+`seq` increments on every call, `epoch` also for `seek`, `play`, `pause` and
+`set_document` (not `request_frame`). Controls carry their stamp. The coalesced
+seek/frame atomics become one leaf `Mutex<Coalesced>` of `(target, stamp)`
+pairs. The worker posts a coalesced request only after applying every control
+whose epoch ≤ the request's (else it waits one loop), so each job binds its
+stamp to its target and that epoch's document and LUT; queued work is never
+relabelled. Worker-initiated stops (EOS, audio failure) take no stamp.
+
+**R-2 [S2a] Validation at the final consumer.**
+- *Channel:* `Playback::frames()` becomes `Receiver<PreviewFrame { at, stamp,
+  texture }>`; `Playback::stamp()` is added (default zero); the twelve
+  implementors change mechanically.
+- *Selection:* `poll_background` only collects candidates. `finalize_preview`,
+  the last step of `App::ui` (after every keyboard, timeline and transport call
+  in the pass), reads `stamp()` and publishes the newest candidate with the
+  current epoch and seq ≥ the shown seq. For playback the candidate must also
+  satisfy position() − 1 frame < at ≤ `position()`. An expired candidate is
+  never newly published; it counts dropped. `TextureHandle::set` (CPU path) or
+  the stable `TextureId` re-point (G-4) happens here, and in the same step the
+  shared `DisplayCell { stamp, at, frame_id, stale }` is written to describe
+  what is now bound. A deferred rebind (G-4) leaves both unchanged. Layout uses
+  the previous size (a one-pass lag on aspect change).
+- *Held vs stale:* with no qualifying candidate, an image of the current epoch
+  stays up as *held* (its held age grows). An image of an older epoch stays
+  visible only as *stale* (`stale` set, visibly marked, P8), so a seek does not
+  flash to blank. It is never acked and never counts as held or on time for the
+  new epoch; held age and L-* run from the epoch change. `set_document(None)`
+  clears it.
+- *Drag:* intermediate `request_frame` results of one epoch are exact and show
+  in seq order; release calls `seek`, whose epoch bump excludes them.
+- *Stamped errors:* a preview-path failure carries its job's stamp. The worker
+  calls `fail` only if that epoch is current **and** its seq ≥ the latest
+  issued transport seq, and emits the new `MediaEvent::StampedError(FrameStamp,
+  MediaError)`, which the app treats as `Error` (stop, incident) under the same
+  test. Superseded or old-epoch errors only count `stale_errors`. I8 runs 1,000
+  seeded interleavings of drags, seeks, play/pause and edits on both paths.
+
+**R-3 [S2a] Jobs.**
+
+| Kind | Posted on | Exact | Waits | Replaces |
+|---|---|---|---|---|
+| `Paused(at)` | coalesced seek/frame, `set_document` | yes | untimed | pending `Paused`/`Playback` |
+| `Playback` | `play` | each shown frame exact | to deadline | the same |
+| `Agent` | `Thumbnail`, `PreviewCacheStats`, `ClearPreviewCache` | yes | never (synchronous) | never (FIFO) |
+
+Playback renders at = clock + lead (EWMA of render time, ≤ 2 frames), holds the
+result until `position()` ≥ at (never early), and drops it, counted, once the
+clock passes at + 1 frame. A frame missing a required layer at its deadline is
+**held**: the previous image stays and its held age grows.
+
+**R-4 [S2a] Agent lane (RS7).**
+- *Push:* the worker resolves `document: None` to its current document, binds
+  that document's own LUT and calls `try_push`; a full queue gets an immediate
+  `Backend("preview-thread: agent queue full")`. The worker never waits.
+- *Execution (R15):* an agent job renders on the preview's synchronous
+  `FrameRenderer` with `DecodeStrategy::Seek`, outside all locks, byte-exact
+  (C-5); it never enters FrameWait.
+- *Fair selection:* after each transport *attempt* (a render published, held or
+  dropped at its deadline) the preview runs one queued agent job; with no
+  transport job pending, back to back. An agent push during a **paused**
+  FrameWait suspends it (demands stay posted, readers keep decoding), runs the
+  agent job, then re-evaluates the predicate; a **playback** FrameWait first
+  ends at its deadline (≤ lead + 1 frame ≤ 3 frames). *Bound:* the job at queue
+  position q starts after ≤ q agent renders + q transport attempts + one
+  playback wait. Long-GOP agent seeks interrupt playback; `dropped_agent` is
+  recorded.
+- *Cancellation:* `thumbnail_*` hold a `CancelOnDrop` guard whose drop sets the
+  job's flag under `Sched` and notifies `ready`; the preview discards a
+  cancelled job at dequeue, and a running render finishes with its reply
+  dropped. No wait predicate involves an agent job.
+- *Exactly once:* the reply `Sender` moves with the job and sends once: the
+  render result (errors included, never `Worker::fail`, as today), "agent queue
+  full", or "media worker stopped" (H-6). `monitor_proof_for_document` keeps its
+  caller-thread renderer (K-6).
+
+**R-5 [S2a] Stats and acks (RB8, R17).** `Playback::stats()` (default impl):
+due-frame outcomes, `max_held_ms`, `max_av_offset_ms`, `max_clock_stall_ms`,
+`underrun_events`/`_frames`, `lookahead_starved`, `sync_fallback_frames`,
+`sync_decoders`, `slot_starved`, `stale_errors`, permits in use. *Paint
+marker:* over the preview image's rect and clip the app adds an
+`egui_wgpu::Callback` holding the `DisplayCell`, never a copied stamp, so
+layout (A) followed by a binding (B) or a deferred choice (C) is still marked
+as B. Its `paint` (not `prepare`) reads the cell and stores `PaintMark { stamp,
+at, frame_id, epoch n }`, unless `stale` is set or the cell's epoch is older
+than `stamp()` (a seek issued before paint); both record nothing. In egui-wgpu
+0.35, `Renderer::render` calls `paint` only for a non-empty clip and only after
+the surface texture is acquired, then finishes and submits with no early
+return; an abandoned paint (surface error, invisible viewport, zero clip) never
+calls it. `App::logic` at a later root epoch m > n takes the mark and calls
+`Playback::ack_presented(stamp, at)` (default no-op) once per `frame_id`, so a
+held frame repainted over many epochs is acked once: *painted and submitted*,
+not physically presented (unobservable here). Per due frame: *on time* if acked
+within [due, due + 1 frame + 1 epoch], *late* if later, *dropped* if never. Held age is the time since the last ack of a newer frame,
+sampled every 5 ms (harness) or at each `App::logic` (app).
+
+## 8 Seek and scrub
+
+**S-1 [S2a] Coalescing.** The paused slot keeps the newest stamp. At most one
+paused render is in flight, and the final target is always rendered (L-6).
+
+**S-2 [S2c] Forward continuation, only inside a demonstrated domain (R12,
+R18).** For a paused target t with reader cursor c, the reader decodes forward
+from c instead of seeking only if **all** of these hold; anything unknown uses
+today's seek.
+1. *Anchor = the actual seek's result.* Today's seek calls
+   `avformat_seek_file(-1, …, ts)`: `av_seek_frame` selects
+   `av_find_default_stream_index` and rescales ts to it, and `mov_read_seek`
+   then subtracts that stream's `min_corrected_pts + dts_shift` before its
+   backward index search. Those fields are private to `MOVStreamContext`, so a
+   lookup table cannot reproduce them. Instead each reader keeps a demux-only
+   *shadow* context of the same file, and A(t) is the first packet of the
+   selected stream after the identical `seek` call on the shadow: (`pos`,
+   DTS, key flag). If the selected stream is not the decoder's video stream, or
+   the shadow fails, the correction is unknown and the reader seeks normally.
+2. *Matching anchor:* at the run's seek to t0 the real context's first packet
+   of that video stream must equal A(t0) (`pos`, DTS, key), else continuation
+   is disabled for the decoder. A(t) must equal A(t0), and no key packet may
+   have been read since it (one appearing before t is produced abandons
+   continuation for a seek).
+3. *Valid decoded timestamps:* every frame produced since the anchor has a
+   `best_effort_timestamp`, strictly increasing; selection uses them, never
+   `fallback_index`; c < t ≤ c + 12 frames.
+4. *Witnessed pair:* the demuxer/codec pair is on the list (`mov`/H.264 to
+   start), extended only by adding witnesses.
+
+Here a seek to t would feed the same packets from the same flushed state; the
+witnesses must show `pending`, `lookahead`, `continuation_at` and `eof_sent`
+equal the seek path's. Cancellation is checked between produced frames; the
+decoder resets on a `VideoSourceKey` change, `shrink` reopen or error.
+*Witnesses* compare with a fresh `Seek` at 50 seeded targets each: default x264
+B-frames; reordered timestamps (`-bf 3 -b_pyramid normal`, negative
+composition offsets); an MP4 edit list (`elst` start offset); `open-gop=1`
+(exits at its key packets); VFR; missing PTS (falls back); targets at c + 1,
+just before and at a key packet, and ±1 tick around each corrected anchor
+boundary (key index timestamp + `min_corrected_pts + dts_shift`, in the
+edit-list and negative-offset files); an edit; a relink; a same-source jump
+cut; cancellation mid-run.
+
+**S-3 [S2c] Bounded backward window.** On a backward paused step to a
+non-resident target t: B = clamp(share in frames, 1, 16), start = max(source
+start, clip in-point, t − B + 1). The reader seeks to the key ≤ start, decodes
+to t and converts only [start, t], a demand region (K-5). A hit is one render
+(L-4a); a refill is a seek, plus decode from that key (possibly in an earlier
+GOP), plus B conversions (L-4b, recorded). GOPs over 250 are recorded, not
+gated (D4).
+
+## 9 Audio clock and A/V sync
+
+**V-1 [S1] The clock counts programme frames popped (R6).** `render_output`
+pops whole interleaved frames only (while `consumer.slots() ≥ channels`); the
+rest of the callback is silence, preserving channel alignment. `SharedClock`
+advances by frames popped; unpopped frames go to `underrun_frames`. Content is
+never inspected: authored silence, muted mixes, zero-track timelines and
+`next_chunk_limited` padding are programme. The amended
+`callback_consumes_ring_then_writes_silence_and_accounts_frames` expects
+position **11** (was 12), output `[0.25, -0.5, 0.0, 0.0]`, `underrun_frames` =
+1; a partial frame (3 samples, 2 channels) pops one frame; an empty ring leaves
+the position unchanged (G9).
+
+**V-2 [S1] Drained end and terminal stop (RB7).**
+- *Drained predicate* (each tick while playing): `fill_ring` has returned
+  `false` (latched by `fill`) ∧ `pending` fully pushed ∧ ring empty ∧
+  `position_samples` ≥ `fed_position_samples()` (the callback pops before it
+  updates the position, so this holds only once all popped frames count).
+- *Terminal stop:* the drained predicate, or today's `position ≥ duration`,
+  calls the new `Worker::stop_at_end`, never `pause()` (which would read
+  position 0 in the 1601-sample case and truncate loudness there). It (1)
+  pauses the stream; (2) calls `loudness.pause_at(duration)`, publishing and
+  truncating at the terminal position; (3) drops audio and installs empty mix
+  meters; (4) stores `fallback_frame` = duration, then `sample_rate` = 0, so
+  `position()` switches directly to duration; (5) sets `playing` = false and
+  emits `PlaybackStateChanged(Paused)` and `Position(duration)`.
+- *Tests:* a one-frame 30000/1001 timeline at 48 kHz (ends at sample 1601)
+  and a long programme both finish with `position()` = duration, loudness
+  truncated there and the stopped state; the 2 s stall control does not
+  complete. AU2, AU3 and AU4 suites run unedited.
+
+**V-3 [S2a] Fill independence.** `fill_audio` runs on the worker at its own
+cadence, since the worker no longer renders.
+
+**V-4 [S0] Observables before S2a.** S0 computes due-frame outcomes, held age
+and offset consumer-side from today's `frames()` arrivals and `position()`, so
+baselines need no new API. The cpal playback timestamp minus the callback
+timestamp is recorded as `device_latency_ms`, not compensated (D9).
+
+**V-5 [S0] Device-free audio driver (R7).** `AudioRuntime` gains
+`AudioOutput::{Cpal(cpal::Stream), Simulated(_)}`. The simulated output calls
+the same `render_output`, stepped by `advance(frames)` in CI or paced in real
+time (1,024-frame callbacks at 48 kHz) for P-play, via a harness-only engine
+option. One LH run per workload cross-checks on the real device.
+
+## 10 GPU display path and upload (SDR only)
+
+**G-1 [S1] CPU monitor table.** `readback_for`'s SDR BT.709 branch of
+`encode_monitor_rgba8_for_description` uses `MonitorTable` (65,536 entries
+indexed by f16 bits). Its doc comment rejecting a **4,096-entry interpolated**
+LUT is amended: this table has no interpolation and is exhaustively equal.
+Test: all 65,536 patterns equal, including NaN → 0, ±Inf, and every denormal and
+±0 → 0.
+
+**G-2 [S3a] GPU encode pass** (SDR BT.709 monitoring only, R2). A compute pass
+reads the Rgba16Float output with **unfiltered** `textureLoad`; the f32 of an
+f16 texel is exact and `pack2x16float` recovers the bits (a denormal-flushing
+backend yields ±0, which maps to 0 like every denormal; all NaN payloads map to
+0). It looks up the 192 KiB storage buffer (X-5) and writes an Rgba8Unorm slot
+with exactly the bytes egui uploads today; other monitoring stays on the CPU.
+
+**G-3 [S3a] Ownership.** The engine already runs on eframe's device and queue
+(`GpuContext::new_with_adapter_info` → `new_with_gpu`), so compositor, display
+pass and egui submit to one ordered `wgpu::Queue`. The app passes the
+premultiply table (from `Color32::from_rgba_unmultiplied`) and the `repaint`
+hook in `DisplayConfig`; media returns `wgpu::TextureView`s, with no egui
+dependency.
+
+**G-4 [S3a] Slot fence: root full-frame epoch (R11, R17).** e =
+`ctx.cumulative_frame_nr_for(ViewportId::ROOT)`, read in `App::logic` and
+`App::ui`; the app creates no other viewport (debug-asserted). One stable
+preview `TextureId` is re-pointed by `finalize_preview`
+(`update_egui_texture_from_wgpu_texture_with_sampler_options`, LINEAR). A slot
+unbound during epoch e becomes Retiring(e): egui samples it at most in epoch
+e's paint, which is submitted or abandoned before the next root epoch, so
+`App::logic` at any m > e frees it (it runs even when minimised).
+- *One rebind per epoch:* after one Bound → Retiring(e) in epoch e, later passes
+  of e (`request_discard`) keep the binding; the newer Ready binds next epoch.
+  The app thus holds ≤ Bound + one Retiring, and the preview always owns the
+  third slot (Free, Writing or its unbound Ready).
+- *Retirement repaint:* each rebind calls `DisplayConfig`'s `repaint` hook
+  (`ctx.request_repaint`), so a later epoch soon frees the Retiring slot.
+- *Bounded wait:* a preview finding no slot (a debug-asserted backstop, e.g.
+  mid-resize) waits ≤ 2 frame intervals and calls `repaint`; on timeout it
+  counts `slot_starved`, drops a playback frame, or retries a paused one on the
+  next release.
+- *Terminal handoff:* `App::on_exit` (called by eframe's `save_and_destroy`
+  after the last paint, before `painter.destroy()`), or `Drop` if it never ran,
+  marks the display **Terminal**, "no future paint": Bound and Retiring slots
+  are released through G-7's token without another epoch.
+
+| State | Owner | Next |
+|---|---|---|
+| Free | preview | a write starts → Writing |
+| Writing | preview submission | flags clean → Ready(stamp); flags set → Free + `StampedError` |
+| Ready(stamp) | preview, complete (G-5) | bound (previous Bound → Retiring(e)); stale or newer Ready → Free; overwritable |
+| Bound | app (stable id) | rebind → Retiring(e); Terminal → token release |
+| Retiring(e) | app | `App::logic` at m > e → Free; Terminal → token release |
+
+**I16** (fake epochs): A → B → C bound in one epoch's passes (one rebind, no
+stall), a skipped paint, 100 minimised epochs, a mid-epoch resize, the wait
+timeout, and Terminal teardown with no further epoch; plus a validated GPU run
+on CI-L.
+
+**G-5 [S3a] Non-finite refusal kept (B6).** The display submission also copies
+the compositor's validity flags (`frame.validity` or `pooled_flags`) into the
+slot's small charged `MAP_READ` buffer; the preview waits ME16-style
+(`frame_poll`, no deadline). A set flag yields a stamped
+`MediaError::NonFiniteRender { layer, .. }`, as `for_each_linear_pixel` does,
+the slot returns to Free and nothing is published (I6 on MO2's non-finite
+fixture; `app_playback_does_no_readback` counts full-frame readbacks = 0).
+
+**G-6 [S3a] Self-check with fallback.** `enable_display` encodes a 256×256
+texture of all 65,536 f16 patterns (with alpha sweeps) and compares it with CPU
+encode + premultiply; on mismatch or a missing feature it keeps the CPU
+`frames()` path, logged once, never adopting a tolerance. Headless AW1, tests
+and agent jobs always use the CPU path.
+
+**G-7 [S3a/S3b] Completion-owned resources,** each charged to `GpuLedger` at
+its actual API size.
+
+| Resource | Reusable / releasable when | On error, cancel, device loss |
+|---|---|---|
+| Display slots (3 × w×h×4: 10.55 MiB at 1280×720, 15 MiB at 1024×1280) | reuse: Free via G-4. Uncharge/destroy (resize, disable, teardown): once Free or Terminal, the preview calls `queue.submit([])` → `SubmissionIndex` and uncharges when `device.poll(Wait{that index, timeout: None})` or `frame_poll` observes it | charged until observed |
+| Flag buffers | per slot, after G-5's wait | ME16 retirement |
+| GPU table buffer + staging | ME16 atlas pattern | rebuilt per device |
+| Upload staging ring (`MAP_WRITE`, ≤ 2 frames × layers, S3b) | its frame completed (G-5 or readback wait) **and** `map_async(Write)`'s callback ran | ME15 `retired` under the completion flag; device loss drains callbacks |
+| Resident layer textures (U-2, S3b) | evicted and last using submission completed | retired, charged |
+
+The preview thread is the completion owner: it polls via `frame_poll` and, at
+teardown (H-6 step 4), waits deadline-free on its final token, so callbacks run
+even when egui submits nothing more. The Terminal handoff (G-4) frees the
+stable id through the app's stored `RenderState` and hands every slot to that
+token. Its `queue.submit([])` follows egui's last submission in queue order, so
+no epoch is needed.
+
+**U-1 [S1/S3b] Upload copies.** S1e (conditional): if S0 finds
+`upload_bytes`'s extra full copy material, pixels go straight into mapped
+staging (exact byte cast); S3b adds the staging ring.
+
+**U-2 [S3b] Residency.** Cache keyed by (`VideoSourceKey` or `TitleCacheKey`,
+frame time, `shared_buffer_id`), ≤ 64 MiB, charged, idle eviction after 2 s;
+layers stay Rgba16Float. Test: a repeated paused frame uploads 0 bytes.
+
+**P-1 [S1] Monitor long-edge cap.** Only `present` changes: max_width =
+min(`PREVIEW_MAX_WIDTH`, ⌊1280·w/h⌋). 9:16 → 720×1280 (the 720p pixel count);
+4:5 → 1024×1280, 42% more pixels than 720p. `RenderScale`, thumbnails, agent
+replies, `media_status`'s `max_width`, proofs and export are unchanged.
+Portrait sources inside landscape documents still decode up to 1280 wide (D8).
+
+## 11 Gate registry
+
+*Inv* must pass from its stage onward; *Gate* must pass at its stage (later
+ones are run and recorded); *Rec* is recorded only. **D**: today's value is
+direct evidence on the gate's protocol; **PB**: pending an S0 baseline.
+
+| ID | Invariant | Lane | Stage |
+|---|---|---|---|
+| I1 | X-2 input tables and G-1 monitor table exhaustively exact | CI-L, CI-W | S1 |
+| C-5 | Existing pins unchanged: CC1–CC8 S1, MO2 byte and solo pins, export, `preview_frame`/`get_frame_at`, `preview_solo`. Export changes only via X-1 (proven by I1); G-1 is monitor-only. Only the V-1 test is edited | CI | S1+ |
+| C-3 | Monitor pixels change only via P-1 (new pins at the capped raster) | CI | S1 |
+| I3 | Ledger ceilings (384 / 1,536 MiB) and release (`r28_ledger_*`); every new resource charged | CI | S1+ |
+| I4 | ME13 `BASELINES` untouched; `r28_end_to_end_tracked` 5% rule | LL, LH | all |
+| I9 | V-1/V-2 tests; `position()`/loudness/state after terminal stop; AU2–AU4 unedited | CI | S1 |
+| I8 | R-2 interleavings: no old-epoch or expired frame published, no superseded error stops playback, release target shown | CI | S2a |
+| I18 | R-5 marker: abandoned, zero-clip, discarded-pass and stale paints never acked; one ack per `frame_id`; witnesses A-layout/B-bind/C-deferred and seek-before-paint | CI | S2a |
+| I13 | Agent lane: FIFO, bound, cancel, paused-wait suspension, exactly-once replies incl. shutdown, errors only via reply | CI | S2a |
+| I15 | H-8 model per S2b commit; stress test at S2b-4 | CI | S2b-1+ |
+| I11 | Reader frame threads ≤ P; synchronous decoders min(P, 16), outside the pool; FIFO tickets removed on retire/cancel; no deadlock or lost required request for P ∈ {1, 2, 3, 20} | CI | S2b-2 |
+| I12 | Scheduler live bytes ≤ C always; oversized sets take K-3 | CI | S2b-3 |
+| I10 | H-7 thread counts, quiescence retirement (injected clock), no synchronous decoder after a park; AW1 B5 | CI-L, CI-W | S2b-4 |
+| C-4 | Continuation = `Seek` in its domain, and falls back outside it (S-2 witnesses) | CI | S2c |
+| I1b | Premultiply table = `Color32::from_rgba_unmultiplied` for all inputs | CI | S3a |
+| I5 | GPU display = CPU + premultiply, zero tolerance: all-pattern texture + 10 frames per workload | CI-L, CI-W, LH | S3a |
+| I6 | Stamped `NonFiniteRender` on the display path; charges back to baseline | CI | S3a |
+| I16 | G-4 fence model (one rebind, bounded wait, Terminal) and G-7 lifetimes, teardown to zero charge | CI | S3a |
+| I17 | Staging ring reuse only after completion and map callback; ME15/ME16 retirement; 0-byte repeated paused upload | CI | S3b |
+
+| ID | Target | Protocol, lane | Stage | Today | Ev. |
+|---|---|---|---|---|---|
+| G3 | `blend_heavy_holds_floors_on_hardware` (ME13, 60 fps) | P-comp, LH | S1 | 27.4 fps | D |
+| G9 | The clock does not advance on underrun | stepped, CI | S1 | advances | D |
+| G12 | `reel_9x16` monitor raster 720×1280 | CI | S1 | 1080×1920 | D |
+| G5 | 0 seeks per output frame after warm-up, two continuous sources | counter, CI-L | S1 | — (0.88 is the cut workload) | PB |
+| G10 | Offset ≤ 33 ms within 5 s after a 2 s stall | stepped, CI | S2a | — | PB |
+| G11 | 0 underruns over 60 s of `blend_heavy_1080p` | P-play, LL | S2a | — (T4 render loop) | PB |
+| G16 | Max clock stall ≤ 100 ms in every run; the clock-freeze control fails it | P-play, LL, LH | S2a | — | PB |
+| G13 | Four active sources: reader threads ≤ P = 20 | counter, CI | S2b-2 | 64 (min(P, 16) × 4) | D |
+| G18 | Export wall time on the PERFORMANCE export lane ≤ S0 + 5% (no regression) | LH | S2b-2 | — | PB |
+| G17 | `sync_fallback_frames` ≤ 0.1% of due frames in every run of every W workload (expected 0) | P-play, LL | S2b-3 | — | PB |
+| G1 | `typical_1080p`: every run ≤ 1% late/held/dropped; p95 present interval ≤ 50 ms | P-play, LH | S2b-4 | — (T4: 1.8 fps render loop) | PB |
+| G6 | typical p95/p50 present interval ≤ 3 | P-play, LL, LH | S2b-4 | — | PB |
+| G14 | Max held age ≤ 100 ms in every run; the freeze control fails it | P-play, LH | S2b-4 | — | PB |
+| G15 | Settled-idle RSS ≤ S0 baseline + 4 MiB for every workload and a title-only document | P-rss, LL pinned | S2b-4 | — | PB |
+| G8 | L-1 ≤ 40 ms, L-2 ≤ 110 ms (one source; provisional, fixed from S0 and an S2b-2 run under permits), L-3 +1 step ≤ 20 ms, L-4a backward hit ≤ 20 ms, L-5 ≥ 10 / 7 distinct stamped frames/s received during the 30 Hz drag at GOP 60 / 250, L-6 release target shown (S2a) | P-seek, LL, LH | S2c | — (T3 decoder-level) | PB |
+| G7a | 0 full-frame readbacks on the app display path | counter, CI | S3a | 1 per frame | D |
+| G7b | GPU encode ≤ 2 ms per frame | LH | S3a | — (19 ms is CPU encode) | PB |
+| G2 | G1's criterion for `explainer_16x9`, `reel_9x16`, `feed_4x5`, `talk_recut` | P-play, LH | S3b | — | PB |
+| G4 | typical, `explainer_16x9` ≥ 24 fps; `blend_heavy_1080p`, `reel_9x16` ≥ 15 fps (provisional) | P-play, LL | S3b | — | PB |
+
+**Rec:** L-1m/L-2m and L-4b; `dropped_agent`, `stale_errors`, `slot_starved`,
+`sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
+S0 and the ratio at S4 (ME14's absolute 20 fps floor stays **owed**, D6); the
+PERFORMANCE heavy-4K, agent and desktop lanes.
+
+## 12 Coordination
+
+- **CC8 S2 lands after PF1 (R1)** and reruns
+  `input_tables_match_every_accepted_descriptor` (X-2); a newly accepted
+  descriptor is `Separable` only if it passes parity, otherwise `PerPixel`.
+- **CC8 S3 rebases onto PF1 (R2).** Its HDR adapter is `PerPixel` and its
+  HDR → SDR monitor intent stays fused f32 on the CPU readback path; G-2 is
+  disabled unless monitoring is SDR BT.709; its transform digest joins
+  `VideoSourceKey`, `TitleCacheKey` and `ConversionKey`. Any GPU HDR path is
+  S3's, under R22. CE9 is untouched.
+- **AW1** keeps the CPU path (B5 constructs no engine); **AW2**: W-2, D10.
+
+## 13 Stages, budgets and gates (R8, R13)
+
+Lines are production source lines, harness and tests included (N19). S2b's
+four commits each land alone with their must-pass green. Before S2b-2, readers
+open with ⌊P / R⌋ threads; before S2b-3, each ring holds the S1d window.
+
+| Stage | Scope | Must pass | Budget |
+|---|---|---|---|
+| S0 | Harness: `perf_fixtures`, W-1, P-play/P-seek/P-rss on today's APIs, clock-stall metric, V-4 consumer metrics, V-5 driver, `process_memory()`, controls, baseline run (WARP VM by hand) | I4; baselines recorded; every Q-3 control fails its metric | ~670 |
+| S1 | Exact fixes, each commit landable alone: S1a `collect` removal (control); S1b X-1…X-5 incl. live table counter; S1c G-1; S1d K-6 preview window cap + distance eviction; S1e U-1 (conditional); S1f V-1/V-2 + `stop_at_end`; S1g P-1 | I1, C-5, C-3, I3, I9; G3, G9, G12, G5 | ~650 |
+| S2a | Preview thread with its synchronous renderer, R-1…R-5 (core `FrameStamp`, `PreviewFrame`, `StampedError`, `stats`, `ack_presented`; `Coalesced`; 12 implementors), app `finalize_preview`, paint marker and `App::logic` acks, agent lane, S-1, V-3 | I8, I18, I13 + S1's; G10, G11, G16, L-6 | ~1,150 (core ~150, app ~260) |
+| S2b-1 | `Sched`, readers, H-2/H-3/H-4/H-6, plan versions, quiescence retirement, model | I15 (model) + earlier | ~450 |
+| S2b-2 | `Permits` (H-5, R19), tickets, `shrink`, close-before-growth, P witnesses | I11 + earlier; G13, G18 | ~200 |
+| S2b-3 | K-1…K-5 admission, `draining`, K-3 fallback, eviction | I12 + earlier; G17 | ~250 |
+| S2b-4 | H-7 idle, synchronous-decoder release on park, stress test, playback gates | I10, I15 (stress) + earlier; G1, G6, G14, G15 | ~150 |
+| S2c | S-2 shadow-anchored continuation, S-3 backward window, witnesses | C-4 + earlier; G8 | ~560 |
+| S3a | G-2…G-7 display correctness: encode, fence, rebind rule, bounded wait, Terminal handoff, flag readback, lifetimes, self-check, premultiply, app registration | I1b, I5, I6, I16 + earlier; G7a, G7b | ~950 |
+| S3b | Staging ring, U-2 residency | I17 + earlier; G2, G4 | ~450 |
+| S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes | all | ~80 |
+
+The total is about 5,560 lines (rev 3: 5,830): R15/R16 remove ≈ 450 from S2b;
+the paint marker, Terminal handoff and shadow-seek anchor add ≈ 180.
+*Per commit:* workspace build, clippy `-D warnings`, fmt, the affected crates'
+tests (media never with `--test-threads=2`), `cargo build -p kinewright-app`
+when core or app changes. *Per stage:* full workspace test; the Must-pass
+column of that and every earlier stage; LL and LH runs; AW1 gates; one critic
+and two Astra reviews (S2b once, after S2b-4), with race and kill tests on
+Opus. *CI on push*, Windows included.
+
+## 14 Errors and incidents
+
+- **E-1 [S2a] Typed errors pass through unchanged** (`SourceColorForAsset`,
+  `UnsupportedDecoderFormat`, `NonFiniteRender`, every variant). A transport
+  job's failure is stamped and reaches `Worker::fail` as today, when a
+  **required** frame fails, only if current and not superseded (R-2). A
+  lookahead failure surfaces only if its (source, time) becomes required in the
+  current plan version (H-3). Agent job errors return only via their reply.
+- **E-2 [S2a/S3a] Only genuinely new failures are prefixed.** Thread spawn
+  failure, agent queue full and display enable failure are `MediaError::Backend`
+  with `preview-thread:`, `decode-reader:` or `display:` (`BackendUnclassified`),
+  each asserted by a test. A display enable failure falls back to the CPU path
+  (G-6) without an event. `MediaError::Cancelled` is internal, never surfaced.
+
+## 15 Deferrals
+
+| # | Deferred | Why | Owner | Revisit when |
+|---|---|---|---|---|
+| D1 | Hardware decode (hwaccel, software fallback) | Here, for 8-bit H.264, NVDEC and Vulkan decode were slower than 16 frame threads (T2; commands and memory domain in E2). After S1 decode is not the bottleneck; zero-copy needs wgpu interop. **Not** a general claim about hosts or codecs | HW1, after CC8 S3 | CPU saturation with ≥ 4 simultaneous 4K or 10-bit HEVC sources; HEVC/10-bit footage in the session |
+| D2 | GPU YUV → RGB | swscale identity cannot be guaranteed today and is costly to establish; swscale costs 0.8 ms | HW1 | the D1 trigger |
+| D3 | Parallel export, delivery-encode tables | export already gains X-1, K-3 and K-6 exactly | export-performance slice | export slower than 2× real time |
+| D4 | Proxy media; seeks at GOP > 250 | media-management feature | media backlog | such a source in the session |
+| D5 | Playback stats as an MCP tool | needs an AW design | AW programme | an agent workflow needing live health |
+| D6 | ME14's absolute WARP 20 fps floor (owed) | WARP's passes dominate | lead with Riel, VM | the VM run |
+| D7 | Reverse and > 1× shuttle | not needed for the three videos | MO backlog | a session request |
+| D8 | Long-edge decode cap for portrait sources in landscape documents | changes pixels; needs a per-layer argument | MO backlog | such a source in W-1 or the session |
+| D9 | Device output-latency compensation | AU-owned clock semantics | AU backlog | recorded `device_latency_ms` > 1 frame |
+| D10 | Native SVG raster gates; cached external-render fixture | AW2 owns code and external clips (A1) | AW2 | AW2 design |
+| D11 | Bounded streaming, row banding and a lazy `decoded_layers` for required sets > C (preview or full resolution) | R15: kept out of the scheduler core; K-3 falls back to today's path | export-performance slice (D3 owner) | G17 fails, or a full-resolution set exceeds C in the session |
