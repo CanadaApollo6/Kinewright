@@ -395,6 +395,8 @@ lanes ran strictly one at a time.
 - `pf1/impl` at `d19bdf9` for I4, P-play and P-seek (2026-09-27, 04:03–06:11
   EDT). P-rss ran at `3df1a22` (06:17–06:25 EDT). That commit only fixes how
   the P-rss parent finds its child's result line.
+- The review-fix reruns (P-seek, and the P-play spot checks) ran at
+  `82fe858`; E9.9 has their provenance.
 - rustc 1.98.0, release profile. The binary is
   `cargo test --release -p kinewright-media --lib`
   (`kinewright_media-cf306d076b2fd4bf`).
@@ -436,24 +438,37 @@ The raw lines are in E9.8.
 Setup (Q-2):
 - Three runs per workload on the paced V-5 driver, plus one real-device run
   per workload on LH.
-- The on-time / late / dropped column shows the worst run. Every other
-  column gives the range over the runs.
-- Every run was **valid**: the clock reached the duration within 1.02 ×
-  duration + 0.5 s.
+- Every column gives the range over the runs (a single value where the runs
+  agree). Every run is 100% late or dropped, so no run is "worst" on G1.
+- Every run was **valid** under the rule of the time: the clock reached the
+  duration within 1.02 × duration + 0.5 s. The review fixes (E9.9) add a
+  lower bound, 0.98 × duration − 0.5 s, and invalidate a run whose paced
+  driver missed a callback deadline; the E9.9 spot checks meet both.
+- **`underrun_frames` in this table and in E9.4 is the pre-R22 counter, and
+  it overstates.** It estimated each callback's shortfall from the ring's
+  occupancy *before* the callback popped, and it was read after a 250 ms
+  drain past the endpoint. R22 replaced it with a count of the pops that
+  actually failed, snapshot at the endpoint (E9.9). The G1 and G14
+  conclusions below do not depend on it.
+- These runs predate two metric fixes (review A F1 and its should-fix): a
+  receipt now counts only once the clock has reached its frame (early frames
+  are counted apart and fail G1), and present intervals and held age now use
+  the same population, eligible receipts of newer frames up to the endpoint.
+  They were not rerun (R24); the E9.9 spot checks use the new rules.
 
-| Workload | Lane | Output | Valid | On time / late / dropped (worst run) | Present p50 / p95 / max ms | Held max ms | A/V offset max ms | Clock stall max ms | underrun_frames | Peak RSS MiB | Ledger peak MiB |
+| Workload | Lane | Output | Valid | On time / late / dropped (range over runs) | Present p50 / p95 / max ms | Held max ms | A/V offset max ms | Clock stall max ms | underrun_frames (pre-R22 counter, overstated) | Peak RSS MiB | Ledger peak MiB |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| `typical_1080p` | LL | simulated | all | 0 / 56 / 1744 of 1800 | 679–1103 / 1317–1578 / 1553–1708 | 1550–1708 | 1567–1700 | 45.5–46.0 | 260096–525312 | 863–1237 | 56.3 |
+| `typical_1080p` | LL | simulated | all | 0 / 56–77 / 1723–1744 of 1800 | 679–1103 / 1317–1578 / 1553–1708 | 1550–1708 | 1567–1700 | 45.5–46.0 | 260096–525312 | 863–1237 | 56.3 |
 | `blend_heavy_1080p` | LL | simulated | all | 0 / 30 / 1770 of 1800 | 1997–2008 / 2045–2054 / 2050–2080 | 2048–2079 | 2067 | 45.4–46.1 | 1398784–1405952 | 1454–2050 | 63.3 |
 | `explainer_16x9` | LL | simulated | all | 0 / 67 / 1733 of 1800 | 698–726 / 1355–1373 / 1467–1502 | 1466–1499 | 1467–1500 | 45.3–46.4 | 317440–330752 | 1729–2297 | 56.3 |
-| `reel_9x16` | LL | simulated | all | 0 / 37 / 1763 of 1800 | 1317–1336 / 2033–3254 / 2570–3302 | 2565–3300 | 2533–3267 | 45.4–48.4 | 933888–1110016 | 1984–2456 | 156.9 |
-| `feed_4x5` | LL | simulated | all | 0 / 61 / 1739 of 1800 | 1020–1027 / 1997–2043 / 2079–2188 | 2078–2185 | 2100–2167 | 45.8–47.8 | 534528–558080 | 2289–2525 | 114.5 |
-| `talk_recut` | LL | simulated | all | 0 / 360 / 6840 of 7200 | 675–676 / 720–725 / 774–844 | 773–844 | 767–833 | 45.7–46.2 | 7168–8192 | 2058–2240 | 42.2 |
-| `typical_1080p` | LH | simulated | all | 0 / 61 / 1739 of 1800 | 986–1010 / 1453–1568 / 1618–1726 | 1614–1723 | 1633–1700 | 45.4–45.5 | 367616–492544 | 1037–1418 | 56.3 |
+| `reel_9x16` | LL | simulated | all | 0 / 37–41 / 1759–1763 of 1800 | 1317–1336 / 2033–3254 / 2570–3302 | 2565–3300 | 2533–3267 | 45.4–48.4 | 933888–1110016 | 1984–2456 | 156.9 |
+| `feed_4x5` | LL | simulated | all | 0 / 60–61 / 1739–1740 of 1800 | 1020–1027 / 1997–2043 / 2079–2188 | 2078–2185 | 2100–2167 | 45.8–47.8 | 534528–558080 | 2289–2525 | 114.5 |
+| `talk_recut` | LL | simulated | all | 0 / 360–361 / 6839–6840 of 7200 | 675–676 / 720–725 / 774–844 | 773–844 | 767–833 | 45.7–46.2 | 7168–8192 | 2058–2240 | 42.2 |
+| `typical_1080p` | LH | simulated | all | 0 / 61–65 / 1735–1739 of 1800 | 986–1010 / 1453–1568 / 1618–1726 | 1614–1723 | 1633–1700 | 45.4–45.5 | 367616–492544 | 1037–1418 | 56.3 |
 | `blend_heavy_1080p` | LH | simulated | all | 0 / 31 / 1769 of 1800 | 1948–1968 / 1989–2027 / 1990–2036 | 1989–2031 | 2000–2033 | 45.4–45.7 | 1339392–1342464 | 1786–2167 | 63.3 |
-| `explainer_16x9` | LH | simulated | all | 0 / 67 / 1733 of 1800 | 707–736 / 1381–1390 / 1497–1539 | 1493–1536 | 1500–1533 | 45.4–45.9 | 324608–337920 | 1953–2436 | 56.3 |
-| `reel_9x16` | LH | simulated | all | 0 / 39 / 1761 of 1800 | 1315–1332 / 2531–3254 / 3219–3268 | 3217–3265 | 3200–3267 | 45.4–45.5 | 1048576–1121280 | 2202–2334 | 156.9 |
-| `feed_4x5` | LH | simulated | all | 0 / 62 / 1738 of 1800 | 1010–1018 / 1979–2023 / 2070–2245 | 2066–2243 | 2067–2233 | 45.4–45.5 | 535552–537600 | 1983–2262 | 114.5 |
+| `explainer_16x9` | LH | simulated | all | 0 / 66–67 / 1733–1734 of 1800 | 707–736 / 1381–1390 / 1497–1539 | 1493–1536 | 1500–1533 | 45.4–45.9 | 324608–337920 | 1953–2436 | 56.3 |
+| `reel_9x16` | LH | simulated | all | 0 / 36–39 / 1761–1764 of 1800 | 1315–1332 / 2531–3254 / 3219–3268 | 3217–3265 | 3200–3267 | 45.4–45.5 | 1048576–1121280 | 2202–2334 | 156.9 |
+| `feed_4x5` | LH | simulated | all | 0 / 60–62 / 1738–1740 of 1800 | 1010–1018 / 1979–2023 / 2070–2245 | 2066–2243 | 2067–2233 | 45.4–45.5 | 535552–537600 | 1983–2262 | 114.5 |
 | `talk_recut` | LH | simulated | all | 0 / 361 / 6839 of 7200 | 673–675 / 719–722 / 772–854 | 768–854 | 767–833 | 45.8–46.7 | 7168–8192 | 1914–2017 | 42.2 |
 | `typical_1080p` | LH | device (1 run) | all | 0 / 69 / 1731 of 1800 | 980 / 1340 / 1648 | 1645 | 1633 | 45.4 | 282624 | 928 | 56.3 |
 | `blend_heavy_1080p` | LH | device (1 run) | all | 0 / 31 / 1769 of 1800 | 1965 / 1992 / 1994 | 1993 | 2000 | 45.4 | 1335808 | 1150 | 63.3 |
@@ -475,8 +490,8 @@ How to read the table:
   1,024-frame callback is 21.3 ms. The position is a 30 fps frame index, so it
   can stay unchanged for up to two callbacks (42.7 ms), plus the 5 ms sampling
   step. G16's 100 ms bound sits above this floor.
-- **`underrun_frames` is large because the worker renders synchronously in
-  `tick`.** A render slower than the 1 s live fill target drains the ring.
+- **`underrun_frames` (pre-R22) is large because the worker renders
+  synchronously in `tick`.** A render slower than the 1 s live fill target drains the ring.
   Today's clock advances through underruns (T7), so these runs stay valid.
   `talk_recut`'s renders take about 0.7 s, under the fill target, so it
   underruns least.
@@ -491,7 +506,7 @@ Each control fires at 20 s on `typical_1080p` (slowdown: from the start).
 Every control **fails its metric** on both lanes, and `pf1_play_baseline`
 asserts this.
 
-| Control | Lane | Metric | Fails | Late + dropped | Present p95 ms | Held max ms | Clock stall max ms | underrun_frames |
+| Control | Lane | Metric | Fails | Late + dropped | Present p95 ms | Held max ms | Clock stall max ms | underrun_frames (pre-R22 counter, overstated) |
 |---|---|---|---|---|---|---|---|---|
 | slowdown | LL | G1 | true | 1800 | 1699.8 | 1725.6 | 47.0 | 418816 |
 | freeze | LL | G14 | true | 1800 | 1578.6 | 1870.7 | 45.4 | 385024 |
@@ -508,11 +523,24 @@ direction:
 - slowdown: 1,800 of 1,800 frames late or dropped;
 - freeze: held age 1.87 s / 2.64 s, against 1.55–1.73 s uncontrolled;
 - clock freeze: stall 1,050 ms, against about 46 ms;
-- stall: held age 3.7 s / 3.2 s, and more underrun frames.
+- stall: held age 3.7 s / 3.2 s, and more underrun frames (pre-R22 counter).
 
-The CI test `pf1_metrics_pass_a_clean_trace_and_every_control_fails_its_metric`
-proves that each metric flips a *passing* trace. S2 should rerun the controls
-once the uncontrolled run passes G1 and G14.
+The stall control's "fails" was decided on the pre-R22 counter, so it was
+true for every run. It is not evidence of discrimination.
+
+CI covers discrimination with deterministic witnesses instead:
+- `pf1_metrics_pass_a_clean_trace_and_every_control_fails_its_metric` shows
+  that the slowdown, freeze and clock-freeze metrics each flip a *passing*
+  synthetic trace (G1, G14, G16).
+- `a_two_second_fill_stall_underruns_where_the_clean_schedule_does_not`
+  covers the fourth control. It runs matched producer schedules through the
+  simulated consumer and `render_output`: the clean schedule records 0
+  underrun frames and the 2 s fill stall a positive count (40,000–50,000
+  expected).
+
+This replaces the earlier claim that the first test alone proved every
+control; it did not cover the fill stall (review A F6). S2 should rerun the
+controls once the uncontrolled run passes G1 and G14.
 
 ### E9.5 P-rss (fresh process per workload)
 
@@ -548,38 +576,87 @@ after 6 s idle: decoders, caches and threads stay resident.
 
 ### E9.6 P-seek
 
+Rerun after the review fixes (R24), at `82fe858`. The original E9 P-seek
+figures are superseded: that run's first "forward" steps were backward
+seeks, and its release was measured only after the drag had settled
+(review A F4 and should-fix).
+
 Paused, three seeded runs per workload (`0x5EED0000 + run`). Each run does:
 - 200 random seeks;
-- 200 forward steps (+1…+12);
+- 200 forward steps (+1…+12). They start with a seek to the first frame, so
+  that every step really moves forward from where the transport is;
 - 200 backward steps (−1…−12);
 - a 5 s `request_frame` drag at 30 Hz, forward and monotone, in 1–4 frame
   steps;
-- then the release `seek`.
+- then, at the 5 s boundary and **without waiting for the drag to settle**,
+  the release `seek` to the frame after the last drag target. The drag never
+  requests that frame, so its arrival is attributable to the release.
 
 Each operation mirrors the app's `seek_to` (`seek` + `request_frame`). The
-latency runs from the call to receipt of the matching frame; a drag call is
-answered by the first frame at or past its target. The table shows the
-worst run's p95. L-4a (backward hit) has no cache today, so it equals the
-backward p95.
+latency runs from the call to receipt of the matching frame. A drag call is
+answered by the first drag frame at or past its target, up to the last drag
+target.
 
-| Workload | Lane | Random p95 (worst run) / max | Forward p95 | +1 p95 (L-3) | Backward p95 | Drag p95 | Drag distinct fps (L-5, worst) | Release shown / ms (L-6) | Timeouts |
-|---|---|---|---|---|---|---|---|---|---|
-| `seek_gop60` | LL | 119.5 / 145.4 | 117.4 | 120.2 | 115.7 | 188.8 | 10.2 | all / 30.3 | 0 |
-| `talk_recut` | LL | 163.8 / 221.7 | 196.4 | 208.4 | 192.1 | 227.0 | 9.0 | all / 29.7 | 0 |
-| `explainer_16x9` | LL | 205.7 / 271.8 | 206.0 | 205.5 | 206.0 | 366.5 | 6.6 | all / 36.5 | 0 |
-| `seek_gop60` | LH | 115.6 / 138.8 | 114.7 | 120.0 | 116.5 | 197.0 | 10.2 | all / 28.3 | 0 |
-| `talk_recut` | LH | 162.8 / 213.1 | 191.4 | 202.3 | 192.9 | 228.7 | 9.0 | all / 28.4 | 0 |
-| `explainer_16x9` | LH | 205.6 / 270.8 | 206.2 | 203.6 | 207.8 | 360.8 | 6.8 | all / 36.3 | 0 |
+How to read the columns:
+- Latency columns are the worst run's value (the largest over the three
+  runs). Distinct fps is the smallest. Counts and release latency are given
+  as ranges.
+- `+1` is the subset of forward steps that were +1; there are only 8–17
+  per run.
+- **Backward is combined.** `FrameRenderer::decode_video_frame` already
+  checks the source frame cache before decoding, so backward steps mix cache
+  hits and refills. **L-4a and L-4b are not measured separately** (review A
+  F5).
+- Drag p95 counts an unanswered call as infinite. Answered p95 is taken over
+  answered calls only. Unanswered means no drag frame at or past the call's
+  target arrived before the release frame.
+- Pending is the number of drag calls still unanswered when the release was
+  issued.
+- Stale / over:
+  - *stale* counts drag frames delivered after the release call;
+  - *over* counts frames delivered within 500 ms after the release frame,
+    which would replace it on screen.
+
+| Workload | Lane | Random p95 / max | Forward p95 | +1 p95 (L-3) | Backward p95, combined | Drag p95 / answered p95 | Drag unanswered | Drag distinct fps (L-5) | Pending at release | Release shown / ms (L-6) | Stale / over release | Timeouts |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `seek_gop60` | LL | 117.5 / 128.8 | 118.7 | 118.1 | 116.8 | 196.8 / 194.3 | 0–2 | 10.2 | 2–4 | all / 86.1–170.6 | 0–1 / 0 | 0 |
+| `talk_recut` | LL | 162.0 / 223.4 | 162.4 | 181.0 | 147.5 | 236.7 / 232.4 | 0–2 | 8.8 | 3–6 | all / 129.1–173.7 | 1 / 0 | 0 |
+| `explainer_16x9` | LL | 211.6 / 273.1 | 206.9 | 224.5 | 206.2 | 359.8 / 359.8 | 0–1 | 6.8 | 3–5 | all / 178.9–296.6 | 1 / 0 | 0 |
+| `seek_gop60` | LH | 119.8 / 127.0 | 117.7 | 125.1 | 117.1 | 197.9 / 197.7 | 1–2 | 10.0 | 4 | all / 94.1–183.1 | 1 / 0 | 0 |
+| `talk_recut` | LH | 162.8 / 225.7 | 163.0 | 189.8 | 152.9 | 231.5 / 231.5 | 0 | 9.0 | 2–4 | all / 189.6–238.7 | 1 / 0 | 0 |
+| `explainer_16x9` | LH | 208.0 / 270.1 | 204.0 | 222.3 | 203.5 | 387.9 / 366.2 | 2 | 6.6 | 4–6 | all / 109.4–243.6 | 1 / 0 | 0 |
 
 Mapping to G8 (all ms):
 
 | Metric | Measured (LL / LH) | Gate |
 |---|---|---|
-| L-1 | 119.5 / 115.6 | ≤ 40 |
-| L-2 (talk) | 163.8 / 162.8 | ≤ 110 |
-| L-3 | 120.2 / 120.0 at GOP 60 | ≤ 20 |
-| L-5 | 10.2 at GOP 60 and 9.0 at GOP 250 | ≥ 10 / 7 |
-| L-6 | shown in every run | — |
+| L-1 | 117.5 / 119.8 | ≤ 40 |
+| L-2 (talk) | 162.0 / 162.8 | ≤ 110 |
+| L-3 | 118.1 / 125.1 at GOP 60 (8–17 samples per run) | ≤ 20 |
+| L-4a / L-4b | not measured separately; combined backward p95 is 116.8 / 117.1 at GOP 60 | — |
+| L-5 | 10.2 / 10.0 at GOP 60; 8.8 / 9.0 at GOP 250 | ≥ 10 / 7 |
+| L-6 | shown in every run; 86–297 ms after an unsettled release | — |
+
+What changed from the first run:
+- **Release latency rose.** It was about 30 ms against an already-rendered
+  target. Now it is 86–297 ms, because the release queues behind 2–6
+  pending drag renders.
+- **A pending drag render still lands after the release call** (stale = 1)
+  in 17 of 18 runs. None landed after the release frame (over = 0), so
+  today's release is never overwritten within 500 ms. Today's API has no
+  release stamp, so attribution relies on the release frame being unique.
+- **`talk_recut`'s step latencies fell.** Forward p95 went from 196.4 /
+  191.4 to 162.4 / 163.0, and backward from 192.1 / 192.9 to 147.5 / 152.9.
+  The cause is not isolated. The forward-init seek draws one more value from
+  the seeded generator, so every later position in the run moved.
+- **The talk L-5 LL worst run is now 8.8 fps** (it was 9.0), still above
+  GOP 250's 7.
+- **Random seeks (L-1, L-2) and the other workloads' forward and backward
+  steps are within about 5% of the first run.** Two exceptions:
+  - `explainer_16x9`'s +1 p95 is about 9% higher (224.5 / 222.3 against
+    205.5 / 203.6), but it rests on only 8–17 samples per run;
+  - its LH drag p95 is 7.5% higher (387.9 against 360.8), because
+    unanswered calls now count as infinite.
 
 ### E9.7 Harness notes (proposed amendments are in the S0 report)
 
@@ -589,14 +666,37 @@ Mapping to G8 (all ms):
   `unsafe_code`. The counters are the same ones. The peak cannot be reset,
   so Windows peaks are process-lifetime values, marked `(lifetime)`.
   Compiled for `x86_64-pc-windows-msvc`; it has not yet run on Windows.
-  CI-W runs `pf1_process_memory_reads_this_process`.
+  CI-W runs `pf1_process_memory_reads_this_process`. Since the review fixes
+  the probe has a 30 s deadline (the child is killed on timeout). It checks
+  the exit status and requires exactly three integers. A failed probe is
+  reported as `unavailable(...)`, never as 0 (review B F2 and S2).
 - **A/V offset.** Today has no ack, so the offset is measured at receipt:
   |`position()` − frame stamp|.
-- **Device underruns.** On the real device, `underrun_frames` comes from a
-  counter in the cpal callback that only records. It computes the same
-  shortfall as the simulated driver, and playback is unchanged.
+- **Underruns (R22).** `render_output` returns the number of its pops that
+  failed, at the existing `unwrap_or(0.0)` sites. Both the cpal callback and
+  the simulated driver record that count, so the samples and the clock are
+  unchanged. The harness snapshots the counter when the clock reaches the
+  duration, and reports what follows (the drain to the engine's own pause)
+  apart, as `drain_underrun_frames`. `failed_pops_are_exact_under_a_concurrent_refill`
+  witnesses the count while a producer refills concurrently.
+- **Diagnostics are per engine (R23).** `AudioDiagnostics` (underrun frames
+  and device latency) is owned by each engine's `AudioRuntime` and shared
+  with the harness by `Arc`. The process-wide statics are gone, and the
+  reads are `cfg(test)`. The counters still record in production builds;
+  that is two relaxed atomic operations per callback.
+- **Missed callback deadlines (review A F2).** The paced driver runs one
+  callback per wake and never bursts to catch up. It counts deadlines it
+  woke too late to meet (`missed_callbacks`), and a P-play run with any is
+  invalid.
+- **P-rss guards.** Parent and child require a release build. The parent
+  checks the child's exit status. The child requires at least 5 s of played
+  timeline and no engine error before it labels the snapshot "playing".
 
 ### E9.8 Raw result lines
+
+These are the first run's lines. In the `PF1 play` and `PF1 control` lines,
+`underrun_frames` is the pre-R22 counter, which overstates. The `PF1 seek`
+lines are superseded by E9.9's rerun.
 
 ```
 R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=509.86 fps=2.0 p95_ms=1619.55 ledger_peak_mib=56.3 validate_us=1.3
@@ -689,4 +789,72 @@ PF1 rss before=33.6/2 constructed=163.9/11 first_render=479.0/57 settled_idle=47
 PF1 rss before=33.5/2 constructed=164.1/11 first_render=450.8/57 settled_idle=450.8/57 playing=937.2/150 playing_peak_mib=980.8 lane=LH workload=feed_4x5
 PF1 rss before=33.5/2 constructed=163.7/11 first_render=450.8/57 settled_idle=450.8/57 playing=716.2/58 playing_peak_mib=720.1 lane=LH workload=talk_recut
 PF1 rss before=33.5/2 constructed=164.0/11 first_render=305.3/11 settled_idle=305.3/11 playing=326.7/12 playing_peak_mib=326.7 lane=LH workload=title_only
+```
+
+### E9.9 Review-fix reruns (R24)
+
+**Provenance.**
+- `pf1/impl` at `82fe858` (the review fixes), rustc 1.98.0, release
+  (`kinewright_media-cf306d076b2fd4bf`). Same machine, drivers and pinned
+  FFmpeg as E9.1.
+- 2026-09-27, 07:04–07:32 EDT. The two `foot` screensaver processes were
+  again using about 1.5 cores; the load average was 6.5 at the start.
+  Nothing else ran: the runs were sequential, with no build in parallel.
+- Commands, each with `--exact --ignored --nocapture --test-threads=1`:
+  - `PF1_ONLY=typical_1080p PF1_RUNS=1 pf1_play_baseline` on LL, then with
+    `PF1_HARDWARE=1` on LH. `PF1_ONLY` excludes `controls`, so no control
+    ran.
+  - `pf1_seek_baseline` on LL and on LH; E9.6 has the table.
+
+**P-play spot checks** (`typical_1080p`, one run per lane, simulated driver).
+They exercise the R22 counter, the early-frame rule, the new validity
+bounds and the missed-callback check:
+
+| Lane | Valid | Missed callbacks | On time / late / early / dropped | Present p50 / p95 / max ms | Held max ms | Clock stall max ms | underrun_frames (R22, to endpoint) | drain_underrun_frames | Passes |
+|---|---|---|---|---|---|---|---|---|---|
+| LL | true (60.02 s) | 0 | 0 / 64 / 0 / 1736 | 1028.7 / 1374.5 / 1659.1 | 1659.1 | 47.5 | 355328 | 0 | false |
+| LH | true (60.02 s) | 0 | 0 / 63 / 0 / 1737 | 1009.1 / 1564.4 / 1642.0 | 1637.9 | 46.4 | 452608 | 4096 | false |
+
+- **The R22 counter still reports hundreds of thousands of underrun
+  frames.** Those are pops that actually failed: the synchronous renders
+  drain the ring, as E9.3 explains. The pre-R22 figures for `typical_1080p`
+  were in the same range (260,096–525,312 across six simulated runs), so the
+  overstatement is small against today's real shortfall.
+- **No early frames.** Today's engine renders at or behind the clock. The
+  early-frame rule matters once S2 renders ahead.
+- **The paced driver missed no deadline**, and both runs meet the new lower
+  bound (≥ 0.98 × 60 s − 0.5 s).
+- **G1 and G14 still fail**, as in E9.3.
+
+**Observed once.** After the LH play test reported `ok`, during process
+exit, the engine's worker thread panicked in wgpu's
+`Buffer::get_mapped_range` (`wgpu_core.rs:2253`). `FfmpegMediaEngine` has no
+`Drop` that joins its worker, so a readback in flight when the process
+exits can meet a device already torn down. This happened after the
+measurement, and the result was complete. It was not seen in the first
+run, and nothing in `82fe858` touches that path.
+
+**Raw lines.**
+
+```
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=0 late=64 early=0 dropped=1736 present_p50_ms=1028.7 present_p95_ms=1374.5 present_max_ms=1659.1 held_max_ms=1659.1 av_offset_max_ms=1666.7 clock_stall_max_ms=47.5 underrun_frames=355328 drain_underrun_frames=0 peak_rss_mib=984.2 ledger_peak_mib=56.3 passes=false
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=0 late=63 early=0 dropped=1737 present_p50_ms=1009.1 present_p95_ms=1564.4 present_max_ms=1642.0 held_max_ms=1637.9 av_offset_max_ms=1633.3 clock_stall_max_ms=46.4 underrun_frames=452608 drain_underrun_frames=4096 peak_rss_mib=894.8 ledger_peak_mib=56.3 passes=false
+PF1 seek lane=LL workload=seek_gop60 run=0 random_p95_ms=112.8 random_max_ms=121.8 forward_p95_ms=118.3 plus1_p95_ms=116.5 plus1_n=17 backward_combined_p95_ms=116.8 drag_p95_ms=194.3 drag_answered_p95_ms=194.3 drag_unanswered=0 drag_distinct_fps=10.2 release_pending_drag_calls=3 release_shown=true release_ms=170.6 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=seek_gop60 run=1 random_p95_ms=117.5 random_max_ms=128.8 forward_p95_ms=118.7 plus1_p95_ms=118.1 plus1_n=11 backward_combined_p95_ms=115.8 drag_p95_ms=196.8 drag_answered_p95_ms=191.1 drag_unanswered=2 drag_distinct_fps=10.2 release_pending_drag_calls=2 release_shown=true release_ms=86.1 stale_frames_after_release=0 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=seek_gop60 run=2 random_p95_ms=116.3 random_max_ms=123.9 forward_p95_ms=117.5 plus1_p95_ms=116.8 plus1_n=8 backward_combined_p95_ms=115.9 drag_p95_ms=194.8 drag_answered_p95_ms=191.4 drag_unanswered=2 drag_distinct_fps=10.2 release_pending_drag_calls=4 release_shown=true release_ms=102.8 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=talk_recut run=0 random_p95_ms=147.6 random_max_ms=203.9 forward_p95_ms=162.4 plus1_p95_ms=181.0 plus1_n=17 backward_combined_p95_ms=147.5 drag_p95_ms=220.0 drag_answered_p95_ms=220.0 drag_unanswered=0 drag_distinct_fps=9.2 release_pending_drag_calls=3 release_shown=true release_ms=173.7 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=talk_recut run=1 random_p95_ms=150.3 random_max_ms=207.6 forward_p95_ms=141.1 plus1_p95_ms=145.8 plus1_n=12 backward_combined_p95_ms=145.7 drag_p95_ms=228.6 drag_answered_p95_ms=225.2 drag_unanswered=2 drag_distinct_fps=9.0 release_pending_drag_calls=6 release_shown=true release_ms=144.4 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=talk_recut run=2 random_p95_ms=162.0 random_max_ms=223.4 forward_p95_ms=145.3 plus1_p95_ms=145.3 plus1_n=8 backward_combined_p95_ms=144.7 drag_p95_ms=236.7 drag_answered_p95_ms=232.4 drag_unanswered=2 drag_distinct_fps=8.8 release_pending_drag_calls=6 release_shown=true release_ms=129.1 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=explainer_16x9 run=0 random_p95_ms=204.7 random_max_ms=264.5 forward_p95_ms=204.7 plus1_p95_ms=221.8 plus1_n=17 backward_combined_p95_ms=205.0 drag_p95_ms=359.8 drag_answered_p95_ms=359.8 drag_unanswered=0 drag_distinct_fps=6.8 release_pending_drag_calls=3 release_shown=true release_ms=296.6 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=explainer_16x9 run=1 random_p95_ms=208.7 random_max_ms=226.9 forward_p95_ms=206.9 plus1_p95_ms=224.5 plus1_n=11 backward_combined_p95_ms=205.8 drag_p95_ms=325.4 drag_answered_p95_ms=324.5 drag_unanswered=1 drag_distinct_fps=7.0 release_pending_drag_calls=5 release_shown=true release_ms=224.7 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LL workload=explainer_16x9 run=2 random_p95_ms=211.6 random_max_ms=273.1 forward_p95_ms=203.5 plus1_p95_ms=204.3 plus1_n=8 backward_combined_p95_ms=206.2 drag_p95_ms=352.6 drag_answered_p95_ms=352.6 drag_unanswered=0 drag_distinct_fps=6.8 release_pending_drag_calls=3 release_shown=true release_ms=178.9 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=seek_gop60 run=0 random_p95_ms=118.1 random_max_ms=127.0 forward_p95_ms=115.8 plus1_p95_ms=115.8 plus1_n=17 backward_combined_p95_ms=117.1 drag_p95_ms=194.3 drag_answered_p95_ms=194.2 drag_unanswered=1 drag_distinct_fps=10.4 release_pending_drag_calls=4 release_shown=true release_ms=183.1 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=seek_gop60 run=1 random_p95_ms=119.8 random_max_ms=125.3 forward_p95_ms=117.7 plus1_p95_ms=125.1 plus1_n=11 backward_combined_p95_ms=116.7 drag_p95_ms=197.9 drag_answered_p95_ms=197.7 drag_unanswered=1 drag_distinct_fps=10.0 release_pending_drag_calls=4 release_shown=true release_ms=128.0 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=seek_gop60 run=2 random_p95_ms=115.5 random_max_ms=126.9 forward_p95_ms=115.2 plus1_p95_ms=104.6 plus1_n=8 backward_combined_p95_ms=115.3 drag_p95_ms=197.4 drag_answered_p95_ms=194.5 drag_unanswered=2 drag_distinct_fps=10.2 release_pending_drag_calls=4 release_shown=true release_ms=94.1 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=talk_recut run=0 random_p95_ms=150.6 random_max_ms=204.3 forward_p95_ms=163.0 plus1_p95_ms=189.8 plus1_n=17 backward_combined_p95_ms=147.0 drag_p95_ms=212.7 drag_answered_p95_ms=212.7 drag_unanswered=0 drag_distinct_fps=9.6 release_pending_drag_calls=2 release_shown=true release_ms=189.6 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=talk_recut run=1 random_p95_ms=142.0 random_max_ms=204.4 forward_p95_ms=137.2 plus1_p95_ms=141.5 plus1_n=12 backward_combined_p95_ms=147.3 drag_p95_ms=223.2 drag_answered_p95_ms=223.2 drag_unanswered=0 drag_distinct_fps=9.2 release_pending_drag_calls=4 release_shown=true release_ms=238.7 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=talk_recut run=2 random_p95_ms=162.8 random_max_ms=225.7 forward_p95_ms=137.1 plus1_p95_ms=144.6 plus1_n=8 backward_combined_p95_ms=152.9 drag_p95_ms=231.5 drag_answered_p95_ms=231.5 drag_unanswered=0 drag_distinct_fps=9.0 release_pending_drag_calls=4 release_shown=true release_ms=190.5 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=explainer_16x9 run=0 random_p95_ms=200.5 random_max_ms=270.1 forward_p95_ms=204.0 plus1_p95_ms=222.3 plus1_n=17 backward_combined_p95_ms=201.2 drag_p95_ms=376.9 drag_answered_p95_ms=366.2 drag_unanswered=2 drag_distinct_fps=6.6 release_pending_drag_calls=4 release_shown=true release_ms=243.6 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=explainer_16x9 run=1 random_p95_ms=208.0 random_max_ms=228.1 forward_p95_ms=203.7 plus1_p95_ms=219.9 plus1_n=11 backward_combined_p95_ms=203.5 drag_p95_ms=308.7 drag_answered_p95_ms=302.6 drag_unanswered=2 drag_distinct_fps=7.4 release_pending_drag_calls=6 release_shown=true release_ms=195.5 stale_frames_after_release=1 frames_over_release=0 timeouts=0
+PF1 seek lane=LH workload=explainer_16x9 run=2 random_p95_ms=204.9 random_max_ms=266.0 forward_p95_ms=195.7 plus1_p95_ms=208.3 plus1_n=8 backward_combined_p95_ms=202.3 drag_p95_ms=387.9 drag_answered_p95_ms=360.3 drag_unanswered=2 drag_distinct_fps=6.6 release_pending_drag_calls=5 release_shown=true release_ms=109.4 stale_frames_after_release=1 frames_over_release=0 timeouts=0
 ```
