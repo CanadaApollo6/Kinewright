@@ -4118,17 +4118,44 @@ enum AudioOutput {
     Simulated(simulated::SimulatedOutput),
 }
 
-/// PF1 V-4/V-5 (S0): the device's playback timestamp minus its callback
-/// timestamp, recorded for the harness's real-device cross-check and never
-/// compensated (D9).
-pub(crate) static DEVICE_LATENCY_MICROS: AtomicU64 = AtomicU64::new(0);
-/// PF1 S0: whole frames device callbacks found missing from the ring,
-/// recorded for the harness only; playback is unchanged.
-pub(crate) static DEVICE_UNDERRUN_FRAMES: AtomicU64 = AtomicU64::new(0);
+/// PF1 V-4/R23: one engine's output-callback diagnostics, owned by each
+/// `AudioRuntime` it opens and shared by `Arc` with the S0 harness. They only
+/// record: samples and the clock are unchanged (R22).
+#[derive(Debug, Default)]
+pub(crate) struct AudioDiagnostics {
+    /// Frames whose samples a callback failed to pop (an `unwrap_or(0.0)`
+    /// in [`render_output`]), counted as they happen.
+    underrun_frames: AtomicU64,
+    /// The device's playback timestamp minus its callback timestamp, never
+    /// compensated (D9).
+    latency_micros: AtomicU64,
+}
 
-/// Whole frames a callback of `frames` cannot pop from the ring.
-fn short_frames(consumer: &Consumer<f32>, frames: usize, channels: usize) -> u64 {
-    u64::try_from(frames.saturating_sub(consumer.slots() / channels.max(1))).unwrap_or(u64::MAX)
+impl AudioDiagnostics {
+    fn record_underrun(&self, failed_samples: usize, channels: usize) {
+        if failed_samples > 0 {
+            let frames = failed_samples.div_ceil(channels.max(1));
+            let frames = u64::try_from(frames).unwrap_or(u64::MAX);
+            self.underrun_frames.fetch_add(frames, Ordering::Relaxed);
+        }
+    }
+
+    fn record_latency(&self, latency: std::time::Duration) {
+        let micros = u64::try_from(latency.as_micros()).unwrap_or(u64::MAX);
+        self.latency_micros.store(micros, Ordering::Relaxed);
+    }
+
+    /// Frames any callback of this engine has failed to pop so far.
+    #[cfg(test)]
+    pub(crate) fn underrun_frames(&self) -> u64 {
+        self.underrun_frames.load(Ordering::Relaxed)
+    }
+
+    /// The latest device callback's `device_latency_ms`, in microseconds.
+    #[cfg(test)]
+    pub(crate) fn latency_micros(&self) -> u64 {
+        self.latency_micros.load(Ordering::Relaxed)
+    }
 }
 
 pub(crate) struct AudioRuntime {
@@ -4145,7 +4172,8 @@ pub(crate) struct AudioRuntime {
 }
 
 impl AudioRuntime {
-    /// PF1 V-5: `output` picks the device or the harness's simulated driver.
+    /// PF1 V-5: `output` picks the device or the harness's simulated driver;
+    /// the stream records into the engine's `diagnostics` (R23).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         document: &Document,
@@ -4156,6 +4184,7 @@ impl AudioRuntime {
         mix_meters: Arc<MixMeters>,
         monitor_gain_tenth_db: Arc<AtomicI32>,
         output: &OutputDevice,
+        diagnostics: &Arc<AudioDiagnostics>,
     ) -> Result<Self, MediaError> {
         let sink = match output {
             OutputDevice::Default => {
@@ -4193,12 +4222,14 @@ impl AudioRuntime {
                 Arc::clone(position_samples),
                 Arc::clone(&error_flag),
                 monitor_gain_tenth_db,
+                Arc::clone(diagnostics),
             )?),
             #[cfg(test)]
             Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach(
                 consumer,
                 Arc::clone(position_samples),
                 monitor_gain_tenth_db,
+                Arc::clone(diagnostics),
             )),
         };
         let mut mixer =
@@ -4311,6 +4342,7 @@ fn build_stream(
     position: Arc<AtomicU64>,
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
+    diagnostics: Arc<AudioDiagnostics>,
 ) -> Result<cpal::Stream, MediaError> {
     match format {
         cpal::SampleFormat::F32 => build_typed_stream::<f32>(
@@ -4321,6 +4353,7 @@ fn build_stream(
             position,
             error_flag,
             monitor_gain_tenth_db,
+            diagnostics,
         ),
         cpal::SampleFormat::I16 => build_typed_stream::<i16>(
             device,
@@ -4330,6 +4363,7 @@ fn build_stream(
             position,
             error_flag,
             monitor_gain_tenth_db,
+            diagnostics,
         ),
         cpal::SampleFormat::U16 => build_typed_stream::<u16>(
             device,
@@ -4339,6 +4373,7 @@ fn build_stream(
             position,
             error_flag,
             monitor_gain_tenth_db,
+            diagnostics,
         ),
         unsupported => Err(MediaError::Backend(format!(
             "unsupported audio device sample format {unsupported}"
@@ -4355,6 +4390,7 @@ fn build_typed_stream<T>(
     position: Arc<AtomicU64>,
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
+    diagnostics: Arc<AudioDiagnostics>,
 ) -> Result<cpal::Stream, MediaError>
 where
     T: cpal::SizedSample + cpal::Sample + cpal::FromSample<f32>,
@@ -4365,19 +4401,15 @@ where
             *config,
             move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
                 let stamp = info.timestamp();
-                let latency = stamp.playback.duration_since(stamp.callback).as_micros();
-                DEVICE_LATENCY_MICROS
-                    .store(latency.try_into().unwrap_or(u64::MAX), Ordering::Relaxed);
-                let frames = output.len() / callback_channels;
-                let short = short_frames(&consumer, frames, callback_channels);
-                DEVICE_UNDERRUN_FRAMES.fetch_add(short, Ordering::Relaxed);
-                render_output(
+                diagnostics.record_latency(stamp.playback.duration_since(stamp.callback));
+                let failed = render_output(
                     &mut consumer,
                     output,
                     callback_channels,
                     &position,
                     monitor_gain_tenth_db.load(Ordering::Relaxed),
                 );
+                diagnostics.record_underrun(failed, callback_channels);
             },
             move |_error| {
                 error_flag.store(true, Ordering::Release);
@@ -4401,25 +4433,34 @@ fn monitor_linear_gain(tenth_db: i32) -> f32 {
 #[cfg(test)]
 pub(crate) mod simulated;
 
+/// Pops one callback's samples (silence where the ring is empty) and advances
+/// the clock by the whole callback. Returns the pops that failed (PF1 R22:
+/// counted where they happen; the samples and the clock are unchanged).
 fn render_output<T>(
     consumer: &mut Consumer<f32>,
     output: &mut [T],
     channels: usize,
     position: &AtomicU64,
     monitor_gain_tenth_db: i32,
-) where
+) -> usize
+where
     T: cpal::Sample + cpal::FromSample<f32>,
 {
     let sample_frames = output.len() / channels.max(1);
     let gain = monitor_linear_gain(monitor_gain_tenth_db);
+    let mut failed = 0;
     for destination in output {
-        let sample = consumer.pop().unwrap_or(0.0);
+        let sample = consumer.pop().unwrap_or_else(|_| {
+            failed += 1;
+            0.0
+        });
         *destination = T::from_sample(sample * gain);
     }
     position.fetch_add(
         u64::try_from(sample_frames).unwrap_or(u64::MAX),
         Ordering::Release,
     );
+    failed
 }
 
 pub(crate) struct AudioDecoder {
@@ -4857,7 +4898,11 @@ mod tests {
         let position = AtomicU64::new(10);
         let mut output = [1.0_f32; 4];
 
-        render_output(&mut consumer, &mut output, 2, &position, 0);
+        // PF1 R22: the two failed pops are counted where they happen.
+        assert_eq!(
+            render_output(&mut consumer, &mut output, 2, &position, 0),
+            2
+        );
 
         assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
         assert_eq!(position.load(Ordering::Acquire), 12);

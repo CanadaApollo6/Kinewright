@@ -31,7 +31,10 @@ use kinewright_core::{
 
 use crate::{
     analysis::VisualAssetService,
-    audio::{AudioDecoder, AudioRuntime, MeterState, MixMeters, OutputDevice, decode_audio_range},
+    audio::{
+        AudioDecoder, AudioDiagnostics, AudioRuntime, MeterState, MixMeters, OutputDevice,
+        decode_audio_range,
+    },
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     decode::probe_path,
@@ -423,13 +426,15 @@ impl FfmpegMediaEngine {
     }
 
     /// PF1 S0: an engine on the V-5 simulated output (`None` keeps the
-    /// device) with the Q-3 faults armed by the harness. Test builds only.
+    /// device) with the Q-3 faults armed by the harness, which shares the
+    /// engine's audio `diagnostics` (R23). Test builds only.
     #[cfg(test)]
     pub(crate) fn new_for_harness(
         gpu: GpuContext,
         data_dir: PathBuf,
         audio: Option<crate::audio::simulated::SimulatedAudio>,
         faults: Arc<Faults>,
+        diagnostics: Arc<AudioDiagnostics>,
     ) -> Result<Self, MediaError> {
         let config = DerivedAnalysisConfig::default();
         Self::start(gpu, data_dir, config, move |worker| {
@@ -437,6 +442,7 @@ impl FfmpegMediaEngine {
                 worker.output_device = OutputDevice::Simulated(audio);
             }
             worker.faults = faults;
+            worker.audio_diagnostics = diagnostics;
         })
     }
 
@@ -1688,6 +1694,8 @@ struct Worker {
     last_position: Option<TimeCode>,
     /// PF1 V-5: the default device, or the harness's simulated output.
     output_device: OutputDevice,
+    /// PF1 R23: this engine's output-callback diagnostics.
+    audio_diagnostics: Arc<AudioDiagnostics>,
     #[cfg(test)]
     faults: Arc<Faults>,
 }
@@ -1765,6 +1773,7 @@ impl Worker {
             playing: false,
             last_position: None,
             output_device: OutputDevice::Default,
+            audio_diagnostics: Arc::default(),
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -2113,6 +2122,7 @@ impl Worker {
             mix_meters,
             Arc::clone(&self.monitor_gain_tenth_db),
             &self.output_device,
+            &self.audio_diagnostics,
         )
     }
 

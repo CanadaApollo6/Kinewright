@@ -5,8 +5,9 @@
 //! lanes are `--ignored` release runs: LL (lavapipe, the default), LH
 //! (`PF1_HARDWARE=1`, the RTX 3090) and, by hand, the WARP VM.
 //! `PF1_ONLY=a,b` narrows the workloads (`controls` names the Q-3 runs);
-//! `PF1_DEVICE=1` plays one run per workload on the real device (V-5's
-//! cross-check). Every result line starts with `PF1 `.
+//! `PF1_RUNS=n` overrides P-play's three runs (a spot check); `PF1_DEVICE=1`
+//! plays one run per workload on the real device (V-5's cross-check). Every
+//! result line starts with `PF1 `.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -29,7 +30,7 @@ use kinewright_core::{Document, FrameTexture, MediaEvent, Playback, PlaybackStat
 use crate::{
     FfmpegMediaEngine,
     audio::{
-        DEVICE_LATENCY_MICROS, DEVICE_UNDERRUN_FRAMES,
+        AudioDiagnostics,
         simulated::{CALLBACK_FRAMES, SimulatedAudio},
     },
     compositor::GpuContext,
@@ -72,10 +73,10 @@ pub(crate) struct ProcessMemory {
 /// Linux: `VmRSS`/`VmHWM` from `/proc/self/status`, threads from
 /// `/proc/self/task`.
 #[cfg(target_os = "linux")]
-pub(crate) fn process_memory() -> Option<ProcessMemory> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let threads = std::fs::read_dir("/proc/self/task").ok()?.count() as u64;
-    parse_status(&status, threads)
+pub(crate) fn process_memory() -> Result<ProcessMemory, String> {
+    let status = std::fs::read_to_string("/proc/self/status").map_err(|e| e.to_string())?;
+    let tasks = std::fs::read_dir("/proc/self/task").map_err(|e| e.to_string())?;
+    parse_status(&status, tasks.count() as u64).ok_or_else(|| format!("unparsed: {status}"))
 }
 
 #[cfg(target_os = "linux")]
@@ -101,32 +102,65 @@ fn reset_peak() -> bool {
 
 /// Windows: the same counters (`GetProcessMemoryInfo`'s working set and its
 /// peak, the thread snapshot) through `Get-Process`: the workspace forbids
-/// `unsafe_code`, so the FFI calls cannot be made directly.
+/// `unsafe_code`, so the FFI calls cannot be made directly. Bounded by a
+/// 30 s deadline; the exit status and exactly three integers are required.
 #[cfg(windows)]
-pub(crate) fn process_memory() -> Option<ProcessMemory> {
+pub(crate) fn process_memory() -> Result<ProcessMemory, String> {
+    use std::{io::Read, process::Stdio};
     let script = format!(
         "$p = Get-Process -Id {}; \"$($p.WorkingSet64) $($p.PeakWorkingSet64) $($p.Threads.Count)\"",
         std::process::id()
     );
-    let output = std::process::Command::new("powershell.exe")
+    let mut child = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .ok()?;
-    let text = String::from_utf8(output.stdout).ok()?;
-    let fields: Vec<u64> = text
-        .split_whitespace()
-        .filter_map(|f| f.parse().ok())
-        .collect();
-    let [rss, peak, threads] = fields[..] else {
-        return None;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("powershell.exe: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Get-Process timed out after 30 s".to_owned());
+        }
+        thread::sleep(Duration::from_millis(20));
     };
-    Some(ProcessMemory { rss, peak, threads })
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    let pipes = (child.stdout.take(), child.stderr.take());
+    if let (Some(mut out), Some(mut err)) = pipes {
+        out.read_to_string(&mut stdout).map_err(|e| e.to_string())?;
+        err.read_to_string(&mut stderr).map_err(|e| e.to_string())?;
+    }
+    if !status.success() {
+        return Err(format!("Get-Process failed ({status}): {stderr}"));
+    }
+    let fields: Result<Vec<u64>, _> = stdout.split_whitespace().map(str::parse).collect();
+    match fields.as_deref() {
+        Ok(&[rss, peak, threads]) => Ok(ProcessMemory { rss, peak, threads }),
+        _ => Err(format!(
+            "unexpected Get-Process output {stdout:?}: {stderr}"
+        )),
+    }
 }
 
 /// Windows keeps the process-lifetime peak.
 #[cfg(windows)]
 fn reset_peak() -> bool {
     false
+}
+
+/// A memory reading for a result line; a failed probe is never a zero.
+fn peak_field(peak_reset: bool) -> String {
+    match process_memory() {
+        Ok(memory) if peak_reset => format!("{:.1}", mib(memory.peak)),
+        Ok(memory) => format!("{:.1}(lifetime)", mib(memory.peak)),
+        Err(error) => format!("unavailable({})", error.replace(' ', "_")),
+    }
 }
 
 // ---------------------------------------------------------------- V-4 metrics
@@ -147,18 +181,28 @@ struct PlayMetrics {
     due: usize,
     on_time: usize,
     late: usize,
+    /// Received only before the clock reached them (R-5's lower bound).
+    early: usize,
     dropped: usize,
-    /// Present intervals: p50, p95, max.
+    /// Intervals between presentations of newer frames: p50, p95, max.
     present: [f64; 3],
     held_max: f64,
     av_offset_max: f64,
     clock_stall_max: f64,
+    /// Q-2 validity, set by the run; every gate requires it.
+    valid: bool,
 }
 
 impl Trace {
+    /// Due-frame outcomes (R-5), present intervals, held age, A/V offset and
+    /// clock stall, all over the measured window (up to `end`). A receipt is
+    /// eligible only once the clock has reached its frame (its receipt
+    /// position); presentations are eligible receipts of newer frames, so
+    /// repeated or early images improve neither intervals nor held age.
     fn metrics(&self, due: i64, frame_ms: f64) -> PlayMetrics {
         let end = self.end.unwrap_or(f64::INFINITY);
         let samples: Vec<_> = self.samples.iter().filter(|(t, _)| *t <= end).collect();
+        let arrivals: Vec<_> = self.arrivals.iter().filter(|(t, ..)| *t <= end).collect();
         // A frame is due at the first sample whose position reached it.
         let (mut due_at, mut next) = (vec![None; due as usize], 0);
         for &&(t, position) in &samples {
@@ -167,31 +211,39 @@ impl Trace {
                 next += 1;
             }
         }
-        let mut first = BTreeMap::new();
-        for &(t, at, _) in &self.arrivals {
-            first.entry(at).or_insert(t);
+        let (mut eligible, mut received) = (BTreeMap::new(), BTreeSet::new());
+        let mut shown: Vec<(f64, i64)> = Vec::new();
+        for &&(t, at, position) in &arrivals {
+            received.insert(at);
+            if position >= at {
+                eligible.entry(at).or_insert(t);
+                if shown.last().is_none_or(|&(_, last)| at > last) {
+                    shown.push((t, at));
+                }
+            }
         }
         let mut m = PlayMetrics {
             due: due as usize,
             ..PlayMetrics::default()
         };
         for (frame, due_t) in due_at.iter().enumerate() {
-            match (due_t, first.get(&(frame as i64))) {
+            let frame = frame as i64;
+            match (due_t, eligible.get(&frame)) {
                 (Some(due_t), Some(t)) if *t <= due_t + frame_ms => m.on_time += 1,
                 (Some(_), Some(_)) => m.late += 1,
+                // Q-2: a frame the clock never passed is dropped.
+                (Some(_), None) if received.contains(&frame) => m.early += 1,
                 _ => m.dropped += 1,
             }
         }
-        let mut intervals: Vec<f64> = self.arrivals.windows(2).map(|w| w[1].0 - w[0].0).collect();
+        let mut intervals: Vec<f64> = shown.windows(2).map(|w| w[1].0 - w[0].0).collect();
         m.present = [0.5, 0.95, 1.0].map(|p| percentile(&mut intervals, p));
-        // Held age: time since the last arrival of a newer frame.
-        let (mut shown, mut since, mut arrivals) = (-1, 0.0, self.arrivals.iter().peekable());
+        // Held age: time since the latest presentation of a newer frame.
+        let (mut since, mut shown) = (0.0, shown.iter().peekable());
         let (mut value, mut changed) = (i64::MIN, 0.0);
         for &&(t, position) in &samples {
-            while let Some(&(arrived, at, _)) = arrivals.next_if(|a| a.0 <= t) {
-                if at > shown {
-                    (shown, since) = (at, arrived);
-                }
+            while let Some(&(presented, _)) = shown.next_if(|s| s.0 <= t) {
+                since = presented;
             }
             m.held_max = m.held_max.max(t - since);
             m.clock_stall_max = m.clock_stall_max.max(t - changed);
@@ -199,7 +251,7 @@ impl Trace {
                 (value, changed) = (position, t);
             }
         }
-        m.av_offset_max = (self.arrivals.iter())
+        m.av_offset_max = (arrivals.iter())
             .map(|(_, at, position)| (position - at).abs() as f64 * frame_ms)
             .fold(0.0, f64::max);
         m
@@ -207,19 +259,25 @@ impl Trace {
 }
 
 impl PlayMetrics {
-    /// G1: ≤ 1% late/held/dropped and p95 present interval ≤ 50 ms.
-    fn g1(&self) -> bool {
-        (self.late + self.dropped) as f64 <= 0.01 * self.due as f64 && self.present[1] <= 50.0
+    /// G1's metric: ≤ 1% late/early/dropped and p95 present interval ≤ 50 ms.
+    fn g1_metric(&self) -> bool {
+        let missed = self.late + self.early + self.dropped;
+        missed as f64 <= 0.01 * self.due as f64 && self.present[1] <= 50.0
     }
 
-    /// G14: max held age ≤ 100 ms.
-    fn g14(&self) -> bool {
+    /// G14's metric: max held age ≤ 100 ms.
+    fn g14_metric(&self) -> bool {
         self.held_max <= 100.0
     }
 
-    /// G16: max clock stall ≤ 100 ms.
-    fn g16(&self) -> bool {
+    /// G16's metric: max clock stall ≤ 100 ms.
+    fn g16_metric(&self) -> bool {
         self.clock_stall_max <= 100.0
+    }
+
+    /// The gates: a run passes only if it is valid and meets every metric.
+    fn passes(&self) -> bool {
+        self.valid && self.g1_metric() && self.g14_metric() && self.g16_metric()
     }
 }
 
@@ -237,12 +295,12 @@ fn wanted(key: &str) -> bool {
 /// A named workload builder.
 type Builder = (&'static str, fn() -> Workload);
 
-/// Timing lanes are release evidence (as R28's).
+/// Timing and memory lanes are release evidence (as R28's).
 fn assert_release() {
     let release = !cfg!(debug_assertions);
     assert!(
         release,
-        "PF1 timing is release evidence: cargo test --release"
+        "PF1 timing and memory lanes are release evidence: cargo test --release"
     );
 }
 
@@ -273,6 +331,8 @@ struct Session {
     frames: Receiver<(TimeCode, FrameTexture)>,
     events: Receiver<MediaEvent>,
     gpu: GpuContext,
+    /// This engine's audio diagnostics (R23).
+    diagnostics: Arc<AudioDiagnostics>,
     _data: TempDirectory,
 }
 
@@ -281,7 +341,9 @@ impl Session {
         let gpu = GpuContext::headless(!hardware).expect("the lane's adapter");
         let data = TempDirectory::new("pf1-harness");
         let root = data.root().to_path_buf();
-        let engine = FfmpegMediaEngine::new_for_harness(gpu.clone(), root, audio, faults)
+        let diagnostics = Arc::new(AudioDiagnostics::default());
+        let shared = Arc::clone(&diagnostics);
+        let engine = FfmpegMediaEngine::new_for_harness(gpu.clone(), root, audio, faults, shared)
             .expect("the harness engine starts");
         let (frames, events) = (engine.frames(), engine.events());
         Self {
@@ -289,6 +351,7 @@ impl Session {
             frames,
             events,
             gpu,
+            diagnostics,
             _data: data,
         }
     }
@@ -313,6 +376,15 @@ impl Session {
     fn drain(&self) {
         self.frames.try_iter().for_each(drop);
     }
+
+    fn assert_no_error(&self, context: &str) {
+        for event in self.events.try_iter() {
+            assert!(
+                !matches!(event, MediaEvent::Error(_)),
+                "{context} failed: {event:?}"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------- P-play
@@ -333,6 +405,9 @@ enum Control {
 
 /// Q-2 P-play: a 2 s warm-up, then the whole timeline from 0 on the paced
 /// simulated driver (or the device), sampled every 5 ms; faults fire at 20 s.
+/// Counters are snapshot when the clock reaches the duration (the measured
+/// endpoint); what follows (the drain to the engine's own pause) is reported
+/// apart as `drain_underrun_frames`.
 fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics, u64, String) {
     let audio = (!device).then(SimulatedAudio::paced);
     let faults = Arc::new(Faults::default());
@@ -349,19 +424,18 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         .is_ok_and(|e| e != paused_event)
     {}
     session.drain();
-    let underruns = || {
-        audio.as_ref().map_or_else(
-            || DEVICE_UNDERRUN_FRAMES.load(Ordering::Relaxed),
-            SimulatedAudio::underrun_frames,
-        )
+    let counters = || {
+        let missed = audio.as_ref().map_or(0, SimulatedAudio::missed_periods);
+        (session.diagnostics.underrun_frames(), missed)
     };
-    let underruns_before = underruns();
+    let before = counters();
     let peak_reset = reset_peak();
     let slowdown = if control == Control::Slowdown { 50 } else { 0 };
     faults.render_delay_ms.store(slowdown, Ordering::Relaxed);
     let (duration, frame) = (document.duration.0, frame_ms(document));
-    let limit = 1.02 * duration as f64 * frame + 500.0;
-    let (mut trace, mut armed) = (Trace::default(), true);
+    let nominal = duration as f64 * frame;
+    let (lower, upper) = (0.98 * nominal - 500.0, 1.02 * nominal + 500.0);
+    let (mut trace, mut armed, mut at_end) = (Trace::default(), true, None);
     let start = Instant::now();
     session.engine.play(TimeCode::ZERO);
     let mut next = start;
@@ -388,39 +462,42 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
                 Control::None | Control::Slowdown => {}
             }
         }
-        for event in session.events.try_iter() {
-            assert!(
-                !matches!(event, MediaEvent::Error(_)),
-                "P-play run failed: {event:?}"
-            );
-        }
+        session.assert_no_error("P-play run");
         if trace.end.is_none() && position >= duration {
             trace.end = Some(t);
+            at_end = Some(counters());
         }
-        if trace.end.is_some_and(|end| t > end + 250.0) || t > limit + 5_000.0 {
+        if trace.end.is_some_and(|end| t > end + 250.0) || t > upper + 5_000.0 {
             break;
         }
     }
+    let peak = peak_field(peak_reset);
     session.engine.pause();
-    let m = trace.metrics(duration, frame);
-    let underrun = underruns() - underruns_before;
-    let peak = process_memory().map_or(0, |memory| memory.peak);
+    let (end_underruns, end_missed) = at_end.unwrap_or_else(counters);
+    let underrun = end_underruns - before.0;
+    let missed = end_missed - before.1;
+    let drain = counters().0 - end_underruns;
+    let mut m = trace.metrics(duration, frame);
+    let elapsed = trace.end.unwrap_or(f64::NAN);
+    m.valid = (lower..=upper).contains(&elapsed) && missed == 0;
     let latency = if device {
-        let micros = DEVICE_LATENCY_MICROS.load(Ordering::Relaxed);
+        let micros = session.diagnostics.latency_micros();
         format!(" device_latency_ms={:.1}", micros as f64 / 1e3)
     } else {
         String::new()
     };
     let line = format!(
-        "valid={} elapsed_s={:.2} due={} on_time={} late={} dropped={} present_p50_ms={:.1} \
-         present_p95_ms={:.1} present_max_ms={:.1} held_max_ms={:.1} av_offset_max_ms={:.1} \
-         clock_stall_max_ms={:.1} underrun_frames={underrun} peak_rss_mib={:.1}{} \
-         ledger_peak_mib={:.1}{latency}",
-        trace.end.is_some_and(|end| end <= limit),
-        trace.end.unwrap_or(f64::NAN) / 1e3,
+        "valid={} elapsed_s={:.2} missed_callbacks={missed} due={} on_time={} late={} early={} \
+         dropped={} present_p50_ms={:.1} present_p95_ms={:.1} present_max_ms={:.1} \
+         held_max_ms={:.1} av_offset_max_ms={:.1} clock_stall_max_ms={:.1} \
+         underrun_frames={underrun} drain_underrun_frames={drain} peak_rss_mib={peak} \
+         ledger_peak_mib={:.1} passes={}{latency}",
+        m.valid,
+        elapsed / 1e3,
         m.due,
         m.on_time,
         m.late,
+        m.early,
         m.dropped,
         m.present[0],
         m.present[1],
@@ -428,9 +505,8 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         m.held_max,
         m.av_offset_max,
         m.clock_stall_max,
-        mib(peak),
-        if peak_reset { "" } else { "(lifetime)" },
         mib(session.gpu.ledger().peak_bytes()),
+        m.passes(),
     );
     (m, underrun, line)
 }
@@ -441,11 +517,14 @@ fn pf1_play_baseline() {
     assert_release();
     let (hardware, lane) = lane();
     let device = std::env::var_os("PF1_DEVICE").is_some();
+    let runs = std::env::var("PF1_RUNS").map_or(if device { 1 } else { 3 }, |runs| {
+        runs.parse().expect("PF1_RUNS is a count")
+    });
     let adapter = GpuContext::headless(!hardware).expect("an adapter");
     let adapter = adapter.monitor_proof_metadata().adapter;
     let output = if device { "device" } else { "simulated" };
     for (key, Workload(document, _media)) in play_workloads() {
-        for run in 0..if device { 1 } else { 3 } {
+        for run in 0..runs {
             let (_, _, line) = play_run(&document, Control::None, device);
             println!(
                 "PF1 play lane={lane} adapter={adapter} output={output} workload={key} run={run} {line}"
@@ -465,9 +544,9 @@ fn pf1_play_baseline() {
     ] {
         let (m, underrun, line) = play_run(&document, control, false);
         let fails = match control {
-            Control::Slowdown => !m.g1(),
-            Control::Freeze => !m.g14(),
-            Control::ClockFreeze => !m.g16(),
+            Control::Slowdown => !m.g1_metric(),
+            Control::Freeze => !m.g14_metric(),
+            Control::ClockFreeze => !m.g16_metric(),
             Control::Stall | Control::None => underrun > 0,
         };
         println!(
@@ -487,7 +566,9 @@ fn pf1_play_baseline() {
 
 /// Q-2 P-seek (paused): 200 random seeks, 200 forward steps (+1…+12), 200
 /// backward steps (−1…−12), each as the app's `seek_to`; then a 5 s
-/// `request_frame` drag at 30 Hz and its release `seek` (L-6).
+/// `request_frame` drag at 30 Hz, released by a `seek` at the 5 s boundary
+/// (L-6) while drag renders may still be pending. Backward steps mix frame
+/// cache hits and refills: reported combined (L-4a/L-4b are not separated).
 fn seek_run(document: &Document, seed: u64) -> String {
     let session = Session::new(None, Arc::default(), lane().0);
     session.load(document);
@@ -508,7 +589,10 @@ fn seek_run(document: &Document, seed: u64) -> String {
         latency.unwrap_or(f64::INFINITY)
     };
     let mut random: Vec<f64> = (0..200).map(|_| op(next(n))).collect();
-    let (mut at, mut forward, mut plus_one, mut backward) = (0, Vec::new(), Vec::new(), Vec::new());
+    // Steps start from where the transport actually is.
+    let mut at = next(n - 13);
+    op(at);
+    let (mut forward, mut plus_one, mut backward) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..200 {
         if at + 12 >= n {
             at = next(n - 13);
@@ -530,59 +614,104 @@ fn seek_run(document: &Document, seed: u64) -> String {
         at -= 1 + next(12);
         backward.push(op(at));
     }
-    // The drag: calls at 30 Hz; call i is answered by the first frame at or
-    // past its target (targets rise, so a newer call's frame answers it).
-    let mut target = next(n - 800);
+    let target = next(n - 800);
     op(target);
-    let (start, mut calls, mut arrivals) = (Instant::now(), Vec::new(), Vec::new());
-    for i in 0..150_u32 {
-        let due = start + Duration::from_secs(1) * i / 30;
-        while let Ok((frame, _)) = session.frames.recv_deadline(due) {
-            arrivals.push((ms(start), frame.0));
-        }
-        target += 1 + next(4);
-        calls.push((ms(start), target));
-        session.engine.request_frame(TimeCode(target));
-    }
-    let settle = start + Duration::from_secs(15);
-    while arrivals.last().is_none_or(|&(_, frame)| frame != target) {
-        let Ok((frame, _)) = session.frames.recv_deadline(settle) else {
-            break;
-        };
-        arrivals.push((ms(start), frame.0));
-    }
-    let mut drag: Vec<f64> = (calls.iter())
-        .map(|&(t, goal)| {
-            let answer = arrivals.iter().find(|&&(a, frame)| a >= t && frame >= goal);
-            answer.map_or(f64::INFINITY, |&(a, _)| a - t)
-        })
-        .collect();
-    let distinct: BTreeSet<i64> = (arrivals.iter())
-        .filter(|(t, _)| *t <= 5_000.0)
-        .map(|&(_, frame)| frame)
-        .collect();
-    let from = Instant::now();
-    session.engine.seek(TimeCode(target));
-    let release = session.wait_frame(target, from, Duration::from_secs(10));
-    let timeouts = [&random, &forward, &backward, &drag]
+    let (drag, release_shown) = drag_and_release(&session, target, || 1 + next(4));
+    let timeouts = [&random, &forward, &backward]
         .iter()
         .flat_map(|v| v.iter())
         .filter(|l| l.is_infinite())
-        .count();
+        .count()
+        + usize::from(!release_shown);
     format!(
         "random_p95_ms={:.1} random_max_ms={:.1} forward_p95_ms={:.1} plus1_p95_ms={:.1} \
-         backward_p95_ms={:.1} drag_p95_ms={:.1} drag_distinct_fps={:.1} release_shown={} \
-         release_ms={:.1} timeouts={timeouts}",
+         plus1_n={} backward_combined_p95_ms={:.1} {drag} timeouts={timeouts}",
         percentile(&mut random, 0.95),
         percentile(&mut random, 1.0),
         percentile(&mut forward, 0.95),
         percentile(&mut plus_one, 0.95),
+        plus_one.len(),
         percentile(&mut backward, 0.95),
+    )
+}
+
+/// The drag from `target` (already shown): 150 `request_frame` calls at
+/// 30 Hz with rising targets, each answered by the first drag frame at or
+/// past it; then the release `seek` at the 5 s boundary, unsettled, to a
+/// frame the drag never requested, so its arrival is attributable to it.
+/// `stale_frames_after_release` counts drag renders delivered after the
+/// release call; `frames_over_release` those delivered after the release
+/// frame itself (within 500 ms), which would replace it on screen.
+fn drag_and_release(
+    session: &Session,
+    mut target: i64,
+    mut step: impl FnMut() -> i64,
+) -> (String, bool) {
+    let (start, mut calls, mut arrivals) = (Instant::now(), Vec::new(), Vec::new());
+    let collect = |until: Instant, arrivals: &mut Vec<(f64, i64)>| {
+        while let Ok((frame, _)) = session.frames.recv_deadline(until) {
+            arrivals.push((ms(start), frame.0));
+        }
+    };
+    for i in 0..150_u32 {
+        collect(start + Duration::from_secs(1) * i / 30, &mut arrivals);
+        target += step();
+        calls.push((ms(start), target));
+        session.engine.request_frame(TimeCode(target));
+    }
+    collect(start + Duration::from_secs(5), &mut arrivals);
+    let answered = |arrivals: &[(f64, i64)], (t, goal): (f64, i64)| {
+        let answer =
+            (arrivals.iter()).find(|&&(a, frame)| a >= t && (goal..=target).contains(&frame));
+        answer.map(|&(a, _)| a - t)
+    };
+    let pending = (calls.iter())
+        .filter(|&&call| answered(&arrivals, call).is_none())
+        .count();
+    let release_target = target + 1;
+    let (release_at, from) = (ms(start), Instant::now());
+    session.engine.seek(TimeCode(release_target));
+    let deadline = from + Duration::from_secs(10);
+    let mut release = None;
+    while let Ok((frame, _)) = session.frames.recv_deadline(deadline) {
+        arrivals.push((ms(start), frame.0));
+        if frame.0 == release_target {
+            release = Some(ms(from));
+            break;
+        }
+    }
+    // A stale drag render landing after the release frame would replace it.
+    let release_arrived = (arrivals.last())
+        .filter(|_| release.is_some())
+        .map_or(f64::INFINITY, |&(t, _)| t);
+    collect(Instant::now() + Duration::from_millis(500), &mut arrivals);
+    let overwrote = (arrivals.iter())
+        .filter(|&&(t, frame)| t > release_arrived && frame != release_target)
+        .count();
+    let mut drag: Vec<f64> = (calls.iter())
+        .map(|&call| answered(&arrivals, call).unwrap_or(f64::INFINITY))
+        .collect();
+    let mut answered: Vec<f64> = drag.iter().copied().filter(|l| l.is_finite()).collect();
+    let unanswered = drag.len() - answered.len();
+    let distinct: BTreeSet<i64> = (arrivals.iter())
+        .filter(|&&(t, frame)| t <= 5_000.0 && frame <= target)
+        .map(|&(_, frame)| frame)
+        .collect();
+    let after_release = (arrivals.iter())
+        .filter(|&&(t, frame)| t >= release_at && frame != release_target)
+        .count();
+    let line = format!(
+        "drag_p95_ms={:.1} drag_answered_p95_ms={:.1} drag_unanswered={unanswered} \
+         drag_distinct_fps={:.1} \
+         release_pending_drag_calls={pending} release_shown={} release_ms={:.1} \
+         stale_frames_after_release={after_release} frames_over_release={overwrote}",
         percentile(&mut drag, 0.95),
+        percentile(&mut answered, 0.95),
         distinct.len() as f64 / 5.0,
         release.is_some(),
         release.unwrap_or(f64::NAN),
-    )
+    );
+    (line, release.is_some())
 }
 
 #[test]
@@ -608,6 +737,7 @@ fn pf1_seek_baseline() {
 #[test]
 #[ignore = "PF1 P-rss lane (LL pinned): cargo test --release -p kinewright-media --lib pf1_rss_baseline -- --ignored --nocapture --test-threads=1"]
 fn pf1_rss_baseline() {
+    assert_release();
     let lane = lane().1;
     let mut all = play_workloads();
     all.push(("title_only", perf_fixtures::title_only()));
@@ -627,22 +757,29 @@ fn pf1_rss_baseline() {
             .output()
             .expect("the P-rss child runs");
         let stdout = String::from_utf8_lossy(&child.stdout);
+        let stderr = String::from_utf8_lossy(&child.stderr);
+        assert!(
+            child.status.success(),
+            "the P-rss child failed ({}): {stdout}{stderr}",
+            child.status
+        );
         // libtest prints `test … ... ` on the same line before the output.
         let line = (stdout.lines()).find_map(|line| Some(&line[line.find("PF1 rss ")?..]));
-        let stderr = String::from_utf8_lossy(&child.stderr);
-        let line = line.unwrap_or_else(|| panic!("the P-rss child failed: {stderr}"));
+        let line = line.unwrap_or_else(|| panic!("no P-rss result: {stdout}{stderr}"));
         println!("{line} lane={lane} workload={key}");
     }
 }
 
 /// One P-rss measurement: before the engine, constructed (no document), first
-/// render, settled idle after 6 s, and 10 s of playback (rss MiB/threads).
+/// render, settled idle after 6 s, and 10 s of playback (rss MiB/threads),
+/// which must have advanced at least 5 s without an engine error.
 #[test]
 #[ignore = "PF1 P-rss child: spawned by pf1_rss_baseline"]
 fn pf1_rss_child() {
     let Some(path) = std::env::var_os("PF1_RSS_DOCUMENT") else {
         return;
     };
+    assert_release();
     let document: Document =
         serde_json::from_slice(&std::fs::read(path).expect("reads")).expect("a document");
     let memory = || process_memory().expect("process memory");
@@ -659,17 +796,24 @@ fn pf1_rss_child() {
     session.engine.play(TimeCode::ZERO);
     thread::sleep(Duration::from_secs(10));
     let playing = memory();
+    let played = session.engine.position().0 as f64 * frame_ms(&document);
+    session.assert_no_error("P-rss playback");
+    assert!(
+        played >= 5_000.0,
+        "P-rss playback advanced only {played} ms"
+    );
     session.engine.pause();
     println!(
         "PF1 rss before={} constructed={} first_render={} settled_idle={} playing={} \
-         playing_peak_mib={:.1}{}",
+         playing_peak_mib={:.1}{} played_s={:.1}",
         show(before),
         show(constructed),
         show(first),
         show(settled),
         show(playing),
         mib(playing.peak),
-        if peak_reset { "" } else { "(lifetime)" }
+        if peak_reset { "" } else { "(lifetime)" },
+        played / 1e3,
     );
 }
 
@@ -704,26 +848,29 @@ fn synthetic(n: i64, delay: f64, clock_gap: (f64, f64), mute: (f64, f64)) -> Tra
 #[test]
 fn pf1_metrics_pass_a_clean_trace_and_every_control_fails_its_metric() {
     let frame = 1e3 / 30.0;
-    let clean = synthetic(90, 10.0, (0.0, 0.0), (0.0, 0.0)).metrics(90, frame);
+    let mut clean = synthetic(90, 10.0, (0.0, 0.0), (0.0, 0.0)).metrics(90, frame);
     assert_eq!(
-        (clean.on_time, clean.late, clean.dropped),
-        (90, 0, 0),
+        (clean.on_time, clean.late, clean.early, clean.dropped),
+        (90, 0, 0, 0),
         "{clean:?}"
     );
-    assert!(clean.g1() && clean.g14() && clean.g16(), "{clean:?}");
+    assert!(!clean.passes(), "an invalid run passes no gate");
+    clean.valid = true;
+    assert!(clean.passes(), "{clean:?}");
     let slowdown = synthetic(90, 60.0, (0.0, 0.0), (0.0, 0.0)).metrics(90, frame);
     assert!(
-        !slowdown.g1() && slowdown.late == 90,
+        // The last frame's delayed arrival is past the endpoint: dropped.
+        !slowdown.g1_metric() && (slowdown.late, slowdown.dropped) == (89, 1),
         "slowdown: {slowdown:?}"
     );
     let freeze = synthetic(90, 10.0, (0.0, 0.0), (1_000.0, 1_000.0)).metrics(90, frame);
     assert!(
-        !freeze.g14() && freeze.held_max >= 1_000.0,
+        !freeze.g14_metric() && freeze.held_max >= 1_000.0,
         "freeze: {freeze:?}"
     );
     let clock = synthetic(90, 10.0, (1_000.0, 1_000.0), (0.0, 0.0)).metrics(90, frame);
     assert!(
-        !clock.g16() && clock.clock_stall_max >= 1_000.0,
+        !clock.g16_metric() && clock.clock_stall_max >= 1_000.0,
         "clock freeze: {clock:?}"
     );
     // A frame the clock never passed is dropped, however the run ends.
@@ -731,6 +878,42 @@ fn pf1_metrics_pass_a_clean_trace_and_every_control_fails_its_metric() {
     short.samples.retain(|s| s.1 < 60);
     short.end = None;
     assert_eq!(short.metrics(90, frame).dropped, 30);
+}
+
+/// A-F1: frames received before the clock reaches them are never on time,
+/// and repeated images improve neither the present intervals nor held age.
+#[test]
+// Repeated arrivals must leave the statistics bit-identical.
+#[allow(clippy::float_cmp)]
+fn pf1_metrics_reject_early_frames_and_repeated_images() {
+    let frame = 1e3 / 30.0;
+    let mut early = synthetic(90, 10.0, (0.0, 0.0), (0.0, 0.0));
+    let arrivals: Vec<_> = (0..90).map(|k| (0.0, k, 0)).collect();
+    early.arrivals = arrivals;
+    let m = early.metrics(90, frame);
+    assert_eq!((m.on_time, m.early), (1, 89), "{m:?}");
+    assert!(!m.g1_metric() && !m.g14_metric(), "{m:?}");
+    let clean = synthetic(90, 10.0, (0.0, 0.0), (0.0, 0.0));
+    let mut repeated = synthetic(90, 10.0, (0.0, 0.0), (0.0, 0.0));
+    for &(t, at, position) in &clean.arrivals {
+        repeated.arrivals.push((t + 1.0, at, position));
+    }
+    repeated.arrivals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (clean, repeated) = (clean.metrics(90, frame), repeated.metrics(90, frame));
+    assert_eq!(repeated.present, clean.present, "{repeated:?}");
+    assert_eq!(repeated.held_max, clean.held_max);
+    // A frozen image repeated every 5 ms is still a held image.
+    let mut frozen = synthetic(90, 10.0, (0.0, 0.0), (1_000.0, 1_000.0));
+    let last_before = (frozen.arrivals.iter()).rfind(|a| a.0 < 1_000.0).copied();
+    let (_, at, position) = last_before.expect("an image before the freeze");
+    for step in 0..200 {
+        frozen
+            .arrivals
+            .push((1_000.0 + f64::from(step) * 5.0, at, position));
+    }
+    frozen.arrivals.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let frozen = frozen.metrics(90, frame);
+    assert!(frozen.held_max >= 1_000.0, "{frozen:?}");
 }
 
 #[cfg(target_os = "linux")]
@@ -765,8 +948,15 @@ fn pf1_engine_clock_follows_the_stepped_simulated_driver() {
     };
     let (audio, data) = (SimulatedAudio::stepped(), TempDirectory::new("pf1-stepped"));
     let root = data.root().to_path_buf();
-    let engine = FfmpegMediaEngine::new_for_harness(gpu, root, Some(audio.clone()), Arc::default())
-        .expect("the engine starts");
+    let diagnostics = Arc::new(AudioDiagnostics::default());
+    let engine = FfmpegMediaEngine::new_for_harness(
+        gpu,
+        root,
+        Some(audio.clone()),
+        Arc::default(),
+        Arc::clone(&diagnostics),
+    )
+    .expect("the engine starts");
     engine.set_document(Arc::new(perf_fixtures::title_card((64, 64), 90)));
     engine.play(TimeCode::ZERO);
     let deadline = Instant::now() + Duration::from_secs(60);
