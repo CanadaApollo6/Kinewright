@@ -2310,7 +2310,8 @@ impl Worker {
                 self.audio = Some(runtime);
                 self.playing = true;
                 let frame_ms = crate::preview::frame_ms(fps);
-                (self.lane.counters()).begin(Instant::now(), from.0, frame_ms);
+                let end = self.document.duration.0;
+                (self.lane.counters()).begin(Instant::now(), from.0, frame_ms, end);
                 self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Playing));
                 self.post(JobKind::Playback { from });
             }

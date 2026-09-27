@@ -24,6 +24,9 @@ pub(crate) struct Counters {
     /// Due frames awaiting an ack, with the instant the clock reached them.
     due: VecDeque<(i64, Instant)>,
     next_due: i64,
+    /// The programme's end (its duration in frames): the clock reaches it,
+    /// but no frame there is due.
+    end_frame: i64,
     /// The latest ack of a newer frame; held age runs from it.
     shown: (Instant, i64),
     /// The clock's latest change; a stall runs from it.
@@ -40,6 +43,7 @@ impl Default for Counters {
             frame_ms: 0.0,
             due: VecDeque::new(),
             next_due: 0,
+            end_frame: i64::MAX,
             shown: (now, -1),
             moved: (now, 0),
         }
@@ -52,9 +56,9 @@ impl Counters {
         (self.stats, self.underrun_base) = (PlaybackStats::default(), underruns);
     }
 
-    /// Playback (re)started at `position`.
-    pub(crate) fn begin(&mut self, now: Instant, position: i64, frame_ms: f64) {
-        (self.playing, self.frame_ms) = (true, frame_ms);
+    /// Playback (re)started at `position` of a programme `end_frame` long.
+    pub(crate) fn begin(&mut self, now: Instant, position: i64, frame_ms: f64, end_frame: i64) {
+        (self.playing, self.frame_ms, self.end_frame) = (true, frame_ms, end_frame);
         self.due.clear();
         self.next_due = position;
         (self.shown, self.moved) = ((now, position - 1), (now, position));
@@ -71,7 +75,7 @@ impl Counters {
         if !self.playing {
             return;
         }
-        while self.next_due <= position {
+        while self.next_due <= position && self.next_due < self.end_frame {
             self.due.push_back((self.next_due, now));
             self.next_due += 1;
             self.stats.due_frames += 1;
@@ -129,7 +133,7 @@ mod tests {
         let mut counters = Counters::default();
         counters.ack(at(0), 0, 0);
         assert_eq!(counters.stats, PlaybackStats::default(), "paused: ignored");
-        counters.begin(at(0), 0, 33.0);
+        counters.begin(at(0), 0, 33.0, 5);
         counters.sample(at(5), 1);
         counters.ack(at(40), 1, 0);
         counters.ack(at(41), 1, 0);
@@ -145,5 +149,7 @@ mod tests {
         counters.sample(at(2_400), 4);
         counters.ack(at(2_401), 4, 2);
         assert_eq!(counters.stats.late, 1, "past the window: stays dropped");
+        counters.sample(at(2_402), 5);
+        assert_eq!(counters.stats.due_frames, 5, "the end is not a due frame");
     }
 }
