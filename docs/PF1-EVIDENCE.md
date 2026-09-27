@@ -685,7 +685,10 @@ What changed from the first run:
     an observer that sees the advanced clock sees that callback's underruns.
   - The harness snapshots the counter right after the clock sample that
     reached the duration. The snapshot holds every callback up to the
-    endpoint, and at most one after it, which is a conservative error.
+    endpoint. It may also hold callbacks after it, because the sampling
+    thread can be suspended between reading the clock and the counter.
+    That error only ever adds underruns to the measured window, never
+    removes them.
   - What follows (the drain to the engine's own pause) is reported apart,
     as `drain_underrun_frames`.
   - Witnesses: `failed_pops_are_exact_under_a_concurrent_refill` (the count
@@ -701,15 +704,23 @@ What changed from the first run:
   runs one callback per deadline and never bursts to catch up.
   - Since R25 it stamps each callback where it executes, under the stream
     lock: immediately before the consume (recorded before the clock
-    advances) and immediately after it. A suspension anywhere between the
-    wake and the end of the consume is therefore seen.
-  - It counts a whole period late, or a consume that took a period, as
-    missed, and re-anchors the schedule on the stamp.
+    advances) and immediately after it.
+  - Since R27 both stamps are measured against the deadline the callback
+    serves, not against each other. Delays split across the wake, the start
+    and the consume therefore add up.
+  - A callback that completes a whole period or more past its deadline
+    misses that many deadlines. After any miss the schedule re-anchors on
+    the completion, so nothing is caught up.
   - A P-play run with any missed deadline is invalid, wherever it falls
     (drain included). `missed_callbacks` reports the run's total.
-  - Witness: `a_suspension_with_a_refill_is_a_missed_deadline_that_invalidates_the_run`.
-    A 32 ms suspension, with a refill during it that hides the starvation
-    from the underrun count, still counts a miss and invalidates the run.
+  - Witnesses:
+    - `a_suspension_with_a_refill_is_a_missed_deadline_that_invalidates_the_run`:
+      a 32 ms suspension, with a refill during it that hides the starvation
+      from the underrun count, still counts a miss and invalidates the run.
+    - `a_split_suspension_with_a_refill_is_a_missed_deadline_that_invalidates_the_run`
+      (R27): 16 ms before the start plus 16 ms before the finish, again with
+      a refill, counts one miss, re-anchors with no immediate catch-up
+      callback, and invalidates the run.
 - **P-rss guards.** Parent and child require a release build. The parent
   checks the child's exit status. The child requires at least 5 s of played
   timeline and no engine error before it labels the snapshot "playing".
@@ -826,12 +837,16 @@ PF1 rss before=33.5/2 constructed=164.0/11 first_render=305.3/11 settled_idle=30
   S0 does not change; the load average was 6.5 at the start. No S0
   conclusion depends on this: today's figures miss their gates by 10–50×.
   The S4 `PF1_PINS` must be taken with the screensaver off.
-- **The spot checks and P-seek figures predate R25** (`f8035c4`): the pacer
-  stamps callbacks at execution, underruns are recorded before the clock
-  advances, and drag answers are capped at the release receipt. No rerun
-  was required (P14): the P-seek tables are unaffected (no frame arrived
-  after a release frame), and D1/D2 are edge cases these runs did not
-  exhibit, as far as the pre-R25 counters can show.
+- **The spot checks and P-seek figures predate R25** (`f8035c4`) and R27:
+  - the pacer now stamps callbacks at execution and accounts them against
+    their scheduled deadlines;
+  - underruns are recorded before the clock advances;
+  - drag answers are capped at the release receipt.
+
+  No rerun was required (P14). The P-seek tables are unaffected, because no
+  frame arrived after a release frame. For D1/D2, the pre-R25 counters
+  reported zero misses; they could not have detected the cases R25 and R27
+  close.
 - Commands, each with `--exact --ignored --nocapture --test-threads=1`:
   - `PF1_ONLY=typical_1080p PF1_RUNS=1 pf1_play_baseline` on LL, then with
     `PF1_HARDWARE=1` on LH. `PF1_ONLY` excludes `controls`, so no control
@@ -856,8 +871,8 @@ bounds and the missed-callback check:
   order.
 - **No early frames.** Today's engine renders at or behind the clock. The
   early-frame rule matters once S2 renders ahead.
-- **The paced driver missed no deadline**, and both runs meet the new lower
-  bound (≥ 0.98 × 60 s − 0.5 s).
+- **The pre-R25 counters reported zero misses**, and both runs meet the new
+  lower bound (≥ 0.98 × 60 s − 0.5 s).
 - **G1 and G14 still fail**, as in E9.3.
 
 **Observed once.** After the LH play test reported `ok`, during process
