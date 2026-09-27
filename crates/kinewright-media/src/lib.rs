@@ -7,6 +7,7 @@ mod cache;
 mod clock;
 pub mod color_pipeline;
 mod compositor;
+mod conversion;
 mod decode;
 mod derived;
 mod derived_cache;

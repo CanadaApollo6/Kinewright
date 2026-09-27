@@ -7,8 +7,12 @@ use kinewright_core::{
     ColorMatrix, ColorRange, ColorSourceProfileAssumption, Effect, FrameTexture, MediaError,
 };
 
-use crate::color_pipeline::{
-    PrimaryCorrection, decode_srgb, decode_transfer, expand_native_range, rgba64_normalization_max,
+use crate::{
+    color_pipeline::{
+        ColorPipelineError, PrimaryCorrection, decode_srgb, decode_transfer, expand_native_range,
+        rgba64_normalization_max,
+    },
+    conversion::PixelStage,
 };
 
 /// Scene-linear RGBA working pixels stored as IEEE-754 binary16 values.
@@ -21,6 +25,24 @@ pub(crate) struct WorkingFrame {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) pixels: Arc<Vec<f16>>,
+}
+
+/// The per-pixel error text; descriptor-determined, so the table path
+/// raises it verbatim at the first pixel (X-1).
+pub(crate) fn managed_pixel_error(
+    stage: PixelStage,
+    description: &kinewright_core::ColorDescription,
+    assumption: Option<ColorSourceProfileAssumption>,
+    error: &ColorPipelineError,
+) -> MediaError {
+    let stage = match stage {
+        PixelStage::RangeExpansion => "RGB range expansion",
+        PixelStage::ColourDecode => "colour decode",
+    };
+    MediaError::Backend(format!(
+        "managed source {stage} failed (transfer={:?}, matrix={:?}, range={:?}, white_point={:?}, assumption={assumption:?}): {error}",
+        description.transfer, description.matrix, description.range, description.white_point,
+    ))
 }
 
 impl WorkingFrame {
@@ -51,39 +73,31 @@ impl WorkingFrame {
             let green = f32::from(u16::from_le_bytes([rgba[2], rgba[3]])) / rgb_max;
             let blue = f32::from(u16::from_le_bytes([rgba[4], rgba[5]])) / rgb_max;
             let alpha = f32::from(u16::from_le_bytes([rgba[6], rgba[7]])) / 65_535.0;
-            let coded_rgb = if matches!(
-                description.matrix,
-                ColorMatrix::Rgb | ColorMatrix::Identity
-            ) && matches!(description.range, ColorRange::Limited)
-            {
-                expand_native_range(
-                    [red, green, blue],
-                    &description.bit_depth,
-                    &description.range,
-                )
-                .map_err(|error| {
-                    MediaError::Backend(format!(
-                        "managed source RGB range expansion failed (transfer={:?}, matrix={:?}, range={:?}, white_point={:?}, assumption={assumption:?}): {error}",
-                        description.transfer,
-                        description.matrix,
-                        description.range,
-                        description.white_point,
-                    ))
-                })?
-            } else {
-                [red, green, blue]
-            };
+            let coded_rgb =
+                if matches!(description.matrix, ColorMatrix::Rgb | ColorMatrix::Identity)
+                    && matches!(description.range, ColorRange::Limited)
+                {
+                    expand_native_range(
+                        [red, green, blue],
+                        &description.bit_depth,
+                        &description.range,
+                    )
+                    .map_err(|error| {
+                        managed_pixel_error(
+                            PixelStage::RangeExpansion,
+                            description,
+                            assumption,
+                            &error,
+                        )
+                    })?
+                } else {
+                    [red, green, blue]
+                };
             // Channels decode in R, G, B order and the first failure is the
             // error, exactly as the former per-pixel `collect` reported it.
             for value in coded_rgb {
                 let decoded = decode_transfer(&description.transfer, value).map_err(|error| {
-                    MediaError::Backend(format!(
-                        "managed source colour decode failed (transfer={:?}, matrix={:?}, range={:?}, white_point={:?}, assumption={assumption:?}): {error}",
-                        description.transfer,
-                        description.matrix,
-                        description.range,
-                        description.white_point,
-                    ))
+                    managed_pixel_error(PixelStage::ColourDecode, description, assumption, &error)
                 })?;
                 pixels.push(f16::from_f32(decoded));
             }

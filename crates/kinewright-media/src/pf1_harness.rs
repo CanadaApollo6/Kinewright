@@ -528,7 +528,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
          dropped={} present_p50_ms={:.1} present_p95_ms={:.1} present_max_ms={:.1} \
          held_max_ms={:.1} av_offset_max_ms={:.1} clock_stall_max_ms={:.1} \
          underrun_frames={underrun} drain_underrun_frames={drain} peak_rss_mib={peak} \
-         ledger_peak_mib={:.1} passes={}{latency}",
+         ledger_peak_mib={:.1} table_live_kib={} passes={}{latency}",
         m.valid,
         elapsed / 1e3,
         m.due,
@@ -543,6 +543,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         m.av_offset_max,
         m.clock_stall_max,
         mib(session.gpu.ledger().peak_bytes()),
+        crate::conversion::live_table_bytes() / 1024,
         m.passes(),
     );
     (m, underrun, line)

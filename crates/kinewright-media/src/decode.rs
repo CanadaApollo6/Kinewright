@@ -3,14 +3,14 @@ use std::{path::Path, sync::Arc};
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, FrameTexture,
-    MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
-    classify_source_with_assumption,
+    ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
+    FrameTexture, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
 };
 
 use crate::{
     cache::FrameCache,
-    frame::{CachedFrame, WorkingFrame},
+    conversion::{Conversion, TransferTable, alpha_table, select_conversion},
+    frame::{CachedFrame, WorkingFrame, managed_pixel_error},
     sha256::source_fingerprint,
 };
 
@@ -911,6 +911,21 @@ struct PendingVideoFrame {
 pub(crate) struct ManagedSource {
     description: ColorDescription,
     assumption: Option<ColorSourceProfileAssumption>,
+    conversion: Conversion,
+}
+
+impl ManagedSource {
+    /// PF1 X-2: the production dispatch; a refusal is today's classify error.
+    pub(crate) fn with_conversion(
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+    ) -> Result<Self, ColorSourceError> {
+        Ok(Self {
+            conversion: select_conversion(description, assumption)?,
+            description: description.clone(),
+            assumption,
+        })
+    }
 }
 
 enum VideoConverter {
@@ -1086,6 +1101,17 @@ impl DecoderFrame for WorkingFrame {
                 "managed RGBA64 decoder output is missing source colour metadata".to_owned(),
             )
         })?;
+        if let Conversion::Separable(table) = &source.conversion {
+            let plane = (rgba.data(0), rgba.stride(0));
+            return fill_managed_plane(
+                plane,
+                (width, height),
+                rotation,
+                flip_horizontal,
+                table,
+                source,
+            );
+        }
         let pixels = read_plane(rgba, width, height, 8)?;
         // MO1 R7: EXIF's mirrored orientations flip in stored-pixel space
         // before the right-angle rotation.
@@ -1151,9 +1177,8 @@ impl VideoDecoder {
         // `SourceColorRefusal`'s `#[error(...)]` template once
         // `contextual_managed_decode_error` has added the asset and the path,
         // so no caller sees a different string.
-        let source = classify_source_with_assumption(description, assumption)
+        let source = ManagedSource::with_conversion(description, assumption)
             .map_err(MediaError::SourceColor)?;
-        let _ = source;
         let _declared_depth = declared_integer_depth(description).map_err(|error| {
             unsupported_decoder_format(
                 path,
@@ -1163,15 +1188,7 @@ impl VideoDecoder {
                 format!("managed source depth rejected: {error}"),
             )
         })?;
-        Self::open_scaled_internal(
-            path,
-            fps,
-            max_width,
-            Some(ManagedSource {
-                description: description.clone(),
-                assumption,
-            }),
-        )
+        Self::open_scaled_internal(path, fps, max_width, Some(source))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1564,6 +1581,80 @@ fn read_plane(
     Ok(pixels)
 }
 
+/// PF1 X-3: `read_plane` + flip + rotate + table lookup in one pass, raising
+/// the error the unfused path would raise first.
+fn fill_managed_plane(
+    (plane, stride): (&[u8], usize),
+    (width, height): (u32, u32),
+    rotation: VideoRotation,
+    flip_horizontal: bool,
+    table: &TransferTable,
+    source: &ManagedSource,
+) -> Result<WorkingFrame, MediaError> {
+    let (w, h) = (
+        usize::try_from(width).unwrap_or_default(),
+        usize::try_from(height).unwrap_or_default(),
+    );
+    let row_bytes = w
+        .checked_mul(8)
+        .ok_or_else(|| MediaError::Backend("decoded frame row is too large".to_owned()))?;
+    for row in 0..h {
+        let start = row.saturating_mul(stride);
+        if plane.get(start..start.saturating_add(row_bytes)).is_none() {
+            return Err(MediaError::Backend(
+                "decoded RGBA frame has an invalid stride".to_owned(),
+            ));
+        }
+    }
+    let too_large = match (flip_horizontal, rotation) {
+        (true, _) => "flipped frame is too large",
+        (false, VideoRotation::None) => "managed source frame is too large",
+        (false, _) => "rotated frame is too large",
+    };
+    let bytes = row_bytes
+        .checked_mul(h)
+        .ok_or_else(|| MediaError::Backend(too_large.to_owned()))?;
+    let rgb = match table.entries() {
+        Ok(rgb) => rgb,
+        Err(_) if bytes == 0 => &[],
+        Err((stage, error)) => {
+            return Err(managed_pixel_error(
+                *stage,
+                &source.description,
+                source.assumption,
+                error,
+            ));
+        }
+    };
+    let alpha = alpha_table();
+    let (out_width, out_height) = rotation.display_dimensions(width, height);
+    let (out_w, out_h) = (
+        usize::try_from(out_width).unwrap_or_default(),
+        usize::try_from(out_height).unwrap_or_default(),
+    );
+    let mut pixels = Vec::with_capacity(bytes / 2);
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let (x, y) = match rotation {
+                VideoRotation::None => (ox, oy),
+                VideoRotation::Clockwise90 => (oy, h - 1 - ox),
+                VideoRotation::HalfTurn => (w - 1 - ox, h - 1 - oy),
+                VideoRotation::Clockwise270 => (w - 1 - oy, ox),
+            };
+            let x = if flip_horizontal { w - 1 - x } else { x };
+            let at = y * stride + x * 8;
+            let code =
+                |i: usize| usize::from(u16::from_le_bytes([plane[at + i], plane[at + i + 1]]));
+            pixels.extend([rgb[code(0)], rgb[code(2)], rgb[code(4)], alpha[code(6)]]);
+        }
+    }
+    Ok(WorkingFrame {
+        width: out_width,
+        height: out_height,
+        pixels: Arc::new(pixels),
+    })
+}
+
 fn rotate_bytes(
     rotation: VideoRotation,
     width: u32,
@@ -1696,6 +1787,8 @@ pub(crate) fn backend(error: impl std::fmt::Display) -> MediaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversion::ConversionKey;
+    use kinewright_core::classify_source_with_assumption;
 
     #[test]
     fn ffmpeg_color_enums_map_known_and_unspecified_values() {
@@ -2610,5 +2703,158 @@ mod tests {
         };
         assert_eq!(declared_bit_depth, Some(8));
         assert_eq!(decoder_bit_depth, Some(16));
+    }
+
+    /// A stride-padded RGBA64LE frame whose four channels carry distinct codes.
+    fn rgba64_frame(width: u32, height: u32) -> ffmpeg::frame::Video {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA64LE, width, height);
+        let (stride, w) = (frame.stride(0), usize::try_from(width).expect("width"));
+        let plane = frame.data_mut(0);
+        for (index, code) in (0..=u16::MAX).cycle().take(w * height as usize).enumerate() {
+            let at = index / w * stride + index % w * 8;
+            let rgba = [code, code ^ 0x5A5A, !code, code.rotate_left(7)];
+            for (channel, value) in rgba.into_iter().enumerate() {
+                plane[at + channel * 2..at + channel * 2 + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        frame
+    }
+
+    fn per_pixel(source: &ManagedSource) -> ManagedSource {
+        ManagedSource {
+            description: source.description.clone(),
+            assumption: source.assumption,
+            conversion: Conversion::PerPixel,
+        }
+    }
+
+    fn decode_bits(
+        frame: &ffmpeg::frame::Video,
+        (width, height): (u32, u32),
+        rotation: VideoRotation,
+        flip: bool,
+        source: &ManagedSource,
+    ) -> Result<(u32, u32, Vec<u16>), String> {
+        WorkingFrame::from_rgba_frame(frame, width, height, rotation, flip, Some(source))
+            .map(|f| {
+                (
+                    f.width,
+                    f.height,
+                    f.pixels.iter().map(|v| v.to_bits()).collect(),
+                )
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn described(
+        primaries: ColorPrimaries,
+        white_point: ColorWhitePoint,
+        matrix: ColorMatrix,
+        range: ColorRange,
+        bit_depth: ColorBitDepth,
+        transfer: ColorTransfer,
+    ) -> ColorDescription {
+        ColorDescription {
+            primaries,
+            transfer,
+            matrix,
+            range,
+            white_point,
+            bit_depth,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::UserOverride,
+        }
+    }
+
+    /// PF1 X-3: the fused fill equals `read_plane` → flip → rotate → per-pixel.
+    #[test]
+    fn fused_table_fill_matches_the_unfused_path_for_every_orientation() {
+        let frame = rgba64_frame(5, 3);
+        let description = described(
+            ColorPrimaries::Bt709,
+            ColorWhitePoint::D65,
+            ColorMatrix::Rgb,
+            ColorRange::Limited,
+            ColorBitDepth::Ten,
+            ColorTransfer::Bt709,
+        );
+        let tables = ManagedSource::with_conversion(&description, None).expect("accepted");
+        assert!(matches!(tables.conversion, Conversion::Separable(_)));
+        let reference = per_pixel(&tables);
+        for rotation in [
+            VideoRotation::None,
+            VideoRotation::Clockwise90,
+            VideoRotation::HalfTurn,
+            VideoRotation::Clockwise270,
+        ] {
+            for flip in [false, true] {
+                let fused = decode_bits(&frame, (5, 3), rotation, flip, &tables);
+                let unfused = decode_bits(&frame, (5, 3), rotation, flip, &reference);
+                assert!(fused.is_ok(), "{rotation:?} {flip}");
+                assert_eq!(fused, unfused, "{rotation:?} flip={flip}");
+                // A plane shorter than the claimed height fails identically.
+                let fused = decode_bits(&frame, (5, 4), rotation, flip, &tables);
+                assert_eq!(
+                    fused,
+                    decode_bits(&frame, (5, 4), rotation, flip, &reference)
+                );
+                assert!(fused.is_err());
+            }
+        }
+    }
+
+    /// PF1 X-2 (I1): every descriptor tuple through the production dispatch.
+    /// Accepted tuples decode all 65,536 codes on every channel exactly as
+    /// today's per-pixel path; rejected tuples return today's classify error.
+    #[rustfmt::skip]
+    #[test]
+    fn input_tables_match_every_accepted_descriptor() {
+        use {ColorBitDepth as D, ColorMatrix as M, ColorPrimaries as P, ColorRange as R};
+        use {ColorTransfer as T, ColorWhitePoint as W};
+        let o = || "x".to_owned();
+        let primaries = [P::Unknown, P::Srgb, P::Bt709, P::Bt2020, P::DisplayP3, P::DciP3,
+            P::Smpte170M, P::Smpte240M, P::Bt470M, P::Bt470Bg, P::Film, P::Other(o())];
+        let white_points = [W::Unknown, W::D50, W::D55, W::D60, W::D65, W::Dci, W::Other(o())];
+        let matrices = [M::Unknown, M::Identity, M::Rgb, M::Bt709, M::Bt2020Ncl, M::Bt2020Cl,
+            M::Smpte170M, M::Smpte240M, M::Ycgco, M::ChromaDerivedNcl, M::ChromaDerivedCl,
+            M::Ictcp, M::Other(o())];
+        let ranges = [R::Unknown, R::Full, R::Limited, R::Other(o())];
+        let mut depths = vec![D::Unknown, D::Eight, D::Ten, D::Twelve, D::Sixteen, D::Float16,
+            D::Float32, D::Other(o())];
+        depths.extend([0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 256].map(D::Integer));
+        let transfers = [T::Unknown, T::Srgb, T::Bt709, T::Bt1886, T::Linear, T::Gamma22,
+            T::Gamma28, T::Smpte170M, T::Smpte2084, T::AribStdB67, T::Log, T::LogC, T::Log3G10,
+            T::Other(o())];
+        let frame = rgba64_frame(256, 256);
+        let decode = |source: &ManagedSource| {
+            decode_bits(&frame, (256, 256), VideoRotation::None, false, source)
+        };
+        let mut references = std::collections::HashMap::new();
+        let (mut separable, mut rejected) = (0_usize, 0_usize);
+        for pr in &primaries { for wp in &white_points { for mx in &matrices { for rg in &ranges {
+        for bd in &depths { for tf in &transfers {
+        for a in [None, Some(ColorSourceProfileAssumption::D65)] {
+            let (pr, wp, mx, rg) = (pr.clone(), wp.clone(), mx.clone(), rg.clone());
+            let desc = described(pr, wp, mx, rg, bd.clone(), tf.clone());
+            let expected = classify_source_with_assumption(&desc, a);
+            let source = match ManagedSource::with_conversion(&desc, a) {
+                Err(error) => {
+                    assert_eq!(Err(error), expected, "{desc:?}");
+                    rejected += 1;
+                    continue;
+                }
+                Ok(source) => source,
+            };
+            assert!(expected.is_ok(), "{desc:?}");
+            separable += usize::from(matches!(source.conversion, Conversion::Separable(_)));
+            let reference = references
+                .entry(ConversionKey::of(&desc))
+                .or_insert_with(|| decode(&per_pixel(&source)));
+            let actual = decode(&source);
+            assert!(actual.is_ok(), "{desc:?}");
+            assert_eq!(&actual, reference, "{desc:?} {a:?}");
+        }
+        } } } } } }
+        assert!(separable > 0 && rejected > 0, "{separable} {rejected}");
     }
 }
