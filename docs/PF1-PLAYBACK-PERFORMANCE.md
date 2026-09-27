@@ -619,7 +619,12 @@ no epoch is needed.
 
 **U-1 [S1/S3b] Upload copies.** S1e (conditional): if S0 finds
 `upload_bytes`'s extra full copy material, pixels go straight into mapped
-staging (exact byte cast); S3b adds the staging ring.
+staging (exact byte cast); S3b adds the staging ring. *Amended (R28, S1):*
+S0 never measured the copy. S1 measured it at 1.83 ms per 1280×720 layer,
+against 0.25 ms for a plain copy. G3 passes without U-1, and the exact cast
+needs a `zerocopy` dependency because the workspace forbids `unsafe`. U-1
+therefore moves wholly to S3b, beside the staging ring, and the dependency is
+decided there.
 
 **U-2 [S3b] Residency.** Cache keyed by (`VideoSourceKey` or `TitleCacheKey`,
 frame time, `shared_buffer_id`), ≤ 64 MiB, charged, idle eviction after 2 s;
@@ -640,7 +645,7 @@ direct evidence on the gate's protocol; **PB**: pending an S0 baseline.
 | ID | Invariant | Lane | Stage |
 |---|---|---|---|
 | I1 | X-2 input tables and G-1 monitor table exhaustively exact | CI-L, CI-W | S1 |
-| C-5 | Existing pins unchanged: CC1–CC8 S1, MO2 byte and solo pins, export, `preview_frame`/`get_frame_at`, `preview_solo`. Export changes only via X-1 (proven by I1); G-1 is monitor-only. Only the V-1 test is edited | CI | S1+ |
+| C-5 | Existing pins unchanged: CC1–CC8 S1, MO2 byte and solo pins, export, `preview_frame`/`get_frame_at`, `preview_solo`. Export changes only via X-1 (proven by I1); G-1 is monitor-only. Only the V-1 test is edited, plus the S0 harness tests that model the V-1 clock (R28) | CI | S1+ |
 | C-3 | Monitor pixels change only via P-1 (new pins at the capped raster) | CI | S1 |
 | I3 | Ledger ceilings (384 / 1,536 MiB) and release (`r28_ledger_*`); every new resource charged | CI | S1+ |
 | I4 | ME13 `BASELINES` untouched; `r28_end_to_end_tracked` 5% rule | LL, LH | all |
@@ -707,7 +712,7 @@ open with ⌊P / R⌋ threads; before S2b-3, each ring holds the S1d window.
 | Stage | Scope | Must pass | Budget |
 |---|---|---|---|
 | S0 | Harness: `perf_fixtures`, W-1, P-play/P-seek/P-rss on today's APIs, clock-stall metric, V-4 consumer metrics, V-5 driver, `process_memory()`, controls, baseline run (WARP VM by hand) | I4; baselines recorded; every Q-3 control fails its metric | ~670 |
-| S1 | Exact fixes, each commit landable alone: S1a `collect` removal (control); S1b X-1…X-5 incl. live table counter; S1c G-1; S1d K-6 preview window cap + distance eviction; S1e U-1 (conditional); S1f V-1/V-2 + `stop_at_end`; S1g P-1 | I1, C-5, C-3, I3, I9; G3, G9, G12, G5 | ~650 |
+| S1 | Exact fixes, each commit landable alone: S1a `collect` removal (control); S1b X-1…X-5 incl. live table counter; S1c G-1; S1d K-6 preview window cap + distance eviction; S1e U-1 (conditional; moved to S3b by R28); S1f V-1/V-2 + `stop_at_end`; S1g P-1 | I1, C-5, C-3, I3, I9; G3, G9, G12, G5 | ~650 |
 | S2a | Preview thread with its synchronous renderer, R-1…R-5 (core `FrameStamp`, `PreviewFrame`, `StampedError`, `stats`, `ack_presented`; `Coalesced`; 12 implementors), app `finalize_preview`, paint marker and `App::logic` acks, agent lane, S-1, V-3 | I8, I18, I13 + S1's; G10, G11, G16, L-6 | ~1,150 (core ~150, app ~260) |
 | S2b-1 | `Sched`, readers, H-2/H-3/H-4/H-6, plan versions, quiescence retirement, model | I15 (model) + earlier | ~450 |
 | S2b-2 | `Permits` (H-5, R19), tickets, `shrink`, close-before-growth, P witnesses | I11 + earlier; G13, G18 | ~200 |
