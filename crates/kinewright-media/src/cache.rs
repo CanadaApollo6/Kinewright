@@ -126,6 +126,35 @@ where
         self.frames.len()
     }
 
+    /// PF1 K-6: evict the frame farthest from every demand point, frames
+    /// behind travel first. The frame shown at each demand point is pinned.
+    pub(crate) fn evict_farthest(&mut self, demand: &[TimeCode]) -> bool {
+        let shown = |point: &TimeCode| self.frames.range(..=*point).next_back().map(|(at, _)| *at);
+        let pinned = demand.iter().filter_map(shown).collect::<Vec<_>>();
+        let rank = |at: &TimeCode| {
+            let nearest = demand.iter().min_by_key(|point| at.0.abs_diff(point.0));
+            nearest.map(|point| (*at < *point, at.0.abs_diff(point.0)))
+        };
+        let victim = self
+            .frames
+            .keys()
+            .filter(|at| !pinned.contains(at))
+            .max_by_key(|at| rank(at))
+            .copied();
+        let Some(victim) = victim else {
+            return false;
+        };
+        self.order.retain(|entry| *entry != victim);
+        if let Some(frame) = self.frames.remove(&victim) {
+            self.release_bytes(&frame);
+            #[cfg(test)]
+            {
+                self.evictions = self.evictions.saturating_add(1);
+            }
+        }
+        true
+    }
+
     pub(crate) fn evict_oldest(&mut self) -> bool {
         let Some(oldest) = self.order.pop_front() else {
             return false;
@@ -275,5 +304,25 @@ mod tests {
         // Dropping the surviving shared entry releases its 64 bytes.
         assert!(cache.evict_oldest());
         assert_eq!(cache.byte_len(), 8);
+    }
+
+    /// PF1 K-6: behind travel first, farthest first; the shown frame stays.
+    #[test]
+    fn distance_eviction_spares_the_shown_frame_and_drops_behind_travel_first() {
+        let mut cache = FrameCache::new(8);
+        for at in [0, 1, 2, 4, 5, 6] {
+            let frame = FrameTexture {
+                width: 1,
+                height: 1,
+                rgba: Arc::new(vec![0; 4]),
+            };
+            cache.insert(TimeCode(at), frame);
+        }
+        let (mut victims, mut left) = (Vec::new(), vec![0, 1, 2, 4, 5, 6]);
+        while cache.evict_farthest(&[TimeCode(3)]) {
+            let gone = left.iter().position(|at| !cache.contains(TimeCode(*at)));
+            victims.push(left.remove(gone.expect("one frame was evicted")));
+        }
+        assert_eq!((victims, left), (vec![0, 1, 6, 5, 4], vec![2]));
     }
 }

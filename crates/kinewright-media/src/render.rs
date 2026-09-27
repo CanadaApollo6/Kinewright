@@ -200,6 +200,28 @@ struct VideoSource {
     cache: FrameCache<WorkingFrame>,
 }
 
+/// PF1 K-6: the preview renderer's demand for the frame being rendered: its
+/// active sources with their demand points, and its generated raster bytes.
+#[derive(Default)]
+struct PreviewDemand {
+    sources: HashMap<VideoSourceKey, Vec<TimeCode>>,
+    generated: usize,
+}
+
+impl PreviewDemand {
+    /// The Sequential window clamp(⌊(C − G) / (n·f)⌋, 1, `PREFETCH_FRAMES` + 1),
+    /// as a prefetch count past the demanded frame.
+    fn prefetch(&self, budget: usize, frame_bytes: usize) -> i64 {
+        if frame_bytes == 0 {
+            return 0;
+        }
+        let per_source = frame_bytes.saturating_mul(self.sources.len().max(1));
+        let window = budget.saturating_sub(self.generated) / per_source;
+        let cap = usize::try_from(PREFETCH_FRAMES + 1).unwrap_or(1);
+        i64::try_from(window.clamp(1, cap) - 1).unwrap_or(0)
+    }
+}
+
 /// The single frame-rendering path used by both playback preview and export.
 pub(crate) struct FrameRenderer {
     video_sources: HashMap<VideoSourceKey, VideoSource>,
@@ -209,6 +231,9 @@ pub(crate) struct FrameRenderer {
     title_cache: HashMap<TitleCacheKey, WorkingFrame>,
     title_order: VecDeque<TitleCacheKey>,
     cache_budget: usize,
+    /// PF1 K-6: `Some` for the preview renderer (window cap and eviction by
+    /// distance); `None` keeps today's policy for proofs, export and benches.
+    preview: Option<PreviewDemand>,
     /// CC4 2.4: the verified lattices every `technical_lut` / `creative_look`
     /// node resolves against. Bound by the caller to the asset hashes of the
     /// document it is about to render; the renderer never opens a LUT file for
@@ -235,7 +260,16 @@ impl FrameRenderer {
             title_cache: HashMap::new(),
             title_order: VecDeque::new(),
             cache_budget: FRAME_CACHE_BYTE_BUDGET,
+            preview: None,
             lut_library: Arc::new(LutLibrary::default()),
+        }
+    }
+
+    /// PF1 K-6: the playback preview's renderer.
+    pub(crate) fn new_preview(gpu: GpuContext) -> Self {
+        Self {
+            preview: Some(PreviewDemand::default()),
+            ..Self::new(gpu)
         }
     }
 
@@ -495,6 +529,34 @@ impl FrameRenderer {
             .validate()
             .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
         let layer_specs = visual_layers_at(document, project_at)?;
+        if let Some(demand) = &mut self.preview {
+            *demand = PreviewDemand::default();
+            for layer in &layer_specs {
+                match layer {
+                    TimelineVisualLayer::Video(layer) => {
+                        let Some(asset) = document.asset(layer.source.asset) else {
+                            continue;
+                        };
+                        let description = &asset.color_description;
+                        let key = VideoSourceKey::new(
+                            asset.id,
+                            &asset.path,
+                            &asset.source_fingerprint,
+                            asset.fps,
+                            description,
+                            d65_assumption(description),
+                            scale.max_width(),
+                        );
+                        let points = demand.sources.entry(key).or_default();
+                        points.push(layer.source.source_at);
+                    }
+                    TimelineVisualLayer::Title(_) | TimelineVisualLayer::Solid(_) => {
+                        demand.generated += working_bytes(resolution);
+                    }
+                    TimelineVisualLayer::Adjustment(_) => {}
+                }
+            }
+        }
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
             match layer {
@@ -645,7 +707,10 @@ impl FrameRenderer {
                 .map_or(0, working_bytes);
             let prefetch = match strategy {
                 DecodeStrategy::Seek => 0,
-                DecodeStrategy::Sequential => prefetch_frames(frame_bytes),
+                DecodeStrategy::Sequential => match &self.preview {
+                    Some(demand) => demand.prefetch(self.cache_budget, frame_bytes),
+                    None => prefetch_frames(frame_bytes),
+                },
             };
             let end = TimeCode(
                 source_at
@@ -656,7 +721,7 @@ impl FrameRenderer {
             let window_frames =
                 usize::try_from(end.0.saturating_sub(source_at.0).saturating_add(1))
                     .unwrap_or(usize::MAX);
-            self.reserve_cache_bytes(frame_bytes.saturating_mul(window_frames));
+            self.reserve_for(frame_bytes.saturating_mul(window_frames), Some(&key));
             let source = self
                 .video_sources
                 .get_mut(&key)
@@ -688,8 +753,8 @@ impl FrameRenderer {
                     "no video frame decoded for asset {asset} at {source_at}"
                 ))
             })?;
-        self.touch_source(key);
-        self.reserve_cache_bytes(0);
+        self.touch_source(key.clone());
+        self.reserve_for(0, Some(&key));
         Ok(frame)
     }
 
@@ -739,12 +804,49 @@ impl FrameRenderer {
     }
 
     fn reserve_cache_bytes(&mut self, incoming: usize) {
+        self.reserve_for(incoming, None);
+    }
+
+    /// Make room for `incoming` bytes that `requesting` is about to decode.
+    fn reserve_for(&mut self, incoming: usize, requesting: Option<&VideoSourceKey>) {
         while self.total_cache_bytes().saturating_add(incoming) > self.cache_budget {
-            if self.evict_oldest_video_frame() || self.evict_oldest_title_frame() {
+            if self.evict_video_frame(incoming, requesting) || self.evict_oldest_title_frame() {
                 continue;
             }
             break;
         }
+    }
+
+    /// Today's round-robin eviction, or (K-6, preview) inactive sources
+    /// first, then the sources over their share, farthest frame first.
+    fn evict_video_frame(&mut self, incoming: usize, requesting: Option<&VideoSourceKey>) -> bool {
+        let Some(demand) = &self.preview else {
+            return self.evict_oldest_video_frame();
+        };
+        let inactive = self
+            .video_sources
+            .iter_mut()
+            .find(|(key, source)| !demand.sources.contains_key(*key) && source.cache.len() > 0);
+        if let Some((_, source)) = inactive {
+            return source.cache.evict_oldest();
+        }
+        let share =
+            self.cache_budget.saturating_sub(demand.generated) / demand.sources.len().max(1);
+        let mut over = demand
+            .sources
+            .iter()
+            .filter_map(|(key, points)| {
+                let held = self.video_sources.get(key)?.cache.byte_len();
+                let bytes = held.saturating_add(if requesting == Some(key) { incoming } else { 0 });
+                (bytes > share).then_some((bytes, key, points))
+            })
+            .collect::<Vec<_>>();
+        over.sort_by_key(|(bytes, ..)| std::cmp::Reverse(*bytes));
+        over.into_iter().any(|(_, key, points)| {
+            self.video_sources
+                .get_mut(key)
+                .is_some_and(|source| source.cache.evict_farthest(points))
+        })
     }
 
     fn evict_oldest_video_frame(&mut self) -> bool {
@@ -1658,6 +1760,66 @@ mod tests {
                 .pixels
                 .chunks(4)
                 .all(|p| p == [0.0, 0.0, 0.0, 1.0])
+        );
+    }
+    /// PF1 G5 (K-6): two continuous sources under a binding budget decode
+    /// with 0 seeks after warm-up on the preview renderer; today's policy
+    /// thrashes on the same budget (the control).
+    #[test]
+    fn preview_window_plays_two_continuous_sources_without_seeking() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let source = |label, filter: &str, id| {
+            let filter = format!("{filter}=size=64x36:rate=30:duration=2");
+            let args = [
+                "-f", "lavfi", "-i", &filter, "-c:v", "ffv1", "-pix_fmt", "yuv420p",
+            ];
+            let media = GeneratedMedia::ffmpeg(label, &args, "mkv");
+            let mut asset = probe_path(media.path(), AssetId(id)).expect("source probes");
+            asset.color_description = ColorDescription {
+                primaries: ColorPrimaries::Bt709,
+                transfer: ColorTransfer::Bt709,
+                matrix: kinewright_core::ColorMatrix::Bt709,
+                range: kinewright_core::ColorRange::Limited,
+                white_point: kinewright_core::ColorWhitePoint::D65,
+                bit_depth: kinewright_core::ColorBitDepth::Eight,
+                confidence_basis_points: 10_000,
+                provenance: kinewright_core::ColorProvenance::UserOverride,
+            };
+            (media, asset)
+        };
+        let (_a, lower) = source("pf1-g5-a", "testsrc2", 1);
+        let (_b, upper) = source("pf1-g5-b", "smptebars", 2);
+        let mut document = single_clip_document(lower);
+        let mut track = document.tracks[0].clone();
+        (track.id, track.clips[0].id, track.clips[0].asset) = (TrackId(2), ClipId(2), upper.id);
+        document.tracks.push(track);
+        document.media_pool.push(upper);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let seeks_after_warm_up = |mut renderer: FrameRenderer| {
+            renderer.set_cache_budget(12 * working_bytes((64, 36)));
+            let mut warm = 0;
+            for at in 0..60 {
+                let strategy = DecodeStrategy::Sequential;
+                let frame = renderer.render(&document, TimeCode(at), (64, 36), scale, strategy);
+                frame.expect("frame renders");
+                warm = if at == 0 {
+                    renderer.video_seek_count()
+                } else {
+                    warm
+                };
+            }
+            renderer.video_seek_count() - warm
+        };
+        assert_eq!(
+            seeks_after_warm_up(FrameRenderer::new_preview(gpu.clone())),
+            0
+        );
+        assert!(
+            seeks_after_warm_up(FrameRenderer::new(gpu)) > 0,
+            "the control"
         );
     }
 }

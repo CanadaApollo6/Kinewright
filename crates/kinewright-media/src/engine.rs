@@ -1764,7 +1764,7 @@ impl Worker {
             handled_frame_sequence: 0,
             handled_seek_sequence: 0,
             document: Arc::new(Document::default()),
-            renderer: FrameRenderer::new(gpu),
+            renderer: FrameRenderer::new_preview(gpu),
             lut_lattices,
             lut_library: Arc::new(LutLibrary::default()),
             audio: None,
