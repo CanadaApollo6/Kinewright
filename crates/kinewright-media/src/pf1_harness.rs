@@ -120,15 +120,18 @@ pub(crate) fn process_memory() -> Result<ProcessMemory, String> {
         .map_err(|e| format!("powershell.exe: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     let status = loop {
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() <= deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let cleanup = abandon(&mut child);
+                return Err(format!("Get-Process timed out after 30 s; {cleanup}"));
+            }
+            Err(error) => {
+                let cleanup = abandon(&mut child);
+                return Err(format!("waiting on Get-Process failed: {error}; {cleanup}"));
+            }
         }
-        if Instant::now() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err("Get-Process timed out after 30 s".to_owned());
-        }
-        thread::sleep(Duration::from_millis(20));
     };
     let (mut stdout, mut stderr) = (String::new(), String::new());
     let pipes = (child.stdout.take(), child.stderr.take());
@@ -145,6 +148,26 @@ pub(crate) fn process_memory() -> Result<ProcessMemory, String> {
         _ => Err(format!(
             "unexpected Get-Process output {stdout:?}: {stderr}"
         )),
+    }
+}
+
+/// Kills an abandoned `powershell.exe` and reaps it, both bounded (5 s):
+/// returns what each step did, for the error.
+#[cfg(windows)]
+fn abandon(child: &mut std::process::Child) -> String {
+    let kill = child.kill();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let reap = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break format!("reaped ({status})"),
+            Ok(None) if Instant::now() <= deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => break "not reaped within 5 s".to_owned(),
+            Err(error) => break format!("reap failed: {error}"),
+        }
+    };
+    match kill {
+        Ok(()) => format!("killed, {reap}"),
+        Err(error) => format!("kill failed: {error}, {reap}"),
     }
 }
 
@@ -403,11 +426,34 @@ enum Control {
     Stall,
 }
 
+/// Fires a Q-3 control's fault (at 20 s; the slowdown runs from the start).
+fn fire(control: Control, faults: &Faults, audio: Option<&SimulatedAudio>) {
+    match control {
+        Control::Freeze => {
+            let until = Instant::now() + Duration::from_secs(1);
+            *faults.unpublished_until.lock().expect("fault state") = Some(until);
+        }
+        Control::ClockFreeze => audio.expect("paced").freeze(Duration::from_secs(1)),
+        Control::Stall => faults.fill_stall_ms.store(2_000, Ordering::Relaxed),
+        Control::None | Control::Slowdown => {}
+    }
+}
+
+/// Q-2 validity: the clock reached the duration within 0.98–1.02 of nominal
+/// (± 0.5 s) and the paced driver missed no callback deadline (A-F2, R25/D1).
+pub(crate) fn q2_valid(elapsed_ms: f64, nominal_ms: f64, missed_callbacks: u64) -> bool {
+    let (lower, upper) = (0.98 * nominal_ms - 500.0, 1.02 * nominal_ms + 500.0);
+    (lower..=upper).contains(&elapsed_ms) && missed_callbacks == 0
+}
+
 /// Q-2 P-play: a 2 s warm-up, then the whole timeline from 0 on the paced
 /// simulated driver (or the device), sampled every 5 ms; faults fire at 20 s.
-/// Counters are snapshot when the clock reaches the duration (the measured
-/// endpoint); what follows (the drain to the engine's own pause) is reported
-/// apart as `drain_underrun_frames`.
+/// Underruns are snapshot right after the sample whose clock reached the
+/// duration (the measured endpoint). Callbacks record them before advancing
+/// the clock (R25/D2), so the snapshot holds every callback up to the
+/// endpoint, and at most the one after it. What follows (the drain to the
+/// engine's own pause) is reported apart as `drain_underrun_frames`. Missed
+/// deadlines invalidate the run wherever they fall, drain included.
 fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics, u64, String) {
     let audio = (!device).then(SimulatedAudio::paced);
     let faults = Arc::new(Faults::default());
@@ -434,7 +480,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     faults.render_delay_ms.store(slowdown, Ordering::Relaxed);
     let (duration, frame) = (document.duration.0, frame_ms(document));
     let nominal = duration as f64 * frame;
-    let (lower, upper) = (0.98 * nominal - 500.0, 1.02 * nominal + 500.0);
+    let upper = 1.02 * nominal + 500.0;
     let (mut trace, mut armed, mut at_end) = (Trace::default(), true, None);
     let start = Instant::now();
     session.engine.play(TimeCode::ZERO);
@@ -446,26 +492,16 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
             trace.arrivals.push((ms(start), at.0, position));
         }
         let (t, position) = (ms(start), session.engine.position().0);
+        let sampled = counters();
         trace.samples.push((t, position));
         if armed && t >= 20_000.0 {
             armed = false;
-            match control {
-                Control::Freeze => {
-                    let until = Instant::now() + Duration::from_secs(1);
-                    *faults.unpublished_until.lock().expect("fault state") = Some(until);
-                }
-                Control::ClockFreeze => audio
-                    .as_ref()
-                    .expect("paced")
-                    .freeze(Duration::from_secs(1)),
-                Control::Stall => faults.fill_stall_ms.store(2_000, Ordering::Relaxed),
-                Control::None | Control::Slowdown => {}
-            }
+            fire(control, &faults, audio.as_ref());
         }
         session.assert_no_error("P-play run");
         if trace.end.is_none() && position >= duration {
             trace.end = Some(t);
-            at_end = Some(counters());
+            at_end = Some(sampled);
         }
         if trace.end.is_some_and(|end| t > end + 250.0) || t > upper + 5_000.0 {
             break;
@@ -473,13 +509,14 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     }
     let peak = peak_field(peak_reset);
     session.engine.pause();
-    let (end_underruns, end_missed) = at_end.unwrap_or_else(counters);
+    let (end_underruns, _) = at_end.unwrap_or_else(counters);
+    let (final_underruns, final_missed) = counters();
     let underrun = end_underruns - before.0;
-    let missed = end_missed - before.1;
-    let drain = counters().0 - end_underruns;
+    let missed = final_missed - before.1;
+    let drain = final_underruns - end_underruns;
     let mut m = trace.metrics(duration, frame);
     let elapsed = trace.end.unwrap_or(f64::NAN);
-    m.valid = (lower..=upper).contains(&elapsed) && missed == 0;
+    m.valid = q2_valid(elapsed, nominal, missed);
     let latency = if device {
         let micros = session.diagnostics.latency_micros();
         format!(" device_latency_ms={:.1}", micros as f64 / 1e3)
@@ -680,6 +717,9 @@ fn drag_and_release(
             break;
         }
     }
+    // Drag answers stop at the release receipt (R25/D4); later arrivals only
+    // feed the overwrite diagnostic.
+    let answerable = arrivals.len();
     // A stale drag render landing after the release frame would replace it.
     let release_arrived = (arrivals.last())
         .filter(|_| release.is_some())
@@ -689,7 +729,7 @@ fn drag_and_release(
         .filter(|&&(t, frame)| t > release_arrived && frame != release_target)
         .count();
     let mut drag: Vec<f64> = (calls.iter())
-        .map(|&call| answered(&arrivals, call).unwrap_or(f64::INFINITY))
+        .map(|&call| answered(&arrivals[..answerable], call).unwrap_or(f64::INFINITY))
         .collect();
     let mut answered: Vec<f64> = drag.iter().copied().filter(|l| l.is_finite()).collect();
     let unanswered = drag.len() - answered.len();

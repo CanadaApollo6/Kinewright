@@ -66,26 +66,48 @@ impl SimulatedAudio {
     /// One callback of `frames` if a playing stream is open; `false` if none.
     /// Its failed pops are recorded where they happen (R22).
     pub(crate) fn advance(&self, frames: usize) -> bool {
+        self.callback(frames, None)
+    }
+
+    /// One callback, under the stream lock. With a `pacer`, it is stamped as
+    /// it executes (R25/D1): immediately before the consume, its misses are
+    /// recorded before the clock advances (D2); immediately after it, a
+    /// consume that was itself suspended for a period counts as well.
+    fn callback(
+        &self,
+        frames: usize,
+        mut pacer: Option<(&mut Pacer, &mut dyn FnMut() -> Instant)>,
+    ) -> bool {
         let mut stream = lock(&self.0.stream);
         let Some(stream) = stream.as_mut().filter(|stream| stream.playing) else {
             return false;
         };
+        if let Some((pacer, clock)) = pacer.as_mut() {
+            let missed = pacer.start(clock());
+            self.0.missed_periods.fetch_add(missed, Ordering::Relaxed);
+        }
         let channels = usize::from(CHANNELS);
         let mut output = vec![0.0_f32; frames * channels];
         let gain = stream.gain.load(Ordering::Relaxed);
-        let failed = render_output(
+        render_output(
             &mut stream.consumer,
             &mut output,
             channels,
             &stream.position,
             gain,
+            &stream.diagnostics,
         );
-        stream.diagnostics.record_underrun(failed, channels);
+        if let Some((pacer, clock)) = pacer.as_mut() {
+            let missed = pacer.finish(clock());
+            self.0.missed_periods.fetch_add(missed, Ordering::Relaxed);
+        }
         true
     }
 
     /// Deadlines the paced driver missed; a timing run with any is invalid.
+    /// Read under the stream lock, so it includes every completed callback.
     pub(crate) fn missed_periods(&self) -> u64 {
+        let _completed = lock(&self.0.stream);
         self.0.missed_periods.load(Ordering::Relaxed)
     }
 
@@ -123,9 +145,9 @@ impl SimulatedAudio {
         }
     }
 
-    /// One callback per deadline. A late wake runs one callback, never a
+    /// One callback per deadline. A late callback runs once, never a
     /// catch-up burst against audio refilled meanwhile, and counts the
-    /// deadlines it missed (A-F2). Paused and frozen spans re-anchor.
+    /// deadlines it missed (A-F2, R25/D1). Paused and frozen spans re-anchor.
     fn pace(&self, stop: &AtomicBool) {
         let mut pacer = Pacer::new(Instant::now());
         while !stop.load(Ordering::Acquire) {
@@ -136,24 +158,27 @@ impl SimulatedAudio {
                 pacer.reanchor(now);
                 continue;
             }
-            let missed = pacer.woke(now);
-            if self.advance(CALLBACK_FRAMES) {
-                self.0.missed_periods.fetch_add(missed, Ordering::Relaxed);
-            } else {
-                pacer.reanchor(now);
+            if !self.callback(CALLBACK_FRAMES, Some((&mut pacer, &mut Instant::now))) {
+                pacer.reanchor(Instant::now());
             }
         }
     }
 }
 
 /// The paced driver's deadlines, apart from the clock so a test can drive it.
+/// Every stamp is taken where the callback actually executes (R25/D1): a
+/// wake-up stamp would miss a suspension between waking and consuming.
 struct Pacer {
     next: Instant,
+    started: Instant,
 }
 
 impl Pacer {
     fn new(now: Instant) -> Self {
-        Self { next: now + PERIOD }
+        Self {
+            next: now + PERIOD,
+            started: now,
+        }
     }
 
     /// How long to sleep before the next deadline.
@@ -161,11 +186,12 @@ impl Pacer {
         self.next.saturating_duration_since(now)
     }
 
-    /// A wake at `now` serves one deadline; returns how many later deadlines
-    /// had also passed (missed), re-anchoring after a miss.
-    fn woke(&mut self, now: Instant) -> u64 {
-        let late = now.saturating_duration_since(self.next).as_nanos();
-        let missed = u64::try_from(late / PERIOD.as_nanos()).unwrap_or(u64::MAX);
+    /// A callback starting to consume at `now` serves one deadline. Returns
+    /// how many later deadlines had also passed (missed); after a miss the
+    /// schedule re-anchors on `now`, so nothing is caught up.
+    fn start(&mut self, now: Instant) -> u64 {
+        self.started = now;
+        let missed = periods(now.saturating_duration_since(self.next));
         self.next = if missed == 0 {
             self.next + PERIOD
         } else {
@@ -174,9 +200,24 @@ impl Pacer {
         missed
     }
 
+    /// The callback finished consuming at `now`. A consume suspended for a
+    /// period or more missed that many deadlines, and re-anchors on `now`.
+    fn finish(&mut self, now: Instant) -> u64 {
+        let missed = periods(now.saturating_duration_since(self.started));
+        if missed > 0 {
+            self.next = now + PERIOD;
+        }
+        missed
+    }
+
     fn reanchor(&mut self, now: Instant) {
         self.next = now + PERIOD;
     }
+}
+
+/// Whole callback periods in `span`.
+fn periods(span: Duration) -> u64 {
+    u64::try_from(span.as_nanos() / PERIOD.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// The runtime's end of the output; dropping it detaches the stream.
@@ -292,9 +333,10 @@ mod tests {
             }
         });
         let (position, mut output) = (AtomicU64::new(0), vec![0.0_f32; 2 * CALLBACK_FRAMES]);
+        let diagnostics = AudioDiagnostics::default();
         let (mut requested, mut failed) = (0, 0);
         let mut callback = |consumer: &mut Consumer<f32>| {
-            failed += render_output(consumer, &mut output, 2, &position, 0);
+            failed += render_output(consumer, &mut output, 2, &position, 0, &diagnostics);
             requested += 2 * CALLBACK_FRAMES;
         };
         while !refill.is_finished() {
@@ -340,25 +382,77 @@ mod tests {
         assert!((40_000..=50_000).contains(&stalled), "{stalled}");
     }
 
-    /// A-F2: a late wake serves one deadline, counts the ones it missed and
-    /// re-anchors, so it never bursts through audio refilled meanwhile.
+    /// A-F2: a late callback serves one deadline, counts the ones it missed
+    /// and re-anchors, so it never bursts through audio refilled meanwhile.
     #[test]
     fn the_pacer_counts_missed_deadlines_and_never_bursts() {
         let start = Instant::now();
         let mut pacer = Pacer::new(start);
-        assert_eq!(pacer.woke(start + PERIOD), 0, "on time");
+        assert_eq!(pacer.start(start + PERIOD), 0, "on time");
+        assert_eq!(pacer.finish(start + PERIOD), 0);
         assert_eq!(
             pacer.wait(start + PERIOD),
             PERIOD,
             "the next deadline is one period on"
         );
         assert_eq!(
-            pacer.woke(start + 2 * PERIOD + PERIOD / 2),
+            pacer.start(start + 2 * PERIOD + PERIOD / 2),
             0,
             "half a period late still meets it"
         );
         let late = start + 6 * PERIOD + PERIOD / 2;
-        assert_eq!(pacer.woke(late), 3, "three later deadlines passed");
+        assert_eq!(pacer.start(late), 3, "three later deadlines passed");
         assert_eq!(pacer.wait(late), PERIOD, "re-anchored, not a burst");
+    }
+
+    /// R25/D1: the reviewer's schedule. The driver wakes on time, is suspended
+    /// for 32 ms before it consumes, and the producer refills the starved ring
+    /// meanwhile. The refill hides the starvation from the underrun count, so
+    /// the miss must be counted, where the callback executes, before its
+    /// clock advance, and must invalidate the run; nothing is caught up. A
+    /// suspension inside the consume counts the same way.
+    #[test]
+    fn a_suspension_with_a_refill_is_a_missed_deadline_that_invalidates_the_run() {
+        let stall = Duration::from_millis(32);
+        let (audio, mut producer, output) = stepped_stream(1 << 16);
+        output.set_playing(true);
+        let t0 = Instant::now();
+        let mut pacer = Pacer::new(t0);
+        let samples = 2 * CALLBACK_FRAMES;
+        producer
+            .push_entire_slice(&vec![0.1; samples])
+            .expect("room");
+        let on_time = t0 + PERIOD;
+        let mut stamps = [on_time, on_time].into_iter();
+        let mut clock = || stamps.next().expect("two stamps");
+        assert!(audio.callback(CALLBACK_FRAMES, Some((&mut pacer, &mut clock))));
+        assert_eq!((audio.missed_periods(), underruns(&audio)), (0, 0));
+        // The ring is now empty. The next deadline passes during the stall,
+        // while the producer refills.
+        let deadline = on_time + PERIOD;
+        producer
+            .push_entire_slice(&vec![0.1; samples])
+            .expect("room");
+        let executes = deadline + stall;
+        let mut stamps = [executes, executes].into_iter();
+        let mut clock = || stamps.next().expect("two stamps");
+        assert!(audio.callback(CALLBACK_FRAMES, Some((&mut pacer, &mut clock))));
+        assert_eq!(underruns(&audio), 0, "the refill hid the starvation");
+        let missed = audio.missed_periods();
+        assert_eq!(missed, 1, "the stall is a missed deadline");
+        assert_eq!(pacer.wait(executes), PERIOD, "no catch-up after it");
+        let nominal = 60_000.0;
+        assert!(crate::pf1_harness::q2_valid(nominal, nominal, 0));
+        assert!(!crate::pf1_harness::q2_valid(nominal, nominal, missed));
+        // Suspended inside the consume: on time in, 32 ms out.
+        let begins = executes + PERIOD;
+        producer
+            .push_entire_slice(&vec![0.1; samples])
+            .expect("room");
+        let mut stamps = [begins, begins + stall].into_iter();
+        let mut clock = || stamps.next().expect("two stamps");
+        assert!(audio.callback(CALLBACK_FRAMES, Some((&mut pacer, &mut clock))));
+        assert_eq!(audio.missed_periods(), 2);
+        assert_eq!(pacer.wait(begins + stall), PERIOD, "re-anchored after it");
     }
 }

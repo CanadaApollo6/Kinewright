@@ -4402,14 +4402,14 @@ where
             move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
                 let stamp = info.timestamp();
                 diagnostics.record_latency(stamp.playback.duration_since(stamp.callback));
-                let failed = render_output(
+                render_output(
                     &mut consumer,
                     output,
                     callback_channels,
                     &position,
                     monitor_gain_tenth_db.load(Ordering::Relaxed),
+                    &diagnostics,
                 );
-                diagnostics.record_underrun(failed, callback_channels);
             },
             move |_error| {
                 error_flag.store(true, Ordering::Release);
@@ -4436,12 +4436,16 @@ pub(crate) mod simulated;
 /// Pops one callback's samples (silence where the ring is empty) and advances
 /// the clock by the whole callback. Returns the pops that failed (PF1 R22:
 /// counted where they happen; the samples and the clock are unchanged).
+/// They are recorded *before* the clock's release advance (R25/D2), so a
+/// thread that observes the advanced clock also observes this callback's
+/// underruns.
 fn render_output<T>(
     consumer: &mut Consumer<f32>,
     output: &mut [T],
     channels: usize,
     position: &AtomicU64,
     monitor_gain_tenth_db: i32,
+    diagnostics: &AudioDiagnostics,
 ) -> usize
 where
     T: cpal::Sample + cpal::FromSample<f32>,
@@ -4456,6 +4460,7 @@ where
         });
         *destination = T::from_sample(sample * gain);
     }
+    diagnostics.record_underrun(failed, channels);
     position.fetch_add(
         u64::try_from(sample_frames).unwrap_or(u64::MAX),
         Ordering::Release,
@@ -4897,15 +4902,45 @@ mod tests {
         producer.push(-0.5).unwrap();
         let position = AtomicU64::new(10);
         let mut output = [1.0_f32; 4];
+        let diagnostics = AudioDiagnostics::default();
 
         // PF1 R22: the two failed pops are counted where they happen.
         assert_eq!(
-            render_output(&mut consumer, &mut output, 2, &position, 0),
+            render_output(&mut consumer, &mut output, 2, &position, 0, &diagnostics),
             2
         );
 
         assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
         assert_eq!(position.load(Ordering::Acquire), 12);
+        assert_eq!(diagnostics.underrun_frames(), 1);
+    }
+
+    /// PF1 R25/D2: underruns are recorded before the clock's release advance,
+    /// so an observer that acquires a clock value sees every underrun up to
+    /// it. On an empty ring every frame underruns: the count can never trail
+    /// the clock.
+    #[test]
+    fn an_observed_clock_never_runs_ahead_of_its_underruns() {
+        let (_producer, mut consumer) = RingBuffer::<f32>::new(4);
+        let position = Arc::new(AtomicU64::new(0));
+        let diagnostics = Arc::new(AudioDiagnostics::default());
+        let callbacks = 20_000_u64;
+        let observer = {
+            let (position, diagnostics) = (Arc::clone(&position), Arc::clone(&diagnostics));
+            std::thread::spawn(move || {
+                let mut observed = 0;
+                while observed < callbacks * 64 {
+                    observed = position.load(Ordering::Acquire);
+                    let underruns = diagnostics.underrun_frames();
+                    assert!(underruns >= observed, "{underruns} < {observed}");
+                }
+            })
+        };
+        let mut output = [0.0_f32; 128];
+        for _ in 0..callbacks {
+            render_output(&mut consumer, &mut output, 2, &position, 0, &diagnostics);
+        }
+        observer.join().expect("the observer");
     }
 
     #[test]
@@ -4915,7 +4950,14 @@ mod tests {
         producer.push(-0.25).unwrap();
         let position = AtomicU64::new(0);
         let mut output = [0.0_f32; 2];
-        render_output(&mut consumer, &mut output, 2, &position, 60);
+        render_output(
+            &mut consumer,
+            &mut output,
+            2,
+            &position,
+            60,
+            &AudioDiagnostics::default(),
+        );
         assert_close(output[0], 0.5 * db_gain(60));
         assert_close(output[1], -0.25 * db_gain(60));
     }
