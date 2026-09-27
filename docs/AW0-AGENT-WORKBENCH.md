@@ -2,6 +2,7 @@
 
 Status: **promoted 2026-09-24** (revision 2) — incorporates the Opus critic
 verdict (`revise`), the lead's N1 rulings, and Riel's answers (all binding).
+**Amended 2026-09-27 (A1, Riel): AW2 re-scoped** — see "Amendment A1".
 Decides the boundary, slice order, headless/code-clip/whole-edit models,
 sharing, security, determinism, budgets, and slices AW1–AW4.
 
@@ -39,6 +40,47 @@ Conventions: prose cites symbols (`Type`/`fn`/module names), never
   budgets as named gates in every slice and AW4, (d) adapter
   specified-only and external if ever built.
 
+## Amendment A1 — AW2 re-scoped (Riel, 2026-09-27)
+
+The N1.1 parity goal is **withdrawn**. Claude + Remotion proved stronger
+than a native re-implementation could become. Its power is arbitrary
+program logic in a language models write fluently: React/TSX, with
+layout, loops, data, and the whole library ecosystem. Reaching parity
+would mean rebuilding a layout engine and a scripting runtime.
+Kinewright now integrates external code renderers instead of imitating
+them, and keeps native code clips for what native does best.
+
+- **Native code clips (SVG):** titles, lower thirds, callouts, and
+  bound charts. They are lean, deterministic, and scrub live at 60 fps.
+  They remain AW2's first part, with the §5 descriptor/binding model
+  unchanged.
+- **External-render clips:** a generic external-renderer interface,
+  built in AW2 with a **Remotion adapter first**. Manim, Motion Canvas,
+  and Blender can follow on the same interface.
+  - *Not bundled.* The external renderer uses the person's own Node and
+    Remotion installation.
+  - *Out of process, on demand.* The renderer runs only to render, and
+    its output is cached by content hash as project-owned media.
+  - *Typed props.* The composition's zod schema becomes typed
+    Kinewright parameters.
+- **Lottie demoted.** It is an import format for designer-made assets,
+  not an agent authoring format, and moves out of AW2 (§15).
+- **The efficiency principle is kept, restated.** Kinewright still
+  ships no Node, Python, or Chromium runtime, and its own RSS gates are
+  unchanged. What changes is that an external renderer the person
+  installed may run beside it, as a child process that exits when its
+  render ends.
+- **§8 is re-opened, as it foresaw** ("a future executing language
+  re-opens this section"). External renders execute code, so they get
+  their own trust rule (§5, §8).
+- **Licensing.** Remotion is source-available, not OSI open source, and
+  companies above its size threshold need a paid licence. Kinewright
+  therefore never ships, vendors, or requires Remotion. The integration
+  is optional, and the licence is the person's.
+
+Changed sections: §1, §5, §8, §12, §13, §14, §15. The roadmap's AW
+section carries the same amendment.
+
 ## 0. How this programme runs
 
 Recipe v2 mechanics, fixed for AW1–AW4 (the MO0 precedent):
@@ -70,14 +112,18 @@ In scope for this programme:
 - A headless Kinewright: a `kinewright` CLI plus a stdio MCP mode that
   proxies to the GUI's live server when the project is open there and
   runs headless otherwise — so any MCP client drives a real project.
-- Code as a first-class clip source: vector/code-generated clips
-  (SVG first, then Lottie; Typst, WGSL later) with keyframable
-  parameters, deterministic cached renders, sandboxing, and provenance.
-  Manim/Remotion stay native-only-for-now: execution closed, a
-  render-import adapter specified in AW2 but built only if AW4 shows
-  agents need it — and outside Kinewright if ever built (Riel ruled).
-- Programme principle (N1.1): native Rust only. Kinewright never ships
-  a bundled Node, Python, or Chromium runtime to render code clips.
+- Code as a first-class clip source, in two kinds (A1):
+  - *Native SVG code clips.* Keyframable parameters, deterministic
+    cached renders, pure-function sandboxing, and provenance. Typst
+    and WGSL come later.
+  - *External-render clips.* A Remotion adapter comes first. It
+    renders out of process with the person's own installation, and
+    its output is cached by hash as project-owned media, with typed
+    props and provenance.
+- Programme principle (N1.1 as amended by A1): Kinewright never ships
+  a bundled Node, Python, or Chromium runtime. An external renderer
+  the person installed may run as an on-demand child process. It is
+  never embedded, and never required to open or play a project.
 - Agent-lethality multipliers on the existing runtime: one-call
   whole-edit plans with complete errors, compact timeline state diffs,
   and `explain_frame` provenance for any pixel/region.
@@ -245,59 +291,102 @@ server, the lockfile + proxy client (§10), the shared project-IO crate
 (B3, moved logic), lifecycle ops (registry-only), consent plumbing,
 skill v1 + MCPB. No served byte, no renderer change.
 
-## 5. AW2 — Code-generated clips
+## 5. AW2 — Code-generated clips (re-scoped by A1)
 
-**Recommendation.** A new `ClipContent::Code` whose source is code plus
-parameters: `{ language, source, params }`, rendered deterministically,
-cached by content hash, sandboxed, with provenance. Ship order: **SVG
-first, then Lottie** (S8 — a known keyframed JSON motion format with a
-Rust renderer, not a bespoke language with no model prior); Typst and
-WGSL-shader sources are specified interfaces with deferred
-implementations. Source is a hash-addressed blob (the LUT-store
-precedent); only typed params animate, via `AutomationCurve` owners.
+**Recommendation.** AW2 ships two clip sources on one parameter model.
+Both open with AW2-OBL-1, the bounded, echo-free transport refusals
+carried from MO2.
 
-- **Reconciliation with MO0/MO6 (S7).** "SVG import is AE scope" stands
-  — and code clips are not an SVG *import workflow* (no pen tools,
-  paths, or artboard editing). They are *generated assets*: authored
-  source rendered to pixels, like the CC4 built-in looks. Stated here
-  so the boundary holds on both sides.
-- **Declared descriptors + typed bindings.** Code-clip params get their
-  own declared descriptor table (not `EFFECT_DESCRIPTORS` rows) with
-  typed bindings to SVG ids/attributes and Lottie properties — no
-  string templating into source, ever. Unbound ids fail closed.
-- **Parameters, not source, animate.** Source blob immutable per
-  `SetCodeSource` revision; only declared numeric params take curves,
-  riding the keep-outside video rules from MO1.
-- **Manim/Remotion: native-only for now (Riel ruled).** Execution stays
-  closed; AW2 *specifies* (not builds) a render-import adapter — the
-  host renders externally, `import_render` ingests an alpha image
-  sequence / ProRes 4444 / FFV1, hash-addressed, with source/props/tool
-  versions as provenance. Specified-only; external if ever built.
-- **Parity goal (N1.1): build something equally capable ourselves**
-  — Remotion/Manim parity for the common video-from-code jobs, natively:
+**Part 1: native SVG code clips.** A new `ClipContent::Code` whose
+source is code plus parameters, `{ language, source, params }`. It is
+rendered deterministically, cached by content hash, sandboxed as a pure
+function (§8), and carries provenance. SVG ships first. Typst and WGSL
+shader sources are specified interfaces with deferred implementations.
+The source is a hash-addressed blob (the LUT-store precedent), and only
+typed params animate, via `AutomationCurve` owners. This part serves the
+live-scrubbed majority: titles, lower thirds, callouts, bound charts,
+and later MO6 template fields.
 
-| Job | Native feature | Gap, if any |
-| --- | --- | --- |
-| Animated text / typography | SVG text + Lottie text animators, hashed fonts | None targeted |
-| Shapes and paths | SVG geometry + typed attribute bindings | None targeted |
-| Easing and springs | `AutomationCurve` easings; spring solver if needed | Verified in AW2, else named gap |
-| Data / chart animation | Param curves driving SVG chart bindings | None targeted |
-| Math / equation display | Typst source (later slice) | Deferred, interface specified in AW2 |
-| Sequencing / staggering | Clip-local frame evaluation + `Hold` keys | None targeted |
-| Templates with props | Descriptors + bindings (§5) as the props surface | None targeted |
+- **Reconciliation with MO0/MO6 (S7).** "SVG import is AE scope" still
+  stands. Code clips are not an SVG *import workflow*: there are no pen
+  tools, paths, or artboard editing. They are *generated assets*,
+  authored source rendered to pixels like the CC4 built-in looks.
+- **Declared descriptors and typed bindings.** Code-clip params get
+  their own declared descriptor table, not `EFFECT_DESCRIPTORS` rows,
+  with typed bindings to SVG ids and attributes. Nothing is ever
+  string-templated into source. Unbound ids fail closed.
+- **Parameters animate, not source.** The source blob is immutable per
+  `SetCodeSource` revision. Only declared numeric params take curves,
+  riding MO1's keep-outside video rules.
 
-- **MO coordination.** Code clips rasterise CPU-side and alpha-over
-  like titles (S7), so AW2 needs composite order, not MO2's
-  sub-composite pass; MO6 may embed code clips as template fields later.
+**Part 2: external-render clips (A1).** A generic external-renderer
+interface, with Remotion as the first adapter. A clip references a
+renderer project, a composition id, and typed props. The renderer runs
+out of process and writes alpha-preserving frames, which Kinewright
+ingests as project-owned, hash-addressed media.
 
-**Rejected alternative.** Shell-out rendering, the bespoke DSL, and
-bundling Node/Python/Chromium (N1.1: never by default). All surrender
-what beats code: typed, cached, reproducible, lean.
+- **Never bundled; the person's own installation.** Kinewright locates
+  the person's Node and Remotion and records their versions. If either
+  is missing, it fails closed with a typed error naming what to
+  install. Kinewright never downloads a runtime or installs packages
+  on the person's behalf.
+- **On demand, then gone.** The renderer starts only when a clip needs
+  frames that are not cached, and exits when the render ends. Cancel,
+  timeout and shutdown kill the whole process tree. Gate: no renderer
+  process survives a finished, cancelled or failed render, and
+  Kinewright's own RSS budgets are unchanged. The child's peak RSS and
+  render time are recorded, not gated.
+- **Rendered frames are the project's truth.** The cache key hashes:
+  - the renderer project's sources and lockfile;
+  - the composition id;
+  - the canonical props;
+  - the frame range, size and rate;
+  - the renderer, Remotion and Node versions.
 
-**Cost.** One `ClipContent` variant + renderer dispatch, one SVG
-dependency and one Lottie dependency (pure Rust), the descriptor table
-+ bindings, hash-blob store, param-curve owners, generated mutators
-(registry-only). No served byte.
+  The frames are stored as project-owned media under the M41 cache
+  discipline. A project opens, plays and exports on a machine without
+  Remotion. Only changing the source or the props needs the renderer.
+- **Typed props.** The composition's zod schema maps onto the §5
+  declared descriptor table. Props become typed, validated, undoable
+  Kinewright parameters, and an unknown or ill-typed prop fails
+  closed. v1 props are constant per clip revision, and animation lives
+  in the renderer code. Whether Kinewright curves drive props, as
+  sampled per-frame values the composition reads, is an AW2 design
+  question.
+- **Colour and alpha.** The output is display-referred sRGB and is
+  ingested with an explicit sRGB assumption through the managed
+  pipeline (the CC rules). Alpha is straight, via PNG sequence or
+  ProRes 4444; the AW2 brief picks one.
+- **Interaction.** A prop edit re-renders in the background. Stale
+  frames are marked stale in the GUI and in proofs, and never served as
+  final. An agent sees a typed "render pending" state rather than a
+  silent old frame. Playback of cached frames is ordinary media
+  playback, so PF1 applies.
+- **Trust (§8).** An external render executes the person's code with
+  the person's privileges, as if they ran it themselves. It is
+  therefore enabled per project by the person, never by an agent, and
+  confined to the project's allowed roots for inputs and outputs.
+  Kinewright does not claim to sandbox it.
+
+**Rejected alternatives.**
+- Native Remotion/Manim parity (the withdrawn N1.1 goal): it means
+  rebuilding React's layout and logic, for a worse copy.
+- Bundling Node or Chromium: it breaks the efficiency principle and
+  would pass Remotion's licence on to every user.
+- Import-only rendering, where the host renders and Kinewright ingests
+  the result: there are no typed props, no cache, no provenance and no
+  undo, so the agent is back to scripting render loops.
+
+**Cost.**
+- One `ClipContent` variant for code clips and one for external
+  renders, plus renderer dispatch.
+- One pure-Rust SVG dependency.
+- The descriptor table and bindings, and the zod → descriptor mapping.
+- The hash-blob store, and the param-curve owners.
+- The external-process supervisor: spawn, cancel, tree-kill and version
+  probe.
+- Generated mutators, which are registry-only.
+- No served byte.
 
 ## 6. AW3 — Aggregate diagnostics, state diffs, explain-frame
 
@@ -407,11 +496,10 @@ design says so plainly:
   are allowed, so `import_media` works; anything outside fails closed.
   The loopback proxy is authenticated (0600 Bearer [REDACTED], B2) — no
   unauthenticated local port.
-- **Code clips are sandboxed by construction, not by container.**
+- **Native code clips are sandboxed by construction, not by container.**
   Renderers are pure functions over `(source_bytes, params, frame) →
   pixels`: no path access, no network, no clock, no process spawn in the
-  render call. SVG needs no execution at all; Lottie evaluates
-  keyframed JSON with no IO. Resource bounds are explicit: output
+  render call. SVG needs no execution at all. Resource bounds are explicit: output
   resolution cap, per-frame CPU timeout, render memory cap derived from
   dimensions; over budget fails closed with a typed incident, never a
   partial frame served as final.
@@ -420,10 +508,22 @@ design says so plainly:
   Fonts are hashed assets (S12, the LUT-store precedent), not a system
   fallback — "same source, different machine" cannot diverge.
 
+- **External renders (A1) execute code, so they are trusted, not
+  sandboxed.** They run the person's own renderer installation with the
+  person's privileges. The person enables them per project; an agent
+  can never enable them, and a headless session cannot enable them
+  either without the explicit flag. Inputs and outputs are confined to
+  the allowed roots. Every render records its command, versions and
+  hashes in provenance. An agent may author the source, but that is
+  source the person has chosen to run, the same trust as a person
+  running `npx remotion render` in their own shell. Kinewright never
+  claims otherwise in the UI or in docs.
+
 **Rejected alternative.** OS-level sandboxing (seccomp, containers).
-Rejected as disproportionate: the renderers take no IO, so the sandbox
-is the function signature plus budgets. A future executing language
-re-opens this section.
+Rejected as disproportionate: the native renderers take no IO, so the
+sandbox is the function signature plus budgets. External renders are
+the executing case this section anticipated. They are governed by the
+person-enabled trust rule above, not by a claimed sandbox.
 
 **Cost.** Path-resolution guard in CLI + plan apply, per-frame render
 budgets, bundled-font decision in the AW2 brief, typed incidents for
@@ -435,7 +535,11 @@ each refusal. No new dependencies, no platform-specific sandbox code.
 machines, and GUI/headless:
 
 - **Code-clip cache key** is `hash(source_bytes, evaluated_params,
-  output_size, renderer_name, renderer_version)`. Renderer version in
+  output_size, renderer_name, renderer_version)`. The external-render
+  key (§5, Part 2) adds the renderer project's lockfile and the
+  Node/Remotion versions. Byte identity is claimed across runs on one
+  machine; the stored frames, not a re-render, carry the result to
+  other machines. Renderer version in
   the key is load-bearing: a renderer upgrade invalidates silently
   otherwise. Cache entries live under the M41 managed-cache discipline
   (scoped inspection, clearing, byte accounting) — visible in the same
@@ -562,16 +666,30 @@ render one sheet with diffs, QA, batch proofs, and costs; diff/explain
 compute inside budget; served quad unchanged. *Depends:* AW1. *Size:*
 medium-large, two parts.
 
-**AW2 — Code-generated clips.** `ClipContent::Code` with SVG + Lottie
-sources, declared descriptors, typed bindings, hash-blob store,
-param curves, sandbox bounds, provenance; Typst/WGSL specified but
-deferred; render-import adapter specified, not built. *Exit gate:* an
-SVG lower third byte-identical across runs and both CI operating
-systems; a Lottie animation's params survive trim-in-then-out; an
-over-budget render fails closed with no partial frame; unbound ids
-fail closed; per-frame render cost and cache bounds inside budget;
-parity table green except named gaps; served quad unchanged. *Depends:*
-AW1, AW3; MO1 content model settled. *Size:* large, two parts.
+**AW2 — Code-generated clips (A1).** AW2 opens with AW2-OBL-1.
+- *Part 1:* `ClipContent::Code` with SVG, declared descriptors, typed
+  bindings, a hash-blob store, param curves, sandbox bounds and
+  provenance. Typst and WGSL are specified but deferred.
+- *Part 2:* external-render clips with the Remotion adapter: zod props
+  as typed parameters, hash-cached project-owned frames, and a
+  supervised child process.
+
+*Exit gate:*
+- An SVG lower third is byte-identical across runs and on both CI
+  operating systems. SVG params survive trim-in-then-out.
+- An over-budget render fails closed with no partial frame. Unbound ids
+  and ill-typed props fail closed.
+- A Remotion clip renders, caches and plays back. A project opened
+  without Remotion installed still plays and exports from the stored
+  frames.
+- No renderer process survives a finished, cancelled or failed render.
+- External renders stay disabled until the person enables them.
+- Kinewright's peak RSS, per-frame cost and cache bounds are inside
+  budget.
+- The served quad is unchanged.
+
+*Depends:* AW1, and MO1's content model settled. *Size:* large, two
+parts.
 
 **AW4 — Workflow evaluation.** Scenario authority, scripted agent/person
 paths, the §13 comparison harness (Claude Code `-p` both arms), blinded
@@ -605,7 +723,8 @@ two never earns "excellent").
 | Task | Baseline may use | Engine must win on |
 | --- | --- | --- |
 | Silence-cut + captions on a podcast | ASR, gap ranking, filtergraph concat, srt burn-in | Tokens/corrections: diffs + aggregate plans vs re-emitted filtergraphs; cut-default correctness |
-| Animated lower third over an interview | Remotion/Manim + official skills | Iteration speed: SVG/Lottie clip + param curves + instant proof vs render-loop scripting |
+| Animated lower third over an interview | Remotion/Manim + official skills | Iteration speed: SVG clip + param curves + instant proof vs render-loop scripting |
+| Data-driven motion graphic cut into an edit | Remotion + official skill, then an ffmpeg overlay | Integration (A1): the same Remotion code as an external-render clip, with typed props, cached frames and undo, cut and graded in place, vs re-render-and-re-overlay |
 | Reframe 16:9 to 9:16 with caption safety | Crop arithmetic, caption re-layout | Correctness: deterministic cover-crop + safe-area QA |
 | Match two cameras + deliver tagged | FFmpeg colour work, tag flags | Technical gate: managed pipeline + scopes + decoded-output verification |
 | Revise after review ("tighter, swap take 2") | Re-run, re-verify | Revision cost: one branch + plan + undo; decision log carries intent |
@@ -623,9 +742,14 @@ Risks:
   + lifecycle + consent is a three-part slice; if it runs hot, split
   the cutover from the proxy rather than thinning either.
 - **AW2's renderer dependencies are the programme's new third-party
-  trust.** SVG + Lottie crates and hashed fonts must be license-clean,
-  deterministic, and cross-platform. The AW2 brief picks the crates and
-  records the license verdicts.
+  trust.** The SVG crate and the hashed fonts must be licence-clean,
+  deterministic, and cross-platform. The AW2 brief picks the crate and
+  records the licence verdicts.
+- **External renderers are an interface we do not control (A1).**
+  Remotion versions, CLI flags and output formats move. The adapter
+  pins a supported version range, probes the version before use, and
+  fails closed outside that range. Remotion's licence stays the
+  person's; Kinewright ships none of its code.
 - **Registry pin-site contention (S11).** AW3/MO2 landings at
   `INSPECTOR_TOOL_NAMES` serialise; whoever lands second re-pins.
 - **AW4 needs IN3's self-check.** If IN3 slips, AW4 gates on QA + lane
@@ -637,7 +761,9 @@ destructive fail-closed unless per-call consent or the explicit flag,
 reconciled with the loop via B5; SVG first, then Lottie as the motion
 format; Manim/Remotion native-only-for-now with the render-import
 adapter specified, built only if AW4 shows need; decision log CLI +
-registry first, GUI panel later.
+registry first, GUI panel later. **Superseded by A1 (2026-09-27):**
+Remotion is integrated in AW2 as an external-render clip, and Lottie is
+demoted to import-only.
 
 Open questions: none. All five revision-1 questions are answered above.
 
@@ -647,8 +773,10 @@ Deferred with owners, not rejected:
 
 - **Typst and WGSL code sources.** Owner: a future AW code-depth slice;
   interfaces specified in AW2, implementations unbudgeted.
-- **Manim/Remotion render-import adapter.** Specified-only in AW2;
-  external if ever built, only if AW4 shows need (Riel ruled).
+- **Further external-render adapters** (Manim, Motion Canvas,
+  Blender). Owner: a later AW slice, on AW2's interface (A1).
+- **Lottie import** for designer-made assets. Owner: MO6 or a later AE
+  slice. It is import only, never the agent authoring format (A1).
 - **Multi-machine project sharing.** Owner: a future collaboration
   slice; the lockfile assumes one machine. Network drives get
   fail-closed behaviour, not corruption.

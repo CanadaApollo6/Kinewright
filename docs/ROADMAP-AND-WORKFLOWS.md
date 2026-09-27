@@ -937,10 +937,10 @@ proxied to the GUI's live server when the project is open there,
 headless otherwise — apply revision-gated plans, render proofs, and
 hand the same file back to the GUI, while code stays a first-class clip
 source with deterministic cached renders. It owns the headless CLI and
-stdio mode, code-generated clips (SVG, Lottie; native Rust only —
-never a bundled Node/Python/Chromium runtime; Manim/Remotion
-native-only-for-now with a specified-only external adapter),
-aggregate diagnostics, state diffs, frame
+stdio mode; code-generated clips, which are native SVG plus
+external-render clips with Remotion first (AW0 amendment A1,
+2026-09-27: run out of process on the person's own installation, never
+bundled); aggregate diagnostics, state diffs, frame
 explanation, the sharing contract, the decision log, and the shipped
 skill. It consumes the IN3 row (timeline view, post-render self-check,
 cut defaults, capability packs); it is not a hosted service, not a
@@ -978,11 +978,20 @@ diff, frame explanation, decision log, comparison sheet, or skill exists.
 - **Headless inverts the sandbox.** The external host is outside our
   trust; destructive commits need per-call consent or the explicit
   flag, with a pre-commit snapshot; file scope is MCP roots.
-- **Code renders are pure functions.** `(source, params, frame)` in,
-  pixels out — no IO, no clock, bounded resources, hashed fonts.
-- **Native Rust only.** No bundled Node, Python, or Chromium runtime,
-  ever by default; AW2 targets capability parity with Remotion/Manim
-  for the common video-from-code jobs, natively.
+- **Native code renders are pure functions.** `(source, params, frame)`
+  in, pixels out: no IO, no clock, bounded resources, hashed fonts.
+- **Integrate code renderers, do not imitate them (A1, Riel
+  2026-09-27).** The native parity goal is withdrawn. Remotion runs as
+  an external-render clip:
+  - it uses the person's own install, never a bundled Node or
+    Chromium;
+  - it runs out of process, on demand, and never survives its render;
+  - the person enables it per project, never an agent;
+  - its frames are cached by hash as project-owned media, so a project
+    plays and exports without Remotion installed.
+
+  Native SVG keeps the live-scrubbed titles, callouts and charts.
+  Lottie is import-only, later.
 - **Memory and CPU are gated.** Every slice pins budgets (headless
   peak RSS, per-frame code-clip render cost, cache bounds); AW4
   measures them against the baseline's toolchain footprint.
@@ -1003,7 +1012,7 @@ diff, frame explanation, decision log, comparison sheet, or skill exists.
 | Stage | Deliverable | Exit gate |
 | --- | --- | --- |
 | AW1 — Headless Kinewright | `kinewright` CLI (new/open/import/save/inspect/schema/apply plan/proof frame/strip/check/export/branch) plus proxy-first stdio with server auth; lockfile discovery; shared project-IO crate; lifecycle capabilities; destructive-consent plumbing; skill v1 + MCPB package | Headless: stdio client opens, splits, commits, proofs; the GUI opens the same file with the change and one CLI commit in provenance. GUI open: the same session proxies live and one GUI undo removes the edit. Destructive without consent refuses naming the flag; proofs equal on the pinned adapter; headless peak RSS inside budget; served quad unchanged |
-| AW2 — Code-generated clips | `ClipContent::Code` with SVG and Lottie sources, declared descriptors, typed bindings, hash-blob store, keyframable parameters, sandbox bounds, and provenance; Typst/WGSL specified but deferred; render-import adapter specified-only and external if ever built; parity with Remotion/Manim for the common jobs | SVG lower third byte-identical across runs and both CI operating systems; Lottie params survive trim-in-then-out; over-budget renders and unbound ids fail closed; per-frame render cost and cache bounds inside budget; parity table green except named gaps; served quad unchanged |
+| AW2 — Code-generated clips (re-scoped A1) | Opens with AW2-OBL-1. Part 1: `ClipContent::Code` with SVG, declared descriptors, typed bindings, hash-blob store, keyframable parameters, sandbox bounds and provenance; Typst/WGSL specified but deferred. Part 2: external-render clips with the Remotion adapter: zod props as typed parameters, hash-cached project-owned frames, a supervised child process, person-enabled per project | SVG lower third byte-identical across runs and both CI operating systems; SVG params survive trim-in-then-out; over-budget renders, unbound ids and ill-typed props fail closed; a Remotion clip renders, caches and plays, and the project still plays and exports without Remotion installed; no renderer process survives a finished, cancelled or failed render; external renders are off until the person enables them; Kinewright RSS, per-frame cost and cache bounds inside budget; served quad unchanged |
 | AW3 — Aggregate diagnostics, state diffs, explain-frame | Aggregate `apply_batch` diagnostics with lenient plan parsing under a byte budget; `get_timeline_diff` over revision-indexed snapshots; two-tier `explain_frame`; per-frame hash; decision-log sidecar; comparison sheet with batch proofs | A 50-op plan with three seeded errors returns all three plus fixes in one call; a diff answers a cut-point question inside budget; tier-1 explanation names every stack contributor; two branches render one sheet with diffs, QA, batch proofs, and costs; diff/explain compute inside budget; served quad unchanged |
 | AW4 — Workflow evaluation | Scenario authority with synthetic sources, scripted agent/person paths, the Claude Code `-p` both-arms comparison harness against a full-strength baseline (ffmpeg + Remotion/Manim + official skills) measuring tokens, time, corrections, and peak RSS, blinded review; no feature, no tool | All gates green on both OSes with lanes named; N runs per task per arm with setup time counted; engine wins tokens/time/corrections/RSS; human reviewer left only creative questions |
 
