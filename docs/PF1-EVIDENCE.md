@@ -583,8 +583,9 @@ seeks, and its release was measured only after the drag had settled
 
 Paused, three seeded runs per workload (`0x5EED0000 + run`). Each run does:
 - 200 random seeks;
-- 200 forward steps (+1…+12). They start with a seek to the first frame, so
-  that every step really moves forward from where the transport is;
+- 200 forward steps (+1…+12). They start with a seek to a seeded random
+  start frame, so that every step really moves forward from where the
+  transport is;
 - 200 backward steps (−1…−12);
 - a 5 s `request_frame` drag at 30 Hz, forward and monotone, in 1–4 frame
   steps;
@@ -609,9 +610,12 @@ How to read the columns:
   F5).
 - Drag p95 counts an unanswered call as infinite. Answered p95 is taken over
   answered calls only. Unanswered means no drag frame at or past the call's
-  target arrived before the release frame.
+  target arrived before the release frame. Since R25 (D4) the harness takes
+  answers only from arrivals up to the release receipt; the later 500 ms
+  feed only the overwrite count. The rerun's tables are unaffected: no
+  frame arrived after a release frame.
 - Pending is the number of drag calls still unanswered when the release was
-  issued.
+  issued. It counts calls, not renders: the engine may coalesce them.
 - Stale / over:
   - *stale* counts drag frames delivered after the release call;
   - *over* counts frames delivered within 500 ms after the release frame,
@@ -639,8 +643,9 @@ Mapping to G8 (all ms):
 
 What changed from the first run:
 - **Release latency rose.** It was about 30 ms against an already-rendered
-  target. Now it is 86–297 ms, because the release queues behind 2–6
-  pending drag renders.
+  target. Now it is 86–297 ms, because the release is issued while 2–6
+  drag calls are still unanswered and queues behind their renders (however
+  many the engine coalesces them into).
 - **A pending drag render still lands after the release call** (stale = 1)
   in 17 of 18 runs. None landed after the release frame (over = 0), so
   today's release is never overwritten within 500 ms. Today's API has no
@@ -667,27 +672,44 @@ What changed from the first run:
   so Windows peaks are process-lifetime values, marked `(lifetime)`.
   Compiled for `x86_64-pc-windows-msvc`; it has not yet run on Windows.
   CI-W runs `pf1_process_memory_reads_this_process`. Since the review fixes
-  the probe has a 30 s deadline (the child is killed on timeout). It checks
-  the exit status and requires exactly three integers. A failed probe is
+  the probe has a 30 s deadline. It checks the exit status and requires
+  exactly three integers. On a timeout, or if waiting fails, the child is
+  killed and reaped within a bounded 5 s, and the error reports what the
+  kill and reap did (R25/D3). A failed probe is
   reported as `unavailable(...)`, never as 0 (review B F2 and S2).
 - **A/V offset.** Today has no ack, so the offset is measured at receipt:
   |`position()` − frame stamp|.
-- **Underruns (R22).** `render_output` returns the number of its pops that
-  failed, at the existing `unwrap_or(0.0)` sites. Both the cpal callback and
-  the simulated driver record that count, so the samples and the clock are
-  unchanged. The harness snapshots the counter when the clock reaches the
-  duration, and reports what follows (the drain to the engine's own pause)
-  apart, as `drain_underrun_frames`. `failed_pops_are_exact_under_a_concurrent_refill`
-  witnesses the count while a producer refills concurrently.
+- **Underruns (R22).** `render_output` counts the pops that failed, at the
+  existing `unwrap_or(0.0)` sites. The samples and the clock are unchanged.
+  - Since R25 (D2) it records them *before* the clock's release advance, so
+    an observer that sees the advanced clock sees that callback's underruns.
+  - The harness snapshots the counter right after the clock sample that
+    reached the duration. The snapshot holds every callback up to the
+    endpoint, and at most one after it, which is a conservative error.
+  - What follows (the drain to the engine's own pause) is reported apart,
+    as `drain_underrun_frames`.
+  - Witnesses: `failed_pops_are_exact_under_a_concurrent_refill` (the count
+    under a concurrent refill) and
+    `an_observed_clock_never_runs_ahead_of_its_underruns` (the ordering; it
+    fails with the pre-R25 order).
 - **Diagnostics are per engine (R23).** `AudioDiagnostics` (underrun frames
   and device latency) is owned by each engine's `AudioRuntime` and shared
   with the harness by `Arc`. The process-wide statics are gone, and the
   reads are `cfg(test)`. The counters still record in production builds;
   that is two relaxed atomic operations per callback.
-- **Missed callback deadlines (review A F2).** The paced driver runs one
-  callback per wake and never bursts to catch up. It counts deadlines it
-  woke too late to meet (`missed_callbacks`), and a P-play run with any is
-  invalid.
+- **Missed callback deadlines (review A F2, R25/D1).** The paced driver
+  runs one callback per deadline and never bursts to catch up.
+  - Since R25 it stamps each callback where it executes, under the stream
+    lock: immediately before the consume (recorded before the clock
+    advances) and immediately after it. A suspension anywhere between the
+    wake and the end of the consume is therefore seen.
+  - It counts a whole period late, or a consume that took a period, as
+    missed, and re-anchors the schedule on the stamp.
+  - A P-play run with any missed deadline is invalid, wherever it falls
+    (drain included). `missed_callbacks` reports the run's total.
+  - Witness: `a_suspension_with_a_refill_is_a_missed_deadline_that_invalidates_the_run`.
+    A 32 ms suspension, with a refill during it that hides the starvation
+    from the underrun count, still counts a miss and invalidates the run.
 - **P-rss guards.** Parent and child require a release build. The parent
   checks the child's exit status. The child requires at least 5 s of played
   timeline and no engine error before it labels the snapshot "playing".
@@ -797,9 +819,19 @@ PF1 rss before=33.5/2 constructed=164.0/11 first_render=305.3/11 settled_idle=30
 - `pf1/impl` at `82fe858` (the review fixes), rustc 1.98.0, release
   (`kinewright_media-cf306d076b2fd4bf`). Same machine, drivers and pinned
   FFmpeg as E9.1.
-- 2026-09-27, 07:04–07:32 EDT. The two `foot` screensaver processes were
-  again using about 1.5 cores; the load average was 6.5 at the start.
-  Nothing else ran: the runs were sequential, with no build in parallel.
+- 2026-09-27, 07:04–07:32 EDT. The runs were sequential, with no build in
+  parallel.
+- **The S0 reruns ran under about 1.5 cores of screensaver load** (R26). The
+  two `foot` screensaver processes belong to Riel's desktop session, which
+  S0 does not change; the load average was 6.5 at the start. No S0
+  conclusion depends on this: today's figures miss their gates by 10–50×.
+  The S4 `PF1_PINS` must be taken with the screensaver off.
+- **The spot checks and P-seek figures predate R25** (`f8035c4`): the pacer
+  stamps callbacks at execution, underruns are recorded before the clock
+  advances, and drag answers are capped at the release receipt. No rerun
+  was required (P14): the P-seek tables are unaffected (no frame arrived
+  after a release frame), and D1/D2 are edge cases these runs did not
+  exhibit, as far as the pre-R25 counters can show.
 - Commands, each with `--exact --ignored --nocapture --test-threads=1`:
   - `PF1_ONLY=typical_1080p PF1_RUNS=1 pf1_play_baseline` on LL, then with
     `PF1_HARDWARE=1` on LH. `PF1_ONLY` excludes `controls`, so no control
@@ -818,8 +850,10 @@ bounds and the missed-callback check:
 - **The R22 counter still reports hundreds of thousands of underrun
   frames.** Those are pops that actually failed: the synchronous renders
   drain the ring, as E9.3 explains. The pre-R22 figures for `typical_1080p`
-  were in the same range (260,096–525,312 across six simulated runs), so the
-  overstatement is small against today's real shortfall.
+  were in the same range (260,096–525,312 across six simulated runs). The
+  ranges overlap, and the runs differ, so they do not measure how much the
+  old counter overstated: only that today's real shortfall is of the same
+  order.
 - **No early frames.** Today's engine renders at or behind the clock. The
   early-frame rule matters once S2 renders ahead.
 - **The paced driver missed no deadline**, and both runs meet the new lower
