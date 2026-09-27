@@ -12,6 +12,7 @@
 > **Status:** evidence for the design's diagnosis, **not** gate baselines.
 > The S0 harness re-measures every number it gates, on the pinned FFmpeg,
 > through the engine (design §2 and §11).
+> Those S0 baselines are in **§E9**; the WARP VM run there is owed.
 
 ## E0 Diagnosis table (moved from design §1, revision 2)
 
@@ -370,3 +371,322 @@ with f = 7.031 MiB at 1280×720 or 720×1280 and 10 MiB at 1024×1280.
 | `reel_9x16`: 3 sources, 4 titles | (224 − 28.13 − 21.09) / 3 = 58.26 MiB | 8 |
 | `feed_4x5`: 3 sources, 4 titles | (224 − 40 − 30) / 3 = 51.33 MiB | 5 (starved, recorded) |
 | 8 sources at 720p, 3 titles (P = 20, R = 8) | (224 − 21.09 − 56.25) / 8 = 18.33 MiB | 2 (starved) |
+
+
+## E9 S0 baselines
+
+These are the S0 harness's first measurements of today's engine, through
+`pf1_harness` on the pinned FFmpeg. They are the "S0" figures the design's
+gates cite as **PB**. The WARP VM run is **owed**; the lead runs it by hand.
+
+### E9.1 Provenance
+
+**Machine and software.**
+- i5-13600K (20 hardware threads), 31 GiB RAM.
+- RTX 3090 on NVIDIA driver 615.71.09. lavapipe is llvmpipe (LLVM 22.1.8).
+- Linux 7.2.5-4-omarchy, with PipeWire as the audio server.
+
+**Background load.** Two `foot` terminal screensaver processes used about
+1.5 cores for the whole session. The load average was 7.1 at the start and
+4.8 at the end. Nothing else ran during timing: builds, tests and the timed
+lanes ran strictly one at a time.
+
+**Build.**
+- `pf1/impl` at `d19bdf9` for I4, P-play and P-seek (2026-09-27, 04:03–06:11
+  EDT). P-rss ran at `3df1a22` (06:17–06:25 EDT). That commit only fixes how
+  the P-rss parent finds its child's result line.
+- rustc 1.98.0, release profile. The binary is
+  `cargo test --release -p kinewright-media --lib`
+  (`kinewright_media-cf306d076b2fd4bf`).
+
+**FFmpeg.** The pinned `third_party/ffmpeg` (n8.0-23-gd1f31a829d-20251022),
+selected through `scripts/setup-ffmpeg.sh`. It serves both as the linked
+libraries and as the fixture tool (`test_support::ffmpeg_tool` reads
+`FFMPEG_DIR`). System FFmpeg was not used.
+
+**Commands.** Each was run with `--ignored --nocapture --test-threads=1`:
+- `mo2_perf_fixtures::r28_end_to_end_tracked` on LL, then with
+  `R28_HARDWARE=1` for LH.
+- `pf1_harness::pf1_play_baseline`, `pf1_seek_baseline` and
+  `pf1_rss_baseline`. LL is the default; `PF1_HARDWARE=1` selects LH.
+- `PF1_HARDWARE=1 PF1_DEVICE=1 pf1_play_baseline`: the V-5 real-device
+  cross-check, one run per workload.
+
+**Workloads.**
+- W-1 as built by `perf_fixtures`.
+- MO2's builders, unchanged, parameterised to 60 s for P-play so that the
+  denominator is 1,800:
+  - `typical_1080p` = `cuts((1920,1080), 600, 3, 360, 15)`;
+  - `blend_heavy_1080p` = `blend_heavy(1800)`.
+- `seek_gop60`: a noisy 1080p GOP 60 single source, 60 s. It is added for
+  L-1, because W-1 has no single-source GOP 60 timeline.
+- `title_only`: for G15.
+
+### E9.2 I4
+
+ME13's `BASELINES` are untouched, and `r28_end_to_end_tracked`'s 5% rule is
+green on both lanes:
+- LL: 509.8 ms against a 497.86 ms baseline, +2.4%.
+- LH: +2.6% against 494.39 ms.
+
+The raw lines are in E9.8.
+
+### E9.3 P-play
+
+Setup (Q-2):
+- Three runs per workload on the paced V-5 driver, plus one real-device run
+  per workload on LH.
+- The on-time / late / dropped column shows the worst run. Every other
+  column gives the range over the runs.
+- Every run was **valid**: the clock reached the duration within 1.02 ×
+  duration + 0.5 s.
+
+| Workload | Lane | Output | Valid | On time / late / dropped (worst run) | Present p50 / p95 / max ms | Held max ms | A/V offset max ms | Clock stall max ms | underrun_frames | Peak RSS MiB | Ledger peak MiB |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `typical_1080p` | LL | simulated | all | 0 / 56 / 1744 of 1800 | 679–1103 / 1317–1578 / 1553–1708 | 1550–1708 | 1567–1700 | 45.5–46.0 | 260096–525312 | 863–1237 | 56.3 |
+| `blend_heavy_1080p` | LL | simulated | all | 0 / 30 / 1770 of 1800 | 1997–2008 / 2045–2054 / 2050–2080 | 2048–2079 | 2067 | 45.4–46.1 | 1398784–1405952 | 1454–2050 | 63.3 |
+| `explainer_16x9` | LL | simulated | all | 0 / 67 / 1733 of 1800 | 698–726 / 1355–1373 / 1467–1502 | 1466–1499 | 1467–1500 | 45.3–46.4 | 317440–330752 | 1729–2297 | 56.3 |
+| `reel_9x16` | LL | simulated | all | 0 / 37 / 1763 of 1800 | 1317–1336 / 2033–3254 / 2570–3302 | 2565–3300 | 2533–3267 | 45.4–48.4 | 933888–1110016 | 1984–2456 | 156.9 |
+| `feed_4x5` | LL | simulated | all | 0 / 61 / 1739 of 1800 | 1020–1027 / 1997–2043 / 2079–2188 | 2078–2185 | 2100–2167 | 45.8–47.8 | 534528–558080 | 2289–2525 | 114.5 |
+| `talk_recut` | LL | simulated | all | 0 / 360 / 6840 of 7200 | 675–676 / 720–725 / 774–844 | 773–844 | 767–833 | 45.7–46.2 | 7168–8192 | 2058–2240 | 42.2 |
+| `typical_1080p` | LH | simulated | all | 0 / 61 / 1739 of 1800 | 986–1010 / 1453–1568 / 1618–1726 | 1614–1723 | 1633–1700 | 45.4–45.5 | 367616–492544 | 1037–1418 | 56.3 |
+| `blend_heavy_1080p` | LH | simulated | all | 0 / 31 / 1769 of 1800 | 1948–1968 / 1989–2027 / 1990–2036 | 1989–2031 | 2000–2033 | 45.4–45.7 | 1339392–1342464 | 1786–2167 | 63.3 |
+| `explainer_16x9` | LH | simulated | all | 0 / 67 / 1733 of 1800 | 707–736 / 1381–1390 / 1497–1539 | 1493–1536 | 1500–1533 | 45.4–45.9 | 324608–337920 | 1953–2436 | 56.3 |
+| `reel_9x16` | LH | simulated | all | 0 / 39 / 1761 of 1800 | 1315–1332 / 2531–3254 / 3219–3268 | 3217–3265 | 3200–3267 | 45.4–45.5 | 1048576–1121280 | 2202–2334 | 156.9 |
+| `feed_4x5` | LH | simulated | all | 0 / 62 / 1738 of 1800 | 1010–1018 / 1979–2023 / 2070–2245 | 2066–2243 | 2067–2233 | 45.4–45.5 | 535552–537600 | 1983–2262 | 114.5 |
+| `talk_recut` | LH | simulated | all | 0 / 361 / 6839 of 7200 | 673–675 / 719–722 / 772–854 | 768–854 | 767–833 | 45.8–46.7 | 7168–8192 | 1914–2017 | 42.2 |
+| `typical_1080p` | LH | device (1 run) | all | 0 / 69 / 1731 of 1800 | 980 / 1340 / 1648 | 1645 | 1633 | 45.4 | 282624 | 928 | 56.3 |
+| `blend_heavy_1080p` | LH | device (1 run) | all | 0 / 31 / 1769 of 1800 | 1965 / 1992 / 1994 | 1993 | 2000 | 45.4 | 1335808 | 1150 | 63.3 |
+| `explainer_16x9` | LH | device (1 run) | all | 0 / 66 / 1734 of 1800 | 734 / 1389 / 1521 | 1520 | 1533 | 45.4 | 324608 | 1285 | 56.3 |
+| `reel_9x16` | LH | device (1 run) | all | 0 / 40 / 1760 of 1800 | 1309 / 2547 / 3194 | 3190 | 3167 | 45.3 | 1012224 | 1293 | 156.9 |
+| `feed_4x5` | LH | device (1 run) | all | 0 / 59 / 1741 of 1800 | 1020 / 1992 / 2483 | 2482 | 2467 | 45.3 | 557056 | 1174 | 114.5 |
+| `talk_recut` | LH | device (1 run) | all | 0 / 360 / 6840 of 7200 | 674 / 725 / 784 | 783 | 767 | 45.5 | 6656 | 1011 | 42.2 |
+
+How to read the table:
+- **Every workload fails G1 and G14 today, on both lanes.** No due frame was
+  presented on time. Frames arrive about every 0.7–2 s, which matches E3's
+  T4 (1.8 / 0.5 fps).
+- **LL ≈ LH.** Playback is bound by decode and transfer, not by the GPU
+  (E0).
+- **The real device reproduces the simulated driver.** The present
+  distribution, held age and stall match. `device_latency_ms` is 20.9–21.3
+  (one PipeWire quantum), and the stall floor is the same.
+- **The clock-stall floor is about 45 ms, and it is structural.** A
+  1,024-frame callback is 21.3 ms. The position is a 30 fps frame index, so it
+  can stay unchanged for up to two callbacks (42.7 ms), plus the 5 ms sampling
+  step. G16's 100 ms bound sits above this floor.
+- **`underrun_frames` is large because the worker renders synchronously in
+  `tick`.** A render slower than the 1 s live fill target drains the ring.
+  Today's clock advances through underruns (T7), so these runs stay valid.
+  `talk_recut`'s renders take about 0.7 s, under the fill target, so it
+  underruns least.
+- **Peak RSS is in-process.** VmHWM is reset per run through
+  `/proc/self/clear_refs`, but memory kept from earlier runs in the same test
+  process stays in the reading. P-rss (E9.5) is the authoritative memory
+  figure.
+
+### E9.4 Q-3 controls
+
+Each control fires at 20 s on `typical_1080p` (slowdown: from the start).
+Every control **fails its metric** on both lanes, and `pf1_play_baseline`
+asserts this.
+
+| Control | Lane | Metric | Fails | Late + dropped | Present p95 ms | Held max ms | Clock stall max ms | underrun_frames |
+|---|---|---|---|---|---|---|---|---|
+| slowdown | LL | G1 | true | 1800 | 1699.8 | 1725.6 | 47.0 | 418816 |
+| freeze | LL | G14 | true | 1800 | 1578.6 | 1870.7 | 45.4 | 385024 |
+| clock freeze | LL | G16 | true | 1800 | 1772.0 | 1801.7 | 1050.0 | 476160 |
+| stall | LL | underrun_frames | true | 1800 | 1814.5 | 3734.2 | 46.2 | 762880 |
+| slowdown | LH | G1 | true | 1800 | 1638.8 | 1702.8 | 45.6 | 530432 |
+| freeze | LH | G14 | true | 1800 | 1575.0 | 2636.4 | 45.5 | 345088 |
+| clock freeze | LH | G16 | true | 1800 | 1446.5 | 1666.0 | 1050.0 | 350208 |
+| stall | LH | underrun_frames | true | 1800 | 1655.5 | 3196.0 | 45.8 | 525312 |
+
+**Only the clock freeze discriminates today.** The uncontrolled runs already
+fail G1 and G14 and already underrun. The controls still show the expected
+direction:
+- slowdown: 1,800 of 1,800 frames late or dropped;
+- freeze: held age 1.87 s / 2.64 s, against 1.55–1.73 s uncontrolled;
+- clock freeze: stall 1,050 ms, against about 46 ms;
+- stall: held age 3.7 s / 3.2 s, and more underrun frames.
+
+The CI test `pf1_metrics_pass_a_clean_trace_and_every_control_fails_its_metric`
+proves that each metric flips a *passing* trace. S2 should rerun the controls
+once the uncontrolled run passes G1 and G14.
+
+### E9.5 P-rss (fresh process per workload)
+
+Resident MiB / thread count at each point:
+- **Before:** before the engine is created.
+- **Constructed:** 500 ms after construction, with no document.
+- **First render:** the first paused frame.
+- **Settled idle:** 6 s later. This is G15's baseline.
+- **Playing:** after 10 s of simulated-driver playback, with the peak since a
+  VmHWM reset.
+
+LL is the pinned lane; LH is recorded as well.
+
+| Workload | Lane | Before | Constructed | First render | Settled idle (G15) | Playing 10 s | Playing peak MiB |
+|---|---|---|---|---|---|---|---|
+| `typical_1080p` | LL | 33.4/2 | 169.9/48 | 584.7/140 | 584.8/140 | 833.4/141 | 946.3 |
+| `blend_heavy_1080p` | LL | 33.5/2 | 170.0/48 | 677.2/186 | 677.2/186 | 995.1/187 | 995.1 |
+| `explainer_16x9` | LL | 33.5/2 | 169.9/48 | 546.4/140 | 546.4/140 | 964.2/187 | 973.5 |
+| `reel_9x16` | LL | 33.5/2 | 170.0/48 | 492.4/94 | 492.5/94 | 1127.0/187 | 1138.4 |
+| `feed_4x5` | LL | 33.9/2 | 170.0/48 | 402.7/94 | 402.7/94 | 898.7/187 | 964.8 |
+| `talk_recut` | LL | 33.6/2 | 170.1/48 | 381.8/94 | 381.8/94 | 649.0/95 | 651.1 |
+| `title_only` | LL | 33.5/2 | 170.2/48 | 236.0/48 | 236.0/48 | 254.0/49 | 254.0 |
+| `typical_1080p` | LH | 33.4/2 | 163.5/11 | 624.9/103 | 624.9/103 | 862.5/104 | 862.5 |
+| `blend_heavy_1080p` | LH | 33.5/2 | 164.0/11 | 711.0/149 | 711.0/149 | 1026.7/150 | 1026.7 |
+| `explainer_16x9` | LH | 33.6/2 | 163.7/11 | 587.7/103 | 587.7/103 | 958.6/150 | 1004.2 |
+| `reel_9x16` | LH | 33.6/2 | 163.9/11 | 479.0/57 | 479.0/57 | 1031.2/150 | 1086.4 |
+| `feed_4x5` | LH | 33.5/2 | 164.1/11 | 450.8/57 | 450.8/57 | 937.2/150 | 980.8 |
+| `talk_recut` | LH | 33.5/2 | 163.7/11 | 450.8/57 | 450.8/57 | 716.2/58 | 720.1 |
+| `title_only` | LH | 33.5/2 | 164.0/11 | 305.3/11 | 305.3/11 | 326.7/12 | 326.7 |
+
+Settled idle equals first render on every workload. Nothing is released
+after 6 s idle: decoders, caches and threads stay resident.
+
+### E9.6 P-seek
+
+Paused, three seeded runs per workload (`0x5EED0000 + run`). Each run does:
+- 200 random seeks;
+- 200 forward steps (+1…+12);
+- 200 backward steps (−1…−12);
+- a 5 s `request_frame` drag at 30 Hz, forward and monotone, in 1–4 frame
+  steps;
+- then the release `seek`.
+
+Each operation mirrors the app's `seek_to` (`seek` + `request_frame`). The
+latency runs from the call to receipt of the matching frame; a drag call is
+answered by the first frame at or past its target. The table shows the
+worst run's p95. L-4a (backward hit) has no cache today, so it equals the
+backward p95.
+
+| Workload | Lane | Random p95 (worst run) / max | Forward p95 | +1 p95 (L-3) | Backward p95 | Drag p95 | Drag distinct fps (L-5, worst) | Release shown / ms (L-6) | Timeouts |
+|---|---|---|---|---|---|---|---|---|---|
+| `seek_gop60` | LL | 119.5 / 145.4 | 117.4 | 120.2 | 115.7 | 188.8 | 10.2 | all / 30.3 | 0 |
+| `talk_recut` | LL | 163.8 / 221.7 | 196.4 | 208.4 | 192.1 | 227.0 | 9.0 | all / 29.7 | 0 |
+| `explainer_16x9` | LL | 205.7 / 271.8 | 206.0 | 205.5 | 206.0 | 366.5 | 6.6 | all / 36.5 | 0 |
+| `seek_gop60` | LH | 115.6 / 138.8 | 114.7 | 120.0 | 116.5 | 197.0 | 10.2 | all / 28.3 | 0 |
+| `talk_recut` | LH | 162.8 / 213.1 | 191.4 | 202.3 | 192.9 | 228.7 | 9.0 | all / 28.4 | 0 |
+| `explainer_16x9` | LH | 205.6 / 270.8 | 206.2 | 203.6 | 207.8 | 360.8 | 6.8 | all / 36.3 | 0 |
+
+Mapping to G8 (all ms):
+
+| Metric | Measured (LL / LH) | Gate |
+|---|---|---|
+| L-1 | 119.5 / 115.6 | ≤ 40 |
+| L-2 (talk) | 163.8 / 162.8 | ≤ 110 |
+| L-3 | 120.2 / 120.0 at GOP 60 | ≤ 20 |
+| L-5 | 10.2 at GOP 60 and 9.0 at GOP 250 | ≥ 10 / 7 |
+| L-6 | shown in every run | — |
+
+### E9.7 Harness notes (proposed amendments are in the S0 report)
+
+- **Windows `process_memory()`.** It runs `Get-Process` (WorkingSet64,
+  PeakWorkingSet64, Threads.Count) through `powershell.exe` rather than
+  calling `GetProcessMemoryInfo` and Toolhelp: the workspace forbids
+  `unsafe_code`. The counters are the same ones. The peak cannot be reset,
+  so Windows peaks are process-lifetime values, marked `(lifetime)`.
+  Compiled for `x86_64-pc-windows-msvc`; it has not yet run on Windows.
+  CI-W runs `pf1_process_memory_reads_this_process`.
+- **A/V offset.** Today has no ack, so the offset is measured at receipt:
+  |`position()` − frame stamp|.
+- **Device underruns.** On the real device, `underrun_frames` comes from a
+  counter in the cpal callback that only records. It computes the same
+  shortfall as the simulated driver, and playback is unchanged.
+
+### E9.8 Raw result lines
+
+```
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=509.86 fps=2.0 p95_ms=1619.55 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=510.75 fps=2.0 p95_ms=1616.60 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=508.83 fps=2.0 p95_ms=1615.36 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) workload=typical_1080p baseline_ms=497.86 delta=+2.4%
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=56 dropped=1744 present_p50_ms=1103.2 present_p95_ms=1574.8 present_max_ms=1708.2 held_max_ms=1707.7 av_offset_max_ms=1700.0 clock_stall_max_ms=45.5 underrun_frames=525312 peak_rss_mib=863.1 ledger_peak_mib=56.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=77 dropped=1723 present_p50_ms=679.1 present_p95_ms=1317.2 present_max_ms=1552.6 held_max_ms=1550.0 av_offset_max_ms=1566.7 clock_stall_max_ms=45.8 underrun_frames=260096 peak_rss_mib=1236.6 ledger_peak_mib=56.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=61 dropped=1739 present_p50_ms=1003.6 present_p95_ms=1578.5 present_max_ms=1685.8 held_max_ms=1683.1 av_offset_max_ms=1700.0 clock_stall_max_ms=46.0 underrun_frames=402432 peak_rss_mib=1056.8 ledger_peak_mib=56.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=30 dropped=1770 present_p50_ms=2005.1 present_p95_ms=2044.9 present_max_ms=2050.1 held_max_ms=2047.6 av_offset_max_ms=2066.7 clock_stall_max_ms=45.4 underrun_frames=1399808 peak_rss_mib=1454.4 ledger_peak_mib=63.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=30 dropped=1770 present_p50_ms=2007.9 present_p95_ms=2046.0 present_max_ms=2061.6 held_max_ms=2058.3 av_offset_max_ms=2066.7 clock_stall_max_ms=46.1 underrun_frames=1405952 peak_rss_mib=1787.8 ledger_peak_mib=63.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=30 dropped=1770 present_p50_ms=1997.1 present_p95_ms=2053.8 present_max_ms=2079.5 held_max_ms=2078.9 av_offset_max_ms=2066.7 clock_stall_max_ms=45.4 underrun_frames=1398784 peak_rss_mib=2050.3 ledger_peak_mib=63.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=67 dropped=1733 present_p50_ms=725.7 present_p95_ms=1372.7 present_max_ms=1497.1 held_max_ms=1492.6 av_offset_max_ms=1500.0 clock_stall_max_ms=46.4 underrun_frames=330752 peak_rss_mib=2297.2 ledger_peak_mib=56.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=67 dropped=1733 present_p50_ms=698.4 present_p95_ms=1355.5 present_max_ms=1502.1 held_max_ms=1499.0 av_offset_max_ms=1466.7 clock_stall_max_ms=46.0 underrun_frames=318464 peak_rss_mib=1729.0 ledger_peak_mib=56.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=67 dropped=1733 present_p50_ms=711.0 present_p95_ms=1355.2 present_max_ms=1467.3 held_max_ms=1466.0 av_offset_max_ms=1466.7 clock_stall_max_ms=45.3 underrun_frames=317440 peak_rss_mib=1812.8 ledger_peak_mib=56.3
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=37 dropped=1763 present_p50_ms=1336.4 present_p95_ms=3253.8 present_max_ms=3302.5 held_max_ms=3299.8 av_offset_max_ms=3266.7 clock_stall_max_ms=45.4 underrun_frames=1110016 peak_rss_mib=1983.5 ledger_peak_mib=156.9
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=38 dropped=1762 present_p50_ms=1328.0 present_p95_ms=2593.4 present_max_ms=3271.7 held_max_ms=3267.3 av_offset_max_ms=3266.7 clock_stall_max_ms=47.2 underrun_frames=1038336 peak_rss_mib=2371.6 ledger_peak_mib=156.9
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=41 dropped=1759 present_p50_ms=1317.1 present_p95_ms=2033.2 present_max_ms=2569.5 held_max_ms=2565.4 av_offset_max_ms=2533.3 clock_stall_max_ms=48.4 underrun_frames=933888 peak_rss_mib=2456.4 ledger_peak_mib=156.9
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=61 dropped=1739 present_p50_ms=1026.8 present_p95_ms=1996.7 present_max_ms=2187.8 held_max_ms=2185.1 av_offset_max_ms=2166.7 clock_stall_max_ms=46.3 underrun_frames=558080 peak_rss_mib=2524.9 ledger_peak_mib=114.5
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=60 dropped=1740 present_p50_ms=1019.5 present_p95_ms=2013.5 present_max_ms=2100.2 held_max_ms=2098.4 av_offset_max_ms=2100.0 clock_stall_max_ms=45.8 underrun_frames=551936 peak_rss_mib=2343.6 ledger_peak_mib=114.5
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=60 dropped=1740 present_p50_ms=1020.7 present_p95_ms=2042.8 present_max_ms=2079.3 held_max_ms=2078.3 av_offset_max_ms=2100.0 clock_stall_max_ms=47.8 underrun_frames=534528 peak_rss_mib=2288.7 ledger_peak_mib=114.5
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=0 valid=true elapsed_s=240.00 due=7200 on_time=0 late=360 dropped=6840 present_p50_ms=675.4 present_p95_ms=719.9 present_max_ms=795.9 held_max_ms=795.2 av_offset_max_ms=800.0 clock_stall_max_ms=46.0 underrun_frames=7168 peak_rss_mib=2239.9 ledger_peak_mib=42.2
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=1 valid=true elapsed_s=240.01 due=7200 on_time=0 late=360 dropped=6840 present_p50_ms=675.9 present_p95_ms=722.6 present_max_ms=844.4 held_max_ms=844.0 av_offset_max_ms=833.3 clock_stall_max_ms=45.7 underrun_frames=7168 peak_rss_mib=2058.0 ledger_peak_mib=42.2
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=2 valid=true elapsed_s=240.01 due=7200 on_time=0 late=361 dropped=6839 present_p50_ms=676.0 present_p95_ms=724.9 present_max_ms=773.9 held_max_ms=772.7 av_offset_max_ms=766.7 clock_stall_max_ms=46.2 underrun_frames=8192 peak_rss_mib=2167.3 ledger_peak_mib=42.2
+PF1 control=Slowdown lane=LL workload=typical_1080p metric=G1 fails=true valid=true elapsed_s=60.02 due=1800 on_time=0 late=59 dropped=1741 present_p50_ms=987.3 present_p95_ms=1699.8 present_max_ms=1726.1 held_max_ms=1725.6 av_offset_max_ms=1733.3 clock_stall_max_ms=47.0 underrun_frames=418816 peak_rss_mib=2246.0 ledger_peak_mib=56.3
+PF1 control=Freeze lane=LL workload=typical_1080p metric=G14 fails=true valid=true elapsed_s=60.02 due=1800 on_time=0 late=67 dropped=1733 present_p50_ms=899.6 present_p95_ms=1578.6 present_max_ms=1874.7 held_max_ms=1870.7 av_offset_max_ms=1666.7 clock_stall_max_ms=45.4 underrun_frames=385024 peak_rss_mib=2238.1 ledger_peak_mib=56.3
+PF1 control=ClockFreeze lane=LL workload=typical_1080p metric=G16 fails=true valid=true elapsed_s=61.02 due=1800 on_time=0 late=62 dropped=1738 present_p50_ms=994.8 present_p95_ms=1772.0 present_max_ms=1805.1 held_max_ms=1801.7 av_offset_max_ms=1800.0 clock_stall_max_ms=1050.0 underrun_frames=476160 peak_rss_mib=2360.5 ledger_peak_mib=56.3
+PF1 control=Stall lane=LL workload=typical_1080p metric=underrun_frames fails=true valid=true elapsed_s=60.02 due=1800 on_time=0 late=54 dropped=1746 present_p50_ms=1128.8 present_p95_ms=1814.5 present_max_ms=3737.0 held_max_ms=3734.2 av_offset_max_ms=1800.0 clock_stall_max_ms=46.2 underrun_frames=762880 peak_rss_mib=2305.0 ledger_peak_mib=56.3
+PF1 seek lane=LL workload=seek_gop60 run=0 random_p95_ms=114.8 random_max_ms=129.0 forward_p95_ms=112.6 plus1_p95_ms=117.9 backward_p95_ms=114.7 drag_p95_ms=185.6 drag_distinct_fps=10.4 release_shown=true release_ms=28.8 timeouts=0
+PF1 seek lane=LL workload=seek_gop60 run=1 random_p95_ms=119.5 random_max_ms=145.4 forward_p95_ms=117.4 plus1_p95_ms=120.2 backward_p95_ms=115.7 drag_p95_ms=188.8 drag_distinct_fps=10.2 release_shown=true release_ms=30.3 timeouts=0
+PF1 seek lane=LL workload=seek_gop60 run=2 random_p95_ms=116.0 random_max_ms=120.0 forward_p95_ms=116.1 plus1_p95_ms=106.8 backward_p95_ms=114.5 drag_p95_ms=188.8 drag_distinct_fps=10.4 release_shown=true release_ms=30.0 timeouts=0
+PF1 seek lane=LL workload=talk_recut run=0 random_p95_ms=144.1 random_max_ms=202.0 forward_p95_ms=189.9 plus1_p95_ms=188.0 backward_p95_ms=191.0 drag_p95_ms=224.3 drag_distinct_fps=9.2 release_shown=true release_ms=29.2 timeouts=0
+PF1 seek lane=LL workload=talk_recut run=1 random_p95_ms=147.5 random_max_ms=207.4 forward_p95_ms=193.5 plus1_p95_ms=208.4 backward_p95_ms=192.1 drag_p95_ms=219.1 drag_distinct_fps=9.2 release_shown=true release_ms=29.7 timeouts=0
+PF1 seek lane=LL workload=talk_recut run=2 random_p95_ms=163.8 random_max_ms=221.7 forward_p95_ms=196.4 plus1_p95_ms=179.2 backward_p95_ms=188.8 drag_p95_ms=227.0 drag_distinct_fps=9.0 release_shown=true release_ms=29.7 timeouts=0
+PF1 seek lane=LL workload=explainer_16x9 run=0 random_p95_ms=200.0 random_max_ms=266.5 forward_p95_ms=205.0 plus1_p95_ms=205.5 backward_p95_ms=204.4 drag_p95_ms=365.4 drag_distinct_fps=6.6 release_shown=true release_ms=35.2 timeouts=0
+PF1 seek lane=LL workload=explainer_16x9 run=1 random_p95_ms=205.7 random_max_ms=226.2 forward_p95_ms=206.0 plus1_p95_ms=201.2 backward_p95_ms=206.0 drag_p95_ms=366.5 drag_distinct_fps=7.0 release_shown=true release_ms=29.8 timeouts=0
+PF1 seek lane=LL workload=explainer_16x9 run=2 random_p95_ms=205.4 random_max_ms=271.8 forward_p95_ms=200.1 plus1_p95_ms=200.2 backward_p95_ms=206.0 drag_p95_ms=356.2 drag_distinct_fps=6.6 release_shown=true release_ms=36.5 timeouts=0
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=507.26 fps=2.0 p95_ms=1619.27 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=508.49 fps=2.0 p95_ms=1610.05 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=506.56 fps=2.0 p95_ms=1616.88 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 workload=typical_1080p baseline_ms=494.39 delta=+2.6%
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=61 dropped=1739 present_p50_ms=1010.4 present_p95_ms=1568.2 present_max_ms=1716.0 held_max_ms=1711.5 av_offset_max_ms=1700.0 clock_stall_max_ms=45.4 underrun_frames=492544 peak_rss_mib=1036.9 ledger_peak_mib=56.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=65 dropped=1735 present_p50_ms=986.2 present_p95_ms=1453.3 present_max_ms=1617.5 held_max_ms=1614.4 av_offset_max_ms=1633.3 clock_stall_max_ms=45.5 underrun_frames=367616 peak_rss_mib=1357.2 ledger_peak_mib=56.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=61 dropped=1739 present_p50_ms=1006.8 present_p95_ms=1548.0 present_max_ms=1726.1 held_max_ms=1723.0 av_offset_max_ms=1700.0 clock_stall_max_ms=45.5 underrun_frames=425984 peak_rss_mib=1418.5 ledger_peak_mib=56.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=blend_heavy_1080p run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=31 dropped=1769 present_p50_ms=1967.7 present_p95_ms=2000.8 present_max_ms=2001.4 held_max_ms=1999.6 av_offset_max_ms=2000.0 clock_stall_max_ms=45.7 underrun_frames=1342464 peak_rss_mib=1786.2 ledger_peak_mib=63.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=blend_heavy_1080p run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=31 dropped=1769 present_p50_ms=1948.4 present_p95_ms=2027.0 present_max_ms=2035.6 held_max_ms=2031.1 av_offset_max_ms=2033.3 clock_stall_max_ms=45.4 underrun_frames=1339392 peak_rss_mib=2127.2 ledger_peak_mib=63.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=blend_heavy_1080p run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=31 dropped=1769 present_p50_ms=1960.4 present_p95_ms=1989.3 present_max_ms=1990.3 held_max_ms=1988.7 av_offset_max_ms=2000.0 clock_stall_max_ms=45.5 underrun_frames=1342464 peak_rss_mib=2166.7 ledger_peak_mib=63.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=explainer_16x9 run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=67 dropped=1733 present_p50_ms=713.4 present_p95_ms=1381.6 present_max_ms=1539.4 held_max_ms=1536.4 av_offset_max_ms=1533.3 clock_stall_max_ms=45.5 underrun_frames=324608 peak_rss_mib=2435.9 ledger_peak_mib=56.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=explainer_16x9 run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=66 dropped=1734 present_p50_ms=736.4 present_p95_ms=1389.9 present_max_ms=1497.0 held_max_ms=1493.2 av_offset_max_ms=1500.0 clock_stall_max_ms=45.9 underrun_frames=337920 peak_rss_mib=1952.8 ledger_peak_mib=56.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=explainer_16x9 run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=67 dropped=1733 present_p50_ms=706.8 present_p95_ms=1381.4 present_max_ms=1524.6 held_max_ms=1522.5 av_offset_max_ms=1533.3 clock_stall_max_ms=45.4 underrun_frames=332800 peak_rss_mib=2174.3 ledger_peak_mib=56.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=reel_9x16 run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=39 dropped=1761 present_p50_ms=1325.3 present_p95_ms=2540.0 present_max_ms=3245.0 held_max_ms=3240.4 av_offset_max_ms=3266.7 clock_stall_max_ms=45.4 underrun_frames=1048576 peak_rss_mib=2309.5 ledger_peak_mib=156.9
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=reel_9x16 run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=36 dropped=1764 present_p50_ms=1332.3 present_p95_ms=3254.1 present_max_ms=3268.4 held_max_ms=3265.1 av_offset_max_ms=3266.7 clock_stall_max_ms=45.4 underrun_frames=1121280 peak_rss_mib=2201.5 ledger_peak_mib=156.9
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=reel_9x16 run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=37 dropped=1763 present_p50_ms=1315.0 present_p95_ms=2530.6 present_max_ms=3219.4 held_max_ms=3217.1 av_offset_max_ms=3200.0 clock_stall_max_ms=45.5 underrun_frames=1064960 peak_rss_mib=2334.5 ledger_peak_mib=156.9
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=feed_4x5 run=0 valid=true elapsed_s=60.02 due=1800 on_time=0 late=62 dropped=1738 present_p50_ms=1013.1 present_p95_ms=1979.2 present_max_ms=2245.3 held_max_ms=2242.8 av_offset_max_ms=2233.3 clock_stall_max_ms=45.5 underrun_frames=535552 peak_rss_mib=2261.8 ledger_peak_mib=114.5
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=feed_4x5 run=1 valid=true elapsed_s=60.02 due=1800 on_time=0 late=61 dropped=1739 present_p50_ms=1017.8 present_p95_ms=1980.7 present_max_ms=2070.2 held_max_ms=2065.6 av_offset_max_ms=2066.7 clock_stall_max_ms=45.4 underrun_frames=537600 peak_rss_mib=1983.1 ledger_peak_mib=114.5
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=feed_4x5 run=2 valid=true elapsed_s=60.02 due=1800 on_time=0 late=60 dropped=1740 present_p50_ms=1009.8 present_p95_ms=2022.7 present_max_ms=2086.4 held_max_ms=2082.1 av_offset_max_ms=2100.0 clock_stall_max_ms=45.4 underrun_frames=536576 peak_rss_mib=2187.8 ledger_peak_mib=114.5
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=talk_recut run=0 valid=true elapsed_s=240.01 due=7200 on_time=0 late=361 dropped=6839 present_p50_ms=673.7 present_p95_ms=722.3 present_max_ms=771.6 held_max_ms=770.7 av_offset_max_ms=766.7 clock_stall_max_ms=46.1 underrun_frames=8192 peak_rss_mib=1914.4 ledger_peak_mib=42.2
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=talk_recut run=1 valid=true elapsed_s=240.01 due=7200 on_time=0 late=361 dropped=6839 present_p50_ms=673.0 present_p95_ms=718.9 present_max_ms=771.9 held_max_ms=768.3 av_offset_max_ms=766.7 clock_stall_max_ms=45.8 underrun_frames=7168 peak_rss_mib=1914.4 ledger_peak_mib=42.2
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=talk_recut run=2 valid=true elapsed_s=240.01 due=7200 on_time=0 late=361 dropped=6839 present_p50_ms=674.8 present_p95_ms=719.0 present_max_ms=854.3 held_max_ms=854.2 av_offset_max_ms=833.3 clock_stall_max_ms=46.7 underrun_frames=8192 peak_rss_mib=2016.8 ledger_peak_mib=42.2
+PF1 control=Slowdown lane=LH workload=typical_1080p metric=G1 fails=true valid=true elapsed_s=60.02 due=1800 on_time=0 late=59 dropped=1741 present_p50_ms=1066.2 present_p95_ms=1638.8 present_max_ms=1704.5 held_max_ms=1702.8 av_offset_max_ms=1700.0 clock_stall_max_ms=45.6 underrun_frames=530432 peak_rss_mib=2000.2 ledger_peak_mib=56.3
+PF1 control=Freeze lane=LH workload=typical_1080p metric=G14 fails=true valid=true elapsed_s=60.02 due=1800 on_time=0 late=64 dropped=1736 present_p50_ms=989.3 present_p95_ms=1575.0 present_max_ms=2637.4 held_max_ms=2636.4 av_offset_max_ms=1633.3 clock_stall_max_ms=45.5 underrun_frames=345088 peak_rss_mib=2082.1 ledger_peak_mib=56.3
+PF1 control=ClockFreeze lane=LH workload=typical_1080p metric=G16 fails=true valid=true elapsed_s=61.02 due=1800 on_time=0 late=71 dropped=1729 present_p50_ms=995.6 present_p95_ms=1446.5 present_max_ms=1670.7 held_max_ms=1666.0 av_offset_max_ms=1666.7 clock_stall_max_ms=1050.0 underrun_frames=350208 peak_rss_mib=2072.9 ledger_peak_mib=56.3
+PF1 control=Stall lane=LH workload=typical_1080p metric=underrun_frames fails=true valid=true elapsed_s=60.02 due=1800 on_time=0 late=58 dropped=1742 present_p50_ms=1090.7 present_p95_ms=1655.5 present_max_ms=3199.0 held_max_ms=3196.0 av_offset_max_ms=1700.0 clock_stall_max_ms=45.8 underrun_frames=525312 peak_rss_mib=1836.9 ledger_peak_mib=56.3
+PF1 seek lane=LH workload=seek_gop60 run=0 random_p95_ms=112.4 random_max_ms=138.8 forward_p95_ms=113.7 plus1_p95_ms=117.7 backward_p95_ms=116.5 drag_p95_ms=185.0 drag_distinct_fps=10.4 release_shown=true release_ms=28.3 timeouts=0
+PF1 seek lane=LH workload=seek_gop60 run=1 random_p95_ms=115.6 random_max_ms=125.1 forward_p95_ms=114.7 plus1_p95_ms=120.0 backward_p95_ms=114.6 drag_p95_ms=197.0 drag_distinct_fps=10.2 release_shown=true release_ms=27.5 timeouts=0
+PF1 seek lane=LH workload=seek_gop60 run=2 random_p95_ms=114.1 random_max_ms=124.2 forward_p95_ms=113.8 plus1_p95_ms=103.8 backward_p95_ms=113.4 drag_p95_ms=191.1 drag_distinct_fps=10.6 release_shown=true release_ms=28.1 timeouts=0
+PF1 seek lane=LH workload=talk_recut run=0 random_p95_ms=144.9 random_max_ms=205.7 forward_p95_ms=191.4 plus1_p95_ms=188.3 backward_p95_ms=192.9 drag_p95_ms=214.4 drag_distinct_fps=9.4 release_shown=true release_ms=28.1 timeouts=0
+PF1 seek lane=LH workload=talk_recut run=1 random_p95_ms=145.9 random_max_ms=207.3 forward_p95_ms=190.8 plus1_p95_ms=202.3 backward_p95_ms=189.3 drag_p95_ms=216.7 drag_distinct_fps=9.2 release_shown=true release_ms=28.4 timeouts=0
+PF1 seek lane=LH workload=talk_recut run=2 random_p95_ms=162.8 random_max_ms=213.1 forward_p95_ms=189.0 plus1_p95_ms=177.1 backward_p95_ms=191.6 drag_p95_ms=228.7 drag_distinct_fps=9.0 release_shown=true release_ms=27.6 timeouts=0
+PF1 seek lane=LH workload=explainer_16x9 run=0 random_p95_ms=205.6 random_max_ms=270.8 forward_p95_ms=202.5 plus1_p95_ms=194.0 backward_p95_ms=203.4 drag_p95_ms=356.6 drag_distinct_fps=6.8 release_shown=true release_ms=32.1 timeouts=0
+PF1 seek lane=LH workload=explainer_16x9 run=1 random_p95_ms=205.4 random_max_ms=225.3 forward_p95_ms=206.2 plus1_p95_ms=203.6 backward_p95_ms=207.8 drag_p95_ms=349.9 drag_distinct_fps=6.8 release_shown=true release_ms=36.3 timeouts=0
+PF1 seek lane=LH workload=explainer_16x9 run=2 random_p95_ms=205.0 random_max_ms=262.1 forward_p95_ms=203.8 plus1_p95_ms=196.3 backward_p95_ms=205.1 drag_p95_ms=360.8 drag_distinct_fps=6.8 release_shown=true release_ms=33.1 timeouts=0
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=device workload=typical_1080p run=0 valid=true elapsed_s=59.99 due=1800 on_time=0 late=69 dropped=1731 present_p50_ms=980.3 present_p95_ms=1339.5 present_max_ms=1647.5 held_max_ms=1644.6 av_offset_max_ms=1633.3 clock_stall_max_ms=45.4 underrun_frames=282624 peak_rss_mib=928.5 ledger_peak_mib=56.3 device_latency_ms=21.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=device workload=blend_heavy_1080p run=0 valid=true elapsed_s=60.00 due=1800 on_time=0 late=31 dropped=1769 present_p50_ms=1964.7 present_p95_ms=1991.6 present_max_ms=1994.0 held_max_ms=1993.0 av_offset_max_ms=2000.0 clock_stall_max_ms=45.4 underrun_frames=1335808 peak_rss_mib=1149.8 ledger_peak_mib=63.3 device_latency_ms=21.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=device workload=explainer_16x9 run=0 valid=true elapsed_s=60.00 due=1800 on_time=0 late=66 dropped=1734 present_p50_ms=734.0 present_p95_ms=1388.6 present_max_ms=1521.3 held_max_ms=1519.9 av_offset_max_ms=1533.3 clock_stall_max_ms=45.4 underrun_frames=324608 peak_rss_mib=1284.7 ledger_peak_mib=56.3 device_latency_ms=21.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=device workload=reel_9x16 run=0 valid=true elapsed_s=60.00 due=1800 on_time=0 late=40 dropped=1760 present_p50_ms=1308.6 present_p95_ms=2546.6 present_max_ms=3193.6 held_max_ms=3190.0 av_offset_max_ms=3166.7 clock_stall_max_ms=45.3 underrun_frames=1012224 peak_rss_mib=1293.2 ledger_peak_mib=156.9 device_latency_ms=21.3
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=device workload=feed_4x5 run=0 valid=true elapsed_s=59.99 due=1800 on_time=0 late=59 dropped=1741 present_p50_ms=1020.1 present_p95_ms=1992.2 present_max_ms=2482.8 held_max_ms=2482.2 av_offset_max_ms=2466.7 clock_stall_max_ms=45.3 underrun_frames=557056 peak_rss_mib=1174.0 ledger_peak_mib=114.5 device_latency_ms=20.9
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=device workload=talk_recut run=0 valid=true elapsed_s=240.01 due=7200 on_time=0 late=360 dropped=6840 present_p50_ms=673.5 present_p95_ms=725.0 present_max_ms=784.0 held_max_ms=783.0 av_offset_max_ms=766.7 clock_stall_max_ms=45.5 underrun_frames=6656 peak_rss_mib=1010.8 ledger_peak_mib=42.2 device_latency_ms=21.3
+PF1 rss before=33.4/2 constructed=169.9/48 first_render=584.7/140 settled_idle=584.8/140 playing=833.4/141 playing_peak_mib=946.3 lane=LL workload=typical_1080p
+PF1 rss before=33.5/2 constructed=170.0/48 first_render=677.2/186 settled_idle=677.2/186 playing=995.1/187 playing_peak_mib=995.1 lane=LL workload=blend_heavy_1080p
+PF1 rss before=33.5/2 constructed=169.9/48 first_render=546.4/140 settled_idle=546.4/140 playing=964.2/187 playing_peak_mib=973.5 lane=LL workload=explainer_16x9
+PF1 rss before=33.5/2 constructed=170.0/48 first_render=492.4/94 settled_idle=492.5/94 playing=1127.0/187 playing_peak_mib=1138.4 lane=LL workload=reel_9x16
+PF1 rss before=33.9/2 constructed=170.0/48 first_render=402.7/94 settled_idle=402.7/94 playing=898.7/187 playing_peak_mib=964.8 lane=LL workload=feed_4x5
+PF1 rss before=33.6/2 constructed=170.1/48 first_render=381.8/94 settled_idle=381.8/94 playing=649.0/95 playing_peak_mib=651.1 lane=LL workload=talk_recut
+PF1 rss before=33.5/2 constructed=170.2/48 first_render=236.0/48 settled_idle=236.0/48 playing=254.0/49 playing_peak_mib=254.0 lane=LL workload=title_only
+PF1 rss before=33.4/2 constructed=163.5/11 first_render=624.9/103 settled_idle=624.9/103 playing=862.5/104 playing_peak_mib=862.5 lane=LH workload=typical_1080p
+PF1 rss before=33.5/2 constructed=164.0/11 first_render=711.0/149 settled_idle=711.0/149 playing=1026.7/150 playing_peak_mib=1026.7 lane=LH workload=blend_heavy_1080p
+PF1 rss before=33.6/2 constructed=163.7/11 first_render=587.7/103 settled_idle=587.7/103 playing=958.6/150 playing_peak_mib=1004.2 lane=LH workload=explainer_16x9
+PF1 rss before=33.6/2 constructed=163.9/11 first_render=479.0/57 settled_idle=479.0/57 playing=1031.2/150 playing_peak_mib=1086.4 lane=LH workload=reel_9x16
+PF1 rss before=33.5/2 constructed=164.1/11 first_render=450.8/57 settled_idle=450.8/57 playing=937.2/150 playing_peak_mib=980.8 lane=LH workload=feed_4x5
+PF1 rss before=33.5/2 constructed=163.7/11 first_render=450.8/57 settled_idle=450.8/57 playing=716.2/58 playing_peak_mib=720.1 lane=LH workload=talk_recut
+PF1 rss before=33.5/2 constructed=164.0/11 first_render=305.3/11 settled_idle=305.3/11 playing=326.7/12 playing_peak_mib=326.7 lane=LH workload=title_only
+```
