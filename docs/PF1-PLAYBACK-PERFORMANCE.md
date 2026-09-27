@@ -200,7 +200,8 @@ obsolete lookahead **before** it waits.
 *Travel (R29, review B F4; S1d implements it per source cache):* behind is
 below the nearest demand point travelling forward, above it travelling
 backward. The direction follows the demand point that moved least (the
-smallest non-zero step to the nearest previous point, forward on a tie),
+smallest non-zero step to the nearest previous point, forward on a tie
+both in choosing that nearest point and across points: R30),
 so a reversal flips it at once and a discontinuous seek is a step in the
 jump's direction (what the jump left behind goes first); an unmoved or
 cleared demand keeps it; a source's first demand is forward. Capacity
@@ -524,7 +525,10 @@ the position unchanged (G9).
 - *Races (R29, review B F1/F2).* A seek pending when the programme drains
   is applied first, still playing; a seek published before the stop's
   `eos_generation` bump resumes playing after it. A `Pause` handled once
-  the programme has played out, before the tick, takes the terminal stop.
+  the ring has drained (the samples the callback consumed, never the
+  requested position a `seek` sets), before the tick and with no seek
+  pending, takes the terminal stop (R30, re-review D1). Continuous seeking
+  defers the stop; a finite burst is consumed on the next pass.
 - *Tests:* a one-frame 30000/1001 timeline at 48 kHz (ends at sample 1601)
   and a long programme both finish with `position()` = duration, loudness
   truncated there and the stopped state; the 2 s stall control does not

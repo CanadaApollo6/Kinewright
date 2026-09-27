@@ -1199,16 +1199,29 @@ The full `cargo test --workspace` at `bb9b68d` is in E10.8.
 - **The live table counter is test-only** (`table_live_kib=` on the
   harness line). `CacheStats` is public wire data, so the production
   exposure is left to S2a's preview `stats`.
-- **K-6 overshoot (corrected, review B S2):** titles are still evicted
-  after every video frame. The frame shown at each *demand point* is
-  pinned, and one source can have several points (several clips of one
-  source), so the preview's video cache can exceed C by pinned frames
-  alone: live ≤ max(C, P·f), P the demand points of the current frame
-  (not the active sources), f the proxy frame bytes, and it stays there
-  for as long as those points are demanded, not only until the next
-  reservation. `render::tests::overshoot_is_bounded_by_the_demand_points`
-  covers it: a one-frame budget and points 0/100/200 on one source hold
-  exactly 3f over three frames. S1 still claims no I12 (that is S2b-3's).
+- **K-6 overshoot (corrected twice: review B S2, re-review D4).** Titles
+  are still evicted after every video frame. The frame shown at each
+  *demand point* is pinned, one source can have several points, and a
+  source at or under its share is never asked to give up a frame, so the
+  S1 preview renderer can hold more than C. What is true of its reservation
+  loop (`reserve_for`): it stops only when the total fits C or nothing is
+  evictable, i.e. no inactive source holds a frame, no title is cached, and
+  every active source s holds at most its share (C − G)/n or only its
+  pinned frames. So, with p_s the bytes of s's pinned frames:
+  - after each video layer's final reservation, live ≤ max(C, Σ_s
+    max((C − G)/n, p_s));
+  - while a layer's window is being decoded, add at most that window: w_r
+    frames of the requesting source r, w_r ≤ `PREFETCH_FRAMES` + 1 = 16
+    (at least one frame, so a frame larger than its share still lands),
+    each of r's proxy frame bytes f_r.
+  The earlier "max(C, P·f)" is false across sources:
+  `mixed_sources_hold_their_shares_and_pins_over_the_budget` (C = 4f; A
+  demands 0/100/200, B demands 0; each share 2f) ends with A holding its
+  three pins and B its 2f window, 5f, over max(C, P·f) = 4f and equal to
+  the bound above (3f + 2f). `overshoot_is_bounded_by_the_demand_points`
+  is the one-source case (a one-frame budget holds 3f). Per R30 the S1
+  eviction policy is unchanged: **S2b-3's I12 (live ≤ C at all times)
+  must close this**, with K-2's atomic admission and K-5's eviction.
 - **Budget:** 1,029 non-blank, non-comment `.rs` lines added and 93
   removed across S1a–S1g, against ~650; the exhaustive and worker tests
   are most of the excess (per-commit counts are in the S1 report).
@@ -1219,19 +1232,23 @@ Both S1 reviews (`target/review/pf/review-s1-A.md`, `review-s1-B.md`)
 accepted with fixes. Every finding was confirmed against the code; none is
 disputed.
 
-| Finding | Commit | Fix | Witness (fails with the fix reverted) |
+"Witness" tests fail with their fix reverted (the re-review confirmed
+these distinguish the old behaviour); "coverage" tests pass on the old
+code too and document or widen what is checked.
+
+| Finding | Commit | Fix | Witness / coverage |
 |---|---|---|---|
-| A F1: G-1 reached proofs and agent images | `9ee47fa` | `MonitorPurpose`; only `Worker::present` (`render_live`) encodes through the table; proofs, `Control::Thumbnail` and every fixture keep the f32 encode | `only_the_live_monitor_encodes_through_the_table` |
-| A F2: oracle memoised by `ConversionKey` | `507e22c` | a per-pixel reference decode per accepted tuple | the exhaustive test itself |
-| A F3: two builds of one key under eviction | `507e22c` | the registry never evicts a cell still being built | `a_key_being_built_is_built_once_under_eviction` (fails on the old eviction) |
-| A should: counter lifecycle | `507e22c` | isolated counter and registry: eviction retains, clones, final drop, failed builds add 0 | `built_tables_are_counted_while_held_and_alpha_is_exact` |
-| B F1: EOS turned a racing seek into a paused one | `bb9b68d` | tick defers the stop while a seek is pending; a seek stamped before the stop's `eos_generation` resumes playing | `a_playing_seek_that_races_the_terminal_stop_keeps_playing`; control `a_seek_after_the_stop_or_before_a_pause_stays_paused` |
-| B F2: a pause after drain stopped short | `bb9b68d` | `Control::Pause` takes `stop_at_end` once the programme has played out | `a_pause_after_the_programme_drained_stops_at_the_duration` |
-| B F3: capacity eviction ignored pins | `d8c6364` | `FrameCache::insert` evicts the oldest *unpinned* entry | `capacity_eviction_keeps_every_shown_frame_of_one_source` (old code: frame 0 evicted), `capacity_eviction_keeps_the_pinned_frames` |
-| B F4: "behind" ignored direction | `d8c6364` | per-cache travel: the demand point that moved least sets it; a discontinuous seek is a step in the jump's direction; unmoved or cleared demand keeps it; the first is Forward | `backward_travel_drops_the_frames_above_the_demand_first`, `travel_follows_reversals_and_seeks` |
-| B F5: thumbnails used the preview policy | `9ee47fa` | `render_thumbnail` sets the preview demand aside, so no demand rebuild, pins, window or distance eviction | `a_thumbnail_leaves_the_preview_demand_alone` |
+| A F1: G-1 reached proofs and agent images | `9ee47fa` | `MonitorPurpose`; only `Worker::present` (`render_live`) encodes through the table; proofs, `Control::Thumbnail` and the fixtures keep the f32 encode, except the R28/G3 bench (`mo2_bench`), which requests `LiveMonitor` to measure the live path | witness `only_the_live_monitor_encodes_through_the_table` |
+| A F2: oracle memoised by `ConversionKey` | `507e22c` | a per-pixel reference decode per accepted tuple | coverage: the exhaustive test itself |
+| A F3: two builds of one key under eviction | `507e22c`, `cfcd756` | a key being built is never evicted (since `cfcd756`: kept in `building`, outside the LRU) | witness `a_key_being_built_is_built_once_under_eviction` |
+| A should: counter lifecycle | `507e22c` | isolated counter and registry: eviction retains, clones, final drop, failed builds add 0 | coverage `built_tables_are_counted_while_held_and_alpha_is_exact` |
+| B F1: EOS turned a racing seek into a paused one | `bb9b68d` | tick defers the stop while a seek is pending; a seek stamped before the stop's `eos_generation` resumes playing | witness `a_playing_seek_that_races_the_terminal_stop_keeps_playing`; coverage (control) `a_seek_after_the_stop_or_before_a_pause_stays_paused` |
+| B F2: a pause after drain stopped short | `bb9b68d`, `1fad53f` | `Control::Pause` takes `stop_at_end` once the ring has drained (since `1fad53f`: the ring only, and no seek pending) | witness `a_pause_after_the_programme_drained_stops_at_the_duration` |
+| B F3: capacity eviction ignored pins | `d8c6364` | `FrameCache::insert` evicts the oldest *unpinned* entry | witness `capacity_eviction_keeps_every_shown_frame_of_one_source` (old code: frame 0 evicted); coverage `capacity_eviction_keeps_the_pinned_frames` |
+| B F4: "behind" ignored direction | `d8c6364`, `a5362ff` | per-cache travel: the demand point that moved least sets it (forward on ties, per point too since `a5362ff`); a discontinuous seek is a step in the jump's direction; unmoved or cleared demand keeps it; the first is Forward | witness `backward_travel_drops_the_frames_above_the_demand_first`; coverage `travel_follows_reversals_and_seeks` |
+| B F5: thumbnails used the preview policy | `9ee47fa`, `a5362ff` | `render_thumbnail` sets the preview demand aside (since `a5362ff` through a drop guard), so no demand rebuild, pins, window or distance eviction | witness `a_thumbnail_leaves_the_preview_demand_alone` |
 | B S1: drained ≠ audible | docs | §9 V-2 and D9 state the boundary | — |
-| B S2: overshoot bound | `d8c6364`, docs | E10.7 corrected to demand points | `overshoot_is_bounded_by_the_demand_points` |
+| B S2: overshoot bound | `d8c6364`, docs | E10.7 (corrected again by E10.9, D4) | coverage `overshoot_is_bounded_by_the_demand_points` |
 | B S3: raw gate lines | docs | E10.6 | — |
 
 - **B S1 — drained means the ring is drained, not that the device has
@@ -1241,6 +1258,13 @@ disputed.
   sounds. The simulated fixtures cannot show last-audible-sample
   completion, and S1 does not claim device drain. An output-drain
   acknowledgment and its test belong to the AU follow-up with D9.
+- **Continuous seeking defers the end (accepted boundary).** While a seek
+  is pending, `tick` does not take the terminal stop. A finite burst of
+  seeks is consumed on the next worker pass (`handle_coalesced_requests`
+  runs every iteration), so the stop follows at once; only a caller that
+  publishes a new seek before every pass could defer it indefinitely, and
+  then the transport is where that caller keeps putting it. The
+  `eos_generation` bump, before `Paused` is emitted, is the stop boundary.
 - **Timing lanes not rerun.** No fix moves G3 or G5's hot path: G3's
   bench (`mo2_bench`) renders through `FrameRenderer::new` with
   `MonitorPurpose::LiveMonitor`, the same encode as `217986a`; a legacy
@@ -1254,3 +1278,50 @@ disputed.
   --all-targets -D warnings`, rustfmt on its files and the full
   `cargo test -p kinewright-media` (880 lib tests passed, 20 ignored, at
   `bb9b68d`).
+
+### E10.9 Re-review fixes (R30)
+
+The S1 fix re-review (`target/review/pf/rereview-s1.md`) accepted with
+fixes: four defects and nits, each confirmed against the code, none
+disputed. Per R30 the S1 eviction policy is unchanged (D4 is documented).
+
+| Item | Commit | Fix | Witness (fails on `1fc7d01`) / coverage |
+|---|---|---|---|
+| D1: `seek(duration)` + `Pause` manufactured completion | `1fad53f` | `pause_or_stop_at_end` decides from the current runtime's drained ring (samples the callback consumed), never `position()`; a pending seek keeps the ordinary pause | witness `a_pause_behind_a_seek_to_the_end_is_not_terminal`: exactly `[Paused, Position(duration)]`, undrained and drained; the old code emits `[Paused, Position(50), Position(50)]` |
+| D2: registry above eight keys; abandoned cells | `cfcd756` | builds in flight live in `building` (cell + waiting requests), outside the ready LRU; the last request to leave a finished build moves it to the LRU, trimmed to eight; a drop guard forgets a build whose builder unwound | witnesses `concurrent_builds_finish_within_the_key_bound` (old: 9 held) and `a_panicking_build_is_forgotten_and_a_retry_builds` (old: the empty cell stays); `a_key_being_built_is_built_once_under_eviction` still green |
+| D3: nearest-previous-point tie ignored forward | `a5362ff` | `(magnitude, backward)` ordering per point as well as across points | witness `travel_ties_resolve_forward_in_any_order` (old: `[10, 0] → [5]` read Backward) |
+| D4: the overshoot bound was false across sources | docs, `a5362ff` | E10.7 states the true bound, Σ_s max(share, pinned_s) plus one window in flight; I12 (S2b-3) must close it | coverage (documents today's behaviour) `mixed_sources_hold_their_shares_and_pins_over_the_budget`: 5f with C = 4f |
+| Nit: thumbnail restore not scoped | `a5362ff` | `PreviewAside` drop guard | coverage: the thumbnail test's Err path and an unwind |
+| Nit: E10.8 wording | docs | the bench's `LiveMonitor`; witness vs coverage labels | — |
+| Nit: continuous seeks defer EOS | docs | E10.8 records the accepted boundary | — |
+
+Raw lines, `1fad53f`, debug profile, default lane (LL, llvmpipe),
+`cargo test -p kinewright-media --lib -- --exact --test-threads=1 <names>`
+(stderr discarded):
+
+```
+running 7 tests
+test cache::tests::travel_ties_resolve_forward_in_any_order ... ok
+test conversion::tests::a_key_being_built_is_built_once_under_eviction ... ok
+test conversion::tests::a_panicking_build_is_forgotten_and_a_retry_builds ... ok
+test conversion::tests::concurrent_builds_finish_within_the_key_bound ... ok
+test engine::tests::a_pause_behind_a_seek_to_the_end_is_not_terminal ... ok
+test render::tests::a_thumbnail_leaves_the_preview_demand_alone ... ok
+test render::tests::mixed_sources_hold_their_shares_and_pins_over_the_budget ... ok
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 898 filtered out; finished in 1.61s
+```
+
+- **"Fails on `1fc7d01`"** was shown by running each witness against the
+  previous code (for D2, the previous registry with a `held()` count
+  added; for D1 and D3, the previous predicate or ordering restored);
+  each failed as the table says, and passes at `1fad53f`.
+- **Workspace gate at `1fad53f`** (debug, default lane, default threads):
+  `cargo test --workspace` exit 0, 36 test binaries, 3,369 passed,
+  0 failed, 41 ignored; `cargo fmt -- --check` clean. Each R30 commit
+  passed the workspace build, `clippy --workspace --all-targets -D
+  warnings`, rustfmt on its files and the full `cargo test -p
+  kinewright-media` (885 lib tests passed, 20 ignored, at `1fad53f`).
+- **Timing lanes not rerun:** the R30 fixes touch table-registry
+  bookkeeping on a cache miss, the pause path, a tie-break in
+  `set_demand` and the thumbnail path; none is on G3's resident render
+  loop, and G5 passes.
