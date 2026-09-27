@@ -166,18 +166,26 @@ impl SimulatedAudio {
 }
 
 /// The paced driver's deadlines, apart from the clock so a test can drive it.
-/// Every stamp is taken where the callback actually executes (R25/D1): a
-/// wake-up stamp would miss a suspension between waking and consuming.
+/// Every stamp is taken where the callback actually executes (R25/D1), and
+/// each callback is accounted against its own scheduled deadline through
+/// completion (R27): how late it is comes from the schedule, not from the
+/// spans between stamps, so delays split across the wake, the start and the
+/// consume add up.
 struct Pacer {
+    /// The deadline the next callback serves.
     next: Instant,
-    started: Instant,
+    /// The deadline the running callback serves.
+    serving: Instant,
+    /// Misses already reported for the running callback.
+    reported: u64,
 }
 
 impl Pacer {
     fn new(now: Instant) -> Self {
         Self {
             next: now + PERIOD,
-            started: now,
+            serving: now + PERIOD,
+            reported: 0,
         }
     }
 
@@ -186,28 +194,28 @@ impl Pacer {
         self.next.saturating_duration_since(now)
     }
 
-    /// A callback starting to consume at `now` serves one deadline. Returns
-    /// how many later deadlines had also passed (missed); after a miss the
-    /// schedule re-anchors on `now`, so nothing is caught up.
+    /// A callback starts consuming at `now`, serving the next deadline.
+    /// Returns the whole periods it is already past that deadline (missed),
+    /// reported before the consume advances the clock (R25/D2).
     fn start(&mut self, now: Instant) -> u64 {
-        self.started = now;
-        let missed = periods(now.saturating_duration_since(self.next));
+        self.serving = self.next;
+        self.reported = periods(now.saturating_duration_since(self.serving));
+        self.reported
+    }
+
+    /// The callback finished consuming at `now`. Returns the further whole
+    /// periods its completion is past its deadline (so the total is measured
+    /// from the schedule), then schedules the next deadline: on time, one
+    /// period on; after any miss, re-anchored on `now`, so nothing is caught
+    /// up.
+    fn finish(&mut self, now: Instant) -> u64 {
+        let missed = periods(now.saturating_duration_since(self.serving));
         self.next = if missed == 0 {
-            self.next + PERIOD
+            self.serving + PERIOD
         } else {
             now + PERIOD
         };
-        missed
-    }
-
-    /// The callback finished consuming at `now`. A consume suspended for a
-    /// period or more missed that many deadlines, and re-anchors on `now`.
-    fn finish(&mut self, now: Instant) -> u64 {
-        let missed = periods(now.saturating_duration_since(self.started));
-        if missed > 0 {
-            self.next = now + PERIOD;
-        }
-        missed
+        missed.saturating_sub(self.reported)
     }
 
     fn reanchor(&mut self, now: Instant) {
@@ -395,13 +403,21 @@ mod tests {
             PERIOD,
             "the next deadline is one period on"
         );
+        let half_late = start + 2 * PERIOD + PERIOD / 2;
         assert_eq!(
-            pacer.start(start + 2 * PERIOD + PERIOD / 2),
+            pacer.start(half_late),
             0,
             "half a period late still meets it"
         );
+        assert_eq!(pacer.finish(half_late), 0);
+        assert_eq!(
+            pacer.wait(half_late),
+            PERIOD.saturating_sub(PERIOD / 2),
+            "and keeps the schedule"
+        );
         let late = start + 6 * PERIOD + PERIOD / 2;
         assert_eq!(pacer.start(late), 3, "three later deadlines passed");
+        assert_eq!(pacer.finish(late), 0, "reported once");
         assert_eq!(pacer.wait(late), PERIOD, "re-anchored, not a burst");
     }
 
@@ -454,5 +470,49 @@ mod tests {
         assert!(audio.callback(CALLBACK_FRAMES, Some((&mut pacer, &mut clock))));
         assert_eq!(audio.missed_periods(), 2);
         assert_eq!(pacer.wait(begins + stall), PERIOD, "re-anchored after it");
+    }
+
+    /// R27: the re-review's split suspension. After an on-time callback at
+    /// 21.333 ms the next deadline is 42.667 ms; the driver is suspended
+    /// 16 ms before it starts (58.667) and 16 ms more before it finishes
+    /// (74.667), while the producer refills the starved ring. Neither span
+    /// is a period, but the completion is 32 ms past the scheduled deadline:
+    /// one miss, re-anchored, no immediate catch-up callback, and the run is
+    /// invalid.
+    #[test]
+    fn a_split_suspension_with_a_refill_is_a_missed_deadline_that_invalidates_the_run() {
+        let split = Duration::from_millis(16);
+        let (audio, mut producer, output) = stepped_stream(1 << 16);
+        output.set_playing(true);
+        let t0 = Instant::now();
+        let mut pacer = Pacer::new(t0);
+        let samples = 2 * CALLBACK_FRAMES;
+        producer
+            .push_entire_slice(&vec![0.1; samples])
+            .expect("room");
+        let on_time = t0 + PERIOD;
+        let mut stamps = [on_time, on_time].into_iter();
+        let mut clock = || stamps.next().expect("two stamps");
+        assert!(audio.callback(CALLBACK_FRAMES, Some((&mut pacer, &mut clock))));
+        assert_eq!((audio.missed_periods(), underruns(&audio)), (0, 0));
+        // The ring is now empty; it is refilled during the suspension.
+        producer
+            .push_entire_slice(&vec![0.1; samples])
+            .expect("room");
+        let deadline = on_time + PERIOD;
+        let (starts, finishes) = (deadline + split, deadline + split + split);
+        let mut stamps = [starts, finishes].into_iter();
+        let mut clock = || stamps.next().expect("two stamps");
+        assert!(audio.callback(CALLBACK_FRAMES, Some((&mut pacer, &mut clock))));
+        assert_eq!(underruns(&audio), 0, "the refill hid the starvation");
+        let missed = audio.missed_periods();
+        assert_eq!(missed, 1, "32 ms past the deadline through completion");
+        assert_eq!(
+            pacer.wait(finishes),
+            PERIOD,
+            "re-anchored: no immediate catch-up callback"
+        );
+        let nominal = 60_000.0;
+        assert!(!crate::pf1_harness::q2_valid(nominal, nominal, missed));
     }
 }
