@@ -570,34 +570,7 @@ impl FrameRenderer {
             .validate()
             .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
         let layer_specs = visual_layers_at(document, project_at)?;
-        if let Some(demand) = &mut self.preview {
-            *demand = PreviewDemand::default();
-            for layer in &layer_specs {
-                match layer {
-                    TimelineVisualLayer::Video(layer) => {
-                        let Some(asset) = document.asset(layer.source.asset) else {
-                            continue;
-                        };
-                        let description = &asset.color_description;
-                        let key = VideoSourceKey::new(
-                            asset.id,
-                            &asset.path,
-                            &asset.source_fingerprint,
-                            asset.fps,
-                            description,
-                            d65_assumption(description),
-                            scale.max_width(),
-                        );
-                        let points = demand.sources.entry(key).or_default();
-                        points.push(layer.source.source_at);
-                    }
-                    TimelineVisualLayer::Title(_) | TimelineVisualLayer::Solid(_) => {
-                        demand.generated += working_bytes(resolution);
-                    }
-                    TimelineVisualLayer::Adjustment(_) => {}
-                }
-            }
-        }
+        self.set_demand(document, &layer_specs, resolution, scale);
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
             match layer {
@@ -732,10 +705,15 @@ impl FrameRenderer {
             .map_err(|error| {
                 contextual_managed_decode_error(asset, path, description, assumption, error)
             })?;
-            entry.insert(VideoSource {
-                decoder,
-                cache: FrameCache::new(FRAME_CACHE_CAPACITY),
-            });
+            let mut cache = FrameCache::new(FRAME_CACHE_CAPACITY);
+            let demand = self
+                .preview
+                .as_ref()
+                .and_then(|demand| demand.sources.get(&key));
+            if let Some(points) = demand {
+                cache.set_demand(points);
+            }
+            entry.insert(VideoSource { decoder, cache });
         }
 
         let cache_miss = !self
@@ -797,6 +775,61 @@ impl FrameRenderer {
         self.touch_source(key.clone());
         self.reserve_for(0, Some(&key));
         Ok(frame)
+    }
+
+    /// PF1 K-6: the preview's demand for this frame (its active sources with
+    /// their demand points, and its generated raster bytes), handed to the
+    /// source caches as pins; outside the preview every cache pins nothing.
+    fn set_demand(
+        &mut self,
+        document: &Document,
+        layer_specs: &[TimelineVisualLayer],
+        resolution: (u32, u32),
+        scale: RenderScale,
+    ) {
+        if let Some(demand) = &mut self.preview {
+            *demand = PreviewDemand::default();
+            for layer in layer_specs {
+                match layer {
+                    TimelineVisualLayer::Video(layer) => {
+                        let Some(asset) = document.asset(layer.source.asset) else {
+                            continue;
+                        };
+                        let description = &asset.color_description;
+                        let key = VideoSourceKey::new(
+                            asset.id,
+                            &asset.path,
+                            &asset.source_fingerprint,
+                            asset.fps,
+                            description,
+                            d65_assumption(description),
+                            scale.max_width(),
+                        );
+                        let points = demand.sources.entry(key).or_default();
+                        points.push(layer.source.source_at);
+                    }
+                    TimelineVisualLayer::Title(_) | TimelineVisualLayer::Solid(_) => {
+                        demand.generated += working_bytes(resolution);
+                    }
+                    TimelineVisualLayer::Adjustment(_) => {}
+                }
+            }
+        }
+        self.pin_demand();
+    }
+
+    /// PF1 K-5/K-6: hand each source cache this render's demand points, so
+    /// the frames they show are pinned and eviction knows the travel; a
+    /// source with no demand, and every source outside the preview, pins
+    /// nothing.
+    fn pin_demand(&mut self) {
+        let demand = self.preview.as_ref().map(|demand| &demand.sources);
+        for (key, source) in &mut self.video_sources {
+            match demand.and_then(|sources| sources.get(key)) {
+                Some(points) => source.cache.set_demand(points),
+                None => source.cache.clear_demand(),
+            }
+        }
     }
 
     fn touch_source(&mut self, key: VideoSourceKey) {
@@ -875,18 +908,18 @@ impl FrameRenderer {
             self.cache_budget.saturating_sub(demand.generated) / demand.sources.len().max(1);
         let mut over = demand
             .sources
-            .iter()
-            .filter_map(|(key, points)| {
+            .keys()
+            .filter_map(|key| {
                 let held = self.video_sources.get(key)?.cache.byte_len();
                 let bytes = held.saturating_add(if requesting == Some(key) { incoming } else { 0 });
-                (bytes > share).then_some((bytes, key, points))
+                (bytes > share).then_some((bytes, key))
             })
             .collect::<Vec<_>>();
-        over.sort_by_key(|(bytes, ..)| std::cmp::Reverse(*bytes));
-        over.into_iter().any(|(_, key, points)| {
+        over.sort_by_key(|(bytes, _)| std::cmp::Reverse(*bytes));
+        over.into_iter().any(|(_, key)| {
             self.video_sources
                 .get_mut(key)
-                .is_some_and(|source| source.cache.evict_farthest(points))
+                .is_some_and(|source| source.cache.evict_farthest())
         })
     }
 
@@ -1802,6 +1835,94 @@ mod tests {
                 .chunks(4)
                 .all(|p| p == [0.0, 0.0, 0.0, 1.0])
         );
+    }
+
+    /// Three video tracks showing one source at once, from source frames 0,
+    /// 100 and 200: one source cache, three demand points.
+    fn three_demands_on_one_source(asset: MediaAsset) -> Document {
+        let mut document = single_clip_document(asset);
+        let track = document.tracks[0].clone();
+        document.tracks.clear();
+        for (index, start) in [0_i64, 100, 200].into_iter().enumerate() {
+            let mut track = track.clone();
+            let id = u64::try_from(index).expect("small") + 1;
+            (track.id, track.clips[0].id) = (TrackId(id), ClipId(id));
+            track.clips[0].source_range = TimeCode(start)..TimeCode(start + 40);
+            document.tracks.push(track);
+        }
+        document.duration = TimeCode(40);
+        document
+    }
+
+    /// The frames of the one source cache, and its charged bytes.
+    fn resident(renderer: &FrameRenderer, frames: &[i64]) -> (Vec<i64>, usize) {
+        let [source] = renderer.video_sources.values().collect::<Vec<_>>()[..] else {
+            panic!("one source cache");
+        };
+        let held = frames.iter().copied();
+        let held = held
+            .filter(|at| source.cache.contains(TimeCode(*at)))
+            .collect();
+        (held, source.cache.byte_len())
+    }
+
+    /// PF1 K-5 (review B F3): three demand windows on one source overflow
+    /// its 32-entry ring; capacity eviction must keep every frame the render
+    /// shows resident and charged, the first window's frame 0 included.
+    #[test]
+    fn capacity_eviction_keeps_every_shown_frame_of_one_source() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_media, asset) = small_source("pf1-pins", "testsrc2", 1, 8);
+        let document = three_demands_on_one_source(asset);
+        let frame = working_bytes((64, 36));
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        renderer.set_cache_budget(64 * frame);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let strategy = DecodeStrategy::Sequential;
+        let shown = renderer.render_live(&document, TimeCode(0), (64, 36), scale, strategy);
+        shown.expect("a frame renders");
+        let (held, bytes) = resident(&renderer, &[0, 100, 200]);
+        assert_eq!(held, [0, 100, 200], "every shown frame is resident");
+        let source = renderer.video_sources.values().next().expect("one source");
+        assert!(
+            source.cache.eviction_count() > 0,
+            "the windows overflowed the ring"
+        );
+        assert_eq!(source.cache.len(), FRAME_CACHE_CAPACITY);
+        // Charged once per distinct allocation (grid frames share one), the
+        // three shown frames among them, within the budget.
+        let charged = 3 * frame..=64 * frame;
+        assert!(charged.contains(&bytes), "the shown frames are charged");
+    }
+
+    /// PF1 K-6 (review B S2): the preview's overshoot is bounded by demand
+    /// points, not sources: with a one-frame budget and three points on one
+    /// source, the three shown frames stay, live = max(C, P·f) = 3f.
+    #[test]
+    fn overshoot_is_bounded_by_the_demand_points() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_media, asset) = small_source("pf1-overshoot", "testsrc2", 1, 8);
+        let document = three_demands_on_one_source(asset);
+        let frame = working_bytes((64, 36));
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        renderer.set_cache_budget(frame);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        for at in [0, 1, 2] {
+            let strategy = DecodeStrategy::Sequential;
+            let composed = renderer.render_live(&document, TimeCode(at), (64, 36), scale, strategy);
+            composed.expect("a frame renders");
+            let shown = [at, 100 + at, 200 + at];
+            let (held, bytes) = resident(&renderer, &shown);
+            assert_eq!(held, shown, "the shown frames stay");
+            assert_eq!(renderer.total_cache_bytes(), bytes);
+            assert_eq!(bytes, 3 * frame, "live = max(C, P·f) with P = 3");
+        }
     }
 
     /// A 64×36 ffv1 BT.709 source of `seconds` at 30 fps.
