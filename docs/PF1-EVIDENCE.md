@@ -13,6 +13,7 @@
 > The S0 harness re-measures every number it gates, on the pinned FFmpeg,
 > through the engine (design §2 and §11).
 > Those S0 baselines are in **§E9**; the WARP VM run there is owed.
+> The S1 stage-end results (I4, G3, G5, G9, G12, I9, P-play) are in **§E10**.
 
 ## E0 Diagnosis table (moved from design §1, revision 2)
 
@@ -907,3 +908,249 @@ PF1 seek lane=LH workload=explainer_16x9 run=0 random_p95_ms=200.5 random_max_ms
 PF1 seek lane=LH workload=explainer_16x9 run=1 random_p95_ms=208.0 random_max_ms=228.1 forward_p95_ms=203.7 plus1_p95_ms=219.9 plus1_n=11 backward_combined_p95_ms=203.5 drag_p95_ms=308.7 drag_answered_p95_ms=302.6 drag_unanswered=2 drag_distinct_fps=7.4 release_pending_drag_calls=6 release_shown=true release_ms=195.5 stale_frames_after_release=1 frames_over_release=0 timeouts=0
 PF1 seek lane=LH workload=explainer_16x9 run=2 random_p95_ms=204.9 random_max_ms=266.0 forward_p95_ms=195.7 plus1_p95_ms=208.3 plus1_n=8 backward_combined_p95_ms=202.3 drag_p95_ms=387.9 drag_answered_p95_ms=360.3 drag_unanswered=2 drag_distinct_fps=6.6 release_pending_drag_calls=5 release_shown=true release_ms=109.4 stale_frames_after_release=1 frames_over_release=0 timeouts=0
 ```
+
+## E10 S1 results
+
+### E10.1 Provenance
+
+- `pf1/impl`: S0 at `4082d5d`, S1a at `47b7d68`, the stage end at `217986a`
+  (S1g). rustc 1.98.0, release profile, binary
+  `kinewright_media-cf306d076b2fd4bf` (built once per commit and copied
+  aside, so every lane of one commit ran the same binary). Same machine as
+  E9.1: i5-13600K, RTX 3090 on NVIDIA 615.71.09, llvmpipe (LLVM 22.1.8),
+  Linux 7.2.5-4-omarchy, PipeWire; pinned FFmpeg n8.0-23-gd1f31a829d.
+- 2026-09-27. S0 and S1a timing 09:53–10:29 EDT; the stage-end runs
+  11:21–11:45 EDT. Every timed run ran alone: no build, test or other lane
+  alongside.
+- **Ambient load (R26), unchanged.** The two `foot` screensaver processes
+  used about 1.5 cores throughout (≈107% + 54% CPU at 11:21). A transient
+  `omarchy-agent-u` process at ~99% CPU was seen during the S0 runs. Load
+  averages were 3.3–8.4 across the runs; each log records `uptime` before
+  and after.
+- Commands, each `--exact --ignored --nocapture --test-threads=1` from
+  `crates/kinewright-media`: `mo2_perf_fixtures::r28_end_to_end_tracked`
+  (LL; `R28_HARDWARE=1` for LH); `mo2_perf_fixtures::blend_heavy_holds_floors_on_hardware`
+  (G3, LH) and `…_on_the_fallback_adapter` (LL, recorded);
+  `PF1_ONLY=typical_1080p PF1_RUNS=1 pf1_harness::pf1_play_baseline` (LL;
+  `PF1_HARDWARE=1` for LH). The CI gates ran on the same release binary
+  (LL, `--nocapture`), and in each commit's `cargo test -p kinewright-media`.
+
+### E10.2 I4 (S0's 5% rule, `BASELINES` untouched)
+
+`mo2_perf_fixtures.rs` and `perf_fixtures.rs` are unchanged since
+`4082d5d`.
+
+| Build | LL mean ms (3 runs) | LL delta | LH mean ms (3 runs) | LH delta | Result |
+|---|---|---|---|---|---|
+| S0 `4082d5d`, same session | 529.83 / 528.64 / 531.24 | +6.4% | 526.96 / 526.99 / 528.01 | +6.7% | FAILED on both lanes |
+| S1a `47b7d68` (control alone) | 232.95 / 232.66 / 233.48 | −53.2% | 231.93 / 229.98 / 230.32 | −53.3% | ok |
+| S1 end `217986a` | 77.03 / 76.23 / 75.95 | −84.7% | 72.87 / 73.00 / 73.69 | −85.2% | ok |
+
+- **The unmodified S0 binary fails I4 in this session** (+6.4% / +6.7%,
+  against +2.4% / +2.6% in E9.2). Nothing in the code changed, so this is
+  the ambient load above. It shows the 5% rule's margin is within this
+  desktop's noise; the S1 figures clear it by 80 points.
+- **S1a's own effect** (the control, measured before S1b): −56% of the
+  end-to-end mean on both lanes (529.8 → 233.0 ms LL, 527.0 → 230.7 ms
+  LH), from removing one per-pixel `Vec` collect.
+- S1b–S1g take it a further −67% (233 → 76 ms LL, 231 → 73 ms LH).
+
+### E10.3 G3 (`blend_heavy_holds_floors_on_hardware`, 60 fps floor, LH)
+
+| Build | Lane | `blend_heavy_1080p` fps (3 runs) | mean ms | p95 ms | Result |
+|---|---|---|---|---|---|
+| S0 `4082d5d`, same session | LH | 25.6 / 25.8 / 25.8 | 38.7–39.0 | 46.9–48.4 | FAILED (design value 27.4) |
+| S1 end `217986a` | LH | 72.1 / 71.4 / 71.7 | 13.86–14.00 | 15.47–15.67 | **passes** |
+| S1 end `217986a` | LL (recorded) | 47.0 / 47.3 / 47.2 | 21.13–21.29 | 23.60–23.83 | the fallback test's floor holds |
+
+- The other R28 resident workloads on LH at S1: `typical_1080p` 72.1–73.1
+  fps, `heavy_4k` 57.8–58.8 fps. The slowdown control still fails its
+  verdict on both lanes, as it must.
+- **The `R28 phases` lines are a diagnostic, not production.**
+  `render::phases::monitor` (ME14) still calls the f32
+  `encode_monitor_rgba8_for_description` per pixel, so its
+  `monitor_encode_ms` (≈19–27 ms) is the pre-G-1 cost. Its `upload_ms` is
+  production's `Compositor::composite` (layer staging, upload and pass
+  recording), ≈10–13 ms on LH, now most of a 14 ms resident frame; see
+  E10.7 (U-1).
+
+### E10.4 G9, G12, G5 and I9 (CI)
+
+All pass in every commit's `cargo test -p kinewright-media` and on the
+stage-end release binary (LL):
+- **G9** `audio::tests::the_clock_counts_whole_popped_frames_only`: a partial
+  frame pops one frame (position 10 → 11); an empty ring leaves the position
+  unchanged while `underrun_frames` counts every frame.
+  `callback_consumes_ring_then_writes_silence_and_accounts_frames` is amended
+  as §9 says (position 11, `[0.25, -0.5, 0, 0]`, 1 underrun frame, return 2).
+  `stepped_callbacks_pop_through_render_output_and_count_underruns` now reads
+  (1,125, 1,023): the clock stops where the ring ran dry (T7 had 2,148).
+- **G12** `engine::tests::the_monitor_caps_the_long_edge_at_1280`: the engine
+  presents a 1080×1920 document (the `reel_9x16` size) at 720×1280; 4:5 →
+  1024×1280, 16:9 and small documents unchanged.
+- **G5** `render::tests::preview_window_plays_two_continuous_sources_without_seeking`:
+  two continuous 64×36 sources under a 12-frame budget, 60 frames: the
+  preview renderer seeks 0 times after warm-up; the control
+  (`FrameRenderer::new`, today's round-robin) keeps seeking (109 seeks
+  after warm-up during development); the test asserts it is non-zero.
+- **I9** `engine::tests::a_drained_one_frame_timeline_stops_at_its_duration`
+  (30000/1001, 48 kHz, ends at sample 1,601 where the clock reads frame 0)
+  and `…a_long_programme_stops_at_its_duration_and_a_stall_does_not_complete`
+  (5 s; 94 callbacks with no fill leave the clock short of the end, still
+  playing, not drained): both end with `position()` = duration,
+  `paused_at` = duration, the stream dropped, `sample_rate` 0 and
+  `Paused` then `Position(duration)`. With the drained predicate disabled,
+  the one-frame test fails (it never stops). AU2/AU3/AU4 suites unedited
+  and green.
+- **I1** (exhaustive): `decode::tests::input_tables_match_every_accepted_descriptor`
+  (442 accepted tuples through `classify_source_with_assumption` and
+  `select_conversion`, 2,567,942 rejected, 90 keys, every code),
+  `decode::tests::fused_table_fill_matches_the_unfused_path_for_every_orientation`,
+  `frame::tests::rgba64_decode_matches_the_collect_reference_bit_for_bit`
+  and `conversion::tests::monitor_table_equals_the_f32_encode_for_every_f16_pattern`.
+
+### E10.5 P-play (`typical_1080p`, one run per lane, simulated driver)
+
+| Build | Lane | On time / late / dropped of 1800 | Present p50 / p95 / max ms | Held max ms | A/V offset max ms | underrun_frames (R22) | table_live_kib |
+|---|---|---|---|---|---|---|---|
+| S0 | LL | 0 / 66 / 1734 | 937.1 / 1559.9 / 1806.8 | 1804.9 | 1800.0 | 386048 | — |
+| S0 | LH | 0 / 61 / 1739 | 924.9 / 1751.5 / 1765.2 | 1763.6 | 1766.7 | 502784 | — |
+| S1a | LL | 0 / 119 / 1681 | 502.7 / 576.9 / 674.0 | 672.0 | 666.7 | 512 | — |
+| S1a | LH | 0 / 120 / 1680 | 497.5 / 564.9 / 674.3 | 671.2 | 666.7 | 512 | — |
+| S1 end | LL | 450 / 640 / 710 | 33.6 / 146.0 / 173.6 | 170.9 | 200.0 | 512 | 128 |
+| S1 end | LH | 523 / 590 / 687 | 38.3 / 145.6 / 188.7 | 185.8 | 200.0 | 512 | 128 |
+
+G1/G14 are S2 gates and still fail (`passes=false`): the worker still
+renders synchronously in `tick`. All runs are valid under the E9.9 rules
+(60.02 s, 0 missed callbacks). One live 128 KiB table (the BT.709 8-bit
+key) serves the whole workload. After the S1 LH run reported `ok`, process
+exit panicked in `khronos-egl` (`lib.rs:841`), as in the S1a LH run; it is
+teardown after the measurement (compare E9.9's exit-time wgpu panic).
+
+### E10.6 Raw result lines
+
+I4 (`r28_end_to_end_tracked`):
+
+```
+# S0 (4082d5d), same session
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=529.83 fps=1.9 p95_ms=1681.10 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=528.64 fps=1.9 p95_ms=1685.60 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=531.24 fps=1.9 p95_ms=1687.03 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) workload=typical_1080p baseline_ms=497.86 delta=+6.4%
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=526.96 fps=1.9 p95_ms=1680.47 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=526.99 fps=1.9 p95_ms=1684.47 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=528.01 fps=1.9 p95_ms=1678.17 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 workload=typical_1080p baseline_ms=494.39 delta=+6.7%
+# S1a (47b7d68)
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=232.95 fps=4.3 p95_ms=680.46 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=232.66 fps=4.3 p95_ms=685.46 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=233.48 fps=4.3 p95_ms=683.85 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) workload=typical_1080p baseline_ms=497.86 delta=-53.2%
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=231.93 fps=4.3 p95_ms=682.44 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=229.98 fps=4.3 p95_ms=678.14 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=230.32 fps=4.3 p95_ms=681.21 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 workload=typical_1080p baseline_ms=494.39 delta=-53.3%
+# S1 end (217986a)
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=77.03 fps=13.0 p95_ms=210.06 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=76.23 fps=13.1 p95_ms=208.88 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=75.95 fps=13.2 p95_ms=206.03 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) workload=typical_1080p baseline_ms=497.86 delta=-84.7%
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=0 dims=(1280, 720) mean_ms=72.87 fps=13.7 p95_ms=204.63 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=1 dims=(1280, 720) mean_ms=73.00 fps=13.7 p95_ms=202.29 ledger_peak_mib=56.3 validate_us=2.2
+R28 adapter=NVIDIA GeForce RTX 3090 resident=false workload=typical_1080p run=2 dims=(1280, 720) mean_ms=73.69 fps=13.6 p95_ms=207.84 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 workload=typical_1080p baseline_ms=494.39 delta=-85.2%
+```
+
+G3:
+
+```
+# S1 end (217986a), LH: blend_heavy_holds_floors_on_hardware — ok
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=0 dims=(1280, 720) mean_ms=13.68 fps=73.1 p95_ms=15.34 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=1 dims=(1280, 720) mean_ms=13.88 fps=72.1 p95_ms=16.88 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=2 dims=(1280, 720) mean_ms=13.72 fps=72.9 p95_ms=15.63 ledger_peak_mib=56.3 validate_us=1.3
+R28 phases workload=typical_1080p upload_ms=10.05 gpu_passes_readback_ms=1.31 monitor_encode_ms=19.36
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=0 dims=(1280, 720) mean_ms=13.86 fps=72.1 p95_ms=15.47 ledger_peak_mib=63.3 validate_us=1.4
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=1 dims=(1280, 720) mean_ms=14.00 fps=71.4 p95_ms=15.67 ledger_peak_mib=63.3 validate_us=1.2
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=2 dims=(1280, 720) mean_ms=13.95 fps=71.7 p95_ms=15.62 ledger_peak_mib=63.3 validate_us=1.2
+R28 phases workload=blend_heavy_1080p upload_ms=10.94 gpu_passes_readback_ms=1.46 monitor_encode_ms=26.55
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=0 dims=(1280, 720) mean_ms=17.31 fps=57.8 p95_ms=20.34 ledger_peak_mib=70.3 validate_us=9.2
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=1 dims=(1280, 720) mean_ms=17.01 fps=58.8 p95_ms=19.11 ledger_peak_mib=70.3 validate_us=14.7
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=2 dims=(1280, 720) mean_ms=17.01 fps=58.8 p95_ms=18.64 ledger_peak_mib=70.3 validate_us=9.1
+R28 phases workload=heavy_4k upload_ms=13.37 gpu_passes_readback_ms=1.72 monitor_encode_ms=20.10
+R28 control=slowdown delay_ms=41.7 mean_ms=56.28 p95_ms=57.89 verdict=Err("17.8 fps (floor 60), p95 57.9 ms vs mean 56.3 ms")
+# S0 (4082d5d), LH, same session — FAILED (floor 60)
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=0 dims=(1280, 720) mean_ms=30.97 fps=32.3 p95_ms=34.54 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=1 dims=(1280, 720) mean_ms=31.22 fps=32.0 p95_ms=35.44 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=2 dims=(1280, 720) mean_ms=32.70 fps=30.6 p95_ms=44.66 ledger_peak_mib=56.3 validate_us=1.3
+R28 phases workload=typical_1080p upload_ms=10.03 gpu_passes_readback_ms=1.77 monitor_encode_ms=19.61
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=0 dims=(1280, 720) mean_ms=39.01 fps=25.6 p95_ms=48.42 ledger_peak_mib=63.3 validate_us=2.0
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=1 dims=(1280, 720) mean_ms=38.74 fps=25.8 p95_ms=47.04 ledger_peak_mib=63.3 validate_us=1.9
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=2 dims=(1280, 720) mean_ms=38.82 fps=25.8 p95_ms=46.89 ledger_peak_mib=63.3 validate_us=1.2
+R28 phases workload=blend_heavy_1080p upload_ms=10.03 gpu_passes_readback_ms=1.84 monitor_encode_ms=25.86
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=0 dims=(1280, 720) mean_ms=35.05 fps=28.5 p95_ms=42.08 ledger_peak_mib=70.3 validate_us=9.5
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=1 dims=(1280, 720) mean_ms=34.48 fps=29.0 p95_ms=37.67 ledger_peak_mib=70.3 validate_us=9.4
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=2 dims=(1280, 720) mean_ms=34.56 fps=28.9 p95_ms=37.62 ledger_peak_mib=70.3 validate_us=9.5
+R28 phases workload=heavy_4k upload_ms=13.23 gpu_passes_readback_ms=1.86 monitor_encode_ms=18.81
+R28 control=slowdown delay_ms=41.7 mean_ms=80.16 p95_ms=90.67 verdict=Err("12.5 fps (floor 60), p95 90.7 ms vs mean 80.2 ms")
+R28 gate 10 failed: [
+# S1 end (217986a), LL: blend_heavy_holds_floors_on_the_fallback_adapter — ok
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=typical_1080p run=0 dims=(1280, 720) mean_ms=16.86 fps=59.3 p95_ms=19.46 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=typical_1080p run=1 dims=(1280, 720) mean_ms=17.39 fps=57.5 p95_ms=20.57 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=typical_1080p run=2 dims=(1280, 720) mean_ms=17.13 fps=58.4 p95_ms=19.71 ledger_peak_mib=56.3 validate_us=1.3
+R28 phases workload=typical_1080p upload_ms=8.56 gpu_passes_readback_ms=6.06 monitor_encode_ms=19.17
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=blend_heavy_1080p run=0 dims=(1280, 720) mean_ms=21.29 fps=47.0 p95_ms=23.60 ledger_peak_mib=63.3 validate_us=2.1
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=blend_heavy_1080p run=1 dims=(1280, 720) mean_ms=21.13 fps=47.3 p95_ms=23.74 ledger_peak_mib=63.3 validate_us=1.2
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=blend_heavy_1080p run=2 dims=(1280, 720) mean_ms=21.18 fps=47.2 p95_ms=23.83 ledger_peak_mib=63.3 validate_us=1.2
+R28 phases workload=blend_heavy_1080p upload_ms=8.85 gpu_passes_readback_ms=10.56 monitor_encode_ms=26.34
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=heavy_4k run=0 dims=(1280, 720) mean_ms=23.43 fps=42.7 p95_ms=26.93 ledger_peak_mib=70.3 validate_us=9.3
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=heavy_4k run=1 dims=(1280, 720) mean_ms=23.34 fps=42.8 p95_ms=26.55 ledger_peak_mib=70.3 validate_us=10.0
+R28 adapter=llvmpipe (LLVM 22.1.8, 256 bits) resident=true workload=heavy_4k run=2 dims=(1280, 720) mean_ms=23.59 fps=42.4 p95_ms=26.22 ledger_peak_mib=70.3 validate_us=9.2
+R28 phases workload=heavy_4k upload_ms=12.02 gpu_passes_readback_ms=9.55 monitor_encode_ms=20.21
+R28 control=slowdown delay_ms=312.5 mean_ms=334.09 p95_ms=336.64 verdict=Err("3.0 fps (floor 8), p95 336.6 ms vs mean 334.1 ms")
+```
+
+P-play:
+
+```
+# S0 (4082d5d)
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=0 late=66 early=0 dropped=1734 present_p50_ms=937.1 present_p95_ms=1559.9 present_max_ms=1806.8 held_max_ms=1804.9 av_offset_max_ms=1800.0 clock_stall_max_ms=45.5 underrun_frames=386048 drain_underrun_frames=0 peak_rss_mib=1013.4 ledger_peak_mib=56.3 passes=false
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=0 late=61 early=0 dropped=1739 present_p50_ms=924.9 present_p95_ms=1751.5 present_max_ms=1765.2 held_max_ms=1763.6 av_offset_max_ms=1766.7 clock_stall_max_ms=45.8 underrun_frames=502784 drain_underrun_frames=5120 peak_rss_mib=891.8 ledger_peak_mib=56.3 passes=false
+# S1a (47b7d68)
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=0 late=119 early=0 dropped=1681 present_p50_ms=502.7 present_p95_ms=576.9 present_max_ms=674.0 held_max_ms=672.0 av_offset_max_ms=666.7 clock_stall_max_ms=47.5 underrun_frames=512 drain_underrun_frames=9216 peak_rss_mib=851.5 ledger_peak_mib=56.3 passes=false
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=0 late=120 early=0 dropped=1680 present_p50_ms=497.5 present_p95_ms=564.9 present_max_ms=674.3 held_max_ms=671.2 av_offset_max_ms=666.7 clock_stall_max_ms=45.8 underrun_frames=512 drain_underrun_frames=8192 peak_rss_mib=959.8 ledger_peak_mib=56.3 passes=false
+# S1 end (217986a)
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=450 late=640 early=0 dropped=710 present_p50_ms=33.6 present_p95_ms=146.0 present_max_ms=173.6 held_max_ms=170.9 av_offset_max_ms=200.0 clock_stall_max_ms=47.9 underrun_frames=512 drain_underrun_frames=0 peak_rss_mib=860.3 ledger_peak_mib=56.3 table_live_kib=128 passes=false
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=523 late=590 early=0 dropped=687 present_p50_ms=38.3 present_p95_ms=145.6 present_max_ms=188.7 held_max_ms=185.8 av_offset_max_ms=200.0 clock_stall_max_ms=45.6 underrun_frames=512 drain_underrun_frames=1024 peak_rss_mib=898.6 ledger_peak_mib=56.3 table_live_kib=128 passes=false
+```
+
+### E10.7 Deviations and notes
+
+- **S1e (U-1) is not implemented.** Its condition is "S0 finds
+  `upload_bytes`'s extra full copy material"; S0 never measured it (E3 says
+  S0 would; E9 has no figure). A scratch release measurement (not
+  committed) gives `upload_bytes` 1.829 ms against a plain copy's 0.250 ms
+  for one 1280×720 layer (7,372,800 bytes), about 1.6 ms of extra copy per
+  layer per frame, and the phases `upload_ms` above is 10–13 ms of a 14 ms
+  LH frame. G3 passes without it. An exact byte cast needs
+  `zerocopy::IntoBytes` for `f16` (`half` 2.7.1 already implements it and
+  zerocopy is already in the lock file) as a direct dependency of
+  `kinewright-media`, because the workspace forbids `unsafe`. Proposed: the
+  lead decides whether that counts as material and whether to add the
+  direct dependency (S1e follow-up) or leave it to S3b's staging ring.
+- **Two S0 harness tests are adjusted for V-1** besides the named test
+  (C-5 says only the V-1 test is edited):
+  `stepped_callbacks_pop_through_render_output_and_count_underruns` (its
+  comment already said "V-1 fixes that in S1") and
+  `an_observed_clock_never_runs_ahead_of_its_underruns`, which relied on the
+  clock advancing over an empty ring (it would never finish under V-1) and
+  now half-fills the ring each callback. Proposed: C-5 reads "only the V-1
+  tests (including S0's T7/R25 harness tests) are edited".
+- **The live table counter is test-only** (`table_live_kib=` on the
+  harness line). `CacheStats` is public wire data, so the production
+  exposure is left to S2a's preview `stats`.
+- **K-6:** titles are still evicted after every video frame, and a pinned
+  frame per demand point can overshoot the window cap by at most one frame
+  per active source until the next reservation (S1 claims no I12).
+- **Budget:** 1,029 non-blank, non-comment `.rs` lines added and 93
+  removed across S1a–S1g, against ~650; the exhaustive and worker tests
+  are most of the excess (per-commit counts are in the S1 report).
