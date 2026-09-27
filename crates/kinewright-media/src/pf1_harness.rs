@@ -25,7 +25,9 @@ use std::{
 };
 
 use crossbeam_channel::Receiver;
-use kinewright_core::{Document, MediaEvent, Playback, PlaybackState, PreviewFrame, TimeCode};
+use kinewright_core::{
+    Document, MediaEvent, Playback, PlaybackState, PlaybackStats, PreviewFrame, TimeCode,
+};
 
 use crate::{
     FfmpegMediaEngine,
@@ -478,15 +480,22 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     let (duration, frame) = (document.duration.0, frame_ms(document));
     let nominal = duration as f64 * frame;
     let upper = 1.02 * nominal + 500.0;
-    let (mut trace, mut armed, mut at_end) = (Trace::default(), true, None);
+    let (mut trace, mut armed, mut at_end, mut rejected) = (Trace::default(), true, None, 0);
     let start = Instant::now();
     session.engine.play(TimeCode::ZERO);
     let mut next = start;
     loop {
         next += SAMPLE;
-        while let Ok(PreviewFrame { at, .. }) = session.frames.recv_deadline(next) {
+        while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(next) {
             let position = session.engine.position().0;
             trace.arrivals.push((ms(start), at.0, position));
+            // R-2 at the final consumer (here, at receipt): the current
+            // epoch and the clock's own frame; then the R-5 ack.
+            if stamp.epoch == session.engine.stamp().epoch && at.0 == position {
+                session.engine.ack_presented(stamp, at);
+            } else {
+                rejected += 1;
+            }
         }
         let (t, position) = (ms(start), session.engine.position().0);
         let sampled = counters();
@@ -505,6 +514,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         }
     }
     let peak = peak_field(peak_reset);
+    let stats = session.engine.stats();
     session.engine.pause();
     let (end_underruns, _) = at_end.unwrap_or_else(counters);
     let (final_underruns, final_missed) = counters();
@@ -525,7 +535,8 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
          dropped={} present_p50_ms={:.1} present_p95_ms={:.1} present_max_ms={:.1} \
          held_max_ms={:.1} av_offset_max_ms={:.1} clock_stall_max_ms={:.1} \
          underrun_frames={underrun} drain_underrun_frames={drain} peak_rss_mib={peak} \
-         ledger_peak_mib={:.1} table_live_kib={} passes={}{latency}",
+         ledger_peak_mib={:.1} table_live_kib={} passes={}{latency} {} \
+         consumer_rejected={rejected}",
         m.valid,
         elapsed / 1e3,
         m.due,
@@ -542,8 +553,30 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         mib(session.gpu.ledger().peak_bytes()),
         crate::conversion::live_table_bytes() / 1024,
         m.passes(),
+        engine_fields(&stats),
     );
     (m, underrun, line)
+}
+
+/// R-5: the engine's own `stats()` for the run, beside the consumer's.
+fn engine_fields(stats: &PlaybackStats) -> String {
+    format!(
+        "engine_due={} engine_on_time={} engine_late={} engine_dropped={} \
+         engine_dropped_agent={} engine_held_max_ms={:.1} engine_av_offset_max_ms={:.1} \
+         engine_clock_stall_max_ms={:.1} engine_underrun_events={} engine_underrun_frames={} \
+         engine_stale_errors={}",
+        stats.due_frames,
+        stats.on_time,
+        stats.late,
+        stats.dropped,
+        stats.dropped_agent,
+        stats.max_held_ms,
+        stats.max_av_offset_ms,
+        stats.max_clock_stall_ms,
+        stats.underrun_events,
+        stats.underrun_frames,
+        stats.stale_errors,
+    )
 }
 
 #[test]
@@ -708,9 +741,11 @@ fn drag_and_release(
     session.engine.seek(TimeCode(release_target));
     let deadline = from + Duration::from_secs(10);
     let mut release = None;
-    while let Ok(PreviewFrame { at, .. }) = session.frames.recv_deadline(deadline) {
+    let latest = session.engine.stamp();
+    while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(deadline) {
         arrivals.push((ms(start), at.0));
-        if at.0 == release_target {
+        // L-6 (R-2): the release target with the release's own epoch.
+        if at.0 == release_target && stamp.epoch == latest.epoch {
             release = Some(ms(from));
             break;
         }
@@ -722,7 +757,12 @@ fn drag_and_release(
     let release_arrived = (arrivals.last())
         .filter(|_| release.is_some())
         .map_or(f64::INFINITY, |&(t, _)| t);
-    collect(Instant::now() + Duration::from_millis(500), &mut arrivals);
+    // Frames after it that R-2 would bind in its place (current epoch).
+    let (until, mut valid_over) = (Instant::now() + Duration::from_millis(500), 0);
+    while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(until) {
+        arrivals.push((ms(start), at.0));
+        valid_over += usize::from(stamp.epoch == latest.epoch && at.0 != release_target);
+    }
     let overwrote = (arrivals.iter())
         .filter(|&&(t, frame)| t > release_arrived && frame != release_target)
         .count();
@@ -742,7 +782,8 @@ fn drag_and_release(
         "drag_p95_ms={:.1} drag_answered_p95_ms={:.1} drag_unanswered={unanswered} \
          drag_distinct_fps={:.1} \
          release_pending_drag_calls={pending} release_shown={} release_ms={:.1} \
-         stale_frames_after_release={after_release} frames_over_release={overwrote}",
+         stale_frames_after_release={after_release} frames_over_release={overwrote} \
+         valid_frames_over_release={valid_over}",
         percentile(&mut drag, 0.95),
         percentile(&mut answered, 0.95),
         distinct.len() as f64 / 5.0,

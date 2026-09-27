@@ -7904,20 +7904,25 @@ pub(crate) mod phases {
             None,
             Vec::with_capacity(width as usize * height as usize * 4),
         );
-        let result = compositor.for_each_linear_pixel(
-            width,
-            height,
-            &output,
-            encoder,
-            &mut frame,
-            |linear| {
+        // PF1 R28: time the live monitor's encode as `readback_for` runs it,
+        // through the G-1 table when monitoring is BT.709.
+        let result = if monitoring.transfer == ColorTransfer::Bt709 {
+            let (target, frame) = (&output, &mut frame);
+            compositor.for_each_pixel_bits(width, height, target, encoder, frame, |bits| {
+                mapped.get_or_insert_with(Instant::now);
+                rgba.extend_from_slice(&monitor_rgba8(bits));
+                Ok(())
+            })
+        } else {
+            let (target, frame) = (&output, &mut frame);
+            compositor.for_each_linear_pixel(width, height, target, encoder, frame, |linear| {
                 mapped.get_or_insert_with(Instant::now);
                 let code = encode_monitor_rgba8_for_description(linear, monitoring)
                     .map_err(|error| MediaError::Backend(format!("{error}")))?;
                 rgba.extend_from_slice(&code);
                 Ok(())
-            },
-        );
+            })
+        };
         std::hint::black_box(rgba);
         compositor.finish_frame(output, frame);
         result?;
