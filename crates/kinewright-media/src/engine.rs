@@ -2050,8 +2050,16 @@ impl Worker {
     /// played out, before `tick` saw it, is the terminal stop: the clock
     /// trails the end by up to a frame, so an ordinary pause would stop
     /// short of the duration.
+    ///
+    /// Re-review D1: "played out" is the current runtime's ring drained,
+    /// counted by the samples the callback consumed, never `position()`,
+    /// which a caller's `seek` has already moved to the requested frame.
+    /// A pending seek decides the position itself, so it also keeps the
+    /// ordinary pause (one `Position`, from the seek).
     fn pause_or_stop_at_end(&mut self) {
-        if self.playing && self.programme_ended() {
+        let seek_pending =
+            self.requested.seek_sequence.load(Ordering::Acquire) != self.handled_seek_sequence;
+        if self.playing && self.ring_drained() && !seek_pending {
             self.stop_at_end();
             self.resume_after_eos = false;
         } else {
@@ -2059,15 +2067,19 @@ impl Worker {
         }
     }
 
-    /// The programme has played out: the ring drained with the mixer
-    /// exhausted, or the clock reached the duration.
-    fn programme_ended(&self) -> bool {
+    /// The current runtime's programme has left the ring: the mixer
+    /// exhausted, all of it pushed and popped (V-2's drained predicate).
+    fn ring_drained(&self) -> bool {
         let samples = self.clock.position_samples.load(Ordering::Acquire);
-        let drained = self
-            .audio
+        self.audio
             .as_ref()
-            .is_some_and(|audio| audio.drained(samples));
-        drained || self.clock.position() >= self.document.duration
+            .is_some_and(|audio| audio.drained(samples))
+    }
+
+    /// The programme has played out: the ring drained, or the clock reached
+    /// the duration (today's check).
+    fn programme_ended(&self) -> bool {
+        self.ring_drained() || self.clock.position() >= self.document.duration
     }
 
     fn pause(&mut self) {
@@ -3680,6 +3692,42 @@ mod tests {
         worker.handle_coalesced_requests();
         assert!(!worker.playing && worker.audio.is_none(), "the pause wins");
         assert_eq!(worker.clock.position(), TimeCode(10));
+    }
+
+    /// PF1 V-2 (re-review D1): `seek(duration)` then `Pause`, both before
+    /// the worker runs, mid-programme: the requested position is not
+    /// completion. The pause is ordinary (no terminal stop) and the seek
+    /// alone reports the duration, once. The same holds once the ring has
+    /// drained: the pending seek decides the position.
+    #[test]
+    fn a_pause_behind_a_seek_to_the_end_is_not_terminal() {
+        let exactly_one_pause_and_position = |worker: &mut Worker, events: &Receiver<_>| {
+            let end = worker.document.duration;
+            let _ = events.try_iter().count();
+            let eos = worker.requested.eos_generation.load(Ordering::SeqCst);
+            seek(worker, end);
+            worker.handle_control(Control::Pause);
+            worker.handle_coalesced_requests();
+            let paused = MediaEvent::PlaybackStateChanged(PlaybackState::Paused);
+            let events: Vec<_> = events.try_iter().collect();
+            assert_eq!(events, [paused, MediaEvent::Position(end)]);
+            assert_eq!(worker.requested.eos_generation.load(Ordering::SeqCst), eos);
+            assert!(!worker.playing && !worker.resume_after_eos);
+            assert_eq!(worker.clock.position(), end);
+        };
+
+        let fps = Rational::new(10, 1).unwrap();
+        let (mut worker, audio, events) = stepped_worker(fps, TimeCode(50));
+        assert_eq!(play_out(&mut worker, &audio, 10), 10, "mid-programme");
+        let samples = worker.clock.position_samples.load(Ordering::Acquire);
+        assert!(
+            !worker.audio.as_ref().unwrap().drained(samples),
+            "undrained"
+        );
+        exactly_one_pause_and_position(&mut worker, &events);
+
+        let (mut worker, _audio, events) = drained_before_the_tick();
+        exactly_one_pause_and_position(&mut worker, &events);
     }
 
     /// PF1 V-2: a long programme stops at its duration; a 2 s fill stall
