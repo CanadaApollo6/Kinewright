@@ -118,6 +118,9 @@ mod mo2_identity_corpus;
 /// MO2 §13 gate 10: the floors, the ledger ceilings and their controls.
 #[cfg(test)]
 mod mo2_perf_fixtures;
+/// PF1 W-0/W-1: the shared performance workloads (MO2 R28's).
+#[cfg(test)]
+mod perf_fixtures;
 mod still_orientation;
 
 use ffmpeg_next as ffmpeg;
