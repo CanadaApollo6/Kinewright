@@ -26,7 +26,8 @@ use std::{
 
 use crossbeam_channel::Receiver;
 use kinewright_core::{
-    Document, MediaEvent, Playback, PlaybackState, PlaybackStats, PreviewFrame, TimeCode,
+    Document, FrameStamp, MediaEvent, Playback, PlaybackState, PlaybackStats, PreviewFrame,
+    TimeCode,
 };
 
 use crate::{
@@ -383,15 +384,28 @@ impl Session {
 
     fn load(&self, document: &Document) {
         self.engine.set_document(Arc::new(document.clone()));
-        let first = self.wait_frame(0, Instant::now(), Duration::from_secs(120));
+        let issued = self.engine.stamp();
+        let first = self.wait_frame(0, issued, Instant::now(), Duration::from_secs(120));
         first.expect("the first paused frame renders");
     }
 
-    /// The first `target` frame received after `from`, in ms since `from`.
-    fn wait_frame(&self, target: i64, from: Instant, limit: Duration) -> Option<f64> {
+    /// The first `target` frame received after `from` that answers the
+    /// call stamped `issued` (R-2: its epoch, not older), in ms since
+    /// `from`; an older in-flight image of the same target does not count.
+    fn wait_frame(
+        &self,
+        target: i64,
+        issued: FrameStamp,
+        from: Instant,
+        limit: Duration,
+    ) -> Option<f64> {
         loop {
             match self.frames.recv_deadline(from + limit) {
-                Ok(PreviewFrame { at, .. }) if at.0 == target => return Some(ms(from)),
+                Ok(PreviewFrame { at, stamp, .. })
+                    if at.0 == target && stamp.is_current(issued) =>
+                {
+                    return Some(ms(from));
+                }
                 Ok(_) => {}
                 Err(_) => return None,
             }
@@ -447,12 +461,13 @@ pub(crate) fn q2_valid(elapsed_ms: f64, nominal_ms: f64, missed_callbacks: u64) 
 
 /// Q-2 P-play: a 2 s warm-up, then the whole timeline from 0 on the paced
 /// simulated driver (or the device), sampled every 5 ms; faults fire at 20 s.
-/// Underruns are snapshot right after the sample whose clock reached the
-/// duration (the measured endpoint). Callbacks record them before advancing
-/// the clock (R25/D2), so the snapshot holds every callback up to the
-/// endpoint, and at most the one after it. What follows (the drain to the
-/// engine's own pause) is reported apart as `drain_underrun_frames`. Missed
-/// deadlines invalidate the run wherever they fall, drain included.
+/// R31 (a): the callbacks classify their own underruns: before the
+/// programme's last sample is in the ring (`underrun_frames`, G11's) or
+/// after it (`post_end_underrun_frames`, the straddle at the end). Missed
+/// deadlines invalidate the run wherever they fall, drain included. After
+/// the run the session is torn down and `teardown` records whether the
+/// preview thread finished, what the engine still holds, and the process's
+/// threads and current RSS (review B: RSS attribution).
 fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics, u64, String) {
     let audio = (!device).then(SimulatedAudio::paced);
     let faults = Arc::new(Faults::default());
@@ -471,7 +486,8 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     session.drain();
     let counters = || {
         let missed = audio.as_ref().map_or(0, SimulatedAudio::missed_periods);
-        (session.diagnostics.underrun_frames(), missed)
+        let [_, frames, _, post_end] = session.diagnostics.underruns();
+        (frames, post_end, missed)
     };
     let before = counters();
     let peak_reset = reset_peak();
@@ -480,25 +496,25 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     let (duration, frame) = (document.duration.0, frame_ms(document));
     let nominal = duration as f64 * frame;
     let upper = 1.02 * nominal + 500.0;
-    let (mut trace, mut armed, mut at_end, mut rejected) = (Trace::default(), true, None, 0);
+    let (mut trace, mut armed, mut rejected) = (Trace::default(), true, 0);
     let start = Instant::now();
     session.engine.play(TimeCode::ZERO);
     let mut next = start;
     loop {
         next += SAMPLE;
         while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(next) {
-            let position = session.engine.position().0;
+            let (received, position) = (Instant::now(), session.engine.position().0);
             trace.arrivals.push((ms(start), at.0, position));
             // R-2 at the final consumer (here, at receipt): the current
-            // epoch and the clock's own frame; then the R-5 ack.
+            // epoch and the clock's own frame; then the R-5 ack, with the
+            // receipt standing for the paint.
             if stamp.epoch == session.engine.stamp().epoch && at.0 == position {
-                session.engine.ack_presented(stamp, at);
+                session.engine.ack_presented(stamp, at, received);
             } else {
                 rejected += 1;
             }
         }
         let (t, position) = (ms(start), session.engine.position().0);
-        let sampled = counters();
         trace.samples.push((t, position));
         if armed && t >= 20_000.0 {
             armed = false;
@@ -507,7 +523,6 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         session.assert_no_error("P-play run");
         if trace.end.is_none() && position >= duration {
             trace.end = Some(t);
-            at_end = Some(sampled);
         }
         if trace.end.is_some_and(|end| t > end + 250.0) || t > upper + 5_000.0 {
             break;
@@ -516,11 +531,10 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     let peak = peak_field(peak_reset);
     let stats = session.engine.stats();
     session.engine.pause();
-    let (end_underruns, _) = at_end.unwrap_or_else(counters);
-    let (final_underruns, final_missed) = counters();
-    let underrun = end_underruns - before.0;
-    let missed = final_missed - before.1;
-    let drain = final_underruns - end_underruns;
+    let (final_underruns, final_post_end, final_missed) = counters();
+    let underrun = final_underruns - before.0;
+    let post_end = final_post_end - before.1;
+    let missed = final_missed - before.2;
     let mut m = trace.metrics(duration, frame);
     let elapsed = trace.end.unwrap_or(f64::NAN);
     m.valid = q2_valid(elapsed, nominal, missed);
@@ -533,8 +547,8 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     let line = format!(
         "valid={} elapsed_s={:.2} missed_callbacks={missed} due={} on_time={} late={} early={} \
          dropped={} present_p50_ms={:.1} present_p95_ms={:.1} present_max_ms={:.1} \
-         held_max_ms={:.1} av_offset_max_ms={:.1} clock_stall_max_ms={:.1} \
-         underrun_frames={underrun} drain_underrun_frames={drain} peak_rss_mib={peak} \
+         held_max_ms={:.1} receipt_offset_max_ms={:.1} clock_stall_max_ms={:.1} \
+         underrun_frames={underrun} post_end_underrun_frames={post_end} peak_rss_mib={peak} \
          ledger_peak_mib={:.1} table_live_kib={} passes={}{latency} {} \
          consumer_rejected={rejected}",
         m.valid,
@@ -555,7 +569,42 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         m.passes(),
         engine_fields(&stats),
     );
+    let line = format!("{line} {}", teardown(session));
     (m, underrun, line)
+}
+
+/// Review B (RSS attribution): drop the session, wait (≤ 30 s) for the
+/// preview thread to finish (its frame sender disconnects), then record
+/// what outlives it: ledger charges, decoders, conversion tables, and the
+/// process's threads and current RSS.
+fn teardown(session: Session) -> String {
+    let Session {
+        engine,
+        frames,
+        gpu,
+        ..
+    } = session;
+    let decoders = engine.decoder_gauge();
+    drop(engine);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let complete = loop {
+        match frames.recv_deadline(deadline) {
+            Ok(_) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break true,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => break false,
+        }
+    };
+    let memory = process_memory().map_or_else(
+        |error| format!("unavailable({})", error.replace(' ', "_")),
+        |memory| format!("{:.1} threads={}", mib(memory.rss), memory.threads),
+    );
+    format!(
+        "teardown_complete={complete} teardown_ledger_live_kib={} teardown_decoders={} \
+         teardown_table_live_kib={} teardown_rss_mib={memory}",
+        gpu.ledger().live_bytes() / 1024,
+        decoders.open(),
+        crate::conversion::live_table_bytes() / 1024,
+    )
 }
 
 /// R-5: the engine's own `stats()` for the run, beside the consumer's.
@@ -564,6 +613,7 @@ fn engine_fields(stats: &PlaybackStats) -> String {
         "engine_due={} engine_on_time={} engine_late={} engine_dropped={} \
          engine_dropped_agent={} engine_held_max_ms={:.1} engine_av_offset_max_ms={:.1} \
          engine_clock_stall_max_ms={:.1} engine_underrun_events={} engine_underrun_frames={} \
+         engine_post_end_underrun_frames={} engine_sync_decoders={} engine_table_live_kib={} \
          engine_stale_errors={}",
         stats.due_frames,
         stats.on_time,
@@ -575,6 +625,9 @@ fn engine_fields(stats: &PlaybackStats) -> String {
         stats.max_clock_stall_ms,
         stats.underrun_events,
         stats.underrun_frames,
+        stats.post_end_underrun_frames,
+        stats.sync_decoders,
+        stats.live_table_bytes / 1024,
         stats.stale_errors,
     )
 }
@@ -653,7 +706,8 @@ fn seek_run(document: &Document, seed: u64) -> String {
         let from = Instant::now();
         session.engine.seek(TimeCode(target));
         session.engine.request_frame(TimeCode(target));
-        let latency = session.wait_frame(target, from, Duration::from_secs(10));
+        let issued = session.engine.stamp();
+        let latency = session.wait_frame(target, issued, from, Duration::from_secs(10));
         latency.unwrap_or(f64::INFINITY)
     };
     let mut random: Vec<f64> = (0..200).map(|_| op(next(n))).collect();
@@ -716,22 +770,26 @@ fn drag_and_release(
     mut step: impl FnMut() -> i64,
 ) -> (String, bool) {
     let (start, mut calls, mut arrivals) = (Instant::now(), Vec::new(), Vec::new());
-    let collect = |until: Instant, arrivals: &mut Vec<(f64, i64)>| {
-        while let Ok(PreviewFrame { at, .. }) = session.frames.recv_deadline(until) {
-            arrivals.push((ms(start), at.0));
+    let collect = |until: Instant, arrivals: &mut Vec<(f64, i64, FrameStamp)>| {
+        while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(until) {
+            arrivals.push((ms(start), at.0, stamp));
         }
     };
     for i in 0..150_u32 {
         collect(start + Duration::from_secs(1) * i / 30, &mut arrivals);
         target += step();
-        calls.push((ms(start), target));
         session.engine.request_frame(TimeCode(target));
+        calls.push((ms(start), target, session.engine.stamp()));
     }
     collect(start + Duration::from_secs(5), &mut arrivals);
-    let answered = |arrivals: &[(f64, i64)], (t, goal): (f64, i64)| {
-        let answer =
-            (arrivals.iter()).find(|&&(a, frame)| a >= t && (goal..=target).contains(&frame));
-        answer.map(|&(a, _)| a - t)
+    // Review B: an answer carries the call's stamp or a newer one of its
+    // epoch, so an older in-flight image never answers a newer call.
+    let answered = |arrivals: &[(f64, i64, FrameStamp)],
+                    (t, goal, issued): (f64, i64, FrameStamp)| {
+        let answer = (arrivals.iter()).find(|&&(a, frame, stamp)| {
+            a >= t && (goal..=target).contains(&frame) && stamp.is_current(issued)
+        });
+        answer.map(|&(a, ..)| a - t)
     };
     let pending = (calls.iter())
         .filter(|&&call| answered(&arrivals, call).is_none())
@@ -743,7 +801,7 @@ fn drag_and_release(
     let mut release = None;
     let latest = session.engine.stamp();
     while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(deadline) {
-        arrivals.push((ms(start), at.0));
+        arrivals.push((ms(start), at.0, stamp));
         // L-6 (R-2): the release target with the release's own epoch.
         if at.0 == release_target && stamp.epoch == latest.epoch {
             release = Some(ms(from));
@@ -756,15 +814,15 @@ fn drag_and_release(
     // A stale drag render landing after the release frame would replace it.
     let release_arrived = (arrivals.last())
         .filter(|_| release.is_some())
-        .map_or(f64::INFINITY, |&(t, _)| t);
+        .map_or(f64::INFINITY, |&(t, ..)| t);
     // Frames after it that R-2 would bind in its place (current epoch).
     let (until, mut valid_over) = (Instant::now() + Duration::from_millis(500), 0);
     while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(until) {
-        arrivals.push((ms(start), at.0));
+        arrivals.push((ms(start), at.0, stamp));
         valid_over += usize::from(stamp.epoch == latest.epoch && at.0 != release_target);
     }
     let overwrote = (arrivals.iter())
-        .filter(|&&(t, frame)| t > release_arrived && frame != release_target)
+        .filter(|&&(t, frame, _)| t > release_arrived && frame != release_target)
         .count();
     let mut drag: Vec<f64> = (calls.iter())
         .map(|&call| answered(&arrivals[..answerable], call).unwrap_or(f64::INFINITY))
@@ -772,11 +830,11 @@ fn drag_and_release(
     let mut answered: Vec<f64> = drag.iter().copied().filter(|l| l.is_finite()).collect();
     let unanswered = drag.len() - answered.len();
     let distinct: BTreeSet<i64> = (arrivals.iter())
-        .filter(|&&(t, frame)| t <= 5_000.0 && frame <= target)
-        .map(|&(_, frame)| frame)
+        .filter(|&&(t, frame, _)| t <= 5_000.0 && frame <= target)
+        .map(|&(_, frame, _)| frame)
         .collect();
     let after_release = (arrivals.iter())
-        .filter(|&&(t, frame)| t >= release_at && frame != release_target)
+        .filter(|&&(t, frame, _)| t >= release_at && frame != release_target)
         .count();
     let line = format!(
         "drag_p95_ms={:.1} drag_answered_p95_ms={:.1} drag_unanswered={unanswered} \

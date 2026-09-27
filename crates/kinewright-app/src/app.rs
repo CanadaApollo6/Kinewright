@@ -2998,7 +2998,7 @@ impl eframe::App for KinewrightApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
         if let Some((stamp, at)) = self.presenter.take_ack(epoch) {
-            self.playback.ack_presented(stamp, at);
+            self.playback.ack_presented(stamp, at, std::time::Instant::now());
         }
     }
 

@@ -155,6 +155,8 @@ pub use derived::{
     DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS, DEFAULT_SILENCE_WINDOW_MILLISECONDS,
     DerivedAnalysisConfig, SceneDetectionConfig, SilenceDetectionConfig,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use engine::AgentLaneHold;
 pub use engine::FfmpegMediaEngine;
 pub use export::{NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS};
 pub use kinewright_core::{

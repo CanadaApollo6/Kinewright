@@ -4128,19 +4128,75 @@ pub(crate) struct AudioDiagnostics {
     underrun_frames: AtomicU64,
     /// Callbacks that underran at all (R-5 `underrun_events`).
     underrun_events: AtomicU64,
+    /// R31 (a): the same, once the whole programme is in the ring: the
+    /// callbacks that straddle or follow the programme's end.
+    post_end_frames: AtomicU64,
+    post_end_events: AtomicU64,
+    /// The current runtime has pushed the programme's last sample.
+    programme_pushed: AtomicBool,
+    /// R31 (b): the clock's progress, recorded where it happens: the latest
+    /// callback that advanced it (µs since `origin`), and the longest gap
+    /// between two advancing callbacks since the latest `play`.
+    origin: std::sync::OnceLock<std::time::Instant>,
+    last_advance_micros: AtomicU64,
+    max_stall_micros: AtomicU64,
     /// The device's playback timestamp minus its callback timestamp, never
     /// compensated (D9).
     latency_micros: AtomicU64,
 }
 
 impl AudioDiagnostics {
-    fn record_underrun(&self, failed_samples: usize, channels: usize) {
+    /// `pushed` is the programme-pushed flag read before the callback
+    /// popped: a failed pop after it is the post-end straddle.
+    fn record_underrun(&self, failed_samples: usize, channels: usize, pushed: bool) {
         if failed_samples > 0 {
             let frames = failed_samples.div_ceil(channels.max(1));
             let frames = u64::try_from(frames).unwrap_or(u64::MAX);
-            self.underrun_frames.fetch_add(frames, Ordering::Relaxed);
-            self.underrun_events.fetch_add(1, Ordering::Relaxed);
+            let (frames_counter, events) = if pushed {
+                (&self.post_end_frames, &self.post_end_events)
+            } else {
+                (&self.underrun_frames, &self.underrun_events)
+            };
+            frames_counter.fetch_add(frames, Ordering::Relaxed);
+            events.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    fn micros_now(&self) -> u64 {
+        let origin = *self.origin.get_or_init(std::time::Instant::now);
+        u64::try_from(origin.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    /// A callback advanced the clock (R31 b).
+    fn record_advance(&self) {
+        let now = self.micros_now();
+        let last = self.last_advance_micros.swap(now, Ordering::AcqRel);
+        (self.max_stall_micros).fetch_max(now.saturating_sub(last), Ordering::AcqRel);
+    }
+
+    /// A runtime opened: its programme is not yet pushed, and its clock
+    /// starts now (the time paused is no stall).
+    fn begin_programme(&self) {
+        self.programme_pushed.store(false, Ordering::Release);
+        self.last_advance_micros
+            .store(self.micros_now(), Ordering::Release);
+    }
+
+    /// An explicit `play`: the longest stall restarts.
+    pub(crate) fn reset_stall(&self) {
+        self.max_stall_micros.store(0, Ordering::Release);
+    }
+
+    /// R-5 `max_clock_stall_ms`: the longest gap between advancing
+    /// callbacks, and, while `playing` a programme not yet all pushed, the
+    /// gap since the latest one.
+    pub(crate) fn max_stall_ms(&self, playing: bool) -> f64 {
+        let mut stall = self.max_stall_micros.load(Ordering::Acquire);
+        if playing && !self.programme_pushed.load(Ordering::Acquire) {
+            let last = self.last_advance_micros.load(Ordering::Acquire);
+            stall = stall.max(self.micros_now().saturating_sub(last));
+        }
+        u32::try_from(stall).map_or(f64::MAX, f64::from) / 1e3
     }
 
     fn record_latency(&self, latency: std::time::Duration) {
@@ -4148,15 +4204,23 @@ impl AudioDiagnostics {
         self.latency_micros.store(micros, Ordering::Relaxed);
     }
 
-    /// Frames any callback of this engine has failed to pop so far.
+    /// Frames any callback of this engine has failed to pop so far, before
+    /// the programme's end.
+    #[cfg(test)]
     pub(crate) fn underrun_frames(&self) -> u64 {
         self.underrun_frames.load(Ordering::Relaxed)
     }
 
-    /// (Callbacks that underran, frames not popped) so far (R-5).
-    pub(crate) fn underruns(&self) -> (u64, u64) {
-        let events = self.underrun_events.load(Ordering::Relaxed);
-        (events, self.underrun_frames())
+    /// (Callbacks that underran, frames not popped) so far (R-5), in the
+    /// programme, then after its end (R31 a).
+    pub(crate) fn underruns(&self) -> [u64; 4] {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        [
+            load(&self.underrun_events),
+            load(&self.underrun_frames),
+            load(&self.post_end_events),
+            load(&self.post_end_frames),
+        ]
     }
 
     /// The latest device callback's `device_latency_ms`, in microseconds.
@@ -4179,6 +4243,7 @@ pub(crate) struct AudioRuntime {
     /// PF1 V-2: `fill_ring` has reported the mixer exhausted.
     exhausted: bool,
     pub(crate) error_flag: Arc<AtomicBool>,
+    diagnostics: Arc<AudioDiagnostics>,
 }
 
 impl AudioRuntime {
@@ -4218,6 +4283,7 @@ impl AudioRuntime {
             .saturating_mul(usize::from(channels))
             .saturating_mul(BUFFER_SECONDS);
         let (producer, consumer) = RingBuffer::new(capacity.max(1));
+        diagnostics.begin_programme();
         let start_sample = frame_to_samples(project_from, sample_rate, document.fps);
         position_samples.store(start_sample, Ordering::Release);
         sample_rate_atomic.store(sample_rate, Ordering::Release);
@@ -4262,6 +4328,7 @@ impl AudioRuntime {
             channels,
             exhausted: false,
             error_flag,
+            diagnostics: Arc::clone(diagnostics),
         })
     }
 
@@ -4348,6 +4415,9 @@ impl AudioRuntime {
             self.target_samples,
             meter,
         )?;
+        if self.exhausted && self.pending_index >= self.pending.len() {
+            (self.diagnostics.programme_pushed).store(true, Ordering::Release);
+        }
         Ok(())
     }
 }
@@ -4472,6 +4542,7 @@ where
     let channels = channels.max(1);
     let sample_frames = output.len() / channels;
     let gain = monitor_linear_gain(monitor_gain_tenth_db);
+    let pushed = diagnostics.programme_pushed.load(Ordering::Acquire);
     let mut popped = 0;
     while popped < sample_frames && consumer.slots() >= channels {
         for destination in &mut output[popped * channels..(popped + 1) * channels] {
@@ -4483,8 +4554,11 @@ where
         *destination = T::from_sample(0.0 * gain);
     }
     let failed = output.len() - popped * channels;
-    diagnostics.record_underrun(failed, channels);
+    diagnostics.record_underrun(failed, channels, pushed);
     position.fetch_add(u64::try_from(popped).unwrap_or(u64::MAX), Ordering::Release);
+    if popped > 0 {
+        diagnostics.record_advance();
+    }
     failed
 }
 

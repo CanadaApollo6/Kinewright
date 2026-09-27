@@ -80,6 +80,12 @@ pub(crate) enum AgentWork {
         clear: bool,
         reply: Sender<Result<CacheStats, MediaError>>,
     },
+    /// Test support: occupy the preview until `release` disconnects.
+    #[cfg(any(test, feature = "test-util"))]
+    Hold {
+        started: Sender<()>,
+        release: Receiver<()>,
+    },
 }
 
 pub(crate) struct AgentJob {
@@ -93,6 +99,8 @@ impl AgentJob {
         match self.work {
             AgentWork::Thumbnail { reply, .. } => drop(reply.send(Err(error))),
             AgentWork::CacheStats { reply, .. } => drop(reply.send(Err(error))),
+            #[cfg(any(test, feature = "test-util"))]
+            AgentWork::Hold { .. } => {}
         }
     }
 }
@@ -175,6 +183,18 @@ impl Lane {
         };
         job.reply_error(refusal.unwrap_or_else(worker_stopped));
         false
+    }
+
+    /// Queued agent jobs, and how many are cancelled (test support).
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn waiting(&self) -> (usize, usize) {
+        let state = self.lock();
+        let cancelled = state
+            .agent
+            .iter()
+            .filter(|job| job.cancel.load(Ordering::Acquire))
+            .count();
+        (state.agent.len(), cancelled)
     }
 
     pub(crate) fn set_wakeup(&self, wakeup: Wakeup) {
@@ -284,6 +304,8 @@ pub(crate) struct Preview {
     held: Option<Held>,
     /// R-4 fairness: one agent job after each transport attempt.
     agent_turn: bool,
+    /// Review B: the newest frame already counted in `dropped_agent`.
+    agent_dropped_through: i64,
     #[cfg(test)]
     pub(crate) faults: Arc<crate::engine::Faults>,
 }
@@ -309,6 +331,7 @@ impl Preview {
             parked: None,
             held: None,
             agent_turn: false,
+            agent_dropped_through: i64::MIN,
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -320,6 +343,7 @@ impl Preview {
     pub(crate) fn reset_cursor(&mut self) {
         (self.playback_version, self.parked, self.held) = (None, None, None);
         (self.next_at, self.agent_turn) = (0, false);
+        self.agent_dropped_through = i64::MIN;
     }
 
     pub(crate) fn run(mut self) {
@@ -333,7 +357,12 @@ impl Preview {
     pub(crate) fn execute(&mut self, work: Work) {
         match work {
             Work::Agent(job) => {
+                let playing = self.playback_end();
+                let before = self.clock.position().0;
                 self.run_agent(job);
+                if let Some(end) = playing {
+                    self.count_displaced(before, self.clock.position().0, end);
+                }
                 self.agent_turn = false;
             }
             Work::Paused(job) => {
@@ -344,6 +373,28 @@ impl Preview {
                 self.run_playback(&job, version);
                 self.agent_turn = true;
             }
+        }
+    }
+
+    /// The programme end of the runnable playback job, if one is running.
+    fn playback_end(&self) -> Option<i64> {
+        let state = self.lane.lock();
+        let job = state.transport.as_ref()?;
+        let runnable = self.parked != Some(state.version);
+        let playback = matches!(job.kind, JobKind::Playback { .. });
+        (runnable && playback).then(|| job.scene.document.duration.0)
+    }
+
+    /// Review B: the due frames the clock passed while an agent job ran,
+    /// `(before, after]` short of the end, displaced by it: each is counted
+    /// once in `dropped_agent` (a subset of R-5's dropped frames).
+    fn count_displaced(&mut self, before: i64, after: i64, end: i64) {
+        let from = before.max(self.agent_dropped_through);
+        let through = after.min(end - 1);
+        if through > from {
+            let displaced = u64::try_from(through - from).unwrap_or(0);
+            self.lane.counters().stats.dropped_agent += displaced;
+            self.agent_dropped_through = through;
         }
     }
 
@@ -421,7 +472,9 @@ impl Preview {
         if self.faults.fail_render.swap(false, Ordering::AcqRel) {
             return Err(MediaError::Backend("injected render failure".to_owned()));
         } else if self.faults.fake_render.load(Ordering::Acquire) {
-            let rgba = Arc::new(vec![0; 4]);
+            // The I8 oracle's witness of which document rendered it.
+            let duration = u32::try_from(document.duration.0).unwrap_or(u32::MAX);
+            let rgba = Arc::new(duration.to_le_bytes().to_vec());
             let (width, height) = (1, 1);
             return Ok(Some(FrameTexture {
                 width,
@@ -484,7 +537,13 @@ impl Preview {
         let attempt = self.hold(&held);
         match attempt {
             Attempt::Published => self.publish(held.frame),
-            Attempt::Dropped { agent: true } => self.lane.counters().stats.dropped_agent += 1,
+            Attempt::Dropped { agent: true } => {
+                let at = held.frame.at.0;
+                if at > self.agent_dropped_through {
+                    self.lane.counters().stats.dropped_agent += 1;
+                    self.agent_dropped_through = at;
+                }
+            }
             #[cfg(test)]
             Attempt::Pending => self.held = Some(held),
             _ => {}
@@ -502,6 +561,7 @@ impl Preview {
         if self.playback_version != Some(version) {
             self.playback_version = Some(version);
             self.next_at = from.0;
+            self.agent_dropped_through = i64::MIN;
         }
         let frame_ms = frame_ms(document.fps);
         let lead = lead_frames(self.render_ewma_ms, frame_ms);
@@ -585,6 +645,10 @@ impl Preview {
     /// lock; its reply is sent exactly once, unless it was cancelled.
     pub(crate) fn run_agent(&mut self, job: AgentJob) {
         let AgentJob { work, cancel } = job;
+        #[cfg(test)]
+        if let Some(hook) = self.faults.on_agent.lock().expect("fault state").take() {
+            hook();
+        }
         match work {
             AgentWork::Thumbnail {
                 document,
@@ -613,6 +677,11 @@ impl Preview {
                     self.renderer.cache_stats()
                 };
                 self.reply(&cancel, &reply, Ok(stats));
+            }
+            #[cfg(any(test, feature = "test-util"))]
+            AgentWork::Hold { started, release } => {
+                let _ = started.send(());
+                let _ = release.recv();
             }
         }
     }
@@ -881,6 +950,44 @@ pub(crate) mod tests {
             frames.try_recv().is_err(),
             "a dropped frame is never published"
         );
+    }
+
+    /// Review B: the due frames the clock passes while an agent job renders
+    /// are counted in `dropped_agent`, each once; the held frame the next
+    /// attempt then finds expired is not counted again.
+    #[test]
+    fn an_agent_job_counts_the_due_frames_it_displaces() {
+        let clock = Arc::new(SharedClock::new());
+        let (mut preview, _frames) = test_preview(Arc::clone(&clock));
+        preview.faults.fake_render.store(true, Ordering::Release);
+        preview.faults.step_hold.store(true, Ordering::Release);
+        let lane = Arc::clone(&preview.lane);
+        let document = Arc::new(title_card((64, 64), 100));
+        clock.set_fps(document.fps);
+        clock.set_frame(TimeCode(10));
+        let playback = JobKind::Playback { from: TimeCode(10) };
+        lane.post(Some(job(&document, playback, stamp(2, 2))));
+        let Some(Work::Playback(job, version)) = preview.next_work(false) else {
+            panic!("the playback attempt");
+        };
+        assert_eq!(preview.run_playback(&job, version), Attempt::Pending);
+        let (agent, _response, _flag) = stats_job();
+        assert!(lane.try_push(agent));
+        let moved = Arc::clone(&clock);
+        let hook = Box::new(move || moved.set_frame(TimeCode(16)));
+        *preview.faults.on_agent.lock().unwrap() = Some(hook);
+        preview.agent_turn = true;
+        let work = preview.next_work(false).expect("the agent job");
+        preview.execute(work);
+        assert_eq!(lane.counters().stats.dropped_agent, 6, "11 through 16");
+        let Some(Work::Playback(job, version)) = preview.next_work(false) else {
+            panic!("the next attempt");
+        };
+        assert_eq!(
+            preview.run_playback(&job, version),
+            Attempt::Dropped { agent: false }
+        );
+        assert_eq!(lane.counters().stats.dropped_agent, 6, "counted once");
     }
 
     /// H-6 on one thread: queued agent jobs are answered "media worker

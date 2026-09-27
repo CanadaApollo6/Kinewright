@@ -151,10 +151,9 @@ pub(crate) fn alpha_table() -> &'static [f16] {
     &ALPHA
 }
 
-/// Bytes of RGB input tables currently held by the registry or any decoder.
-/// Read by the PF1 harness; the public `CacheStats` reply is wire data, so
-/// S2a's preview `stats` is where it surfaces in production.
-#[cfg(test)]
+/// Bytes of RGB input tables currently held by the registry or any decoder,
+/// process-wide. The public `CacheStats` reply is wire data, so S2a's
+/// `Playback::stats` is where it surfaces in production (review B F4).
 pub(crate) fn live_table_bytes() -> usize {
     LIVE_TABLE_BYTES.load(Ordering::Relaxed)
 }

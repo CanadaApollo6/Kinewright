@@ -198,6 +198,54 @@ type TitleCacheKey = (ClipId, (u32, u32), Generated);
 struct VideoSource {
     decoder: VideoDecoder,
     cache: FrameCache<WorkingFrame>,
+    /// Counts this open decoder in its engine's gauge while it lives.
+    _counted: Option<DecoderHold>,
+}
+
+/// PF1 R-5 `sync_decoders` (review B F4): one engine's open decoders, over
+/// every renderer it builds (preview, proofs, export).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DecoderGauge(Arc<std::sync::atomic::AtomicU64>);
+
+thread_local! {
+    /// The gauge renderers built on this thread count their decoders in.
+    static DECODER_GAUGE: std::cell::RefCell<Option<DecoderGauge>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl DecoderGauge {
+    /// Decoders open now.
+    pub(crate) fn open(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Run `build` with this gauge current: the renderers it builds on this
+    /// thread count their decoders here.
+    pub(crate) fn scope<T>(&self, build: impl FnOnce() -> T) -> T {
+        struct Restore(Option<DecoderGauge>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                DECODER_GAUGE.with(|gauge| *gauge.borrow_mut() = self.0.take());
+            }
+        }
+        let previous = DECODER_GAUGE.with(|gauge| gauge.borrow_mut().replace(self.clone()));
+        let _restore = Restore(previous);
+        build()
+    }
+
+    fn hold(&self) -> DecoderHold {
+        (self.0).fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        DecoderHold(Arc::clone(&self.0))
+    }
+}
+
+/// One open decoder in a gauge, released when its source drops.
+struct DecoderHold(Arc<std::sync::atomic::AtomicU64>);
+
+impl Drop for DecoderHold {
+    fn drop(&mut self) {
+        (self.0).fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
 }
 
 /// PF1 K-6: the preview renderer's demand for the frame being rendered: its
@@ -268,11 +316,14 @@ pub(crate) struct FrameRenderer {
     /// a document with an active LUT node then fails the render with
     /// `missing_lut_asset` instead of quietly dropping the look.
     lut_library: Arc<LutLibrary>,
+    /// The engine gauge current when this renderer was built, if any.
+    decoders: Option<DecoderGauge>,
 }
 
 impl FrameRenderer {
     pub(crate) fn new(gpu: GpuContext) -> Self {
         Self {
+            decoders: DECODER_GAUGE.with(|gauge| gauge.borrow().clone()),
             video_sources: HashMap::new(),
             source_order: VecDeque::new(),
             compositor: Compositor::new(gpu),
@@ -728,7 +779,11 @@ impl FrameRenderer {
             if let Some(points) = demand {
                 cache.set_demand(points);
             }
-            entry.insert(VideoSource { decoder, cache });
+            entry.insert(VideoSource {
+                decoder,
+                cache,
+                _counted: self.decoders.as_ref().map(DecoderGauge::hold),
+            });
         }
 
         let cache_miss = !self

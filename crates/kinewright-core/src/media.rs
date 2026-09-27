@@ -397,6 +397,51 @@ impl FrameStamp {
     }
 }
 
+/// PF1 R-4 (review B F2): a caller's cancellation of the agent-lane media
+/// requests it makes (thumbnails, frame proofs, cache inventory). `scope`
+/// makes the token current on the calling thread; an agent-lane request
+/// made inside it stops waiting once the token is cancelled, and its queued
+/// job is discarded unanswered. The MCP server cancels it when a client
+/// cancels a tool call, so the synchronous tool handlers keep their shape.
+#[derive(Debug, Clone, Default)]
+pub struct AgentCancel(Arc<AtomicBool>);
+
+thread_local! {
+    static CURRENT_AGENT_CANCEL: std::cell::RefCell<Option<AgentCancel>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl AgentCancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    /// Run `run` with this token current on this thread.
+    pub fn scope<T>(&self, run: impl FnOnce() -> T) -> T {
+        struct Restore(Option<AgentCancel>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CURRENT_AGENT_CANCEL.with(|current| *current.borrow_mut() = self.0.take());
+            }
+        }
+        let previous =
+            CURRENT_AGENT_CANCEL.with(|current| current.borrow_mut().replace(self.clone()));
+        let _restore = Restore(previous);
+        run()
+    }
+
+    /// The token current on this thread, if any.
+    #[must_use]
+    pub fn current() -> Option<Self> {
+        CURRENT_AGENT_CANCEL.with(|current| current.borrow().clone())
+    }
+}
+
 /// PF1 R-2: one preview candidate. The consumer validates it against
 /// [`Playback::stamp`] before it is shown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,12 +464,23 @@ pub struct PlaybackStats {
     pub dropped_agent: u64,
     pub max_held_ms: f64,
     pub max_av_offset_ms: f64,
+    /// The longest gap between output callbacks that advanced the clock
+    /// (recorded in the callback, so a blocked worker cannot hide it).
     pub max_clock_stall_ms: f64,
+    /// Underruns before the programme's end (R31: G11 counts these).
     pub underrun_events: u64,
     pub underrun_frames: u64,
+    /// Underruns once the whole programme is in the ring: the callbacks that
+    /// straddle or follow its end, reported apart (R31).
+    pub post_end_underrun_events: u64,
+    pub post_end_underrun_frames: u64,
     pub lookahead_starved: u64,
     pub sync_fallback_frames: u64,
+    /// Decoders open now in this engine's renderers (preview, proofs,
+    /// export).
     pub sync_decoders: u64,
+    /// Colour-conversion table bytes live now, process-wide (R28).
+    pub live_table_bytes: u64,
     pub slot_starved: u64,
     /// Stamped preview failures suppressed as superseded or old-epoch (R-2).
     pub stale_errors: u64,
@@ -2108,9 +2164,10 @@ pub trait Playback: Send + Sync {
     fn stats(&self) -> PlaybackStats {
         PlaybackStats::default()
     }
-    /// PF1 R-5: the frame stamped `stamp` at `at` was painted and submitted.
-    /// Called once per bound frame. Default: ignore.
-    fn ack_presented(&self, _stamp: FrameStamp, _at: TimeCode) {}
+    /// PF1 R-5: the frame stamped `stamp` at `at` was painted and submitted
+    /// at `painted`; R-5 judges it by that instant. Called once per bound
+    /// frame, at a later root epoch. Default: ignore.
+    fn ack_presented(&self, _stamp: FrameStamp, _at: TimeCode, _painted: std::time::Instant) {}
 }
 
 pub trait Analysis: Send + Sync {
