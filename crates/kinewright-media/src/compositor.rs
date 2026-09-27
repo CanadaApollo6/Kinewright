@@ -596,6 +596,26 @@ impl CompositorInput for WorkingFrame {
     }
 }
 
+/// PF1 G-1/K-6: who a monitor frame is for. Only the live preview monitor
+/// encodes through the exact BT.709 table; proofs, thumbnails and every other
+/// caller keep the f32 encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MonitorPurpose {
+    Proof,
+    LiveMonitor,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_TABLE_FRAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Frames this thread has encoded through the G-1 table (routing tests).
+#[cfg(test)]
+pub(crate) fn live_table_frames() -> usize {
+    LIVE_TABLE_FRAMES.with(std::cell::Cell::get)
+}
+
 pub struct Compositor {
     gpu: GpuContext,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -1212,9 +1232,24 @@ impl Compositor {
         monitoring: &ColorDescription,
         library: Option<&LutLibrary>,
     ) -> Result<FrameTexture, MediaError> {
+        let purpose = MonitorPurpose::Proof;
+        self.render_monitor_for(resolution, layers, monitoring, library, purpose)
+    }
+
+    /// [`Self::render_monitor_with_luts`] for a stated [`MonitorPurpose`].
+    pub(crate) fn render_monitor_for<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        monitoring: &ColorDescription,
+        library: Option<&LutLibrary>,
+        purpose: MonitorPurpose,
+    ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
         let (output, mut frame, encoder) = self.composite(width, height, layers, library, None)?;
-        let readback = self.readback_for(width, height, &output, encoder, &mut frame, monitoring);
+        let readback = self.readback_for(
+            width, height, &output, encoder, &mut frame, monitoring, purpose,
+        );
         self.finish_frame(output, frame);
         readback
     }
@@ -2387,6 +2422,7 @@ impl Compositor {
     /// inside the CC1 6.2 monitor gate. PF1 G-1's BT.709 table is different:
     /// one entry per f16 bit pattern, each computed by that exact f32 math, no
     /// interpolation, and exhaustively equal to `encode_monitor_rgba8`.
+    #[allow(clippy::too_many_arguments)]
     fn readback_for(
         &self,
         width: u32,
@@ -2395,6 +2431,7 @@ impl Compositor {
         encoder: wgpu::CommandEncoder,
         frame: &mut FrameResources,
         monitoring: &ColorDescription,
+        purpose: MonitorPurpose,
     ) -> Result<FrameTexture, MediaError> {
         let mut rgba = Vec::with_capacity(
             usize::try_from(width)
@@ -2402,7 +2439,9 @@ impl Compositor {
                 .saturating_mul(usize::try_from(height).unwrap_or_default())
                 .saturating_mul(4),
         );
-        if monitoring.transfer == ColorTransfer::Bt709 {
+        if purpose == MonitorPurpose::LiveMonitor && monitoring.transfer == ColorTransfer::Bt709 {
+            #[cfg(test)]
+            LIVE_TABLE_FRAMES.with(|frames| frames.set(frames.get() + 1));
             self.for_each_pixel_bits(width, height, output, encoder, frame, |bits| {
                 rgba.extend_from_slice(&monitor_rgba8(bits));
                 Ok(())

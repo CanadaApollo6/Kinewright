@@ -1820,7 +1820,7 @@ impl Worker {
                 let resolution = scale.output_resolution(requested.resolution);
                 let result = self
                     .renderer
-                    .render(&requested, at, resolution, scale, DecodeStrategy::Seek)
+                    .render_thumbnail(&requested, at, resolution, scale)
                     .map(|frame| RgbaImage {
                         width: frame.width,
                         height: frame.height,
@@ -2115,7 +2115,7 @@ impl Worker {
         };
         let frame = match self
             .renderer
-            .render(&document, project_at, resolution, scale, strategy)
+            .render_live(&document, project_at, resolution, scale, strategy)
         {
             Ok(frame) => frame,
             Err(error) => {
@@ -3423,11 +3423,29 @@ mod tests {
         fps: Rational,
         duration: TimeCode,
     ) -> (Worker, SimulatedAudio, Receiver<MediaEvent>) {
+        let (mut worker, events_rx) = test_worker();
+        let audio = SimulatedAudio::stepped();
+        worker.output_device = OutputDevice::Simulated(audio.clone());
+        let mut document = crate::perf_fixtures::title_card((64, 64), duration.0);
+        document.fps = fps;
+        worker.document = Arc::new(document);
+        worker.clock.set_fps(fps);
+        worker.start_playback(TimeCode::ZERO);
+        assert!(
+            worker.playing,
+            "{:?}",
+            events_rx.try_iter().collect::<Vec<_>>()
+        );
+        (worker, audio, events_rx)
+    }
+
+    /// A worker driven from the test thread (no `run` loop).
+    fn test_worker() -> (Worker, Receiver<MediaEvent>) {
         let (_control_tx, control_rx) = unbounded::<Control>();
         let (frames_tx, frames_rx) = bounded(2);
         let (events_tx, events_rx) = bounded(16);
         let meter = Arc::new(MeterState::default());
-        let mut worker = Worker::new(
+        let worker = Worker::new(
             WorkerChannels {
                 control_rx,
                 frames_tx,
@@ -3444,19 +3462,37 @@ mod tests {
             Arc::new(RwLock::new(PublishedLattices::default())),
             Arc::new(AtomicI32::new(0)),
         );
-        let audio = SimulatedAudio::stepped();
-        worker.output_device = OutputDevice::Simulated(audio.clone());
-        let mut document = crate::perf_fixtures::title_card((64, 64), duration.0);
-        document.fps = fps;
-        worker.document = Arc::new(document);
-        worker.clock.set_fps(fps);
-        worker.start_playback(TimeCode::ZERO);
-        assert!(
-            worker.playing,
-            "{:?}",
-            events_rx.try_iter().collect::<Vec<_>>()
-        );
-        (worker, audio, events_rx)
+        (worker, events_rx)
+    }
+
+    /// PF1 G-1/K-6 (review A F1): only the live preview monitor encodes
+    /// through the table; worker thumbnails (`thumbnail_at`,
+    /// `thumbnail_for_document`, the agent's frame tools) and
+    /// `monitor_proof_for_document` keep the f32 encode.
+    #[test]
+    fn only_the_live_monitor_encodes_through_the_table() {
+        use crate::compositor::live_table_frames;
+        let (mut worker, _events) = test_worker();
+        let document = crate::perf_fixtures::title_card((64, 64), 3);
+        let before = live_table_frames();
+        worker.set_document(&document);
+        worker.present(TimeCode(1));
+        assert_eq!(live_table_frames(), before + 2, "set_document and present");
+        let (reply, response) = bounded(1);
+        worker.handle_control(Control::Thumbnail {
+            document: Some(Arc::new(document.clone())),
+            at: TimeCode(1),
+            max_width: 64,
+            reply,
+        });
+        let thumbnail = response.recv().unwrap().expect("a thumbnail");
+        assert_eq!((thumbnail.width, thumbnail.height), (64, 64));
+        let temp = TempDirectory::new("pf1-g1-routing");
+        let gpu = fallback_gpu().context();
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        let proof = engine.monitor_proof_for_document(Arc::new(document), TimeCode(1));
+        assert_eq!(proof.expect("a proof").image.width, 64);
+        assert_eq!(live_table_frames(), before + 2, "thumbnail and proof: f32");
     }
 
     /// Callbacks with a tick after each until the worker stops (or `limit`).

@@ -16,7 +16,7 @@ use crate::{
     cache::FrameCache,
     compositor::{
         Compositor, CompositorLayer, DeliveryFrame, GpuContext, LayerMode, LayerRole,
-        MatteRenderTarget,
+        MatteRenderTarget, MonitorPurpose,
     },
     decode::VideoDecoder,
     derived_cache::CacheStats,
@@ -359,8 +359,48 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<FrameTexture, MediaError> {
-        let rendered = self.render_timed(document, project_at, resolution, scale, strategy);
+        let purpose = MonitorPurpose::Proof;
+        let rendered =
+            self.render_timed(document, project_at, resolution, (scale, strategy), purpose);
         rendered.map(|(frame, _)| frame)
+    }
+
+    /// PF1 G-1: [`Self::render`] for the live preview monitor, the only
+    /// caller whose encode goes through the exact BT.709 table.
+    pub(crate) fn render_live(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<FrameTexture, MediaError> {
+        let purpose = MonitorPurpose::LiveMonitor;
+        let rendered =
+            self.render_timed(document, project_at, resolution, (scale, strategy), purpose);
+        rendered.map(|(frame, _)| frame)
+    }
+
+    /// PF1 K-6 (review B F5): a thumbnail on the preview renderer keeps
+    /// today's policy: it neither rebuilds the preview's demand nor runs its
+    /// window, pins or distance eviction.
+    pub(crate) fn render_thumbnail(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+    ) -> Result<FrameTexture, MediaError> {
+        let preview = self.preview.take();
+        let rendered = self.render(
+            document,
+            project_at,
+            resolution,
+            scale,
+            DecodeStrategy::Seek,
+        );
+        self.preview = preview;
+        rendered
     }
 
     /// MO2 R28 (ME13): [`Self::render`] and its compositor frame time —
@@ -370,19 +410,20 @@ impl FrameRenderer {
         document: &Document,
         project_at: TimeCode,
         resolution: (u32, u32),
-        scale: RenderScale,
-        strategy: DecodeStrategy,
+        (scale, strategy): (RenderScale, DecodeStrategy),
+        purpose: MonitorPurpose,
     ) -> Result<(FrameTexture, std::time::Duration), MediaError> {
         let decoded_layers =
             self.decoded_layers(document, project_at, resolution, scale, strategy)?;
         let started = std::time::Instant::now();
         let layers = compositor_layers(&decoded_layers);
         self.compositor
-            .render_monitor_with_luts(
+            .render_monitor_for(
                 resolution,
                 &layers,
                 &document.color_context.monitoring,
                 Some(&self.lut_library),
+                purpose,
             )
             .map_err(attribute_layer(&decoded_layers, project_at))
             .map(|frame| (frame, started.elapsed()))
@@ -1033,7 +1074,7 @@ mod tests {
     use half::f16;
     use kinewright_core::{
         Analysis, AssetId, Clip, ClipContent, ColorPipelineState, ColorTransfer, EffectId,
-        LutAssetId, ParamValue, Track, TrackId, TrackKind,
+        LutAssetId, MediaAsset, ParamValue, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -1762,6 +1803,59 @@ mod tests {
                 .all(|p| p == [0.0, 0.0, 0.0, 1.0])
         );
     }
+
+    /// A 64×36 ffv1 BT.709 source of `seconds` at 30 fps.
+    fn small_source(
+        label: &str,
+        filter: &str,
+        id: u64,
+        seconds: u32,
+    ) -> (GeneratedMedia, MediaAsset) {
+        let filter = format!("{filter}=size=64x36:rate=30:duration={seconds}");
+        let args = [
+            "-f", "lavfi", "-i", &filter, "-c:v", "ffv1", "-pix_fmt", "yuv420p",
+        ];
+        let media = GeneratedMedia::ffmpeg(label, &args, "mkv");
+        let mut asset = probe_path(media.path(), AssetId(id)).expect("source probes");
+        asset.color_description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: kinewright_core::ColorMatrix::Bt709,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: kinewright_core::ColorWhitePoint::D65,
+            bit_depth: kinewright_core::ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::UserOverride,
+        };
+        (media, asset)
+    }
+
+    /// PF1 K-6 (review B F5): a thumbnail on the preview renderer keeps
+    /// today's policy: the preview's demand is not rebuilt by it.
+    #[test]
+    fn a_thumbnail_leaves_the_preview_demand_alone() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_media, asset) = small_source("pf1-thumb", "testsrc2", 1, 2);
+        let document = single_clip_document(asset);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        let strategy = DecodeStrategy::Sequential;
+        let live = renderer.render_live(&document, TimeCode(5), (64, 36), scale, strategy);
+        live.expect("a preview frame");
+        let demand = |renderer: &FrameRenderer| {
+            let demand = renderer.preview.as_ref().expect("the preview renderer");
+            (demand.sources.clone(), demand.generated)
+        };
+        let before = demand(&renderer);
+        assert_eq!(before.0.values().collect::<Vec<_>>(), [&[TimeCode(5)]]);
+        let thumbnail = renderer.render_thumbnail(&document, TimeCode(40), (64, 36), scale);
+        thumbnail.expect("a thumbnail");
+        assert_eq!(demand(&renderer), before);
+    }
+
     /// PF1 G5 (K-6): two continuous sources under a binding budget decode
     /// with 0 seeks after warm-up on the preview renderer; today's policy
     /// thrashes on the same budget (the control).
@@ -1771,27 +1865,8 @@ mod tests {
         let Some(gpu) = fixture_gpu_or_skip() else {
             return;
         };
-        let source = |label, filter: &str, id| {
-            let filter = format!("{filter}=size=64x36:rate=30:duration=2");
-            let args = [
-                "-f", "lavfi", "-i", &filter, "-c:v", "ffv1", "-pix_fmt", "yuv420p",
-            ];
-            let media = GeneratedMedia::ffmpeg(label, &args, "mkv");
-            let mut asset = probe_path(media.path(), AssetId(id)).expect("source probes");
-            asset.color_description = ColorDescription {
-                primaries: ColorPrimaries::Bt709,
-                transfer: ColorTransfer::Bt709,
-                matrix: kinewright_core::ColorMatrix::Bt709,
-                range: kinewright_core::ColorRange::Limited,
-                white_point: kinewright_core::ColorWhitePoint::D65,
-                bit_depth: kinewright_core::ColorBitDepth::Eight,
-                confidence_basis_points: 10_000,
-                provenance: kinewright_core::ColorProvenance::UserOverride,
-            };
-            (media, asset)
-        };
-        let (_a, lower) = source("pf1-g5-a", "testsrc2", 1);
-        let (_b, upper) = source("pf1-g5-b", "smptebars", 2);
+        let (_a, lower) = small_source("pf1-g5-a", "testsrc2", 1, 2);
+        let (_b, upper) = small_source("pf1-g5-b", "smptebars", 2, 2);
         let mut document = single_clip_document(lower);
         let mut track = document.tracks[0].clone();
         (track.id, track.clips[0].id, track.clips[0].asset) = (TrackId(2), ClipId(2), upper.id);

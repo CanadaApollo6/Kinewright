@@ -142,7 +142,8 @@ fn final_ledger_exact_resources_and_lifetime() {
         "every per-frame resource counted"
     );
     let monitor = kinewright_core::ColorContext::sdr_rec709().monitoring;
-    c.readback_for(32, 4, &output, encoder, &mut resources, &monitor)
+    let purpose = crate::compositor::MonitorPurpose::Proof;
+    c.readback_for(32, 4, &output, encoder, &mut resources, &monitor, purpose)
         .unwrap();
     c.finish_frame(output, resources);
     assert_eq!(

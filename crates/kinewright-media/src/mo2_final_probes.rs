@@ -432,11 +432,12 @@ fn final_render_timed_measures_inside_the_call() {
     let doc = document_sized((3, 3), vec![solid(1, GREY, BlendMode::Normal, vec![])]);
     r.set_cache_budget(1 << 30);
     let full = (RenderScale::FullResolution, DecodeStrategy::Sequential);
-    r.render_timed(&doc, TimeCode(0), doc.resolution, full.0, full.1)
+    let proof = crate::compositor::MonitorPurpose::Proof;
+    r.render_timed(&doc, TimeCode(0), doc.resolution, full, proof)
         .unwrap();
     let started = std::time::Instant::now();
     let (_, measured) = r
-        .render_timed(&doc, TimeCode(0), doc.resolution, full.0, full.1)
+        .render_timed(&doc, TimeCode(0), doc.resolution, full, proof)
         .unwrap();
     let total = started.elapsed();
     assert!(
