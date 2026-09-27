@@ -1424,7 +1424,7 @@ impl KinewrightApp {
                         format_bytes(result.removed_bytes)
                     );
                     self.media_cache_clear_result = Some(result);
-                    self.media_cache_inventory = Some(self.analysis.cache_inventory());
+                    self.refresh_cache_inventory(ctx);
                 }
                 // Appendix B row 88: the cache is the project's, not an
                 // asset's.
@@ -1576,10 +1576,22 @@ impl KinewrightApp {
         }
     }
 
-    pub(crate) fn open_media_cache_dialog(&mut self) {
+    pub(crate) fn open_media_cache_dialog(&mut self, ctx: &egui::Context) {
         self.media_cache_dialog_open = true;
-        self.media_cache_inventory = Some(self.analysis.cache_inventory());
+        self.media_cache_inventory = None;
+        self.refresh_cache_inventory(ctx);
         self.media_cache_clear_result = None;
+    }
+
+    /// The inventory is read off the UI thread (its request can wait behind
+    /// a render); the dialog reads "Reading cache inventory…" until then.
+    fn refresh_cache_inventory(&self, ctx: &egui::Context) {
+        let media = Arc::clone(&self.analysis);
+        self.off_ui(
+            ctx,
+            move || media.cache_inventory(),
+            |app, _, inventory| app.media_cache_inventory = Some(inventory),
+        );
     }
 
     fn clear_media_cache(&mut self, family: MediaCacheFamily) {
@@ -1683,7 +1695,7 @@ impl KinewrightApp {
             self.clear_media_cache(family);
         }
         if refresh {
-            self.media_cache_inventory = Some(self.analysis.cache_inventory());
+            self.refresh_cache_inventory(ctx);
         }
     }
 

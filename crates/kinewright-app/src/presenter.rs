@@ -2,7 +2,10 @@
 //! describes the bound preview image, and the paint marker whose mark
 //! `App::logic` acks at a later root epoch.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    sync::{Arc, Mutex, PoisonError},
+    time::Instant,
+};
 
 use eframe::{egui, egui_wgpu};
 use kinewright_core::{FrameStamp, PreviewFrame, TimeCode};
@@ -18,11 +21,12 @@ pub(crate) struct DisplayCell {
     pub(crate) stale: bool,
 }
 
-/// A paint of a bound, current image in root epoch `epoch`.
+/// A paint of a bound, current image in root epoch `epoch`, at `painted`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PaintMark {
     pub(crate) cell: DisplayCell,
     pub(crate) epoch: u64,
+    pub(crate) painted: Instant,
 }
 
 type Shared<T> = Arc<Mutex<Option<T>>>;
@@ -93,22 +97,35 @@ impl Presenter {
         self.candidates.push(frame);
     }
 
-    /// `finalize_preview`: the frame to bind now, with the cell describing
-    /// it written in the same step; otherwise an older-epoch image turns stale.
-    pub(crate) fn finalize(
+    /// `finalize_preview` (review A F2): choose a candidate under `now`
+    /// (the latest stamp and, while playing, the clock), `prepare` its CPU
+    /// image, then re-check it under `now` again. Only a still-eligible
+    /// frame is returned with its image, the cell describing it written in
+    /// the same step, for the caller to bind at once; otherwise an
+    /// older-epoch image turns stale.
+    pub(crate) fn finalize<P>(
         &mut self,
-        latest: FrameStamp,
-        playing: Option<TimeCode>,
-    ) -> Option<PreviewFrame> {
+        now: impl Fn() -> (FrameStamp, Option<TimeCode>),
+        prepare: impl FnOnce(&PreviewFrame) -> P,
+    ) -> Option<(PreviewFrame, P)> {
         let shown = read(&self.cell);
+        let (latest, playing) = now();
         let chosen = choose_candidate(
             &mut self.candidates,
             latest,
             shown.map(|c| c.stamp),
             playing,
         );
+        let prepared = chosen.map(|frame| {
+            let image = prepare(&frame);
+            (frame, image)
+        });
+        let (latest, playing) = now();
+        let chosen = prepared.filter(|(frame, _)| {
+            frame.stamp.epoch == latest.epoch && playing.is_none_or(|position| frame.at == position)
+        });
         let cell = match (&chosen, shown) {
-            (Some(frame), _) => {
+            (Some((frame, _)), _) => {
                 self.next_frame_id += 1;
                 let (stamp, at, frame_id) = (frame.stamp, frame.at, self.next_frame_id);
                 DisplayCell {
@@ -139,6 +156,17 @@ impl Presenter {
         read(&self.cell).is_some_and(|cell| cell.stale)
     }
 
+    /// Review A F4: the bound image is `target`, current under `latest` and
+    /// no older than `since`.
+    pub(crate) fn shows(&self, since: FrameStamp, target: TimeCode, latest: FrameStamp) -> bool {
+        read(&self.cell).is_some_and(|cell| {
+            !cell.stale
+                && cell.at == target
+                && cell.stamp.epoch == latest.epoch
+                && cell.stamp.seq >= since.seq
+        })
+    }
+
     /// The marker for this layout pass of root epoch `epoch`: it holds the
     /// cell itself, never a copied stamp, so a later binding in the same pass
     /// is what it marks.
@@ -154,13 +182,13 @@ impl Presenter {
 
     /// `App::logic` at root epoch `now`: a mark from an earlier epoch is
     /// acked once per bound image.
-    pub(crate) fn take_ack(&mut self, now: u64) -> Option<(FrameStamp, TimeCode)> {
+    pub(crate) fn take_ack(&mut self, now: u64) -> Option<(FrameStamp, TimeCode, Instant)> {
         let mark = read(&self.mark).filter(|mark| mark.epoch < now)?;
         write(&self.mark, None);
         let cell = mark.cell;
         (self.acked != Some(cell.frame_id)).then(|| {
             self.acked = Some(cell.frame_id);
-            (cell.stamp, cell.at)
+            (cell.stamp, cell.at, mark.painted)
         })
     }
 }
@@ -186,13 +214,19 @@ impl PaintMarker {
                 Some(PaintMark {
                     cell,
                     epoch: self.epoch,
+                    painted: Instant::now(),
                 }),
             );
         }
     }
 
-    pub(crate) fn shape(self, rect: egui::Rect) -> egui::Shape {
-        egui::Shape::Callback(egui_wgpu::Callback::new_paint_callback(rect, self))
+    /// Mark over `image_rect`, clipped to it within `painter`'s clip (review
+    /// A F3): a viewer whose visible part misses the image paints nothing.
+    pub(crate) fn add_to(self, painter: &egui::Painter, image_rect: egui::Rect) {
+        let callback = egui_wgpu::Callback::new_paint_callback(image_rect, self);
+        painter
+            .with_clip_rect(image_rect)
+            .add(egui::Shape::Callback(callback));
     }
 }
 
@@ -250,6 +284,20 @@ mod tests {
         (FrameStamp { epoch, seq }, TimeCode(at))
     }
 
+    /// `finalize` with nothing moving between choice and binding.
+    fn fin(
+        presenter: &mut Presenter,
+        latest: FrameStamp,
+        playing: Option<TimeCode>,
+    ) -> Option<PreviewFrame> {
+        let now = move || (latest, playing);
+        presenter.finalize(now, |_| ()).map(|(frame, ())| frame)
+    }
+
+    fn ack(presenter: &mut Presenter, now: u64) -> Option<(FrameStamp, TimeCode)> {
+        presenter.take_ack(now).map(|(stamp, at, _)| (stamp, at))
+    }
+
     /// I18 witnesses. A-layout/B-bind: the marker laid out before a binding
     /// in the same pass marks the binding. C-deferred: no binding leaves the
     /// held image, already acked, so no second ack. Seek-before-paint: an
@@ -260,44 +308,32 @@ mod tests {
         let (epoch, latest) = engine_epoch(1);
         let mut presenter = Presenter::default();
         presenter.collect(frame(1, 1, 5));
-        assert!(
-            presenter
-                .finalize(FrameStamp { epoch: 1, seq: 1 }, None)
-                .is_some()
-        );
+        assert!(fin(&mut presenter, FrameStamp { epoch: 1, seq: 1 }, None).is_some());
         let marker = presenter.marker(1, latest()); // A: layout of pass 1…
         presenter.collect(frame(1, 2, 6));
         let now = FrameStamp { epoch: 1, seq: 2 };
-        assert!(presenter.finalize(now, None).is_some()); // …B: a binding.
+        assert!(fin(&mut presenter, now, None).is_some()); // …B: a binding.
         marker.record();
-        assert_eq!(presenter.take_ack(1), None, "not before a later epoch");
+        assert_eq!(ack(&mut presenter, 1), None, "not before a later epoch");
         assert_eq!(
-            presenter.take_ack(2),
+            ack(&mut presenter, 2),
             Some(acked(6, 1, 2)),
             "the binding, B"
         );
         let marker = presenter.marker(2, latest());
-        assert!(presenter.finalize(now, None).is_none()); // C: deferred.
+        assert!(fin(&mut presenter, now, None).is_none()); // C: deferred.
         marker.record();
-        assert_eq!(presenter.take_ack(3), None, "one ack per bound image");
+        assert_eq!(ack(&mut presenter, 3), None, "one ack per bound image");
         presenter.collect(frame(1, 3, 7));
-        assert!(
-            presenter
-                .finalize(FrameStamp { epoch: 1, seq: 3 }, None)
-                .is_some()
-        );
+        assert!(fin(&mut presenter, FrameStamp { epoch: 1, seq: 3 }, None).is_some());
         let marker = presenter.marker(3, latest());
         epoch.store(2, Ordering::Release); // A seek before the paint.
         marker.record();
-        assert_eq!(presenter.take_ack(4), None, "seek-before-paint");
-        assert!(
-            presenter
-                .finalize(FrameStamp { epoch: 2, seq: 4 }, None)
-                .is_none()
-        );
+        assert_eq!(ack(&mut presenter, 4), None, "seek-before-paint");
+        assert!(fin(&mut presenter, FrameStamp { epoch: 2, seq: 4 }, None).is_none());
         assert!(presenter.stale(), "the old image stays up, marked");
         presenter.marker(4, latest()).record();
-        assert_eq!(presenter.take_ack(5), None, "a stale paint is never acked");
+        assert_eq!(ack(&mut presenter, 5), None, "a stale paint is never acked");
     }
 
     /// I18: an abandoned paint (surface error, invisible viewport), a zero
@@ -307,12 +343,216 @@ mod tests {
         let (_epoch, latest) = engine_epoch(1);
         let mut presenter = Presenter::default();
         presenter.collect(frame(1, 1, 0));
-        presenter.finalize(FrameStamp { epoch: 1, seq: 1 }, None);
+        fin(&mut presenter, FrameStamp { epoch: 1, seq: 1 }, None);
         drop(presenter.marker(1, latest()));
-        assert_eq!(presenter.take_ack(2), None);
+        assert_eq!(ack(&mut presenter, 2), None);
         presenter.clear();
         presenter.marker(2, latest()).record();
-        assert_eq!(presenter.take_ack(3), None, "a cleared cell marks nothing");
+        assert_eq!(ack(&mut presenter, 3), None, "a cleared cell marks nothing");
+    }
+
+    /// Review A F2 barrier witness: the audio callback advances the clock
+    /// from 10 to 11 while the image of frame 10 is prepared. Nothing binds
+    /// (the old finalize bound it and wrote the cell first); frame 11 does.
+    #[test]
+    fn a_clock_advance_during_preparation_binds_nothing() {
+        let (_epoch, latest) = engine_epoch(1);
+        let stamp = FrameStamp { epoch: 1, seq: 1 };
+        let clock = Arc::new(std::sync::atomic::AtomicI64::new(10));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let callback = {
+            let (clock, barrier) = (Arc::clone(&clock), Arc::clone(&barrier));
+            std::thread::spawn(move || {
+                barrier.wait();
+                clock.store(11, Ordering::Release);
+                barrier.wait();
+            })
+        };
+        let now = || (stamp, Some(TimeCode(clock.load(Ordering::Acquire))));
+        let mut presenter = Presenter::default();
+        presenter.collect(frame(1, 1, 10));
+        presenter.collect(frame(1, 1, 11));
+        let bound = presenter.finalize(now, |frame| {
+            assert_eq!(frame.at, TimeCode(10), "chosen under clock 10");
+            barrier.wait();
+            barrier.wait();
+        });
+        callback.join().unwrap();
+        assert!(bound.is_none(), "an expired frame never binds");
+        assert_eq!(read(&presenter.cell), None, "the cell is untouched");
+        presenter.marker(1, latest()).record();
+        assert_eq!(ack(&mut presenter, 2), None);
+        let bound = presenter.finalize(now, |_| ()).map(|(frame, ())| frame.at);
+        assert_eq!(bound, Some(TimeCode(11)));
+    }
+
+    /// Review A S2: I18 through the real `CallbackTrait::paint`, run by
+    /// egui-wgpu's `Renderer` on a headless device (lavapipe by default).
+    struct Painted {
+        gpu: kinewright_media::GpuContext,
+        renderer: egui_wgpu::Renderer,
+        view: egui_wgpu::wgpu::TextureView,
+        ctx: egui::Context,
+    }
+
+    /// How a laid-out pass reaches the GPU.
+    #[derive(Clone, Copy)]
+    enum Pass {
+        /// Tessellated, prepared and rendered in a submitted pass.
+        Rendered,
+        /// Prepared, but the pass is never recorded (no surface texture).
+        Discarded,
+        /// eframe skips tessellating and painting an invisible root.
+        Invisible,
+    }
+
+    const SIDE: f32 = 64.0;
+
+    impl Painted {
+        fn new() -> Self {
+            use egui_wgpu::wgpu;
+            let gpu = kinewright_media::GpuContext::headless(true).expect("a headless device");
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let renderer = egui_wgpu::Renderer::new(
+                &gpu.device,
+                format,
+                egui_wgpu::RendererOptions::default(),
+            );
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("i18-target"),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            Self {
+                gpu,
+                renderer,
+                view,
+                ctx: egui::Context::default(),
+            }
+        }
+
+        /// One root pass: the production marker over `image`, inside a
+        /// viewer clipped to `clip`, then `pass`.
+        fn pass(
+            &mut self,
+            presenter: &Presenter,
+            latest: Latest,
+            clip: egui::Rect,
+            image: egui::Rect,
+            pass: Pass,
+        ) {
+            use egui_wgpu::wgpu;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIDE, SIDE));
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let epoch = self.ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+            let mut latest = Some(latest);
+            let output = self.ctx.run_ui(input, |ui| {
+                let viewer = ui.painter().with_clip_rect(clip);
+                if let Some(latest) = latest.take() {
+                    presenter.marker(epoch, latest).add_to(&viewer, image);
+                }
+            });
+            if matches!(pass, Pass::Invisible) {
+                return;
+            }
+            let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
+            let descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [64, 64],
+                pixels_per_point: output.pixels_per_point,
+            };
+            let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let mut commands = (self.renderer).update_buffers(
+                device,
+                queue,
+                &mut encoder,
+                &primitives,
+                &descriptor,
+            );
+            if matches!(pass, Pass::Rendered) {
+                let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("i18"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    ..Default::default()
+                });
+                let mut render_pass = render_pass.forget_lifetime();
+                self.renderer
+                    .render(&mut render_pass, &primitives, &descriptor);
+            }
+            commands.push(encoder.finish());
+            queue.submit(commands);
+        }
+
+        fn epoch(&self) -> u64 {
+            self.ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+        }
+    }
+
+    /// Review A S2/F3: a rendered pass acks its bound image once, at the
+    /// paint instant; a discarded pass, an invisible root and a viewer
+    /// whose positive clip misses the image (review A F3) ack nothing. A
+    /// no-op `paint` fails the first assertion; the old viewer-rect clip
+    /// fails the clipped-image one.
+    #[test]
+    fn the_real_paint_callback_acks_only_painted_images() {
+        let mut painted = Painted::new();
+        let (_engine, latest) = engine_epoch(1);
+        let mut presenter = Presenter::default();
+        let image = egui::Rect::from_min_size(egui::pos2(8.0, 16.0), egui::vec2(48.0, 40.0));
+        let whole = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIDE, SIDE));
+        let top_strip = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIDE, 8.0));
+        let bind = |presenter: &mut Presenter, seq: u64| {
+            presenter.collect(frame(1, seq, 0));
+            assert!(fin(presenter, FrameStamp { epoch: 1, seq }, None).is_some());
+        };
+
+        bind(&mut presenter, 1);
+        let before = Instant::now();
+        painted.pass(&presenter, latest(), whole, image, Pass::Rendered);
+        let (stamp, at, when) = presenter.take_ack(painted.epoch()).expect("painted");
+        assert_eq!((stamp, at), acked(0, 1, 1));
+        assert!(when >= before, "the paint instant");
+        assert_eq!(ack(&mut presenter, painted.epoch() + 1), None, "once");
+
+        for (seq, clip, pass, case) in [
+            (2, whole, Pass::Discarded, "discarded pass"),
+            (3, whole, Pass::Invisible, "invisible root"),
+            (4, top_strip, Pass::Rendered, "clipped image"),
+        ] {
+            bind(&mut presenter, seq);
+            assert!(top_strip.is_positive() && !top_strip.intersects(image));
+            painted.pass(&presenter, latest(), clip, image, pass);
+            painted.pass(&presenter, latest(), clip, image, Pass::Invisible);
+            assert_eq!(ack(&mut presenter, painted.epoch()), None, "{case}");
+        }
+        painted.pass(&presenter, latest(), whole, image, Pass::Rendered);
+        assert_eq!(
+            ack(&mut presenter, painted.epoch()),
+            Some(acked(0, 1, 4)),
+            "the same image, painted"
+        );
     }
 
     /// R-2 while playing: only the clock's own frame binds; an expired one
@@ -367,7 +607,7 @@ mod tests {
                     }
                     3 => {
                         let playing = (below(2) == 0).then_some(TimeCode(at));
-                        if let Some(frame) = presenter.finalize(latest, playing) {
+                        if let Some(frame) = fin(&mut presenter, latest, playing) {
                             assert_eq!(frame.stamp.epoch, latest.epoch, "seed {seed}");
                             if let Some((shown, _)) = bound.filter(|b| b.0.epoch == latest.epoch) {
                                 assert!(frame.stamp.seq >= shown.seq, "seed {seed}: order");
@@ -387,7 +627,7 @@ mod tests {
                     }
                     _ => {
                         root += 1;
-                        if let Some(ack) = presenter.take_ack(root) {
+                        if let Some(ack) = ack(&mut presenter, root) {
                             assert!(painted.contains(&ack), "seed {seed}: unpainted ack");
                             assert_ne!(acks.last(), Some(&ack), "seed {seed}: twice");
                             acks.push(ack);
@@ -402,7 +642,7 @@ mod tests {
             for frame in in_flight.drain(..) {
                 presenter.collect(frame);
             }
-            let shown = presenter.finalize(latest, None).map(|f| (f.stamp, f.at));
+            let shown = fin(&mut presenter, latest, None).map(|f| (f.stamp, f.at));
             assert_eq!(shown, Some((latest, target)), "seed {seed}: L-6");
         }
     }

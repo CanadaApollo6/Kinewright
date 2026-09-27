@@ -283,6 +283,9 @@ fn router_apply_accepted(
     }
 }
 
+/// A reply applied on the UI thread (`KinewrightApp::off_ui`).
+pub(crate) type UiReply = Box<dyn FnOnce(&mut KinewrightApp, &egui::Context) + Send>;
+
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct KinewrightApp {
@@ -398,6 +401,9 @@ pub(crate) struct KinewrightApp {
     pub(crate) refuse_rename: Option<Arc<RefuseRename>>,
     pub(crate) media_cache_dialog_open: bool,
     pub(crate) media_cache_inventory: Option<kinewright_core::MediaCacheInventory>,
+    /// Review B (UI blocking): replies of agent-lane requests made off the
+    /// UI thread, applied on it by `poll_background`.
+    pub(crate) ui_replies: (mpsc::Sender<UiReply>, mpsc::Receiver<UiReply>),
     pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
     pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
@@ -438,6 +444,12 @@ pub(crate) struct KinewrightApp {
     /// document and never travels with a project.
     pub(crate) mixer_selection: Option<crate::mixer_ui::MixerSelection>,
     pub(crate) resume_after_scrub: bool,
+    /// Review A F4: a scrub released while playing resumes from `.1` once
+    /// the release target is bound under a stamp no older than `.0`.
+    pub(crate) pending_resume: Option<(kinewright_core::FrameStamp, TimeCode)>,
+    /// The Program viewer's reserved STALE caption slot for this pass, set
+    /// by `finalize_preview` from the finalized binding.
+    pub(crate) stale_caption: Option<(egui::Painter, egui::layers::ShapeIdx, egui::Rect)>,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) material_tab: MaterialTab,
     pub(crate) show_material_strip: bool,
@@ -652,6 +664,7 @@ impl KinewrightApp {
             refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
+            ui_replies: std::sync::mpsc::channel(),
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
@@ -673,6 +686,8 @@ impl KinewrightApp {
                 &document,
             ),
             resume_after_scrub: false,
+            pending_resume: None,
+            stale_caption: None,
             transcript_scope: TranscriptScope::default(),
             material_tab: match std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref() {
                 Ok("transcript") => MaterialTab::Transcript,
@@ -886,6 +901,7 @@ impl KinewrightApp {
         self.playback.pause();
         self.playing = false;
         self.resume_after_scrub = false;
+        self.pending_resume = None;
         self.meter_levels = [0.0; 2];
         self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
         self.mixer_selection = None;
@@ -2462,6 +2478,9 @@ impl KinewrightApp {
     // Polling coordinates six independent channels and preserves their visible event ordering.
     #[allow(clippy::too_many_lines)]
     fn poll_background(&mut self, ctx: &egui::Context) {
+        while let Ok(reply) = self.ui_replies.1.try_recv() {
+            reply(self, ctx);
+        }
         self.poll_agent(ctx);
         self.poll_export(ctx);
         let session = self.focused();
@@ -2772,6 +2791,7 @@ impl KinewrightApp {
                 MediaEvent::StampedError(stamp, _) if !stamp.is_current(self.playback.stamp()) => {}
                 MediaEvent::Error(error) | MediaEvent::StampedError(_, error) => {
                     self.playing = false;
+                    self.pending_resume = None;
                     let revision = self.focused().revision;
                     // `IN1b` §5.1 rule 12: the constructor is total after
                     // Part B, so both arms fold into one and IN1 §5.2 rule 6's
@@ -2807,28 +2827,48 @@ impl KinewrightApp {
         }
     }
 
+    /// Review B (UI blocking): run `work` (an agent-lane request, which may
+    /// wait behind a render) off the UI thread; `apply` runs on the UI
+    /// thread with its result at the next pass.
+    pub(crate) fn off_ui<T: Send + 'static>(
+        &self,
+        ctx: &egui::Context,
+        work: impl FnOnce() -> T + Send + 'static,
+        apply: impl FnOnce(&mut Self, &egui::Context, T) + Send + 'static,
+    ) {
+        let (replies, ctx) = (self.ui_replies.0.clone(), ctx.clone());
+        thread::Builder::new()
+            .name("kinewright-ui-request".to_owned())
+            .spawn(move || {
+                let value = work();
+                let reply: UiReply = Box::new(move |app, ctx| apply(app, ctx, value));
+                let _ = replies.send(reply);
+                ctx.request_repaint();
+            })
+            .expect("failed to spawn a UI request worker");
+    }
+
     /// The preview texture is gone: nothing describes or marks it (R-2).
     pub(crate) fn clear_preview(&mut self) {
         self.texture = None;
         self.presenter.clear();
+        self.pending_resume = None;
     }
 
     /// PF1 R-2: the last step of `ui`, after every transport call in the
     /// pass, binds the newest valid candidate and writes the display cell.
     fn finalize_preview(&mut self, ctx: &egui::Context) {
-        let latest = self.playback.stamp();
-        let playing = self.playing.then(|| self.playback.position());
-        if let Some(PreviewFrame {
-            at, texture: frame, ..
-        }) = self.presenter.finalize(latest, playing)
-        {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [
-                    usize::try_from(frame.width).unwrap_or_default(),
-                    usize::try_from(frame.height).unwrap_or_default(),
-                ],
-                frame.rgba.as_slice(),
-            );
+        let (playback, playing) = (Arc::clone(&self.playback), self.playing);
+        // Review A F2: the CPU image is prepared before the final stamp and
+        // clock check; the cell and the texture then bind together.
+        let now = || (playback.stamp(), playing.then(|| playback.position()));
+        let prepare = |frame: &PreviewFrame| {
+            let texture = &frame.texture;
+            let size = [texture.width, texture.height]
+                .map(|side| usize::try_from(side).unwrap_or_default());
+            egui::ColorImage::from_rgba_unmultiplied(size, texture.rgba.as_slice())
+        };
+        if let Some((PreviewFrame { at, .. }, image)) = self.presenter.finalize(now, prepare) {
             if let Some(texture) = &mut self.texture {
                 texture.set(image, egui::TextureOptions::LINEAR);
             } else {
@@ -2841,6 +2881,14 @@ impl KinewrightApp {
             if !self.resume_after_scrub && !self.playing {
                 self.focused_mut().position = at;
             }
+        }
+        if let Some((painter, slot, image_rect)) = self.stale_caption.take()
+            && self.presenter.stale()
+        {
+            painter.set(slot, crate::preview_ui::stale_caption(&painter, image_rect));
+        }
+        if self.pending_resume.is_some() {
+            ctx.request_repaint();
         }
     }
 
@@ -2997,8 +3045,8 @@ impl eframe::App for KinewrightApp {
     /// per bound image.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-        if let Some((stamp, at)) = self.presenter.take_ack(epoch) {
-            self.playback.ack_presented(stamp, at, std::time::Instant::now());
+        if let Some((stamp, at, painted)) = self.presenter.take_ack(epoch) {
+            self.playback.ack_presented(stamp, at, painted);
         }
     }
 
@@ -3007,6 +3055,7 @@ impl eframe::App for KinewrightApp {
         self.update_window_title(ui.ctx());
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
+        self.resume_released_scrub();
         self.keyboard_shortcuts(ui.ctx());
         self.import_dropped_files(ui.ctx());
         let outcome = self.projects.first_mut().map(|project| {
@@ -5632,6 +5681,7 @@ pub(crate) mod in1_tests {
             refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
+            ui_replies: std::sync::mpsc::channel(),
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
@@ -5650,6 +5700,8 @@ pub(crate) mod in1_tests {
             mixer_levels: crate::mixer_ui::MixerMeterLevels::default(),
             mixer_selection: None,
             resume_after_scrub: false,
+            pending_resume: None,
+            stale_caption: None,
             transcript_scope: TranscriptScope::default(),
             material_tab: MaterialTab::default(),
             show_material_strip: false,
@@ -5691,6 +5743,148 @@ pub(crate) mod in1_tests {
             performance: None,
         };
         (app, engine)
+    }
+
+    /// A transport double that records calls and stamps them as the engine
+    /// does (a seek or play starts an epoch).
+    #[derive(Default)]
+    struct RecordingPlayback {
+        calls: std::sync::Mutex<Vec<(&'static str, i64)>>,
+        stamp: std::sync::Mutex<kinewright_core::FrameStamp>,
+    }
+
+    impl RecordingPlayback {
+        fn record(&self, call: &'static str, at: i64, new_epoch: bool) {
+            let mut stamp = self.stamp.lock().unwrap();
+            (stamp.epoch, stamp.seq) = (stamp.epoch + u64::from(new_epoch), stamp.seq + 1);
+            self.calls.lock().unwrap().push((call, at));
+        }
+
+        fn calls(&self) -> Vec<(&'static str, i64)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Playback for RecordingPlayback {
+        fn set_document(&self, _doc: Arc<Document>) {}
+        fn request_frame(&self, at: TimeCode) {
+            self.record("request_frame", at.0, false);
+        }
+        fn frames(&self) -> crossbeam_channel::Receiver<PreviewFrame> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn events(&self) -> crossbeam_channel::Receiver<MediaEvent> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn play(&self, from: TimeCode) {
+            self.record("play", from.0, true);
+        }
+        fn pause(&self) {
+            self.record("pause", 0, true);
+        }
+        fn seek(&self, to: TimeCode) {
+            self.record("seek", to.0, true);
+        }
+        fn position(&self) -> TimeCode {
+            TimeCode::ZERO
+        }
+        fn output_peaks(&self) -> [f32; 2] {
+            [0.0; 2]
+        }
+        fn stamp(&self) -> kinewright_core::FrameStamp {
+            *self.stamp.lock().unwrap()
+        }
+    }
+
+    fn preview_frame(stamp: kinewright_core::FrameStamp, at: i64) -> PreviewFrame {
+        let texture = kinewright_core::FrameTexture {
+            width: 1,
+            height: 1,
+            rgba: Arc::new(vec![0; 4]),
+        };
+        PreviewFrame {
+            at: TimeCode(at),
+            stamp,
+            texture,
+        }
+    }
+
+    /// Review A F4: a scrub released at the last frame while playing shows
+    /// the release target before playback resumes. The old release issued
+    /// `seek` then `play` at once, so the seek's image was never current and
+    /// playback, starting one frame ahead, rendered nothing at the end.
+    /// Another transport call while waiting cancels the resume.
+    #[test]
+    fn a_released_scrub_resumes_only_once_its_target_is_shown() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let recorder = Arc::new(RecordingPlayback::default());
+        app.playback = recorder.clone();
+        let ctx = egui::Context::default();
+        let last = 29;
+        let before = recorder.stamp();
+        app.resume_after_scrub = true; // the drag paused playback
+        app.release_scrub(TimeCode(last));
+        let since = recorder.stamp();
+        assert_eq!(recorder.calls(), [("seek", last)]);
+        for early in [preview_frame(before, last), preview_frame(since, last - 1)] {
+            app.presenter.collect(early);
+            app.finalize_preview(&ctx);
+            app.resume_released_scrub();
+            assert_eq!(recorder.calls(), [("seek", last)], "not before the target");
+        }
+        app.presenter.collect(preview_frame(since, last));
+        app.finalize_preview(&ctx);
+        assert!(app.presenter.shows(since, TimeCode(last), since), "bound");
+        app.resume_released_scrub();
+        assert_eq!(recorder.calls(), [("seek", last), ("play", last)]);
+        app.resume_released_scrub();
+        assert_eq!(recorder.calls().len(), 2, "resumed once");
+
+        app.resume_after_scrub = true;
+        app.release_scrub(TimeCode(3));
+        app.seek_to(TimeCode(5));
+        let now = recorder.stamp();
+        app.presenter.collect(preview_frame(now, 3));
+        app.finalize_preview(&ctx);
+        app.resume_released_scrub();
+        assert!(
+            recorder
+                .calls()
+                .iter()
+                .all(|call| call.0 != "play" || call.1 == last)
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Review B (UI blocking): opening the cache dialog while a render holds
+    /// the agent lane returns at once (the old synchronous read waited for
+    /// the lane, here 2 s); the inventory arrives once the lane frees.
+    #[test]
+    fn the_cache_dialog_opens_while_the_agent_lane_is_busy() {
+        let (mut app, engine) = in1_harness(Document::default());
+        let ctx = egui::Context::default();
+        let hold = engine.hold_agent_lane();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            drop(hold);
+        });
+        let began = Instant::now();
+        app.open_media_cache_dialog(&ctx);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(app.media_cache_inventory.is_none(), "reading…");
+        let reply = app
+            .ui_replies
+            .1
+            .recv_timeout(IN1_APP_DEADLINE)
+            .expect("a reply");
+        reply(&mut app, &ctx);
+        assert!(app.media_cache_inventory.is_some());
+        release.join().unwrap();
+        in1_shutdown(&mut app);
     }
 
     /// Shut down every branch server the harness started, so no test leaves
@@ -10283,6 +10477,7 @@ mod in2b_tests {
             refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
+            ui_replies: std::sync::mpsc::channel(),
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
@@ -10301,6 +10496,8 @@ mod in2b_tests {
             mixer_levels: crate::mixer_ui::MixerMeterLevels::default(),
             mixer_selection: None,
             resume_after_scrub: false,
+            pending_resume: None,
+            stale_caption: None,
             transcript_scope: TranscriptScope::default(),
             material_tab: MaterialTab::default(),
             show_material_strip: false,

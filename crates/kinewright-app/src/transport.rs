@@ -19,6 +19,7 @@ impl KinewrightApp {
             );
             return;
         }
+        self.pending_resume = None;
         if self.playing {
             self.playback.pause();
         } else {
@@ -30,7 +31,31 @@ impl KinewrightApp {
         }
     }
 
+    /// A scrub released at `target` (review A F4): seek there; a scrub that
+    /// paused playback resumes only once the target's own image is bound
+    /// (`resume_released_scrub`), so the release target is shown even at
+    /// the last frame, where playback would otherwise render nothing.
+    pub(crate) fn release_scrub(&mut self, target: TimeCode) {
+        self.playback.seek(target);
+        self.qc_mask.set_scrubbing(false);
+        self.pending_resume = self
+            .resume_after_scrub
+            .then(|| (self.playback.stamp(), target));
+        self.resume_after_scrub = false;
+    }
+
+    /// The pass after the release target bound: resume from it.
+    pub(crate) fn resume_released_scrub(&mut self) {
+        if let Some((since, target)) = self.pending_resume
+            && self.presenter.shows(since, target, self.playback.stamp())
+        {
+            self.pending_resume = None;
+            self.playback.play(target);
+        }
+    }
+
     pub(crate) fn seek_to(&mut self, position: TimeCode) {
+        self.pending_resume = None;
         let maximum = self.focused().document.duration.0.saturating_sub(1).max(0);
         let position = TimeCode(position.0.clamp(0, maximum));
         self.focused_mut().position = position;
@@ -75,7 +100,7 @@ impl KinewrightApp {
                         .text("Position"),
                 );
                 if response.drag_started() {
-                    self.resume_after_scrub = self.playing;
+                    self.resume_after_scrub = self.playing || self.pending_resume.take().is_some();
                     self.qc_mask.set_scrubbing(true);
                     if self.playing {
                         self.playback.pause();
@@ -88,12 +113,7 @@ impl KinewrightApp {
                 }
                 if response.drag_stopped() || (response.changed() && !response.dragged()) {
                     let position = self.focused().position;
-                    self.playback.seek(position);
-                    self.qc_mask.set_scrubbing(false);
-                    if self.resume_after_scrub {
-                        self.playback.play(position);
-                    }
-                    self.resume_after_scrub = false;
+                    self.release_scrub(position);
                 }
                 ui.add_space(space::TWO);
                 let position = self.focused().position;

@@ -1010,17 +1010,12 @@ impl KinewrightApp {
             let epoch = ui.ctx().cumulative_frame_nr_for(egui::ViewportId::ROOT);
             let playback = Arc::clone(&self.playback);
             let marker = (self.presenter).marker(epoch, Box::new(move || playback.stamp()));
-            ui.painter_at(frame.response.rect)
-                .add(marker.shape(image_rect));
-            if self.presenter.stale() {
-                theme::paint_caps(
-                    &ui.painter_at(image_rect),
-                    image_rect.left_bottom() + egui::vec2(space::TWO, -space::TWO),
-                    egui::Align2::LEFT_BOTTOM,
-                    "STALE",
-                    color::STATUS_WARNING,
-                );
-            }
+            marker.add_to(&ui.painter_at(frame.response.rect), image_rect);
+            // Nit: the caption is decided by `finalize_preview`, after every
+            // transport call of the pass; it describes the finalized binding.
+            let caption = ui.painter_at(image_rect);
+            let slot = caption.add(egui::Shape::Noop);
+            self.stale_caption = Some((caption, slot, image_rect));
         }
         if let (Some(target), Some(image_rect)) = (&transform_target, frame.image_rect) {
             self.handle_transform_drag(ui, &frame.response, image_rect, target);
@@ -3310,4 +3305,12 @@ pub(crate) mod mo2_tests {
             in1_shutdown(&mut app);
         }
     }
+}
+
+/// The STALE caption over the Program image (bottom left).
+pub(crate) fn stale_caption(painter: &egui::Painter, image_rect: egui::Rect) -> egui::Shape {
+    let galley = painter.layout_job(theme::caps_label("STALE", color::STATUS_WARNING));
+    let pos = image_rect.left_bottom() + egui::vec2(space::TWO, -space::TWO);
+    let rect = egui::Align2::LEFT_BOTTOM.anchor_size(pos, galley.size());
+    egui::Shape::galley(rect.min, galley, color::STATUS_WARNING)
 }

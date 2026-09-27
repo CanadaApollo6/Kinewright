@@ -1169,7 +1169,34 @@ impl KinewrightApp {
                 .0
                 .clamp(0, document.duration.0.saturating_sub(1)),
         );
-        match self.analysis.thumbnail_for_document(document, at, 1_280) {
+        // Review B (UI blocking): the frame proof renders off the UI thread;
+        // its reply applies to the same project's thread, if still open.
+        let (analysis, project_id) = (Arc::clone(&self.analysis), self.projects[project_index].id);
+        self.off_ui(
+            ctx,
+            move || analysis.thumbnail_for_document(document, at, 1_280),
+            move |app, ctx, result| {
+                let project = app
+                    .projects
+                    .iter()
+                    .position(|project| project.id == project_id);
+                if let Some(project_index) = project
+                    && thread_index < app.projects[project_index].threads.len()
+                {
+                    app.show_branch_frame(ctx, (project_index, thread_index), at, result);
+                }
+            },
+        );
+    }
+
+    fn show_branch_frame(
+        &mut self,
+        ctx: &egui::Context,
+        (project_index, thread_index): (usize, usize),
+        at: TimeCode,
+        result: Result<kinewright_core::RgbaImage, kinewright_core::MediaError>,
+    ) {
+        match result {
             Ok(frame) => {
                 let image = egui::ColorImage::from_rgba_unmultiplied(
                     [frame.width as usize, frame.height as usize],

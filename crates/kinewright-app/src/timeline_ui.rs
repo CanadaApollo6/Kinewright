@@ -2501,7 +2501,7 @@ impl KinewrightApp {
         }
         self.submit_inspector_edits(envelope_edits);
         if scrub_started {
-            self.resume_after_scrub = self.playing;
+            self.resume_after_scrub = self.playing || self.pending_resume.take().is_some();
             self.qc_mask.set_scrubbing(true);
             if self.playing {
                 self.playback.pause();
@@ -2511,16 +2511,9 @@ impl KinewrightApp {
             let maximum = self.focused().document.duration.0.saturating_sub(1).max(0);
             playhead_position = TimeCode(position.0.clamp(0, maximum));
             self.playback.request_frame(playhead_position);
-            if scrub_stopped {
-                self.playback.seek(playhead_position);
-            }
         }
         if scrub_stopped {
-            self.qc_mask.set_scrubbing(false);
-            if self.resume_after_scrub {
-                self.playback.play(playhead_position);
-            }
-            self.resume_after_scrub = false;
+            self.release_scrub(playhead_position);
         }
         let session = &mut self.projects[project_index];
         let previous_selected_asset = session.selected_asset;
