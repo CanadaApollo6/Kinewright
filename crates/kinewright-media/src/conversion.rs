@@ -160,13 +160,29 @@ pub(crate) fn live_table_bytes() -> usize {
 }
 
 type Cell<T> = Arc<OnceLock<Arc<T>>>;
-/// The cells by key, and the keys from least to most recently requested.
-type Cells<T> = (HashMap<ConversionKey, Cell<T>>, VecDeque<ConversionKey>);
 
-/// X-5: one table per key, built outside the lock. LRU drops registry
+/// A build in flight: its cell and how many requests wait on it.
+struct Building<T> {
+    cell: Cell<T>,
+    requests: usize,
+}
+
+/// The ready tables (bounded LRU) and the builds in flight (not bounded:
+/// one per key being built, gone when its last request returns).
+struct State<T> {
+    ready: HashMap<ConversionKey, Arc<T>>,
+    /// Ready keys, least to most recently requested.
+    recency: VecDeque<ConversionKey>,
+    building: HashMap<ConversionKey, Building<T>>,
+}
+
+/// X-5: one table per key, built outside the lock. A key being built keeps
+/// its identity in `building`, outside the LRU, so every request for it
+/// waits on the one build; on completion the table joins the ready LRU,
+/// trimmed to `keys` (review A F3, re-review D2). LRU drops registry
 /// membership only, so a decoder holding an evicted key keeps its `Arc`.
 struct Registry<T> {
-    state: Mutex<Cells<T>>,
+    state: Mutex<State<T>>,
     keys: usize,
 }
 
@@ -176,34 +192,96 @@ impl<T> Registry<T> {
     }
 
     fn with_keys(keys: usize) -> Self {
+        let state = State {
+            ready: HashMap::new(),
+            recency: VecDeque::new(),
+            building: HashMap::new(),
+        };
         Self {
-            state: Mutex::new((HashMap::new(), VecDeque::new())),
+            state: Mutex::new(state),
             keys,
         }
     }
 
+    fn lock(&self) -> std::sync::MutexGuard<'_, State<T>> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn get(&self, key: &ConversionKey, build: impl FnOnce() -> T) -> Arc<T> {
         let cell = {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            let (cells, recency) = &mut *state;
-            recency.retain(|held| held != key);
-            recency.push_back(key.clone());
-            let cell = Arc::clone(cells.entry(key.clone()).or_default());
-            // Only ready tables leave: a build in progress keeps its cell, so
-            // a concurrent request for its key waits on it (one build per key).
-            while recency.len() > self.keys {
-                let ready =
-                    |held: &ConversionKey| cells.get(held).is_none_or(|c| c.get().is_some());
-                let Some(oldest) = recency.iter().position(ready) else {
-                    break;
-                };
-                if let Some(oldest) = recency.remove(oldest) {
-                    cells.remove(&oldest);
-                }
+            let mut state = self.lock();
+            if let Some(table) = state.ready.get(key).map(Arc::clone) {
+                state.recency.retain(|held| held != key);
+                state.recency.push_back(key.clone());
+                return table;
             }
-            cell
+            let building = state
+                .building
+                .entry(key.clone())
+                .or_insert_with(|| Building {
+                    cell: Arc::default(),
+                    requests: 0,
+                });
+            building.requests += 1;
+            Arc::clone(&building.cell)
+        };
+        // Leaves the build on every exit, an unwinding build included.
+        let _leave = Leave {
+            registry: self,
+            key,
+            cell: &cell,
         };
         Arc::clone(cell.get_or_init(|| Arc::new(build())))
+    }
+
+    /// One request leaves the build of `key`: a finished table joins the
+    /// ready LRU (trimmed to `keys`); a build abandoned by its last request
+    /// (its builder unwound) is forgotten, so a retry builds afresh.
+    fn leave(&self, key: &ConversionKey, cell: &Cell<T>) {
+        let mut state = self.lock();
+        let Some(building) = state.building.get_mut(key) else {
+            return;
+        };
+        if !Arc::ptr_eq(&building.cell, cell) {
+            return;
+        }
+        building.requests -= 1;
+        let table = cell.get().map(Arc::clone);
+        if table.is_none() && building.requests > 0 {
+            return;
+        }
+        state.building.remove(key);
+        let Some(table) = table else {
+            return;
+        };
+        state.ready.insert(key.clone(), table);
+        state.recency.retain(|held| held != key);
+        state.recency.push_back(key.clone());
+        while state.ready.len() > self.keys {
+            let Some(oldest) = state.recency.pop_front() else {
+                break;
+            };
+            state.ready.remove(&oldest);
+        }
+    }
+
+    /// Keys the registry holds, ready or in flight.
+    #[cfg(test)]
+    fn held(&self) -> usize {
+        let state = self.lock();
+        state.ready.len() + state.building.len()
+    }
+}
+
+struct Leave<'a, T> {
+    registry: &'a Registry<T>,
+    key: &'a ConversionKey,
+    cell: &'a Cell<T>,
+}
+
+impl<T> Drop for Leave<'_, T> {
+    fn drop(&mut self) {
+        self.registry.leave(self.key, self.cell);
     }
 }
 
@@ -370,6 +448,59 @@ mod tests {
         let (first, second) = (first.join().unwrap(), second.join().unwrap());
         assert!(Arc::ptr_eq(&first, &second));
         assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    /// A value that counts itself live while any owner holds it.
+    struct Tracked(Arc<AtomicUsize>);
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    /// PF1 X-5 (re-review D2): nine distinct builds all in flight at once
+    /// finish into the eight-key registry, which then retains eight.
+    #[test]
+    fn concurrent_builds_finish_within_the_key_bound() {
+        let registry = Arc::new(Registry::<Tracked>::with_keys(8));
+        let live = Arc::new(AtomicUsize::new(0));
+        let all_building = Arc::new(std::sync::Barrier::new(9));
+        let builders = (1..=9_u16).map(|bits| {
+            let (registry, live) = (Arc::clone(&registry), Arc::clone(&live));
+            let all_building = Arc::clone(&all_building);
+            std::thread::spawn(move || {
+                let table = registry.get(&key(bits, ColorTransfer::Bt709), || {
+                    live.fetch_add(1, Ordering::SeqCst);
+                    all_building.wait();
+                    Tracked(Arc::clone(&live))
+                });
+                drop(table);
+            })
+        });
+        for builder in builders.collect::<Vec<_>>() {
+            builder.join().expect("a build");
+        }
+        assert_eq!(registry.held(), 8);
+        assert_eq!(live.load(Ordering::SeqCst), 8, "the ninth is released");
+        drop(registry);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    /// PF1 X-5 (re-review D2): a build that panics leaves no cell behind,
+    /// and a retry of its key builds and is registered.
+    #[test]
+    fn a_panicking_build_is_forgotten_and_a_retry_builds() {
+        let registry = Registry::<usize>::with_keys(8);
+        let failing = key(8, ColorTransfer::Bt709);
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            registry.get(&failing, || panic!("the build fails"))
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(registry.held(), 0, "no abandoned cell");
+        assert_eq!(*registry.get(&failing, || 7), 7);
+        assert_eq!(registry.held(), 1);
+        assert_eq!(*registry.get(&failing, || 8), 7, "ready, not rebuilt");
     }
 
     /// PF1 G-1 (I1): every f16 pattern, NaN, ±Inf, denormals and ±0 included.
