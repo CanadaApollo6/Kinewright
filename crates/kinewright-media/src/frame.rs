@@ -73,11 +73,10 @@ impl WorkingFrame {
             } else {
                 [red, green, blue]
             };
-            let decoded = coded_rgb
-                .map(|value| decode_transfer(&description.transfer, value))
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| {
+            // Channels decode in R, G, B order and the first failure is the
+            // error, exactly as the former per-pixel `collect` reported it.
+            for value in coded_rgb {
+                let decoded = decode_transfer(&description.transfer, value).map_err(|error| {
                     MediaError::Backend(format!(
                         "managed source colour decode failed (transfer={:?}, matrix={:?}, range={:?}, white_point={:?}, assumption={assumption:?}): {error}",
                         description.transfer,
@@ -86,7 +85,8 @@ impl WorkingFrame {
                         description.white_point,
                     ))
                 })?;
-            pixels.extend(decoded.into_iter().map(f16::from_f32));
+                pixels.push(f16::from_f32(decoded));
+            }
             pixels.push(f16::from_f32(alpha));
         }
         Ok(Self {
@@ -464,6 +464,83 @@ mod tests {
         assert_close(rgb10.pixels[4].to_f32(), 1.0, 1.0e-3);
         assert_close(rgb10.pixels[3].to_f32(), 1.0, 0.0);
         assert_close(rgb10.pixels[7].to_f32(), 1.0, 0.0);
+    }
+
+    /// The pre-S1a per-pixel path, kept verbatim as the bit-identity witness.
+    fn collect_reference(bytes: &[u8], description: &ColorDescription) -> Result<Vec<u16>, String> {
+        #[allow(clippy::cast_precision_loss)]
+        let rgb_max = rgba64_normalization_max(description).map_err(|e| e.to_string())? as f32;
+        let mut pixels = Vec::new();
+        for rgba in bytes.as_chunks::<8>().0 {
+            let channel = |index: usize| {
+                f32::from(u16::from_le_bytes([rgba[index], rgba[index + 1]])) / rgb_max
+            };
+            let rgb = [channel(0), channel(2), channel(4)];
+            let coded = if matches!(description.matrix, ColorMatrix::Rgb | ColorMatrix::Identity)
+                && matches!(description.range, ColorRange::Limited)
+            {
+                expand_native_range(rgb, &description.bit_depth, &description.range)
+                    .map_err(|e| e.to_string())?
+            } else {
+                rgb
+            };
+            let decoded = coded
+                .map(|value| decode_transfer(&description.transfer, value))
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            pixels.extend(decoded.into_iter().map(|v| f16::from_f32(v).to_bits()));
+            let alpha = f32::from(u16::from_le_bytes([rgba[6], rgba[7]])) / 65_535.0;
+            pixels.push(f16::from_f32(alpha).to_bits());
+        }
+        Ok(pixels)
+    }
+
+    #[test]
+    fn rgba64_decode_matches_the_collect_reference_bit_for_bit() {
+        let rgb = (0..=u16::MAX)
+            .map(|code| [code, code ^ 0x5A5A, u16::MAX - code])
+            .collect::<Vec<_>>();
+        let alpha = (0..=u16::MAX).collect::<Vec<_>>();
+        let bytes = rgba64_bytes(&rgb, &alpha);
+        let mut descriptions = Vec::new();
+        for depth in [
+            ColorBitDepth::Eight,
+            ColorBitDepth::Ten,
+            ColorBitDepth::Sixteen,
+        ] {
+            for range in [ColorRange::Limited, ColorRange::Full] {
+                descriptions.push(rec709(depth.clone(), range.clone()));
+                descriptions.push(rec709_rgb(depth.clone(), range));
+            }
+            descriptions.push(srgb(depth));
+        }
+        for description in &descriptions {
+            let frame = WorkingFrame::from_rgba64_le(256, 256, &bytes, description, None)
+                .expect("accepted description decodes");
+            let actual = frame.pixels.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            assert_eq!(
+                Ok(actual),
+                collect_reference(&bytes, description),
+                "{description:?}"
+            );
+        }
+        for transfer in [
+            ColorTransfer::Unknown,
+            ColorTransfer::Other("pq".to_owned()),
+        ] {
+            let mut description = rec709(ColorBitDepth::Eight, ColorRange::Full);
+            description.transfer = transfer;
+            let error = WorkingFrame::from_rgba64_le(256, 256, &bytes, &description, None)
+                .expect_err("unsupported transfer is rejected")
+                .to_string();
+            let reference = collect_reference(&bytes, &description).expect_err("reference");
+            assert!(
+                error.contains("managed source colour decode failed"),
+                "{error}"
+            );
+            assert!(error.ends_with(&reference), "{error} / {reference}");
+        }
     }
 
     #[test]
