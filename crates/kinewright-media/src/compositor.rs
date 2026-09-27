@@ -14,9 +14,9 @@ use std::{
 use half::f16;
 use kinewright_core::{
     BlendMode, COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorContext, ColorCurveChannel,
-    ColorDescription, ColorNodeKind, ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect,
-    EffectId, EffectParameterDescriptor, EffectUniform, FrameTexture, LinearRgbaImage,
-    LutNodeParams, MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError,
+    ColorDescription, ColorNodeKind, ColorTransfer, ColorWheelChannel, ColorWheelsParams,
+    CurvePoints, Effect, EffectId, EffectParameterDescriptor, EffectUniform, FrameTexture,
+    LinearRgbaImage, LutNodeParams, MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError,
     MonitorProofMetadata, MonitorProofRenderKind, ParamValue, ResolvedCurves, TransitionAxis,
     classify_color_node, color_node_inactive_reason, effect_descriptor, managed_color_node_count,
 };
@@ -25,6 +25,7 @@ use crate::{
     color_pipeline::{
         PrimaryCorrection, encode_delivery_for_description, encode_monitor_rgba8_for_description,
     },
+    conversion::monitor_rgba8,
     frame::WorkingFrame,
     lut::{CubeLut, parse_cube_lut},
     lut_store::LutLibrary,
@@ -2249,9 +2250,25 @@ impl Compositor {
         width: u32,
         height: u32,
         output: &wgpu::Texture,
-        mut encoder: wgpu::CommandEncoder,
+        encoder: wgpu::CommandEncoder,
         frame: &mut FrameResources,
         mut visit: impl FnMut([f32; 4]) -> Result<(), MediaError>,
+    ) -> Result<(), MediaError> {
+        self.for_each_pixel_bits(width, height, output, encoder, frame, |bits| {
+            visit(bits.map(|channel| f16::from_bits(channel).to_f32()))
+        })
+    }
+
+    /// The readback behind [`Self::for_each_linear_pixel`], visiting each
+    /// pixel's raw f16 bits (PF1 G-1 indexes its monitor table by them).
+    fn for_each_pixel_bits(
+        &self,
+        width: u32,
+        height: u32,
+        output: &wgpu::Texture,
+        mut encoder: wgpu::CommandEncoder,
+        frame: &mut FrameResources,
+        mut visit: impl FnMut([u16; 4]) -> Result<(), MediaError>,
     ) -> Result<(), MediaError> {
         let row_bytes = width.saturating_mul(8);
         let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
@@ -2342,13 +2359,13 @@ impl Compositor {
             let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
             let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
             for pixel in mapped[start..end].as_chunks::<8>().0 {
-                let linear = [
-                    f16::from_le_bytes([pixel[0], pixel[1]]).to_f32(),
-                    f16::from_le_bytes([pixel[2], pixel[3]]).to_f32(),
-                    f16::from_le_bytes([pixel[4], pixel[5]]).to_f32(),
-                    f16::from_le_bytes([pixel[6], pixel[7]]).to_f32(),
+                let bits = [
+                    u16::from_le_bytes([pixel[0], pixel[1]]),
+                    u16::from_le_bytes([pixel[2], pixel[3]]),
+                    u16::from_le_bytes([pixel[4], pixel[5]]),
+                    u16::from_le_bytes([pixel[6], pixel[7]]),
                 ];
-                if let Err(error) = visit(linear) {
+                if let Err(error) = visit(bits) {
                     outcome = Err(error);
                     break 'rows;
                 }
@@ -2365,10 +2382,11 @@ impl Compositor {
     /// The BT.709 OETF is applied in f32 and RGB is clamped and quantized
     /// exactly once, here, at the display boundary.
     ///
-    /// Deliberately no `powf` lookup table: a 4096-entry LUT was rejected
-    /// because interpolation error near black, where the OETF slope is 4.5,
-    /// does not provably stay inside the CC1 6.2 monitor gate (max <= 2,
-    /// P99 <= 1, mean <= 0.5) against the CPU reference. The exact math stays.
+    /// A 4096-entry *interpolated* LUT was rejected because interpolation
+    /// error near black, where the OETF slope is 4.5, does not provably stay
+    /// inside the CC1 6.2 monitor gate. PF1 G-1's BT.709 table is different:
+    /// one entry per f16 bit pattern, each computed by that exact f32 math, no
+    /// interpolation, and exhaustively equal to `encode_monitor_rgba8`.
     fn readback_for(
         &self,
         width: u32,
@@ -2384,6 +2402,17 @@ impl Compositor {
                 .saturating_mul(usize::try_from(height).unwrap_or_default())
                 .saturating_mul(4),
         );
+        if monitoring.transfer == ColorTransfer::Bt709 {
+            self.for_each_pixel_bits(width, height, output, encoder, frame, |bits| {
+                rgba.extend_from_slice(&monitor_rgba8(bits));
+                Ok(())
+            })?;
+            return Ok(FrameTexture {
+                width,
+                height,
+                rgba: Arc::new(rgba),
+            });
+        }
         self.for_each_linear_pixel(width, height, output, encoder, frame, |linear| {
             let monitor_code =
                 encode_monitor_rgba8_for_description(linear, monitoring).map_err(|error| {

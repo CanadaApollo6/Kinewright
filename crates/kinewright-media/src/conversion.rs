@@ -19,7 +19,8 @@ use kinewright_core::{
 };
 
 use crate::color_pipeline::{
-    ColorPipelineError, decode_transfer, expand_native_range, rgba64_normalization_max,
+    ColorPipelineError, decode_transfer, encode_monitor_rgba8, expand_native_range,
+    rgba64_normalization_max,
 };
 
 const CODES: usize = 1 << 16;
@@ -119,6 +120,24 @@ impl Drop for TransferTable {
             LIVE_TABLE_BYTES.fetch_sub(entries.len() * 2, Ordering::Relaxed);
         }
     }
+}
+
+/// PF1 G-1: BT.709 monitor codes per f16 bit pattern, RGB then alpha, each
+/// entry computed by `encode_monitor_rgba8`'s own f32 math.
+static MONITOR: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
+    (0..=u16::MAX)
+        .map(|bits| {
+            let [rgb, _, _, alpha] = encode_monitor_rgba8([f16::from_bits(bits).to_f32(); 4]);
+            (rgb, alpha)
+        })
+        .unzip()
+});
+
+/// Exactly `encode_monitor_rgba8` of the f16 working pixel `bits`.
+pub(crate) fn monitor_rgba8(bits: [u16; 4]) -> [u8; 4] {
+    let (rgb, alpha) = &*MONITOR;
+    let [r, g, b, a] = bits.map(usize::from);
+    [rgb[r], rgb[g], rgb[b], alpha[a]]
 }
 
 /// The static alpha table: code / 65,535.
@@ -249,5 +268,22 @@ mod tests {
             let expected = f16::from_f32(f32::from(code) / 65_535.0);
             assert_eq!(value.to_bits(), expected.to_bits());
         }
+    }
+
+    /// PF1 G-1 (I1): every f16 pattern, NaN, ±Inf, denormals and ±0 included.
+    #[test]
+    fn monitor_table_equals_the_f32_encode_for_every_f16_pattern() {
+        for bits in 0..=u16::MAX {
+            let linear = f16::from_bits(bits).to_f32();
+            let rotated = [bits, bits.rotate_left(5), !bits, bits ^ 0x3C00];
+            let expected = encode_monitor_rgba8(rotated.map(|b| f16::from_bits(b).to_f32()));
+            assert_eq!(monitor_rgba8(rotated), expected, "{bits:#06x}");
+            // NaN, and a zero exponent field: ±0 and every denormal.
+            if linear.is_nan() || bits & 0x7C00 == 0 {
+                assert_eq!(monitor_rgba8([bits; 4]), [0; 4], "{bits:#06x}");
+            }
+        }
+        assert_eq!(monitor_rgba8([f16::INFINITY.to_bits(); 4]), [255; 4]);
+        assert_eq!(monitor_rgba8([f16::NEG_INFINITY.to_bits(); 4]), [0; 4]);
     }
 }
