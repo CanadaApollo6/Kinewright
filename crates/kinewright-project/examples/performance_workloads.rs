@@ -339,7 +339,7 @@ fn seek_positions(duration_frames: i64, count: usize) -> Vec<TimeCode> {
 /// Request one frame and wait for its exact receipt, validating the evidence.
 fn timed_seek(
     engine: &FfmpegMediaEngine,
-    frames: &crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    frames: &crossbeam_channel::Receiver<kinewright_core::PreviewFrame>,
     at: TimeCode,
 ) -> Result<(Duration, (u32, u32)), Box<dyn Error>> {
     let started = Instant::now();
@@ -350,7 +350,11 @@ fn timed_seek(
         if remaining.is_zero() {
             return Err(format!("frame {} was not received within {FRAME_TIMEOUT:?}", at.0).into());
         }
-        let (received_at, frame) = frames.recv_timeout(remaining)?;
+        let kinewright_core::PreviewFrame {
+            at: received_at,
+            texture: frame,
+            ..
+        } = frames.recv_timeout(remaining)?;
         if received_at != at {
             continue;
         }

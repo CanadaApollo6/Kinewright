@@ -15,18 +15,18 @@ use kinewright_core::{
     Analysis, AnalysisKind, AssetId, AssetTranscript, AudioLoudness, AudioQcReport, AudioQcRequest,
     AudioRepairReport, AudioRepairRequest, BeatStatus, ClipContent, ClipId,
     DeliveryAudioVerification, DeliveryVerification, DeliveryVerificationRequest, Document,
-    EffectId, Export, ExportCancellation, ExportReport, ExportSettings, FrameTexture,
+    EffectId, Export, ExportCancellation, ExportReport, ExportSettings, FrameStamp,
     LiveAudioChange, LoudnessSnapshot, LoudnessTarget, LutAvailabilityKind, LutAvailabilityStatus,
     MATTE_COVERAGE_ENCODING, MATTE_COVERAGE_SCALE, MatteParams, MatteProof, MatteProofError,
     MatteProofMetadata, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
     MediaError, MediaEvent, MediaKind, MixLevelReport, MixLevelRequest, MixNoiseProfileRequest,
     MixPeaks, MixSpectrumReport, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
-    MonitorProof, NoiseProfileReport, Playback, PlaybackState, ProgressSink, Rational, RgbaImage,
-    SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange, TimelineSilenceSpan,
-    TimelineTranscriptWord, TranscriptStatus, VisualAssetResult, WORKING_PROOF_ENCODING,
-    WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata, audio_qc_technical_pass,
-    delivery_audio_exceptions, export_lut_preflight_with,
+    MonitorProof, NoiseProfileReport, Playback, PlaybackState, PreviewFrame, ProgressSink,
+    Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
+    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
+    WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata,
+    audio_qc_technical_pass, delivery_audio_exceptions, export_lut_preflight_with,
 };
 
 use crate::{
@@ -324,7 +324,7 @@ enum Control {
 
 pub struct FfmpegMediaEngine {
     control_tx: Sender<Control>,
-    frames_rx: Receiver<(TimeCode, FrameTexture)>,
+    frames_rx: Receiver<PreviewFrame>,
     events_rx: Receiver<MediaEvent>,
     requested: Arc<RequestedPositions>,
     clock: Arc<SharedClock>,
@@ -755,7 +755,7 @@ impl Playback for FfmpegMediaEngine {
             .fetch_add(1, Ordering::Release);
     }
 
-    fn frames(&self) -> Receiver<(TimeCode, FrameTexture)> {
+    fn frames(&self) -> Receiver<PreviewFrame> {
         self.frames_rx.clone()
     }
 
@@ -1684,8 +1684,8 @@ impl WorkerLoudness {
 struct Worker {
     control_rx: Receiver<Control>,
     event_wakeup: Option<Box<dyn Fn() + Send + Sync>>,
-    frames_tx: Sender<(TimeCode, FrameTexture)>,
-    frames_drop_rx: Receiver<(TimeCode, FrameTexture)>,
+    frames_tx: Sender<PreviewFrame>,
+    frames_drop_rx: Receiver<PreviewFrame>,
     events_tx: Sender<MediaEvent>,
     events_drop_rx: Receiver<MediaEvent>,
     clock: Arc<SharedClock>,
@@ -1754,8 +1754,8 @@ impl Faults {
 
 struct WorkerChannels {
     control_rx: Receiver<Control>,
-    frames_tx: Sender<(TimeCode, FrameTexture)>,
-    frames_drop_rx: Receiver<(TimeCode, FrameTexture)>,
+    frames_tx: Sender<PreviewFrame>,
+    frames_drop_rx: Receiver<PreviewFrame>,
     events_tx: Sender<MediaEvent>,
     events_drop_rx: Receiver<MediaEvent>,
 }
@@ -2196,7 +2196,15 @@ impl Worker {
         if !self.faults.publish_after_render() {
             return;
         }
-        send_latest(&self.frames_tx, &self.frames_drop_rx, (project_at, frame));
+        send_latest(
+            &self.frames_tx,
+            &self.frames_drop_rx,
+            PreviewFrame {
+                at: project_at,
+                stamp: FrameStamp::default(),
+                texture: frame,
+            },
+        );
         self.wake_consumer();
     }
 
@@ -2358,7 +2366,7 @@ mod tests {
             ..Document::default()
         }));
         let (frame, event) = wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        assert_eq!(frame.unwrap().0, TimeCode::ZERO);
+        assert_eq!(frame.unwrap().at, TimeCode::ZERO);
         assert!(event.is_none());
 
         // No playback clock or UI polling is running. A seek must wake for
@@ -2368,7 +2376,7 @@ mod tests {
         assert!(frame.is_none());
         assert!(matches!(event, Some(MediaEvent::Position(TimeCode(10)))));
         let (frame, event) = wake_rx.recv_timeout(Duration::from_secs(10)).unwrap();
-        assert_eq!(frame.unwrap().0, TimeCode(10));
+        assert_eq!(frame.unwrap().at, TimeCode(10));
         assert!(event.is_none());
 
         // Errors must also wake the consumer instead of waiting for input.
@@ -3773,7 +3781,10 @@ mod tests {
             (1_080, 1_920),
             3,
         )));
-        let (_, frame) = frames.recv_timeout(Duration::from_secs(60)).unwrap();
+        let frame = frames
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap()
+            .texture;
         assert_eq!((frame.width, frame.height), (720, 1_280));
         assert_eq!(frame.rgba.len(), 720 * 1_280 * 4);
     }
@@ -3790,7 +3801,7 @@ mod tests {
                 self.0.fetch_add(1, Ordering::Relaxed);
             }
             fn request_frame(&self, _t: TimeCode) {}
-            fn frames(&self) -> Receiver<(TimeCode, FrameTexture)> {
+            fn frames(&self) -> Receiver<PreviewFrame> {
                 unbounded().1
             }
             fn events(&self) -> Receiver<MediaEvent> {
@@ -3819,7 +3830,7 @@ mod tests {
                 self.documents.fetch_add(1, Ordering::Relaxed);
             }
             fn request_frame(&self, _t: TimeCode) {}
-            fn frames(&self) -> Receiver<(TimeCode, FrameTexture)> {
+            fn frames(&self) -> Receiver<PreviewFrame> {
                 unbounded().1
             }
             fn events(&self) -> Receiver<MediaEvent> {

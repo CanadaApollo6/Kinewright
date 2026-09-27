@@ -12615,7 +12615,7 @@ mod tests {
     impl kinewright_core::Playback for Cc7StubAnalysis {
         fn set_document(&self, _document: Arc<Document>) {}
         fn request_frame(&self, _at: TimeCode) {}
-        fn frames(&self) -> Receiver<(TimeCode, kinewright_core::FrameTexture)> {
+        fn frames(&self) -> Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::never()
         }
         fn events(&self) -> Receiver<kinewright_core::MediaEvent> {

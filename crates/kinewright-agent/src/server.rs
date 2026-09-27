@@ -18174,14 +18174,13 @@ mod tests {
         AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, AudioChannelClipping,
         AudioClipping, AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest,
         BeatMarker, Clip, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries,
-        ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, FrameTexture, Marker,
-        MarkerId, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
-        MediaCacheClearResult, MediaCacheFamily, MediaCacheInventory, MediaError, MediaEvent,
-        MediaKind, MediaSourceFingerprint, MixLevelReport, MonitorProof, MonitorProofMetadata,
-        ParamValue, Rational, RgbaImage, STREAMING_PLATFORM_TARGET, SceneChange, SceneStatus,
-        SilenceSpan, SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track,
-        TrackId, TrackKind, TrackLevels, TrackMix, TranscriptWord, VisualAssetResult,
-        audio_qc_exceptions, audio_qc_technical_pass,
+        ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Marker, MarkerId, MediaAsset,
+        MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
+        MediaCacheInventory, MediaError, MediaEvent, MediaKind, MediaSourceFingerprint,
+        MixLevelReport, MonitorProof, MonitorProofMetadata, ParamValue, Rational, RgbaImage,
+        STREAMING_PLATFORM_TARGET, SceneChange, SceneStatus, SilenceSpan, SilenceStatus,
+        TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TrackLevels,
+        TrackMix, TranscriptWord, VisualAssetResult, audio_qc_exceptions, audio_qc_technical_pass,
     };
     use kinewright_core::{
         AudioChain, ColorSourceError, IncidentEvidence, IncidentObservation, IncidentState,
@@ -18292,7 +18291,7 @@ mod tests {
 
         fn request_frame(&self, _t: TimeCode) {}
 
-        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, FrameTexture)> {
+        fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::never()
         }
 
@@ -19315,7 +19314,7 @@ mod tests {
 
         fn request_frame(&self, _t: TimeCode) {}
 
-        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, FrameTexture)> {
+        fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::never()
         }
 

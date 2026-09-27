@@ -379,6 +379,58 @@ pub struct FrameTexture {
     pub rgba: Arc<Vec<u8>>,
 }
 
+/// PF1 R-1: the transport stamp a preview request takes on the caller's
+/// thread. `seq` increments on every transport call; `epoch` also on `seek`,
+/// `play`, `pause` and `set_document` (not `request_frame`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FrameStamp {
+    pub epoch: u64,
+    pub seq: u64,
+}
+
+impl FrameStamp {
+    /// R-2: whether work stamped `self` still speaks for the transport whose
+    /// newest issued stamp is `latest`: the same epoch and not superseded.
+    #[must_use]
+    pub fn is_current(self, latest: Self) -> bool {
+        self.epoch == latest.epoch && self.seq >= latest.seq
+    }
+}
+
+/// PF1 R-2: one preview candidate. The consumer validates it against
+/// [`Playback::stamp`] before it is shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewFrame {
+    pub at: TimeCode,
+    pub stamp: FrameStamp,
+    pub texture: FrameTexture,
+}
+
+/// PF1 R-5: playback health since the engine started. Fields a stage does
+/// not measure yet stay zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlaybackStats {
+    /// Due frames: every acked or dropped playback frame.
+    pub due_frames: u64,
+    pub on_time: u64,
+    pub late: u64,
+    pub dropped: u64,
+    /// Playback frames dropped at a deadline an agent job delayed (R-4).
+    pub dropped_agent: u64,
+    pub max_held_ms: f64,
+    pub max_av_offset_ms: f64,
+    pub max_clock_stall_ms: f64,
+    pub underrun_events: u64,
+    pub underrun_frames: u64,
+    pub lookahead_starved: u64,
+    pub sync_fallback_frames: u64,
+    pub sync_decoders: u64,
+    pub slot_starved: u64,
+    /// Stamped preview failures suppressed as superseded or old-epoch (R-2).
+    pub stale_errors: u64,
+    pub permits_in_use: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RgbaImage {
     pub width: u32,
@@ -1443,6 +1495,20 @@ pub enum MediaEvent {
     Position(TimeCode),
     PlaybackStateChanged(PlaybackState),
     Error(MediaError),
+    /// PF1 R-2: a preview-path failure carrying its job's stamp. Consumers
+    /// treat it as `Error` only while the stamp is current and not superseded.
+    StampedError(FrameStamp, MediaError),
+}
+
+impl MediaEvent {
+    /// The error either error variant carries.
+    #[must_use]
+    pub fn error(&self) -> Option<&MediaError> {
+        match self {
+            Self::Error(error) | Self::StampedError(_, error) => Some(error),
+            Self::Position(_) | Self::PlaybackStateChanged(_) => None,
+        }
+    }
 }
 
 /// One recognized word. Both boundaries are half-open source-frame positions
@@ -1966,7 +2032,8 @@ pub enum LiveAudioChange {
 pub trait Playback: Send + Sync {
     fn set_document(&self, doc: Arc<Document>);
     fn request_frame(&self, t: TimeCode);
-    fn frames(&self) -> Receiver<(TimeCode, FrameTexture)>;
+    /// Preview candidates; the consumer validates each against [`Self::stamp`].
+    fn frames(&self) -> Receiver<PreviewFrame>;
     /// Non-blocking playback status stream. Implementations may coalesce ticks.
     fn events(&self) -> Receiver<MediaEvent>;
     fn play(&self, from: TimeCode);
@@ -2032,6 +2099,18 @@ pub trait Playback: Send + Sync {
     /// AU6 §13: monitor-only gain in tenth dB, applied after the master so a
     /// loudness-matched A/B hold is not a document edit. Default: ignore.
     fn set_monitor_gain_tenth_db(&self, _gain_tenth_db: i32) {}
+    /// PF1 R-2: the newest transport stamp issued. Default: zero, so a double
+    /// that stamps nothing shows every frame it sends.
+    fn stamp(&self) -> FrameStamp {
+        FrameStamp::default()
+    }
+    /// PF1 R-5: playback health. Default: nothing measured.
+    fn stats(&self) -> PlaybackStats {
+        PlaybackStats::default()
+    }
+    /// PF1 R-5: the frame stamped `stamp` at `at` was painted and submitted.
+    /// Called once per bound frame. Default: ignore.
+    fn ack_presented(&self, _stamp: FrameStamp, _at: TimeCode) {}
 }
 
 pub trait Analysis: Send + Sync {

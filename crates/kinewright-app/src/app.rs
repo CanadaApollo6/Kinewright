@@ -17,8 +17,8 @@ use kinewright_core::{
     IncidentOutcome, IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident,
     LiveAudioChange, MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
     NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
-    PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, Rational,
-    RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
+    PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, PreviewFrame,
+    Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
     recovery_description,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
@@ -305,7 +305,7 @@ pub(crate) struct KinewrightApp {
     /// sends the library to the playback worker and stores it where the proof
     /// and export entry points read it.
     pub(crate) lut_publisher: Arc<FfmpegMediaEngine>,
-    pub(crate) frames: crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    pub(crate) frames: crossbeam_channel::Receiver<PreviewFrame>,
     pub(crate) media_events: crossbeam_channel::Receiver<MediaEvent>,
     pub(crate) visual_cache: crate::visual_cache::VisualCache,
     /// Per-harness detection, model catalog, and remembered picks, indexed
@@ -2766,7 +2766,8 @@ impl KinewrightApp {
                 MediaEvent::PlaybackStateChanged(state) => {
                     self.playing = state == PlaybackState::Playing;
                 }
-                MediaEvent::Error(error) => {
+                MediaEvent::StampedError(stamp, _) if !stamp.is_current(self.playback.stamp()) => {}
+                MediaEvent::Error(error) | MediaEvent::StampedError(_, error) => {
                     self.playing = false;
                     let revision = self.focused().revision;
                     // `IN1b` §5.1 rule 12: the constructor is total after
@@ -2796,7 +2797,10 @@ impl KinewrightApp {
         while let Ok(frame) = self.frames.try_recv() {
             newest_frame = Some(frame);
         }
-        if let Some((at, frame)) = newest_frame {
+        if let Some(PreviewFrame {
+            at, texture: frame, ..
+        }) = newest_frame
+        {
             let image = egui::ColorImage::from_rgba_unmultiplied(
                 [
                     usize::try_from(frame.width).unwrap_or_default(),
@@ -4571,9 +4575,7 @@ mod tests {
         fn request_frame(&self, _at: super::TimeCode) {
             self.bump(&self.requested_frames, "request_frame");
         }
-        fn frames(
-            &self,
-        ) -> crossbeam_channel::Receiver<(super::TimeCode, kinewright_core::FrameTexture)> {
+        fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::bounded(0).1
         }
         fn events(&self) -> crossbeam_channel::Receiver<super::MediaEvent> {
@@ -4719,10 +4721,7 @@ mod tests {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             fn request_frame(&self, _at: super::TimeCode) {}
-            fn frames(
-                &self,
-            ) -> crossbeam_channel::Receiver<(super::TimeCode, kinewright_core::FrameTexture)>
-            {
+            fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
                 crossbeam_channel::bounded(0).1
             }
             fn events(&self) -> crossbeam_channel::Receiver<super::MediaEvent> {
@@ -5511,7 +5510,7 @@ pub(crate) mod in1_tests {
         let mut seen: Vec<String> = Vec::new();
         loop {
             while let Ok(event) = events.try_recv() {
-                if let MediaEvent::Error(error) = event {
+                if let MediaEvent::Error(error) | MediaEvent::StampedError(_, error) = event {
                     return error;
                 }
                 seen.push(format!("{event:?}"));
@@ -7180,7 +7179,7 @@ pub(crate) mod in1_tests {
         let expiry = Instant::now() + Duration::from_secs(2);
         while Instant::now() < expiry {
             while let Ok(event) = events.try_recv() {
-                if let MediaEvent::Error(error) = event {
+                if let MediaEvent::Error(error) | MediaEvent::StampedError(_, error) = event {
                     errors.push(error);
                 }
             }
@@ -10379,7 +10378,7 @@ mod in2b_tests {
         engine.request_frame(TimeCode(1));
         let expiry = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let Ok((at, _)) = frames.recv_timeout(
+            let Ok(PreviewFrame { at, .. }) = frames.recv_timeout(
                 expiry
                     .checked_duration_since(std::time::Instant::now())
                     .unwrap_or_default(),

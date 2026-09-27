@@ -25,7 +25,7 @@ use std::{
 };
 
 use crossbeam_channel::Receiver;
-use kinewright_core::{Document, FrameTexture, MediaEvent, Playback, PlaybackState, TimeCode};
+use kinewright_core::{Document, MediaEvent, Playback, PlaybackState, PreviewFrame, TimeCode};
 
 use crate::{
     FfmpegMediaEngine,
@@ -351,7 +351,7 @@ fn typical_60s() -> Workload {
 
 struct Session {
     engine: FfmpegMediaEngine,
-    frames: Receiver<(TimeCode, FrameTexture)>,
+    frames: Receiver<PreviewFrame>,
     events: Receiver<MediaEvent>,
     gpu: GpuContext,
     /// This engine's audio diagnostics (R23).
@@ -389,7 +389,7 @@ impl Session {
     fn wait_frame(&self, target: i64, from: Instant, limit: Duration) -> Option<f64> {
         loop {
             match self.frames.recv_deadline(from + limit) {
-                Ok((at, _)) if at.0 == target => return Some(ms(from)),
+                Ok(PreviewFrame { at, .. }) if at.0 == target => return Some(ms(from)),
                 Ok(_) => {}
                 Err(_) => return None,
             }
@@ -402,10 +402,7 @@ impl Session {
 
     fn assert_no_error(&self, context: &str) {
         for event in self.events.try_iter() {
-            assert!(
-                !matches!(event, MediaEvent::Error(_)),
-                "{context} failed: {event:?}"
-            );
+            assert!(event.error().is_none(), "{context} failed: {event:?}");
         }
     }
 }
@@ -487,7 +484,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     let mut next = start;
     loop {
         next += SAMPLE;
-        while let Ok((at, _)) = session.frames.recv_deadline(next) {
+        while let Ok(PreviewFrame { at, .. }) = session.frames.recv_deadline(next) {
             let position = session.engine.position().0;
             trace.arrivals.push((ms(start), at.0, position));
         }
@@ -687,8 +684,8 @@ fn drag_and_release(
 ) -> (String, bool) {
     let (start, mut calls, mut arrivals) = (Instant::now(), Vec::new(), Vec::new());
     let collect = |until: Instant, arrivals: &mut Vec<(f64, i64)>| {
-        while let Ok((frame, _)) = session.frames.recv_deadline(until) {
-            arrivals.push((ms(start), frame.0));
+        while let Ok(PreviewFrame { at, .. }) = session.frames.recv_deadline(until) {
+            arrivals.push((ms(start), at.0));
         }
     };
     for i in 0..150_u32 {
@@ -711,9 +708,9 @@ fn drag_and_release(
     session.engine.seek(TimeCode(release_target));
     let deadline = from + Duration::from_secs(10);
     let mut release = None;
-    while let Ok((frame, _)) = session.frames.recv_deadline(deadline) {
-        arrivals.push((ms(start), frame.0));
-        if frame.0 == release_target {
+    while let Ok(PreviewFrame { at, .. }) = session.frames.recv_deadline(deadline) {
+        arrivals.push((ms(start), at.0));
+        if at.0 == release_target {
             release = Some(ms(from));
             break;
         }

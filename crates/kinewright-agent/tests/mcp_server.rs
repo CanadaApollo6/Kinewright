@@ -9992,7 +9992,7 @@ async fn in1_await_media_error(playback: &dyn Playback, deadline: Duration) -> O
     let mut seen: Vec<String> = Vec::new();
     loop {
         while let Ok(event) = events.try_recv() {
-            if let MediaEvent::Error(error) = event {
+            if let MediaEvent::Error(error) | MediaEvent::StampedError(_, error) = event {
                 return Some(error);
             }
             seen.push(format!("{event:?}"));
