@@ -708,6 +708,27 @@ struct RequestedPositions {
     frame_sequence: AtomicU64,
     seek: AtomicI64,
     seek_sequence: AtomicU64,
+    /// PF1 V-2 (review B F1): bumped by the worker's terminal stop before it
+    /// publishes `Paused`, so a seek can tell whether it saw that stop.
+    eos_generation: AtomicU64,
+    /// The `eos_generation` the latest seek observed when it was published.
+    seek_eos_generation: AtomicU64,
+}
+
+impl RequestedPositions {
+    /// Publish a seek, stamped with the terminal-stop generation it saw.
+    fn publish_seek(&self, to: TimeCode) {
+        let eos = self.eos_generation.load(Ordering::SeqCst);
+        self.seek_eos_generation.store(eos, Ordering::SeqCst);
+        self.seek.store(to.0.max(0), Ordering::Relaxed);
+        self.seek_sequence.fetch_add(1, Ordering::Release);
+    }
+
+    /// Whether the latest seek was published before the latest terminal stop.
+    fn seek_predates_eos(&self) -> bool {
+        self.seek_eos_generation.load(Ordering::SeqCst)
+            != self.eos_generation.load(Ordering::SeqCst)
+    }
 }
 
 impl Playback for FfmpegMediaEngine {
@@ -755,8 +776,7 @@ impl Playback for FfmpegMediaEngine {
 
     fn seek(&self, to: TimeCode) {
         self.clock.set_frame(to);
-        self.requested.seek.store(to.0.max(0), Ordering::Relaxed);
-        self.requested.seek_sequence.fetch_add(1, Ordering::Release);
+        self.requested.publish_seek(to);
         self.request_frame(to);
     }
 
@@ -1691,6 +1711,9 @@ struct Worker {
     loudness: WorkerLoudness,
     monitor_gain_tenth_db: Arc<AtomicI32>,
     playing: bool,
+    /// PF1 V-2 (review B F1): the transport stopped at the end on its own,
+    /// not by a pause; a seek published before that stop resumes playing.
+    resume_after_eos: bool,
     last_position: Option<TimeCode>,
     /// PF1 V-5: the default device, or the harness's simulated output.
     output_device: OutputDevice,
@@ -1771,6 +1794,7 @@ impl Worker {
             loudness: WorkerLoudness::new(loudness),
             monitor_gain_tenth_db,
             playing: false,
+            resume_after_eos: false,
             last_position: None,
             output_device: OutputDevice::Default,
             audio_diagnostics: Arc::default(),
@@ -1805,7 +1829,7 @@ impl Worker {
             Control::LutLatticesPublished => self.rebind_lut_library(),
             Control::UpdateAudio(kind, doc) => self.update_audio(kind, doc),
             Control::Play(from) => self.start_playback(from),
-            Control::Pause => self.pause(),
+            Control::Pause => self.pause_or_stop_at_end(),
             Control::ResetLoudness => self.reset_loudness(),
             Control::Thumbnail {
                 document,
@@ -1967,7 +1991,10 @@ impl Worker {
         if seek_sequence != self.handled_seek_sequence {
             self.handled_seek_sequence = seek_sequence;
             let at = TimeCode(self.requested.seek.load(Ordering::Relaxed));
-            if self.playing {
+            // PF1 V-2 (review B F1): a seek published while playing, which
+            // raced the terminal stop, keeps playing.
+            let raced_eos = self.resume_after_eos && self.requested.seek_predates_eos();
+            if self.playing || raced_eos {
                 self.start_playback(at);
             } else {
                 self.clock.set_frame(at);
@@ -1983,6 +2010,7 @@ impl Worker {
     }
 
     fn start_playback(&mut self, from: TimeCode) {
+        self.resume_after_eos = false;
         self.audio = None;
         self.meter.clear();
         if let Ok(meters) = self.mix_meters.read() {
@@ -2018,7 +2046,32 @@ impl Worker {
         }
     }
 
+    /// PF1 V-2 (review B F2): a pause that arrives once the programme has
+    /// played out, before `tick` saw it, is the terminal stop: the clock
+    /// trails the end by up to a frame, so an ordinary pause would stop
+    /// short of the duration.
+    fn pause_or_stop_at_end(&mut self) {
+        if self.playing && self.programme_ended() {
+            self.stop_at_end();
+            self.resume_after_eos = false;
+        } else {
+            self.pause();
+        }
+    }
+
+    /// The programme has played out: the ring drained with the mixer
+    /// exhausted, or the clock reached the duration.
+    fn programme_ended(&self) -> bool {
+        let samples = self.clock.position_samples.load(Ordering::Acquire);
+        let drained = self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.drained(samples));
+        drained || self.clock.position() >= self.document.duration
+    }
+
     fn pause(&mut self) {
+        self.resume_after_eos = false;
         if let Some(audio) = &self.audio
             && let Err(error) = audio.pause()
         {
@@ -2045,6 +2098,9 @@ impl Worker {
     /// which trails the end by up to a frame when the programme drains
     /// (a one-frame 30000/1001 timeline ends at sample 1601, clock frame 0).
     fn stop_at_end(&mut self) {
+        // Review B F1: a seek stamped before this bump raced the stop.
+        self.requested.eos_generation.fetch_add(1, Ordering::SeqCst);
+        self.resume_after_eos = true;
         if let Some(audio) = &self.audio
             && let Err(error) = audio.pause()
         {
@@ -2088,10 +2144,11 @@ impl Worker {
         self.loudness
             .publish_at(self.clock.position_samples.load(Ordering::Acquire));
         let position = self.clock.position();
-        let drained = self.audio.as_ref().is_some_and(|audio| {
-            audio.drained(self.clock.position_samples.load(Ordering::Acquire))
-        });
-        if drained || position >= self.document.duration {
+        // Review B F1: a seek pending since `handle_coalesced_requests` is
+        // applied, still playing, on the next pass instead of the stop.
+        let seek_pending =
+            self.requested.seek_sequence.load(Ordering::Acquire) != self.handled_seek_sequence;
+        if !seek_pending && self.programme_ended() {
             self.stop_at_end();
             return;
         }
@@ -3537,6 +3594,92 @@ mod tests {
         let (mut worker, audio, events) = stepped_worker(fps, TimeCode(1));
         assert_eq!(play_out(&mut worker, &audio, 8), 1, "stops on the 2nd tick");
         assert_stopped_at_end(&worker, &events, TimeCode(1));
+    }
+
+    /// PF1 V-2 (review B F2): a pause handled after the last callback
+    /// drained the one-frame programme, before `tick`, is the terminal stop.
+    #[test]
+    fn a_pause_after_the_programme_drained_stops_at_the_duration() {
+        let fps = Rational::new(30_000, 1_001).unwrap();
+        let (mut worker, audio, events) = stepped_worker(fps, TimeCode(1));
+        audio.advance(CALLBACK_FRAMES);
+        audio.advance(CALLBACK_FRAMES);
+        assert_eq!(worker.clock.position(), TimeCode::ZERO, "the clock trails");
+        worker.handle_control(Control::Pause);
+        assert_stopped_at_end(&worker, &events, TimeCode(1));
+        assert!(!worker.resume_after_eos, "a pause never resumes");
+    }
+
+    /// A long programme played until its ring has drained, the terminal
+    /// `tick` not yet run.
+    fn drained_before_the_tick() -> (Worker, SimulatedAudio, Receiver<MediaEvent>) {
+        let fps = Rational::new(10, 1).unwrap();
+        let (mut worker, audio, events) = stepped_worker(fps, TimeCode(50));
+        for _ in 0..400 {
+            audio.advance(CALLBACK_FRAMES);
+            let samples = worker.clock.position_samples.load(Ordering::Acquire);
+            if worker.audio.as_ref().unwrap().drained(samples) {
+                return (worker, audio, events);
+            }
+            worker.tick();
+            assert!(worker.playing);
+        }
+        panic!("the programme never drained");
+    }
+
+    fn seek(worker: &Worker, to: TimeCode) {
+        worker.clock.set_frame(to);
+        worker.requested.publish_seek(to);
+    }
+
+    /// PF1 V-2 (review B F1): a seek published while playing, which races
+    /// the terminal stop, keeps playing: whether it lands before the tick's
+    /// check (the stop waits for it) or between that check and the stop
+    /// (its generation predates the stop's).
+    #[test]
+    fn a_playing_seek_that_races_the_terminal_stop_keeps_playing() {
+        // Published after `handle_coalesced_requests`, before `tick`.
+        let (mut worker, _audio, _events) = drained_before_the_tick();
+        seek(&worker, TimeCode(10));
+        worker.tick();
+        assert!(worker.playing, "the stop waits for the pending seek");
+        worker.handle_coalesced_requests();
+        assert!(worker.playing && worker.audio.is_some());
+        assert_eq!(worker.clock.position(), TimeCode(10));
+
+        // Published after the tick's check, before the stop's generation.
+        let (mut worker, _audio, events) = drained_before_the_tick();
+        seek(&worker, TimeCode(10));
+        worker.stop_at_end();
+        assert!(!worker.playing);
+        let _ = events.try_iter().count();
+        worker.handle_coalesced_requests();
+        assert!(worker.playing && worker.audio.is_some(), "resumed");
+        assert_eq!(worker.clock.position(), TimeCode(10));
+        let events: Vec<_> = events.try_iter().collect();
+        let resumed = MediaEvent::PlaybackStateChanged(PlaybackState::Playing);
+        assert!(events.contains(&resumed), "{events:?}");
+    }
+
+    /// PF1 V-2 (review B F1, the controls): a seek after the published stop,
+    /// or one followed by a pause, stays paused.
+    #[test]
+    fn a_seek_after_the_stop_or_before_a_pause_stays_paused() {
+        let (mut worker, _audio, _events) = drained_before_the_tick();
+        worker.tick();
+        assert!(!worker.playing, "the terminal stop");
+        seek(&worker, TimeCode(10));
+        worker.handle_coalesced_requests();
+        assert!(!worker.playing && worker.audio.is_none());
+        assert_eq!(worker.clock.position(), TimeCode(10));
+
+        let (mut worker, _audio, _events) = drained_before_the_tick();
+        seek(&worker, TimeCode(10));
+        worker.stop_at_end();
+        worker.handle_control(Control::Pause);
+        worker.handle_coalesced_requests();
+        assert!(!worker.playing && worker.audio.is_none(), "the pause wins");
+        assert_eq!(worker.clock.position(), TimeCode(10));
     }
 
     /// PF1 V-2: a long programme stops at its duration; a 2 s fill stall
