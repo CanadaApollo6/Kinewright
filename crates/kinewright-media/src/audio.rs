@@ -4168,6 +4168,8 @@ pub(crate) struct AudioRuntime {
     target_samples: usize,
     sample_rate: u32,
     channels: u16,
+    /// PF1 V-2: `fill_ring` has reported the mixer exhausted.
+    exhausted: bool,
     pub(crate) error_flag: Arc<AtomicBool>,
 }
 
@@ -4250,8 +4252,18 @@ impl AudioRuntime {
             target_samples,
             sample_rate,
             channels,
+            exhausted: false,
             error_flag,
         })
+    }
+
+    /// PF1 V-2: the programme has played out: the mixer is exhausted, all of
+    /// it is in the ring, the ring is empty and the clock has counted it.
+    pub(crate) fn drained(&self, position_samples: u64) -> bool {
+        self.exhausted
+            && self.pending_index >= self.pending.len()
+            && self.producer.slots() == self.producer.buffer().capacity()
+            && position_samples >= self.fed_position_samples()
     }
 
     /// The device stream's rate.
@@ -4320,7 +4332,7 @@ impl AudioRuntime {
     /// AU1 §5.3: top the ring up to the live target, metering as it goes
     /// (AU3 §3.9).
     pub(crate) fn fill(&mut self, meter: &mut LiveLoudnessMeter) -> Result<(), MediaError> {
-        fill_ring(
+        self.exhausted |= !fill_ring(
             &mut self.producer,
             &mut self.pending,
             &mut self.pending_index,
@@ -4433,12 +4445,11 @@ fn monitor_linear_gain(tenth_db: i32) -> f32 {
 #[cfg(test)]
 pub(crate) mod simulated;
 
-/// Pops one callback's samples (silence where the ring is empty) and advances
-/// the clock by the whole callback. Returns the pops that failed (PF1 R22:
-/// counted where they happen; the samples and the clock are unchanged).
-/// They are recorded *before* the clock's release advance (R25/D2), so a
-/// thread that observes the advanced clock also observes this callback's
-/// underruns.
+/// PF1 V-1: pops whole interleaved programme frames while the ring holds
+/// one, then writes silence, and advances the clock by the frames popped.
+/// Returns the samples not popped; their frames are counted as underruns
+/// *before* the clock's release advance (R25/D2), so a thread that observes
+/// the advanced clock also observes this callback's underruns.
 fn render_output<T>(
     consumer: &mut Consumer<f32>,
     output: &mut [T],
@@ -4450,21 +4461,22 @@ fn render_output<T>(
 where
     T: cpal::Sample + cpal::FromSample<f32>,
 {
-    let sample_frames = output.len() / channels.max(1);
+    let channels = channels.max(1);
+    let sample_frames = output.len() / channels;
     let gain = monitor_linear_gain(monitor_gain_tenth_db);
-    let mut failed = 0;
-    for destination in output {
-        let sample = consumer.pop().unwrap_or_else(|_| {
-            failed += 1;
-            0.0
-        });
-        *destination = T::from_sample(sample * gain);
+    let mut popped = 0;
+    while popped < sample_frames && consumer.slots() >= channels {
+        for destination in &mut output[popped * channels..(popped + 1) * channels] {
+            *destination = T::from_sample(consumer.pop().unwrap_or(0.0) * gain);
+        }
+        popped += 1;
     }
+    for destination in &mut output[popped * channels..] {
+        *destination = T::from_sample(0.0 * gain);
+    }
+    let failed = output.len() - popped * channels;
     diagnostics.record_underrun(failed, channels);
-    position.fetch_add(
-        u64::try_from(sample_frames).unwrap_or(u64::MAX),
-        Ordering::Release,
-    );
+    position.fetch_add(u64::try_from(popped).unwrap_or(u64::MAX), Ordering::Release);
     failed
 }
 
@@ -4911,17 +4923,41 @@ mod tests {
         );
 
         assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
-        assert_eq!(position.load(Ordering::Acquire), 12);
+        assert_eq!(position.load(Ordering::Acquire), 11);
         assert_eq!(diagnostics.underrun_frames(), 1);
+    }
+
+    /// PF1 V-1/G9: only whole frames pop; the clock counts them and nothing
+    /// else, so an empty ring leaves it where it was.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn the_clock_counts_whole_popped_frames_only() {
+        let (mut producer, mut consumer) = RingBuffer::new(8);
+        producer.push_entire_slice(&[0.25, -0.5, 0.75]).unwrap();
+        let position = AtomicU64::new(10);
+        let mut output = [1.0_f32; 4];
+        let diagnostics = AudioDiagnostics::default();
+        let render = |consumer: &mut Consumer<f32>, output: &mut [f32]| {
+            render_output(consumer, output, 2, &position, 0, &diagnostics)
+        };
+        assert_eq!(render(&mut consumer, &mut output), 2);
+        assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
+        assert_eq!(consumer.slots(), 1, "the odd sample stays queued");
+        assert_eq!(position.load(Ordering::Acquire), 11);
+        consumer.pop().unwrap();
+        assert_eq!(render(&mut consumer, &mut output), 4);
+        assert_eq!(output, [0.0; 4]);
+        assert_eq!(position.load(Ordering::Acquire), 11);
+        assert_eq!(diagnostics.underrun_frames(), 3);
     }
 
     /// PF1 R25/D2: underruns are recorded before the clock's release advance,
     /// so an observer that acquires a clock value sees every underrun up to
-    /// it. On an empty ring every frame underruns: the count can never trail
-    /// the clock.
+    /// it. Each callback finds half its frames queued (V-1: the clock counts
+    /// those): the count can never trail the clock.
     #[test]
     fn an_observed_clock_never_runs_ahead_of_its_underruns() {
-        let (_producer, mut consumer) = RingBuffer::<f32>::new(4);
+        let (mut producer, mut consumer) = RingBuffer::<f32>::new(128);
         let position = Arc::new(AtomicU64::new(0));
         let diagnostics = Arc::new(AudioDiagnostics::default());
         let callbacks = 20_000_u64;
@@ -4929,7 +4965,7 @@ mod tests {
             let (position, diagnostics) = (Arc::clone(&position), Arc::clone(&diagnostics));
             std::thread::spawn(move || {
                 let mut observed = 0;
-                while observed < callbacks * 64 {
+                while observed < callbacks * 32 {
                     observed = position.load(Ordering::Acquire);
                     let underruns = diagnostics.underrun_frames();
                     assert!(underruns >= observed, "{underruns} < {observed}");
@@ -4938,6 +4974,7 @@ mod tests {
         };
         let mut output = [0.0_f32; 128];
         for _ in 0..callbacks {
+            producer.push_entire_slice(&[0.0; 64]).unwrap();
             render_output(&mut consumer, &mut output, 2, &position, 0, &diagnostics);
         }
         observer.join().expect("the observer");

@@ -2041,6 +2041,29 @@ impl Worker {
         }
     }
 
+    /// PF1 V-2: the terminal stop. Unlike `pause()` it never reads the clock,
+    /// which trails the end by up to a frame when the programme drains
+    /// (a one-frame 30000/1001 timeline ends at sample 1601, clock frame 0).
+    fn stop_at_end(&mut self) {
+        if let Some(audio) = &self.audio
+            && let Err(error) = audio.pause()
+        {
+            self.emit(MediaEvent::Error(error));
+        }
+        let end = self.document.duration;
+        if self.audio.is_some() {
+            self.loudness.pause_at(end, self.document.fps);
+        }
+        self.audio = None;
+        self.meter.clear();
+        self.install_mix_meters(Arc::new(MixMeters::empty(Arc::clone(&self.meter))));
+        self.clock.fallback_frame.store(end.0, Ordering::Release);
+        self.clock.sample_rate.store(0, Ordering::Release);
+        self.playing = false;
+        self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Paused));
+        self.emit(MediaEvent::Position(end));
+    }
+
     fn tick(&mut self) {
         if !self.playing {
             return;
@@ -2065,11 +2088,11 @@ impl Worker {
         self.loudness
             .publish_at(self.clock.position_samples.load(Ordering::Acquire));
         let position = self.clock.position();
-        if position >= self.document.duration {
-            let end = self.document.duration;
-            self.clock.fallback_frame.store(end.0, Ordering::Release);
-            self.pause();
-            self.emit(MediaEvent::Position(end));
+        let drained = self.audio.as_ref().is_some_and(|audio| {
+            audio.drained(self.clock.position_samples.load(Ordering::Acquire))
+        });
+        if drained || position >= self.document.duration {
+            self.stop_at_end();
             return;
         }
         if self.last_position != Some(position) {
@@ -2228,6 +2251,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        audio::simulated::{CALLBACK_FRAMES, SimulatedAudio},
         cc1_fixtures::fallback_gpu,
         initialize_ffmpeg,
         lut::parse_cube_lut,
@@ -3383,6 +3407,111 @@ mod tests {
         worker.update_audio_mix(Arc::new(faded));
         assert_eq!(worker.clock.position(), TimeCode(10));
         assert_eq!(worker.document.audio_mix.buses[0].gain_tenth_db, -60);
+    }
+
+    /// PF1 V-2 (I9): a worker on the stepped simulated output, playing a
+    /// title-only (silent) timeline from frame 0; `tick` runs only when a test calls it.
+    fn stepped_worker(
+        fps: Rational,
+        duration: TimeCode,
+    ) -> (Worker, SimulatedAudio, Receiver<MediaEvent>) {
+        let (_control_tx, control_rx) = unbounded::<Control>();
+        let (frames_tx, frames_rx) = bounded(2);
+        let (events_tx, events_rx) = bounded(16);
+        let meter = Arc::new(MeterState::default());
+        let mut worker = Worker::new(
+            WorkerChannels {
+                control_rx,
+                frames_tx,
+                frames_drop_rx: frames_rx,
+                events_tx,
+                events_drop_rx: events_rx.clone(),
+            },
+            Arc::new(SharedClock::new()),
+            Arc::clone(&meter),
+            Arc::new(RwLock::new(Arc::new(MixMeters::empty(meter)))),
+            Arc::new(LiveLoudness::default()),
+            Arc::new(RequestedPositions::default()),
+            fallback_gpu().context(),
+            Arc::new(RwLock::new(PublishedLattices::default())),
+            Arc::new(AtomicI32::new(0)),
+        );
+        let audio = SimulatedAudio::stepped();
+        worker.output_device = OutputDevice::Simulated(audio.clone());
+        let mut document = crate::perf_fixtures::title_card((64, 64), duration.0);
+        document.fps = fps;
+        worker.document = Arc::new(document);
+        worker.clock.set_fps(fps);
+        worker.start_playback(TimeCode::ZERO);
+        assert!(
+            worker.playing,
+            "{:?}",
+            events_rx.try_iter().collect::<Vec<_>>()
+        );
+        (worker, audio, events_rx)
+    }
+
+    /// Callbacks with a tick after each until the worker stops (or `limit`).
+    fn play_out(worker: &mut Worker, audio: &SimulatedAudio, limit: usize) -> usize {
+        (0..limit)
+            .take_while(|_| {
+                audio.advance(CALLBACK_FRAMES);
+                worker.tick();
+                worker.playing
+            })
+            .count()
+    }
+
+    fn assert_stopped_at_end(worker: &Worker, events: &Receiver<MediaEvent>, end: TimeCode) {
+        assert!(!worker.playing && worker.audio.is_none());
+        assert_eq!(worker.clock.position(), end);
+        assert_eq!(worker.clock.sample_rate.load(Ordering::Acquire), 0);
+        assert_eq!(
+            worker.loudness.paused_at(),
+            Some(end),
+            "truncated at the end"
+        );
+        let events: Vec<_> = events.try_iter().collect();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    ..,
+                    MediaEvent::PlaybackStateChanged(PlaybackState::Paused),
+                    MediaEvent::Position(at)
+                ] if *at == end
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// PF1 V-2: a one-frame 30000/1001 timeline ends at sample 1,601, where
+    /// the clock still reads frame 0; the drained stop lands on the duration.
+    #[test]
+    fn a_drained_one_frame_timeline_stops_at_its_duration() {
+        let fps = Rational::new(30_000, 1_001).unwrap();
+        let (mut worker, audio, events) = stepped_worker(fps, TimeCode(1));
+        assert_eq!(play_out(&mut worker, &audio, 8), 1, "stops on the 2nd tick");
+        assert_stopped_at_end(&worker, &events, TimeCode(1));
+    }
+
+    /// PF1 V-2: a long programme stops at its duration; a 2 s fill stall
+    /// underruns without advancing the clock, so it does not complete early.
+    #[test]
+    fn a_long_programme_stops_at_its_duration_and_a_stall_does_not_complete() {
+        let fps = Rational::new(10, 1).unwrap();
+        let (mut worker, audio, events) = stepped_worker(fps, TimeCode(50));
+        assert_eq!(play_out(&mut worker, &audio, 40), 40);
+        for _ in 0..94 {
+            assert!(audio.advance(CALLBACK_FRAMES), "a stall: no tick, no fill");
+        }
+        let stalled = worker.clock.position();
+        assert!(stalled < TimeCode(50), "{stalled:?}");
+        assert!(worker.playing);
+        let samples = worker.clock.position_samples.load(Ordering::Acquire);
+        assert!(!worker.audio.as_ref().unwrap().drained(samples));
+        assert!(play_out(&mut worker, &audio, 400) < 400);
+        assert_stopped_at_end(&worker, &events, TimeCode(50));
     }
 
     /// AU4 §7 item A15 (§4.4 rule 89): the defaulted `Playback::update_audio`

@@ -309,15 +309,15 @@ mod tests {
             ),
             (1_124, 0)
         );
-        // Today's clock advances through an underrun (evidence T7); V-1 fixes
-        // that in S1. 3 samples were left: 2,045 failed pops, 1,023 frames.
+        // V-1: 3 samples were left; one whole frame pops, the clock counts it,
+        // and 1,023 frames underrun (evidence T7 had the clock run through).
         assert!(audio.advance(CALLBACK_FRAMES));
         assert_eq!(
             (
                 position.load(Ordering::Acquire),
                 diagnostics.underrun_frames()
             ),
-            (2_148, 1_023)
+            (1_125, 1_023)
         );
         drop(output);
         assert!(!audio.advance(CALLBACK_FRAMES), "a dropped output detaches");
