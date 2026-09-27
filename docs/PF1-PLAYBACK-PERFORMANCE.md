@@ -197,6 +197,14 @@ farthest from every demand region on that source (two readers → two regions),
 behind-travel first. Across rings, inactive sources go first, then sources over
 share. Pinned frames are never evicted. On a job change the preview drops
 obsolete lookahead **before** it waits.
+*Travel (R29, review B F4; S1d implements it per source cache):* behind is
+below the nearest demand point travelling forward, above it travelling
+backward. The direction follows the demand point that moved least (the
+smallest non-zero step to the nearest previous point, forward on a tie),
+so a reversal flips it at once and a discontinuous seek is a step in the
+jump's direction (what the jump left behind goes first); an unmoved or
+cleared demand keeps it; a source's first demand is forward. Capacity
+eviction (the 32-entry ring) also skips pinned frames (review B F3).
 
 **K-6 [S1] Proofs, export, thumbnails (R15).** `monitor_proof_for_document`,
 export and agent thumbnails keep today's synchronous `FrameRenderer`, cache and
@@ -507,6 +515,16 @@ the position unchanged (G9).
   meters; (4) stores `fallback_frame` = duration, then `sample_rate` = 0, so
   `position()` switches directly to duration; (5) sets `playing` = false and
   emits `PlaybackStateChanged(Paused)` and `Position(duration)`.
+- *Drained is the ring, not the device (R29, review B S1).* The clock
+  advances inside the output callback, before the host API takes the
+  buffer (ALSA `writei`, WASAPI `ReleaseBuffer`), so "drained" means the
+  programme has left the ring, not that its last sample has sounded; the
+  terminal stop can cut the device's queued output. S1 claims no device
+  drain; an output-drain acknowledgment is deferred with D9.
+- *Races (R29, review B F1/F2).* A seek pending when the programme drains
+  is applied first, still playing; a seek published before the stop's
+  `eos_generation` bump resumes playing after it. A `Pause` handled once
+  the programme has played out, before the tick, takes the terminal stop.
 - *Tests:* a one-frame 30000/1001 timeline at 48 kHz (ends at sample 1601)
   and a long programme both finish with `position()` = duration, loudness
   truncated there and the stopped state; the 2 s stall control does not
@@ -758,6 +776,6 @@ Opus. *CI on push*, Windows included.
 | D6 | ME14's absolute WARP 20 fps floor (owed) | WARP's passes dominate | lead with Riel, VM | the VM run |
 | D7 | Reverse and > 1× shuttle | not needed for the three videos | MO backlog | a session request |
 | D8 | Long-edge decode cap for portrait sources in landscape documents | changes pixels; needs a per-layer argument | MO backlog | such a source in W-1 or the session |
-| D9 | Device output-latency compensation | AU-owned clock semantics | AU backlog | recorded `device_latency_ms` > 1 frame |
+| D9 | Device output-latency compensation; an output-drain acknowledgment, so the terminal stop waits for the last sample to sound (V-2's drained predicate is the ring's) | AU-owned clock semantics | AU backlog | recorded `device_latency_ms` > 1 frame, or an audibly clipped programme end |
 | D10 | Native SVG raster gates; cached external-render fixture | AW2 owns code and external clips (A1) | AW2 | AW2 design |
 | D11 | Bounded streaming, row banding and a lazy `decoded_layers` for required sets > C (preview or full resolution) | R15: kept out of the scheduler core; K-3 falls back to today's path | export-performance slice (D3 owner) | G17 fails, or a full-resolution set exceeds C in the session |

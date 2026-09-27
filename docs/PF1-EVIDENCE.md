@@ -933,7 +933,12 @@ PF1 seek lane=LH workload=explainer_16x9 run=2 random_p95_ms=204.9 random_max_ms
   (G3, LH) and `…_on_the_fallback_adapter` (LL, recorded);
   `PF1_ONLY=typical_1080p PF1_RUNS=1 pf1_harness::pf1_play_baseline` (LL;
   `PF1_HARDWARE=1` for LH). The CI gates ran on the same release binary
-  (LL, `--nocapture`), and in each commit's `cargo test -p kinewright-media`.
+  (LL, `--nocapture`), and in `cargo test -p kinewright-media` at each
+  commit from the one that introduced them (E10.4).
+- **Review fixes (R29).** `507e22c`, `9ee47fa`, `d8c6364` and `bb9b68d`
+  fix both S1 reviews' findings after the stage end; E10.8 records them.
+  The timing lanes were not rerun (E10.8 says why); the correctness gates'
+  raw lines at `bb9b68d` are in E10.6.
 
 ### E10.2 I4 (S0's 5% rule, `BASELINES` untouched)
 
@@ -947,9 +952,10 @@ PF1 seek lane=LH workload=explainer_16x9 run=2 random_p95_ms=204.9 random_max_ms
 | S1 end `217986a` | 77.03 / 76.23 / 75.95 | −84.7% | 72.87 / 73.00 / 73.69 | −85.2% | ok |
 
 - **The unmodified S0 binary fails I4 in this session** (+6.4% / +6.7%,
-  against +2.4% / +2.6% in E9.2). Nothing in the code changed, so this is
-  the ambient load above. It shows the 5% rule's margin is within this
-  desktop's noise; the S1 figures clear it by 80 points.
+  against +2.4% / +2.6% in E9.2). The code is the same, so this is
+  session-to-session variability; the ambient load above is the likely
+  cause but is not shown to be the only one. It shows the 5% rule's margin
+  is within this desktop's noise; the S1 figures clear it by 80 points.
 - **S1a's own effect** (the control, measured before S1b): −56% of the
   end-to-end mean on both lanes (529.8 → 233.0 ms LL, 527.0 → 230.7 ms
   LH), from removing one per-pixel `Vec` collect.
@@ -976,8 +982,11 @@ PF1 seek lane=LH workload=explainer_16x9 run=2 random_p95_ms=204.9 random_max_ms
 
 ### E10.4 G9, G12, G5 and I9 (CI)
 
-All pass in every commit's `cargo test -p kinewright-media` and on the
-stage-end release binary (LL):
+Each passes in `cargo test -p kinewright-media` at every commit from the
+one that introduced it (G5 `8e1a285`; G9 and I9 `207fd6c`; G12 `217986a`;
+the I1 tests `47b7d68`–`1d54158`; before those commits the tests did not
+exist), and on the stage-end release binary (LL). The raw lines, rerun
+after the review fixes at `bb9b68d`, are in E10.6:
 - **G9** `audio::tests::the_clock_counts_whole_popped_frames_only`: a partial
   frame pops one frame (position 10 → 11); an empty ring leaves the position
   unchanged while `underrun_frames` counts every frame.
@@ -1004,7 +1013,10 @@ stage-end release binary (LL):
   and green.
 - **I1** (exhaustive): `decode::tests::input_tables_match_every_accepted_descriptor`
   (442 accepted tuples through `classify_source_with_assumption` and
-  `select_conversion`, 2,567,942 rejected, 90 keys, every code),
+  `select_conversion`, 2,567,942 rejected, every code; since `507e22c`
+  each accepted tuple is checked against its own per-pixel reference
+  decode, not one reference per production `ConversionKey` (review A F2);
+  the 442 tuples share 90 keys),
   `decode::tests::fused_table_fill_matches_the_unfused_path_for_every_orientation`,
   `frame::tests::rgba64_decode_matches_the_collect_reference_bit_for_bit`
   and `conversion::tests::monitor_table_equals_the_f32_encode_for_every_f16_pattern`.
@@ -1123,9 +1135,49 @@ PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workl
 PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=523 late=590 early=0 dropped=687 present_p50_ms=38.3 present_p95_ms=145.6 present_max_ms=188.7 held_max_ms=185.8 av_offset_max_ms=200.0 clock_stall_max_ms=45.6 underrun_frames=512 drain_underrun_frames=1024 peak_rss_mib=898.6 ledger_peak_mib=56.3 table_live_kib=128 passes=false
 ```
 
+Correctness gates (review B S3), `bb9b68d`, debug profile, default lane
+(LL, llvmpipe), `cargo test -p kinewright-media --lib -- --exact
+--test-threads=1 <names>`. FFmpeg's stderr log lines that interleave with
+four of the `ok` lines are removed; the summary line is as printed:
+
+```
+running 23 tests
+test audio::tests::callback_consumes_ring_then_writes_silence_and_accounts_frames ... ok
+test audio::tests::the_clock_counts_whole_popped_frames_only ... ok
+test cache::tests::backward_travel_drops_the_frames_above_the_demand_first ... ok
+test cache::tests::capacity_eviction_keeps_the_pinned_frames ... ok
+test cache::tests::distance_eviction_spares_the_shown_frame_and_drops_behind_travel_first ... ok
+test cache::tests::travel_follows_reversals_and_seeks ... ok
+test conversion::tests::a_key_being_built_is_built_once_under_eviction ... ok
+test conversion::tests::built_tables_are_counted_while_held_and_alpha_is_exact ... ok
+test conversion::tests::monitor_table_equals_the_f32_encode_for_every_f16_pattern ... ok
+test decode::tests::input_tables_match_every_accepted_descriptor ... ok
+test engine::tests::a_drained_one_frame_timeline_stops_at_its_duration ... ok
+test engine::tests::a_long_programme_stops_at_its_duration_and_a_stall_does_not_complete ... ok
+test engine::tests::a_pause_after_the_programme_drained_stops_at_the_duration ... ok
+test engine::tests::a_playing_seek_that_races_the_terminal_stop_keeps_playing ... ok
+test engine::tests::a_seek_after_the_stop_or_before_a_pause_stays_paused ... ok
+test engine::tests::only_the_live_monitor_encodes_through_the_table ... ok
+test engine::tests::the_monitor_caps_the_long_edge_at_1280 ... ok
+test mo2_perf_fixtures::r28_ledger_control_rejects_the_1080p_budget ... ok
+test mo2_perf_fixtures::r28_ledger_holds_the_ceilings_and_releases_every_charge ... ok
+test render::tests::a_thumbnail_leaves_the_preview_demand_alone ... ok
+test render::tests::capacity_eviction_keeps_every_shown_frame_of_one_source ... ok
+test render::tests::overshoot_is_bounded_by_the_demand_points ... ok
+test render::tests::preview_window_plays_two_continuous_sources_without_seeking ... ok
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 877 filtered out; finished in 52.60s
+```
+
+G5 = `preview_window_plays…`; G9 = `the_clock_counts…` and the amended
+`callback_consumes…`; G12 = `the_monitor_caps…`; I9 = the two
+`…stops_at_its_duration…` tests; I3 = the two `r28_ledger_*` tests (MO2's,
+unchanged by S1: S1's tables are CPU allocations and charge no GPU ledger).
+The full `cargo test --workspace` at `bb9b68d` is in E10.8.
+
 ### E10.7 Deviations and notes
 
-- **S1e (U-1) is not implemented.** Its condition is "S0 finds
+- **S1e (U-1) is not implemented — resolved by R28: U-1 moves to S3b.**
+  Its condition is "S0 finds
   `upload_bytes`'s extra full copy material"; S0 never measured it (E3 says
   S0 would; E9 has no figure). A scratch release measurement (not
   committed) gives `upload_bytes` 1.829 ms against a plain copy's 0.250 ms
@@ -1134,23 +1186,71 @@ PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typic
   LH frame. G3 passes without it. An exact byte cast needs
   `zerocopy::IntoBytes` for `f16` (`half` 2.7.1 already implements it and
   zerocopy is already in the lock file) as a direct dependency of
-  `kinewright-media`, because the workspace forbids `unsafe`. Proposed: the
-  lead decides whether that counts as material and whether to add the
-  direct dependency (S1e follow-up) or leave it to S3b's staging ring.
+  `kinewright-media`, because the workspace forbids `unsafe`. (Proposed at
+  the stage end; R28 moved it to S3b's staging ring.)
 - **Two S0 harness tests are adjusted for V-1** besides the named test
   (C-5 says only the V-1 test is edited):
   `stepped_callbacks_pop_through_render_output_and_count_underruns` (its
   comment already said "V-1 fixes that in S1") and
   `an_observed_clock_never_runs_ahead_of_its_underruns`, which relied on the
   clock advancing over an empty ring (it would never finish under V-1) and
-  now half-fills the ring each callback. Proposed: C-5 reads "only the V-1
-  tests (including S0's T7/R25 harness tests) are edited".
+  now half-fills the ring each callback. **Resolved by R28:** C-5 now
+  permits these V-1 edits to S0's harness tests.
 - **The live table counter is test-only** (`table_live_kib=` on the
   harness line). `CacheStats` is public wire data, so the production
   exposure is left to S2a's preview `stats`.
-- **K-6:** titles are still evicted after every video frame, and a pinned
-  frame per demand point can overshoot the window cap by at most one frame
-  per active source until the next reservation (S1 claims no I12).
+- **K-6 overshoot (corrected, review B S2):** titles are still evicted
+  after every video frame. The frame shown at each *demand point* is
+  pinned, and one source can have several points (several clips of one
+  source), so the preview's video cache can exceed C by pinned frames
+  alone: live ≤ max(C, P·f), P the demand points of the current frame
+  (not the active sources), f the proxy frame bytes, and it stays there
+  for as long as those points are demanded, not only until the next
+  reservation. `render::tests::overshoot_is_bounded_by_the_demand_points`
+  covers it: a one-frame budget and points 0/100/200 on one source hold
+  exactly 3f over three frames. S1 still claims no I12 (that is S2b-3's).
 - **Budget:** 1,029 non-blank, non-comment `.rs` lines added and 93
   removed across S1a–S1g, against ~650; the exhaustive and worker tests
   are most of the excess (per-commit counts are in the S1 report).
+
+### E10.8 Review fixes (R29)
+
+Both S1 reviews (`target/review/pf/review-s1-A.md`, `review-s1-B.md`)
+accepted with fixes. Every finding was confirmed against the code; none is
+disputed.
+
+| Finding | Commit | Fix | Witness (fails with the fix reverted) |
+|---|---|---|---|
+| A F1: G-1 reached proofs and agent images | `9ee47fa` | `MonitorPurpose`; only `Worker::present` (`render_live`) encodes through the table; proofs, `Control::Thumbnail` and every fixture keep the f32 encode | `only_the_live_monitor_encodes_through_the_table` |
+| A F2: oracle memoised by `ConversionKey` | `507e22c` | a per-pixel reference decode per accepted tuple | the exhaustive test itself |
+| A F3: two builds of one key under eviction | `507e22c` | the registry never evicts a cell still being built | `a_key_being_built_is_built_once_under_eviction` (fails on the old eviction) |
+| A should: counter lifecycle | `507e22c` | isolated counter and registry: eviction retains, clones, final drop, failed builds add 0 | `built_tables_are_counted_while_held_and_alpha_is_exact` |
+| B F1: EOS turned a racing seek into a paused one | `bb9b68d` | tick defers the stop while a seek is pending; a seek stamped before the stop's `eos_generation` resumes playing | `a_playing_seek_that_races_the_terminal_stop_keeps_playing`; control `a_seek_after_the_stop_or_before_a_pause_stays_paused` |
+| B F2: a pause after drain stopped short | `bb9b68d` | `Control::Pause` takes `stop_at_end` once the programme has played out | `a_pause_after_the_programme_drained_stops_at_the_duration` |
+| B F3: capacity eviction ignored pins | `d8c6364` | `FrameCache::insert` evicts the oldest *unpinned* entry | `capacity_eviction_keeps_every_shown_frame_of_one_source` (old code: frame 0 evicted), `capacity_eviction_keeps_the_pinned_frames` |
+| B F4: "behind" ignored direction | `d8c6364` | per-cache travel: the demand point that moved least sets it; a discontinuous seek is a step in the jump's direction; unmoved or cleared demand keeps it; the first is Forward | `backward_travel_drops_the_frames_above_the_demand_first`, `travel_follows_reversals_and_seeks` |
+| B F5: thumbnails used the preview policy | `9ee47fa` | `render_thumbnail` sets the preview demand aside, so no demand rebuild, pins, window or distance eviction | `a_thumbnail_leaves_the_preview_demand_alone` |
+| B S1: drained ≠ audible | docs | §9 V-2 and D9 state the boundary | — |
+| B S2: overshoot bound | `d8c6364`, docs | E10.7 corrected to demand points | `overshoot_is_bounded_by_the_demand_points` |
+| B S3: raw gate lines | docs | E10.6 | — |
+
+- **B S1 — drained means the ring is drained, not that the device has
+  played it.** The clock advances inside the output callback, before cpal
+  hands the buffer to ALSA (`writei`) or WASAPI (`ReleaseBuffer`); the
+  stop can therefore cut up to the device's queued output before it
+  sounds. The simulated fixtures cannot show last-audible-sample
+  completion, and S1 does not claim device drain. An output-drain
+  acknowledgment and its test belong to the AU follow-up with D9.
+- **Timing lanes not rerun.** No fix moves G3 or G5's hot path: G3's
+  bench (`mo2_bench`) renders through `FrameRenderer::new` with
+  `MonitorPurpose::LiveMonitor`, the same encode as `217986a`; a legacy
+  renderer has no demand, so capacity eviction takes the same entry as
+  before (an empty pin list, no allocation) and `pin_demand` is a no-op
+  pass over its sources. G5 is a seek-count gate and passes (E10.6).
+- **Workspace gate at `bb9b68d`** (debug, default lane, default threads):
+  `cargo test --workspace` exit 0, 36 test binaries, 3,364 passed,
+  0 failed, 41 ignored; `cargo fmt -- --check` clean. Each review-fix
+  commit also passed the workspace build, `clippy --workspace
+  --all-targets -D warnings`, rustfmt on its files and the full
+  `cargo test -p kinewright-media` (880 lib tests passed, 20 ignored, at
+  `bb9b68d`).
