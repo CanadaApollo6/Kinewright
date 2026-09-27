@@ -17,6 +17,7 @@ use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
 };
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
+use kinewright_core::{AgentCancel, RecordProposalError, truncate_to_serialized_bytes};
 use kinewright_core::{
     AgentEvent, Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus,
     AudioBusId, AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect,
@@ -44,7 +45,6 @@ use kinewright_core::{
     plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
-use kinewright_core::{RecordProposalError, truncate_to_serialized_bytes};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
@@ -11876,18 +11876,41 @@ impl ServerHandler for KinewrightMcp {
             .then(|| request.arguments.as_ref()?.get("name")?.as_str())
             .flatten()
             == Some("preview_solo");
+        // PF1 R-4 (review B F2): the client's cancellation reaches the media
+        // requests the blocking handler makes, through a token it owns.
+        // rmcp cancels `ct` on `notifications/cancelled` but keeps polling
+        // this future; dropping it also cancels.
+        let cancel = AgentCancel::default();
+        let ct = context.ct.clone();
         async move {
+            struct CancelOnExit(AgentCancel);
+            impl Drop for CancelOnExit {
+                fn drop(&mut self) {
+                    self.0.cancel();
+                }
+            }
+            let _exit = CancelOnExit(cancel.clone());
+            let scoped = cancel.clone();
+            let task = tokio::task::spawn_blocking(move || {
+                scoped.scope(|| service.call_exposed_blocking(request))
+            });
+            tokio::pin!(task);
+            let joined = tokio::select! {
+                joined = &mut task => joined,
+                () = ct.cancelled() => {
+                    cancel.cancel();
+                    task.await
+                }
+            };
             // A panicked or cancelled handler becomes fixed text: its payload
             // may be unbounded or carry paths, and it still crosses ME4's
             // choke point below.
-            let reply = tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(McpError::internal_error(
-                        "tool call failed: handler panicked",
-                        None,
-                    ))
-                });
+            let reply = joined.unwrap_or_else(|_| {
+                Err(McpError::internal_error(
+                    "tool call failed: handler panicked",
+                    None,
+                ))
+            });
             let reply = if solo {
                 bound_solo_reply(context.id, reply)
             } else {

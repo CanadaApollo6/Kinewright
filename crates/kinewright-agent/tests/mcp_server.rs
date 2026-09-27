@@ -13,8 +13,8 @@ use kinewright_media::{
 };
 use rmcp::{
     RoleClient, ServiceExt as _,
-    model::{CallToolRequestParams, CallToolResult},
-    service::RunningService,
+    model::{CallToolRequest, CallToolRequestParams, CallToolResult, ClientRequest},
+    service::{PeerRequestOptions, RunningService},
     transport::StreamableHttpClientTransport,
 };
 use serde_json::json;
@@ -253,6 +253,64 @@ async fn ripple_marker_position_renders_through_the_real_mcp_server() {
             .text
             .contains("marker 1 at=45f/1.500s color=0 label=\"Review cut\"")
     );
+
+    client.cancel().await.unwrap();
+    server.shutdown();
+}
+
+/// PF1 review B F2: a client's `notifications/cancelled` reaches a frame
+/// proof waiting in the agent lane, through the production path (MCP
+/// `call_tool` -> `spawn_blocking` -> `frame_at` -> `thumbnail_for_document`).
+/// Before the fix the job stayed queued and uncancelled until the lane freed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_tool_call_cancels_its_waiting_frame_proof() {
+    let mut arguments = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x180:rate=30000/1001",
+        "-frames:v",
+        "30",
+    ];
+    arguments.extend(MANAGED_BT709_ENCODE_ARGUMENTS);
+    let generated = GeneratedMedia::ffmpeg("pf1-cancel", &arguments, "mp4");
+    let media = Arc::new(FfmpegMediaEngine::new().unwrap());
+    let asset = media.probe(generated.path()).unwrap();
+    let core = Core::spawn(single_clip_document(asset)).unwrap();
+    let server = McpServer::start(core, media.clone(), media.clone()).unwrap();
+    let client =
+        ().serve(StreamableHttpClientTransport::from_uri(server.endpoint()))
+            .await
+            .unwrap();
+    let hold = media.hold_agent_lane();
+    let request = ClientRequest::CallToolRequest(CallToolRequest::new(
+        CallToolRequestParams::new("invoke_capability").with_arguments(
+            json!({"name": "get_frame_at", "arguments": {"timecode": 1}})
+                .as_object()
+                .unwrap()
+                .clone(),
+        ),
+    ));
+    let handle = client
+        .peer()
+        .send_cancellable_request(request, PeerRequestOptions::no_options())
+        .await
+        .unwrap();
+    let until = |wanted: (usize, usize)| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while hold.waiting() != wanted {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiting {:?}, wanted {wanted:?}",
+                hold.waiting()
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    until((1, 0));
+    handle.cancel(Some("test".to_owned())).await.unwrap();
+    until((1, 1));
+    drop(hold);
 
     client.cancel().await.unwrap();
     server.shutdown();
