@@ -32,7 +32,7 @@ static ALPHA: LazyLock<Box<[f16]>> = LazyLock::new(|| {
         .map(|code| f16::from_f32(f32::from(code) / 65_535.0))
         .collect()
 });
-static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(Mutex::default);
+static REGISTRY: LazyLock<Registry<TransferTable>> = LazyLock::new(Registry::new);
 
 /// Every field that determines `rgba64_normalization_max`, the
 /// `expand_native_range` branch and `decode_transfer` (R1).
@@ -67,11 +67,17 @@ pub(crate) enum PixelStage {
 #[derive(Debug)]
 pub(crate) struct TransferTable {
     entries: Result<Box<[f16]>, (PixelStage, ColorPipelineError)>,
+    /// The live-bytes counter this table is charged to (tests isolate it).
+    counter: &'static AtomicUsize,
 }
 
 impl TransferTable {
     /// `max` is `rgba64_normalization_max` of any description with this key.
     fn build(key: &ConversionKey, max: u32) -> Self {
+        Self::build_counted(key, max, &LIVE_TABLE_BYTES)
+    }
+
+    fn build_counted(key: &ConversionKey, max: u32, counter: &'static AtomicUsize) -> Self {
         let description = ColorDescription {
             matrix: key.matrix.clone(),
             range: key.range.clone(),
@@ -81,9 +87,9 @@ impl TransferTable {
         };
         let entries = Self::fill(&description, max);
         if let Ok(entries) = &entries {
-            LIVE_TABLE_BYTES.fetch_add(entries.len() * 2, Ordering::Relaxed);
+            counter.fetch_add(entries.len() * 2, Ordering::Relaxed);
         }
-        Self { entries }
+        Self { entries, counter }
     }
 
     fn fill(
@@ -117,7 +123,7 @@ impl TransferTable {
 impl Drop for TransferTable {
     fn drop(&mut self) {
         if let Ok(entries) = &self.entries {
-            LIVE_TABLE_BYTES.fetch_sub(entries.len() * 2, Ordering::Relaxed);
+            self.counter.fetch_sub(entries.len() * 2, Ordering::Relaxed);
         }
     }
 }
@@ -153,28 +159,56 @@ pub(crate) fn live_table_bytes() -> usize {
     LIVE_TABLE_BYTES.load(Ordering::Relaxed)
 }
 
-#[derive(Default)]
-struct Registry {
-    cells: HashMap<ConversionKey, Arc<OnceLock<Arc<TransferTable>>>>,
-    recency: VecDeque<ConversionKey>,
+type Cell<T> = Arc<OnceLock<Arc<T>>>;
+/// The cells by key, and the keys from least to most recently requested.
+type Cells<T> = (HashMap<ConversionKey, Cell<T>>, VecDeque<ConversionKey>);
+
+/// X-5: one table per key, built outside the lock. LRU drops registry
+/// membership only, so a decoder holding an evicted key keeps its `Arc`.
+struct Registry<T> {
+    state: Mutex<Cells<T>>,
+    keys: usize,
 }
 
-/// One table per key; LRU drops registry membership only, so a decoder
-/// holding an evicted key keeps its `Arc` (X-5).
-fn transfer_table(key: &ConversionKey, max: u32) -> Arc<TransferTable> {
-    let cell = {
-        let mut registry = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
-        registry.recency.retain(|held| held != key);
-        registry.recency.push_back(key.clone());
-        let cell = Arc::clone(registry.cells.entry(key.clone()).or_default());
-        while registry.recency.len() > REGISTRY_KEYS {
-            if let Some(oldest) = registry.recency.pop_front() {
-                registry.cells.remove(&oldest);
-            }
+impl<T> Registry<T> {
+    fn new() -> Self {
+        Self::with_keys(REGISTRY_KEYS)
+    }
+
+    fn with_keys(keys: usize) -> Self {
+        Self {
+            state: Mutex::new((HashMap::new(), VecDeque::new())),
+            keys,
         }
-        cell
-    };
-    Arc::clone(cell.get_or_init(|| Arc::new(TransferTable::build(key, max))))
+    }
+
+    fn get(&self, key: &ConversionKey, build: impl FnOnce() -> T) -> Arc<T> {
+        let cell = {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            let (cells, recency) = &mut *state;
+            recency.retain(|held| held != key);
+            recency.push_back(key.clone());
+            let cell = Arc::clone(cells.entry(key.clone()).or_default());
+            // Only ready tables leave: a build in progress keeps its cell, so
+            // a concurrent request for its key waits on it (one build per key).
+            while recency.len() > self.keys {
+                let ready =
+                    |held: &ConversionKey| cells.get(held).is_none_or(|c| c.get().is_some());
+                let Some(oldest) = recency.iter().position(ready) else {
+                    break;
+                };
+                if let Some(oldest) = recency.remove(oldest) {
+                    cells.remove(&oldest);
+                }
+            }
+            cell
+        };
+        Arc::clone(cell.get_or_init(|| Arc::new(build())))
+    }
+}
+
+fn transfer_table(key: &ConversionKey, max: u32) -> Arc<TransferTable> {
+    REGISTRY.get(key, || TransferTable::build(key, max))
 }
 
 /// How a validated source converts to working pixels.
@@ -238,36 +272,104 @@ fn separable(description: &ColorDescription) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
-    fn built_tables_are_counted_while_held_and_alpha_is_exact() {
-        let key = ConversionKey {
+    fn key(bits: u16, transfer: ColorTransfer) -> ConversionKey {
+        ConversionKey {
             matrix: ColorMatrix::Bt709,
             range: ColorRange::Full,
-            bit_depth: ColorBitDepth::Eight,
-            transfer: ColorTransfer::Bt709,
-        };
-        let table = TransferTable::build(&key, 255 << 8);
+            bit_depth: ColorBitDepth::Integer(bits),
+            transfer,
+        }
+    }
+
+    /// The live-bytes lifecycle on an isolated counter and registry: a
+    /// table stays charged after eviction while any owner holds it, only the
+    /// last drop releases it, and a failed build charges nothing.
+    #[test]
+    fn built_tables_are_counted_while_held_and_alpha_is_exact() {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let registry = Registry::with_keys(2);
+        let build = |key: &ConversionKey| TransferTable::build_counted(key, 255 << 8, &COUNTER);
+        let held = key(8, ColorTransfer::Bt709);
+        let table = registry.get(&held, || build(&held));
         let bytes = table.entries().map(<[f16]>::len).expect("builds") * 2;
-        assert_eq!(bytes, 128 * 1024);
-        assert!(live_table_bytes() >= bytes);
-        let failed = TransferTable::build(
-            &ConversionKey {
-                transfer: ColorTransfer::Unknown,
-                ..key
-            },
-            255 << 8,
-        );
         assert_eq!(
-            failed.entries().map(<[f16]>::len),
-            Err(&(
-                PixelStage::ColourDecode,
-                ColorPipelineError::UnknownTransfer
-            ))
+            (bytes, COUNTER.load(Ordering::Relaxed)),
+            (128 * 1024, bytes)
         );
+        let owner = Arc::clone(&table);
+        for bits in 9..12 {
+            let failed = key(bits, ColorTransfer::Unknown);
+            let failed = registry.get(&failed, || build(&failed));
+            assert_eq!(
+                failed.entries().map(<[f16]>::len),
+                Err(&(
+                    PixelStage::ColourDecode,
+                    ColorPipelineError::UnknownTransfer
+                ))
+            );
+        }
+        assert_eq!(
+            COUNTER.load(Ordering::Relaxed),
+            bytes,
+            "failed builds add 0"
+        );
+        let rebuilt = registry.get(&held, || build(&held));
+        assert!(!Arc::ptr_eq(&rebuilt, &table), "evicted from the registry");
+        assert_eq!(COUNTER.load(Ordering::Relaxed), 2 * bytes);
+        drop((rebuilt, table));
+        assert_eq!(
+            COUNTER.load(Ordering::Relaxed),
+            2 * bytes,
+            "the registry and an owner"
+        );
+        drop(owner);
+        assert_eq!(
+            COUNTER.load(Ordering::Relaxed),
+            bytes,
+            "the last owner releases"
+        );
+        drop(registry);
+        assert_eq!(COUNTER.load(Ordering::Relaxed), 0);
         for (code, value) in (0..=u16::MAX).zip(alpha_table()) {
             let expected = f16::from_f32(f32::from(code) / 65_535.0);
             assert_eq!(value.to_bits(), expected.to_bits());
         }
+    }
+
+    /// X-5 (review A F3): a key whose build is in progress survives LRU
+    /// pressure, so a concurrent request waits for that build instead of
+    /// starting a second one.
+    #[test]
+    fn a_key_being_built_is_built_once_under_eviction() {
+        use std::sync::mpsc;
+        let registry = Arc::new(Registry::<usize>::with_keys(1));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let slow = key(8, ColorTransfer::Bt709);
+        let (started_tx, started) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let spawn = |started: Option<mpsc::Sender<()>>, wait: Option<mpsc::Receiver<()>>| {
+            let (registry, builds, slow) =
+                (Arc::clone(&registry), Arc::clone(&builds), slow.clone());
+            std::thread::spawn(move || {
+                registry.get(&slow, || {
+                    if let (Some(started), Some(wait)) = (started, wait) {
+                        started.send(()).expect("the test waits");
+                        wait.recv().expect("the test releases");
+                    }
+                    builds.fetch_add(1, Ordering::SeqCst)
+                })
+            })
+        };
+        let first = spawn(Some(started_tx), Some(release_rx));
+        started.recv().expect("the first build started");
+        for bits in 9..12 {
+            registry.get(&key(bits, ColorTransfer::Bt709), || 99);
+        }
+        let second = spawn(None, None);
+        release.send(()).expect("release the first build");
+        let (first, second) = (first.join().unwrap(), second.join().unwrap());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
     }
 
     /// PF1 G-1 (I1): every f16 pattern, NaN, ±Inf, denormals and ±0 included.

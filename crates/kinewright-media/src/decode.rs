@@ -1787,7 +1787,6 @@ pub(crate) fn backend(error: impl std::fmt::Display) -> MediaError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversion::ConversionKey;
     use kinewright_core::classify_source_with_assumption;
 
     #[test]
@@ -2829,7 +2828,6 @@ mod tests {
         let decode = |source: &ManagedSource| {
             decode_bits(&frame, (256, 256), VideoRotation::None, false, source)
         };
-        let mut references = std::collections::HashMap::new();
         let (mut separable, mut rejected) = (0_usize, 0_usize);
         for pr in &primaries { for wp in &white_points { for mx in &matrices { for rg in &ranges {
         for bd in &depths { for tf in &transfers {
@@ -2847,12 +2845,11 @@ mod tests {
             };
             assert!(expected.is_ok(), "{desc:?}");
             separable += usize::from(matches!(source.conversion, Conversion::Separable(_)));
-            let reference = references
-                .entry(ConversionKey::of(&desc))
-                .or_insert_with(|| decode(&per_pixel(&source)));
+            // Review A F2: each accepted tuple gets its own reference decode,
+            // never one shared through the production key.
             let actual = decode(&source);
             assert!(actual.is_ok(), "{desc:?}");
-            assert_eq!(&actual, reference, "{desc:?} {a:?}");
+            assert_eq!(actual, decode(&per_pixel(&source)), "{desc:?} {a:?}");
         }
         } } } } } }
         assert!(separable > 0 && rejected > 0, "{separable} {rejected}");
