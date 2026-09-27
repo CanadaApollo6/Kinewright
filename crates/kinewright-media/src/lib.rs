@@ -23,6 +23,7 @@ mod render;
 mod room_tone_store;
 mod sha256;
 mod spectrum;
+mod stats;
 mod timeline;
 mod title;
 mod transcript;

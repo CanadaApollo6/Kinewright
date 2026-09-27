@@ -406,8 +406,8 @@ pub struct PreviewFrame {
     pub texture: FrameTexture,
 }
 
-/// PF1 R-5: playback health since the engine started. Fields a stage does
-/// not measure yet stay zero.
+/// PF1 R-5: playback health since the latest `play` (a seek while playing
+/// keeps counting). Fields a stage does not measure yet stay zero.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlaybackStats {
     /// Due frames: every acked or dropped playback frame.

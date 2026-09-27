@@ -978,6 +978,42 @@ fn pf1_process_memory_reads_this_process() {
     );
 }
 
+/// V-3: the worker keeps filling while the preview thread is stuck in a 5 s
+/// render: 3.2 s of stepped callbacks, 20 ms apart, never underrun (a worker
+/// that rendered would starve the 1 s cushion within about a second).
+#[test]
+fn pf1_the_fill_runs_while_the_preview_renders() {
+    let Some(gpu) = fixture_gpu_or_skip() else {
+        return;
+    };
+    let (audio, data) = (SimulatedAudio::stepped(), TempDirectory::new("pf1-v3"));
+    let (faults, diagnostics) = (Arc::new(Faults::default()), Arc::default());
+    faults.render_delay_ms.store(5_000, Ordering::Relaxed);
+    let root = data.root().to_path_buf();
+    let engine = FfmpegMediaEngine::new_for_harness(
+        gpu,
+        root,
+        Some(audio.clone()),
+        faults,
+        Arc::clone(&diagnostics),
+    )
+    .expect("the engine starts");
+    engine.set_document(Arc::new(perf_fixtures::title_card((64, 64), 900)));
+    engine.play(TimeCode::ZERO);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !audio.advance(0) {
+        assert!(Instant::now() < deadline, "the simulated stream opens");
+        thread::sleep(Duration::from_millis(1));
+    }
+    for _ in 0..150 {
+        assert!(audio.advance(CALLBACK_FRAMES));
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(diagnostics.underrun_frames(), 0, "the worker kept filling");
+    assert!(engine.position() >= TimeCode(95), "{:?}", engine.position());
+    engine.pause();
+}
+
 /// V-5: the engine's clock moves only when the stepped driver runs a callback.
 #[test]
 fn pf1_engine_clock_follows_the_stepped_simulated_driver() {

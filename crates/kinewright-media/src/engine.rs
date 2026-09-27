@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
@@ -22,11 +22,12 @@ use kinewright_core::{
     MediaCacheClearResult, MediaCacheFamily, MediaCacheFamilyStatus, MediaCacheInventory,
     MediaError, MediaEvent, MediaKind, MixLevelReport, MixLevelRequest, MixNoiseProfileRequest,
     MixPeaks, MixSpectrumReport, MixSpectrumRequest, MixWindowLevelReport, MixWindowRequest,
-    MonitorProof, NoiseProfileReport, Playback, PlaybackState, PreviewFrame, ProgressSink,
-    Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus, VisualAssetResult,
-    WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof, WorkingProofMetadata,
-    audio_qc_technical_pass, delivery_audio_exceptions, export_lut_preflight_with,
+    MonitorProof, NoiseProfileReport, Playback, PlaybackState, PlaybackStats, PreviewFrame,
+    ProgressSink, Rational, RgbaImage, SceneStatus, SilenceStatus, TimeCode, TimelineBeat,
+    TimelineSceneChange, TimelineSilenceSpan, TimelineTranscriptWord, TranscriptStatus,
+    VisualAssetResult, WORKING_PROOF_ENCODING, WORKING_PROOF_STAGE, WorkingProof,
+    WorkingProofMetadata, audio_qc_technical_pass, delivery_audio_exceptions,
+    export_lut_preflight_with,
 };
 
 use crate::{
@@ -335,6 +336,8 @@ pub struct FfmpegMediaEngine {
     coalesced: Arc<Mutex<Coalesced>>,
     /// PF1 R-4: the agent lane the `thumbnail_*` guards cancel through.
     lane: Arc<Lane>,
+    /// PF1 R-5: this engine's output-callback underrun counters.
+    diagnostics: Arc<AudioDiagnostics>,
     clock: Arc<SharedClock>,
     meter: Arc<MeterState>,
     /// AU1 §4.1: the peak table the worker installs while it is playing, read
@@ -497,6 +500,7 @@ impl FfmpegMediaEngine {
         let worker_lane = Arc::clone(&lane);
         let lut_lattices = Arc::new(RwLock::new(PublishedLattices::default()));
         let worker_lut_lattices = Arc::clone(&lut_lattices);
+        let diagnostics = Arc::clone(&options.diagnostics);
         let spawned = thread::Builder::new()
             .name("kinewright-media".to_owned())
             .spawn(move || {
@@ -538,6 +542,7 @@ impl FfmpegMediaEngine {
             events_rx,
             coalesced,
             lane,
+            diagnostics,
             clock,
             meter,
             mix_meters,
@@ -908,6 +913,26 @@ impl Playback for FfmpegMediaEngine {
 
     fn stamp(&self) -> FrameStamp {
         self.coalesced().latest
+    }
+
+    fn stats(&self) -> PlaybackStats {
+        let (mut stats, base) = {
+            let counters = self.lane.counters();
+            (counters.stats, counters.underrun_base)
+        };
+        let (events, frames) = self.diagnostics.underruns();
+        stats.underrun_events = events.saturating_sub(base.0);
+        stats.underrun_frames = frames.saturating_sub(base.1);
+        stats
+    }
+
+    /// R-5: an ack of an image of the current epoch (older ones are stale and
+    /// never acked; the check guards a caller that skips R-2).
+    fn ack_presented(&self, stamp: FrameStamp, at: TimeCode) {
+        if stamp.epoch == self.coalesced().latest.epoch {
+            let position = self.clock.position().0;
+            self.lane.counters().ack(Instant::now(), position, at.0);
+        }
     }
 
     fn position(&self) -> TimeCode {
@@ -1845,7 +1870,6 @@ struct Worker {
     /// PF1 R23: this engine's output-callback diagnostics.
     audio_diagnostics: Arc<AudioDiagnostics>,
     /// PF1 R-2: stamped failures suppressed as superseded or old-epoch.
-    stale_errors: u64,
     #[cfg(test)]
     faults: Arc<Faults>,
 }
@@ -1931,7 +1955,6 @@ impl Worker {
             last_position: None,
             output_device: OutputDevice::Default,
             audio_diagnostics: Arc::default(),
-            stale_errors: 0,
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -1985,6 +2008,8 @@ impl Worker {
             Control::UpdateAudio(kind, doc) => self.update_audio(kind, doc),
             Control::Play(from, stamp) => {
                 self.apply_control(stamp);
+                let underruns = self.audio_diagnostics.underruns();
+                self.lane.counters().clear(underruns);
                 self.start_playback(from);
                 if !self.playing {
                     self.post_resting(from);
@@ -2078,7 +2103,7 @@ impl Worker {
                 self.pause();
                 self.emit(MediaEvent::StampedError(stamp, error));
             } else {
-                self.stale_errors += 1;
+                self.lane.counters().stats.stale_errors += 1;
             }
         }
     }
@@ -2284,6 +2309,8 @@ impl Worker {
                 self.install_mix_meters(mix_meters);
                 self.audio = Some(runtime);
                 self.playing = true;
+                let frame_ms = crate::preview::frame_ms(fps);
+                (self.lane.counters()).begin(Instant::now(), from.0, frame_ms);
                 self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Playing));
                 self.post(JobKind::Playback { from });
             }
@@ -2345,6 +2372,7 @@ impl Worker {
         self.meter.clear();
         self.install_mix_meters(Arc::new(MixMeters::empty(Arc::clone(&self.meter))));
         self.clock.sample_rate.store(0, Ordering::Release);
+        self.lane.counters().end();
         if self.playing {
             self.playing = false;
             self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Paused));
@@ -2375,6 +2403,7 @@ impl Worker {
         self.clock.fallback_frame.store(end.0, Ordering::Release);
         self.clock.sample_rate.store(0, Ordering::Release);
         self.playing = false;
+        self.lane.counters().end();
         self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Paused));
         self.emit(MediaEvent::Position(end));
     }
@@ -2403,6 +2432,7 @@ impl Worker {
         self.loudness
             .publish_at(self.clock.position_samples.load(Ordering::Acquire));
         let position = self.clock.position();
+        (self.lane.counters()).sample(Instant::now(), position.0);
         // Review B F1: a seek pending since `handle_coalesced_requests` is
         // applied, still playing, on the next pass instead of the stop.
         let seek_pending = self.lock_coalesced().seek.is_some();
@@ -3857,7 +3887,7 @@ mod tests {
         let _ = events.try_iter().count();
         worker.handle_preview_failures();
         assert!(worker.playing && events.is_empty());
-        assert_eq!(worker.stale_errors, 2);
+        assert_eq!(worker.lane.counters().stats.stale_errors, 2);
         let current = worker.lock_coalesced().latest;
         worker.lane.lock().failures = vec![(current, error())];
         worker.handle_preview_failures();
@@ -3896,7 +3926,7 @@ mod tests {
         let latest = worker.lock_coalesced().latest;
         let stamps: Vec<_> = worker.lane.lock().failures.iter().map(|f| f.0).collect();
         let current = stamps.iter().any(|stamp| stamp.is_current(latest));
-        let (playing, stale) = (worker.playing, worker.stale_errors);
+        let (playing, stale) = (worker.playing, worker.lane.counters().stats.stale_errors);
         let _ = events.try_iter().count();
         worker.handle_preview_failures();
         let stopped: Vec<_> = (events.try_iter())
@@ -3910,7 +3940,8 @@ mod tests {
             assert!(!worker.playing && !stopped.is_empty());
         } else {
             assert_eq!((worker.playing, stopped.len()), (playing, 0));
-            assert_eq!(worker.stale_errors, stale + stamps.len() as u64);
+            let now = worker.lane.counters().stats.stale_errors;
+            assert_eq!(now, stale + stamps.len() as u64);
         }
     }
 
@@ -4035,6 +4066,51 @@ mod tests {
 
     i8_shards!(i8_media_0: 0, i8_media_1: 1, i8_media_2: 2, i8_media_3: 3);
     i8_shards!(i8_media_4: 4, i8_media_5: 5, i8_media_6: 6, i8_media_7: 7);
+
+    /// G10 (stepped): a 2 s fill stall (94 callbacks with no worker pass, as
+    /// the Q-3 stall blocks it) starves the ring and stops the clock; the
+    /// preview never waits on the fill (V-3), every frame it publishes is
+    /// within 33 ms of the clock, and publication is back within 5 s.
+    #[test]
+    fn g10_video_tracks_the_clock_within_five_seconds_of_a_fill_stall() {
+        let fps = Rational::new(30, 1).unwrap();
+        let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(900));
+        let (lane, clock) = (Arc::clone(&worker.lane), Arc::clone(&worker.clock));
+        let (mut preview, frames) = crate::preview::tests::test_preview_on(lane, clock);
+        preview.faults.fake_render.store(true, Ordering::Release);
+        preview.faults.step_hold.store(true, Ordering::Release);
+        let (stall, recovered, end) = (47..141, 141 + 235, 141 + 235 + 47);
+        let (mut frozen, mut first_after, mut tail) = (0, None, 0);
+        for callback in 0..end {
+            let before = worker.clock.position();
+            assert!(audio.advance(CALLBACK_FRAMES));
+            if !stall.contains(&callback) {
+                worker.tick();
+            }
+            frozen += usize::from(worker.clock.position() == before);
+            let work = preview.next_work(false).expect("the playback job stays");
+            preview.execute(work);
+            for frame in frames.try_iter() {
+                // One frame is 33.3 ms: ≤ 33 ms means the clock's own frame.
+                let offset = worker.clock.position().0 - frame.at.0;
+                assert_eq!(offset, 0, "callback {callback}: offset {offset} frames");
+                if callback >= stall.end {
+                    first_after.get_or_insert(callback);
+                }
+                tail += usize::from(callback >= recovered);
+            }
+        }
+        assert!(
+            worker.audio_diagnostics.underrun_frames() > 0,
+            "the stall starved"
+        );
+        assert!(frozen >= 40, "the clock stopped: {frozen}");
+        assert!(
+            first_after.is_some_and(|at| at < recovered),
+            "{first_after:?}"
+        );
+        assert!(tail >= 15, "still publishing: {tail}");
+    }
 
     /// Callbacks with a tick after each until the worker stops (or `limit`).
     fn play_out(worker: &mut Worker, audio: &SimulatedAudio, limit: usize) -> usize {

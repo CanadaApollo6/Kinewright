@@ -4126,6 +4126,8 @@ pub(crate) struct AudioDiagnostics {
     /// Frames whose samples a callback failed to pop (an `unwrap_or(0.0)`
     /// in [`render_output`]), counted as they happen.
     underrun_frames: AtomicU64,
+    /// Callbacks that underran at all (R-5 `underrun_events`).
+    underrun_events: AtomicU64,
     /// The device's playback timestamp minus its callback timestamp, never
     /// compensated (D9).
     latency_micros: AtomicU64,
@@ -4137,6 +4139,7 @@ impl AudioDiagnostics {
             let frames = failed_samples.div_ceil(channels.max(1));
             let frames = u64::try_from(frames).unwrap_or(u64::MAX);
             self.underrun_frames.fetch_add(frames, Ordering::Relaxed);
+            self.underrun_events.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -4146,9 +4149,14 @@ impl AudioDiagnostics {
     }
 
     /// Frames any callback of this engine has failed to pop so far.
-    #[cfg(test)]
     pub(crate) fn underrun_frames(&self) -> u64 {
         self.underrun_frames.load(Ordering::Relaxed)
+    }
+
+    /// (Callbacks that underran, frames not popped) so far (R-5).
+    pub(crate) fn underruns(&self) -> (u64, u64) {
+        let events = self.underrun_events.load(Ordering::Relaxed);
+        (events, self.underrun_frames())
     }
 
     /// The latest device callback's `device_latency_ms`, in microseconds.

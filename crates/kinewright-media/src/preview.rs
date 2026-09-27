@@ -29,6 +29,7 @@ use crate::{
     engine::{SharedClock, monitor_max_width, send_latest},
     lut_store::LutLibrary,
     render::{DecodeStrategy, FrameRenderer, RenderScale},
+    stats::Counters,
 };
 
 /// R-4: at most this many agent jobs wait; a full queue replies at once.
@@ -114,11 +115,17 @@ pub(crate) struct LaneState {
 pub(crate) struct Lane {
     state: Mutex<LaneState>,
     ready: Condvar,
+    /// R-5's counters: a separate leaf, never taken with `state`.
+    counters: Mutex<Counters>,
 }
 
 impl Lane {
     pub(crate) fn lock(&self) -> MutexGuard<'_, LaneState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn counters(&self) -> MutexGuard<'_, Counters> {
+        self.counters.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn notify(&self) {
@@ -477,6 +484,7 @@ impl Preview {
         let attempt = self.hold(&held);
         match attempt {
             Attempt::Published => self.publish(held.frame),
+            Attempt::Dropped { agent: true } => self.lane.counters().stats.dropped_agent += 1,
             #[cfg(test)]
             Attempt::Pending => self.held = Some(held),
             _ => {}
