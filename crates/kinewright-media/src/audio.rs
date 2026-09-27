@@ -4096,8 +4096,43 @@ fn fill_ring(
     }
 }
 
+/// PF1 V-5: the output a runtime opens. Production always uses the
+/// default device; only test builds can select the simulated one.
+pub(crate) enum OutputDevice {
+    Default,
+    #[cfg(test)]
+    Simulated(simulated::SimulatedAudio),
+}
+
+/// An opened output device, before its stream exists.
+enum Sink {
+    Cpal(cpal::Device, cpal::SampleFormat, cpal::StreamConfig),
+    #[cfg(test)]
+    Simulated(simulated::SimulatedAudio),
+}
+
+/// PF1 V-5: the stream that pops the ring through [`render_output`].
+enum AudioOutput {
+    Cpal(cpal::Stream),
+    #[cfg(test)]
+    Simulated(simulated::SimulatedOutput),
+}
+
+/// PF1 V-4/V-5 (S0): the device's playback timestamp minus its callback
+/// timestamp, recorded for the harness's real-device cross-check and never
+/// compensated (D9).
+pub(crate) static DEVICE_LATENCY_MICROS: AtomicU64 = AtomicU64::new(0);
+/// PF1 S0: whole frames device callbacks found missing from the ring,
+/// recorded for the harness only; playback is unchanged.
+pub(crate) static DEVICE_UNDERRUN_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// Whole frames a callback of `frames` cannot pop from the ring.
+fn short_frames(consumer: &Consumer<f32>, frames: usize, channels: usize) -> u64 {
+    u64::try_from(frames.saturating_sub(consumer.slots() / channels.max(1))).unwrap_or(u64::MAX)
+}
+
 pub(crate) struct AudioRuntime {
-    stream: cpal::Stream,
+    output: AudioOutput,
     producer: Producer<f32>,
     mixer: AudioMixer,
     pending: Vec<f32>,
@@ -4110,6 +4145,8 @@ pub(crate) struct AudioRuntime {
 }
 
 impl AudioRuntime {
+    /// PF1 V-5: `output` picks the device or the harness's simulated driver.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         document: &Document,
         project_from: TimeCode,
@@ -4118,16 +4155,25 @@ impl AudioRuntime {
         meter: Arc<MeterState>,
         mix_meters: Arc<MixMeters>,
         monitor_gain_tenth_db: Arc<AtomicI32>,
+        output: &OutputDevice,
     ) -> Result<Self, MediaError> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| MediaError::Backend("no default audio output device".to_owned()))?;
-        let supported = device.default_output_config().map_err(backend)?;
-        let sample_format = supported.sample_format();
-        let config = supported.config();
-        let sample_rate = config.sample_rate;
-        let channels = config.channels;
+        let sink = match output {
+            OutputDevice::Default => {
+                let host = cpal::default_host();
+                let device = host.default_output_device().ok_or_else(|| {
+                    MediaError::Backend("no default audio output device".to_owned())
+                })?;
+                let supported = device.default_output_config().map_err(backend)?;
+                Sink::Cpal(device, supported.sample_format(), supported.config())
+            }
+            #[cfg(test)]
+            OutputDevice::Simulated(audio) => Sink::Simulated(audio.clone()),
+        };
+        let (sample_rate, channels) = match &sink {
+            Sink::Cpal(_, _, config) => (config.sample_rate, config.channels),
+            #[cfg(test)]
+            Sink::Simulated(_) => (simulated::RATE, simulated::CHANNELS),
+        };
         let capacity = usize::try_from(sample_rate)
             .unwrap_or(48_000)
             .saturating_mul(usize::from(channels))
@@ -4137,16 +4183,24 @@ impl AudioRuntime {
         position_samples.store(start_sample, Ordering::Release);
         sample_rate_atomic.store(sample_rate, Ordering::Release);
         let error_flag = Arc::new(AtomicBool::new(false));
-        let stream = build_stream(
-            &device,
-            &config,
-            sample_format,
-            consumer,
-            channels,
-            Arc::clone(position_samples),
-            Arc::clone(&error_flag),
-            monitor_gain_tenth_db,
-        )?;
+        let output = match sink {
+            Sink::Cpal(device, sample_format, config) => AudioOutput::Cpal(build_stream(
+                &device,
+                &config,
+                sample_format,
+                consumer,
+                channels,
+                Arc::clone(position_samples),
+                Arc::clone(&error_flag),
+                monitor_gain_tenth_db,
+            )?),
+            #[cfg(test)]
+            Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach(
+                consumer,
+                Arc::clone(position_samples),
+                monitor_gain_tenth_db,
+            )),
+        };
         let mut mixer =
             AudioMixer::open(document, project_from, sample_rate, channels, Some(meter))?;
         mixer.attach_mix_meters(mix_meters);
@@ -4157,7 +4211,7 @@ impl AudioRuntime {
             .saturating_div(1_000)
             .max(1);
         Ok(Self {
-            stream,
+            output,
             producer,
             mixer,
             pending: Vec::new(),
@@ -4211,11 +4265,25 @@ impl AudioRuntime {
     }
 
     pub(crate) fn play(&self) -> Result<(), MediaError> {
-        self.stream.play().map_err(backend)
+        match &self.output {
+            AudioOutput::Cpal(stream) => stream.play().map_err(backend),
+            #[cfg(test)]
+            AudioOutput::Simulated(output) => {
+                output.set_playing(true);
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn pause(&self) -> Result<(), MediaError> {
-        self.stream.pause().map_err(backend)
+        match &self.output {
+            AudioOutput::Cpal(stream) => stream.pause().map_err(backend),
+            #[cfg(test)]
+            AudioOutput::Simulated(output) => {
+                output.set_playing(false);
+                Ok(())
+            }
+        }
     }
 
     /// AU1 §5.3: top the ring up to the live target, metering as it goes
@@ -4295,7 +4363,14 @@ where
     device
         .build_output_stream(
             *config,
-            move |output: &mut [T], _| {
+            move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
+                let stamp = info.timestamp();
+                let latency = stamp.playback.duration_since(stamp.callback).as_micros();
+                DEVICE_LATENCY_MICROS
+                    .store(latency.try_into().unwrap_or(u64::MAX), Ordering::Relaxed);
+                let frames = output.len() / callback_channels;
+                let short = short_frames(&consumer, frames, callback_channels);
+                DEVICE_UNDERRUN_FRAMES.fetch_add(short, Ordering::Relaxed);
                 render_output(
                     &mut consumer,
                     output,
@@ -4321,6 +4396,10 @@ fn monitor_linear_gain(tenth_db: i32) -> f32 {
         db_gain(i64::from(tenth_db))
     }
 }
+
+/// PF1 V-5 (S0): the device-free output the harness drives.
+#[cfg(test)]
+pub(crate) mod simulated;
 
 fn render_output<T>(
     consumer: &mut Consumer<f32>,

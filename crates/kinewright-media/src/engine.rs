@@ -31,7 +31,7 @@ use kinewright_core::{
 
 use crate::{
     analysis::VisualAssetService,
-    audio::{AudioDecoder, AudioRuntime, MeterState, MixMeters, decode_audio_range},
+    audio::{AudioDecoder, AudioRuntime, MeterState, MixMeters, OutputDevice, decode_audio_range},
     clock::{frame_to_samples, samples_to_frame},
     compositor::GpuContext,
     decode::probe_path,
@@ -419,6 +419,33 @@ impl FfmpegMediaEngine {
         data_dir: PathBuf,
         analysis_config: DerivedAnalysisConfig,
     ) -> Result<Self, MediaError> {
+        Self::start(gpu, data_dir, analysis_config, |_| {})
+    }
+
+    /// PF1 S0: an engine on the V-5 simulated output (`None` keeps the
+    /// device) with the Q-3 faults armed by the harness. Test builds only.
+    #[cfg(test)]
+    pub(crate) fn new_for_harness(
+        gpu: GpuContext,
+        data_dir: PathBuf,
+        audio: Option<crate::audio::simulated::SimulatedAudio>,
+        faults: Arc<Faults>,
+    ) -> Result<Self, MediaError> {
+        let config = DerivedAnalysisConfig::default();
+        Self::start(gpu, data_dir, config, move |worker| {
+            if let Some(audio) = audio {
+                worker.output_device = OutputDevice::Simulated(audio);
+            }
+            worker.faults = faults;
+        })
+    }
+
+    fn start(
+        gpu: GpuContext,
+        data_dir: PathBuf,
+        analysis_config: DerivedAnalysisConfig,
+        configure: impl FnOnce(&mut Worker) + Send + 'static,
+    ) -> Result<Self, MediaError> {
         crate::initialize_ffmpeg()?;
         let data_dir_for_self = data_dir.clone();
         let (control_tx, control_rx) = unbounded();
@@ -444,7 +471,7 @@ impl FfmpegMediaEngine {
         thread::Builder::new()
             .name("kinewright-media".to_owned())
             .spawn(move || {
-                Worker::new(
+                let mut worker = Worker::new(
                     WorkerChannels {
                         control_rx,
                         frames_tx,
@@ -460,8 +487,9 @@ impl FfmpegMediaEngine {
                     worker_gpu,
                     worker_lut_lattices,
                     worker_monitor_gain,
-                )
-                .run();
+                );
+                configure(&mut worker);
+                worker.run();
             })
             .map_err(|error| MediaError::Backend(error.to_string()))?;
 
@@ -1658,6 +1686,39 @@ struct Worker {
     monitor_gain_tenth_db: Arc<AtomicI32>,
     playing: bool,
     last_position: Option<TimeCode>,
+    /// PF1 V-5: the default device, or the harness's simulated output.
+    output_device: OutputDevice,
+    #[cfg(test)]
+    faults: Arc<Faults>,
+}
+
+/// PF1 Q-3: the faults the harness's controls inject into the worker.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct Faults {
+    /// Slowdown: added to every preview render.
+    pub(crate) render_delay_ms: AtomicU64,
+    /// Freeze: renders finishing before this instant are not published.
+    pub(crate) unpublished_until: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Stall: the next playing tick sleeps this long before it fills (once).
+    pub(crate) fill_stall_ms: AtomicU64,
+}
+
+#[cfg(test)]
+impl Faults {
+    fn publish_after_render(&self) -> bool {
+        thread::sleep(Duration::from_millis(
+            self.render_delay_ms.load(Ordering::Relaxed),
+        ));
+        let until = *self.unpublished_until.lock().expect("fault state");
+        until.is_none_or(|until| std::time::Instant::now() >= until)
+    }
+
+    fn stall_fill(&self) {
+        thread::sleep(Duration::from_millis(
+            self.fill_stall_ms.swap(0, Ordering::Relaxed),
+        ));
+    }
 }
 
 struct WorkerChannels {
@@ -1703,6 +1764,9 @@ impl Worker {
             monitor_gain_tenth_db,
             playing: false,
             last_position: None,
+            output_device: OutputDevice::Default,
+            #[cfg(test)]
+            faults: Arc::default(),
         }
     }
 
@@ -1972,6 +2036,8 @@ impl Worker {
         if !self.playing {
             return;
         }
+        #[cfg(test)]
+        self.faults.stall_fill();
         let audio_error = self
             .audio
             .as_ref()
@@ -2025,6 +2091,10 @@ impl Worker {
                 return;
             }
         };
+        #[cfg(test)]
+        if !self.faults.publish_after_render() {
+            return;
+        }
         send_latest(&self.frames_tx, &self.frames_drop_rx, (project_at, frame));
         self.wake_consumer();
     }
@@ -2042,6 +2112,7 @@ impl Worker {
             Arc::clone(&self.meter),
             mix_meters,
             Arc::clone(&self.monitor_gain_tenth_db),
+            &self.output_device,
         )
     }
 

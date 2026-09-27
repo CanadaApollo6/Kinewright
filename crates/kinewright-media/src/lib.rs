@@ -118,9 +118,13 @@ mod mo2_identity_corpus;
 /// MO2 §13 gate 10: the floors, the ledger ceilings and their controls.
 #[cfg(test)]
 mod mo2_perf_fixtures;
-/// PF1 W-0/W-1: the shared performance workloads (MO2 R28's).
+/// PF1 W-0/W-1: the shared performance workloads (MO2 R28's and PF1's).
 #[cfg(test)]
 mod perf_fixtures;
+/// PF1 S0: the playback measurement harness (P-play, P-seek, P-rss), its
+/// V-4 consumer metrics, `process_memory()` and the Q-3 controls.
+#[cfg(test)]
+mod pf1_harness;
 mod still_orientation;
 
 use ffmpeg_next as ffmpeg;
