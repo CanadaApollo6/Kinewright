@@ -3,10 +3,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        Arc, OnceLock, RwLock,
-        atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock,
+        atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering},
     },
-    thread,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -43,6 +43,10 @@ use crate::{
     loudness::{LiveLoudnessMeter, LoudnessMeter},
     lut::CubeLut,
     lut_store::LutLibrary,
+    preview::{
+        AgentJob, AgentWork, CancelOnDrop, JobKind, Lane, Preview, Scene, TransportJob, Wakeup,
+        worker_stopped,
+    },
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     sha256::source_fingerprint,
     transcript::{TranscriptService, default_data_dir},
@@ -55,7 +59,7 @@ const WORKER_TICK: Duration = Duration::from_millis(5);
 const AUDIO_MEASUREMENT_RATE: u32 = 48_000;
 const AUDIO_MEASUREMENT_CHANNELS: u16 = 2;
 
-struct SharedClock {
+pub(crate) struct SharedClock {
     position_samples: Arc<AtomicU64>,
     sample_rate: Arc<AtomicU32>,
     project_fps_num: AtomicU32,
@@ -64,7 +68,7 @@ struct SharedClock {
 }
 
 impl SharedClock {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             position_samples: Arc::new(AtomicU64::new(0)),
             sample_rate: Arc::new(AtomicU32::new(0)),
@@ -74,19 +78,19 @@ impl SharedClock {
         }
     }
 
-    fn set_fps(&self, fps: Rational) {
+    pub(crate) fn set_fps(&self, fps: Rational) {
         self.project_fps_num
             .store(fps.numerator(), Ordering::Release);
         self.project_fps_den
             .store(fps.denominator(), Ordering::Release);
     }
 
-    fn set_frame(&self, frame: TimeCode) {
+    pub(crate) fn set_frame(&self, frame: TimeCode) {
         self.fallback_frame.store(frame.0.max(0), Ordering::Release);
         self.sample_rate.store(0, Ordering::Release);
     }
 
-    fn position(&self) -> TimeCode {
+    pub(crate) fn position(&self) -> TimeCode {
         let sample_rate = self.sample_rate.load(Ordering::Acquire);
         if sample_rate == 0 {
             return TimeCode(self.fallback_frame.load(Ordering::Acquire));
@@ -287,8 +291,9 @@ fn bind_document_luts(
 }
 
 enum Control {
-    SetEventWakeup(Box<dyn Fn() + Send + Sync>),
-    SetDocument(Arc<Document>),
+    SetEventWakeup(Wakeup),
+    /// PF1 R-1: the transport controls carry the stamp they were issued with.
+    SetDocument(Arc<Document>, FrameStamp),
     /// CC4 2.4: the engine's content-addressed lattice table gained entries,
     /// so the playback worker rebinds its document-local library. The library
     /// itself never crosses this channel: it is rebuilt from the worker's own
@@ -303,22 +308,23 @@ enum Control {
     /// with a re-cue or with each other. Draining two controls in send order
     /// gives nothing observable that this does not.
     UpdateAudio(LiveAudioChange, Arc<Document>),
-    Play(TimeCode),
-    Pause,
+    Play(TimeCode, FrameStamp),
+    Pause(FrameStamp),
     /// AU3 §3.9: restart the integrated, range, and true-peak measurement at
     /// the position the meter is being fed.
     ResetLoudness,
+    /// PF1 R-4: the agent lane's jobs; the worker only resolves and pushes.
     Thumbnail {
         document: Option<Arc<Document>>,
         at: TimeCode,
         max_width: u32,
         reply: Sender<Result<RgbaImage, MediaError>>,
+        cancel: Arc<AtomicBool>,
     },
-    PreviewCacheStats {
-        reply: Sender<CacheStats>,
-    },
-    ClearPreviewCache {
-        reply: Sender<CacheStats>,
+    PreviewCache {
+        clear: bool,
+        reply: Sender<Result<CacheStats, MediaError>>,
+        cancel: Arc<AtomicBool>,
     },
 }
 
@@ -326,7 +332,9 @@ pub struct FfmpegMediaEngine {
     control_tx: Sender<Control>,
     frames_rx: Receiver<PreviewFrame>,
     events_rx: Receiver<MediaEvent>,
-    requested: Arc<RequestedPositions>,
+    coalesced: Arc<Mutex<Coalesced>>,
+    /// PF1 R-4: the agent lane the `thumbnail_*` guards cancel through.
+    lane: Arc<Lane>,
     clock: Arc<SharedClock>,
     meter: Arc<MeterState>,
     /// AU1 §4.1: the peak table the worker installs while it is playing, read
@@ -362,7 +370,7 @@ impl FfmpegMediaEngine {
     pub fn set_event_wakeup(&self, wakeup: impl Fn() + Send + Sync + 'static) {
         let _ = self
             .control_tx
-            .send(Control::SetEventWakeup(Box::new(wakeup)));
+            .send(Control::SetEventWakeup(Arc::new(wakeup)));
     }
 
     /// Start the media engine with the default cache directory and GPU selection.
@@ -422,7 +430,7 @@ impl FfmpegMediaEngine {
         data_dir: PathBuf,
         analysis_config: DerivedAnalysisConfig,
     ) -> Result<Self, MediaError> {
-        Self::start(gpu, data_dir, analysis_config, |_| {})
+        Self::start(gpu, data_dir, analysis_config, EngineOptions::default())
     }
 
     /// PF1 S0: an engine on the V-5 simulated output (`None` keeps the
@@ -437,20 +445,19 @@ impl FfmpegMediaEngine {
         diagnostics: Arc<AudioDiagnostics>,
     ) -> Result<Self, MediaError> {
         let config = DerivedAnalysisConfig::default();
-        Self::start(gpu, data_dir, config, move |worker| {
-            if let Some(audio) = audio {
-                worker.output_device = OutputDevice::Simulated(audio);
-            }
-            worker.faults = faults;
-            worker.audio_diagnostics = diagnostics;
-        })
+        let options = EngineOptions {
+            output_device: audio.map_or(OutputDevice::Default, OutputDevice::Simulated),
+            faults,
+            diagnostics,
+        };
+        Self::start(gpu, data_dir, config, options)
     }
 
     fn start(
         gpu: GpuContext,
         data_dir: PathBuf,
         analysis_config: DerivedAnalysisConfig,
-        configure: impl FnOnce(&mut Worker) + Send + 'static,
+        options: EngineOptions,
     ) -> Result<Self, MediaError> {
         crate::initialize_ffmpeg()?;
         let data_dir_for_self = data_dir.clone();
@@ -459,6 +466,23 @@ impl FfmpegMediaEngine {
         let (events_tx, events_rx) = bounded(16);
         let clock = Arc::new(SharedClock::new());
         let worker_clock = Arc::clone(&clock);
+        let lane = Arc::new(Lane::default());
+        let preview = {
+            let (lane, clock, gpu) = (Arc::clone(&lane), Arc::clone(&clock), gpu.clone());
+            let frames = (frames_tx, frames_rx.clone());
+            #[cfg(test)]
+            let faults = Arc::clone(&options.faults);
+            spawn_preview(move || {
+                let renderer = FrameRenderer::new_preview(gpu);
+                #[allow(unused_mut)]
+                let mut preview = Preview::new(lane, renderer, clock, frames);
+                #[cfg(test)]
+                {
+                    preview.faults = faults;
+                }
+                preview
+            })?
+        };
         let meter = Arc::new(MeterState::default());
         let worker_meter = Arc::clone(&meter);
         let mix_meters = Arc::new(RwLock::new(Arc::new(MixMeters::empty(Arc::clone(&meter)))));
@@ -467,37 +491,44 @@ impl FfmpegMediaEngine {
         let worker_loudness = Arc::clone(&loudness);
         let monitor_gain_tenth_db = Arc::new(AtomicI32::new(0));
         let worker_monitor_gain = Arc::clone(&monitor_gain_tenth_db);
-        let frames_drop_rx = frames_rx.clone();
         let events_drop_rx = events_rx.clone();
-        let requested = Arc::new(RequestedPositions::default());
-        let worker_requested = Arc::clone(&requested);
-        let worker_gpu = gpu.clone();
+        let coalesced = Arc::new(Mutex::new(Coalesced::default()));
+        let worker_coalesced = Arc::clone(&coalesced);
+        let worker_lane = Arc::clone(&lane);
         let lut_lattices = Arc::new(RwLock::new(PublishedLattices::default()));
         let worker_lut_lattices = Arc::clone(&lut_lattices);
-        thread::Builder::new()
+        let spawned = thread::Builder::new()
             .name("kinewright-media".to_owned())
             .spawn(move || {
                 let mut worker = Worker::new(
                     WorkerChannels {
                         control_rx,
-                        frames_tx,
-                        frames_drop_rx,
                         events_tx,
                         events_drop_rx,
+                        lane: worker_lane,
                     },
                     worker_clock,
                     worker_meter,
                     worker_mix_meters,
                     worker_loudness,
-                    worker_requested,
-                    worker_gpu,
+                    worker_coalesced,
                     worker_lut_lattices,
                     worker_monitor_gain,
                 );
-                configure(&mut worker);
+                worker.output_device = options.output_device;
+                worker.audio_diagnostics = options.diagnostics;
+                #[cfg(test)]
+                {
+                    worker.faults = options.faults;
+                }
+                worker.preview = Some(preview);
                 worker.run();
-            })
-            .map_err(|error| MediaError::Backend(error.to_string()))?;
+            });
+        if let Err(error) = spawned {
+            // The worker never started: stop the preview it would have joined.
+            drop(lane.shut_down());
+            return Err(MediaError::Backend(error.to_string()));
+        }
 
         let visual_assets = VisualAssetService::new(&data_dir)?;
         let derived_analysis = DerivedAnalysisService::new(&data_dir, analysis_config)?;
@@ -505,7 +536,8 @@ impl FfmpegMediaEngine {
             control_tx,
             frames_rx,
             events_rx,
-            requested,
+            coalesced,
+            lane,
             clock,
             meter,
             mix_meters,
@@ -629,18 +661,40 @@ impl FfmpegMediaEngine {
     }
 
     fn preview_cache_command(&self, clear: bool) -> Result<CacheStats, MediaError> {
+        self.agent_request(|reply, cancel| Control::PreviewCache {
+            clear,
+            reply,
+            cancel,
+        })
+    }
+
+    /// PF1 R-4: send one agent-lane control and wait for its one reply,
+    /// holding the guard that cancels it if this caller goes away.
+    fn agent_request<T>(
+        &self,
+        control: impl FnOnce(Sender<Result<T, MediaError>>, Arc<AtomicBool>) -> Control,
+    ) -> Result<T, MediaError> {
         let (reply, response) = bounded(1);
-        let control = if clear {
-            Control::ClearPreviewCache { reply }
-        } else {
-            Control::PreviewCacheStats { reply }
-        };
+        let guard = CancelOnDrop::new(&self.lane);
         self.control_tx
-            .send(control)
-            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?;
-        response
-            .recv()
-            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))
+            .send(control(reply, guard.flag()))
+            .map_err(|_| worker_stopped())?;
+        let result = response.recv().map_err(|_| worker_stopped())?;
+        drop(guard);
+        result
+    }
+
+    fn coalesced(&self) -> MutexGuard<'_, Coalesced> {
+        self.coalesced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// PF1 R-1: stamp one transport control on the caller's thread and send
+    /// it. The count is taken under the lock, the send after it (H-4).
+    fn send_stamped(&self, control: impl FnOnce(FrameStamp) -> Control) {
+        let stamp = self.coalesced().control();
+        let _ = self.control_tx.send(control(stamp));
     }
 
     fn cache_root(&self, family: &str) -> PathBuf {
@@ -702,32 +756,108 @@ impl FfmpegMediaEngine {
     }
 }
 
-#[derive(Default)]
-struct RequestedPositions {
-    frame: AtomicI64,
-    frame_sequence: AtomicU64,
-    seek: AtomicI64,
-    seek_sequence: AtomicU64,
-    /// PF1 V-2 (review B F1): bumped by the worker's terminal stop before it
-    /// publishes `Paused`, so a seek can tell whether it saw that stop.
-    eos_generation: AtomicU64,
-    /// The `eos_generation` the latest seek observed when it was published.
-    seek_eos_generation: AtomicU64,
+/// How `start` configures the worker and the preview.
+struct EngineOptions {
+    /// PF1 V-5: the default device, or the harness's simulated output.
+    output_device: OutputDevice,
+    /// PF1 R23: this engine's output-callback diagnostics.
+    diagnostics: Arc<AudioDiagnostics>,
+    #[cfg(test)]
+    faults: Arc<Faults>,
 }
 
-impl RequestedPositions {
-    /// Publish a seek, stamped with the terminal-stop generation it saw.
-    fn publish_seek(&self, to: TimeCode) {
-        let eos = self.eos_generation.load(Ordering::SeqCst);
-        self.seek_eos_generation.store(eos, Ordering::SeqCst);
-        self.seek.store(to.0.max(0), Ordering::Relaxed);
-        self.seek_sequence.fetch_add(1, Ordering::Release);
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self {
+            output_device: OutputDevice::Default,
+            diagnostics: Arc::default(),
+            #[cfg(test)]
+            faults: Arc::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// E-2 witness: the next preview spawn on this thread fails.
+    pub(crate) static FAIL_PREVIEW_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// PF1 H-1: start the preview thread, which builds its own renderer. E-2: a
+/// spawn failure is new, so it is prefixed `preview-thread:`.
+fn spawn_preview(
+    make: impl FnOnce() -> Preview + Send + 'static,
+) -> Result<JoinHandle<()>, MediaError> {
+    let spawned = thread::Builder::new().name("kinewright-preview".to_owned());
+    #[cfg(test)]
+    if FAIL_PREVIEW_SPAWN.with(std::cell::Cell::take) {
+        return Err(MediaError::Backend(
+            "preview-thread: spawn failed: injected".to_owned(),
+        ));
+    }
+    spawned
+        .spawn(move || make().run())
+        .map_err(|error| MediaError::Backend(format!("preview-thread: spawn failed: {error}")))
+}
+
+/// PF1 R-1: one coalesced `(target, stamp)` request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Request {
+    at: TimeCode,
+    stamp: FrameStamp,
+    /// Stamped controls issued before it; the worker posts it only once it
+    /// has applied that many.
+    controls_before: u64,
+}
+
+/// PF1 R-1: the stamp source and the coalesced seek/frame slots, one leaf
+/// lock (H-4) replacing today's atomics.
+#[derive(Debug, Default)]
+struct Coalesced {
+    /// The newest stamp issued.
+    latest: FrameStamp,
+    /// Stamped controls issued.
+    controls: u64,
+    seek: Option<Request>,
+    frame: Option<Request>,
+    /// PF1 V-2 (review B F1): bumped by the worker's terminal stop before it
+    /// publishes `Paused`, so a seek can tell whether it saw that stop.
+    eos_generation: u64,
+    /// The `eos_generation` the latest seek observed when it was published.
+    seek_eos_generation: u64,
+}
+
+impl Coalesced {
+    fn issue(&mut self, epoch: bool) -> FrameStamp {
+        self.latest.seq += 1;
+        self.latest.epoch += u64::from(epoch);
+        self.latest
     }
 
-    /// Whether the latest seek was published before the latest terminal stop.
-    fn seek_predates_eos(&self) -> bool {
-        self.seek_eos_generation.load(Ordering::SeqCst)
-            != self.eos_generation.load(Ordering::SeqCst)
+    /// `set_document`, `play`, `pause`: a new epoch, sent as a control.
+    fn control(&mut self) -> FrameStamp {
+        self.controls += 1;
+        self.issue(true)
+    }
+
+    fn request(&mut self, at: TimeCode, epoch: bool) -> Request {
+        Request {
+            at: TimeCode(at.0.max(0)),
+            stamp: self.issue(epoch),
+            controls_before: self.controls,
+        }
+    }
+
+    fn request_frame(&mut self, at: TimeCode) {
+        self.frame = Some(self.request(at, false));
+    }
+
+    /// A seek supersedes any pending frame request and records the
+    /// terminal-stop generation it saw.
+    fn seek(&mut self, to: TimeCode) {
+        self.seek = Some(self.request(to, true));
+        self.frame = None;
+        self.seek_eos_generation = self.eos_generation;
     }
 }
 
@@ -745,14 +875,11 @@ impl Playback for FfmpegMediaEngine {
         if let Ok(mut export_document) = self.export_document.write() {
             *export_document = Arc::clone(&doc);
         }
-        let _ = self.control_tx.send(Control::SetDocument(doc));
+        self.send_stamped(|stamp| Control::SetDocument(doc, stamp));
     }
 
     fn request_frame(&self, at: TimeCode) {
-        self.requested.frame.store(at.0.max(0), Ordering::Relaxed);
-        self.requested
-            .frame_sequence
-            .fetch_add(1, Ordering::Release);
+        self.coalesced().request_frame(at);
     }
 
     fn frames(&self) -> Receiver<PreviewFrame> {
@@ -766,18 +893,21 @@ impl Playback for FfmpegMediaEngine {
     fn play(&self, from: TimeCode) {
         self.clear_mix_meters();
         self.clock.set_frame(from);
-        let _ = self.control_tx.send(Control::Play(from));
+        self.send_stamped(|stamp| Control::Play(from, stamp));
     }
 
     fn pause(&self) {
         self.clear_mix_meters();
-        let _ = self.control_tx.send(Control::Pause);
+        self.send_stamped(Control::Pause);
     }
 
     fn seek(&self, to: TimeCode) {
         self.clock.set_frame(to);
-        self.requested.publish_seek(to);
-        self.request_frame(to);
+        self.coalesced().seek(to);
+    }
+
+    fn stamp(&self) -> FrameStamp {
+        self.coalesced().latest
     }
 
     fn position(&self) -> TimeCode {
@@ -1014,18 +1144,13 @@ impl Analysis for FfmpegMediaEngine {
     }
 
     fn thumbnail_at(&self, at: TimeCode, max_width: u32) -> Result<RgbaImage, MediaError> {
-        let (reply, response) = bounded(1);
-        self.control_tx
-            .send(Control::Thumbnail {
-                document: None,
-                at,
-                max_width,
-                reply,
-            })
-            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?;
-        response
-            .recv()
-            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?
+        self.agent_request(|reply, cancel| Control::Thumbnail {
+            document: None,
+            at,
+            max_width,
+            reply,
+            cancel,
+        })
     }
 
     fn thumbnail_for_document(
@@ -1034,18 +1159,13 @@ impl Analysis for FfmpegMediaEngine {
         at: TimeCode,
         max_width: u32,
     ) -> Result<RgbaImage, MediaError> {
-        let (reply, response) = bounded(1);
-        self.control_tx
-            .send(Control::Thumbnail {
-                document: Some(document),
-                at,
-                max_width,
-                reply,
-            })
-            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?;
-        response
-            .recv()
-            .map_err(|_| MediaError::Backend("media worker stopped".to_owned()))?
+        self.agent_request(|reply, cancel| Control::Thumbnail {
+            document: Some(document),
+            at,
+            max_width,
+            reply,
+            cancel,
+        })
     }
 
     fn monitor_proof_for_document(
@@ -1683,9 +1803,7 @@ impl WorkerLoudness {
 
 struct Worker {
     control_rx: Receiver<Control>,
-    event_wakeup: Option<Box<dyn Fn() + Send + Sync>>,
-    frames_tx: Sender<PreviewFrame>,
-    frames_drop_rx: Receiver<PreviewFrame>,
+    event_wakeup: Option<Wakeup>,
     events_tx: Sender<MediaEvent>,
     events_drop_rx: Receiver<MediaEvent>,
     clock: Arc<SharedClock>,
@@ -1693,11 +1811,18 @@ struct Worker {
     /// AU1 §4.1: shared with the engine; holds `MixMeters::empty` whenever the
     /// worker is not playing.
     mix_meters: Arc<RwLock<Arc<MixMeters>>>,
-    requested: Arc<RequestedPositions>,
-    handled_frame_sequence: u64,
-    handled_seek_sequence: u64,
+    coalesced: Arc<Mutex<Coalesced>>,
+    /// PF1 R-1: stamped controls applied, and the newest stamp applied; every
+    /// job the worker posts carries it.
+    applied_controls: u64,
+    applied: FrameStamp,
+    /// PF1 H-1: the preview thread's jobs and agent lane.
+    lane: Arc<Lane>,
+    /// Joined at shutdown (H-6); `None` for a worker a test drives.
+    preview: Option<JoinHandle<()>>,
+    /// Bumped by every `set_document`, so the preview clears its caches.
+    generation: u64,
     document: Arc<Document>,
-    renderer: FrameRenderer,
     /// The engine's content-addressed lattice table, shared with the
     /// caller-thread proof and export paths (CC4 2.4).
     lut_lattices: Arc<RwLock<PublishedLattices>>,
@@ -1719,6 +1844,8 @@ struct Worker {
     output_device: OutputDevice,
     /// PF1 R23: this engine's output-callback diagnostics.
     audio_diagnostics: Arc<AudioDiagnostics>,
+    /// PF1 R-2: stamped failures suppressed as superseded or old-epoch.
+    stale_errors: u64,
     #[cfg(test)]
     faults: Arc<Faults>,
 }
@@ -1733,11 +1860,19 @@ pub(crate) struct Faults {
     pub(crate) unpublished_until: std::sync::Mutex<Option<std::time::Instant>>,
     /// Stall: the next playing tick sleeps this long before it fills (once).
     pub(crate) fill_stall_ms: AtomicU64,
+    /// PF1 S2a model tests: the preview skips the GPU and publishes 1×1.
+    pub(crate) fake_render: AtomicBool,
+    /// The next preview render fails (once).
+    pub(crate) fail_render: AtomicBool,
+    /// A playback hold checks once and returns `Pending` (stepped models).
+    pub(crate) step_hold: AtomicBool,
+    /// Signalled once when a playback hold begins.
+    pub(crate) on_hold: std::sync::Mutex<Option<Sender<()>>>,
 }
 
 #[cfg(test)]
 impl Faults {
-    fn publish_after_render(&self) -> bool {
+    pub(crate) fn publish_after_render(&self) -> bool {
         thread::sleep(Duration::from_millis(
             self.render_delay_ms.load(Ordering::Relaxed),
         ));
@@ -1754,10 +1889,9 @@ impl Faults {
 
 struct WorkerChannels {
     control_rx: Receiver<Control>,
-    frames_tx: Sender<PreviewFrame>,
-    frames_drop_rx: Receiver<PreviewFrame>,
     events_tx: Sender<MediaEvent>,
     events_drop_rx: Receiver<MediaEvent>,
+    lane: Arc<Lane>,
 }
 
 impl Worker {
@@ -1768,26 +1902,25 @@ impl Worker {
         meter: Arc<MeterState>,
         mix_meters: Arc<RwLock<Arc<MixMeters>>>,
         loudness: Arc<LiveLoudness>,
-        requested: Arc<RequestedPositions>,
-        gpu: GpuContext,
+        coalesced: Arc<Mutex<Coalesced>>,
         lut_lattices: Arc<RwLock<PublishedLattices>>,
         monitor_gain_tenth_db: Arc<AtomicI32>,
     ) -> Self {
         Self {
             control_rx: channels.control_rx,
             event_wakeup: None,
-            frames_tx: channels.frames_tx,
-            frames_drop_rx: channels.frames_drop_rx,
             events_tx: channels.events_tx,
             events_drop_rx: channels.events_drop_rx,
             clock,
             meter,
             mix_meters,
-            requested,
-            handled_frame_sequence: 0,
-            handled_seek_sequence: 0,
+            coalesced,
+            applied_controls: 0,
+            applied: FrameStamp::default(),
+            lane: channels.lane,
+            preview: None,
+            generation: 0,
             document: Arc::new(Document::default()),
-            renderer: FrameRenderer::new_preview(gpu),
             lut_lattices,
             lut_library: Arc::new(LutLibrary::default()),
             audio: None,
@@ -1798,6 +1931,7 @@ impl Worker {
             last_position: None,
             output_device: OutputDevice::Default,
             audio_diagnostics: Arc::default(),
+            stale_errors: 0,
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -1818,46 +1952,133 @@ impl Worker {
                 self.fill_audio();
             }
             self.handle_coalesced_requests();
+            self.handle_preview_failures();
             self.tick();
+        }
+        self.shut_down();
+    }
+
+    /// PF1 H-6: the control channel disconnected.
+    fn shut_down(&mut self) {
+        let (moved, transport) = self.lane.shut_down();
+        drop(transport);
+        for job in moved {
+            job.reply_error(worker_stopped());
+        }
+        self.audio = None;
+        if let Some(preview) = self.preview.take() {
+            let _ = preview.join();
         }
     }
 
     fn handle_control(&mut self, control: Control) {
         match control {
-            Control::SetEventWakeup(wakeup) => self.event_wakeup = Some(wakeup),
-            Control::SetDocument(doc) => self.set_document(&doc),
+            Control::SetEventWakeup(wakeup) => {
+                self.lane.set_wakeup(Arc::clone(&wakeup));
+                self.event_wakeup = Some(wakeup);
+            }
+            Control::SetDocument(doc, stamp) => {
+                self.apply_control(stamp);
+                self.set_document(&doc);
+            }
             Control::LutLatticesPublished => self.rebind_lut_library(),
             Control::UpdateAudio(kind, doc) => self.update_audio(kind, doc),
-            Control::Play(from) => self.start_playback(from),
-            Control::Pause => self.pause_or_stop_at_end(),
+            Control::Play(from, stamp) => {
+                self.apply_control(stamp);
+                self.start_playback(from);
+                if !self.playing {
+                    self.post_resting(from);
+                }
+            }
+            Control::Pause(stamp) => {
+                self.apply_control(stamp);
+                self.pause_or_stop_at_end();
+                self.post_resting(self.clock.position());
+            }
             Control::ResetLoudness => self.reset_loudness(),
             Control::Thumbnail {
                 document,
                 at,
                 max_width,
                 reply,
+                cancel,
             } => {
-                let scale = RenderScale::Proxy { max_width };
-                let requested = document.unwrap_or_else(|| Arc::clone(&self.document));
-                self.renderer
-                    .set_lut_library(self.bound_lut_library(&requested));
-                let resolution = scale.output_resolution(requested.resolution);
-                let result = self
-                    .renderer
-                    .render_thumbnail(&requested, at, resolution, scale)
-                    .map(|frame| RgbaImage {
-                        width: frame.width,
-                        height: frame.height,
-                        pixels: (*frame.rgba).clone(),
-                    });
-                self.renderer.set_lut_library(Arc::clone(&self.lut_library));
-                let _ = reply.send(result);
+                let document = document.unwrap_or_else(|| Arc::clone(&self.document));
+                let lut = self.bound_lut_library(&document);
+                let work = AgentWork::Thumbnail {
+                    document,
+                    lut,
+                    at,
+                    max_width,
+                    reply,
+                };
+                self.push_agent(AgentJob { work, cancel });
             }
-            Control::PreviewCacheStats { reply } => {
-                let _ = reply.send(self.renderer.cache_stats());
+            Control::PreviewCache {
+                clear,
+                reply,
+                cancel,
+            } => {
+                let work = AgentWork::CacheStats { clear, reply };
+                self.push_agent(AgentJob { work, cancel });
             }
-            Control::ClearPreviewCache { reply } => {
-                let _ = reply.send(self.renderer.clear());
+        }
+    }
+
+    /// PF1 R-4: push without waiting; a full queue replies at once.
+    fn push_agent(&self, job: AgentJob) {
+        self.lane.try_push(job);
+    }
+
+    fn apply_control(&mut self, stamp: FrameStamp) {
+        self.applied_controls += 1;
+        self.applied = self.applied.max(stamp);
+    }
+
+    fn lock_coalesced(&self) -> MutexGuard<'_, Coalesced> {
+        self.coalesced
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn scene(&self) -> Scene {
+        Scene {
+            document: Arc::clone(&self.document),
+            lut: Arc::clone(&self.lut_library),
+            generation: self.generation,
+        }
+    }
+
+    fn post(&self, kind: JobKind) {
+        let job = TransportJob {
+            kind,
+            stamp: self.applied,
+            scene: self.scene(),
+        };
+        self.lane.post(Some(job));
+    }
+
+    /// S-1: the paused slot's newest target, exact.
+    fn post_paused(&self, at: TimeCode) {
+        self.post(JobKind::Paused(at));
+    }
+
+    /// PF1 R-2: a `play` or `pause` epoch gets its own image of the frame
+    /// the transport rests on, clamped into the programme.
+    fn post_resting(&self, at: TimeCode) {
+        let last = self.document.duration.0.saturating_sub(1);
+        self.post_paused(TimeCode(at.0.min(last).max(0)));
+    }
+
+    /// PF1 R-2: a stamped preview failure stops playback only while it is
+    /// current and not superseded; anything older is only counted.
+    fn handle_preview_failures(&mut self) {
+        for (stamp, error) in self.lane.take_failures() {
+            if stamp.is_current(self.lock_coalesced().latest) {
+                self.pause();
+                self.emit(MediaEvent::StampedError(stamp, error));
+            } else {
+                self.stale_errors += 1;
             }
         }
     }
@@ -1885,7 +2106,7 @@ impl Worker {
     fn rebind_lut_library(&mut self) {
         let document = Arc::clone(&self.document);
         self.lut_library = self.bound_lut_library(&document);
-        self.renderer.set_lut_library(Arc::clone(&self.lut_library));
+        self.lane.rebind(self.generation, &self.lut_library);
     }
 
     /// AU2 §5.8: the document differs only in `audio_mix`, which no video path
@@ -1945,7 +2166,7 @@ impl Worker {
         let at = TimeCode(at.0.clamp(0, self.document.duration.0.saturating_sub(1)));
         self.clock.set_frame(at);
         self.emit(MediaEvent::Position(at));
-        self.present(at);
+        self.post_paused(at);
     }
 
     fn update_audio_mix(&mut self, doc: Arc<Document>) -> bool {
@@ -1978,34 +2199,58 @@ impl Worker {
         // AU3 §3.9: a new document is a new programme.
         self.loudness.reset(None, doc.fps);
         self.document = Arc::new(doc.clone());
+        self.generation += 1;
         self.rebind_lut_library();
-        self.renderer.clear();
         self.clock.set_fps(doc.fps);
         self.clock.set_frame(TimeCode::ZERO);
         self.last_position = None;
-        self.present(TimeCode::ZERO);
+        self.post_paused(TimeCode::ZERO);
     }
 
+    /// PF1 R-1/S-1: apply the coalesced seek and frame requests whose
+    /// earlier controls have all been applied (else they wait a loop). Each
+    /// posts at most one job, stamped with the newest stamp applied.
     fn handle_coalesced_requests(&mut self) {
-        let seek_sequence = self.requested.seek_sequence.load(Ordering::Acquire);
-        if seek_sequence != self.handled_seek_sequence {
-            self.handled_seek_sequence = seek_sequence;
-            let at = TimeCode(self.requested.seek.load(Ordering::Relaxed));
+        let applied = self.applied_controls;
+        let (seek, frame, seek_predates_eos) = {
+            let mut coalesced = self.lock_coalesced();
+            let ready = |request: Option<Request>| {
+                request.filter(|request| request.controls_before <= applied)
+            };
+            let seek = ready(coalesced.seek).and_then(|_| coalesced.seek.take());
+            let frame = ready(coalesced.frame).and_then(|_| coalesced.frame.take());
+            let predates = coalesced.seek_eos_generation != coalesced.eos_generation;
+            (seek, frame, predates)
+        };
+        // A frame request older than the seek applied with it is superseded.
+        let frame = frame.filter(|frame| seek.is_none_or(|seek| frame.stamp > seek.stamp));
+        for request in seek.iter().chain(&frame) {
+            self.applied = self.applied.max(request.stamp);
+        }
+        if let Some(seek) = seek {
+            let at = seek.at;
             // PF1 V-2 (review B F1): a seek published while playing, which
             // raced the terminal stop, keeps playing.
-            let raced_eos = self.resume_after_eos && self.requested.seek_predates_eos();
+            let raced_eos = self.resume_after_eos && seek_predates_eos;
             if self.playing || raced_eos {
                 self.start_playback(at);
             } else {
                 self.clock.set_frame(at);
                 self.emit(MediaEvent::Position(at));
+                if frame.is_none() {
+                    self.post_paused(at);
+                }
             }
         }
-
-        let frame_sequence = self.requested.frame_sequence.load(Ordering::Acquire);
-        if frame_sequence != self.handled_frame_sequence {
-            self.handled_frame_sequence = frame_sequence;
-            self.present(TimeCode(self.requested.frame.load(Ordering::Relaxed)));
+        if let Some(frame) = frame {
+            if !self.playing {
+                self.post_paused(frame.at);
+            } else if seek.is_none() {
+                // A frame request while playing restamps the playback job.
+                self.post(JobKind::Playback {
+                    from: self.clock.position(),
+                });
+            }
         }
     }
 
@@ -2040,7 +2285,7 @@ impl Worker {
                 self.audio = Some(runtime);
                 self.playing = true;
                 self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Playing));
-                self.present(from);
+                self.post(JobKind::Playback { from });
             }
             Err(error) => self.fail(error),
         }
@@ -2057,8 +2302,7 @@ impl Worker {
     /// A pending seek decides the position itself, so it also keeps the
     /// ordinary pause (one `Position`, from the seek).
     fn pause_or_stop_at_end(&mut self) {
-        let seek_pending =
-            self.requested.seek_sequence.load(Ordering::Acquire) != self.handled_seek_sequence;
+        let seek_pending = self.lock_coalesced().seek.is_some();
         if self.playing && self.ring_drained() && !seek_pending {
             self.stop_at_end();
             self.resume_after_eos = false;
@@ -2084,6 +2328,7 @@ impl Worker {
 
     fn pause(&mut self) {
         self.resume_after_eos = false;
+        self.lane.post(None);
         if let Some(audio) = &self.audio
             && let Err(error) = audio.pause()
         {
@@ -2111,8 +2356,10 @@ impl Worker {
     /// (a one-frame 30000/1001 timeline ends at sample 1601, clock frame 0).
     fn stop_at_end(&mut self) {
         // Review B F1: a seek stamped before this bump raced the stop.
-        self.requested.eos_generation.fetch_add(1, Ordering::SeqCst);
+        self.lock_coalesced().eos_generation += 1;
         self.resume_after_eos = true;
+        // Worker-initiated: no stamp, the playback job just ends (R-1).
+        self.lane.post(None);
         if let Some(audio) = &self.audio
             && let Err(error) = audio.pause()
         {
@@ -2158,54 +2405,16 @@ impl Worker {
         let position = self.clock.position();
         // Review B F1: a seek pending since `handle_coalesced_requests` is
         // applied, still playing, on the next pass instead of the stop.
-        let seek_pending =
-            self.requested.seek_sequence.load(Ordering::Acquire) != self.handled_seek_sequence;
+        let seek_pending = self.lock_coalesced().seek.is_some();
         if !seek_pending && self.programme_ended() {
             self.stop_at_end();
             return;
         }
+        // PF1 H-1: the preview thread renders; the tick only reports.
         if self.last_position != Some(position) {
             self.last_position = Some(position);
             self.emit(MediaEvent::Position(position));
-            self.present(position);
         }
-    }
-
-    fn present(&mut self, project_at: TimeCode) {
-        let document = Arc::clone(&self.document);
-        let scale = RenderScale::Proxy {
-            max_width: monitor_max_width(document.resolution),
-        };
-        let resolution = scale.output_resolution(document.resolution);
-        let strategy = if self.playing {
-            DecodeStrategy::Sequential
-        } else {
-            DecodeStrategy::Seek
-        };
-        let frame = match self
-            .renderer
-            .render_live(&document, project_at, resolution, scale, strategy)
-        {
-            Ok(frame) => frame,
-            Err(error) => {
-                self.fail(error);
-                return;
-            }
-        };
-        #[cfg(test)]
-        if !self.faults.publish_after_render() {
-            return;
-        }
-        send_latest(
-            &self.frames_tx,
-            &self.frames_drop_rx,
-            PreviewFrame {
-                at: project_at,
-                stamp: FrameStamp::default(),
-                texture: frame,
-            },
-        );
-        self.wake_consumer();
     }
 
     fn audio_for_position(
@@ -2277,14 +2486,15 @@ impl Worker {
 }
 
 /// PF1 P-1: the monitor caps the long edge at `PREVIEW_MAX_WIDTH` too, so a
-/// 9:16 document previews at 720×1280 and 4:5 at 1024×1280. Only `present`
-/// uses it; every other proxy keeps `PREVIEW_MAX_WIDTH`.
-fn monitor_max_width((width, height): (u32, u32)) -> u32 {
+/// 9:16 document previews at 720×1280 and 4:5 at 1024×1280. Only the
+/// preview's transport renders use it; every other proxy keeps
+/// `PREVIEW_MAX_WIDTH`.
+pub(crate) fn monitor_max_width((width, height): (u32, u32)) -> u32 {
     let capped = u64::from(PREVIEW_MAX_WIDTH) * u64::from(width) / u64::from(height.max(1));
     u32::try_from(capped).map_or(PREVIEW_MAX_WIDTH, |capped| capped.min(PREVIEW_MAX_WIDTH))
 }
 
-fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: T) {
+pub(crate) fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: T) {
     match sender.try_send(value) {
         Ok(()) | Err(crossbeam_channel::TrySendError::Disconnected(_)) => {}
         Err(crossbeam_channel::TrySendError::Full(value)) => {
@@ -3410,7 +3620,6 @@ mod tests {
         use kinewright_core::{AudioBus, AudioBusId, ParamValue};
 
         let (_control_tx, control_rx) = unbounded::<Control>();
-        let (frames_tx, frames_rx) = bounded(2);
         let (events_tx, events_rx) = bounded(16);
         let clock = Arc::new(SharedClock::new());
         let meter = Arc::new(MeterState::default());
@@ -3418,17 +3627,15 @@ mod tests {
         let mut worker = Worker::new(
             WorkerChannels {
                 control_rx,
-                frames_tx,
-                frames_drop_rx: frames_rx.clone(),
                 events_tx,
                 events_drop_rx: events_rx.clone(),
+                lane: Arc::default(),
             },
             Arc::clone(&clock),
             Arc::clone(&meter),
             Arc::clone(&mix_meters),
             Arc::new(LiveLoudness::default()),
-            Arc::new(RequestedPositions::default()),
-            fallback_gpu().context(),
+            Arc::default(),
             Arc::new(RwLock::new(PublishedLattices::default())),
             Arc::new(AtomicI32::new(0)),
         );
@@ -3519,58 +3726,315 @@ mod tests {
     /// A worker driven from the test thread (no `run` loop).
     fn test_worker() -> (Worker, Receiver<MediaEvent>) {
         let (_control_tx, control_rx) = unbounded::<Control>();
-        let (frames_tx, frames_rx) = bounded(2);
         let (events_tx, events_rx) = bounded(16);
         let meter = Arc::new(MeterState::default());
         let worker = Worker::new(
             WorkerChannels {
                 control_rx,
-                frames_tx,
-                frames_drop_rx: frames_rx,
                 events_tx,
                 events_drop_rx: events_rx.clone(),
+                lane: Arc::default(),
             },
             Arc::new(SharedClock::new()),
             Arc::clone(&meter),
             Arc::new(RwLock::new(Arc::new(MixMeters::empty(meter)))),
             Arc::new(LiveLoudness::default()),
-            Arc::new(RequestedPositions::default()),
-            fallback_gpu().context(),
+            Arc::default(),
             Arc::new(RwLock::new(PublishedLattices::default())),
             Arc::new(AtomicI32::new(0)),
         );
         (worker, events_rx)
     }
 
-    /// PF1 G-1/K-6 (review A F1): only the live preview monitor encodes
-    /// through the table; worker thumbnails (`thumbnail_at`,
-    /// `thumbnail_for_document`, the agent's frame tools) and
-    /// `monitor_proof_for_document` keep the f32 encode.
+    /// E-2: a preview spawn failure is new, so it is prefixed.
     #[test]
-    fn only_the_live_monitor_encodes_through_the_table() {
-        use crate::compositor::live_table_frames;
-        let (mut worker, _events) = test_worker();
-        let document = crate::perf_fixtures::title_card((64, 64), 3);
-        let before = live_table_frames();
-        worker.set_document(&document);
-        worker.present(TimeCode(1));
-        assert_eq!(live_table_frames(), before + 2, "set_document and present");
-        let (reply, response) = bounded(1);
-        worker.handle_control(Control::Thumbnail {
-            document: Some(Arc::new(document.clone())),
-            at: TimeCode(1),
-            max_width: 64,
-            reply,
-        });
-        let thumbnail = response.recv().unwrap().expect("a thumbnail");
-        assert_eq!((thumbnail.width, thumbnail.height), (64, 64));
-        let temp = TempDirectory::new("pf1-g1-routing");
+    fn a_preview_spawn_failure_is_prefixed() {
+        let temp = TempDirectory::new("pf1-preview-spawn");
+        FAIL_PREVIEW_SPAWN.with(|fail| fail.set(true));
+        let gpu = fallback_gpu().context();
+        let started = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into());
+        let Err(MediaError::Backend(message)) = started else {
+            panic!("the engine started without its preview thread");
+        };
+        assert!(message.starts_with("preview-thread: "), "{message}");
+    }
+
+    /// H-6 kill test: dropping the engine disconnects the worker, which
+    /// stops the lane and joins the preview; the preview's frame sender then
+    /// goes away, so a held receiver disconnects.
+    #[test]
+    fn dropping_the_engine_stops_the_preview_thread() {
+        let temp = TempDirectory::new("pf1-preview-drop");
         let gpu = fallback_gpu().context();
         let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
-        let proof = engine.monitor_proof_for_document(Arc::new(document), TimeCode(1));
-        assert_eq!(proof.expect("a proof").image.width, 64);
-        assert_eq!(live_table_frames(), before + 2, "thumbnail and proof: f32");
+        let frames = engine.frames();
+        engine.set_document(Arc::new(crate::perf_fixtures::title_card((64, 64), 3)));
+        assert!(frames.recv_timeout(Duration::from_secs(60)).is_ok());
+        let thumbnail = engine.thumbnail_at(TimeCode(1), 64).expect("a thumbnail");
+        assert_eq!(thumbnail.width, 64);
+        drop(engine);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match frames.recv_deadline(deadline) {
+                Ok(_) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                Err(error) => panic!("the preview thread outlived the engine: {error}"),
+            }
+        }
     }
+
+    /// R-4/E-2: the worker never waits on the agent lane; a full queue gets
+    /// the prefixed refusal at once, as the reply.
+    #[test]
+    fn a_full_agent_queue_is_refused_without_waiting() {
+        let (mut worker, _events) = test_worker();
+        let mut responses = Vec::new();
+        for _ in 0..=crate::preview::AGENT_QUEUE_LIMIT {
+            let (reply, response) = bounded(1);
+            let cancel = Arc::default();
+            worker.handle_control(Control::PreviewCache {
+                clear: false,
+                reply,
+                cancel,
+            });
+            responses.push(response);
+        }
+        let refused = responses
+            .pop()
+            .unwrap()
+            .try_recv()
+            .expect("an immediate reply");
+        let error = MediaError::Backend("preview-thread: agent queue full".to_owned());
+        assert_eq!(refused, Err(error));
+        assert!(responses.iter().all(Receiver::is_empty));
+        worker.shut_down();
+        for response in responses {
+            assert_eq!(response.try_recv().unwrap(), Err(worker_stopped()));
+        }
+    }
+
+    fn transport_job(worker: &Worker) -> Option<(JobKind, FrameStamp)> {
+        let state = worker.lane.lock();
+        state.transport.as_ref().map(|job| (job.kind, job.stamp))
+    }
+
+    /// R-1: a request waits for every control issued before it; the job it
+    /// posts carries its own stamp and that epoch's document.
+    #[test]
+    fn a_request_waits_for_the_controls_issued_before_it() {
+        let (mut worker, _events) = test_worker();
+        let document = Arc::new(crate::perf_fixtures::title_card((64, 64), 9));
+        let control = worker.lock_coalesced().control();
+        worker.lock_coalesced().request_frame(TimeCode(4));
+        worker.handle_coalesced_requests();
+        assert_eq!(transport_job(&worker), None, "waits a loop");
+        worker.handle_control(Control::SetDocument(Arc::clone(&document), control));
+        worker.handle_coalesced_requests();
+        let request = FrameStamp { epoch: 1, seq: 2 };
+        assert_eq!(
+            transport_job(&worker),
+            Some((JobKind::Paused(TimeCode(4)), request))
+        );
+        let scene = worker.lane.lock().transport.as_ref().unwrap().scene.clone();
+        assert_eq!(scene.document.duration, document.duration);
+    }
+
+    /// R-2: a stamped failure stops playback only while current and not
+    /// superseded; anything else counts `stale_errors`.
+    #[test]
+    fn only_a_current_stamped_failure_stops_playback() {
+        let fps = Rational::new(10, 1).unwrap();
+        let (mut worker, _audio, events) = stepped_worker(fps, TimeCode(50));
+        let issued = worker.lock_coalesced().control();
+        let error = || MediaError::Backend("render".to_owned());
+        let old_epoch = FrameStamp {
+            epoch: issued.epoch - 1,
+            seq: issued.seq,
+        };
+        worker.lock_coalesced().request_frame(TimeCode(3));
+        let superseded = issued;
+        worker.lane.lock().failures = vec![(old_epoch, error()), (superseded, error())];
+        let _ = events.try_iter().count();
+        worker.handle_preview_failures();
+        assert!(worker.playing && events.is_empty());
+        assert_eq!(worker.stale_errors, 2);
+        let current = worker.lock_coalesced().latest;
+        worker.lane.lock().failures = vec![(current, error())];
+        worker.handle_preview_failures();
+        assert!(!worker.playing);
+        let events: Vec<_> = events.try_iter().collect();
+        assert!(
+            events.contains(&MediaEvent::StampedError(current, error())),
+            "{events:?}"
+        );
+    }
+
+    /// A tiny deterministic generator for the seeded models.
+    struct Seeded(u64);
+
+    impl Seeded {
+        fn below(&mut self, bound: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % bound
+        }
+
+        fn frame(&mut self, bound: u64) -> TimeCode {
+            TimeCode(i64::try_from(self.below(bound)).unwrap())
+        }
+    }
+
+    /// One worker loop pass over the controls "in the channel", checking
+    /// R-2's error gate: only current, unsuperseded failures stop playback.
+    fn model_pass(worker: &mut Worker, sent: &mut Vec<Control>, events: &Receiver<MediaEvent>) {
+        for control in sent.drain(..) {
+            worker.handle_control(control);
+            worker.fill_audio();
+        }
+        worker.handle_coalesced_requests();
+        let latest = worker.lock_coalesced().latest;
+        let stamps: Vec<_> = worker.lane.lock().failures.iter().map(|f| f.0).collect();
+        let current = stamps.iter().any(|stamp| stamp.is_current(latest));
+        let (playing, stale) = (worker.playing, worker.stale_errors);
+        let _ = events.try_iter().count();
+        worker.handle_preview_failures();
+        let stopped: Vec<_> = (events.try_iter())
+            .filter_map(|event| match event {
+                MediaEvent::StampedError(stamp, _) => Some(stamp),
+                _ => None,
+            })
+            .collect();
+        assert!(stopped.iter().all(|stamp| stamp.is_current(latest)));
+        if current {
+            assert!(!worker.playing && !stopped.is_empty());
+        } else {
+            assert_eq!((worker.playing, stopped.len()), (playing, 0));
+            assert_eq!(worker.stale_errors, stale + stamps.len() as u64);
+        }
+    }
+
+    /// I8 (media path): 1,000 seeded interleavings (eight shards of 125, so
+    /// the harness runs them in parallel: each `Play` opens the audio runtime
+    /// and fills a second of it) of drags, seeks, play/pause, edits, audio
+    /// callbacks and injected render failures. Epochs never go backwards, a
+    /// playback frame is published exactly at its due frame (never early or
+    /// expired), no superseded error stops playback, and the release target
+    /// is shown with the newest epoch.
+    fn seeded_interleavings(seeds: std::ops::Range<u64>) {
+        let (lane, clock) = (Arc::<Lane>::default(), Arc::new(SharedClock::new()));
+        let (mut preview, frames) =
+            crate::preview::tests::test_preview_on(Arc::clone(&lane), Arc::clone(&clock));
+        preview.faults.fake_render.store(true, Ordering::Release);
+        preview.faults.step_hold.store(true, Ordering::Release);
+        let faults = Arc::clone(&preview.faults);
+        let edit = |frames: u64| {
+            Arc::new(crate::perf_fixtures::title_card(
+                (64, 64),
+                10 + i64::try_from(frames).unwrap(),
+            ))
+        };
+        let (count, mut shown, mut playback_frames) = (seeds.end - seeds.start, 0, 0);
+        for seed in seeds {
+            let mut rng = Seeded(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let (mut worker, events) = test_worker();
+            (worker.lane, worker.clock) = (Arc::clone(&lane), Arc::clone(&clock));
+            lane.post(None);
+            drop(lane.take_failures());
+            preview.reset_cursor();
+            let audio = SimulatedAudio::stepped();
+            worker.output_device = OutputDevice::Simulated(audio.clone());
+            let mut sent = Vec::new();
+            let stamp = worker.lock_coalesced().control();
+            sent.push(Control::SetDocument(edit(30), stamp));
+            let mut last = None::<PreviewFrame>;
+            let mut step = |preview: &mut Preview, last: &mut Option<PreviewFrame>| {
+                let Some(work) = preview.next_work(false) else {
+                    return false;
+                };
+                let playback = matches!(work, crate::preview::Work::Playback(..));
+                preview.execute(work);
+                for frame in frames.try_iter() {
+                    let previous = last.as_ref().map_or(0, |last| last.stamp.epoch);
+                    assert!(frame.stamp.epoch >= previous, "epochs go backwards");
+                    if playback {
+                        assert_eq!(frame.at, clock.position(), "early or expired");
+                        playback_frames += 1;
+                    }
+                    *last = Some(frame);
+                }
+                true
+            };
+            for _ in 0..24 {
+                match rng.below(9) {
+                    0 => worker.lock_coalesced().request_frame(rng.frame(40)),
+                    1 => {
+                        let to = rng.frame(40);
+                        clock.set_frame(to);
+                        worker.lock_coalesced().seek(to);
+                    }
+                    2 => {
+                        let from = rng.frame(30);
+                        clock.set_frame(from);
+                        let stamp = worker.lock_coalesced().control();
+                        sent.push(Control::Play(from, stamp));
+                    }
+                    3 => sent.push(Control::Pause(worker.lock_coalesced().control())),
+                    4 => {
+                        let stamp = worker.lock_coalesced().control();
+                        sent.push(Control::SetDocument(edit(rng.below(40)), stamp));
+                    }
+                    5 => model_pass(&mut worker, &mut sent, &events),
+                    6 => drop(step(&mut preview, &mut last)),
+                    7 => {
+                        audio.advance(CALLBACK_FRAMES);
+                        worker.tick();
+                    }
+                    _ => faults.fail_render.store(true, Ordering::Release),
+                }
+            }
+            // A scripted play so every seed exercises due-frame publication.
+            faults.fail_render.store(false, Ordering::Release);
+            let from = rng.frame(30);
+            clock.set_frame(from);
+            sent.push(Control::Play(from, worker.lock_coalesced().control()));
+            model_pass(&mut worker, &mut sent, &events);
+            for _ in 0..12 {
+                step(&mut preview, &mut last);
+                audio.advance(CALLBACK_FRAMES);
+                worker.tick();
+            }
+            // Release: a pause, then the drag's final seek (L-6).
+            sent.push(Control::Pause(worker.lock_coalesced().control()));
+            let target = rng.frame(40);
+            clock.set_frame(target);
+            worker.lock_coalesced().seek(target);
+            model_pass(&mut worker, &mut sent, &events);
+            while step(&mut preview, &mut last) {}
+            let latest = worker.lock_coalesced().latest;
+            let shown_last = last.map(|frame| (frame.at, frame.stamp));
+            assert_eq!(shown_last, Some((target, latest)), "seed {seed}: L-6");
+            let state = lane.lock();
+            assert!(state.transport.is_none(), "seed {seed}: idle");
+            drop(state);
+            shown += 1;
+            drop(worker);
+        }
+        assert_eq!(shown, count);
+        assert!(playback_frames > 0, "the model published playback frames");
+    }
+
+    macro_rules! i8_shards {
+        ($($name:ident: $shard:literal),*) => {$(
+            #[test]
+            fn $name() {
+                seeded_interleavings($shard * 125..($shard + 1) * 125);
+            }
+        )*};
+    }
+
+    i8_shards!(i8_media_0: 0, i8_media_1: 1, i8_media_2: 2, i8_media_3: 3);
+    i8_shards!(i8_media_4: 4, i8_media_5: 5, i8_media_6: 6, i8_media_7: 7);
 
     /// Callbacks with a tick after each until the worker stops (or `limit`).
     fn play_out(worker: &mut Worker, audio: &SimulatedAudio, limit: usize) -> usize {
@@ -3625,7 +4089,7 @@ mod tests {
         audio.advance(CALLBACK_FRAMES);
         audio.advance(CALLBACK_FRAMES);
         assert_eq!(worker.clock.position(), TimeCode::ZERO, "the clock trails");
-        worker.handle_control(Control::Pause);
+        worker.handle_control(Control::Pause(FrameStamp::default()));
         assert_stopped_at_end(&worker, &events, TimeCode(1));
         assert!(!worker.resume_after_eos, "a pause never resumes");
     }
@@ -3649,7 +4113,7 @@ mod tests {
 
     fn seek(worker: &Worker, to: TimeCode) {
         worker.clock.set_frame(to);
-        worker.requested.publish_seek(to);
+        worker.lock_coalesced().seek(to);
     }
 
     /// PF1 V-2 (review B F1): a seek published while playing, which races
@@ -3696,7 +4160,7 @@ mod tests {
         let (mut worker, _audio, _events) = drained_before_the_tick();
         seek(&worker, TimeCode(10));
         worker.stop_at_end();
-        worker.handle_control(Control::Pause);
+        worker.handle_control(Control::Pause(FrameStamp::default()));
         worker.handle_coalesced_requests();
         assert!(!worker.playing && worker.audio.is_none(), "the pause wins");
         assert_eq!(worker.clock.position(), TimeCode(10));
@@ -3712,14 +4176,14 @@ mod tests {
         let exactly_one_pause_and_position = |worker: &mut Worker, events: &Receiver<_>| {
             let end = worker.document.duration;
             let _ = events.try_iter().count();
-            let eos = worker.requested.eos_generation.load(Ordering::SeqCst);
+            let eos = worker.lock_coalesced().eos_generation;
             seek(worker, end);
-            worker.handle_control(Control::Pause);
+            worker.handle_control(Control::Pause(FrameStamp::default()));
             worker.handle_coalesced_requests();
             let paused = MediaEvent::PlaybackStateChanged(PlaybackState::Paused);
             let events: Vec<_> = events.try_iter().collect();
             assert_eq!(events, [paused, MediaEvent::Position(end)]);
-            assert_eq!(worker.requested.eos_generation.load(Ordering::SeqCst), eos);
+            assert_eq!(worker.lock_coalesced().eos_generation, eos);
             assert!(!worker.playing && !worker.resume_after_eos);
             assert_eq!(worker.clock.position(), end);
         };
@@ -3884,7 +4348,6 @@ mod tests {
         use kinewright_core::{AudioBus, AudioBusId, ParamValue};
 
         let (control_tx, control_rx) = unbounded::<Control>();
-        let (frames_tx, frames_rx) = bounded(2);
         let (events_tx, events_rx) = bounded(16);
         let clock = Arc::new(SharedClock::new());
         let meter = Arc::new(MeterState::default());
@@ -3892,17 +4355,15 @@ mod tests {
         let mut worker = Worker::new(
             WorkerChannels {
                 control_rx: control_rx.clone(),
-                frames_tx,
-                frames_drop_rx: frames_rx.clone(),
                 events_tx,
                 events_drop_rx: events_rx.clone(),
+                lane: Arc::default(),
             },
             Arc::clone(&clock),
             Arc::clone(&meter),
             Arc::clone(&mix_meters),
             Arc::new(LiveLoudness::default()),
-            Arc::new(RequestedPositions::default()),
-            fallback_gpu().context(),
+            Arc::default(),
             Arc::new(RwLock::new(PublishedLattices::default())),
             Arc::new(AtomicI32::new(0)),
         );

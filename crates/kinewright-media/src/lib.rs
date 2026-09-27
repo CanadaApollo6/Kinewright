@@ -18,6 +18,7 @@ mod frame;
 mod loudness;
 mod lut;
 mod lut_store;
+mod preview;
 mod render;
 mod room_tone_store;
 mod sha256;
