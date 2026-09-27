@@ -2105,7 +2105,7 @@ impl Worker {
     fn present(&mut self, project_at: TimeCode) {
         let document = Arc::clone(&self.document);
         let scale = RenderScale::Proxy {
-            max_width: PREVIEW_MAX_WIDTH,
+            max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
         let strategy = if self.playing {
@@ -2197,6 +2197,14 @@ impl Worker {
             wakeup();
         }
     }
+}
+
+/// PF1 P-1: the monitor caps the long edge at `PREVIEW_MAX_WIDTH` too, so a
+/// 9:16 document previews at 720×1280 and 4:5 at 1024×1280. Only `present`
+/// uses it; every other proxy keeps `PREVIEW_MAX_WIDTH`.
+fn monitor_max_width((width, height): (u32, u32)) -> u32 {
+    let capped = u64::from(PREVIEW_MAX_WIDTH) * u64::from(width) / u64::from(height.max(1));
+    u32::try_from(capped).map_or(PREVIEW_MAX_WIDTH, |capped| capped.min(PREVIEW_MAX_WIDTH))
 }
 
 fn send_latest<T: Send>(sender: &Sender<T>, drop_receiver: &Receiver<T>, value: T) {
@@ -3512,6 +3520,35 @@ mod tests {
         assert!(!worker.audio.as_ref().unwrap().drained(samples));
         assert!(play_out(&mut worker, &audio, 400) < 400);
         assert_stopped_at_end(&worker, &events, TimeCode(50));
+    }
+
+    /// PF1 P-1/G12: the monitor raster's long edge is capped at 1,280; a
+    /// 1080×1920 (`reel_9x16`) document presents 720×1280.
+    #[test]
+    fn the_monitor_caps_the_long_edge_at_1280() {
+        for (document, monitor) in [
+            ((1_080, 1_920), (720, 1_280)),
+            ((1_080, 1_350), (1_024, 1_280)),
+            ((1_920, 1_080), (1_280, 720)),
+            ((640, 360), (640, 360)),
+        ] {
+            let proxy = RenderScale::Proxy {
+                max_width: monitor_max_width(document),
+            };
+            assert_eq!(proxy.output_resolution(document), monitor, "{document:?}");
+        }
+        let temp = TempDirectory::new("pf1-monitor-raster");
+        let root = temp.root().to_path_buf();
+        let engine =
+            FfmpegMediaEngine::new_with_gpu_and_data_dir(fallback_gpu().context(), root).unwrap();
+        let frames = engine.frames();
+        engine.set_document(Arc::new(crate::perf_fixtures::title_card(
+            (1_080, 1_920),
+            3,
+        )));
+        let (_, frame) = frames.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert_eq!((frame.width, frame.height), (720, 1_280));
+        assert_eq!(frame.rgba.len(), 720 * 1_280 * 4);
     }
 
     /// AU4 §7 item A15 (§4.4 rule 89): the defaulted `Playback::update_audio`
