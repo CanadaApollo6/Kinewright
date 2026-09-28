@@ -899,7 +899,31 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             .collect()
     }
 
-    /// Every ring frame, removed (a preview cache clear).
+    /// Review A F1: a preview cache clear. While a job waits (`active`),
+    /// its required frames stay (its readers, reservations and wait are
+    /// unchanged) and every other ring frame goes. Otherwise the demand is
+    /// complete and is invalidated with the frames: an empty plan (K-3's),
+    /// so no reader stays owed a cleared frame, and idle readers quiesce.
+    pub(crate) fn clear_cache(&mut self, active: bool, now: Duration) -> Posted<K, F> {
+        if !active {
+            return self.post(Vec::new(), (HashMap::new(), 0), now);
+        }
+        let required = &self.required;
+        let mut frames = Vec::new();
+        self.rings.retain(|key, ring| {
+            let gone = ring.extract_if(.., |t, _| !required.contains(&(key.clone(), *t)));
+            frames.extend(gone.map(|(_, frame)| frame));
+            !ring.is_empty()
+        });
+        Posted {
+            spawn: Vec::new(),
+            cancel: Vec::new(),
+            retired: false,
+            dropped: (frames, Vec::new()),
+        }
+    }
+
+    /// Every ring frame, removed (the preview is going).
     pub(crate) fn clear_rings(&mut self) -> Vec<F> {
         let rings = self.rings.drain().flat_map(|(_, ring)| ring.into_values());
         rings.collect()

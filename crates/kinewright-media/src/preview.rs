@@ -285,6 +285,10 @@ pub(crate) struct Lane {
     /// gate (or proceeds once its sender is gone).
     #[cfg(test)]
     pub(crate) gate: Mutex<Option<Receiver<()>>>,
+    /// Test support: a reader decode of exactly this time waits until the
+    /// sender is gone.
+    #[cfg(test)]
+    pub(crate) hold_at: Mutex<Option<(i64, Receiver<()>)>>,
     /// K-2: reader decodes that ended `Cancelled`.
     #[cfg(test)]
     pub(crate) cancelled: std::sync::atomic::AtomicUsize,
@@ -338,6 +342,8 @@ impl Lane {
             skew: Mutex::default(),
             #[cfg(test)]
             gate: Mutex::default(),
+            #[cfg(test)]
+            hold_at: Mutex::default(),
             #[cfg(test)]
             cancelled: std::sync::atomic::AtomicUsize::default(),
             #[cfg(test)]
@@ -738,6 +744,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                         lane.notify(); // a test waiting for `Decoding`
                         let _ = gate.recv();
                     }
+                    let hold_at = lane.hold_at.lock().expect("hold").clone();
+                    if let Some((_, release)) = hold_at.filter(|(time, _)| *time == at) {
+                        lane.notify(); // a test waiting for `Decoding`
+                        let _ = release.recv();
+                    }
                 }
                 let result = match &mut decoder {
                     Some(decoder) => spec.decode(decoder, at),
@@ -916,7 +927,7 @@ impl Preview {
                 if playing {
                     self.lane.counters().agent_started(self.published);
                 }
-                self.run_agent(job);
+                self.run_agent(job, false);
                 if playing {
                     self.lane.counters().agent_finished();
                 }
@@ -1184,7 +1195,7 @@ impl Preview {
                     drop(state);
                     drop(discarded);
                     if let Some(job) = job {
-                        self.run_agent(job);
+                        self.run_agent(job, true);
                     }
                     state = lane.lock();
                 }
@@ -1278,6 +1289,13 @@ impl Preview {
     /// (plans changed, obsolete ones retire), cancel obsolete tickets
     /// (H-5), drop what the plan removed (H-4) and start new readers.
     fn started(&mut self, posted: Posted<VideoSourceKey, Pinned>, demand: &ReaderDemand) {
+        let spawn = self.posted(posted);
+        self.spawn(spawn, demand);
+    }
+
+    /// `started` without a demand to start readers for: the readers the
+    /// post would start (none for an empty plan).
+    fn posted(&self, posted: Posted<VideoSourceKey, Pinned>) -> Vec<(u64, VideoSourceKey)> {
         let Posted {
             spawn,
             cancel,
@@ -1290,7 +1308,7 @@ impl Preview {
                 .permits_change(|book| cancel.iter().for_each(|id| book.cancel(*id)));
         }
         drop(dropped);
-        self.spawn(spawn, demand);
+        spawn
     }
 
     /// Start readers outside the lock; one that cannot start fails its
@@ -1480,7 +1498,8 @@ impl Preview {
 
     /// R-4: an agent job renders synchronously with `Seek`, outside every
     /// lock; its reply is sent exactly once, unless it was cancelled.
-    pub(crate) fn run_agent(&mut self, job: AgentJob) {
+    /// `active`: a paused `FrameWait` suspended for it (review A F1).
+    pub(crate) fn run_agent(&mut self, job: AgentJob, active: bool) {
         let AgentJob { work, cancel } = job;
         #[cfg(test)]
         if let Some(hook) = self.faults.on_agent.lock().expect("fault state").take() {
@@ -1508,12 +1527,16 @@ impl Preview {
                 self.reply(&cancel, &reply, result);
             }
             AgentWork::CacheStats { clear, reply } => {
-                let (rings, frames) = {
+                let (rings, cleared) = {
                     let mut state = self.lane.lock();
                     let rings = state.readers.ring_bytes();
-                    (rings, clear.then(|| state.readers.clear_rings()))
+                    let now = self.lane.now();
+                    (rings, clear.then(|| state.readers.clear_cache(active, now)))
                 };
-                drop(frames);
+                if let Some(cleared) = cleared {
+                    let spawn = self.posted(cleared);
+                    debug_assert!(spawn.is_empty(), "an empty plan starts no reader");
+                }
                 let mut stats = if clear {
                     self.titles = None;
                     self.renderer.clear()
@@ -1621,6 +1644,14 @@ pub(crate) mod tests {
         (job, response, cancel)
     }
 
+    /// A `clear_preview_cache` job (review A F1/S2).
+    fn clear_job() -> (AgentJob, StatsReply) {
+        let (reply, response) = bounded(1);
+        let work = AgentWork::CacheStats { clear: true, reply };
+        let cancel = Arc::default();
+        (AgentJob { work, cancel }, response)
+    }
+
     /// Exactly one reply was sent and the sender is gone.
     fn one_reply<T>(response: &Receiver<Result<T, MediaError>>) -> Result<T, MediaError> {
         let reply = response.try_recv().expect("one reply");
@@ -1657,16 +1688,19 @@ pub(crate) mod tests {
         assert_eq!(frames.try_iter().count(), 2);
         assert_eq!(live_table_frames(), before + 2, "two paused renders");
         let (reply, response) = bounded(1);
-        preview.run_agent(AgentJob {
-            work: AgentWork::Thumbnail {
-                document: Arc::clone(&document),
-                lut: Arc::default(),
-                at: TimeCode(1),
-                max_width: 64,
-                reply,
+        preview.run_agent(
+            AgentJob {
+                work: AgentWork::Thumbnail {
+                    document: Arc::clone(&document),
+                    lut: Arc::default(),
+                    at: TimeCode(1),
+                    max_width: 64,
+                    reply,
+                },
+                cancel: Arc::default(),
             },
-            cancel: Arc::default(),
-        });
+            false,
+        );
         let thumbnail = one_reply(&response).expect("a thumbnail");
         assert_eq!((thumbnail.width, thumbnail.height), (64, 64));
         let temp = TempDirectory::new("pf1-g1-routing");
@@ -2267,6 +2301,69 @@ pub(crate) mod tests {
         assert!(polls(&lane, 2) >= 3, "C woke first, then at B's grant");
     }
 
+    /// Review A F1 (idle): a cache clear after a paused frame completed
+    /// invalidates its demand, so the readers are owed nothing and retire
+    /// at the injected quiescence deadline, releasing their permits.
+    #[test]
+    fn a_cleared_idle_reader_still_retires() {
+        let (document, _workload) = cut_document();
+        let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+        let paused = job(&document, JobKind::Paused(TimeCode(0)), stamp(1, 1));
+        preview.run_paused(&paused, 0);
+        assert!(frames.try_recv().is_ok(), "the paused frame");
+        let lane = Arc::clone(&preview.lane);
+        assert_eq!(lane.lock().readers.slots.len(), 3);
+        let (clear, response) = clear_job();
+        assert!(lane.try_push(clear));
+        let work = preview.next_work(false).expect("the clear");
+        preview.execute(work);
+        assert!(one_reply(&response).is_ok());
+        assert_eq!(lane.lock().readers.ring_bytes(), (0, 0), "cleared");
+        *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
+        lane.work.notify_all();
+        wait_until(&lane, |state| state.readers.slots.is_empty());
+        assert_eq!(lane.permits_in_use(), 0, "no permits kept");
+        assert_eq!(lane.lock().readers.live().0, 0, "no bytes kept");
+    }
+
+    /// Review A F1 (hang): a paused wait for sources 0 and 1; source 0's
+    /// frames arrive and its readers retire; a cache clear suspends the
+    /// wait. The active job's frames stay, so once source 1's decode lands
+    /// the frame publishes (clearing them left no reader to re-decode it).
+    #[test]
+    fn a_clear_during_a_paused_wait_keeps_its_frames() {
+        let (document, _workload) = cut_document();
+        let lane = Arc::new(Lane::default());
+        let (release, held) = bounded::<()>(0);
+        // Frame 0: source 0 at 0 and 14, source 1 at 7 (held).
+        *lane.hold_at.lock().expect("hold") = Some((7, held));
+        let (gate, frames, thread) = gated_preview(&lane);
+        drop(gate);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(0)),
+            stamp(1, 1),
+        )));
+        wait_until(&lane, |state| state.readers.ring_bytes().0 == 2);
+        *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
+        lane.work.notify_all();
+        wait_until(&lane, |state| state.readers.slots.len() == 1);
+        let (clear, response) = clear_job();
+        assert!(lane.try_push(clear));
+        let cleared = response.recv_timeout(Duration::from_secs(60));
+        assert!(cleared.expect("the clear ran").is_ok());
+        assert_eq!(
+            lane.lock().readers.ring_bytes().0,
+            2,
+            "the wait's frames stay"
+        );
+        drop(release);
+        let shown = frames.recv_timeout(Duration::from_secs(60));
+        assert_eq!(shown.expect("the paused frame").at, TimeCode(0));
+        lane.shut_down();
+        join_within(thread);
+    }
+
     /// G13 / I11 (S2b-2): four active sources at P = 20 hold 5 × 4 frame
     /// threads, never more than P; a synchronous decoder (a thumbnail) is
     /// outside the pool and completes while every permit is held.
@@ -2619,7 +2716,7 @@ pub(crate) mod tests {
             let (gate, frames, thread) = gated_preview(&lane);
             *lane.gate.lock().expect("gate") = None;
             drop(gate);
-            let mut seq = 0;
+            let (mut seq, mut clears) = (0, false);
             for sequence in 0..sequences / 8 {
                 let mut post = |kind: Option<JobKind>, document: &Arc<Document>| {
                     seq += 1;
@@ -2634,7 +2731,10 @@ pub(crate) mod tests {
                         1 | 2 => post(Some(JobKind::Playback { from: at }), document),
                         3 => post(None, document),
                         4 => {
-                            let _ = lane.try_push(stats_job().0);
+                            // Review A S2: every other agent job clears.
+                            clears = !clears;
+                            let job = if clears { clear_job().0 } else { stats_job().0 };
+                            let _ = lane.try_push(job);
                             continue;
                         }
                         _ => {
