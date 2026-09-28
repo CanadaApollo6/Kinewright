@@ -10,6 +10,8 @@ name: Kani
 #                                             MAX_RESTORED_ID, compact_json_len
 #   crates/kinewright-core/src/time.rs        TimeCode, the frame type the MO1
 #                                             harnesses build keyframes from
+#   crates/kinewright-core/src/lib.rs         module declarations and re-exports
+#                                             the harnesses import through `crate::`
 #   crates/kinewright-core/Cargo.toml, Cargo.toml, Cargo.lock
 #                                             the dependencies and the
 #                                             `cfg(kani)` lint the proofs compile with
@@ -21,6 +23,7 @@ on:
     paths:
       - crates/kinewright-core/src/automation.rs
       - crates/kinewright-core/src/incident.rs
+      - crates/kinewright-core/src/lib.rs
       - crates/kinewright-core/src/time.rs
       - crates/kinewright-core/Cargo.toml
       - Cargo.toml
@@ -30,6 +33,7 @@ on:
     paths:
       - crates/kinewright-core/src/automation.rs
       - crates/kinewright-core/src/incident.rs
+      - crates/kinewright-core/src/lib.rs
       - crates/kinewright-core/src/time.rs
       - crates/kinewright-core/Cargo.toml
       - Cargo.toml
