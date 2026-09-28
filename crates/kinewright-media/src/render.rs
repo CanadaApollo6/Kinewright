@@ -303,6 +303,9 @@ pub(crate) struct ReaderDemand {
     pub(crate) sources: HashMap<VideoSourceKey, (SourceSpec, Vec<i64>)>,
     /// K-1: G, the job's generated raster bytes (titles and solids).
     pub(crate) generated: usize,
+    /// The rasters G counts (review B S2: only those not resident are
+    /// reserved).
+    generated_keys: Vec<TitleCacheKey>,
 }
 
 /// The job's required frames at `at`, then up to `horizon` frames of
@@ -327,7 +330,19 @@ pub(crate) fn reader_demand(
         for layer in layers {
             let video = match layer {
                 TimelineVisualLayer::Video(video) => video,
-                TimelineVisualLayer::Title(_) | TimelineVisualLayer::Solid(_) if frame == at.0 => {
+                TimelineVisualLayer::Title(layer) if frame == at.0 => {
+                    let content = Generated::Title(layer.title);
+                    demand
+                        .generated_keys
+                        .push((layer.clip, resolution, content));
+                    generated = generated.saturating_add(working_bytes(resolution));
+                    continue;
+                }
+                TimelineVisualLayer::Solid(layer) if frame == at.0 => {
+                    let content = Generated::Solid([layer.color.r, layer.color.g, layer.color.b]);
+                    demand
+                        .generated_keys
+                        .push((layer.clip, resolution, content));
                     generated = generated.saturating_add(working_bytes(resolution));
                     continue;
                 }
@@ -712,6 +727,25 @@ impl FrameRenderer {
     /// K-1: the bytes of the title rasters cached now.
     pub(crate) fn title_bytes(&self) -> usize {
         self.title_cache_bytes()
+    }
+
+    /// K-2 (review B S2): the bytes of `demand`'s generated rasters not
+    /// cached now; those cached are already charged to the preview's titles.
+    pub(crate) fn generated_missing(&self, demand: &ReaderDemand) -> usize {
+        (demand.generated_keys.iter())
+            .filter(|key| !self.title_cache.contains_key(key))
+            .map(|key| working_bytes(key.1))
+            .fold(0, usize::saturating_add)
+    }
+
+    /// The cached generated rasters' buffers (review B S2's witness).
+    #[cfg(test)]
+    pub(crate) fn title_buffer_ids(&self) -> std::collections::BTreeSet<usize> {
+        use crate::frame::CachedFrame;
+        self.title_cache
+            .values()
+            .map(CachedFrame::shared_buffer_id)
+            .collect()
     }
 
     /// K-5: drop the cached title rasters (the preview is draining).

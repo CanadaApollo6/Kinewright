@@ -1065,8 +1065,10 @@ impl Preview {
             0
         };
         let demand = reader_demand(document, at, resolution, scale, horizon);
-        let frames = self.schedule(&demand, at, wait)?;
+        // Bound first: a new generation's cleared titles are not resident
+        // when admission counts them (review B S2).
         self.bind(Some(scene.generation), &scene.lut);
+        let frames = self.schedule(&demand, at, wait)?;
         let frame = match frames {
             Some((frames, pins, generated)) => {
                 let frame =
@@ -1136,13 +1138,15 @@ impl Preview {
         let plan = (sizes, demand.generated);
         // The set is admitted under the post's lock, before a reader starts.
         let mut posted = Some(state.readers.post(regions.unwrap_or_default(), plan, now));
-        let mut generated = Some(demand.generated);
+        // Review B S2: only the rasters not resident are reserved.
+        let mut generated = Some(self.renderer.generated_missing(demand));
         let mut granted = None;
         loop {
             if generated.is_some() || state.readers.unreserved() {
                 let unlocked;
                 (state, unlocked) = self.admit((&lane, state), &mut generated, &mut granted);
                 if unlocked {
+                    self.owe_generated(demand, &mut generated, granted.as_ref());
                     continue; // a release while unlocked woke no one
                 }
             }
@@ -1196,6 +1200,7 @@ impl Preview {
                     drop(discarded);
                     if let Some(job) = job {
                         self.run_agent(job, true);
+                        self.owe_generated(demand, &mut generated, granted.as_ref());
                     }
                     state = lane.lock();
                 }
@@ -1236,7 +1241,10 @@ impl Preview {
         match state.readers.admit(generated.unwrap_or(0)) {
             Admission::Ready { generated: bytes } => {
                 if generated.take().is_some() {
-                    *granted = Some(Hold::adopt(&self.lane, bytes));
+                    match granted {
+                        Some(hold) => hold.bytes += bytes,
+                        None => *granted = Some(Hold::adopt(&self.lane, bytes)),
+                    }
                 }
                 self.lane.work.notify_all();
                 (state, false)
@@ -1252,6 +1260,21 @@ impl Preview {
                 self.titles = None;
                 (lane.lock(), true)
             }
+        }
+    }
+
+    /// Review B S2: resident rasters that went while unlocked (a drain, a
+    /// cache clear) are owed again: G beyond what is admitted is reserved.
+    fn owe_generated(
+        &self,
+        demand: &ReaderDemand,
+        generated: &mut Option<usize>,
+        granted: Option<&Hold>,
+    ) {
+        let need = self.renderer.generated_missing(demand);
+        let admitted = granted.map_or(0, |hold| hold.bytes);
+        if need > admitted {
+            *generated = Some(need - admitted);
         }
     }
 
@@ -2811,6 +2834,40 @@ pub(crate) mod tests {
             0 < kept && kept < both,
             "one raster of two is kept: {kept} of {both}"
         );
+    }
+
+    /// Review B S2: a paused frame shown again reserves nothing for its
+    /// cached title rasters (the preview's titles already hold them), so at
+    /// C = f + G + f/2 it neither drains nor re-rasterizes them.
+    #[test]
+    fn a_resident_title_is_not_reserved_again() {
+        let workload = crate::perf_fixtures::titled((160, 90), 30, 2);
+        let titled = Arc::new(workload.0.clone());
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(titled.resolution),
+        };
+        let size = scale.output_resolution(titled.resolution);
+        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0);
+        let f = (demand.sources.values())
+            .map(|(spec, _)| spec.frame_bytes)
+            .max();
+        let (f, g) = (f.expect("a source"), demand.generated);
+        let budget = f + g + f / 2;
+        let lane = Arc::new(Lane::with_budget(20, budget));
+        let (mut preview, frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        let mut rasters = Vec::new();
+        for seq in 1..=2 {
+            let paused = job(&titled, JobKind::Paused(TimeCode(3)), stamp(1, seq));
+            preview.run_paused(&paused, 0);
+            assert!(frames.try_recv().is_ok(), "shown {seq}");
+            rasters.push(preview.renderer.title_buffer_ids());
+        }
+        assert_eq!(rasters[0].len(), 2, "two title rasters");
+        assert_eq!(rasters[0], rasters[1], "the rasters were reused");
+        let (live, peak) = lane.lock().readers.live();
+        assert_eq!(live, f + g, "frame 3 and the titles");
+        assert!(peak <= budget, "I12");
     }
 
     /// K-3 (S2b-3): a required set over C renders synchronously, counted
