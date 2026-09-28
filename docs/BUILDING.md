@@ -30,6 +30,16 @@ cargo test --workspace
 cargo run -p kinewright-app
 ```
 
+`cargo test --workspace` runs the fast test tier. The slowest tests (the list is
+`ci/slow-tests.txt`) run only when each crate's `slow-tests` feature is on:
+
+```
+cargo test --workspace --features kinewright-media/slow-tests,kinewright-agent/slow-tests,kinewright-app/slow-tests
+```
+
+Programme documents whose exit gate says `cargo test --workspace` mean the fast
+tier unless they say otherwise; CI runs the slow tier on every push to `main`.
+
 `source` the setup script in the same shell as Cargo. It downloads the pinned
 FFmpeg 8.0 x86_64 shared GPL build (the same 8.0 ABI Windows links), verifies
 its SHA-256, extracts it to `third_party/ffmpeg`, and exports `FFMPEG_DIR`,

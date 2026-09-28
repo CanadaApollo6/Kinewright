@@ -19,7 +19,21 @@ Run the test suite with `cargo test --workspace`. Some tests are gated behind en
 | `KINEWRIGHT_AGENT_TEST=1` | Live agent E2E via your installed Claude Code / Codex CLI (uses your subscription; costs cents) |
 | `KINEWRIGHT_TRANSCRIPT_TEST=1` | Real Whisper transcription E2E (downloads the model once) |
 
-CI runs the ungated suite on clean Windows and Linux runners; your PR must keep both green.
+`cargo test --workspace` is the **fast tier**: it skips the slow tests (the ones
+listed in `ci/slow-tests.txt`, each a minute or more on a CI runner) and prints them
+as `ignored, slow tier: ...`. The full suite, before a merge or when you touch code
+they cover, is:
+
+```bash
+cargo test --workspace --features kinewright-media/slow-tests,kinewright-agent/slow-tests,kinewright-app/slow-tests
+```
+
+`python3 scripts/slow_tests.py features` prints that feature list, and
+`python3 scripts/slow_tests.py lint` checks that the manifest and the
+`slow-tests` markers on the tests agree. Two software-renderer performance-evidence
+tests run only on demand (`-- --ignored cc5_performance_evidence`, likewise `cc6_`).
+
+CI runs the fast tier on clean Windows and Linux runners for every push and pull request that changes more than documentation (documentation-only pushes skip CI), and the slow tier on pushes to `main`, on a manual run, and on a push whose head commit message contains `[slow-tier]`. Your PR must keep both green. Kani proofs run in their own workflow, only when the files they cover change.
 
 ## The ground rules (short but firm)
 
@@ -41,7 +55,7 @@ The design system is specified in [docs/DESIGN.md](docs/DESIGN.md) ("Cut Room").
 ## Pull requests
 
 - Branch from `main`; keep PRs focused on one thing.
-- `cargo build --workspace` and `cargo test --workspace` green locally before opening.
+- `cargo build --workspace` and `cargo test --workspace` (the fast tier) green locally before opening; add the slow features above when your change touches audio measurement, export delivery, or the MCP server wire limits.
 - Describe what you verified by hand, not just what you changed.
 - Commit messages: imperative summary line, body explaining *why*.
 

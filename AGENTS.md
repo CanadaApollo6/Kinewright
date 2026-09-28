@@ -19,6 +19,10 @@ buildable here after provisioning FFmpeg and the native desktop libraries:
 
 Windows FFmpeg/GPU-dependent CI remains in `.github/workflows/ci.yml` on
 `windows-latest`. Linux CI runs the same workspace commands on `ubuntu-latest`.
+CI has a fast tier (every non-docs push) and a slow tier (push to `main`, manual
+run, or `[slow-tier]` in the head commit message); the slow tests are listed in
+`ci/slow-tests.txt` and gated by each crate's `slow-tests` feature. Kani runs in
+`.github/workflows/kani.yml`, only when its source files change.
 
 ### Toolchain
 
@@ -33,7 +37,9 @@ and defaults to `stable` (currently 1.97), which satisfies this. There is no
 ./scripts/install-linux-deps.sh          # once per machine
 source ./scripts/setup-ffmpeg.sh         # once per shell
 cargo build --workspace
-cargo test  --workspace
+cargo test  --workspace                  # fast tier: slow tests are skipped
+cargo test  --workspace --features kinewright-media/slow-tests,kinewright-agent/slow-tests,kinewright-app/slow-tests   # full suite
+python3 scripts/slow_tests.py lint       # slow-test manifest and markers agree
 cargo fmt   -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p kinewright-app
