@@ -2,15 +2,18 @@
 """Slow-tier tooling for CI and local runs (standard library only).
 
     python3 scripts/slow_tests.py lint          manifest <-> source markers agree
-    python3 scripts/slow_tests.py fast          cargo test --workspace, then check
-                                                exactly the manifest was skipped
+    python3 scripts/slow_tests.py fast          cargo test --workspace, then check the
+                                                manifest was skipped and nothing else
+                                                unexpected (ci/ignored-tests.txt) was
     python3 scripts/slow_tests.py slow          run exactly the manifest, check all
                                                 of it ran and passed
     python3 scripts/slow_tests.py verify-fast FILE   the check `fast` applies, on a saved log
     python3 scripts/slow_tests.py verify-slow FILE   the check `slow` applies, on a saved log
     python3 scripts/slow_tests.py features      print the --features list for the slow tier
 
-The manifest is ci/slow-tests.txt. A slow test carries
+The manifest is ci/slow-tests.txt; ci/ignored-tests.txt allowlists the hardware,
+audio-device, live-subscription, manual and on-demand tests that carry a plain
+`#[ignore]`. The fast tier fails on any other skipped test. A slow test carries
 
     #[cfg_attr(not(feature = "slow-tests"), ignore = "slow tier: cargo test --features slow-tests")]
 
@@ -33,6 +36,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "ci" / "slow-tests.txt"
+IGNORED = ROOT / "ci" / "ignored-tests.txt"
 REASON = "slow tier: cargo test --features slow-tests"
 
 # The marker, tolerant of rustfmt wrapping it over several lines.
@@ -44,25 +48,39 @@ ATTRIBUTE_OR_COMMENT = re.compile(r"\s*(?:#\[[^\]]*\]|//[^\n]*)")
 FN_NAME = re.compile(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)")
 MACRO_ENTRY = re.compile(r"\s*(\w+)\s*=>")
 RUNNING = re.compile(r"^\s*Running (?:unittests |tests[/\\])?(.*)$")
-TEST_LINE = re.compile(r"^test (\S+) \.\.\. (.*)$")
+# A doctest name contains spaces (`path/lib.rs - item (line 3)`), and a should_panic
+# test prints `name - should panic`; the outcome starts at the first " ... ".
+TEST_LINE = re.compile(r"^test (.+?) \.\.\. (.*)$")
+DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 
-def read_manifest() -> list[tuple[str, str, str]]:
+def read_entries(path: Path) -> list[tuple[str, str, str]]:
+    """`<binary> <test path> <source file>` lines; the path may not contain `#`."""
     entries = []
-    for number, raw in enumerate(MANIFEST.read_text(encoding="utf-8").splitlines(), 1):
+    for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        parts = line.split()
-        if len(parts) != 3:
-            sys.exit(f"{MANIFEST}:{number}: want '<binary> <test path> <source file>', got {raw!r}")
-        entries.append((parts[0], parts[1], parts[2]))
+        # A doctest path has spaces, so split off the binary and the file only.
+        binary, _, rest = line.partition(" ")
+        test_path, _, source_file = rest.rpartition(" ")
+        if not binary or not test_path or not source_file:
+            sys.exit(f"{path}:{number}: want '<binary> <test path> <source file>', got {raw!r}")
+        entries.append((binary, test_path, source_file))
     seen = set()
     for entry in entries:
         if entry[:2] in seen:
-            sys.exit(f"{MANIFEST}: duplicate entry {entry[0]} {entry[1]}")
+            sys.exit(f"{path}: duplicate entry {entry[0]} {entry[1]}")
         seen.add(entry[:2])
     return entries
+
+
+def read_manifest() -> list[tuple[str, str, str]]:
+    return read_entries(MANIFEST)
+
+
+def read_ignored() -> list[tuple[str, str, str]]:
+    return read_entries(IGNORED)
 
 
 def marked_tests() -> set[tuple[str, str]]:
@@ -110,6 +128,42 @@ def feature_list(entries) -> str:
     return ",".join(sorted({f"{crate_of(f)}/slow-tests" for _, _, f in entries}))
 
 
+def attribute_run(text: str, name: str) -> str | None:
+    """The attributes and comments directly above the first `fn <name>`, or None."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if not re.search(rf"\bfn\s+{re.escape(name)}\b", line):
+            continue
+        run = []
+        for previous in reversed(lines[:index]):
+            stripped = previous.strip()
+            if stripped and not stripped.startswith("//") and stripped[-1] in "};{":
+                break
+            run.append(previous)
+        return "\n".join(reversed(run))
+    return None
+
+
+def lint_ignored(problems: list[str], slow_keys: set[tuple[str, str]]) -> None:
+    for binary, path, file in read_ignored():
+        if (binary, path) in slow_keys:
+            problems.append(f"in both ci/slow-tests.txt and ci/ignored-tests.txt: {binary} {path}")
+        source = ROOT / file
+        if not source.is_file():
+            problems.append(f"ci/ignored-tests.txt: {file} does not exist ({binary} {path})")
+            continue
+        text = source.read_text(encoding="utf-8")
+        if binary.startswith("doc-tests:"):
+            if not re.search(r"```[A-Za-z0-9_,\- ]*\bignore\b", text):
+                problems.append(f"ci/ignored-tests.txt: {file} has no ignored doctest fence ({path})")
+            continue
+        run = attribute_run(text, path.rsplit("::", 1)[-1])
+        if run is None:
+            problems.append(f"ci/ignored-tests.txt: {file} has no fn {path.rsplit('::', 1)[-1]}")
+        elif not re.search(r"#\[ignore\b", run):
+            problems.append(f"ci/ignored-tests.txt: {binary} {path} has no plain #[ignore] in {file}")
+
+
 def lint() -> int:
     entries = read_manifest()
     listed = {(f, path.rsplit("::", 1)[-1]) for _, path, f in entries}
@@ -127,12 +181,16 @@ def lint() -> int:
         text = (ROOT / file).read_text(encoding="utf-8")
         if not re.search(rf"\bfn\s+{re.escape(name)}\b|\b{re.escape(name)}\s*=>", text):
             problems.append(f"{file} has no {name}")
+    lint_ignored(problems, {(b, p) for b, p, _ in entries})
     if problems:
-        print("slow-test manifest and markers disagree:")
+        print("slow-test manifest, ignored-test allowlist and markers disagree:")
         for problem in problems:
             print("  " + problem)
         return 1
-    print(f"slow-test manifest and markers agree: {len(entries)} tests, features {feature_list(entries)}")
+    print(
+        f"slow-test manifest and markers agree: {len(entries)} tests, "
+        f"features {feature_list(entries)}; {len(read_ignored())} allowlisted ignores checked"
+    )
     return 0
 
 
@@ -152,8 +210,9 @@ def parse(log: str):
         if running:
             binary = binary_label(running.group(1))
             continue
-        if line.startswith("   Doc-tests"):
-            binary = "doc-tests"
+        doc = DOC_TESTS.match(line)
+        if doc:
+            binary = f"doc-tests:{doc.group(1)}"
             continue
         test = TEST_LINE.match(line)
         if test and binary:
@@ -162,18 +221,25 @@ def parse(log: str):
 
 def verify_fast(log: str) -> int:
     expected = {(b, p) for b, p, _ in read_manifest()}
-    skipped = {
-        (b, p)
-        for b, p, outcome in parse(log)
-        if outcome.startswith("ignored") and REASON in outcome
-    }
+    allowed = {(b, p) for b, p, _ in read_ignored()}
+    ignored = {(b, p, outcome) for b, p, outcome in parse(log) if outcome.startswith("ignored")}
+    skipped = {(b, p) for b, p, outcome in ignored if REASON in outcome}
+    others = {(b, p): outcome for b, p, outcome in ignored if REASON not in outcome}
     problems = [f"not skipped by the fast tier: {b} {p}" for b, p in sorted(expected - skipped)]
     problems += [f"skipped as slow but not in the manifest: {b} {p}" for b, p in sorted(skipped - expected)]
+    problems += [
+        f"unexpected skip, in neither ci/slow-tests.txt nor ci/ignored-tests.txt: {b} {p} ({outcome})"
+        for (b, p), outcome in sorted(others.items())
+        if (b, p) not in allowed
+    ]
     if problems:
         print("fast tier and manifest disagree:")
         print("\n".join("  " + p for p in problems))
         return 1
-    print(f"fast tier skipped exactly the {len(expected)} manifest tests")
+    print(
+        f"fast tier skipped exactly the {len(expected)} manifest tests and "
+        f"{len(others)} allowlisted ignores (ci/ignored-tests.txt), nothing else"
+    )
     return 0
 
 
