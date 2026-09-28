@@ -1045,12 +1045,13 @@ enum Call {
     Frame(TimeCode),
 }
 
-/// `Playback::ack_presented` (R34): the ack is queued for the worker,
-/// which alone settles it against the due frames it registered. It reads
-/// no clock and registers nothing.
+/// `Playback::ack_presented` (R34/R35): the ack is handed to the worker on
+/// the lane's bounded channel, without a lock or a wait (a full channel
+/// drops it, the newest); the worker alone settles it against the due
+/// frames it registered. It reads no clock and registers nothing.
 fn acknowledge(lane: &Lane, stamp: FrameStamp, at: TimeCode, painted: Instant, expired: bool) {
     let (epoch, at) = (stamp.epoch, at.0);
-    (lane.counters()).ack(Ack {
+    lane.ack(Ack {
         epoch,
         at,
         painted,
@@ -1112,6 +1113,7 @@ impl Playback for FfmpegMediaEngine {
             let counters = self.lane.counters();
             (counters.stats, counters.underrun_base, counters.playing())
         };
+        stats.acks_overflowed += self.lane.acks_overflowed();
         let underruns = self.diagnostics.underruns();
         let since = |index: usize| underruns[index].saturating_sub(base[index]);
         stats.underrun_events = since(0);
@@ -2101,6 +2103,12 @@ pub(crate) struct Faults {
     /// Runs once inside the next agent job (a stepped model's clock moves
     /// while it renders).
     pub(crate) on_agent: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// R35: runs once in the next playing tick, after its pending-seek
+    /// check and before its terminal check (a caller's call races them).
+    on_terminal_check: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// R35: runs once in the next transition, while the outgoing stream
+    /// still runs (a callback races the transition).
+    on_quiesce: std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// PF1 I8 cheap model: playback opens no audio runtime; the model moves
     /// the clock itself.
     fake_audio: AtomicBool,
@@ -2118,6 +2126,13 @@ impl Faults {
         ));
         let until = *self.unpublished_until.lock().expect("fault state");
         until.is_none_or(|until| std::time::Instant::now() >= until)
+    }
+
+    fn run_once(hook: &std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>) {
+        let hook = hook.lock().expect("fault state").take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     fn stall_fill(&self) {
@@ -2264,7 +2279,7 @@ impl Worker {
                 self.take_requests_before(issued);
                 self.apply_control(issued);
                 let underruns = self.audio_diagnostics.underruns();
-                self.lane.counters().clear(underruns);
+                self.lane.clear_counters(underruns);
                 self.audio_diagnostics.reset_stall();
                 self.start_playback(from, issued.stamp);
                 if !self.playing {
@@ -2588,11 +2603,11 @@ impl Worker {
 
     fn start_playback(&mut self, from: TimeCode, stamp: FrameStamp) {
         self.resume_after_eos = false;
-        // R34 (re-review 2 D2): the outgoing epoch is due through where its
-        // runtime reached, so a paint of it acked later still matches.
-        let outgoing = self.runtime_position().map(|at| at.0);
-        (self.lane.counters()).end(Instant::now(), outgoing);
-        self.audio = None;
+        // R34/R35 (re-review 2 D2, 3 D2): the outgoing stream stops first;
+        // its epoch is then due through the frame its callbacks consumed,
+        // so a paint of it acked later still matches.
+        let outgoing = self.quiesce(false).map(|at| at.0);
+        (self.lane.settle()).end(Instant::now(), outgoing);
         self.meter.clear();
         if let Ok(meters) = self.mix_meters.read() {
             meters.clear();
@@ -2615,7 +2630,7 @@ impl Worker {
                 let frame_ms = crate::preview::frame_ms(self.document.fps);
                 let end = self.document.duration.0;
                 let now = Instant::now();
-                (self.lane.counters()).begin(now, from.0, frame_ms, end, stamp.epoch);
+                (self.lane.settle()).begin(now, from.0, frame_ms, end, stamp.epoch);
                 self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Playing));
                 self.post(JobKind::Playback { from }, stamp);
             }
@@ -2659,8 +2674,9 @@ impl Worker {
             self.resume_after_eos = false;
         } else if seek_before {
             // The seek moved the clock when it was issued: playback ran
-            // through where the runtime's own samples reached (R34).
-            self.pause_through(self.runtime_position());
+            // through where the runtime's own samples reached (R34), and
+            // without a runtime nothing is known.
+            self.pause_through(None);
         } else {
             self.pause();
         }
@@ -2682,37 +2698,52 @@ impl Worker {
     }
 
     fn pause(&mut self) {
-        let through = self.applied_position();
-        self.pause_through(through);
+        let modelled = self.applied_position();
+        self.pause_through(modelled);
     }
 
-    /// Pause; R-5's due frames run through `through`, the applied playback
-    /// position, if the clock still shows it (review B F3).
-    fn pause_through(&mut self, through: Option<TimeCode>) {
+    /// Pause. R-5's due frames run through the frame the stopped runtime
+    /// consumed (R35); `modelled` stands in only without a runtime (the
+    /// I8 model's fake audio), the clock if every issued call is applied.
+    fn pause_through(&mut self, modelled: Option<TimeCode>) {
         self.resume_after_eos = false;
         self.lane.post(None);
-        if let Some(audio) = &self.audio
-            && let Err(error) = audio.pause()
-        {
-            self.emit(MediaEvent::Error(error));
-        }
+        let running = self.audio.is_some();
+        let through = self.quiesce(true).or(modelled);
         let position = self.clock.position();
         self.clock
             .fallback_frame
             .store(position.0, Ordering::Release);
-        if self.audio.is_some() {
+        if running {
             self.loudness.pause_at(position, self.document.fps);
         }
-        self.audio = None;
         self.meter.clear();
         self.install_mix_meters(Arc::new(MixMeters::empty(Arc::clone(&self.meter))));
         self.clock.sample_rate.store(0, Ordering::Release);
         let now = Instant::now();
-        (self.lane.counters()).end(now, through.map(|at| at.0));
+        (self.lane.settle()).end(now, through.map(|at| at.0));
         if self.playing {
             self.playing = false;
             self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Paused));
         }
+    }
+
+    /// R35 (re-review 3 D2): stop the outgoing stream (dropping it joins
+    /// its callback thread), then read the frame its callbacks consumed
+    /// through, at its own rate and the outgoing document's rate. `None`
+    /// without a runtime. The runtime's error on `pause` is reported, as
+    /// before.
+    fn quiesce(&mut self, pause: bool) -> Option<TimeCode> {
+        let audio = self.audio.take()?;
+        #[cfg(test)]
+        Faults::run_once(&self.faults.on_quiesce);
+        if pause && let Err(error) = audio.pause() {
+            self.emit(MediaEvent::Error(error));
+        }
+        let rate = audio.sample_rate();
+        drop(audio);
+        let samples = self.clock.position_samples.load(Ordering::Acquire);
+        Some(samples_to_frame(samples, rate, self.document.fps))
     }
 
     /// PF1 V-2: the terminal stop. Unlike `pause()` it never reads the clock,
@@ -2724,23 +2755,28 @@ impl Worker {
         self.resume_after_eos = true;
         // Worker-initiated: no stamp, the playback job just ends (R-1).
         self.lane.post(None);
-        if let Some(audio) = &self.audio
-            && let Err(error) = audio.pause()
-        {
-            self.emit(MediaEvent::Error(error));
-        }
         let end = self.document.duration;
-        if self.audio.is_some() {
+        let running = self.audio.is_some();
+        // R35 (re-review 3 D1): what the terminal stop decided never feeds
+        // R-5, which ends at the frame the stopped runtime consumed (the
+        // modelled clock without one), at most the end.
+        let modelled = if running {
+            None
+        } else {
+            self.applied_position()
+        };
+        let through = self.quiesce(true).or(modelled).map(|at| at.0.min(end.0));
+        if running {
             self.loudness.pause_at(end, self.document.fps);
         }
-        self.audio = None;
         self.meter.clear();
         self.install_mix_meters(Arc::new(MixMeters::empty(Arc::clone(&self.meter))));
         self.clock.fallback_frame.store(end.0, Ordering::Release);
         self.clock.sample_rate.store(0, Ordering::Release);
         self.playing = false;
-        // Review A F5: the frames through the last are due.
-        self.lane.counters().end(Instant::now(), Some(end.0));
+        // Review A F5: a drained runtime consumed the last frame, so the
+        // frames through it are due.
+        self.lane.settle().end(Instant::now(), through);
         self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Paused));
         self.emit(MediaEvent::Position(end));
     }
@@ -2748,7 +2784,7 @@ impl Worker {
     fn tick(&mut self) {
         if !self.playing {
             // R34: acks queued after a stop are settled all the same.
-            self.lane.counters().sample(Instant::now(), None);
+            self.lane.settle().sample(Instant::now(), None);
             return;
         }
         #[cfg(test)]
@@ -2771,11 +2807,13 @@ impl Worker {
         self.loudness
             .publish_at(self.clock.position_samples.load(Ordering::Acquire));
         let applied = self.applied_position().map(|at| at.0);
-        (self.lane.counters()).sample(Instant::now(), applied);
+        (self.lane.settle()).sample(Instant::now(), applied);
         let position = self.clock.position();
         // Review B F1: a seek pending since `handle_coalesced_requests` is
         // applied, still playing, on the next pass instead of the stop.
         let seek_pending = self.lock_coalesced().seek.is_some();
+        #[cfg(test)]
+        Faults::run_once(&self.faults.on_terminal_check);
         if !seek_pending && self.programme_ended() {
             self.stop_at_end();
             return;
@@ -4633,6 +4671,117 @@ mod tests {
             assert_eq!(outcomes, (1, 0), "{transition}: {stats:?}");
             assert!(stats.max_av_offset_ms < 0.1, "{transition}: {stats:?}");
         }
+    }
+
+    /// R35 (re-review 3 D2): a callback that consumes into the next frame
+    /// after a transition began, before the outgoing stream stops, still
+    /// makes that frame due: a pause, a playing seek or a new document
+    /// stops the stream first and closes the epoch through its final
+    /// consumed frame.
+    #[test]
+    fn a_callback_racing_a_transition_still_registers_its_frame() {
+        let fps = Rational::new(30, 1).unwrap();
+        for transition in ["pause", "seek", "document"] {
+            let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(1_000));
+            while worker.clock.position() < TimeCode(10) {
+                audio.advance(CALLBACK_FRAMES);
+                worker.tick();
+            }
+            let rate = worker.audio.as_ref().unwrap().sample_rate();
+            let samples = Arc::clone(&worker.clock.position_samples);
+            let reached = samples_to_frame(samples.load(Ordering::Acquire), rate, fps);
+            let racing = audio.clone();
+            let hook = move || {
+                while samples_to_frame(samples.load(Ordering::Acquire), rate, fps) == reached {
+                    assert!(racing.advance(CALLBACK_FRAMES), "the stream still runs");
+                }
+            };
+            *worker.faults.on_quiesce.lock().unwrap() = Some(Box::new(hook));
+            let due = worker.lane.counters().stats.due_frames;
+            match transition {
+                "pause" => {
+                    let pause = worker.lock_coalesced().pause();
+                    worker.handle_control(pause);
+                }
+                "seek" => {
+                    worker.lock_coalesced().seek(TimeCode(900), &worker.clock);
+                    worker.handle_coalesced_requests();
+                }
+                _ => {
+                    let document = Arc::clone(&worker.document);
+                    let control = worker
+                        .lock_coalesced()
+                        .set_document(document, &worker.clock);
+                    worker.handle_control(control);
+                }
+            }
+            assert!(worker.faults.on_quiesce.lock().unwrap().is_none(), "raced");
+            let stats = worker.lane.counters().stats;
+            let seeked = u64::from(transition == "seek");
+            let expected = due + 1 + seeked;
+            assert_eq!(stats.due_frames, expected, "{transition}: {stats:?}");
+        }
+    }
+
+    /// R35 (re-review 3 D1): at runtime frame 10 of a 1,000-frame
+    /// programme, a caller's `seek(1000)` lands after the tick's
+    /// pending-seek check and before its terminal check, which reads the
+    /// caller-visible clock and stops at the end. The stop is S1's (the
+    /// raced seek then resumes playing), but R-5 ends at the stopped
+    /// runtime's frame: no frame 11..=999 becomes due.
+    #[test]
+    fn a_seek_racing_the_terminal_check_registers_no_unplayed_frames() {
+        let fps = Rational::new(30, 1).unwrap();
+        let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(1_000));
+        while worker.clock.position() < TimeCode(10) {
+            audio.advance(CALLBACK_FRAMES);
+            worker.tick();
+        }
+        let due = worker.lane.counters().stats.due_frames;
+        let (coalesced, clock) = (Arc::clone(&worker.coalesced), Arc::clone(&worker.clock));
+        let hook = move || {
+            let mut coalesced = coalesced.lock().unwrap();
+            coalesced.seek(TimeCode(1_000), &clock);
+        };
+        *worker.faults.on_terminal_check.lock().unwrap() = Some(Box::new(hook));
+        worker.tick();
+        assert!(
+            !worker.playing && worker.resume_after_eos,
+            "the terminal stop"
+        );
+        let stats = worker.lane.counters().stats;
+        assert_eq!(stats.due_frames, due, "nothing unplayed: {stats:?}");
+        worker.handle_coalesced_requests();
+        assert!(worker.playing, "the raced seek resumes");
+        assert_eq!(worker.lane.counters().stats.due_frames, due + 1);
+    }
+
+    /// R35 (re-review 3 D3): acks complete while another thread holds the
+    /// counters lock: the hand-off takes no lock and never waits. A full
+    /// channel drops the newest ack and counts it; the worker then holds
+    /// the oldest 256, ahead of its registrations.
+    #[test]
+    fn an_ack_never_waits_for_the_counters() {
+        let fps = Rational::new(30, 1).unwrap();
+        let (mut worker, _audio, _events) = stepped_worker(fps, TimeCode(1_000));
+        let lane = Arc::clone(&worker.lane);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let locked = worker.lane.counters();
+        thread::spawn(move || {
+            for frame in 100..=356 {
+                let at = TimeCode(frame);
+                acknowledge(&lane, FrameStamp::default(), at, Instant::now(), false);
+            }
+            let _ = done_tx.send(());
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(10));
+        drop(locked);
+        assert!(completed.is_ok(), "an ack waited for the counters lock");
+        assert_eq!(worker.lane.acks_overflowed(), 1, "the newest dropped");
+        worker.tick();
+        let held = worker.lane.counters().held();
+        let endpoints = (held.len(), held.first().copied(), held.last().copied());
+        assert_eq!(endpoints, (256, Some(100), Some(355)));
     }
 
     /// Review A F5: the starting frame is due at `play`, and a one-frame

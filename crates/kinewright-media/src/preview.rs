@@ -14,12 +14,12 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 use kinewright_core::{
     Document, FrameStamp, FrameTexture, MediaError, PreviewFrame, Rational, RgbaImage, TimeCode,
 };
@@ -29,7 +29,7 @@ use crate::{
     engine::{SharedClock, monitor_max_width, send_latest},
     lut_store::LutLibrary,
     render::{DecodeStrategy, FrameRenderer, RenderScale},
-    stats::Counters,
+    stats::{ACK_QUEUE, Ack, Counters},
 };
 
 /// R-4: at most this many agent jobs wait; a full queue replies at once.
@@ -119,12 +119,27 @@ pub(crate) struct LaneState {
 }
 
 /// The worker/preview hand-off: one leaf lock and the `ready` condvar.
-#[derive(Default)]
 pub(crate) struct Lane {
     state: Mutex<LaneState>,
     ready: Condvar,
     /// R-5's counters: a separate leaf, never taken with `state`.
     counters: Mutex<Counters>,
+    /// R35 (re-review 3 D3): paint acks, handed to the worker without a
+    /// lock. A full channel drops the newest ack (`acks_overflowed`).
+    acks: (Sender<Ack>, Receiver<Ack>),
+    acks_overflowed: AtomicU64,
+}
+
+impl Default for Lane {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            ready: Condvar::new(),
+            counters: Mutex::default(),
+            acks: crossbeam_channel::bounded(ACK_QUEUE),
+            acks_overflowed: AtomicU64::new(0),
+        }
+    }
 }
 
 impl Lane {
@@ -134,6 +149,37 @@ impl Lane {
 
     pub(crate) fn counters(&self) -> MutexGuard<'_, Counters> {
         self.counters.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// `Playback::ack_presented` (R35): never waits, and takes no lock.
+    pub(crate) fn ack(&self, ack: Ack) {
+        if let Err(TrySendError::Full(_)) = self.acks.0.try_send(ack) {
+            self.acks_overflowed.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Acks the full channel dropped since the counters were cleared.
+    pub(crate) fn acks_overflowed(&self) -> u64 {
+        self.acks_overflowed.load(Ordering::Relaxed)
+    }
+
+    /// The worker's counters, with the acks handed over since its last
+    /// pass moved in for settlement (R34: the worker alone settles).
+    pub(crate) fn settle(&self) -> MutexGuard<'_, Counters> {
+        let mut counters = self.counters();
+        for ack in self.acks.1.try_iter() {
+            counters.receive(ack);
+        }
+        counters
+    }
+
+    /// An explicit `play`: fresh counters, and the acks of the playback
+    /// before it discarded.
+    pub(crate) fn clear_counters(&self, underruns: [u64; 4]) {
+        let mut counters = self.counters();
+        for _ in self.acks.1.try_iter() {}
+        counters.clear(underruns);
+        self.acks_overflowed.store(0, Ordering::Relaxed);
     }
 
     fn notify(&self) {

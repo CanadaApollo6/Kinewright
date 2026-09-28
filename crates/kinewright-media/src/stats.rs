@@ -3,9 +3,9 @@
 //!
 //! R34 single-writer accounting: the worker is the only writer of due-frame
 //! outcomes. It registers due frames from its own applied transport and
-//! settles the paint acks, which `Playback::ack_presented` only queues.
-//! Every structure here has a fixed cap; history past it is folded into
-//! the aggregate counters (E11.8).
+//! settles the paint acks, which `Playback::ack_presented` only hands over
+//! on the lane's lock-free channel (R35). Every structure here has a fixed
+//! cap; history past it is folded into the aggregate counters (E11.8).
 
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -19,9 +19,9 @@ use kinewright_core::PlaybackStats;
 /// at 60 fps, about 3 MB at worst. Past it the oldest is evicted, keeping
 /// its identity; an evicted frame acked later counts late.
 pub(crate) const DUE_RECORDS: usize = 65_536;
-/// R34: queued acks, including those ahead of the worker's registrations.
-/// When it is full the oldest is dropped (`acks_overflowed`); an ack never
-/// waits.
+/// R34/R35: acks in the lane's channel, and again those the worker holds
+/// ahead of its registrations. A full one drops the newest ack
+/// (`acks_overflowed`); an ack never waits.
 pub(crate) const ACK_QUEUE: usize = 256;
 /// R34: epochs whose evicted frames keep their identity. An older epoch's
 /// are forgotten: they stay dropped, and a later ack of one is unmatched.
@@ -135,8 +135,8 @@ pub(crate) struct Counters {
     /// from the latest paint of a newer frame.
     shown: (Instant, i64),
     agent: Option<AgentWindow>,
-    /// Acks the worker has not settled: new ones, and those ahead of its
-    /// registrations in the open epoch.
+    /// Acks the worker has received and not settled: new ones, and those
+    /// ahead of its registrations in the open epoch.
     acks: VecDeque<Ack>,
 }
 
@@ -246,15 +246,14 @@ impl Counters {
         }
     }
 
-    /// Queue one paint's ack for the worker (R34): it samples no clock and
-    /// registers nothing. Taken under this leaf lock for O(1), never behind
-    /// a render; a full queue drops its oldest.
-    pub(crate) fn ack(&mut self, ack: Ack) {
+    /// The worker takes one paint's ack from the lane's channel (R35); the
+    /// next drain settles it. A full hold drops the newest.
+    pub(crate) fn receive(&mut self, ack: Ack) {
         if self.acks.len() == ACK_QUEUE {
-            self.acks.pop_front();
             self.stats.acks_overflowed += 1;
+        } else {
+            self.acks.push_back(ack);
         }
-        self.acks.push_back(ack);
     }
 
     /// The worker settles the queued acks against its own registrations.
@@ -338,18 +337,23 @@ impl Counters {
     pub(crate) const fn playing(&self) -> bool {
         self.playing
     }
+}
 
-    /// Pending due records, evicted epochs, their settled ranges and queued
-    /// acks (tests: the caps).
-    #[cfg(test)]
+/// Tests: pending due records; evicted epochs, their most settled ranges
+/// and held acks (the caps); the held acks' frames.
+#[cfg(test)]
+impl Counters {
     pub(crate) fn pending(&self) -> usize {
         self.due.len()
     }
 
-    #[cfg(test)]
     fn storage(&self) -> (usize, usize, usize) {
         let ranges = self.evicted.values().map(|e| e.settled.0.len()).max();
         (self.evicted.len(), ranges.unwrap_or(0), self.acks.len())
+    }
+
+    pub(crate) fn held(&self) -> Vec<i64> {
+        self.acks.iter().map(|ack| ack.at).collect()
     }
 }
 
@@ -362,7 +366,7 @@ mod tests {
 
     /// One paint's ack, then the worker's drain (R34: an ack only queues).
     fn ack(counters: &mut Counters, painted: Instant, epoch: u64, at: i64, expired: bool) {
-        (counters).ack(Ack {
+        (counters).receive(Ack {
             epoch,
             at,
             painted,
@@ -607,18 +611,19 @@ mod tests {
         assert_eq!((stats.late, stats.acks_unmatched), (152, 1), "{stats:?}");
     }
 
-    /// R34: the ack queue holds `ACK_QUEUE` acks; a push never waits, and a
-    /// full queue drops its oldest (`acks_overflowed`), whose frame stays
-    /// dropped. The held acks settle when the worker registers their frames.
+    /// R34/R35: the worker holds at most `ACK_QUEUE` acks ahead of its
+    /// registrations; one received beyond that is dropped, the newest
+    /// (`acks_overflowed`), and its frame stays dropped. The held acks, the
+    /// oldest, settle when the worker registers their frames.
     #[test]
-    fn a_full_ack_queue_drops_its_oldest() {
+    fn a_full_ack_hold_drops_the_newest() {
         let t0 = Instant::now();
         let mut counters = Counters::default();
         counters.begin(t0, 0, 16.0, 10_000, 1);
         let extra = 44;
         let pushed = i64::try_from(ACK_QUEUE).unwrap() + extra;
         for frame in 1..=pushed {
-            counters.ack(Ack {
+            counters.receive(Ack {
                 epoch: 1,
                 at: frame,
                 painted: t0,
@@ -627,14 +632,29 @@ mod tests {
         }
         let overflowed = u64::try_from(extra).unwrap();
         assert_eq!(counters.stats.acks_overflowed, overflowed);
-        assert_eq!(counters.storage().2, ACK_QUEUE);
+        let kept = i64::try_from(ACK_QUEUE).unwrap();
+        let held = counters.held();
+        assert_eq!(held.len(), ACK_QUEUE);
+        assert_eq!((held[0], held[ACK_QUEUE - 1]), (1, kept), "the oldest kept");
         counters.drain();
-        assert_eq!(counters.storage().2, ACK_QUEUE, "all ahead: held");
+        assert_eq!(counters.held(), held, "all ahead: held, in order");
         counters.sample(t0, Some(pushed));
         let stats = counters.stats;
         assert_eq!(counters.storage().2, 0);
         assert_eq!(stats.on_time, u64::try_from(ACK_QUEUE).unwrap());
-        assert_eq!(stats.dropped, overflowed + 1, "0 and the overflowed");
+        assert_eq!(stats.dropped, overflowed + 1, "0 and the newest");
+        assert!(
+            counters.due.contains_key(&(1, kept + 1)),
+            "the first dropped"
+        );
+        assert!(
+            counters.due.contains_key(&(1, pushed)),
+            "the newest dropped"
+        );
+        assert!(
+            !counters.due.contains_key(&(1, kept)),
+            "the last kept settled"
+        );
     }
 
     /// Re-review B D3 / re-review 2 D4: an agent job is charged each due
@@ -679,12 +699,15 @@ mod tests {
         assert_eq!(stats.dropped_agent, 2, "12 and 13: {stats:?}");
         assert_eq!(stats.on_time, 1, "11 was painted");
 
-        // A frame registered in the window and painted after is settled.
+        // A frame registered in the window and painted after is settled,
+        // during the job or once it has finished.
         counters.begin(t0, 20, 33.0, 1_000, 6);
         counters.agent_started(None);
         counters.sample(t0, Some(22));
         ack(&mut counters, t0, 6, 21, false);
         counters.agent_finished();
         assert_eq!(counters.stats.dropped_agent, 3, "22, not 21");
+        ack(&mut counters, t0, 6, 22, false);
+        assert_eq!(counters.stats.dropped_agent, 2, "22 painted after the job");
     }
 }
