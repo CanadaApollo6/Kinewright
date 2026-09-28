@@ -399,17 +399,7 @@ impl Session {
         from: Instant,
         limit: Duration,
     ) -> Option<f64> {
-        loop {
-            match self.frames.recv_deadline(from + limit) {
-                Ok(PreviewFrame { at, stamp, .. })
-                    if at.0 == target && stamp.is_current(issued) =>
-                {
-                    return Some(ms(from));
-                }
-                Ok(_) => {}
-                Err(_) => return None,
-            }
-        }
+        wait_answer(&self.frames, target, issued, from, limit)
     }
 
     fn drain(&self) {
@@ -573,27 +563,54 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     (m, underrun, line)
 }
 
-/// Review B (RSS attribution): drop the session, wait (≤ 30 s) for the
-/// preview thread to finish (its frame sender disconnects), then record
-/// what outlives it: ledger charges, decoders, conversion tables, and the
+/// `Session::wait_frame`: the first `target` frame from `frames` that
+/// answers the call stamped `issued`, in ms since `from`.
+fn wait_answer(
+    frames: &Receiver<PreviewFrame>,
+    target: i64,
+    issued: FrameStamp,
+    from: Instant,
+    limit: Duration,
+) -> Option<f64> {
+    loop {
+        match frames.recv_deadline(from + limit) {
+            Ok(PreviewFrame { at, stamp, .. }) if at.0 == target && stamp.is_current(issued) => {
+                return Some(ms(from));
+            }
+            Ok(_) => {}
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Review B (RSS attribution), re-review B D6: keep only telemetry
+/// handles (the ledger, the decoder gauge), drop the rest of the session,
+/// wait (≤ 30 s) for the engine's worker thread to finish its whole
+/// teardown (`FfmpegMediaEngine::finished`: preview joined, worker and
+/// audio dropped), drop the GPU context, and only then record what
+/// outlives it: ledger charges, decoders, conversion tables, and the
 /// process's threads and current RSS.
 fn teardown(session: Session) -> String {
     let Session {
         engine,
         frames,
+        events,
         gpu,
-        ..
+        diagnostics,
+        _data: data,
     } = session;
-    let decoders = engine.decoder_gauge();
-    drop(engine);
+    let (decoders, finished, ledger) = (
+        engine.decoder_gauge(),
+        engine.finished(),
+        gpu.shared_ledger(),
+    );
+    drop((engine, frames, events, diagnostics));
     let deadline = Instant::now() + Duration::from_secs(30);
-    let complete = loop {
-        match frames.recv_deadline(deadline) {
-            Ok(_) => {}
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break true,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => break false,
-        }
-    };
+    let complete = matches!(
+        finished.recv_deadline(deadline),
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    );
+    drop((gpu, data));
     let memory = process_memory().map_or_else(
         |error| format!("unavailable({})", error.replace(' ', "_")),
         |memory| format!("{:.1} threads={}", mib(memory.rss), memory.threads),
@@ -601,7 +618,7 @@ fn teardown(session: Session) -> String {
     format!(
         "teardown_complete={complete} teardown_ledger_live_kib={} teardown_decoders={} \
          teardown_table_live_kib={} teardown_rss_mib={memory}",
-        gpu.ledger().live_bytes() / 1024,
+        ledger.live_bytes() / 1024,
         decoders.open(),
         crate::conversion::live_table_bytes() / 1024,
     )
@@ -1051,6 +1068,40 @@ fn pf1_metrics_reject_early_frames_and_repeated_images() {
     frozen.arrivals.sort_by(|a, b| a.0.total_cmp(&b.0));
     let frozen = frozen.metrics(90, frame);
     assert!(frozen.held_max >= 1_000.0, "{frozen:?}");
+}
+
+/// Re-review B nit: P-seek repeats a target, and the earlier seek's image
+/// of it may still be in flight. Only the frame stamped by the newer call
+/// answers it: the stale one of the same target and a current one of
+/// another target are passed over, and stale answers alone time out.
+#[test]
+fn pf1_a_repeated_seek_target_is_answered_only_by_its_own_call() {
+    let frame = |at: i64, epoch: u64, seq: u64| PreviewFrame {
+        at: TimeCode(at),
+        stamp: FrameStamp { epoch, seq },
+        texture: kinewright_core::FrameTexture {
+            width: 1,
+            height: 1,
+            rgba: Arc::new(vec![0; 4]),
+        },
+    };
+    let (sender, frames) = crossbeam_channel::unbounded();
+    let issued = FrameStamp { epoch: 5, seq: 9 };
+    for queued in [
+        frame(10, 4, 7),
+        frame(11, 5, 9),
+        frame(10, 5, 9),
+        frame(10, 5, 10),
+    ] {
+        sender.send(queued).unwrap();
+    }
+    let limit = Duration::from_millis(50);
+    let answer = wait_answer(&frames, 10, issued, Instant::now(), limit);
+    assert!(answer.is_some());
+    assert_eq!(frames.len(), 1, "answered by the third: its own stamp");
+    sender.send(frame(10, 4, 8)).unwrap();
+    let later = FrameStamp { epoch: 6, seq: 11 };
+    assert_eq!(wait_answer(&frames, 10, later, Instant::now(), limit), None);
 }
 
 #[cfg(target_os = "linux")]

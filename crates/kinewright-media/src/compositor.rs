@@ -312,6 +312,13 @@ impl GpuContext {
         &self.ledger
     }
 
+    /// The ledger alone, to read after the context is dropped (re-review B
+    /// D6: the harness samples RSS with no GPU context held).
+    #[cfg(test)]
+    pub(crate) fn shared_ledger(&self) -> Arc<GpuLedger> {
+        Arc::clone(&self.ledger)
+    }
+
     /// A texture charged at its bytes (uncompressed formats, one mip).
     pub(crate) fn charge_texture(&self, texture: wgpu::Texture) -> HeldTexture {
         let (size, texel) = (texture.size(), texture.format().block_copy_size(None));

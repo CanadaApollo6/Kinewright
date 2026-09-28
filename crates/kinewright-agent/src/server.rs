@@ -11877,31 +11877,11 @@ impl ServerHandler for KinewrightMcp {
             .flatten()
             == Some("preview_solo");
         // PF1 R-4 (review B F2): the client's cancellation reaches the media
-        // requests the blocking handler makes, through a token it owns.
-        // rmcp cancels `ct` on `notifications/cancelled` but keeps polling
-        // this future; dropping it also cancels.
-        let cancel = AgentCancel::default();
+        // requests the blocking handler makes (`cancellable_blocking`).
         let ct = context.ct.clone();
         async move {
-            struct CancelOnExit(AgentCancel);
-            impl Drop for CancelOnExit {
-                fn drop(&mut self) {
-                    self.0.cancel();
-                }
-            }
-            let _exit = CancelOnExit(cancel.clone());
-            let scoped = cancel.clone();
-            let task = tokio::task::spawn_blocking(move || {
-                scoped.scope(|| service.call_exposed_blocking(request))
-            });
-            tokio::pin!(task);
-            let joined = tokio::select! {
-                joined = &mut task => joined,
-                () = ct.cancelled() => {
-                    cancel.cancel();
-                    task.await
-                }
-            };
+            let handler = move || service.call_exposed_blocking(request);
+            let joined = cancellable_blocking(ct.cancelled(), handler).await;
             // A panicked or cancelled handler becomes fixed text: its payload
             // may be unbounded or carry paths, and it still crosses ME4's
             // choke point below.
@@ -11917,6 +11897,36 @@ impl ServerHandler for KinewrightMcp {
                 reply
             };
             reply.map(Into::into)
+        }
+    }
+}
+
+/// PF1 R-4 (review B F2): run a blocking tool handler with an
+/// [`AgentCancel`] token current on its thread, cancelled when `cancelled`
+/// completes (rmcp's `ct` on `notifications/cancelled`, after which rmcp
+/// keeps polling this future for the handler's reply) or when the future is
+/// dropped unfinished (abandoned). Either way the handler's waiting media
+/// requests stop and their queued jobs are discarded.
+async fn cancellable_blocking<T: Send + 'static>(
+    cancelled: impl Future<Output = ()>,
+    handler: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    struct CancelOnExit(AgentCancel);
+    impl Drop for CancelOnExit {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+    let cancel = AgentCancel::default();
+    let _exit = CancelOnExit(cancel.clone());
+    let scoped = cancel.clone();
+    let task = tokio::task::spawn_blocking(move || scoped.scope(handler));
+    tokio::pin!(task);
+    tokio::select! {
+        joined = &mut task => joined,
+        () = cancelled => {
+            cancel.cancel();
+            task.await
         }
     }
 }
@@ -14114,6 +14124,63 @@ fn bound_solo_reply(
         }) => Ok(result),
         JsonRpcMessage::Error(JsonRpcError { error, .. }) => Err(error),
         _ => unreachable!("built above as a tool result or an error"),
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// A handler that hands out its current token, then waits (≤ 10 s) for
+    /// it to be cancelled; returns whether it was.
+    fn waiting_handler(
+        tokens: std::sync::mpsc::Sender<AgentCancel>,
+    ) -> impl FnOnce() -> bool + Send + 'static {
+        move || {
+            let token = AgentCancel::current().expect("a current token");
+            tokens.send(token.clone()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !token.is_cancelled() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            token.is_cancelled()
+        }
+    }
+
+    /// Re-review B nit: the call's future abandoned (dropped unfinished,
+    /// as when the transport drops the request) cancels the token its
+    /// blocking handler runs under.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abandoned_call_cancels_its_handler() {
+        let (tokens, token) = std::sync::mpsc::channel();
+        let call = cancellable_blocking(std::future::pending(), waiting_handler(tokens));
+        let abandoned = tokio::time::timeout(Duration::from_millis(200), call).await;
+        assert!(abandoned.is_err(), "still waiting when dropped");
+        let token = token.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(token.is_cancelled(), "dropping the future cancelled it");
+    }
+
+    /// The client's cancellation cancels the token, and the call still
+    /// returns the handler's own reply.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_cancellation_cancels_its_handler_and_awaits_it() {
+        let (tokens, token) = std::sync::mpsc::channel();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let call = cancellable_blocking(
+            async {
+                let _ = cancelled.await;
+            },
+            waiting_handler(tokens),
+        );
+        let call = tokio::spawn(call);
+        let token = tokio::task::spawn_blocking(move || token.recv().unwrap())
+            .await
+            .unwrap();
+        assert!(!token.is_cancelled());
+        cancel.send(()).unwrap();
+        assert!(call.await.unwrap().unwrap(), "the handler saw the cancel");
     }
 }
 

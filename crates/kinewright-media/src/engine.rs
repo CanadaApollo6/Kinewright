@@ -407,6 +407,9 @@ pub struct FfmpegMediaEngine {
     transcripts: TranscriptService,
     visual_assets: VisualAssetService,
     derived_analysis: DerivedAnalysisService,
+    /// Re-review B D6: disconnects once the worker thread has finished.
+    #[cfg(test)]
+    finished: Receiver<()>,
 }
 
 impl FfmpegMediaEngine {
@@ -500,6 +503,9 @@ impl FfmpegMediaEngine {
         Self::start(gpu, data_dir, config, options)
     }
 
+    // The engine's threads and their shared state are wired in one place
+    // (the test-only teardown signal takes it past the limit).
+    #[allow(clippy::too_many_lines)]
     fn start(
         gpu: GpuContext,
         data_dir: PathBuf,
@@ -547,6 +553,8 @@ impl FfmpegMediaEngine {
         let lut_lattices = Arc::new(RwLock::new(PublishedLattices::default()));
         let worker_lut_lattices = Arc::clone(&lut_lattices);
         let diagnostics = Arc::clone(&options.diagnostics);
+        #[cfg(test)]
+        let (finished_tx, finished) = bounded::<()>(0);
         let spawned = thread::Builder::new()
             .name("kinewright-media".to_owned())
             .spawn(move || {
@@ -573,6 +581,8 @@ impl FfmpegMediaEngine {
                 }
                 worker.preview = Some(preview);
                 worker.run();
+                #[cfg(test)]
+                drop(finished_tx);
             });
         if let Err(error) = spawned {
             // The worker never started: stop the preview it would have joined.
@@ -603,7 +613,18 @@ impl FfmpegMediaEngine {
             transcripts: TranscriptService::new(data_dir)?,
             visual_assets,
             derived_analysis,
+            #[cfg(test)]
+            finished,
         })
+    }
+
+    /// Re-review B D6 (harness teardown): a receiver that disconnects once
+    /// the worker thread has finished everything the engine's drop starts:
+    /// its lane shut down, the preview thread joined (its renderer and
+    /// decoders dropped), the worker and its audio runtime dropped.
+    #[cfg(test)]
+    pub(crate) fn finished(&self) -> Receiver<()> {
+        self.finished.clone()
     }
 
     /// Register a trusted transcript for this engine session after verifying
@@ -4081,7 +4102,8 @@ mod tests {
 
     /// H-6 kill test: dropping the engine disconnects the worker, which
     /// stops the lane and joins the preview; the preview's frame sender then
-    /// goes away, so a held receiver disconnects.
+    /// goes away, so a held receiver disconnects. Re-review B D6: the
+    /// harness's teardown signal (`finished`) follows all of that.
     #[test]
     fn dropping_the_engine_stops_the_preview_thread() {
         let temp = TempDirectory::new("pf1-preview-drop");
@@ -4092,15 +4114,22 @@ mod tests {
         assert!(frames.recv_timeout(Duration::from_secs(60)).is_ok());
         let thumbnail = engine.thumbnail_at(TimeCode(1), 64).expect("a thumbnail");
         assert_eq!(thumbnail.width, 64);
+        let finished = engine.finished();
         drop(engine);
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            match frames.recv_deadline(deadline) {
-                Ok(_) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                Err(error) => panic!("the preview thread outlived the engine: {error}"),
+        let done = finished.recv_timeout(Duration::from_secs(30));
+        assert_eq!(done, Err(crossbeam_channel::RecvTimeoutError::Disconnected));
+        // Re-review B D6: the worker thread finishes after joining the
+        // preview, so its frame sender is already gone.
+        let rest = loop {
+            if let Err(error) = frames.try_recv() {
+                break error;
             }
-        }
+        };
+        assert_eq!(
+            rest,
+            crossbeam_channel::TryRecvError::Disconnected,
+            "the preview thread outlived the engine"
+        );
     }
 
     /// R-4/E-2: the worker never waits on the agent lane; a full queue gets
@@ -4610,7 +4639,8 @@ mod tests {
 
     /// Review B F4: `sync_decoders` counts the decoders this engine's
     /// renderers hold: open after a render, closed by a cache clear, and
-    /// none after teardown.
+    /// none after teardown. `live_table_bytes` is nonzero after an SDR
+    /// render and sane (no underflow) after teardown.
     #[test]
     fn sync_decoders_counts_open_decoders_until_teardown() {
         let temp = TempDirectory::new("pf1-decoders");
@@ -4626,6 +4656,11 @@ mod tests {
             .expect("frame 0");
         let stats = engine.stats();
         assert!(stats.sync_decoders >= 1, "{stats:?}");
+        // Re-review B nit: the production table field, not only the
+        // gauge: an SDR source's RGB input table is live (128 KiB each).
+        let table = 1 << 17;
+        assert!(stats.live_table_bytes >= table, "{stats:?}");
+        assert_eq!(stats.live_table_bytes % table, 0, "{stats:?}");
         engine.preview_cache_command(true).unwrap();
         assert_eq!(engine.stats().sync_decoders, 0, "cleared");
         engine.thumbnail_at(TimeCode(15), 64).unwrap();
@@ -4634,6 +4669,10 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while frames.recv_deadline(deadline).is_ok() {}
         assert_eq!(gauge.open(), 0, "teardown closed every decoder");
+        // What outlives it is whole tables the registry keeps (process
+        // wide), never a count driven below zero by the teardown.
+        let after = crate::conversion::live_table_bytes() as u64;
+        assert!(after.is_multiple_of(table) && after < 1 << 30, "{after}");
     }
 
     /// A tiny deterministic generator for the seeded models.

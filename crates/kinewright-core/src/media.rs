@@ -2844,6 +2844,29 @@ mod tests {
         MediaIncident, MediaKind, Rational, ScopeError, TimelineRevision, Track, TrackKind,
     };
 
+    /// Re-review B nit: `AgentCancel::scope` nests, and restores the
+    /// enclosing token when its body unwinds, so a panicking handler never
+    /// leaves its token current on a pooled thread.
+    #[test]
+    fn agent_cancel_scopes_nest_and_restore_on_unwind() {
+        let is = |token: &AgentCancel| {
+            AgentCancel::current().is_some_and(|current| Arc::ptr_eq(&current.0, &token.0))
+        };
+        let (outer, inner) = (AgentCancel::default(), AgentCancel::default());
+        assert!(AgentCancel::current().is_none());
+        outer.scope(|| {
+            assert!(is(&outer));
+            inner.scope(|| assert!(is(&inner), "the inner scope"));
+            assert!(is(&outer), "restored after the inner scope");
+            let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                inner.scope(|| panic!("the handler panicked"));
+            }));
+            assert!(unwound.is_err());
+            assert!(is(&outer), "restored by the unwind");
+        });
+        assert!(AgentCancel::current().is_none(), "none outside");
+    }
+
     /// IN1 §9 clause 11's template: the rendered `Display` of the managed-decode
     /// failure on `in1_untagged.mp4` at `c3a5814`, with the per-run temp path
     /// replaced by `{path}` at both of its two occurrences. A rendered literal
