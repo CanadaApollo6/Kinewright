@@ -40,6 +40,27 @@ fn forward_first(step: &i64) -> (u64, bool) {
     (step.unsigned_abs(), *step < 0)
 }
 
+/// PF1 K-5: the direction after demand moves from `last` to `points` (the
+/// rule [`FrameCache::set_demand`] documents): the smallest non-zero step
+/// of a point from its nearest previous point, forward on a tie; unmoved
+/// or first demand keeps `travel`.
+pub(crate) fn follow(travel: Travel, last: &[i64], points: &[i64]) -> Travel {
+    let step = points
+        .iter()
+        .filter_map(|point| {
+            last.iter()
+                .map(|last| point - last)
+                .min_by_key(forward_first)
+        })
+        .filter(|step| *step != 0)
+        .min_by_key(forward_first);
+    match step {
+        Some(step) if step > 0 => Travel::Forward,
+        Some(_) => Travel::Backward,
+        None => travel,
+    }
+}
+
 /// PF1 K-5: the direction the demand on one source travels in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Travel {
@@ -76,21 +97,8 @@ where
     /// Unmoved points keep the direction, as does the first demand, which
     /// starts Forward.
     pub(crate) fn set_demand(&mut self, points: &[TimeCode]) {
-        let step = points
-            .iter()
-            .filter_map(|point| {
-                let steps = self.last_demand.iter().map(|last| point.0 - last.0);
-                steps.min_by_key(forward_first)
-            })
-            .filter(|step| *step != 0)
-            .min_by_key(forward_first);
-        if let Some(step) = step {
-            self.travel = if step > 0 {
-                Travel::Forward
-            } else {
-                Travel::Backward
-            };
-        }
+        let times = |points: &[TimeCode]| points.iter().map(|point| point.0).collect::<Vec<_>>();
+        self.travel = follow(self.travel, &times(&self.last_demand), &times(points));
         self.demand.clear();
         self.demand.extend_from_slice(points);
         if !points.is_empty() {

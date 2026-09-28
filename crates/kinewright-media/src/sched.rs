@@ -20,6 +20,8 @@ use std::{
 
 use kinewright_core::MediaError;
 
+use crate::cache::{Travel, follow};
+
 /// H-2: an inactive reader retires this long after it went inactive.
 pub(crate) const QUIESCENCE: Duration = Duration::from_secs(5);
 /// H-1: at most this many readers per source.
@@ -267,6 +269,9 @@ pub(crate) struct Readers<K, F> {
     /// K-2: lookahead refusals, once per source per plan.
     pub(crate) starved: u64,
     starved_keys: HashSet<K>,
+    /// K-5 (review B F4): per source, its last required times and the
+    /// direction its demand travels, for eviction.
+    travel: HashMap<K, (Vec<i64>, Travel)>,
 }
 
 impl<K, F> Default for Readers<K, F> {
@@ -300,6 +305,7 @@ impl<K, F> Readers<K, F> {
             required_bytes: 0,
             starved: 0,
             starved_keys: HashSet::new(),
+            travel: HashMap::new(),
         }
     }
 
@@ -373,11 +379,24 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         (self.required, self.wanted) = (HashSet::new(), HashMap::new());
         (self.sizes, self.generated) = (sizes, generated);
         self.starved_keys.clear();
+        let mut points: HashMap<K, Vec<i64>> = HashMap::new();
         for (key, region) in &regions {
             let wanted = self.wanted.entry(key.clone()).or_default();
             wanted.extend(region.required.iter().chain(&region.lookahead));
             let required = region.required.iter().map(|t| (key.clone(), *t));
             self.required.extend(required);
+            let key_points = points.entry(key.clone()).or_default();
+            key_points.extend(&region.required);
+        }
+        // K-5: a source's travel follows its required times; a source
+        // without them keeps its direction.
+        for (key, points) in points.into_iter().filter(|(_, p)| !p.is_empty()) {
+            let (last, travel) = self
+                .travel
+                .entry(key)
+                .or_insert((Vec::new(), Travel::Forward));
+            *travel = follow(*travel, last, &points);
+            *last = points;
         }
         let errors = self.failures.drain().map(|(_, (_, error))| error).collect();
         // Reservations of frames no longer required return at once.
@@ -807,32 +826,40 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         Admission::Wait { evicted, stop }
     }
 
-    /// K-5: unpinned lookahead, sources over their share first, then the
-    /// frame farthest from its source's required times, until `need` bytes
-    /// will be released.
+    /// K-5: unpinned lookahead, sources over their share first, then frames
+    /// behind their source's travel (review B F4), then the frame farthest
+    /// from its source's required times, until `need` bytes will be
+    /// released.
     fn evict(&mut self, need: usize) -> Vec<F> {
+        type Rank = (bool, bool, std::cmp::Reverse<u64>);
         let headroom = self.budget.saturating_sub(self.required_bytes);
         let share = headroom.saturating_sub(self.generated) / self.sizes.len().max(1);
-        let mut victims: Vec<(bool, std::cmp::Reverse<u64>, K, i64)> = Vec::new();
+        let mut victims: Vec<(Rank, K, i64)> = Vec::new();
         for (key, ring) in &self.rings {
             let over = self.lookahead_bytes(key) > share;
-            let near = |at: i64| {
+            let travel = self.travel.get(key).map_or(Travel::Forward, |(_, t)| *t);
+            let rank = |at: i64| -> Rank {
                 let required = self.required.iter().filter(|(k, _)| k == key);
-                required
-                    .map(|(_, t)| t.abs_diff(at))
-                    .min()
-                    .unwrap_or(u64::MAX)
+                let nearest = (required.map(|(_, t)| *t)).min_by_key(|t| (t.abs_diff(at), *t));
+                let Some(point) = nearest else {
+                    return (!over, false, std::cmp::Reverse(u64::MAX));
+                };
+                let behind = match travel {
+                    Travel::Forward => at < point,
+                    Travel::Backward => at > point,
+                };
+                (!over, !behind, std::cmp::Reverse(point.abs_diff(at)))
             };
             for (at, frame) in ring {
                 if !self.required.contains(&(key.clone(), *at)) && !frame.pinned() {
-                    victims.push((!over, std::cmp::Reverse(near(*at)), key.clone(), *at));
+                    victims.push((rank(*at), key.clone(), *at));
                 }
             }
         }
-        victims.sort_by_key(|(under, far, _, _)| (*under, *far));
+        victims.sort_by_key(|(rank, _, at)| (*rank, *at));
         let mut freed = 0;
         let mut evicted = Vec::new();
-        for (_, _, key, at) in victims {
+        for (_, key, at) in victims {
             if freed >= need {
                 break;
             }
@@ -2041,6 +2068,42 @@ mod tests {
         assert_eq!(order, [frame(0, 6), frame(0, 4), frame(0, 3), frame(0, 2)]);
         assert!(stop.is_empty());
         assert!(!readers.admissible(&1), "no lookahead while draining");
+    }
+
+    /// K-5 (review B F4): a drain evicts the lookahead behind its source's
+    /// travel first: forward (99 → 100) evicts 99 before 101, a reversal
+    /// (101 → 100) evicts 101 before 99, and a tie (99 and 101 → 100: steps
+    /// +1 and −1) is forward.
+    #[test]
+    fn eviction_follows_the_travel_direction() {
+        for (previous, first) in [(&[99][..], 99), (&[101][..], 101), (&[99, 101][..], 99)] {
+            let mut readers = Model::new(20).with_budget(4 * F);
+            let sizes = || (HashMap::from([(0, F)]), 0);
+            let region = |required: &[i64], lookahead: &[i64]| {
+                let region = Region {
+                    required: required.to_vec(),
+                    lookahead: lookahead.to_vec(),
+                };
+                vec![(0u8, region)]
+            };
+            readers.post(region(previous, &[]), sizes(), Duration::ZERO);
+            readers.post(region(&[100], &[99, 101]), sizes(), Duration::ZERO);
+            for at in [99, 101] {
+                let fr = Fr {
+                    value: frame(0, at),
+                    bytes: F,
+                    pinned: false,
+                };
+                readers.rings.entry(0).or_default().insert(at, fr);
+            }
+            assert!(readers.reserve(2 * F, usize::MAX));
+            // Live 2f + the missing 100 (f) + G 2f = 5f > C = 4f: one goes.
+            let Admission::Wait { evicted, .. } = readers.admit(2 * F) else {
+                panic!("{previous:?}: the set does not fit beside the lookahead");
+            };
+            let order: Vec<u32> = evicted.iter().map(|f| f.value).collect();
+            assert_eq!(order, [frame(0, first)], "{previous:?} → 100");
+        }
     }
 
     /// H-6: a reader retired while its decode ran (the preview went) stays
