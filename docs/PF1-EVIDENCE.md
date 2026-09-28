@@ -1688,8 +1688,8 @@ report.
     - Approximation: a forgotten epoch's evicted frames, and the frames
       inside a merged gap, stay dropped; a later ack of one is
       unmatched. An evicted frame charged to an agent job stays charged.
-    - Worst case: 65,536 records, 8 × 64 ranges and 256 queued acks, a
-      few MB.
+    - Worst case: 65,536 records, 8 × 64 ranges, 256 held acks and 256
+      in the channel, a few MB.
 - **Single-writer accounting (R34 amendment, re-review 2 D1–D4;
   supersedes R33's ack-time snapshot, `cb36a53`, now deleted).** The
   amendment text is in the design's §7 R-5.
@@ -1700,15 +1700,25 @@ report.
     samples, and neither does a worker transition, so no clock write can
     label playback that did not happen (D1).
   - Each transition ends the outgoing epoch through that runtime
-    position first: the terminal stop through the last frame, and a
-    pause, a new document, a playing seek and a `play` through where the
-    runtime reached (D2). An explicit `play` then clears the counters, as
-    before.
-  - `ack_presented` only pushes (epoch, frame, paint, expired) onto a
-    256-entry queue under the counters' leaf lock. When the queue is
-    full, the oldest is dropped (`acks_overflowed`).
-  - The worker drains the queue each tick (it now ticks while stopped,
-    too) and at each transition. An ack ahead of the registrations in the
+    position first (D2). *R35 (re-review 3 D1, D2):* the transition stops
+    the outgoing stream before it reads the position (`Worker::quiesce`:
+    dropping the runtime joins its callback thread), so a callback that
+    runs meanwhile is counted, and reads it at the stream's own rate and
+    the outgoing document's fps. This covers the terminal stop, a pause, a
+    new document, a playing seek and a `play`. The terminal stop closes at
+    that consumed frame clamped to the duration, never where the terminal
+    check's caller-visible clock was; its user-visible behaviour is S1's,
+    unchanged. An explicit `play` then clears the counters, as before.
+  - *R35 (re-review 3 D3):* `ack_presented` hands (epoch, frame, paint,
+    expired) to the worker on the lane's bounded channel (256) with
+    `try_send`, taking no lock (the R34 push took the counters' lock,
+    which the worker holds through registration and settlement). A full
+    channel drops the newest ack (`acks_overflowed`). The worker moves the
+    channel into its counters when it takes them (`Lane::settle`), and
+    holds at most 256 acks ahead of its registrations, again dropping the
+    newest.
+  - The worker drains them each tick (it now ticks while stopped, too)
+    and at each transition. An ack ahead of the registrations in the
     open epoch is held until a registration reaches its frame. It is
     unmatched (`acks_unmatched`) if its epoch closes first, like a
     duplicate or a frame never due.
@@ -1718,12 +1728,17 @@ report.
     removes the charge, so `dropped_agent` counts job-window frames never
     painted.
   - The A/V offset is now taken at paint: the whole frames the paint
-    trailed its frame's due instant, at least one if `expired`. The ack
-    no longer reads the clock.
-  - Due instants are the registering tick's: at most one tick (5 ms)
-    after the frame became current. A paint within that tick waits in
-    the queue and settles on time.
-- **Final check and binding: the residual window (R33 amendment,- **Final check and binding: the residual window (R33 amendment,
+    trailed its frame's stored due instant, at least one if `expired`.
+    The ack no longer reads the clock.
+  - Due instants are the registering tick's. The tick's 5 ms is a
+    receive timeout, not a bound (R35, re-review 3 D4): worker fills,
+    control processing and scheduling can delay a tick while the
+    callbacks advance. A paint before its frame's registration waits and
+    settles against the later instant, so it reads on time and zero
+    elapsed; one already two frames expired then reads one frame (from
+    `expired`). The offset is therefore a proxy from stored timestamps,
+    which can under-report, not a guaranteed consumed-clock offset.
+- **Final check and binding: the residual window (R33 amendment,
   re-review A D1).**
   - `Presenter::finalize` re-checks the stamp and the clock after it
     prepares the image. It then writes the cell and calls
@@ -2987,8 +3002,11 @@ the mutation was reverted. Every mutation fails at least one witness.
   trailed its frame's due instant, at least one if expired at paint.
   Every run has late frames (5–12), and a late frame is painted more than
   one frame after it was due or expired at paint, so it reads at least one
-  frame. 33.3 ms means no paint trailed its frame by two frames; it is not
-  a regression. The harness's `receipt_offset_max_ms` is a different
+  frame. It is not a regression. *Qualified in R35 (re-review 3 D4):*
+  33.3 ms does not show that no paint trailed its frame by two frames.
+  The figure is a proxy from stored timestamps: a paint that precedes a
+  delayed registration reads zero elapsed, and `expired` supplies only
+  one frame (E11.8). The harness's `receipt_offset_max_ms` is a different
   measure and is unchanged in kind (0.0, and 1966.7 in one run, as in R33).
 - G11 and G16 still pass: 0 underrun frames before the end in the harness
   and the engine, the post-end straddle 512, and the harness's clock stall
@@ -3094,5 +3112,170 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 952 filtered out; fi
 #  180308  0.0  2-05:19:54 foot
 # 3754322 90.9    10:42:59 foot
 # 3754361 51.2    10:42:59 foot
+# ALL DONE
+```
+
+### E11.13 R35 runtime-only registration and a lock-free ack hand-off (re-review 3)
+
+Re-review 3 of `b90128f` closed D3 (caps) and D4 (agent charges). It
+rejected on four implementation gaps against R34's own rule ("registration
+only from the worker's runtime position"). Each was verified against the
+code before fixing; none is disputed:
+- D1 holds: `tick` reads `seek_pending`, then `programme_ended()` reads
+  `clock.position()`, so a `seek(1000)` between them made `stop_at_end`
+  register through the duration.
+- D2 holds: `start_playback` read `runtime_position()` before dropping the
+  runtime, and `pause` read it before `audio.pause()`.
+- D3 holds: `acknowledge` took the counters mutex, which the worker holds
+  through registration and settlement.
+- D4 holds: the 5 ms is `WORKER_TICK`, a `recv_timeout`, and
+  `Counters::settle` saturates the elapsed time to zero for a paint that
+  precedes its registration.
+
+One code commit on `pf1/impl`:
+
+| Commit | What it does |
+|---|---|
+| `8e1b1b1` | `Worker::quiesce` stops the outgoing stream, then reads its final consumed frame; every transition, the terminal stop included, closes R-5 there. `Lane::ack` hands acks over on a bounded crossbeam channel with `try_send` (an existing dependency). Both the channel and the held acks drop the newest when full. It also carries the witness nits. |
+
+It passed its gates:
+- build, `clippy --workspace --all-targets -D warnings`, and rustfmt on the
+  touched files (`skip_children`);
+- the media tests (936 lib tests pass, 20 ignored, at the default thread
+  count, plus its integration tests);
+- `cargo build -p kinewright-app`.
+
+Core is untouched. C-5 and C-3 hold: no render path changed and no
+tolerance was added. The user-visible terminal behaviour is S1's: the R29
+and R30 witnesses (`a_playing_seek_that_races_the_terminal_stop_…`,
+`a_seek_after_the_stop_or_before_a_pause_…`,
+`a_pause_behind_a_seek_to_the_end_…`, `a_drained_one_frame_timeline_…`)
+are unedited and green. A pause now reads its resting position after the
+stream has stopped, not after `pause()` was requested; for cpal, the
+stream stops for certain only when it is dropped. The events and their
+order are unchanged. Agent-protocol replies and MCP shapes are unchanged.
+
+#### E11.13.1 Findings
+
+| Finding | Fix | Witness | Fails when reverted |
+|---|---|---|---|
+| D1: shared-clock terminal detection registers unplayed frames | `stop_at_end` ends R-5 at `quiesce`'s consumed frame, clamped to the duration. The I8 model has no runtime, so it uses its settled clock instead. The stop itself is unchanged. | `engine::tests::a_seek_racing_the_terminal_check_registers_no_unplayed_frames`. A test hook (`on_terminal_check`) issues `seek(1000)` between the tick's pending-seek check and its terminal check, at runtime frame 10 of 1,000. The tick stops at the end and nothing more becomes due; the raced seek then resumes and registers only its own first frame. | M37 (the stop ends at the duration: frames 11..=999 become due) |
+| D2: outgoing position captured before the callbacks stop | `quiesce` takes the runtime, pauses it where the transition always did, and drops it. Dropping joins cpal's callback thread; for the simulated driver, pausing stops it under its stream lock. Only then does `quiesce` read `position_samples`, with the stream's own rate and the outgoing document's fps. `start_playback`, `pause_through` (and so `set_document`) and `stop_at_end` use it. | `engine::tests::a_callback_racing_a_transition_still_registers_its_frame`. A test hook (`on_quiesce`) runs stepped callbacks into the next frame after the transition began and before the stream stops, for a pause, a playing seek and a new document. That frame is due in each case. | M38 (position read before the hook, i.e. before the stream stops) |
+| D3: acknowledgement can block the UI | `Lane::ack` calls `try_send` on a bounded crossbeam channel (256), with no lock. A full channel drops the newest ack and counts it (lane atomic, merged into `stats().acks_overflowed`, reset at `play`). `Lane::settle` moves the channel into the counters for the worker; `Lane::clear_counters` discards it at `play`. | `engine::tests::an_ack_never_waits_for_the_counters`. While the test thread holds the counters lock, another thread sends 257 acks and finishes. One overflows (the newest), and after a tick the worker holds 100..=355. | M39 (the ack takes the counters lock): the sender blocks, 10 s timeout |
+| D4: temporal claims exceed the implementation | Docs only. The 5 ms is qualified as a receive timeout (design §7 R-5 amendment; E11.8). The A/V offset is qualified as a stored-timestamp proxy, and E11.12.4's "no paint trailed its frame by two frames" is withdrawn. | — | — |
+| Nit: the overflow witness checks counts only | The held acks drop the newest (R35's rule). `stats::tests::a_full_ack_hold_drops_the_newest` (renamed from `a_full_ack_queue_drops_its_oldest`) asserts the kept endpoints 1 and 256, their order, and that 257 and 300 stay dropped. | the same | M40 (drop the oldest) |
+| Nit: the agent witness never settles a paint after the job | `stats::tests::an_agent_job_is_charged_only_…` acks frame 22 after `agent_finished()`, and its charge is removed (3 → 2). | the same | (coverage) |
+| Nit: duplicated `#[cfg(test)]` in `stats.rs` | One `#[cfg(test)] impl Counters` block | — | — |
+| Nit: duplicated "Final check and binding" text in E11.8 | Removed | — | — |
+
+Mutations M37–M40 were each applied to `8e1b1b1`, followed by a run of the
+R-5 witnesses (`stats::`, the engine's `a_…` and `an_…` tests,
+`preview::tests`), then reverted. Each fails only the witness named
+above. M38 stops at the first transition (the pause).
+
+**Updated witnesses.** `stats::a_full_ack_queue_drops_its_oldest` became
+`a_full_ack_hold_drops_the_newest`. The model changed which ack a full
+hold drops, so the test's `dropped` expectation is unchanged (45) but it
+now names the newest. `stats::an_agent_job_is_charged_only_…` gained one
+settlement after the job. No other witness changed.
+
+#### E11.13.2 Timing reruns (R35)
+
+- Binary: the release test binary of `8e1b1b1`
+  (`kinewright_media-cf306d076b2fd4bf`, sha256
+  `e138f70903d6247705943e49e6d62e93541e1adc34ac813f36c383aa03d57deb`),
+  built once and copied aside. rustc 1.98.0.
+- When: P-play LL 2026-09-27 23:57:51–23:58:56 EDT, then P-play LH
+  23:58:56–2026-09-28 00:00:02 EDT. Each lane ran alone, with no build or
+  test alongside. Both lanes are `PF1_RUNS=1 PF1_ONLY=typical_1080p`, and
+  both exited 0.
+- Ambient load (R26): the two `foot` screensaver processes (≈91% + 51%)
+  and Hyprland (≈24%) were present at every mark. Two `gh` processes
+  appeared at the final END mark only (elapsed 00:00, after the LH run
+  had finished). 1-minute load averages were 6.0–7.5.
+- No G3 rerun: R35 changes only the ack hand-off and the transitions. No
+  hot-path file outside `stats.rs` and the transitions changed.
+
+| Workload | Lane | Harness on time / late / dropped | Engine due: on time / late / dropped | Δ on time / late | Acks overflowed / unmatched | Held max ms, harness / engine | Clock stall max ms, harness / engine | Underrun frames, harness / engine; post-end |
+|---|---|---|---|---|---|---|---|---|
+| `typical_1080p` | LL | 575 / 4 / 1221 | 1800: 572 / 7 / 1221 | −3 / +3 | 0 / 0 | 360.3 / 363.2 | 46.5 / 23.9 | 0 / 0; 512 |
+| `typical_1080p` | LH | 576 / 9 / 1215 | 1800: 577 / 8 / 1215 | +1 / −1 | 0 / 0 | 340.1 / 333.8 | 45.5 / 22.0 | 0 / 0; 512 |
+
+- **The engine and harness agree within ±6**: 3 at most. Engine due is
+  1,800.
+- Both runs are valid: 60.02 s, 0 missed callbacks.
+- Other fields:
+  - `engine_dropped_agent` 0, `engine_stale_errors` 0;
+  - `engine_av_offset_max_ms` 33.3 (a proxy, E11.8);
+  - receipt offset 0.0, rejected at the consumer 0, sync decoders 2;
+  - present p50 / p95 / max: 64.3 / 268.8 / 363.2 ms (LL), 64.2 / 256.6 /
+    320.5 ms (LH);
+  - teardown complete, threads 44 (LL) and 7 (LH);
+  - teardown RSS 456.1 and 445.3 MiB;
+  - peak RSS 854.1 and 891.6 MiB.
+- These are within run-to-run noise of E11.12.4 and E11.11.4.
+
+#### E11.13.3 Line delta
+
+Non-blank, non-comment `.rs` lines over `b90128f..8e1b1b1`, split at each
+file's test module:
+
+| File | Production | Tests |
+|---|---|---|
+| `media/src/stats.rs` | 247 → 251 (+4) | 271 → 288 (+17) |
+| `media/src/engine.rs` | 2,233 → 2,252 (+19) | 2,441 → 2,534 (+93) |
+| `media/src/preview.rs` | 587 → 620 (+33) | unchanged |
+| **Total** | **+56** | **+110** |
+
+- The production figure includes the two test-only fault hooks and the
+  test-only `held` accessor (about 12 lines).
+- `git diff --stat b90128f..8e1b1b1 -- crates`: 3 files changed, 287
+  insertions and 69 deletions.
+
+#### E11.13.4 Raw result lines (R35)
+
+`#` lines are the runner's lane markers and exit statuses; everything else
+is verbatim from `timing.log`, `8e1b1b1`:
+
+```
+# binary sha256 e138f70903d6247705943e49e6d62e93541e1adc34ac813f36c383aa03d57deb commit 8e1b1b1
+# BEGIN P-play LL 2026-09-27 23:57:51 EDT load: 6.82 6.11 5.27
+#    1423 24.2  2-06:15:29 Hyprland
+#  180308  0.0  2-05:45:05 foot
+# 3754322 90.9    11:08:10 foot
+# 3754361 51.2    11:08:10 foot
+
+running 1 test
+test pf1_harness::pf1_play_baseline ... PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=575 late=4 early=0 dropped=1221 present_p50_ms=64.3 present_p95_ms=268.8 present_max_ms=363.2 held_max_ms=360.3 receipt_offset_max_ms=0.0 clock_stall_max_ms=46.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=854.1 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=572 engine_late=7 engine_dropped=1221 engine_dropped_agent=0 engine_held_max_ms=363.2 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 engine_acks_overflowed=0 engine_acks_unmatched=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=456.1 threads=44
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 955 filtered out; finished in 65.46s
+
+# exit=0
+# END P-play LL 2026-09-27 23:58:56 EDT load: 5.95 6.04 5.31
+#    1423 24.2  2-06:16:34 Hyprland
+#  180308  0.0  2-05:46:11 foot
+# 3754322 90.9    11:09:16 foot
+# 3754361 51.2    11:09:16 foot
+# BEGIN P-play LH 2026-09-27 23:58:56 EDT load: 5.95 6.04 5.31
+#    1423 24.2  2-06:16:34 Hyprland
+#  180308  0.0  2-05:46:11 foot
+# 3754322 90.9    11:09:16 foot
+# 3754361 51.2    11:09:16 foot
+
+running 1 test
+test pf1_harness::pf1_play_baseline ... PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=576 late=9 early=0 dropped=1215 present_p50_ms=64.2 present_p95_ms=256.6 present_max_ms=320.5 held_max_ms=340.1 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=891.6 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=577 engine_late=8 engine_dropped=1215 engine_dropped_agent=0 engine_held_max_ms=333.8 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 engine_acks_overflowed=0 engine_acks_unmatched=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=445.3 threads=7
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 955 filtered out; finished in 65.32s
+
+# exit=0
+# END P-play LH 2026-09-28 00:00:02 EDT load: 7.51 6.65 5.58
+#    1423 24.2  2-06:17:39 Hyprland
+#  180308  0.0  2-05:47:16 foot
+# 2920961 87.5       00:00 gh
+# 2920998  125       00:00 gh
+# 3754322 90.9    11:10:21 foot
+# 3754361 51.2    11:10:21 foot
 # ALL DONE
 ```

@@ -444,16 +444,22 @@ sampled every 5 ms (harness) or at each `App::logic` (app).
    registers due frames only from its own applied transport: the position
    of the samples its audio callback consumed (never the shared clock,
    which a caller's `seek`/`play`/`set_document` and the worker's own
-   transitions write). It registers at every tick (5 ms) and at each of its
-   clock writes: the terminal stop through the last frame; a pause, a new
-   document, a playing seek and a `play` first end the outgoing epoch
-   through the position its runtime reached.
-2. *An ack only queues.* `ack_presented` pushes (epoch, frame, paint
-   instant, expired) onto a bounded queue (256) under the counters' leaf
-   lock, O(1), never behind a render. It samples no clock and registers
-   nothing. A full queue drops its oldest and counts `acks_overflowed`;
-   the UI never blocks.
-3. *Settlement.* The worker drains the queue every tick and at every
+   transitions write). It registers at every tick (a 5 ms receive
+   timeout: a nominal period, not a bound, since fills, controls and
+   scheduling can delay a tick) and at each of its clock writes. *R35:* a
+   transition (the terminal stop, a pause, a new document, a playing seek,
+   a `play`) first stops the outgoing stream, then reads the frame its
+   callbacks consumed through, at the stream's own rate and the outgoing
+   document's fps, closes the epoch there (the terminal stop clamps it to
+   the duration), and only then replaces or resets. What the terminal
+   check or a caller's call wrote to the clock never feeds R-5.
+2. *An ack only hands over.* `ack_presented` sends (epoch, frame, paint
+   instant, expired) on a bounded channel (256) with `try_send`: no lock
+   and no wait (R35). It samples no clock and registers nothing. A full
+   channel *drops the newest* ack (the sender cannot drop the oldest) and
+   counts `acks_overflowed`; the UI never blocks.
+3. *Settlement.* The worker moves the channel's acks into its counters
+   and drains them every tick and at every
    transport change. An ack settles its due record: on time if painted
    current within due + 1 frame, else late. An ack ahead of the
    registrations in the open epoch is held until a registration reaches
@@ -469,12 +475,17 @@ sampled every 5 ms (harness) or at each `App::logic` (app).
    job-window frames never painted.
 5. *Hard caps.* Due records 65,536 (the oldest is evicted, keeping its
    identity); evicted epochs 8; settled ranges per evicted epoch 64 (the
-   two oldest merge); the ack queue 256. History past a cap stays in the
+   two oldest merge); the ack channel 256, and the acks the worker holds
+   ahead of its registrations 256 (both drop the newest). History past a cap stays in the
    aggregate counters. The approximation: a forgotten epoch's evicted
    frames, and the frames inside a merged gap, stay dropped even if acked
    later (the ack is unmatched); an evicted frame charged to an agent job
-   stays charged; a due instant is the registering tick's, up to 5 ms
-   after the frame became current.
+   stays charged; a due instant is the registering tick's, which follows
+   the frame becoming current by the tick's delay (nominally under 5 ms,
+   unbounded under load). The A/V offset is taken from that stored
+   instant: a paint that precedes a delayed registration reads zero
+   elapsed, and `expired` then supplies only one frame, so the offset is
+   a proxy that can under-report, not the consumed-clock offset.
 
 ## 8 Seek and scrub
 
