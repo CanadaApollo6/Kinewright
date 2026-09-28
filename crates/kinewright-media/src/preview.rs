@@ -16,6 +16,7 @@ use std::{
         Arc, Condvar, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -25,10 +26,16 @@ use kinewright_core::{
 };
 
 use crate::{
+    decode::VideoDecoder,
     derived_cache::CacheStats,
     engine::{SharedClock, monitor_max_width, send_latest},
+    frame::WorkingFrame,
     lut_store::LutLibrary,
-    render::{DecodeStrategy, FrameRenderer, RenderScale},
+    render::{
+        DecodeStrategy, FrameRenderer, PREFETCH_FRAMES, ReaderDemand, RenderScale, SourceSpec,
+        SuppliedFrames, VideoSourceKey, reader_demand,
+    },
+    sched::{Next, Posted, Readers, WaitStep, WaitView, plan_regions, reader_limit, wait_step},
     stats::{ACK_QUEUE, Ack, Counters},
 };
 
@@ -116,12 +123,25 @@ pub(crate) struct LaneState {
     /// Stamped transport failures, for the worker's R-2 test.
     pub(crate) failures: Vec<(FrameStamp, MediaError)>,
     pub(crate) wakeup: Option<Wakeup>,
+    /// H-2/H-3 (S2b-1): the readers' plans, states, rings and failures.
+    pub(crate) readers: Readers<VideoSourceKey, WorkingFrame>,
 }
 
 /// The worker/preview hand-off: one leaf lock and the `ready` condvar.
 pub(crate) struct Lane {
     state: Mutex<LaneState>,
     ready: Condvar,
+    /// H-2: the readers' condvar.
+    work: Condvar,
+    /// The readers' clock origin (H-2 quiescence).
+    epoch: Instant,
+    /// I10/I15: an injected advance of the readers' clock.
+    #[cfg(test)]
+    pub(crate) skew: Mutex<Duration>,
+    /// Test support: each reader decode first takes one message from this
+    /// gate (or proceeds once its sender is gone).
+    #[cfg(test)]
+    pub(crate) gate: Mutex<Option<Receiver<()>>>,
     /// R-5's counters: a separate leaf, never taken with `state`.
     counters: Mutex<Counters>,
     /// R35 (re-review 3 D3): paint acks, handed to the worker without a
@@ -135,6 +155,12 @@ impl Default for Lane {
         Self {
             state: Mutex::default(),
             ready: Condvar::new(),
+            work: Condvar::new(),
+            epoch: Instant::now(),
+            #[cfg(test)]
+            skew: Mutex::default(),
+            #[cfg(test)]
+            gate: Mutex::default(),
             counters: Mutex::default(),
             acks: crossbeam_channel::bounded(ACK_QUEUE),
             acks_overflowed: AtomicU64::new(0),
@@ -184,6 +210,14 @@ impl Lane {
 
     fn notify(&self) {
         self.ready.notify_all();
+    }
+
+    /// The readers' clock (H-2), advanced by tests (never a sleep).
+    pub(crate) fn now(&self) -> Duration {
+        let now = self.epoch.elapsed();
+        #[cfg(test)]
+        let now = now + *self.skew.lock().expect("skew");
+        now
     }
 
     /// Replace the transport slot (`None` clears it).
@@ -261,6 +295,7 @@ impl Lane {
             (agent, state.transport.take())
         };
         self.notify();
+        self.work.notify_all();
         moved
     }
 
@@ -301,8 +336,114 @@ impl Drop for CancelOnDrop {
 
 pub(crate) enum Work {
     Agent(AgentJob),
-    Paused(TransportJob),
+    Paused(TransportJob, u64),
     Playback(TransportJob, u64),
+}
+
+/// Why a scheduled render did not produce a frame.
+enum Halt {
+    Failed(MediaError),
+    /// A newer post or shutdown.
+    Superseded,
+    /// Playback: the frame's time passed (or an agent job's deadline) with
+    /// a required layer missing, so the previous image is held (R-3, R-4).
+    Held {
+        agent: bool,
+    },
+}
+
+/// A transport render's `FrameWait` terms (H-2): its lane version, and for
+/// playback the agent deadline (lead + 1 frames, R-4).
+struct FrameWait {
+    version: u64,
+    playback: Option<Instant>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// E-2 witness: the next reader spawn on this thread fails.
+    pub(crate) static FAIL_READER_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// H-1: start reader `id`. E-2: a spawn failure is prefixed `decode-reader:`.
+fn spawn_reader(
+    lane: &Arc<Lane>,
+    (id, spec): (u64, SourceSpec),
+    halt: &Arc<AtomicBool>,
+) -> Result<JoinHandle<()>, MediaError> {
+    #[cfg(test)]
+    if FAIL_READER_SPAWN.with(std::cell::Cell::take) {
+        return Err(MediaError::Backend(
+            "decode-reader: spawn failed: injected".to_owned(),
+        ));
+    }
+    let (lane, halt) = (Arc::clone(lane), Arc::clone(halt));
+    let spawned = thread::Builder::new().name(format!("kinewright-decode-{id}"));
+    spawned
+        .spawn(move || read(&lane, id, &spec, &halt))
+        .map_err(|error| MediaError::Backend(format!("decode-reader: spawn failed: {error}")))
+}
+
+/// Before S2b-2's permits, a reader opens with ⌊P / R⌋ frame threads.
+fn reader_threads() -> usize {
+    let parallelism = thread::available_parallelism().map_or(1, usize::from);
+    (parallelism / reader_limit(parallelism)).max(1)
+}
+
+/// A reader's loop (H-2): every step is decided under the lock; decoding,
+/// opening and closing run outside it, and what `deliver` returns is
+/// dropped after unlock (H-4).
+fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
+    let mut decoder: Option<VideoDecoder> = None;
+    let mut state = lane.lock();
+    loop {
+        let now = lane.now();
+        let shutdown = state.shutdown;
+        match state.readers.next(id, now, shutdown) {
+            Next::Retire => break,
+            Next::Wait { until } => {
+                let timeout = until.saturating_sub(now);
+                let waited = lane.work.wait_timeout(state, timeout);
+                state = waited.unwrap_or_else(PoisonError::into_inner).0;
+            }
+            Next::Decode { at, version } => {
+                drop(state);
+                #[cfg(test)]
+                {
+                    let gate = lane.gate.lock().expect("gate").clone();
+                    if let Some(gate) = gate {
+                        lane.notify(); // a test waiting for `Decoding`
+                        let _ = gate.recv();
+                    }
+                }
+                let result = match &mut decoder {
+                    Some(decoder) => spec.decode(decoder, at),
+                    None => spec.open(reader_threads()).and_then(|mut opened| {
+                        opened.set_stop(Arc::clone(halt));
+                        spec.decode(decoder.insert(opened), at)
+                    }),
+                };
+                // Cancelled only once the reader is retiring.
+                let cancelled = matches!(result, Err(MediaError::Cancelled));
+                let dropped = (!cancelled).then(|| {
+                    let now = lane.now();
+                    let delivered = lane.lock().readers.deliver(id, at, version, result, now);
+                    lane.notify();
+                    // H-3: a dropped failure's time is re-demanded.
+                    if delivered.1.is_some() {
+                        lane.work.notify_all();
+                    }
+                    delivered
+                });
+                drop(dropped);
+                state = lane.lock();
+            }
+        }
+    }
+    drop(state);
+    drop(decoder);
+    lane.lock().readers.exited(id);
+    lane.notify();
 }
 
 /// How a playback attempt ended (R-4's "attempt").
@@ -353,8 +494,30 @@ pub(crate) struct Preview {
     /// Re-review 2 D4: the newest playback frame (epoch, frame) published;
     /// an agent job never displaces it.
     published: Option<(u64, i64)>,
+    /// H-1: this preview's reader threads, joined when it goes.
+    readers: Vec<JoinHandle<()>>,
+    /// H-2: stops this preview's readers at a packet boundary.
+    halt: Arc<AtomicBool>,
     #[cfg(test)]
     pub(crate) faults: Arc<crate::engine::Faults>,
+}
+
+impl Drop for Preview {
+    /// H-6 (3)/(5): every reader retires, closes its decoder and exits
+    /// before the preview does (the worker joins the preview).
+    fn drop(&mut self) {
+        self.halt.store(true, Ordering::Release);
+        let frames = {
+            let mut state = self.lane.lock();
+            state.readers.retire_all();
+            state.readers.clear_rings()
+        };
+        self.lane.work.notify_all();
+        drop(frames);
+        for reader in self.readers.drain(..) {
+            let _ = reader.join();
+        }
+    }
 }
 
 impl Preview {
@@ -379,6 +542,8 @@ impl Preview {
             held: None,
             agent_turn: false,
             published: None,
+            readers: Vec::new(),
+            halt: Arc::default(),
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -414,8 +579,8 @@ impl Preview {
                 }
                 self.agent_turn = false;
             }
-            Work::Paused(job) => {
-                self.run_paused(&job);
+            Work::Paused(job, version) => {
+                self.run_paused(&job, version);
                 self.agent_turn = true;
             }
             Work::Playback(job, version) => {
@@ -463,7 +628,10 @@ impl Preview {
                 break state.agent.pop_front().map(Work::Agent);
             }
             match runnable {
-                Some(JobKind::Paused(_)) => break state.transport.take().map(Work::Paused),
+                Some(JobKind::Paused(_)) => {
+                    let version = state.version;
+                    break state.transport.take().map(|job| Work::Paused(job, version));
+                }
                 Some(JobKind::Playback { .. }) => {
                     let version = state.version;
                     break state
@@ -501,17 +669,19 @@ impl Preview {
     /// Render one monitor frame; `Ok(None)` when a test fault withholds it.
     fn render_monitor(
         &mut self,
-        document: &Document,
+        scene: &Scene,
         at: TimeCode,
-        strategy: DecodeStrategy,
-    ) -> Result<Option<FrameTexture>, MediaError> {
+        wait: &FrameWait,
+    ) -> Result<Option<FrameTexture>, Halt> {
+        let document = &*scene.document;
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
         #[cfg(test)]
         if self.faults.fail_render.swap(false, Ordering::AcqRel) {
-            return Err(MediaError::Backend("injected render failure".to_owned()));
+            let error = MediaError::Backend("injected render failure".to_owned());
+            return Err(Halt::Failed(error));
         } else if self.faults.fake_render.load(Ordering::Acquire) {
             // The I8 oracle's witness of which document rendered it.
             let duration = u32::try_from(document.duration.0).unwrap_or(u32::MAX);
@@ -523,14 +693,156 @@ impl Preview {
                 rgba,
             }));
         }
-        let frame = self
-            .renderer
-            .render_live(document, at, resolution, scale, strategy)?;
+        let horizon = if wait.playback.is_some() {
+            PREFETCH_FRAMES
+        } else {
+            0
+        };
+        let demand = reader_demand(document, at, resolution, scale, horizon);
+        let frames = self.schedule(&demand, at, wait)?;
+        self.bind(Some(scene.generation), &scene.lut);
+        let frame = match frames {
+            Some(frames) => {
+                (self.renderer).render_scheduled(document, at, resolution, scale, &frames)
+            }
+            // More sources than readers: today's synchronous render (K-3).
+            None if wait.playback.is_some() => {
+                let strategy = DecodeStrategy::Sequential;
+                self.renderer
+                    .render_live(document, at, resolution, scale, strategy)
+            }
+            None => {
+                (self.renderer).render_live(document, at, resolution, scale, DecodeStrategy::Seek)
+            }
+        };
+        let frame = frame.map_err(Halt::Failed)?;
         #[cfg(test)]
         if !self.faults.publish_after_render() {
             return Ok(None);
         }
         Ok(Some(frame))
+    }
+
+    /// H-2/H-3: post the job's plan, start the readers it needs, then
+    /// `FrameWait` until every required frame has a result or a current
+    /// failure. `None`: the plan needs more sources than readers.
+    fn schedule(
+        &mut self,
+        demand: &ReaderDemand,
+        at: TimeCode,
+        wait: &FrameWait,
+    ) -> Result<Option<SuppliedFrames>, Halt> {
+        let per_source: Vec<_> = (demand.sources.iter())
+            .map(|(key, (_, lookahead))| {
+                let required = demand.required.iter().filter(|(k, _)| k == key);
+                (
+                    key.clone(),
+                    required.map(|(_, t)| *t).collect(),
+                    lookahead.clone(),
+                )
+            })
+            .collect();
+        let now = self.lane.now();
+        let posted = {
+            let mut state = self.lane.lock();
+            if state.shutdown || state.version != wait.version {
+                return Err(Halt::Superseded);
+            }
+            // More sources than readers: an empty plan (the readers go
+            // idle and their frames drop), then a synchronous render.
+            let regions = plan_regions(&per_source, state.readers.limit());
+            let fallback = regions.is_none();
+            (
+                fallback,
+                state.readers.post(regions.unwrap_or_default(), now),
+            )
+        };
+        self.lane.work.notify_all();
+        let (fallback, Posted { spawn, dropped }) = posted;
+        drop(dropped);
+        if fallback {
+            return Ok(None);
+        }
+        self.spawn(spawn, demand);
+        let mut state = self.lane.lock();
+        loop {
+            let resolved = state.readers.resolve(&demand.required);
+            let agent = |job: &AgentJob| !job.cancel.load(Ordering::Acquire);
+            let view = WaitView {
+                shutdown: state.shutdown,
+                superseded: state.version != wait.version,
+                resolved: resolved.is_some(),
+                playback: wait.playback.is_some(),
+                agent_waiting: state.agent.iter().any(agent),
+                expired: self.clock.position().0 > at.0,
+                agent_due: wait.playback.is_some_and(|due| Instant::now() >= due),
+            };
+            match wait_step(view) {
+                WaitStep::Shutdown | WaitStep::Superseded => return Err(Halt::Superseded),
+                WaitStep::Held { agent } => return Err(Halt::Held { agent }),
+                WaitStep::Ready => {
+                    drop(state);
+                    let results = resolved.unwrap_or_default();
+                    return Ok(Some(demand.required.iter().cloned().zip(results).collect()));
+                }
+                WaitStep::Suspend => {
+                    // R-4: a paused wait runs the agent job, demands posted.
+                    let position = state.agent.iter().position(agent);
+                    let discarded: Vec<_> = state.agent.drain(..position.unwrap_or(0)).collect();
+                    let job = state.agent.pop_front();
+                    drop(state);
+                    drop(discarded);
+                    if let Some(job) = job {
+                        self.run_agent(job);
+                    }
+                    state = self.lane.lock();
+                }
+                WaitStep::Wait if state.readers.waiting() => {
+                    let spawn = state.readers.assign(self.lane.now());
+                    if spawn.is_empty() {
+                        state = self.wait_ready(state, wait);
+                    } else {
+                        drop(state);
+                        self.spawn(spawn, demand);
+                        state = self.lane.lock();
+                    }
+                }
+                WaitStep::Wait => state = self.wait_ready(state, wait),
+            }
+        }
+    }
+
+    fn wait_ready<'a>(
+        &self,
+        state: MutexGuard<'a, LaneState>,
+        wait: &FrameWait,
+    ) -> MutexGuard<'a, LaneState> {
+        let ready = &self.lane.ready;
+        if wait.playback.is_some() {
+            let waited = ready.wait_timeout(state, HOLD_POLL);
+            waited.unwrap_or_else(PoisonError::into_inner).0
+        } else {
+            ready.wait(state).unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    /// Start readers outside the lock; one that cannot start fails its
+    /// required frames in the current plan (E-2).
+    fn spawn(&mut self, spawn: Vec<(u64, VideoSourceKey)>, demand: &ReaderDemand) {
+        self.readers.retain(|reader| !reader.is_finished());
+        for (id, key) in spawn {
+            let spec = demand.sources.get(&key).map(|(spec, _)| spec.clone());
+            let started = spec
+                .ok_or_else(|| MediaError::Backend("decode-reader: no source".to_owned()))
+                .and_then(|spec| spawn_reader(&self.lane, (id, spec), &self.halt));
+            match started {
+                Ok(reader) => self.readers.push(reader),
+                Err(error) => {
+                    self.lane.lock().readers.fail_start(id, &error);
+                    self.lane.notify();
+                }
+            }
+        }
     }
 
     fn publish(&self, frame: PreviewFrame) {
@@ -546,19 +858,22 @@ impl Preview {
     }
 
     /// S-1: one exact render of the paused target, stamped with its job.
-    pub(crate) fn run_paused(&mut self, job: &TransportJob) {
+    pub(crate) fn run_paused(&mut self, job: &TransportJob, version: u64) {
         let JobKind::Paused(at) = job.kind else {
             return;
         };
-        self.bind(Some(job.scene.generation), &job.scene.lut);
-        match self.render_monitor(&job.scene.document, at, DecodeStrategy::Seek) {
+        let wait = FrameWait {
+            version,
+            playback: None,
+        };
+        match self.render_monitor(&job.scene, at, &wait) {
             Ok(Some(texture)) => self.publish(PreviewFrame {
                 at,
                 stamp: job.stamp,
                 texture,
             }),
-            Ok(None) => {}
-            Err(error) => self.fail(job.stamp, error),
+            Ok(None) | Err(Halt::Superseded | Halt::Held { .. }) => {}
+            Err(Halt::Failed(error)) => self.fail(job.stamp, error),
         }
     }
 
@@ -606,10 +921,15 @@ impl Preview {
             self.parked = Some(version);
             return Err(Attempt::Parked);
         }
-        self.bind(Some(job.scene.generation), &job.scene.lut);
         let started = Instant::now();
         let at = TimeCode(target);
-        let rendered = self.render_monitor(&document, at, DecodeStrategy::Sequential);
+        let frames = u32::try_from(lead + 1).unwrap_or(3);
+        let wait = Duration::from_secs_f64(frame_ms * f64::from(frames) / 1e3);
+        let terms = FrameWait {
+            version,
+            playback: Some(started + wait),
+        };
+        let rendered = self.render_monitor(&job.scene, at, &terms);
         let took = started.elapsed().as_secs_f64() * 1_000.0;
         self.render_ewma_ms = if self.render_ewma_ms == 0.0 {
             took
@@ -620,14 +940,14 @@ impl Preview {
         let texture = match rendered {
             Ok(Some(texture)) => texture,
             Ok(None) => return Err(Attempt::Dropped { agent: false }),
-            Err(error) => {
+            Err(Halt::Superseded) => return Err(Attempt::Superseded),
+            Err(Halt::Held { agent }) => return Err(Attempt::Dropped { agent }),
+            Err(Halt::Failed(error)) => {
                 self.fail(job.stamp, error);
                 self.parked = Some(version);
                 return Err(Attempt::Parked);
             }
         };
-        let frames = u32::try_from(lead + 1).unwrap_or(3);
-        let wait = Duration::from_secs_f64(frame_ms * f64::from(frames) / 1e3);
         let frame = PreviewFrame {
             at,
             stamp: job.stamp,
@@ -707,11 +1027,20 @@ impl Preview {
                 self.reply(&cancel, &reply, result);
             }
             AgentWork::CacheStats { clear, reply } => {
-                let stats = if clear {
+                let (rings, frames) = {
+                    let mut state = self.lane.lock();
+                    let rings = state.readers.ring_bytes();
+                    (rings, clear.then(|| state.readers.clear_rings()))
+                };
+                drop(frames);
+                let mut stats = if clear {
                     self.renderer.clear()
                 } else {
                     self.renderer.cache_stats()
                 };
+                let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+                stats.file_count = stats.file_count.saturating_add(count(rings.0));
+                stats.bytes = stats.bytes.saturating_add(count(rings.1));
                 self.reply(&cancel, &reply, Ok(stats));
             }
             #[cfg(any(test, feature = "test-util"))]
@@ -838,7 +1167,10 @@ pub(crate) mod tests {
         let document = Arc::new(title_card((64, 64), 3));
         let before = live_table_frames();
         for at in [0, 1] {
-            preview.run_paused(&job(&document, JobKind::Paused(TimeCode(at)), stamp(1, 1)));
+            preview.run_paused(
+                &job(&document, JobKind::Paused(TimeCode(at)), stamp(1, 1)),
+                0,
+            );
         }
         assert_eq!(frames.try_iter().count(), 2);
         assert_eq!(live_table_frames(), before + 2, "two paused renders");
@@ -1176,5 +1508,223 @@ pub(crate) mod tests {
         done.recv_timeout(Duration::from_secs(10))
             .expect("the preview left the hold");
         thread.join().unwrap();
+    }
+
+    /// A three-track, two-source cut document (sources alternate on top).
+    fn cut_document() -> (Arc<Document>, crate::perf_fixtures::Workload) {
+        let workload = crate::perf_fixtures::cuts((160, 90), 60, 3, 9, 10);
+        (Arc::new(workload.0.clone()), workload)
+    }
+
+    /// Wait on `ready` (no sleep) until `what` holds; 60 s is a hang.
+    fn wait_until(lane: &Lane, what: impl Fn(&LaneState) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut state = lane.lock();
+        while !what(&state) {
+            let left = deadline.checked_duration_since(Instant::now());
+            let left = left.expect("the lane never reached the condition");
+            let waited = lane.ready.wait_timeout(state, left);
+            state = waited.unwrap_or_else(PoisonError::into_inner).0;
+        }
+    }
+
+    fn decoding(state: &LaneState) -> bool {
+        let slots = &state.readers.slots;
+        slots
+            .iter()
+            .any(|slot| matches!(slot.state, crate::sched::ReaderState::Decoding { .. }))
+    }
+
+    /// A preview thread on `lane`, its readers gated; returns the gate.
+    fn gated_preview(
+        lane: &Arc<Lane>,
+    ) -> (Sender<()>, Receiver<PreviewFrame>, thread::JoinHandle<()>) {
+        let (gate, gated) = bounded(0);
+        *lane.gate.lock().expect("gate") = Some(gated);
+        // The renderer is not `Send`: build the preview on its thread.
+        let (lane, (handoff, frames)) = (Arc::clone(lane), bounded(1));
+        let thread = thread::spawn(move || {
+            let (preview, frames) = test_preview_on(lane, Arc::new(SharedClock::new()));
+            handoff.send(frames).expect("frames");
+            preview.run();
+        });
+        (gate, frames.recv().expect("the preview started"), thread)
+    }
+
+    /// H-6: join within 60 s, or the test fails as a hang.
+    fn join_within(thread: thread::JoinHandle<()>) {
+        let (done, joined) = bounded(1);
+        thread::spawn(move || done.send(thread.join().is_ok()));
+        let joined = joined.recv_timeout(Duration::from_secs(60));
+        assert_eq!(joined, Ok(true), "the preview did not exit cleanly");
+    }
+
+    /// C-5 (S2b-1): frames the readers decode composite to the synchronous
+    /// renderer's bytes: consecutive (continuation), a jump and the cuts.
+    #[test]
+    fn scheduled_frames_match_the_synchronous_renderer() {
+        let (document, _workload) = cut_document();
+        let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        for at in [0, 1, 2, 25, 9, 10, 29, 3] {
+            let job = job(&document, JobKind::Paused(TimeCode(at)), stamp(1, 1));
+            preview.run_paused(&job, 0);
+            assert!(preview.lane.take_failures().is_empty(), "frame {at}");
+            let shown = frames.try_recv().expect("published");
+            let expected = reference.render_live(
+                &document,
+                TimeCode(at),
+                resolution,
+                scale,
+                DecodeStrategy::Seek,
+            );
+            assert_eq!(
+                shown.texture.rgba,
+                expected.expect("reference").rgba,
+                "frame {at}"
+            );
+        }
+        assert!(
+            !preview.lane.lock().readers.slots.is_empty(),
+            "readers decoded them"
+        );
+        let synchronous = preview.renderer.cache_stats();
+        assert_eq!(
+            synchronous.file_count, 0,
+            "the synchronous renderer decoded nothing"
+        );
+    }
+
+    /// H-2 (S2b-1): an idle reader retires at the injected quiescence
+    /// deadline, closing its decoder.
+    #[test]
+    fn idle_readers_retire_at_the_quiescence_deadline() {
+        let (document, _workload) = cut_document();
+        let (mut preview, _frames) = test_preview(Arc::new(SharedClock::new()));
+        preview.run_paused(
+            &job(&document, JobKind::Paused(TimeCode(0)), stamp(1, 1)),
+            0,
+        );
+        let lane = Arc::clone(&preview.lane);
+        assert_eq!(lane.lock().readers.slots.len(), 2, "one reader per source");
+        *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
+        lane.work.notify_all();
+        wait_until(&lane, |state| state.readers.slots.is_empty());
+        let rings = lane.lock().readers.ring_bytes();
+        // Source 0 at 0 and 14 (two layers), source 1 at 7.
+        assert_eq!(rings.0, 3, "retirement keeps the frames");
+    }
+
+    /// E-2 (S2b-1): a reader that cannot start fails its required frame
+    /// with the `decode-reader:` prefix, stamped with the job.
+    #[test]
+    fn a_reader_spawn_failure_is_prefixed() {
+        let (document, _workload) = cut_document();
+        let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+        FAIL_READER_SPAWN.with(|fail| fail.set(true));
+        preview.run_paused(
+            &job(&document, JobKind::Paused(TimeCode(0)), stamp(4, 9)),
+            0,
+        );
+        let failures = preview.lane.take_failures();
+        let [(stamped, MediaError::Backend(message))] = failures.as_slice() else {
+            panic!("{failures:?}");
+        };
+        assert_eq!(*stamped, stamp(4, 9));
+        assert_eq!(message, "decode-reader: spawn failed: injected");
+        assert!(frames.try_recv().is_err());
+    }
+
+    /// R-4 / H-8 (S2b-1): while a paused `FrameWait` waits on a reader, an
+    /// agent push suspends it and is answered; a cancelled one is not run;
+    /// the wait then resumes and publishes.
+    #[test]
+    fn an_agent_push_suspends_a_paused_frame_wait() {
+        let (document, _workload) = cut_document();
+        let lane = Arc::<Lane>::default();
+        let (gate, frames, thread) = gated_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(0)),
+            stamp(1, 1),
+        )));
+        wait_until(&lane, decoding);
+        let (cancelled, cancelled_reply, flag) = stats_job();
+        flag.store(true, Ordering::Release);
+        let (live, response, _) = stats_job();
+        assert!(lane.try_push(cancelled) && lane.try_push(live));
+        let reply = response.recv_timeout(Duration::from_secs(60));
+        assert!(reply.expect("answered during the wait").is_ok());
+        assert!(cancelled_reply.try_recv().is_err(), "a cancelled job ran");
+        assert!(frames.try_recv().is_err(), "the frame is still waiting");
+        drop(gate);
+        let shown = frames
+            .recv_timeout(Duration::from_secs(60))
+            .expect("published");
+        assert_eq!((shown.at, shown.stamp), (TimeCode(0), stamp(1, 1)));
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// H-6 (S2b-1): shutdown with the preview in `FrameWait` and a reader
+    /// decoding, with readers idle, or with a newer job decoding, ends
+    /// every reader and then the preview; no agent job is lost.
+    #[test]
+    fn shutdown_ends_every_reader_in_every_phase() {
+        let (document, _workload) = cut_document();
+        for phase in 0..4 {
+            let lane = Arc::<Lane>::default();
+            let (mut gate, frames, thread) = gated_preview(&lane);
+            lane.post(Some(job(
+                &document,
+                JobKind::Paused(TimeCode(0)),
+                stamp(1, 1),
+            )));
+            if phase >= 1 {
+                wait_until(&lane, decoding);
+            }
+            if phase >= 2 {
+                // Open the gate: the readers finish and go idle.
+                *lane.gate.lock().expect("gate") = None;
+                drop(gate);
+                frames
+                    .recv_timeout(Duration::from_secs(60))
+                    .expect("published");
+                wait_until(&lane, |state| !decoding(state));
+                let (closed, gated) = bounded(0);
+                *lane.gate.lock().expect("gate") = Some(gated);
+                gate = closed;
+            }
+            if phase == 3 {
+                lane.post(Some(job(
+                    &document,
+                    JobKind::Paused(TimeCode(25)),
+                    stamp(2, 2),
+                )));
+                wait_until(&lane, decoding);
+            }
+            let (agent, response, _) = stats_job();
+            let queued = lane.try_push(agent);
+            let (moved, _) = lane.shut_down();
+            drop(gate);
+            for job in moved {
+                job.reply_error(worker_stopped());
+            }
+            join_within(thread);
+            assert!(
+                lane.lock().readers.slots.is_empty(),
+                "phase {phase}: a reader outlived"
+            );
+            if queued {
+                assert!(
+                    response.recv_timeout(Duration::from_secs(1)).is_ok(),
+                    "phase {phase}"
+                );
+            }
+        }
     }
 }

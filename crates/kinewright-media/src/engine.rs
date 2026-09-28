@@ -4928,7 +4928,9 @@ mod tests {
             .recv_timeout(Duration::from_secs(60))
             .expect("frame 0");
         let stats = engine.stats();
-        assert!(stats.sync_decoders >= 1, "{stats:?}");
+        // PF1 S2b-1: a reader, not the preview's synchronous renderer,
+        // decoded frame 0 (H-1), so no synchronous decoder is open.
+        assert_eq!(stats.sync_decoders, 0, "{stats:?}");
         // Re-review B nit: the production table field, not only the
         // gauge: an SDR source's RGB input table is live (128 KiB each).
         let table = 1 << 17;

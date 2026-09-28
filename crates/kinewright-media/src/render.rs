@@ -30,7 +30,7 @@ use crate::{
 pub(crate) const PREVIEW_MAX_WIDTH: u32 = 1280;
 
 const FRAME_CACHE_CAPACITY: usize = 32;
-const PREFETCH_FRAMES: i64 = 15;
+pub(crate) const PREFETCH_FRAMES: i64 = 15;
 const FRAME_CACHE_BYTE_BUDGET: usize = 224 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +103,7 @@ pub(crate) struct MatteCoverage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VideoSourceKey {
+pub(crate) struct VideoSourceKey {
     asset: AssetId,
     /// The path is part of the decoder identity even when two paths currently
     /// point at the same bytes. A relink is a runtime input and must not
@@ -194,6 +194,178 @@ enum Generated {
 }
 
 type TitleCacheKey = (ClipId, (u32, u32), Generated);
+
+/// PF1 S2b-1: the readers' frames for one render, by (source, time).
+pub(crate) type SuppliedFrames = HashMap<(VideoSourceKey, i64), Result<WorkingFrame, MediaError>>;
+
+/// Where a render's video layers come from.
+#[derive(Clone, Copy)]
+enum Video<'a> {
+    /// This renderer's own decoders (today's path, K-6).
+    Decode(DecodeStrategy),
+    /// The scheduler's readers (S2b-1).
+    Supplied(&'a SuppliedFrames),
+}
+
+fn source_key(asset: &kinewright_core::MediaAsset, scale: RenderScale) -> VideoSourceKey {
+    let description = &asset.color_description;
+    let assumption = d65_assumption(description);
+    let (fingerprint, max_width) = (&asset.source_fingerprint, scale.max_width());
+    let fps = asset.fps;
+    VideoSourceKey::new(
+        asset.id,
+        &asset.path,
+        fingerprint,
+        fps,
+        description,
+        assumption,
+        max_width,
+    )
+}
+
+fn no_frame(asset: AssetId, at: TimeCode) -> MediaError {
+    MediaError::Backend(format!("no video frame decoded for asset {asset} at {at}"))
+}
+
+/// A managed source decoder with `threads` frame threads, its errors
+/// wrapped with the asset (IN1: the wrap's one production caller).
+fn open_managed(
+    asset: AssetId,
+    path: &Path,
+    fps: Rational,
+    max_width: Option<u32>,
+    description: &ColorDescription,
+    threads: usize,
+) -> Result<VideoDecoder, MediaError> {
+    let assumption = d65_assumption(description);
+    VideoDecoder::open_managed_threads(path, fps, max_width, description, assumption, threads)
+        .map_err(|error| {
+            contextual_managed_decode_error(asset, path, description, assumption, error)
+        })
+}
+
+/// PF1 S2b-1: what a reader opens: today's managed decoder for one source.
+#[derive(Clone)]
+pub(crate) struct SourceSpec {
+    asset: AssetId,
+    path: std::path::PathBuf,
+    fps: Rational,
+    description: ColorDescription,
+    max_width: Option<u32>,
+    /// Working bytes of one frame (S1d's f).
+    pub(crate) frame_bytes: usize,
+}
+
+impl SourceSpec {
+    /// Open with `threads` frame threads; errors as the renderer's open.
+    pub(crate) fn open(&self, threads: usize) -> Result<VideoDecoder, MediaError> {
+        let (path, description) = (&self.path, &self.description);
+        open_managed(
+            self.asset,
+            path,
+            self.fps,
+            self.max_width,
+            description,
+            threads,
+        )
+    }
+
+    /// The frame at `at`, exactly as the renderer's Seek or Sequential
+    /// window would cache it (continuing from the decoder's cursor).
+    pub(crate) fn decode(
+        &self,
+        decoder: &mut VideoDecoder,
+        at: i64,
+    ) -> Result<WorkingFrame, MediaError> {
+        let mut window = FrameCache::new(1);
+        decoder.decode_window_sequential(TimeCode(at), TimeCode(at), &mut window)?;
+        let frame = window.frame_at_or_before(TimeCode(at));
+        frame.ok_or_else(|| no_frame(self.asset, TimeCode(at)))
+    }
+}
+
+/// PF1 S2b-1: a transport job's demand on the readers.
+#[derive(Default)]
+pub(crate) struct ReaderDemand {
+    /// Each video layer's (source, time), in z-order.
+    pub(crate) required: Vec<(VideoSourceKey, i64)>,
+    /// Per source: what opens it, and its lookahead times, nearest first.
+    pub(crate) sources: HashMap<VideoSourceKey, (SourceSpec, Vec<i64>)>,
+}
+
+/// The job's required frames at `at`, then up to `horizon` frames of
+/// lookahead, each source's ring holding S1d's window
+/// clamp(⌊(C − G) / (n·f)⌋, 1, `PREFETCH_FRAMES` + 1). A document the
+/// render will refuse gives no demand (the render reports why).
+pub(crate) fn reader_demand(
+    document: &Document,
+    at: TimeCode,
+    resolution: (u32, u32),
+    scale: RenderScale,
+    horizon: i64,
+) -> ReaderDemand {
+    let mut demand = ReaderDemand::default();
+    let mut generated = 0usize;
+    let mut ahead: Vec<(VideoSourceKey, i64)> = Vec::new();
+    let last = (at.0.saturating_add(horizon)).min(document.duration.0 - 1);
+    for frame in at.0..=last.max(at.0) {
+        let Ok(layers) = visual_layers_at(document, TimeCode(frame)) else {
+            break;
+        };
+        for layer in layers {
+            let video = match layer {
+                TimelineVisualLayer::Video(video) => video,
+                TimelineVisualLayer::Title(_) | TimelineVisualLayer::Solid(_) if frame == at.0 => {
+                    generated = generated.saturating_add(working_bytes(resolution));
+                    continue;
+                }
+                _ => continue,
+            };
+            let Some(asset) = document.asset(video.source.asset) else {
+                continue;
+            };
+            let key = source_key(asset, scale);
+            let max_width = key.max_width;
+            demand.sources.entry(key.clone()).or_insert_with(|| {
+                let frame_bytes = (asset.resolution)
+                    .map_or(0, |size| working_bytes(bounded_resolution(size, max_width)));
+                let spec = SourceSpec {
+                    asset: asset.id,
+                    path: asset.path.clone(),
+                    fps: asset.fps,
+                    description: asset.color_description.clone(),
+                    max_width,
+                    frame_bytes,
+                };
+                (spec, Vec::new())
+            });
+            let time = video.source.source_at.0;
+            if frame == at.0 {
+                demand.required.push((key, time));
+            } else if !ahead.contains(&(key.clone(), time)) {
+                ahead.push((key, time));
+            }
+        }
+    }
+    let n = demand.sources.len().max(1);
+    let cap = usize::try_from(PREFETCH_FRAMES + 1).unwrap_or(1);
+    for (key, (spec, lookahead)) in &mut demand.sources {
+        let window = match spec.frame_bytes {
+            0 => 1,
+            f => (FRAME_CACHE_BYTE_BUDGET.saturating_sub(generated) / f.saturating_mul(n))
+                .clamp(1, cap),
+        };
+        let required: Vec<i64> = (demand.required.iter())
+            .filter_map(|(k, t)| (k == key).then_some(*t))
+            .collect();
+        let room = window.saturating_sub(required.len());
+        let own = ahead
+            .iter()
+            .filter(|(k, t)| k == key && !required.contains(t));
+        lookahead.extend(own.map(|(_, t)| *t).take(room));
+    }
+    demand
+}
 
 struct VideoSource {
     decoder: VideoDecoder,
@@ -479,8 +651,40 @@ impl FrameRenderer {
         (scale, strategy): (RenderScale, DecodeStrategy),
         purpose: MonitorPurpose,
     ) -> Result<(FrameTexture, std::time::Duration), MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        self.render_monitor_from(
+            document,
+            project_at,
+            resolution,
+            (scale, Video::Decode(strategy)),
+            purpose,
+        )
+    }
+
+    /// PF1 S2b-1: the live monitor from the readers' frames (C-5: the same
+    /// layers, compositor and encode as [`Self::render_live`]).
+    pub(crate) fn render_scheduled(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        frames: &SuppliedFrames,
+    ) -> Result<FrameTexture, MediaError> {
+        let purpose = MonitorPurpose::LiveMonitor;
+        let video = (scale, Video::Supplied(frames));
+        let rendered = self.render_monitor_from(document, project_at, resolution, video, purpose);
+        rendered.map(|(frame, _)| frame)
+    }
+
+    fn render_monitor_from(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        (scale, video): (RenderScale, Video<'_>),
+        purpose: MonitorPurpose,
+    ) -> Result<(FrameTexture, std::time::Duration), MediaError> {
+        let decoded_layers = self.decoded_layers(document, project_at, resolution, scale, video)?;
         let started = std::time::Instant::now();
         let layers = compositor_layers(&decoded_layers);
         self.compositor
@@ -519,8 +723,13 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<DeliveryFrame, MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let decoded_layers = self.decoded_layers(
+            document,
+            project_at,
+            resolution,
+            scale,
+            Video::Decode(strategy),
+        )?;
         let layers = compositor_layers(&decoded_layers);
         self.compositor
             .render_delivery_with_luts(
@@ -553,8 +762,13 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<LinearRgbaImage, MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let decoded_layers = self.decoded_layers(
+            document,
+            project_at,
+            resolution,
+            scale,
+            Video::Decode(strategy),
+        )?;
         let layers = compositor_layers(&decoded_layers);
         self.compositor
             .render_working_with_luts(resolution, &layers, Some(&self.lut_library))
@@ -588,8 +802,13 @@ impl FrameRenderer {
         clip: ClipId,
         effect: EffectId,
     ) -> Result<MatteCoverage, MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let decoded_layers = self.decoded_layers(
+            document,
+            project_at,
+            resolution,
+            scale,
+            Video::Decode(strategy),
+        )?;
         let layer_index = decoded_layers
             .iter()
             .position(|layer| layer.clip == clip)
@@ -627,7 +846,7 @@ impl FrameRenderer {
         project_at: TimeCode,
         resolution: (u32, u32),
         scale: RenderScale,
-        strategy: DecodeStrategy,
+        video: Video<'_>,
     ) -> Result<Vec<DecodedLayer>, MediaError> {
         validate_managed_context(document)?;
         // MO2 R8 (review-1 B1): every render root refuses an invalid
@@ -636,7 +855,9 @@ impl FrameRenderer {
             .validate()
             .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
         let layer_specs = visual_layers_at(document, project_at)?;
-        self.set_demand(document, &layer_specs, resolution, scale);
+        if let Video::Decode(_) = video {
+            self.set_demand(document, &layer_specs, resolution, scale);
+        }
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
             match layer {
@@ -647,18 +868,28 @@ impl FrameRenderer {
                             layer.source.asset
                         ))
                     })?;
-                    let frame = self.decode_video_frame(
-                        asset.id,
-                        &asset.path,
-                        asset.fps,
-                        asset.resolution,
-                        layer.source.source_at,
-                        layer.source.source_end,
-                        scale,
-                        strategy,
-                        &asset.source_fingerprint,
-                        &asset.color_description,
-                    )?;
+                    let frame = match video {
+                        Video::Decode(strategy) => self.decode_video_frame(
+                            asset.id,
+                            &asset.path,
+                            asset.fps,
+                            asset.resolution,
+                            layer.source.source_at,
+                            layer.source.source_end,
+                            scale,
+                            strategy,
+                            &asset.source_fingerprint,
+                            &asset.color_description,
+                        )?,
+                        Video::Supplied(frames) => {
+                            let at = layer.source.source_at;
+                            let key = (source_key(asset, scale), at.0);
+                            frames
+                                .get(&key)
+                                .cloned()
+                                .unwrap_or_else(|| Err(no_frame(asset.id, at)))?
+                        }
+                    };
                     decoded_layers.push(DecodedLayer {
                         clip: layer.source.clip,
                         frame,
@@ -761,16 +992,8 @@ impl FrameRenderer {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.video_sources.entry(key.clone())
         {
-            let decoder = VideoDecoder::open_scaled_managed(
-                path,
-                fps,
-                key.max_width,
-                description,
-                assumption,
-            )
-            .map_err(|error| {
-                contextual_managed_decode_error(asset, path, description, assumption, error)
-            })?;
+            let threads = crate::decode::default_threads();
+            let decoder = open_managed(asset, path, fps, key.max_width, description, threads)?;
             let mut cache = FrameCache::new(FRAME_CACHE_CAPACITY);
             let demand = self
                 .preview
@@ -837,11 +1060,7 @@ impl FrameRenderer {
                     .cache
                     .frame_at_or_before_bounded(source_at, self.cache_budget)
             })
-            .ok_or_else(|| {
-                MediaError::Backend(format!(
-                    "no video frame decoded for asset {asset} at {source_at}"
-                ))
-            })?;
+            .ok_or_else(|| no_frame(asset, source_at))?;
         self.touch_source(key.clone());
         self.reserve_for(0, Some(&key));
         Ok(frame)
@@ -865,16 +1084,7 @@ impl FrameRenderer {
                         let Some(asset) = document.asset(layer.source.asset) else {
                             continue;
                         };
-                        let description = &asset.color_description;
-                        let key = VideoSourceKey::new(
-                            asset.id,
-                            &asset.path,
-                            &asset.source_fingerprint,
-                            asset.fps,
-                            description,
-                            d65_assumption(description),
-                            scale.max_width(),
-                        );
+                        let key = source_key(asset, scale);
                         let points = demand.sources.entry(key).or_default();
                         points.push(layer.source.source_at);
                     }
@@ -1202,7 +1412,13 @@ mod tests {
             resolution: (u32, u32),
         ) -> Result<LinearRgbaImage, MediaError> {
             let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);
-            let decoded = self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+            let decoded = self.decoded_layers(
+                document,
+                project_at,
+                resolution,
+                scale,
+                Video::Decode(strategy),
+            )?;
             let layers = compositor_layers(&decoded);
             crate::compositor::twin::render_working(resolution, &layers, Some(&self.lut_library))
                 .map_err(attribute_layer(&decoded, project_at))
@@ -1216,7 +1432,13 @@ mod tests {
             resolution: (u32, u32),
         ) -> Result<Vec<f32>, MediaError> {
             let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);
-            let decoded = self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+            let decoded = self.decoded_layers(
+                document,
+                project_at,
+                resolution,
+                scale,
+                Video::Decode(strategy),
+            )?;
             let layers = compositor_layers(&decoded);
             let library = Some(&*self.lut_library);
             crate::compositor::twin::subtexel_envelope(resolution, &layers, library)
@@ -2160,7 +2382,13 @@ pub(crate) mod phases {
         scale: RenderScale,
     ) -> Result<([Duration; 3], Duration), MediaError> {
         let strategy = DecodeStrategy::Sequential;
-        let decoded = renderer.decoded_layers(document, at, resolution, scale, strategy)?;
+        let decoded = renderer.decoded_layers(
+            document,
+            at,
+            resolution,
+            scale,
+            super::Video::Decode(strategy),
+        )?;
         crate::compositor::phases::monitor(
             &renderer.compositor,
             resolution,

@@ -21,6 +21,7 @@ mod lut_store;
 mod preview;
 mod render;
 mod room_tone_store;
+mod sched;
 mod sha256;
 mod spectrum;
 mod stats;

@@ -1127,6 +1127,13 @@ impl DecoderFrame for WorkingFrame {
     }
 }
 
+/// H-5: a synchronous decoder's frame threads, min(P, 16).
+pub(crate) fn default_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(16)
+}
+
 pub(crate) struct VideoDecoder {
     path: std::path::PathBuf,
     input: ffmpeg::format::context::Input,
@@ -1149,6 +1156,8 @@ pub(crate) struct VideoDecoder {
     continuation_at: Option<TimeCode>,
     eof_sent: bool,
     seek_count: u64,
+    /// PF1 H-2: a reader's decode stops at the next packet boundary once set.
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl VideoDecoder {
@@ -1162,15 +1171,36 @@ impl VideoDecoder {
         fps: Rational,
         max_width: Option<u32>,
     ) -> Result<Self, MediaError> {
-        Self::open_scaled_internal(path, fps, max_width, None)
+        Self::open_scaled_internal(path, fps, max_width, None, default_threads())
     }
 
+    #[cfg(test)]
     pub(crate) fn open_scaled_managed(
         path: &Path,
         fps: Rational,
         max_width: Option<u32>,
         description: &ColorDescription,
         assumption: Option<ColorSourceProfileAssumption>,
+    ) -> Result<Self, MediaError> {
+        Self::open_managed_threads(
+            path,
+            fps,
+            max_width,
+            description,
+            assumption,
+            default_threads(),
+        )
+    }
+
+    /// PF1 S2b H-5: a managed open with `threads` frame threads (a reader's
+    /// share; synchronous decoders keep min(P, 16)).
+    pub(crate) fn open_managed_threads(
+        path: &Path,
+        fps: Rational,
+        max_width: Option<u32>,
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+        threads: usize,
     ) -> Result<Self, MediaError> {
         // IN1 §4.2 rule 8: the typed refusal leaves the decoder intact. The
         // contextual sentence this site used to build by hand is rebuilt by
@@ -1188,7 +1218,7 @@ impl VideoDecoder {
                 format!("managed source depth rejected: {error}"),
             )
         })?;
-        Self::open_scaled_internal(path, fps, max_width, Some(source))
+        Self::open_scaled_internal(path, fps, max_width, Some(source), threads.max(1))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1197,6 +1227,7 @@ impl VideoDecoder {
         fps: Rational,
         max_width: Option<u32>,
         managed_source: Option<ManagedSource>,
+        threads: usize,
     ) -> Result<Self, MediaError> {
         let input = media_input(path)?;
         let stream = input
@@ -1219,9 +1250,7 @@ impl VideoDecoder {
             .map_err(|error| media_error(path, "could not read video codec parameters", error))?;
         context.set_threading(ffmpeg::codec::threading::Config {
             kind: ffmpeg::codec::threading::Type::Frame,
-            count: std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(16),
+            count: threads,
         });
         let decoder = context
             .decoder()
@@ -1319,6 +1348,7 @@ impl VideoDecoder {
             continuation_at: None,
             eof_sent: false,
             seek_count: 0,
+            stop: None,
         })
     }
 
@@ -1360,6 +1390,11 @@ impl VideoDecoder {
         self.decode_from_cursor(start, end, cache)
     }
 
+    /// PF1 H-2: stop decoding at a packet boundary once `stop` is set.
+    pub(crate) fn set_stop(&mut self, stop: Arc<std::sync::atomic::AtomicBool>) {
+        self.stop = Some(stop);
+    }
+
     #[cfg(test)]
     pub(crate) fn seek_count(&self) -> u64 {
         self.seek_count
@@ -1390,6 +1425,11 @@ impl VideoDecoder {
                 self.cache_pending_until(end.0.saturating_add(1), start, end, cache)?;
                 self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
                 return Ok(());
+            }
+            let stop = self.stop.as_ref();
+            if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire)) {
+                self.continuation_at = None;
+                return Err(MediaError::Cancelled);
             }
             let next = self
                 .input
