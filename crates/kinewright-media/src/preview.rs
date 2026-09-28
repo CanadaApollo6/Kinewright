@@ -3499,7 +3499,9 @@ pub(crate) mod tests {
 
     /// Review B S2: a paused frame shown again reserves nothing for its
     /// cached title rasters (the preview's titles already hold them), so at
-    /// C = f + G + f/2 it neither drains nor re-rasterizes them.
+    /// C = f + G + f/2 it neither drains nor re-rasterizes them. The
+    /// renderer's rasterization count is the witness (R38: a drain would
+    /// clear the rasters and the second render would make them again).
     #[test]
     fn a_resident_title_is_not_reserved_again() {
         let workload = crate::perf_fixtures::titled((160, 90), 30, 2);
@@ -3518,15 +3520,16 @@ pub(crate) mod tests {
         let lane = Arc::new(Lane::with_budget(20, budget));
         let (mut preview, frames) =
             test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
-        let mut rasters = Vec::new();
+        let mut rasterized = Vec::new();
         for seq in 1..=2 {
+            let before = preview.renderer.rasterized;
             let paused = job(&titled, JobKind::Paused(TimeCode(3)), stamp(1, seq));
             preview.run_paused(&paused, 0);
             assert!(frames.try_recv().is_ok(), "shown {seq}");
-            rasters.push(preview.renderer.title_buffer_ids());
+            rasterized.push(preview.renderer.rasterized - before);
         }
-        assert_eq!(rasters[0].len(), 2, "two title rasters");
-        assert_eq!(rasters[0], rasters[1], "the rasters were reused");
+        assert_eq!(rasterized, [2, 0], "two rasters made once, then reused");
+        assert_eq!(preview.renderer.title_bytes(), g, "both stay cached");
         let (live, peak) = lane.lock().readers.live();
         assert_eq!(live, f + g, "frame 3 and the titles");
         assert!(peak <= budget, "I12");

@@ -554,6 +554,9 @@ pub(crate) struct FrameRenderer {
     /// K-1: during a scheduled render, the title rasters it used; the
     /// cache keeps only these after it (the preview accounts for them).
     used_titles: Option<HashSet<TitleCacheKey>>,
+    /// Generated rasters made (cache misses), for review B S2's witness.
+    #[cfg(test)]
+    pub(crate) rasterized: usize,
     cache_budget: usize,
     /// PF1 K-6: `Some` for the preview renderer (window cap and eviction by
     /// distance); `None` keeps today's policy for proofs, export and benches.
@@ -587,6 +590,8 @@ impl FrameRenderer {
             title_cache: HashMap::new(),
             title_order: VecDeque::new(),
             used_titles: None,
+            #[cfg(test)]
+            rasterized: 0,
             cache_budget: FRAME_CACHE_BYTE_BUDGET,
             preview: None,
             lut_library: Arc::new(LutLibrary::default()),
@@ -793,16 +798,6 @@ impl FrameRenderer {
     pub(crate) fn drop_titles(&mut self, keys: &HashSet<TitleCacheKey>) {
         self.title_cache.retain(|key, _| !keys.contains(key));
         self.title_order.retain(|key| !keys.contains(key));
-    }
-
-    /// The cached generated rasters' buffers (review B S2's witness).
-    #[cfg(test)]
-    pub(crate) fn title_buffer_ids(&self) -> std::collections::BTreeSet<usize> {
-        use crate::frame::CachedFrame;
-        self.title_cache
-            .values()
-            .map(CachedFrame::shared_buffer_id)
-            .collect()
     }
 
     /// K-5: drop the cached title rasters (the preview is draining).
@@ -1095,6 +1090,10 @@ impl FrameRenderer {
             },
         };
         let frame = WorkingFrame::from_display_frame(&display_frame)?;
+        #[cfg(test)]
+        {
+            self.rasterized += 1;
+        }
         self.cache_title_frame(key, frame.clone());
         Ok(frame)
     }
