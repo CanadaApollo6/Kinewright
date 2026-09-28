@@ -687,6 +687,18 @@ impl FrameRenderer {
         rendered.map(|(frame, _)| frame)
     }
 
+    /// H-7: whether a synchronous decoder is open.
+    pub(crate) fn has_sources(&self) -> bool {
+        !self.video_sources.is_empty()
+    }
+
+    /// H-7: close the synchronous decoders and drop their frames (the
+    /// preview parks; G15).
+    pub(crate) fn release_sources(&mut self) {
+        self.video_sources.clear();
+        self.source_order.clear();
+    }
+
     /// K-1: the bytes of the title rasters cached now.
     pub(crate) fn title_bytes(&self) -> usize {
         self.title_cache_bytes()

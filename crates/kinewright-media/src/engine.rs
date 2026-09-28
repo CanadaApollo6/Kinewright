@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
@@ -522,22 +523,38 @@ impl FfmpegMediaEngine {
         let worker_clock = Arc::clone(&clock);
         let lane = Arc::new(Lane::default());
         let decoders = crate::render::DecoderGauge::default();
-        let preview = {
+        // H-7: the preview thread starts with the first job that needs it.
+        let preview: Spawn = {
             let (lane, clock, gpu) = (Arc::clone(&lane), Arc::clone(&clock), gpu.clone());
             let gauge = decoders.clone();
             let frames = (frames_tx, frames_rx.clone());
             #[cfg(test)]
-            let faults = Arc::clone(&options.faults);
-            spawn_preview(move || {
-                let renderer = gauge.scope(|| FrameRenderer::new_preview(gpu));
-                #[allow(unused_mut)]
-                let mut preview = Preview::new(lane, renderer, clock, frames);
+            let (faults, fail) = (
+                Arc::clone(&options.faults),
+                FAIL_PREVIEW_SPAWN.with(std::cell::Cell::take),
+            );
+            Box::new(move || {
                 #[cfg(test)]
-                {
-                    preview.faults = faults;
+                FAIL_PREVIEW_SPAWN.with(|spawn| spawn.set(fail));
+                #[cfg(test)]
+                let counted = Arc::clone(&lane);
+                let spawned = spawn_preview(move || {
+                    let renderer = gauge.scope(|| FrameRenderer::new_preview(gpu));
+                    #[allow(unused_mut)]
+                    let mut preview = Preview::new(lane, renderer, clock, frames);
+                    #[cfg(test)]
+                    {
+                        preview.faults = faults;
+                    }
+                    preview
+                });
+                // I10: counted on the worker, before its next control.
+                #[cfg(test)]
+                if spawned.is_ok() {
+                    counted.previews.fetch_add(1, Ordering::AcqRel);
                 }
-                preview
-            })?
+                spawned
+            })
         };
         let meter = Arc::new(MeterState::default());
         let worker_meter = Arc::clone(&meter);
@@ -580,7 +597,7 @@ impl FfmpegMediaEngine {
                 {
                     worker.faults = options.faults;
                 }
-                worker.preview = Some(preview);
+                worker.preview = RefCell::new(PreviewThread::Unstarted(preview));
                 worker.run();
                 #[cfg(test)]
                 drop(finished_tx);
@@ -798,6 +815,8 @@ impl FfmpegMediaEngine {
             work: AgentWork::Hold { started, release },
             cancel: Arc::default(),
         };
+        // H-7: the preview thread starts with the first job.
+        let _ = self.preview_cache_command(false);
         assert!(self.lane.try_push(job), "the agent lane took the hold");
         begun.recv().expect("the preview thread runs the hold");
         AgentLaneHold {
@@ -911,6 +930,18 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// E-2 witness: the next preview spawn on this thread fails.
     pub(crate) static FAIL_PREVIEW_SPAWN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// H-7: what starts the preview thread.
+type Spawn = Box<dyn FnOnce() -> Result<JoinHandle<()>, MediaError> + Send>;
+
+/// H-7: the worker's preview thread: not yet needed, running, or failed to
+/// start (every job then fails with that error, E-2).
+enum PreviewThread {
+    None,
+    Unstarted(Spawn),
+    Running(JoinHandle<()>),
+    Failed(MediaError),
 }
 
 /// PF1 H-1: start the preview thread, which builds its own renderer. E-2: a
@@ -2052,8 +2083,9 @@ struct Worker {
     handled: FrameStamp,
     /// PF1 H-1: the preview thread's jobs and agent lane.
     lane: Arc<Lane>,
-    /// Joined at shutdown (H-6); `None` for a worker a test drives.
-    preview: Option<JoinHandle<()>>,
+    /// Started by the first job (H-7), joined at shutdown (H-6); `None`
+    /// for a worker a test drives.
+    preview: RefCell<PreviewThread>,
     /// Bumped by every `set_document`, so the preview clears its caches.
     generation: u64,
     document: Arc<Document>,
@@ -2175,7 +2207,7 @@ impl Worker {
             stashed: BTreeMap::new(),
             handled: FrameStamp::default(),
             lane: channels.lane,
-            preview: None,
+            preview: RefCell::new(PreviewThread::None),
             generation: 0,
             document: Arc::new(Document::default()),
             lut_lattices,
@@ -2222,7 +2254,7 @@ impl Worker {
             job.reply_error(worker_stopped());
         }
         self.audio = None;
-        if let Some(preview) = self.preview.take() {
+        if let PreviewThread::Running(preview) = self.preview.replace(PreviewThread::None) {
             let _ = preview.join();
         }
     }
@@ -2335,7 +2367,29 @@ impl Worker {
 
     /// PF1 R-4: push without waiting; a full queue replies at once.
     fn push_agent(&self, job: AgentJob) {
-        self.lane.try_push(job);
+        match self.started() {
+            Ok(()) => {
+                self.lane.try_push(job);
+            }
+            Err(error) => job.reply_error(error),
+        }
+    }
+
+    /// H-7: start the preview thread if no job has yet.
+    fn started(&self) -> Result<(), MediaError> {
+        let mut preview = self.preview.borrow_mut();
+        if matches!(*preview, PreviewThread::Unstarted(_)) {
+            let PreviewThread::Unstarted(spawn) =
+                std::mem::replace(&mut *preview, PreviewThread::None)
+            else {
+                unreachable!("matched above");
+            };
+            *preview = spawn().map_or_else(PreviewThread::Failed, PreviewThread::Running);
+        }
+        match &*preview {
+            PreviewThread::Failed(error) => Err(error.clone()),
+            _ => Ok(()),
+        }
     }
 
     fn apply_control(&mut self, issued: Issued) {
@@ -2393,6 +2447,10 @@ impl Worker {
     /// R-1: a job carries the stamp of the control or request that posts
     /// it, bound to the scene current at that stamp.
     fn post(&self, kind: JobKind, stamp: FrameStamp) {
+        if let Err(error) = self.started() {
+            self.lane.lock().failures.push((stamp, error));
+            return;
+        }
         let job = TransportJob {
             kind,
             stamp,
@@ -4155,17 +4213,67 @@ mod tests {
         (worker, events_rx)
     }
 
-    /// E-2: a preview spawn failure is new, so it is prefixed.
+    /// E-2 / H-7: the preview thread starts with the first job; a spawn
+    /// failure is new, so it is prefixed, and the job reports it.
     #[test]
     fn a_preview_spawn_failure_is_prefixed() {
         let temp = TempDirectory::new("pf1-preview-spawn");
         FAIL_PREVIEW_SPAWN.with(|fail| fail.set(true));
         let gpu = fallback_gpu().context();
-        let started = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into());
-        let Err(MediaError::Backend(message)) = started else {
-            panic!("the engine started without its preview thread");
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        let events = engine.events();
+        engine.set_document(Arc::new(crate::perf_fixtures::title_card((64, 64), 3)));
+        let message = loop {
+            let event = events.recv_timeout(Duration::from_secs(60));
+            if let MediaEvent::StampedError(_, MediaError::Backend(message)) =
+                event.expect("an event")
+            {
+                break message;
+            }
         };
         assert!(message.starts_with("preview-thread: "), "{message}");
+        let refused = engine.preview_cache_command(false);
+        assert!(
+            matches!(refused, Err(MediaError::Backend(m)) if m.starts_with("preview-thread: "))
+        );
+    }
+
+    /// I10 (S2b-4, H-7): an engine with no document runs no preview thread
+    /// and no reader; the first render starts the preview and a reader per
+    /// visible source; the readers retire at the injected quiescence
+    /// deadline; a synchronous job's decoders close when the preview parks.
+    #[test]
+    fn an_idle_engine_holds_no_preview_reader_or_decoder() {
+        let temp = TempDirectory::new("pf1-i10");
+        let gpu = fallback_gpu().context();
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        let lane = Arc::clone(&engine.lane);
+        let threads = |lane: &Lane| (lane.previews(), lane.lock().readers.slots.len());
+        // A barrier: the worker installs the wakeup after its start-up.
+        engine.set_event_wakeup(|| {});
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while lane.lock().wakeup.is_none() {
+            assert!(Instant::now() < deadline, "the worker never started");
+            thread::yield_now();
+        }
+        assert_eq!(threads(&lane), (0, 0), "+0 threads at construction");
+        let workload = crate::perf_fixtures::cuts((160, 90), 60, 3, 9, 10);
+        let frames = engine.frames();
+        engine.set_document(Arc::new(workload.0.clone()));
+        assert!(frames.recv_timeout(Duration::from_secs(60)).is_ok());
+        assert_eq!(
+            threads(&lane),
+            (1, 2),
+            "the preview and a reader per source"
+        );
+        // A synchronous job (a thumbnail) opens decoders in the preview's
+        // renderer; they close when it parks (it notifies `ready` after).
+        engine.thumbnail_at(TimeCode(20), 64).expect("a thumbnail");
+        crate::preview::tests::wait_until(&lane, |_| engine.decoders.open() == 0);
+        *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
+        lane.work.notify_all();
+        crate::preview::tests::wait_until(&lane, |state| state.readers.slots.is_empty());
+        assert_eq!(threads(&lane), (1, 0), "settled: the parked preview alone");
     }
 
     /// H-6 kill test: dropping the engine disconnects the worker, which

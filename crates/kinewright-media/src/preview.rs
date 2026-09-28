@@ -275,7 +275,7 @@ pub(crate) struct Lane {
     state: Mutex<LaneState>,
     ready: Condvar,
     /// H-2: the readers' condvar.
-    work: Condvar,
+    pub(crate) work: Condvar,
     /// The readers' clock origin (H-2 quiescence).
     epoch: Instant,
     /// I10/I15: an injected advance of the readers' clock.
@@ -288,6 +288,9 @@ pub(crate) struct Lane {
     /// K-2: reader decodes that ended `Cancelled`.
     #[cfg(test)]
     pub(crate) cancelled: std::sync::atomic::AtomicUsize,
+    /// I10: preview threads an engine started.
+    #[cfg(test)]
+    pub(crate) previews: std::sync::atomic::AtomicUsize,
     /// H-5: the `Permits` monitor, a leaf never taken with `state` (H-4).
     permits: Mutex<PermitBook>,
     permits_cv: Condvar,
@@ -328,12 +331,20 @@ impl Lane {
             gate: Mutex::default(),
             #[cfg(test)]
             cancelled: std::sync::atomic::AtomicUsize::default(),
+            #[cfg(test)]
+            previews: std::sync::atomic::AtomicUsize::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
             permits_cv: Condvar::new(),
             counters: Mutex::default(),
             acks: crossbeam_channel::bounded(ACK_QUEUE),
             acks_overflowed: AtomicU64::new(0),
         }
+    }
+
+    /// I10: preview threads an engine started on this lane.
+    #[cfg(test)]
+    pub(crate) fn previews(&self) -> usize {
+        self.previews.load(Ordering::Acquire)
     }
 
     fn book(&self) -> MutexGuard<'_, PermitBook> {
@@ -925,6 +936,14 @@ impl Preview {
                         .transport
                         .clone()
                         .map(|job| Work::Playback(job, version));
+                }
+                // H-1/H-7: nothing queued, so the synchronous renderer's
+                // decoders close (after unlock) before the preview parks.
+                None if self.renderer.has_sources() => {
+                    drop(state);
+                    self.renderer.release_sources();
+                    state = self.lane.lock();
+                    self.lane.ready.notify_all();
                 }
                 None if !wait => break None,
                 None => state = state.wait(&self.lane.ready),
@@ -1902,7 +1921,7 @@ pub(crate) mod tests {
     }
 
     /// Wait on `ready` (no sleep) until `what` holds; 60 s is a hang.
-    fn wait_until(lane: &Lane, what: impl Fn(&LaneState) -> bool) {
+    pub(crate) fn wait_until(lane: &Lane, what: impl Fn(&LaneState) -> bool) {
         let deadline = Instant::now() + Duration::from_secs(60);
         let mut state = lane.lock();
         while !what(&state) {
@@ -2233,8 +2252,20 @@ pub(crate) mod tests {
     /// K-2 / K-1 (S2b-3): a drain stops the lookahead decode in flight, and
     /// a job whose frame is resolved still waits for its titles' G: once
     /// admitted, live bytes are exactly the ring and the title rasters.
+    /// The stop then lapses: the reader decodes the next job's frame
+    /// (S2b-4; a watchdog fails a livelock).
     #[test]
     fn a_drain_stops_lookahead_and_holds_the_render_for_its_titles() {
+        let (done, finished) = bounded(1);
+        thread::spawn(move || {
+            drain_then_decode();
+            let _ = done.send(());
+        });
+        let watchdog = finished.recv_timeout(Duration::from_secs(120));
+        assert_eq!(watchdog, Ok(()), "the drain run hung or failed");
+    }
+
+    fn drain_then_decode() {
         let workload = crate::perf_fixtures::titled((160, 90), 30, 2);
         let mut one = workload.0.clone();
         one.tracks.truncate(1);
@@ -2290,6 +2321,110 @@ pub(crate) mod tests {
             "K-1: G was reserved"
         );
         assert!(peak <= budget, "I12");
+        render_ahead(&mut preview, &one, 20);
+    }
+
+    /// I15 (S2b-4, H-8): a seeded stress on real threads, 10,000 sequences
+    /// over eight (P, C) lanes: P ∈ {1, 2, 3, 20}, C from 2.5 frames to
+    /// 224 MiB. A sequence is one to four events (paused, playback and
+    /// empty posts over one to four sources and the cut document, an agent
+    /// push, a quiescence tick); every eighth ends in a paused post that
+    /// must publish. After each: peak live bytes ≤ C (I12), readers ≤ R,
+    /// permits ≤ P (I11). Shutdown returns every reservation, permit and reader. A
+    /// watchdog fails a hang.
+    #[test]
+    fn the_scheduler_survives_a_seeded_stress_on_real_threads() {
+        let (done, finished) = bounded(1);
+        thread::spawn(move || {
+            stress(10_000);
+            let _ = done.send(());
+        });
+        let watchdog = finished.recv_timeout(Duration::from_secs(600));
+        assert_eq!(watchdog, Ok(()), "the stress run hung or failed");
+    }
+
+    fn stress(sequences: u64) {
+        let workload = crate::perf_fixtures::four_sources((160, 90), 30);
+        let mut documents: Vec<Arc<Document>> = (1..=4)
+            .map(|tracks| {
+                let mut document = workload.0.clone();
+                document.tracks.truncate(tracks);
+                Arc::new(document)
+            })
+            .collect();
+        let (cut, _cut_media) = cut_document();
+        documents.push(cut);
+        let f = reference(&documents[0], 0).1;
+        let c = FRAME_CACHE_BYTE_BUDGET;
+        let lanes = [(1, 5 * f / 2), (2, 4 * f), (3, 8 * f), (20, 5 * f / 2)];
+        let lanes = lanes
+            .into_iter()
+            .chain([(20, 4 * f), (20, 8 * f), (2, c), (20, c)]);
+        for (seed, (parallelism, budget)) in (1u64..).zip(lanes) {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut below = |bound: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let bound = u64::try_from(bound).expect("a bound");
+                usize::try_from(state % bound).expect("below the bound")
+            };
+            let lane = Arc::new(Lane::with_budget(parallelism, budget));
+            let (gate, frames, thread) = gated_preview(&lane);
+            *lane.gate.lock().expect("gate") = None;
+            drop(gate);
+            let mut seq = 0;
+            for sequence in 0..sequences / 8 {
+                let mut post = |kind: Option<JobKind>, document: &Arc<Document>| {
+                    seq += 1;
+                    lane.post(kind.map(|kind| job(document, kind, stamp(seed, seq))));
+                    stamp(seed, seq)
+                };
+                for _ in 0..=below(4) {
+                    let document = &documents[below(documents.len())];
+                    let at = TimeCode(i64::try_from(below(28)).expect("a time"));
+                    match below(6) {
+                        0 => post(Some(JobKind::Paused(at)), document),
+                        1 | 2 => post(Some(JobKind::Playback { from: at }), document),
+                        3 => post(None, document),
+                        4 => {
+                            let _ = lane.try_push(stats_job().0);
+                            continue;
+                        }
+                        _ => {
+                            *lane.skew.lock().expect("skew") += crate::sched::QUIESCENCE;
+                            lane.work.notify_all();
+                            continue;
+                        }
+                    };
+                }
+                if sequence % 8 == 7 {
+                    // Liveness: a paused post publishes (H-2/H-3, K-2).
+                    let document = &documents[below(documents.len())];
+                    let at = TimeCode(i64::try_from(below(28)).expect("a time"));
+                    let stamped = post(Some(JobKind::Paused(at)), document);
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    while frames.recv_deadline(deadline).map(|shown| shown.stamp) != Ok(stamped) {
+                        assert!(
+                            Instant::now() < deadline,
+                            "seed {seed} {sequence}: no frame"
+                        );
+                    }
+                }
+                let (peak, slots) = {
+                    let state = lane.lock();
+                    (state.readers.live().1, state.readers.slots.len())
+                };
+                assert!(peak <= budget, "I12: seed {seed}: {peak} > {budget}");
+                assert!(slots <= crate::sched::reader_limit(parallelism), "R");
+                assert!(lane.permits_in_use() <= parallelism, "I11: permits over P");
+            }
+            lane.shut_down();
+            join_within(thread);
+            assert!(lane.lock().readers.slots.is_empty(), "a reader outlived");
+            assert_eq!(lane.lock().readers.live().0, 0, "K-1: a reservation leaked");
+            assert_eq!(lane.permits_in_use(), 0, "a permit leaked");
+        }
     }
 
     /// H-4 (S2b-3): the drop guard asserts it never releases under `Sched`
