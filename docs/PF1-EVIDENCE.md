@@ -3635,8 +3635,13 @@ is taken at S4 with Riel. Fresh child process per workload, as E9.5. Each cell i
 | S2b `cce86e1`, stage end | 09:54–09:56 | 35916.1 / 36299.4 / 35993.9 | 35993.9 | 3375562 | **−81.9%** |
 
 - **G18 passes** (≤ S0 + 5%), both at S2b-2 and at the stage end.
-- The export bytes are identical in every run, which is consistent with C-5. The gain is S1's X-1 conversion. The
-  synchronous decoders keep min(P, 16) threads outside the permit pool (R19), so S2b does not slow export.
+- **Identity is not established by these runs** (R38, review B S1). They recorded only each file's length, and every
+  run's length is 3,375,562 bytes. Equal lengths are consistent with identical exports but do not show them; a
+  consistently changed export of the same length would pass. The lane now prints each run's SHA-256 and asserts one
+  hash per build (R37-13), and the runner's summary step (`g18_verdict.py`, the last line of the gate plan) compares
+  the S0 exports' hash with the candidate's across the lane logs. Until that rerun, the identity claim stands
+  unproven. The gain is S1's X-1 conversion. The synchronous decoders keep min(P, 16) threads outside the permit pool
+  (R19), so S2b does not slow export.
 
 ### E12.10 Deviations and proposed amendments
 
