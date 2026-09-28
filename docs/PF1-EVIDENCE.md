@@ -1674,14 +1674,66 @@ report.
     frames at 60 fps, at most about 3 MB.
   - Only past that bound is the oldest record evicted. An evicted frame
     acknowledged later still counts late, never dropped.
+  - Since R33 (re-review A D4 / B D5), eviction keeps identity. Each
+    epoch keeps its evicted frame range and the ranges already settled.
+    An evicted frame counts late on its first ack only. A duplicate ack,
+    a key that was never due, or a key from another epoch counts nothing.
   - Records outlive a stop, so an ack after EOS counts. Only an explicit
     `play` clears them.
-- **Harness acks** at receipt, since it has no paint.
-- **Held age (R32 reconciliation with R-5).**
+- **An ack samples only a coherent snapshot (R33, re-review A D3 / B D1).**
+  - At an ack, the engine reads two values together under the coalesced
+    lock: the newest issued epoch and the clock position.
+    - Every call that moves the clock (play, seek, set_document) bumps
+      the epoch as it does so, under that lock.
+    - So the position is playback of that epoch.
+  - The ack samples that position, as the worker's tick does, only if the
+    snapshot's epoch is the applied, playing epoch. It then settles its
+    own record.
+    - A clock that a seek the worker has not applied has moved is never
+      sampled.
+    - An image painted before the worker's 5 ms tick reached its frame
+      is still due and counted.
+  - The at-ack A/V offset is taken against that snapshot only. An ack
+    without a coherent snapshot records no offset.
+  - The first R33 build settled acks without sampling at all. Its P-play
+    rerun counted most frames dropped (E11.11.4).
+- **Final check and binding: the residual window (R33 amendment,
+  re-review A D1).**
+  - `Presenter::finalize` re-checks the stamp and the clock after it
+    prepares the image. It then writes the cell and calls
+    `texture.set`.
+  - The check and the binding cannot be one atomic step:
+    - the audio callback advances the clock on its own thread;
+    - `texture.set` takes egui's texture-manager lock.
+  - So a window remains between the last check and the binding. A frame
+    that was current at the check can be bound after the clock has
+    passed it.
+  - **Amendment:** eligibility is judged again at paint.
+    - The paint marker reads the clock in the paint callback: the stamp,
+      and the position while playing.
+    - A frame the clock has passed is acked `expired`
+      (`Playback::ack_presented`'s new flag), and R-5 counts it late,
+      never on time.
+    - The image is still drawn for that paint; the next pass's finalize
+      replaces it.
+  - R-2's "an expired frame is never bound" therefore holds up to this
+    window. Within it, "an expired binding is never counted on time" is
+    what R-5 enforces.
+  - The window between the paint callback and the actual scan-out is
+    inherent to any paint-time judgment, and is not claimed.
+  - Witness: `presenter::tests::a_frame_expiring_after_its_last_check_is_acked_expired`.
+    The clock passes frame 10 after the last check, in two ways: before
+    the binding is written, and before the paint.
+- **Held age (R32 reconciliation with R-5; qualified in R33).**
   - R-5 samples it every 5 ms (harness) or at each `App::logic` (app).
-    The engine samples it every 5 ms, on its worker tick, for any
-    consumer, and at every ack. That is at least as dense as
-    `App::logic`, so the app needs no sampler of its own.
+  - The engine samples it on its worker tick (nominally every 5 ms) for
+    any consumer, and at every ack.
+    - While the worker keeps its tick, this is denser than
+      `App::logic`. It is not while the worker itself stalls.
+    - Each ack still records the whole gap from the previous paint to
+      its own. A stalled worker therefore delays the record of an
+      ongoing age, but does not lose a gap that ends in a paint.
+    - The app has no sampler of its own.
   - The age runs from the paint instant of the newest painted frame,
     carried in the ack, not from the ack's arrival. The ack's one-epoch
     delay therefore does not add to the held age.
@@ -1893,16 +1945,26 @@ Code delta over `9b51006..af5abf9` (non-blank, non-comment `.rs` lines):
 "Fails on the old code" names the witness that fails when the fix is
 reverted by a mutation (E11.10.3).
 
+**R33 qualification.** The re-reviews of `87f25d5` found several of these
+rows only partly closed:
+- A-F2, A-F4, A-F6 = B-F6, B-F3, the UI item, `dropped_agent`, and R31
+  (a) and (b);
+- the I8 consumer (A-S1) and the egui discard case (A-S2).
+
+The rows describe the code at `af5abf9`. Where a row claims more than that
+code does, E11.11 records the gap and its fix; "closed" is claimed only
+there.
+
 | Finding | Fix | Witness (fails on the old code) |
 |---|---|---|
 | A-F1 = B-F1 relabelling | Every transport call is issued in `Coalesced` under its lock: stamp, control index and caller-side clock effect together. It is sent after unlock (H-4). The worker applies controls in index order and stashes early arrivals. Requests issued before an applied control are superseded (not rendered). A seek issued before a `Pause` sets where the pause rests; the resting image goes under the pause's stamp. A job carries its own request's stamp. The E11.8 "newest applied stamp" reading is withdrawn. | `a_request_issued_before_a_new_document_is_superseded_not_relabelled`; `controls_apply_in_issuance_order_whatever_order_they_arrive`; `two_concurrent_senders_reversed_on_the_wire_apply_in_issuance_order` (real engine; a hook reverses two senders' sends); the I8 shards. `concurrent_callers_never_relabel_a_request` (4 threads, issuance-log oracle) passes under the relabel mutation, so the two above are the F1 witnesses. The R29/R30 stop witnesses stay green. |
-| A-F2 bind after expiry | `Presenter::finalize` chooses a frame, prepares its CPU image, then re-checks the latest stamp and clock. Only a still-eligible frame writes the cell and binds the texture, in one step. | `presenter::tests::a_clock_advance_during_preparation_binds_nothing` (barrier: the clock moves 10 → 11 during preparation) |
+| A-F2 bind after expiry | `Presenter::finalize` chooses a frame, prepares its CPU image, then re-checks the latest stamp and clock. Only a still-eligible frame writes the cell and binds the texture. (R33: the check and the binding are not one step; the residual window is closed by judging expiry at paint, E11.8.) | `presenter::tests::a_clock_advance_during_preparation_binds_nothing` (barrier: the clock moves 10 → 11 during preparation) |
 | A-F3 clipped image acked | The marker is added with the image rect as its clip, intersected with the viewer's clip (`painter_at(image_rect)`). | `the_real_paint_callback_acks_only_painted_images`, clipped-image case: a positive 64×8 viewer clip that misses the image |
-| A-F4 scrub resume skips the target | Release seeks, then resumes only once the target's own image is bound under a stamp no older than the seek. Any other transport call, an error, a preview clear or a project switch cancels the resume. | `a_released_scrub_resumes_only_once_its_target_is_shown` (target = duration − 1, auto-resume) |
+| A-F4 scrub resume skips the target | Release seeks, then resumes only once the target's own image is bound under a stamp no older than the seek. Any other transport call, an error, a preview clear or a project switch cancels the resume. | `a_released_scrub_resumes_only_once_its_target_is_shown` (target = duration − 1, auto-resume). R33: binding is not a paint. The resume now waits for the target's paint ack (E11.11, A-D2). |
 | A-F5 boundary counts | The first frame is due at `play`. The terminal stop samples through the end. Records outlive the stop. | `the_first_frame_is_due_at_play_even_when_drained_before_a_tick`; `an_ack_after_the_terminal_stop_counts`; `stats::an_ack_after_the_stop_counts` (pause after drain, ack after EOS); `due_frames_are_counted_once_by_their_ack` |
 | A-F6 = B-F6 windows | Each ack is judged by its paint instant and its own epoch. Records are bounded by count (65,536, E11.8), and a late ack counts late, never dropped. App held-age sampling is reconciled with R-5 (E11.8). | `a_late_acknowledgment_is_judged_by_its_paint_and_never_expires` (100 ms ack delay; 2.1 s late ack); `an_evicted_record_acknowledged_later_is_late` |
 | B-F2 MCP cancellation | Core `AgentCancel`. `call_tool` runs the handler in its scope and cancels it when rmcp cancels the request context, or when the future drops. A waiting agent request then returns "preview-thread: agent request cancelled" (E-2) and its job is discarded. | `mcp_server::a_cancelled_tool_call_cancels_its_waiting_frame_proof` (real `McpServer`, cancellable client request, `get_frame_at` behind `hold_agent_lane`); `engine::tests::a_cancelled_caller_stops_waiting_for_its_agent_job` |
-| B-F3 racing seek | `tick` and `pause` sample the clock only when every issued control has been applied and no seek is pending. | `a_seek_racing_the_tick_manufactures_no_due_frames` (seek(900) at frame 10, barrier) |
+| B-F3 racing seek | `tick` and `pause` sample the clock only when every issued control has been applied and no seek is pending. | `a_seek_racing_the_tick_manufactures_no_due_frames` (seek(900) at frame 10, sequential stepping of the worker, not a thread barrier). R33: the ack path still sampled the caller clock (E11.11, A-D3 = B-D1). |
 | B-F4 telemetry | `sync_decoders` comes from a `DecoderGauge`. It is scoped on the preview, the proof renderers and the exports, and held by each open `VideoSource`. `PlaybackStats.live_table_bytes` is new. | `sync_decoders_counts_open_decoders_until_teardown` (open, close, engine drop) |
 | B-F5 P-play repetitions | 3 runs per workload per lane for all six workloads (E11.10.4) | — |
 | R31 (a) straddle | The callback classifies failed pops after the programme is fully pushed as post-end, reported apart (`post_end_underrun_*`). G11 is amended to "0 underruns before the programme end". | `underruns_before_the_programme_end_are_reported_apart` |
@@ -2190,8 +2252,9 @@ counts and release ms as ranges.
 #### E11.10.5 RSS teardown telemetry (B RSS)
 
 Each P-play run now ends with a teardown record. The harness drops the
-engine and waits for the preview thread to finish, which disconnects its
-frame channel. Only then does it read the record. `teardown_complete=true`
+engine and waits until the frame channel disconnects. The preview
+thread's exit causes that; the worker's own teardown is not awaited (R33).
+Only then does it read the record. `teardown_complete=true`
 in all 44 runs, controls included.
 
 | Lane | Ledger live | Sync decoders | Conversion tables live | Threads | Teardown RSS MiB across the process's runs (in order) |
@@ -2199,7 +2262,13 @@ in all 44 runs, controls included.
 | LL | 0 KiB in every run | 0 in every run | 128 KiB in every run | 86–88 | 798 → 1017 → 1082 (typical) → 1344–1538 (blend) → 1674–2160 (explainer) → 2184–2273 (reel) → 2531–2857 (feed) → 2748–2796 (talk) → 2584–2947 (controls) |
 | LH | 0 KiB in every run | 0 in every run | 128 KiB in every run | 12–13 | 851 → 1144 → 961 (typical) → 1077–1320 (blend) → 1338–1500 (explainer) → 1353–1539 (reel) → 1472–1490 (feed) → 1478 (talk) → 1500–1530 (controls) |
 
-**Attribution: the growth is not held by the engine.**
+**Attribution (qualified in R33): consistent with retention below the
+engine, not proof.**
+- R33 caveat (re-review A nit, B D6): at `af5abf9` this teardown sampled
+  RSS while the harness still held the `GpuContext` (device and queue).
+  It observed only that the frame channel disconnected, not that the
+  whole worker had finished. E11.11 reruns the teardown to that
+  boundary.
 - Everything the engine accounts for returns to its baseline at every
   teardown: the texture/buffer ledger is 0, and no decoder is open.
 - The conversion-table registry is a bounded, process-wide LRU. It holds
@@ -2209,15 +2278,18 @@ in all 44 runs, controls included.
   - LH levels off at about 1.48–1.53 GiB from the fourth workload on;
   - LL levels off at about 2.7–2.9 GiB;
   - LH even falls between runs (1144 → 961 MiB).
-- RSS that plateaus, with every engine-owned resource released, is
-  retention below the engine. Two holders fit:
+- RSS that plateaus while every counter the engine keeps returns to its
+  baseline is consistent with retention below the engine. It does not
+  prove that every engine-owned allocation was released: an allocation
+  no counter tracks would look the same. Two holders fit:
   - the allocator keeps freed arenas and pages (glibc malloc across about
     86 threads on LL);
   - the graphics driver keeps its own allocations. LL's llvmpipe
     rasterizer threads and its larger growth point to llvmpipe
     specifically.
-- This run does not separate those two holders; neither needs an engine
-  change.
+- This run separates neither those two holders nor retention from an
+  untracked allocation. It does not show that no engine change could be
+  needed.
 - The first-run figures match E11.4:
   - peak RSS 891.5 MiB (LL) and 921.5 MiB (LH) in a fresh process;
   - S1 had 860.3 / 898.6.
@@ -2326,4 +2398,420 @@ PF1 seek lane=LH workload=explainer_16x9 run=0 random_p95_ms=124.9 random_max_ms
 PF1 seek lane=LH workload=explainer_16x9 run=1 random_p95_ms=140.3 random_max_ms=164.4 forward_p95_ms=121.6 plus1_p95_ms=118.8 plus1_n=11 backward_combined_p95_ms=131.9 drag_p95_ms=188.7 drag_answered_p95_ms=172.0 drag_unanswered=2 drag_distinct_fps=15.8 release_pending_drag_calls=4 release_shown=true release_ms=102.7 stale_frames_after_release=1 frames_over_release=0 valid_frames_over_release=0 timeouts=0
 PF1 seek lane=LH workload=explainer_16x9 run=2 random_p95_ms=130.3 random_max_ms=162.1 forward_p95_ms=126.0 plus1_p95_ms=120.4 plus1_n=8 backward_combined_p95_ms=125.3 drag_p95_ms=237.8 drag_answered_p95_ms=237.0 drag_unanswered=1 drag_distinct_fps=15.0 release_pending_drag_calls=2 release_shown=true release_ms=55.0 stale_frames_after_release=1 frames_over_release=0 valid_frames_over_release=0 timeouts=0
 # exit=139 (seek_LH)
+```
+
+### E11.11 R33 re-review fixes and reruns
+
+The re-reviews of `87f25d5` were A (reject) and B (accept with fixes). They
+were addressed in six code commits on `pf1/impl`:
+
+| Commit | What it does |
+|---|---|
+| `845ac31` | Ack accounting, expiry judged at paint, and resume from the paint ack (A-D1, A-D2, A-D3 = B-D1, A-D4 = B-D5, A-N1, B-D3) |
+| `9cb27a0` | Underruns and stalls classified against the consumed programme end (A-D5 = B-D4) |
+| `b466842` | The I8 consumer checks expiry against its own transport view (A-D6) |
+| `9858d8b` | Off-UI replies bind only into the context they were asked for (B-D2) |
+| `d3a4454` | A complete harness teardown before RSS (B-D6), and review B's witness nits |
+| `cb36a53` | An ack samples a coherent transport snapshot. This corrects `845ac31`'s A-D3 fix, after the first timing rerun exposed it (E11.11.4). |
+
+Each commit passed its gates:
+- build, `clippy --workspace --all-targets -D warnings`, and rustfmt on the
+  touched files (`skip_children`);
+- the affected crates' tests, with media at the default thread count;
+- `cargo build -p kinewright-app`.
+
+None of the findings is disputed. C-5 and C-3 still hold:
+- no render, conversion or compositor path changed; `compositor.rs` gains
+  only a test-only ledger handle;
+- the byte-exact suites are unedited and green;
+- the monitor's pixels are unchanged, and no tolerance was added.
+
+Agent-protocol replies and MCP shapes are unchanged:
+- `call_tool`'s cancellation is refactored into `cancellable_blocking`
+  with the same behaviour;
+- no new error was added.
+
+#### E11.11.1 Findings
+
+"Fails on the old code" names the witness that fails when a mutation
+reverts the fix (E11.11.2).
+
+| Finding | Fix | Witness (fails on the old code) |
+|---|---|---|
+| A-D3 = B-D1 ack samples the caller clock | The ack reads the newest issued epoch and the clock together under the coalesced lock. It samples that position only if the epoch is the applied, playing one; the A/V offset is taken against that snapshot (E11.8, `cb36a53`). `845ac31` first made the ack settle-only. That regressed the engine's on-time count, because an image painted before the worker's tick reached its frame found no record. The first P-play LL rerun showed it (E11.11.4). | `engine::tests::an_ack_racing_an_unapplied_seek_manufactures_no_due_frames`. Frame 10 is painted, `seek(900)` is issued, and the paint is acked through the production path before the worker applies the seek (M1, M26). Regression witnesses: `engine::tests::an_ack_ahead_of_the_workers_tick_counts_on_time` (production path) and `stats::tests::an_ack_ahead_of_the_tick_samples_its_applied_snapshot` (M25) |
+| A-D4 = B-D5 eviction identity | Evicted records keep per-epoch identity (`Evicted { frames, settled }`). The first ack of an evicted frame is late. A duplicate, a never-due key or another epoch's key counts nothing (E11.8). | `stats::tests::an_evicted_record_acknowledged_later_is_late`. Cases: duplicate; never due, past the clock; never due, before the start; an epoch that registered nothing; acked before its eviction; each evicted frame once (M2, M3) |
+| A-D5 = B-D4 consumed programme end | `AudioRuntime::open` sets the programme end, `frame_to_samples(duration)`. The callback classifies its failed pops by the sample it consumed through (position before the pop + popped). The ongoing clock stall is measured until the callbacks consume the programme or playback stops. The `programme_pushed` flag is removed. The callback adds only atomic loads and stores: no lock and no allocation. | `audio::tests::a_tail_pushed_during_a_callback_underruns_after_the_end`: the producer pushes the final tail while a callback is preempted (M9). `engine::tests::a_freeze_with_the_tail_queued_is_a_stall`: the whole programme is pushed and the callbacks freeze with the tail queued (M10, M11) |
+| A-D1 residual window after the final check | E11.8 amendment. The paint marker reads the clock at paint, and a frame the clock has passed is acked `expired`. R-5 counts it late. | `presenter::tests::a_frame_expiring_after_its_last_check_is_acked_expired`: the clock passes frame 10 before the binding is written and before the paint (M5). `stats::tests::a_frame_expired_at_its_paint_is_late` (M4) |
+| A-D2 resume before the target is painted | `release_scrub`'s resume waits for the matching paint ack at a later root epoch (`App::acknowledge_paint`). A binding is not enough. | `app::tests::a_released_scrub_resumes_only_once_its_target_is_painted`. It goes through real paint, a discarded pass, egui's `request_discard`, an invisible root and an older epoch's image, then to EOS (M6: "bound, never painted") |
+| A-D6 I8 consumer expiry | `Model::observe` tracks the transport from the `PlaybackStateChanged` events, and it is asserted equal to the worker's after every step. `Model::consume` rejects a playing frame whose `at` the clock has passed (`expired_rejected`). The release phase advances the clock before consumption at random. | The five I8 shards, with the `expired_rejected` floor (M12) and the transport-view assertion (M13) |
+| A-N1 egui discard | `Pass::EguiDiscard`: a real `request_discard` multipass through egui's `Context::run` | `the_real_paint_callback_acks_only_painted_images`: 2 layouts, nothing acked. This is a coverage addition: the old code already acked nothing here. |
+| B-D2 off-UI reply identity | Agent threads get a process-unique id. `BranchReview { generation, thread_id, stamp, document }` binds only when all of these hold: its thread is found by id in the focused project; the branch is still at the rendered document (`Arc::ptr_eq`); there was no transport call since (the playback stamp); and no newer review exists. Otherwise the reply is discarded, with no presenter clear and no provenance. A cache-inventory reply applies only if no newer refresh was issued. | `chat_ui::tests::a_delayed_branch_frame_binds_only_into_its_own_viewer`. Cases: an earlier thread closes; the thread itself is removed; a newer review; a seek; a branch edit; a project switch (M14–M17). `app::tests::a_superseded_cache_inventory_reply_is_discarded` (M18) |
+| B-D3 `dropped_agent` | `AgentWindow { epoch, generation, registered, newest }`. The job is charged the due frames the worker registered in its own epoch while it ran. A seek, pause or replay charges only the frames before it. A `clear` bumps the generation, so the old job charges nothing. | `stats::tests::an_agent_job_is_charged_only_its_epochs_registered_frames`; `preview::tests::an_agent_job_counts_the_due_frames_it_displaces`, with advance, seek, pause and replay cases (M7, M8) |
+| B-D6 teardown boundary | Sequence: the harness keeps only telemetry handles (the GPU ledger and the decoder gauge) and drops the rest of the session. It waits on the worker thread's test-only `finished` signal (sent after the worker joins the preview and drops itself), drops the `GpuContext`, and only then samples RSS. E11.10.5 is qualified. | `engine::tests::dropping_the_engine_stops_the_preview_thread` now waits on `finished`, then requires the frame channel disconnected (M24). Figures are in E11.11.4. |
+| B nit: cancellation witnesses | `cancellable_blocking` | `server::cancel_tests::an_abandoned_call_cancels_its_handler` (M20); `a_client_cancellation_cancels_its_handler_and_awaits_it`; core `agent_cancel_scopes_nest_and_restore_on_unwind` (M21) |
+| B nit: `live_table_bytes` | Production field asserted | `sync_decoders_counts_open_decoders_until_teardown`: at least 128 KiB after an SDR render, a whole number of tables, no underflow after teardown (M22) |
+| B nit: P-seek stale answer | `wait_answer(frames, target, issued, …)` | `pf1_harness::pf1_a_repeated_seek_target_is_answered_only_by_its_own_call` (M23) |
+| B nit and A nit: wording | Changes in E11.8 and E11.10: the tick witness is "sequential stepping", not a barrier; held-age density is qualified; E11.10's closure claims are qualified; the RSS attribution is "consistent with allocator or driver retention", not proof; "neither needs an engine change" is withdrawn. | — |
+
+#### E11.11.2 Broken variants (R33)
+
+Each mutation was applied to the fixed tree and its witness run, then the
+mutation was reverted. The app crate has no library target, so its
+mutations run `--bins`. Every mutation fails its witness, except M19.
+
+M1–M24 ran on `d3a4454`. M25 and M26 ran on `cb36a53`, whose change is
+confined to the ack. On `cb36a53`, M26 is M1's counterpart: the caller
+clock sampled whatever its epoch.
+
+| # | Mutation (the old behaviour) | Fails |
+|---|---|---|
+| M1 | The ack samples the caller-side clock | `an_ack_racing_an_unapplied_seek_…`: 901 due against 11; offset 29,666.7 ms |
+| M2 | Evicted keys: no dedup | `an_evicted_record_…`: "a duplicate" (0, 2) against (0, 1) |
+| M3 | Evicted keys: only a frontier check | the same test: "never due: before the start" |
+| M4 | The counters ignore `expired` | `a_frame_expired_at_its_paint_is_late`: (2, 0) against (1, 1) |
+| M5 | The marker is never expired | `a_frame_expiring_after_its_last_check_is_acked_expired` |
+| M6 | Resume on binding (the old `Presenter::shows`) | `a_released_scrub_resumes_only_once_its_target_is_painted`: "bound, never painted" issues `play(29)` |
+| M7 | The agent window takes any epoch | `an_agent_job_counts_…`: "seek" 8 against 2 |
+| M8 | The agent is charged across a `clear` | the same test: "replay" 2 against 0 |
+| M9 | Underruns classified by the pre-pop position (the old flag read before the pop) | `a_tail_pushed_during_a_callback_…`: [2, 4, 0, 0] against [1, 2, 1, 2] |
+| M10 | Stall measurement ends at the producer's last push | `a_freeze_with_the_tail_queued_is_a_stall`: "frozen with the tail queued: 0 ms" |
+| M11 | The ongoing stall never ends | the same test: 300.05 ms of idle after the end counted |
+| M12 | I8 consumes without the expiry check (the old consume) | all 5 I8 shards: `expired_rejected` 0, below its floor |
+| M13 | No `Paused` event at EOS | all 5 I8 shards: "the state events" (the consumer's transport view diverges) |
+| M14 | The old reply: project id + captured index | `a_delayed_branch_frame_…`: provenance (0, 1) against (1, 0), misattributed to the next thread |
+| M15 | No review generation | the same test: "superseded" |
+| M16 | No transport-stamp check | the same test: "a transport call since" |
+| M17 | No branch-document identity | the same test: "the branch moved on" |
+| M18 | No inventory generation | `a_superseded_cache_inventory_reply_is_discarded`: "superseded" |
+| M19 | No project-id check | **survived**. It is redundant with the process-unique thread id, which is looked up in the focused project, so the check was removed. |
+| M20 | No cancel on abandonment | `an_abandoned_call_cancels_its_handler`: "dropping the future cancelled it" |
+| M21 | The scope restores only on return | `agent_cancel_scopes_nest_and_restore_on_unwind`: "restored by the unwind" |
+| M22 | `stats().live_table_bytes` set to 0 | `sync_decoders_counts_open_decoders_until_teardown`: 0 |
+| M23 | `wait_answer` ignores the stamp | `pf1_a_repeated_seek_target_is_answered_only_by_its_own_call`: answered by the stale frame, 3 left against 1 |
+| M24 | `finished` sent before the teardown | `dropping_the_engine_stops_the_preview_thread`: frames `Empty` against `Disconnected` |
+| M25 | A settle-only ack (`845ac31`: the snapshot is never sampled) | `an_ack_ahead_of_the_workers_tick_counts_on_time`, `an_ack_ahead_of_the_tick_samples_its_applied_snapshot` and `due_frames_are_counted_once_by_their_ack` |
+| M26 | The snapshot is sampled whatever its epoch | `an_ack_racing_an_unapplied_seek_manufactures_no_due_frames` and `an_ack_ahead_of_the_tick_samples_its_applied_snapshot` ("a seek not applied") |
+
+#### E11.11.3 I8 coverage (R33)
+
+`expired_rejected` (new) per fake shard is 47 / 44 / 41 / 53 (floor 10),
+and 7 on real audio (floor 1). The other floors are as in E11.10.2.
+
+#### E11.11.4 Timing reruns (R33)
+
+**Provenance.**
+- Binary: the release test binary of `cb36a53`
+  (`kinewright_media-cf306d076b2fd4bf`, sha256
+  `8aa5a945d84b443ac7198a425a072ec131bcce393cf0532f2a4aaac5426453de`). It
+  was built once and copied aside, so every lane ran the same binary.
+  rustc 1.98.0; the machine, drivers and FFmpeg are as in E11.1.
+- When: 2026-09-27, 21:29:45–22:40:34 EDT. One runner ran the three lanes
+  in sequence, each alone, with no build, test or other lane alongside:
+
+  | Lane | Window (EDT) |
+  |---|---|
+  | G3 LH | 21:29:45–21:32:23 |
+  | P-play LL | 21:32:23–22:06:28 |
+  | P-play LH | 22:06:28–22:40:34 |
+
+- Output was logged unfiltered.
+  - The P-play lanes are `PF1_RUNS=3` with no `PF1_ONLY`: every workload
+    ran 3 times, then the four Q-3 controls ran once, in one process per
+    lane.
+- Every lane printed `test result: ok. 1 passed` and exited 0. No exit-time
+  panic or SIGSEGV this time.
+- **Ambient load (R26).**
+  - The two `foot` screensaver processes (≈91% + 51%) and Hyprland (≈24%)
+    were present at every BEGIN/END. These `ps` figures are lifetime
+    averages.
+  - No `gh` process was present at any mark.
+  - 1-minute load averages were 4.6–9.3.
+- **A first rerun, superseded (E11.11.6).**
+  - It ran on the `d3a4454` binary (sha256
+    `2304016d56a81291ebb2c242a6b0d84abd0d08a74dddab7a2254904878337ed9`),
+    20:43:01–21:22:57 EDT: G3 LH passed, and P-play LL completed.
+  - Its engine columns exposed a regression in `845ac31`'s settle-only
+    ack. Engine on time was 119–165 of 1,800 in every 60 s workload
+    (614–639 of 7,200 for `talk_recut`), against the harness's 568–1,463.
+    `engine_av_offset_max_ms` was 33.3 in every run.
+    - Cause: an image painted before the worker's 5 ms tick reached its
+      frame found no record, and the tick then registered the frame
+      unacknowledged.
+  - Its P-play LH lane was stopped 3 minutes in, and `cb36a53` fixed the
+    ack (E11.8, E11.11.1).
+  - The harness columns, G3, G11 and G16 of that rerun agree with the
+    lanes below.
+
+**G3** (60 fps floor, LH):
+
+| Build | `blend_heavy_1080p` fps (3 runs) | mean ms | p95 ms | Result |
+|---|---|---|---|---|
+| R32 `af5abf9` (E11.10.4) | 71.7 / 71.2 / 71.8 | 13.92–14.04 | 15.37–15.76 | passes |
+| R33 `cb36a53` | 71.6 / 72.2 / 71.2 | 13.85–14.05 | 15.18–15.63 | **passes** |
+
+- `typical_1080p` reads 73.3 fps, and `heavy_4k` 58.7–59.1 fps.
+- The slowdown control fails its verdict (17.8 fps), as it must.
+- Phases for `blend_heavy_1080p`:
+  - `upload_ms` 10.56;
+  - `gpu_passes_readback_ms` 1.43;
+  - `monitor_encode_ms` 1.72.
+- The superseded `d3a4454` rerun read 72.3 / 70.7 / 72.1.
+
+**P-play, G11 and G16 (simulated driver).** The columns are as in
+E11.10.4.
+- Every run is valid: 60.02 s (240.0 s for `talk_recut`), with 0 missed
+  callbacks.
+- `engine_av_offset_max_ms` is 0.0 in every run.
+- `engine_dropped_agent` is 0, and `engine_stale_errors` is 0.
+
+| Workload | Lane | Runs | Harness on time / late / dropped | Engine due: on time / late / dropped | Present p50 / p95 / max ms | Held max ms (engine) | Clock stall max ms, harness / engine | Underrun frames, harness / engine | Post-end frames | Receipt offset max ms | Rejected at consumer | Sync decoders |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `typical_1080p` | LL | 3 | 577–581 / 4–5 / 1215–1219 | 1800: 576–580 / 5–7 / 1215–1219 | 64.2 / 253.9–259.7 / 319.8–362.0 | 319.8–378.0 | 47.3–47.8 / 22.9–24.4 | 0 / 0 | 512 | 0.0 | 0 | 2 |
+| `blend_heavy_1080p` | LL | 3 | 645–655 / 3–8 / 1137–1149 | 1800: 642–655 / 3–9 / 1137–1149 | 64.4–64.5 / 192.6–195.2 / 299.4–340.9 | 299.4–340.9 | 46.7–47.3 / 22.9–23.4 | 0 / 0 | 512 | 0.0–1966.7 | 0–1 | 3 |
+| `explainer_16x9` | LL | 3 | 1441–1465 / 1–7 / 330–358 | 1800: 1442–1464 / 0–7 / 330–358 | 42.2–42.3 / 106.1–106.3 / 234.0–234.6 | 234.0–234.6 | 45.9–46.7 / 22.8–23.1 | 0 / 0 | 512 | 1966.7 | 1 | 4 |
+| `reel_9x16` | LL | 3 | 1313–1340 / 3–8 / 456–480 | 1800: 1312–1339 / 4–8 / 456–480 | 42.3 / 107.0–107.4 / 319.0–341.3 | 319.0–341.3 | 47.6–48.2 / 22.8–23.3 | 0 / 0 | 512 | 1966.7 | 1 | 3 |
+| `feed_4x5` | LL | 3 | 965–987 / 3–6 / 807–832 | 1800: 965–987 / 3–6 / 807–832 | 42.8–42.9 / 170.2–171.1 / 729.5–1367.1 | 729.5–1367.1 | 49.2–49.7 / 22.9–23.4 | 0 / 0 | 512 | 1966.7 | 1 | 3 |
+| `talk_recut` | LL | 3 | 6438–6474 / 14–23 / 703–748 of 7200 | 7200: 6432–6472 / 20–28 / 703–748 | 42.1 / 65.4–69.7 / 235.1–256.0 | 235.1–256.0 | 59.5–60.0 / 42.9–43.1 | 0 / 0 | 0 | 0.0 | 0 | 1 |
+| `typical_1080p` | LH | 3 | 574–575 / 4–8 / 1218–1221 | 1800: 572–575 / 5–10 / 1218–1221 | 64.2 / 258.9–271.6 / 320.8–384.6 | 335.8–384.6 | 45.5–46.3 / 22.0–22.3 | 0 / 0 | 512 | 0.0 | 0 | 2 |
+| `blend_heavy_1080p` | LH | 3 | 690–821 / 5–11 / 968–1103 | 1800: 689–824 / 5–8 / 968–1103 | 63.8–64.3 / 171.0–190.9 / 255.9–277.4 | 255.9–277.4 | 45.5–46.3 / 22.0–22.4 | 0 / 0 | 512 | 0.0–1966.7 | 0–1 | 3 |
+| `explainer_16x9` | LH | 3 | 1486–1499 / 7–16 / 285–307 | 1800: 1486–1497 / 7–18 / 285–307 | 42.1–42.2 / 98.2–106.1 / 234.5–235.3 | 234.5–235.3 | 45.5–46.2 / 21.8–21.9 | 0 / 0 | 512 | 1966.7 | 1 | 4 |
+| `reel_9x16` | LH | 3 | 1403–1416 / 8–10 / 376–387 | 1800: 1404–1416 / 8–9 / 376–387 | 42.1 / 106.6–106.8 / 298.7–320.3 | 298.7–320.3 | 45.5–45.6 / 21.9–22.4 | 0 / 0 | 512 | 1966.7 | 1 | 3 |
+| `feed_4x5` | LH | 3 | 1180–1208 / 4–6 / 588–614 | 1800: 1180–1206 / 5–6 / 588–614 | 42.3–42.4 / 149.3–169.9 / 426.5–1194.6 | 426.5–1194.6 | 45.5–45.6 / 22.0–22.4 | 0 / 0 | 512 | 1966.7 | 1 | 3 |
+| `talk_recut` | LH | 3 | 6514–6522 / 28–43 / 638–658 of 7200 | 7200: 6516–6520 / 25–45 / 638–659 | 42.0 / 62.8–63.1 / 235.2–256.3 | 235.2–256.3 | 45.7–60.1 / 22.0–42.9 | 0 / 0 | 0 | 0.0–33.3 | 0–1 | 1 |
+
+Q-3 controls (`typical_1080p`, one run each):
+
+| Control | Lane | Metric | Fails, as it must | Clock stall max ms, harness / engine | Held max ms | Underrun frames (engine events) / post-end | On time, harness / engine |
+|---|---|---|---|---|---|---|---|
+| Slowdown | LL | G1 | yes | 47.9 / 22.9 | 1514.7 | 0 (0) / 512 | 121 / 122 |
+| Freeze | LL | G14 | yes | 47.8 / 22.9 | 1091.2 | 0 (0) / 512 | 550 / 552 |
+| ClockFreeze | LL | G16 | yes | 1050.0 / 1027.2 | 1091.4 | 0 (0) / 512 | 571 / 570 |
+| Stall | LL | underruns | yes | 1045.0 / 1024.0 | 1065.3 | 48128 (47) / 512 | 574 / 574 |
+| Slowdown | LH | G1 | yes | 45.4 / 22.8 | 1055.8 | 0 (0) / 512 | 178 / 183 |
+| Freeze | LH | G14 | yes | 45.7 / 23.1 | 1122.7 | 0 (0) / 512 | 571 / 569 |
+| ClockFreeze | LH | G16 | yes | 1050.0 / 1026.8 | 1086.5 | 0 (0) / 512 | 593 / 592 |
+| Stall | LH | underruns | yes | 1045.0 / 1024.0 | 1063.8 | 48128 (47) / 512 | 586 / 587 |
+
+- **G11 passes (amended: 0 underruns before the programme end).** The
+  consumed-end classification (A-D5 = B-D4) changes nothing in steady
+  state:
+  - every run reads 0 underrun frames before the end, in the harness and
+    in the engine;
+  - the post-end straddle is 512 in every 60 s run and 0 in
+    `talk_recut`, as in R32;
+  - the stall control still reads 48,128 frames in 47 events before the
+    end, plus 512 post-end.
+- **G16 passes on both lanes.**
+  - The harness's max clock stall is 45.5–60.1 ms in every run, against
+    the 100 ms gate.
+  - The clock-freeze control fails on both lanes (1050.0 ms each).
+  - The engine's stall figure is still one callback period in steady
+    state (21.8–24.4 ms). `talk_recut` reads 42.9–43.1 ms, as in R32. It is 1024.0 / 1026.8–1027.2 ms in the stall
+    and clock-freeze controls. The ongoing-stall measurement until
+    consumption therefore adds nothing at the end of a clean play-out.
+- **Engine and harness agree.**
+  - On time and late agree within ±6 in every run. The ±6 is on
+    `talk_recut`'s 7,200 frames; elsewhere it is within ±5, as in R32.
+  - Engine late is 0–45.
+  - Engine due is exactly 1,800 (7,200).
+- The other figures are within run-to-run noise of R32 (E11.10.4): held
+  max, present percentiles, receipt offset, rejected arrivals and sync
+  decoders.
+  - `blend_heavy_1080p` on LH again spreads widely (690–821 on time), as
+    in R32 (671–877).
+
+**Teardown and RSS (B-D6).** Since `d3a4454` each run's teardown record
+is read at a new boundary. The worker has finished its whole teardown,
+the harness holds only telemetry handles, and the `GpuContext` is
+dropped. Only then is RSS sampled.
+
+| Lane | Complete | Ledger live | Sync decoders | Conversion tables live | Threads | Teardown RSS MiB across the process's runs (in order) |
+|---|---|---|---|---|---|---|
+| LL | true in all 22 | 0 KiB | 0 | 128 KiB | 44 in every run (R32: 86–88) | 708 → 846 → 989 (typical) → 1109–1351 (blend) → 1440–1899 (explainer) → 1831–2216 (reel) → 2279–2569 (feed) → 2315–2330 (talk) → 2116–2262 (controls) |
+| LH | true in all 22 | 0 KiB | 0 | 128 KiB | 7 in every run (R32: 12–13) | 573 → 726 → 728 (typical) → 879–1058 (blend) → 1101–1193 (explainer) → 1312–1347 (reel) → 1312–1339 (feed) → 1337 (talk) → 1389–1493 (controls) |
+
+- Dropping the device releases its threads. The llvmpipe rasterizer
+  threads go on LL (44 against 86–88), and the NVIDIA driver's threads on
+  LH (7 against 12–13).
+- Teardown RSS is lower than at R32's boundary, where RSS was sampled with
+  the device held:
+  - LL levels off at about 2.2–2.3 GiB, against 2.7–2.9 GiB;
+  - LH levels off at about 1.31–1.34 GiB before the controls, against
+    about 1.48–1.53 GiB.
+- It still grows run over run, then plateaus, and it falls between some
+  runs:
+  - LL 2569 → 2365 (feed);
+  - LH 1058 → 879 (blend).
+- With no device, no decoder, no engine thread and a constant 128 KiB of
+  tables left, this is consistent with allocator or driver retention
+  (freed arenas, driver caches that outlive the device). It is not proof:
+  an allocation that no counter tracks would look the same.
+- P-rss is still measured one process per workload, at S4 (E11.4).
+- The first run's peak RSS is 856.3 MiB (LL) and 914.4 MiB (LH). E11.4's
+  fresh-process figures were 891.5 and 921.5.
+
+#### E11.11.5 Line delta
+
+Non-blank, non-comment `.rs` lines over `87f25d5..cb36a53`:
+
+| Crate | Added | Removed | Of the added: tests | Of the added: harness | Of the added: production |
+|---|---|---|---|---|---|
+| core | 27 | 1 | 19 | — | 8 |
+| media | 613 | 157 | 263 | 63 | 287 |
+| agent | 70 | 20 | 44 | — | 26 |
+| app | 434 | 176 | 219 | — | 215 |
+| **Total** | **1,144** | **354** | **545** | **63** | **536** |
+
+- Tests are the `#[cfg(test)]` test modules. Test-only items outside
+  them, such as `finished` and `shared_ledger`, count as production.
+- `git diff --stat 87f25d5..cb36a53 -- crates`: 14 files changed, 1,488
+  insertions and 434 deletions.
+- The docs are extra.
+
+#### E11.11.6 Raw result lines (R33)
+
+`#` lines are the runner's lane markers (with `ps` and load averages) and
+exit statuses. Everything else is verbatim from `timing.log`, `cb36a53`:
+
+```
+# BEGIN G3 LH 2026-09-27 21:29:45 EDT load: 4.57 6.07 6.31
+#      1423 24.1  2-03:47:23 Hyprland
+#    180308  0.0  2-03:16:59 foot
+#   3754322 91.1    08:40:04 foot
+#   3754361 51.1    08:40:04 foot
+
+running 1 test
+test mo2_perf_fixtures::blend_heavy_holds_floors_on_hardware ... R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=0 dims=(1280, 720) mean_ms=13.65 fps=73.3 p95_ms=15.36 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=1 dims=(1280, 720) mean_ms=13.70 fps=73.0 p95_ms=15.41 ledger_peak_mib=56.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=typical_1080p run=2 dims=(1280, 720) mean_ms=13.61 fps=73.5 p95_ms=15.29 ledger_peak_mib=56.3 validate_us=1.3
+R28 phases workload=typical_1080p upload_ms=10.06 gpu_passes_readback_ms=1.32 monitor_encode_ms=1.68
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=0 dims=(1280, 720) mean_ms=13.96 fps=71.6 p95_ms=15.19 ledger_peak_mib=63.3 validate_us=1.3
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=1 dims=(1280, 720) mean_ms=13.85 fps=72.2 p95_ms=15.18 ledger_peak_mib=63.3 validate_us=1.6
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=blend_heavy_1080p run=2 dims=(1280, 720) mean_ms=14.05 fps=71.2 p95_ms=15.63 ledger_peak_mib=63.3 validate_us=1.5
+R28 phases workload=blend_heavy_1080p upload_ms=10.56 gpu_passes_readback_ms=1.43 monitor_encode_ms=1.72
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=0 dims=(1280, 720) mean_ms=16.97 fps=58.9 p95_ms=18.67 ledger_peak_mib=70.3 validate_us=10.0
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=1 dims=(1280, 720) mean_ms=16.93 fps=59.1 p95_ms=18.13 ledger_peak_mib=70.3 validate_us=10.0
+R28 adapter=NVIDIA GeForce RTX 3090 resident=true workload=heavy_4k run=2 dims=(1280, 720) mean_ms=17.03 fps=58.7 p95_ms=18.73 ledger_peak_mib=70.3 validate_us=16.8
+R28 phases workload=heavy_4k upload_ms=13.44 gpu_passes_readback_ms=1.66 monitor_encode_ms=1.78
+R28 control=slowdown delay_ms=41.7 mean_ms=56.31 p95_ms=58.14 verdict=Err("17.8 fps (floor 60), p95 58.1 ms vs mean 56.3 ms")
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 946 filtered out; finished in 157.57s
+
+# exit=0
+# END G3 LH 2026-09-27 21:32:23 EDT load: 8.54 7.50 6.84
+#      1423 24.1  2-03:50:00 Hyprland
+#    180308  0.0  2-03:19:37 foot
+#   3754322 91.1    08:42:42 foot
+#   3754361 51.1    08:42:42 foot
+# BEGIN P-play LL 2026-09-27 21:32:23 EDT load: 8.54 7.50 6.84
+#      1423 24.1  2-03:50:00 Hyprland
+#    180308  0.0  2-03:19:37 foot
+#   3754322 91.1    08:42:42 foot
+#   3754361 51.1    08:42:42 foot
+
+running 1 test
+test pf1_harness::pf1_play_baseline ... PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=579 late=5 early=0 dropped=1216 present_p50_ms=64.2 present_p95_ms=257.4 present_max_ms=362.0 held_max_ms=361.7 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.8 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=856.3 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=577 engine_late=7 engine_dropped=1216 engine_dropped_agent=0 engine_held_max_ms=362.0 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.2 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=707.7 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=577 late=4 early=0 dropped=1219 present_p50_ms=64.2 present_p95_ms=259.7 present_max_ms=349.6 held_max_ms=380.1 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1159.9 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=576 engine_late=5 engine_dropped=1219 engine_dropped_agent=0 engine_held_max_ms=378.0 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=24.4 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=845.6 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=581 late=4 early=0 dropped=1215 present_p50_ms=64.2 present_p95_ms=253.9 present_max_ms=319.8 held_max_ms=317.8 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.4 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1257.3 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=580 engine_late=5 engine_dropped=1215 engine_dropped_agent=0 engine_held_max_ms=319.8 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=989.2 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=651 late=3 early=0 dropped=1146 present_p50_ms=64.4 present_p95_ms=195.2 present_max_ms=340.9 held_max_ms=339.8 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.8 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1387.0 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=651 engine_late=3 engine_dropped=1146 engine_dropped_agent=0 engine_held_max_ms=340.9 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.4 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1109.2 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=645 late=6 early=0 dropped=1149 present_p50_ms=64.4 present_p95_ms=195.1 present_max_ms=299.4 held_max_ms=296.0 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1469.7 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=642 engine_late=9 engine_dropped=1149 engine_dropped_agent=0 engine_held_max_ms=299.4 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1210.8 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=655 late=8 early=0 dropped=1137 present_p50_ms=64.5 present_p95_ms=192.6 present_max_ms=340.8 held_max_ms=338.2 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1656.6 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=655 engine_late=8 engine_dropped=1137 engine_dropped_agent=0 engine_held_max_ms=340.8 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1350.5 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1465 late=5 early=0 dropped=330 present_p50_ms=42.3 present_p95_ms=106.3 present_max_ms=234.0 held_max_ms=229.8 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.0 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1857.8 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1464 engine_late=6 engine_dropped=330 engine_dropped_agent=0 engine_held_max_ms=234.0 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.1 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1440.4 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1460 late=7 early=0 dropped=333 present_p50_ms=42.2 present_p95_ms=106.1 present_max_ms=234.4 held_max_ms=230.9 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1917.2 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1460 engine_late=7 engine_dropped=333 engine_dropped_agent=0 engine_held_max_ms=234.4 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1693.5 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1441 late=1 early=0 dropped=358 present_p50_ms=42.2 present_p95_ms=106.3 present_max_ms=234.6 held_max_ms=235.1 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.9 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2013.5 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1442 engine_late=0 engine_dropped=358 engine_dropped_agent=0 engine_held_max_ms=234.6 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.8 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1898.7 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1340 late=3 early=0 dropped=457 present_p50_ms=42.3 present_p95_ms=107.1 present_max_ms=319.0 held_max_ms=317.3 receipt_offset_max_ms=1966.7 clock_stall_max_ms=47.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2291.0 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1339 engine_late=4 engine_dropped=457 engine_dropped_agent=0 engine_held_max_ms=319.0 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1830.5 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1313 late=7 early=0 dropped=480 present_p50_ms=42.3 present_p95_ms=107.4 present_max_ms=320.1 held_max_ms=318.0 receipt_offset_max_ms=1966.7 clock_stall_max_ms=48.2 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2316.0 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1312 engine_late=8 engine_dropped=480 engine_dropped_agent=0 engine_held_max_ms=320.1 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.3 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2082.3 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1336 late=8 early=0 dropped=456 present_p50_ms=42.3 present_p95_ms=107.0 present_max_ms=341.3 held_max_ms=337.7 receipt_offset_max_ms=1966.7 clock_stall_max_ms=47.6 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2592.1 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1336 engine_late=8 engine_dropped=456 engine_dropped_agent=0 engine_held_max_ms=341.3 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.8 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2215.6 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=971 late=5 early=0 dropped=824 present_p50_ms=42.8 present_p95_ms=171.1 present_max_ms=729.5 held_max_ms=726.1 receipt_offset_max_ms=1966.7 clock_stall_max_ms=49.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2695.4 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=971 engine_late=5 engine_dropped=824 engine_dropped_agent=0 engine_held_max_ms=729.5 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.4 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2278.6 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=965 late=3 early=0 dropped=832 present_p50_ms=42.9 present_p95_ms=170.6 present_max_ms=1026.9 held_max_ms=1023.4 receipt_offset_max_ms=1966.7 clock_stall_max_ms=49.2 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2864.6 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=965 engine_late=3 engine_dropped=832 engine_dropped_agent=0 engine_held_max_ms=1026.9 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.1 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2569.0 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=987 late=6 early=0 dropped=807 present_p50_ms=42.8 present_p95_ms=170.2 present_max_ms=1367.1 held_max_ms=1363.9 receipt_offset_max_ms=1966.7 clock_stall_max_ms=49.2 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2588.7 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=987 engine_late=6 engine_dropped=807 engine_dropped_agent=0 engine_held_max_ms=1367.1 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2365.3 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=0 valid=true elapsed_s=240.03 missed_callbacks=0 due=7200 on_time=6464 late=22 early=0 dropped=714 present_p50_ms=42.1 present_p95_ms=67.5 present_max_ms=255.8 held_max_ms=254.6 receipt_offset_max_ms=0.0 clock_stall_max_ms=60.0 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=2526.7 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=6458 engine_late=28 engine_dropped=714 engine_dropped_agent=0 engine_held_max_ms=255.8 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=42.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2314.5 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=1 valid=true elapsed_s=240.03 missed_callbacks=0 due=7200 on_time=6438 late=14 early=0 dropped=748 present_p50_ms=42.1 present_p95_ms=69.7 present_max_ms=256.0 held_max_ms=254.4 receipt_offset_max_ms=0.0 clock_stall_max_ms=60.0 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=2638.3 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=6432 engine_late=20 engine_dropped=748 engine_dropped_agent=0 engine_held_max_ms=256.0 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=42.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2329.5 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=2 valid=true elapsed_s=240.03 missed_callbacks=0 due=7200 on_time=6474 late=23 early=0 dropped=703 present_p50_ms=42.1 present_p95_ms=65.4 present_max_ms=235.1 held_max_ms=234.8 receipt_offset_max_ms=0.0 clock_stall_max_ms=59.5 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=2378.2 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=6472 engine_late=25 engine_dropped=703 engine_dropped_agent=0 engine_held_max_ms=235.1 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=43.1 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2324.2 threads=44
+PF1 control=Slowdown lane=LL workload=typical_1080p metric=G1 fails=true valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=121 late=27 early=0 dropped=1652 present_p50_ms=419.6 present_p95_ms=1017.9 present_max_ms=1519.6 held_max_ms=1514.7 receipt_offset_max_ms=33.3 clock_stall_max_ms=47.9 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2570.8 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=122 engine_late=25 engine_dropped=1653 engine_dropped_agent=0 engine_held_max_ms=1519.6 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2262.3 threads=44
+PF1 control=Freeze lane=LL workload=typical_1080p metric=G14 fails=true valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=550 late=11 early=0 dropped=1239 present_p50_ms=64.3 present_p95_ms=275.5 present_max_ms=1094.1 held_max_ms=1091.2 receipt_offset_max_ms=33.3 clock_stall_max_ms=47.8 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2625.5 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=552 engine_late=8 engine_dropped=1240 engine_dropped_agent=0 engine_held_max_ms=1094.1 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2233.4 threads=44
+PF1 control=ClockFreeze lane=LL workload=typical_1080p metric=G16 fails=true valid=true elapsed_s=61.02 missed_callbacks=0 due=1800 on_time=571 late=6 early=0 dropped=1223 present_p50_ms=64.2 present_p95_ms=269.2 present_max_ms=1091.7 held_max_ms=1091.4 receipt_offset_max_ms=0.0 clock_stall_max_ms=1050.0 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2505.8 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=570 engine_late=7 engine_dropped=1223 engine_dropped_agent=0 engine_held_max_ms=1091.7 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=1027.2 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2233.5 threads=44
+PF1 control=Stall lane=LL workload=typical_1080p metric=underrun_frames fails=true valid=true elapsed_s=61.02 missed_callbacks=0 due=1800 on_time=574 late=9 early=0 dropped=1217 present_p50_ms=64.2 present_p95_ms=260.4 present_max_ms=1066.5 held_max_ms=1065.3 receipt_offset_max_ms=33.3 clock_stall_max_ms=1045.0 underrun_frames=48128 post_end_underrun_frames=512 peak_rss_mib=2448.6 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=574 engine_late=8 engine_dropped=1218 engine_dropped_agent=0 engine_held_max_ms=1066.5 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=1024.0 engine_underrun_events=47 engine_underrun_frames=48128 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2115.5 threads=44
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 946 filtered out; finished in 2045.22s
+
+# exit=0
+# END P-play LL 2026-09-27 22:06:28 EDT load: 4.79 4.36 5.04
+#      1423 24.1  2-04:24:06 Hyprland
+#    180308  0.0  2-03:53:42 foot
+#   3754322 91.0    09:16:47 foot
+#   3754361 51.1    09:16:47 foot
+# BEGIN P-play LH 2026-09-27 22:06:28 EDT load: 4.79 4.36 5.04
+#      1423 24.1  2-04:24:06 Hyprland
+#    180308  0.0  2-03:53:42 foot
+#   3754322 91.0    09:16:47 foot
+#   3754361 51.1    09:16:47 foot
+
+running 1 test
+test pf1_harness::pf1_play_baseline ... PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=574 late=6 early=0 dropped=1220 present_p50_ms=64.2 present_p95_ms=271.6 present_max_ms=362.3 held_max_ms=362.2 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=914.4 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=575 engine_late=5 engine_dropped=1220 engine_dropped_agent=0 engine_held_max_ms=362.3 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.3 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=572.8 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=574 late=8 early=0 dropped=1218 present_p50_ms=64.2 present_p95_ms=258.9 present_max_ms=384.6 held_max_ms=380.3 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1084.9 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=572 engine_late=10 engine_dropped=1218 engine_dropped_agent=0 engine_held_max_ms=384.6 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.2 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=725.5 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=575 late=4 early=0 dropped=1221 present_p50_ms=64.2 present_p95_ms=266.3 present_max_ms=320.8 held_max_ms=340.3 receipt_offset_max_ms=0.0 clock_stall_max_ms=46.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1103.8 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=574 engine_late=5 engine_dropped=1221 engine_dropped_agent=0 engine_held_max_ms=335.8 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=727.7 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=blend_heavy_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=749 late=5 early=0 dropped=1046 present_p50_ms=64.0 present_p95_ms=171.7 present_max_ms=255.9 held_max_ms=252.0 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1202.6 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=749 engine_late=5 engine_dropped=1046 engine_dropped_agent=0 engine_held_max_ms=255.9 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.4 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1054.8 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=blend_heavy_1080p run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=690 late=7 early=0 dropped=1103 present_p50_ms=64.3 present_p95_ms=190.9 present_max_ms=277.4 held_max_ms=274.7 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1416.5 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=689 engine_late=8 engine_dropped=1103 engine_dropped_agent=0 engine_held_max_ms=277.4 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.1 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=878.8 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=blend_heavy_1080p run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=821 late=11 early=0 dropped=968 present_p50_ms=63.8 present_p95_ms=171.0 present_max_ms=276.8 held_max_ms=274.9 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1312.1 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=824 engine_late=8 engine_dropped=968 engine_dropped_agent=0 engine_held_max_ms=276.8 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1058.3 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=explainer_16x9 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1499 late=16 early=0 dropped=285 present_p50_ms=42.1 present_p95_ms=98.2 present_max_ms=235.3 held_max_ms=232.9 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.2 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1532.4 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1497 engine_late=18 engine_dropped=285 engine_dropped_agent=0 engine_held_max_ms=235.3 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=21.8 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1101.3 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=explainer_16x9 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1486 late=7 early=0 dropped=307 present_p50_ms=42.2 present_p95_ms=106.1 present_max_ms=234.5 held_max_ms=230.4 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1478.0 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1486 engine_late=7 engine_dropped=307 engine_dropped_agent=0 engine_held_max_ms=234.5 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=21.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1163.5 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=explainer_16x9 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1488 late=9 early=0 dropped=303 present_p50_ms=42.2 present_p95_ms=106.0 present_max_ms=234.9 held_max_ms=231.1 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.9 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1550.2 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1487 engine_late=10 engine_dropped=303 engine_dropped_agent=0 engine_held_max_ms=234.9 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=21.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1192.5 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=reel_9x16 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1416 late=8 early=0 dropped=376 present_p50_ms=42.1 present_p95_ms=106.6 present_max_ms=320.3 held_max_ms=318.5 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1552.2 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1416 engine_late=8 engine_dropped=376 engine_dropped_agent=0 engine_held_max_ms=320.3 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.4 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1346.5 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=reel_9x16 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1403 late=10 early=0 dropped=387 present_p50_ms=42.1 present_p95_ms=106.8 present_max_ms=298.7 held_max_ms=296.4 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.6 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1582.2 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1404 engine_late=9 engine_dropped=387 engine_dropped_agent=0 engine_held_max_ms=298.7 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=21.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1328.3 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=reel_9x16 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1410 late=9 early=0 dropped=381 present_p50_ms=42.1 present_p95_ms=106.6 present_max_ms=298.7 held_max_ms=297.1 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.6 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1615.8 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1410 engine_late=9 engine_dropped=381 engine_dropped_agent=0 engine_held_max_ms=298.7 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=21.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1311.7 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=feed_4x5 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1188 late=6 early=0 dropped=606 present_p50_ms=42.3 present_p95_ms=150.0 present_max_ms=1194.6 held_max_ms=1192.2 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1564.9 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1189 engine_late=5 engine_dropped=606 engine_dropped_agent=0 engine_held_max_ms=1194.6 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.1 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1311.7 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=feed_4x5 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1208 late=4 early=0 dropped=588 present_p50_ms=42.4 present_p95_ms=149.3 present_max_ms=426.5 held_max_ms=424.6 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.6 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1552.3 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1206 engine_late=6 engine_dropped=588 engine_dropped_agent=0 engine_held_max_ms=426.5 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1338.8 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=feed_4x5 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1180 late=6 early=0 dropped=614 present_p50_ms=42.4 present_p95_ms=169.9 present_max_ms=426.9 held_max_ms=425.4 receipt_offset_max_ms=1966.7 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1567.5 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=1180 engine_late=6 engine_dropped=614 engine_dropped_agent=0 engine_held_max_ms=426.9 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.4 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1329.8 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=talk_recut run=0 valid=true elapsed_s=240.03 missed_callbacks=0 due=7200 on_time=6514 late=28 early=0 dropped=658 present_p50_ms=42.0 present_p95_ms=63.1 present_max_ms=256.3 held_max_ms=254.5 receipt_offset_max_ms=33.3 clock_stall_max_ms=60.1 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=1478.7 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=6516 engine_late=25 engine_dropped=659 engine_dropped_agent=0 engine_held_max_ms=256.3 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=42.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1337.4 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=talk_recut run=1 valid=true elapsed_s=240.01 missed_callbacks=0 due=7200 on_time=6519 late=43 early=0 dropped=638 present_p50_ms=42.0 present_p95_ms=62.8 present_max_ms=256.0 held_max_ms=251.0 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.7 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=1478.6 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=6517 engine_late=45 engine_dropped=638 engine_dropped_agent=0 engine_held_max_ms=256.0 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1337.4 threads=7
+PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=talk_recut run=2 valid=true elapsed_s=240.03 missed_callbacks=0 due=7200 on_time=6522 late=36 early=0 dropped=642 present_p50_ms=42.0 present_p95_ms=63.0 present_max_ms=235.2 held_max_ms=234.7 receipt_offset_max_ms=0.0 clock_stall_max_ms=60.0 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=1477.9 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=6520 engine_late=38 engine_dropped=642 engine_dropped_agent=0 engine_held_max_ms=235.2 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=42.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1337.4 threads=7
+PF1 control=Slowdown lane=LH workload=typical_1080p metric=G1 fails=true valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=178 late=31 early=0 dropped=1591 present_p50_ms=378.0 present_p95_ms=585.2 present_max_ms=1058.2 held_max_ms=1055.8 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.4 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1531.9 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=183 engine_late=26 engine_dropped=1591 engine_dropped_agent=0 engine_held_max_ms=1058.2 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=22.8 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1388.9 threads=7
+PF1 control=Freeze lane=LH workload=typical_1080p metric=G14 fails=true valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=571 late=8 early=0 dropped=1221 present_p50_ms=64.2 present_p95_ms=254.9 present_max_ms=1125.3 held_max_ms=1122.7 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1896.3 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=569 engine_late=10 engine_dropped=1221 engine_dropped_agent=0 engine_held_max_ms=1125.3 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=23.1 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1492.8 threads=7
+PF1 control=ClockFreeze lane=LH workload=typical_1080p metric=G16 fails=true valid=true elapsed_s=61.02 missed_callbacks=0 due=1800 on_time=593 late=4 early=0 dropped=1203 present_p50_ms=64.2 present_p95_ms=256.2 present_max_ms=1090.5 held_max_ms=1086.5 receipt_offset_max_ms=0.0 clock_stall_max_ms=1050.0 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1636.6 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=592 engine_late=5 engine_dropped=1203 engine_dropped_agent=0 engine_held_max_ms=1090.5 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=1026.8 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1492.8 threads=7
+PF1 control=Stall lane=LH workload=typical_1080p metric=underrun_frames fails=true valid=true elapsed_s=61.02 missed_callbacks=0 due=1800 on_time=586 late=11 early=0 dropped=1203 present_p50_ms=64.2 present_p95_ms=259.8 present_max_ms=1067.1 held_max_ms=1063.8 receipt_offset_max_ms=0.0 clock_stall_max_ms=1045.0 underrun_frames=48128 post_end_underrun_frames=512 peak_rss_mib=1911.6 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=587 engine_late=10 engine_dropped=1203 engine_dropped_agent=0 engine_held_max_ms=1067.1 engine_av_offset_max_ms=0.0 engine_clock_stall_max_ms=1024.0 engine_underrun_events=47 engine_underrun_frames=48128 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1492.7 threads=7
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 946 filtered out; finished in 2046.57s
+
+# exit=0
+# END P-play LH 2026-09-27 22:40:34 EDT load: 9.29 5.63 4.84
+#      1423 24.2  2-04:58:12 Hyprland
+#    180308  0.0  2-04:27:49 foot
+#   3754322 91.0    09:50:54 foot
+#   3754361 51.2    09:50:54 foot
+# ALL DONE 2026-09-27 22:40:34 EDT
+```
+
+The superseded first rerun (`d3a4454`, the settle-only ack). These are
+its P-play LL lines and its stopped LH lane's only line:
+
+```
+# BEGIN P-play LL 2026-09-27 20:45:38 EDT load: 8.02 7.11 5.69
+test pf1_harness::pf1_play_baseline ... PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=574 late=5 early=0 dropped=1221 present_p50_ms=64.2 present_p95_ms=259.5 present_max_ms=362.6 held_max_ms=360.4 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=870.2 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=124 engine_late=6 engine_dropped=1670 engine_dropped_agent=0 engine_held_max_ms=362.6 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=588.9 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=568 late=8 early=0 dropped=1224 present_p50_ms=64.2 present_p95_ms=275.2 present_max_ms=362.5 held_max_ms=358.9 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1005.9 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=119 engine_late=7 engine_dropped=1674 engine_dropped_agent=0 engine_held_max_ms=362.5 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.1 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=726.4 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=typical_1080p run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=571 late=10 early=0 dropped=1219 present_p50_ms=64.3 present_p95_ms=256.7 present_max_ms=361.9 held_max_ms=380.0 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.4 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1138.8 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=129 engine_late=7 engine_dropped=1664 engine_dropped_agent=0 engine_held_max_ms=379.2 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=856.4 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=653 late=7 early=0 dropped=1140 present_p50_ms=64.5 present_p95_ms=192.5 present_max_ms=278.1 held_max_ms=275.0 receipt_offset_max_ms=1966.7 clock_stall_max_ms=47.1 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1395.6 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=130 engine_late=10 engine_dropped=1660 engine_dropped_agent=0 engine_held_max_ms=278.1 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.3 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1104.8 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=652 late=8 early=0 dropped=1140 present_p50_ms=64.4 present_p95_ms=192.6 present_max_ms=276.8 held_max_ms=274.2 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.9 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1468.3 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=135 engine_late=7 engine_dropped=1658 engine_dropped_agent=0 engine_held_max_ms=276.8 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.3 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1189.0 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=blend_heavy_1080p run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=651 late=9 early=0 dropped=1140 present_p50_ms=64.4 present_p95_ms=193.5 present_max_ms=283.9 held_max_ms=282.9 receipt_offset_max_ms=0.0 clock_stall_max_ms=46.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=1642.2 ledger_peak_mib=63.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=138 engine_late=8 engine_dropped=1654 engine_dropped_agent=0 engine_held_max_ms=283.9 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.8 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1559.8 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1455 late=7 early=0 dropped=338 present_p50_ms=42.2 present_p95_ms=106.1 present_max_ms=235.4 held_max_ms=235.1 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2064.2 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=165 engine_late=6 engine_dropped=1629 engine_dropped_agent=0 engine_held_max_ms=235.4 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1757.6 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1440 late=3 early=0 dropped=357 present_p50_ms=42.3 present_p95_ms=106.5 present_max_ms=234.6 held_max_ms=233.2 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2257.5 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=146 engine_late=3 engine_dropped=1651 engine_dropped_agent=0 engine_held_max_ms=234.6 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.6 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1861.6 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=explainer_16x9 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1463 late=4 early=0 dropped=333 present_p50_ms=42.2 present_p95_ms=106.3 present_max_ms=213.3 held_max_ms=211.3 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2400.3 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=143 engine_late=4 engine_dropped=1653 engine_dropped_agent=0 engine_held_max_ms=213.3 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.8 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=4 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1786.6 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1311 late=7 early=0 dropped=482 present_p50_ms=42.3 present_p95_ms=107.0 present_max_ms=341.8 held_max_ms=340.0 receipt_offset_max_ms=1966.7 clock_stall_max_ms=47.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2118.9 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=137 engine_late=9 engine_dropped=1654 engine_dropped_agent=0 engine_held_max_ms=341.8 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.3 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1909.0 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1325 late=5 early=0 dropped=470 present_p50_ms=42.3 present_p95_ms=106.9 present_max_ms=341.6 held_max_ms=337.2 receipt_offset_max_ms=1966.7 clock_stall_max_ms=46.9 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2296.2 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=150 engine_late=6 engine_dropped=1644 engine_dropped_agent=0 engine_held_max_ms=341.6 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=1950.5 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=reel_9x16 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=1333 late=7 early=0 dropped=460 present_p50_ms=42.4 present_p95_ms=107.0 present_max_ms=321.0 held_max_ms=318.2 receipt_offset_max_ms=1966.7 clock_stall_max_ms=47.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2365.8 ledger_peak_mib=68.4 table_live_kib=128 passes=false engine_due=1800 engine_on_time=163 engine_late=7 engine_dropped=1630 engine_dropped_agent=0 engine_held_max_ms=321.0 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=24.6 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2144.5 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=972 late=3 early=0 dropped=825 present_p50_ms=42.9 present_p95_ms=170.9 present_max_ms=1088.0 held_max_ms=1085.8 receipt_offset_max_ms=1966.7 clock_stall_max_ms=48.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2697.1 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=130 engine_late=3 engine_dropped=1667 engine_dropped_agent=0 engine_held_max_ms=1088.0 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.2 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2156.9 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=1 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=961 late=8 early=0 dropped=831 present_p50_ms=42.8 present_p95_ms=170.8 present_max_ms=1280.1 held_max_ms=1276.4 receipt_offset_max_ms=1966.7 clock_stall_max_ms=48.3 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2599.2 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=142 engine_late=10 engine_dropped=1648 engine_dropped_agent=0 engine_held_max_ms=1280.1 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2352.1 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=feed_4x5 run=2 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=995 late=7 early=0 dropped=798 present_p50_ms=42.8 present_p95_ms=170.3 present_max_ms=1494.0 held_max_ms=1493.8 receipt_offset_max_ms=1966.7 clock_stall_max_ms=47.2 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2877.9 ledger_peak_mib=99.0 table_live_kib=128 passes=false engine_due=1800 engine_on_time=124 engine_late=5 engine_dropped=1671 engine_dropped_agent=0 engine_held_max_ms=1494.0 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.3 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=3 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2676.2 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=0 valid=true elapsed_s=240.01 missed_callbacks=0 due=7200 on_time=6454 late=18 early=0 dropped=728 present_p50_ms=42.1 present_p95_ms=71.0 present_max_ms=255.9 held_max_ms=255.4 receipt_offset_max_ms=1933.3 clock_stall_max_ms=46.4 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=2832.0 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=616 engine_late=19 engine_dropped=6565 engine_dropped_agent=0 engine_held_max_ms=255.9 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2378.3 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=1 valid=true elapsed_s=240.01 missed_callbacks=0 due=7200 on_time=6469 late=19 early=0 dropped=712 present_p50_ms=42.1 present_p95_ms=66.2 present_max_ms=256.2 held_max_ms=255.5 receipt_offset_max_ms=33.3 clock_stall_max_ms=46.4 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=2424.2 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=639 engine_late=21 engine_dropped=6540 engine_dropped_agent=0 engine_held_max_ms=256.2 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=22.4 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=1 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2378.3 threads=44
+PF1 play lane=LL adapter=llvmpipe (LLVM 22.1.8, 256 bits) output=simulated workload=talk_recut run=2 valid=true elapsed_s=240.03 missed_callbacks=0 due=7200 on_time=6454 late=12 early=0 dropped=734 present_p50_ms=42.1 present_p95_ms=67.3 present_max_ms=235.5 held_max_ms=235.4 receipt_offset_max_ms=0.0 clock_stall_max_ms=60.0 underrun_frames=0 post_end_underrun_frames=0 peak_rss_mib=2692.4 ledger_peak_mib=42.2 table_live_kib=128 passes=false engine_due=7200 engine_on_time=614 engine_late=15 engine_dropped=6571 engine_dropped_agent=0 engine_held_max_ms=235.5 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=42.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=0 engine_sync_decoders=1 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2410.1 threads=44
+PF1 control=Slowdown lane=LL workload=typical_1080p metric=G1 fails=true valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=138 late=30 early=0 dropped=1632 present_p50_ms=393.4 present_p95_ms=983.1 present_max_ms=1534.3 held_max_ms=1530.0 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.6 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2779.7 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=130 engine_late=26 engine_dropped=1644 engine_dropped_agent=0 engine_held_max_ms=1534.3 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2501.5 threads=44
+PF1 control=Freeze lane=LL workload=typical_1080p metric=G14 fails=true valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=569 late=11 early=0 dropped=1220 present_p50_ms=64.2 present_p95_ms=253.6 present_max_ms=1202.3 held_max_ms=1201.1 receipt_offset_max_ms=0.0 clock_stall_max_ms=47.7 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2699.3 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=138 engine_late=10 engine_dropped=1652 engine_dropped_agent=0 engine_held_max_ms=1202.3 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.2 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2398.8 threads=44
+PF1 control=ClockFreeze lane=LL workload=typical_1080p metric=G16 fails=true valid=true elapsed_s=61.02 missed_callbacks=0 due=1800 on_time=575 late=7 early=0 dropped=1218 present_p50_ms=64.3 present_p95_ms=258.3 present_max_ms=1092.2 held_max_ms=1090.9 receipt_offset_max_ms=0.0 clock_stall_max_ms=1050.0 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=2691.9 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=124 engine_late=8 engine_dropped=1668 engine_dropped_agent=0 engine_held_max_ms=1092.1 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=1027.9 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2354.9 threads=44
+PF1 control=Stall lane=LL workload=typical_1080p metric=underrun_frames fails=true valid=true elapsed_s=61.02 missed_callbacks=0 due=1800 on_time=571 late=14 early=0 dropped=1215 present_p50_ms=64.2 present_p95_ms=258.6 present_max_ms=1067.4 held_max_ms=1065.4 receipt_offset_max_ms=0.0 clock_stall_max_ms=1045.0 underrun_frames=48128 post_end_underrun_frames=512 peak_rss_mib=2571.6 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=142 engine_late=13 engine_dropped=1645 engine_dropped_agent=0 engine_held_max_ms=1067.4 engine_av_offset_max_ms=966.7 engine_clock_stall_max_ms=1024.0 engine_underrun_events=47 engine_underrun_frames=48128 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=2358.9 threads=44
+# BEGIN P-play LH 2026-09-27 21:19:37 EDT load: 6.26 5.10 5.33
+test pf1_harness::pf1_play_baseline ... PF1 play lane=LH adapter=NVIDIA GeForce RTX 3090 output=simulated workload=typical_1080p run=0 valid=true elapsed_s=60.02 missed_callbacks=0 due=1800 on_time=589 late=8 early=0 dropped=1203 present_p50_ms=64.2 present_p95_ms=251.9 present_max_ms=341.8 held_max_ms=341.1 receipt_offset_max_ms=0.0 clock_stall_max_ms=45.5 underrun_frames=0 post_end_underrun_frames=512 peak_rss_mib=912.7 ledger_peak_mib=56.3 table_live_kib=128 passes=false engine_due=1800 engine_on_time=136 engine_late=10 engine_dropped=1654 engine_dropped_agent=0 engine_held_max_ms=341.8 engine_av_offset_max_ms=33.3 engine_clock_stall_max_ms=23.0 engine_underrun_events=0 engine_underrun_frames=0 engine_post_end_underrun_frames=512 engine_sync_decoders=2 engine_table_live_kib=128 engine_stale_errors=0 consumer_rejected=0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=582.8 threads=7
 ```
