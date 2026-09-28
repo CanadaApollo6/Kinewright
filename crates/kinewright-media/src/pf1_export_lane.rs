@@ -5,6 +5,9 @@
 //! full programme is opt-in (`PF1_EXPORT_CLIPS=360`). Media generation is
 //! excluded; every result line starts with `PF1 export`. The file is
 //! self-contained so the same lane applies unchanged to the S0 commit.
+//! Each run records its file's SHA-256 (review B S1), and every run of one
+//! build must write the same bytes, so the S0 and candidate hashes compare
+//! the exports themselves, not their lengths.
 
 use std::time::Instant;
 
@@ -41,7 +44,7 @@ fn pf1_export_lane() {
         cancellation: ExportCancellation::default(),
     };
     let directory = TempDirectory::new("pf1-export-lane");
-    let mut walls = Vec::new();
+    let (mut walls, mut hashes) = (Vec::new(), Vec::new());
     for run in 0..runs {
         let gpu = GpuContext::headless(!hardware).expect("an adapter");
         let out = directory.path(&format!("export-{run}.mp4"));
@@ -51,16 +54,28 @@ fn pf1_export_lane() {
             .expect("the lane exports");
         let wall = started.elapsed().as_secs_f64() * 1e3;
         let bytes = std::fs::metadata(&out).map_or(0, |meta| meta.len());
+        let sha256 = crate::sha256::sha256_file(&out).expect("the export hashes");
         println!(
-            "PF1 export lane={lane} workload=typical_1080p frames={frames} run={run} wall_ms={wall:.1} bytes={bytes}"
+            "PF1 export lane={lane} workload=typical_1080p frames={frames} run={run} wall_ms={wall:.1} bytes={bytes} sha256={sha256}"
         );
         walls.push(wall);
+        hashes.push(sha256);
     }
+    hashes.dedup();
+    assert_eq!(
+        hashes.len(),
+        1,
+        "every run writes the same bytes: {hashes:?}"
+    );
     walls.sort_by(f64::total_cmp);
     println!(
         "PF1 export lane={lane} workload=typical_1080p frames={frames} runs={runs} median_ms={:.1} min_ms={:.1} max_ms={:.1}",
         walls[walls.len() / 2],
         walls[0],
         walls[walls.len() - 1]
+    );
+    println!(
+        "PF1 export lane={lane} workload=typical_1080p frames={frames} sha256={}",
+        hashes[0]
     );
 }
