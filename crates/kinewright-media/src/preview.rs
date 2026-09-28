@@ -304,8 +304,9 @@ pub(crate) struct Preview {
     held: Option<Held>,
     /// R-4 fairness: one agent job after each transport attempt.
     agent_turn: bool,
-    /// Review B: the newest frame already counted in `dropped_agent`.
-    agent_dropped_through: i64,
+    /// Review B: the newest due frame (epoch, frame) already counted in
+    /// `dropped_agent`.
+    agent_dropped_through: Option<(u64, i64)>,
     #[cfg(test)]
     pub(crate) faults: Arc<crate::engine::Faults>,
 }
@@ -331,7 +332,7 @@ impl Preview {
             parked: None,
             held: None,
             agent_turn: false,
-            agent_dropped_through: i64::MIN,
+            agent_dropped_through: None,
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -343,7 +344,7 @@ impl Preview {
     pub(crate) fn reset_cursor(&mut self) {
         (self.playback_version, self.parked, self.held) = (None, None, None);
         (self.next_at, self.agent_turn) = (0, false);
-        self.agent_dropped_through = i64::MIN;
+        self.agent_dropped_through = None;
     }
 
     pub(crate) fn run(mut self) {
@@ -357,11 +358,13 @@ impl Preview {
     pub(crate) fn execute(&mut self, work: Work) {
         match work {
             Work::Agent(job) => {
-                let playing = self.playback_end();
-                let before = self.clock.position().0;
+                let playing = self.playback_running();
+                if playing {
+                    self.lane.counters().agent_started();
+                }
                 self.run_agent(job);
-                if let Some(end) = playing {
-                    self.count_displaced(before, self.clock.position().0, end);
+                if playing && let Some(newest) = self.lane.counters().agent_finished() {
+                    self.agent_dropped_through = self.agent_dropped_through.max(Some(newest));
                 }
                 self.agent_turn = false;
             }
@@ -376,26 +379,18 @@ impl Preview {
         }
     }
 
-    /// The programme end of the runnable playback job, if one is running.
-    fn playback_end(&self) -> Option<i64> {
+    /// A runnable playback job: an agent job run now displaces its due
+    /// frames. Re-review B D3: those counted are the due frames R-5
+    /// registers in that playback's epoch while the job runs
+    /// (`Counters::agent_started`), each once in `dropped_agent` (a subset
+    /// of R-5's dropped frames); a seek's jump, and frames before an
+    /// explicit `play` cleared the counters, are not.
+    fn playback_running(&self) -> bool {
         let state = self.lane.lock();
-        let job = state.transport.as_ref()?;
         let runnable = self.parked != Some(state.version);
-        let playback = matches!(job.kind, JobKind::Playback { .. });
-        (runnable && playback).then(|| job.scene.document.duration.0)
-    }
-
-    /// Review B: the due frames the clock passed while an agent job ran,
-    /// `(before, after]` short of the end, displaced by it: each is counted
-    /// once in `dropped_agent` (a subset of R-5's dropped frames).
-    fn count_displaced(&mut self, before: i64, after: i64, end: i64) {
-        let from = before.max(self.agent_dropped_through);
-        let through = after.min(end - 1);
-        if through > from {
-            let displaced = u64::try_from(through - from).unwrap_or(0);
-            self.lane.counters().stats.dropped_agent += displaced;
-            self.agent_dropped_through = through;
-        }
+        runnable
+            && (state.transport.as_ref())
+                .is_some_and(|job| matches!(job.kind, JobKind::Playback { .. }))
     }
 
     /// The next piece of work, waiting for one if `wait`; `None` once the
@@ -538,10 +533,10 @@ impl Preview {
         match attempt {
             Attempt::Published => self.publish(held.frame),
             Attempt::Dropped { agent: true } => {
-                let at = held.frame.at.0;
-                if at > self.agent_dropped_through {
+                let key = Some((held.frame.stamp.epoch, held.frame.at.0));
+                if key > self.agent_dropped_through {
                     self.lane.counters().stats.dropped_agent += 1;
-                    self.agent_dropped_through = at;
+                    self.agent_dropped_through = key;
                 }
             }
             #[cfg(test)]
@@ -561,7 +556,6 @@ impl Preview {
         if self.playback_version != Some(version) {
             self.playback_version = Some(version);
             self.next_at = from.0;
-            self.agent_dropped_through = i64::MIN;
         }
         let frame_ms = frame_ms(document.fps);
         let lead = lead_frames(self.render_ewma_ms, frame_ms);
@@ -952,42 +946,90 @@ pub(crate) mod tests {
         );
     }
 
-    /// Review B: the due frames the clock passes while an agent job renders
-    /// are counted in `dropped_agent`, each once; the held frame the next
-    /// attempt then finds expired is not counted again.
+    /// Review B, re-review B D3: the due frames R-5 registers in the
+    /// playback's epoch while an agent job renders are counted in
+    /// `dropped_agent`, each once; the held frame the next attempt then
+    /// finds expired is not counted again. A seek, a pause or a replay
+    /// during the job charges only the frames the playback passed before
+    /// it (the old count charged the clock's jump: 890 for the seek).
     #[test]
     fn an_agent_job_counts_the_due_frames_it_displaces() {
-        let clock = Arc::new(SharedClock::new());
-        let (mut preview, _frames) = test_preview(Arc::clone(&clock));
-        preview.faults.fake_render.store(true, Ordering::Release);
-        preview.faults.step_hold.store(true, Ordering::Release);
-        let lane = Arc::clone(&preview.lane);
-        let document = Arc::new(title_card((64, 64), 100));
-        clock.set_fps(document.fps);
-        clock.set_frame(TimeCode(10));
-        let playback = JobKind::Playback { from: TimeCode(10) };
-        lane.post(Some(job(&document, playback, stamp(2, 2))));
-        let Some(Work::Playback(job, version)) = preview.next_work(false) else {
-            panic!("the playback attempt");
-        };
-        assert_eq!(preview.run_playback(&job, version), Attempt::Pending);
-        let (agent, _response, _flag) = stats_job();
-        assert!(lane.try_push(agent));
-        let moved = Arc::clone(&clock);
-        let hook = Box::new(move || moved.set_frame(TimeCode(16)));
-        *preview.faults.on_agent.lock().unwrap() = Some(hook);
-        preview.agent_turn = true;
-        let work = preview.next_work(false).expect("the agent job");
-        preview.execute(work);
-        assert_eq!(lane.counters().stats.dropped_agent, 6, "11 through 16");
-        let Some(Work::Playback(job, version)) = preview.next_work(false) else {
-            panic!("the next attempt");
-        };
-        assert_eq!(
-            preview.run_playback(&job, version),
-            Attempt::Dropped { agent: false }
-        );
-        assert_eq!(lane.counters().stats.dropped_agent, 6, "counted once");
+        type During = fn(&Lane, &SharedClock);
+        let cases: [(&str, During, u64); 4] = [
+            (
+                "advance",
+                |lane, clock| {
+                    clock.set_frame(TimeCode(16));
+                    lane.counters().sample(Instant::now(), 16);
+                },
+                6,
+            ),
+            (
+                "seek",
+                |lane, clock| {
+                    lane.counters().sample(Instant::now(), 12);
+                    clock.set_frame(TimeCode(900));
+                    lane.counters().begin(Instant::now(), 900, 33.3, 1_000, 3);
+                    lane.counters().sample(Instant::now(), 905);
+                },
+                2,
+            ),
+            (
+                "pause",
+                |lane, clock| {
+                    clock.set_frame(TimeCode(12));
+                    lane.counters().end(Instant::now(), 12);
+                },
+                2,
+            ),
+            (
+                "replay",
+                |lane, clock| {
+                    lane.counters().sample(Instant::now(), 12);
+                    lane.counters().clear([0; 4]);
+                    clock.set_frame(TimeCode(0));
+                    lane.counters().begin(Instant::now(), 0, 33.3, 1_000, 3);
+                    lane.counters().sample(Instant::now(), 5);
+                },
+                0,
+            ),
+        ];
+        for (case, during, charged) in cases {
+            let clock = Arc::new(SharedClock::new());
+            let (mut preview, _frames) = test_preview(Arc::clone(&clock));
+            preview.faults.fake_render.store(true, Ordering::Release);
+            preview.faults.step_hold.store(true, Ordering::Release);
+            let lane = Arc::clone(&preview.lane);
+            let document = Arc::new(title_card((64, 64), 1_000));
+            clock.set_fps(document.fps);
+            clock.set_frame(TimeCode(10));
+            lane.counters().begin(Instant::now(), 10, 33.3, 1_000, 2);
+            let playback = JobKind::Playback { from: TimeCode(10) };
+            lane.post(Some(job(&document, playback, stamp(2, 2))));
+            let Some(Work::Playback(job, version)) = preview.next_work(false) else {
+                panic!("the playback attempt");
+            };
+            assert_eq!(preview.run_playback(&job, version), Attempt::Pending);
+            let (agent, _response, _flag) = stats_job();
+            assert!(lane.try_push(agent));
+            let (moved, clocked) = (Arc::clone(&lane), Arc::clone(&clock));
+            let hook = Box::new(move || during(&moved, &clocked));
+            *preview.faults.on_agent.lock().unwrap() = Some(hook);
+            preview.agent_turn = true;
+            let work = preview.next_work(false).expect("the agent job");
+            preview.execute(work);
+            assert_eq!(lane.counters().stats.dropped_agent, charged, "{case}");
+            if case == "advance" {
+                let Some(Work::Playback(job, version)) = preview.next_work(false) else {
+                    panic!("the next attempt");
+                };
+                assert_eq!(
+                    preview.run_playback(&job, version),
+                    Attempt::Dropped { agent: false }
+                );
+                assert_eq!(lane.counters().stats.dropped_agent, 6, "counted once");
+            }
+        }
     }
 
     /// H-6 on one thread: queued agent jobs are answered "media worker

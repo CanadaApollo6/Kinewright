@@ -21,18 +21,30 @@ pub(crate) struct DisplayCell {
     pub(crate) stale: bool,
 }
 
-/// A paint of a bound, current image in root epoch `epoch`, at `painted`.
+/// A paint of a bound, current image in root epoch `epoch`, at `painted`;
+/// `expired` if playback's clock had passed the image's frame by then.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PaintMark {
     pub(crate) cell: DisplayCell,
     pub(crate) epoch: u64,
     pub(crate) painted: Instant,
+    pub(crate) expired: bool,
+}
+
+/// What `App::logic` acknowledges: a bound image's paint (R-5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ack {
+    pub(crate) stamp: FrameStamp,
+    pub(crate) at: TimeCode,
+    pub(crate) painted: Instant,
+    pub(crate) expired: bool,
 }
 
 type Shared<T> = Arc<Mutex<Option<T>>>;
 
-/// `Playback::stamp`, read at paint time.
-pub(crate) type Latest = Box<dyn Fn() -> FrameStamp + Send + Sync>;
+/// `Playback::stamp` and, while playing, `Playback::position`: `finalize`'s
+/// eligibility inputs, read again by the marker at paint time.
+pub(crate) type Now = Box<dyn Fn() -> (FrameStamp, Option<TimeCode>) + Send + Sync>;
 
 fn read<T: Copy>(shared: &Shared<T>) -> Option<T> {
     *shared.lock().unwrap_or_else(PoisonError::into_inner)
@@ -156,39 +168,34 @@ impl Presenter {
         read(&self.cell).is_some_and(|cell| cell.stale)
     }
 
-    /// Review A F4: the bound image is `target`, current under `latest` and
-    /// no older than `since`.
-    pub(crate) fn shows(&self, since: FrameStamp, target: TimeCode, latest: FrameStamp) -> bool {
-        read(&self.cell).is_some_and(|cell| {
-            !cell.stale
-                && cell.at == target
-                && cell.stamp.epoch == latest.epoch
-                && cell.stamp.seq >= since.seq
-        })
-    }
-
     /// The marker for this layout pass of root epoch `epoch`: it holds the
     /// cell itself, never a copied stamp, so a later binding in the same pass
     /// is what it marks.
-    pub(crate) fn marker(&self, epoch: u64, latest: Latest) -> PaintMarker {
+    pub(crate) fn marker(&self, epoch: u64, now: Now) -> PaintMarker {
         let (cell, mark) = (Arc::clone(&self.cell), Arc::clone(&self.mark));
         PaintMarker {
             cell,
             mark,
             epoch,
-            latest,
+            now,
         }
     }
 
     /// `App::logic` at root epoch `now`: a mark from an earlier epoch is
     /// acked once per bound image.
-    pub(crate) fn take_ack(&mut self, now: u64) -> Option<(FrameStamp, TimeCode, Instant)> {
+    pub(crate) fn take_ack(&mut self, now: u64) -> Option<Ack> {
         let mark = read(&self.mark).filter(|mark| mark.epoch < now)?;
         write(&self.mark, None);
         let cell = mark.cell;
         (self.acked != Some(cell.frame_id)).then(|| {
             self.acked = Some(cell.frame_id);
-            (cell.stamp, cell.at, mark.painted)
+            let (stamp, at, painted, expired) = (cell.stamp, cell.at, mark.painted, mark.expired);
+            Ack {
+                stamp,
+                at,
+                painted,
+                expired,
+            }
         })
     }
 }
@@ -197,24 +204,29 @@ pub(crate) struct PaintMarker {
     cell: Shared<DisplayCell>,
     mark: Shared<PaintMark>,
     epoch: u64,
-    latest: Latest,
+    now: Now,
 }
 
 impl PaintMarker {
     /// The paint: marks the bound image unless it is stale or a seek issued
-    /// since has made its epoch old.
+    /// since has made its epoch old. R33 (re-review A D1): `finalize`'s last
+    /// check and the binding are two steps, so the clock can pass the image's
+    /// frame between them (or before this paint); the paint then records it
+    /// expired, and R-5 counts it late, never on time.
     pub(crate) fn record(&self) {
-        let latest = (self.latest)();
+        let (latest, playing) = (self.now)();
         if let Some(cell) = read(&self.cell)
             && !cell.stale
             && cell.stamp.epoch >= latest.epoch
         {
+            let expired = playing.is_some_and(|position| position > cell.at);
             write(
                 &self.mark,
                 Some(PaintMark {
                     cell,
                     epoch: self.epoch,
                     painted: Instant::now(),
+                    expired,
                 }),
             );
         }
@@ -243,13 +255,166 @@ impl egui_wgpu::CallbackTrait for PaintMarker {
     }
 }
 
+/// Review A S2: I18 through the real `CallbackTrait::paint`, run by
+/// egui-wgpu's `Renderer` on a headless device (lavapipe by default).
+#[cfg(test)]
+pub(crate) mod paint_support {
+    use eframe::{egui, egui_wgpu};
+
+    use super::{Now, Presenter};
+
+    pub(crate) struct Painted {
+        gpu: kinewright_media::GpuContext,
+        renderer: egui_wgpu::Renderer,
+        view: egui_wgpu::wgpu::TextureView,
+        ctx: egui::Context,
+    }
+
+    /// How a laid-out pass reaches the GPU.
+    #[derive(Clone, Copy)]
+    pub(crate) enum Pass {
+        /// Tessellated, prepared and rendered in a submitted pass.
+        Rendered,
+        /// Prepared, but the pass is never recorded (no surface texture).
+        Discarded,
+        /// eframe skips tessellating and painting an invisible root.
+        Invisible,
+        /// Review A N1: egui's own multipass. The first layout pass adds the
+        /// marker and calls `request_discard`; egui drops its shapes and
+        /// runs a second pass, which adds the marker again iff `again`; the
+        /// output is then rendered.
+        EguiDiscard { again: bool },
+    }
+
+    pub(crate) const SIDE: f32 = 64.0;
+
+    impl Painted {
+        pub(crate) fn new() -> Self {
+            use egui_wgpu::wgpu;
+            let gpu = kinewright_media::GpuContext::headless(true).expect("a headless device");
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let renderer = egui_wgpu::Renderer::new(
+                &gpu.device,
+                format,
+                egui_wgpu::RendererOptions::default(),
+            );
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("i18-target"),
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            Self {
+                gpu,
+                renderer,
+                view,
+                ctx: egui::Context::default(),
+            }
+        }
+
+        /// One root pass: the production marker over `image`, inside a
+        /// viewer clipped to `clip`, its paint-time inputs from `now`,
+        /// then `pass`.
+        pub(crate) fn pass(
+            &mut self,
+            presenter: &Presenter,
+            now: &dyn Fn() -> Now,
+            clip: egui::Rect,
+            image: egui::Rect,
+            pass: Pass,
+        ) {
+            use egui_wgpu::wgpu;
+            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIDE, SIDE));
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let epoch = self.ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+            let mut layouts = 0;
+            let output = self.ctx.run_ui(input, |ui| {
+                layouts += 1;
+                let viewer = ui.painter().with_clip_rect(clip);
+                match pass {
+                    Pass::EguiDiscard { again } => {
+                        if layouts == 1 {
+                            presenter.marker(epoch, now()).add_to(&viewer, image);
+                            ui.ctx().request_discard("i18 multipass");
+                        } else if again {
+                            presenter.marker(epoch, now()).add_to(&viewer, image);
+                        }
+                    }
+                    _ => presenter.marker(epoch, now()).add_to(&viewer, image),
+                }
+            });
+            if let Pass::EguiDiscard { .. } = pass {
+                assert_eq!(layouts, 2, "egui ran the discarded pass again");
+            }
+            if matches!(pass, Pass::Invisible) {
+                return;
+            }
+            let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
+            let descriptor = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [64, 64],
+                pixels_per_point: output.pixels_per_point,
+            };
+            let (device, queue) = (&self.gpu.device, &self.gpu.queue);
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            let mut commands = (self.renderer).update_buffers(
+                device,
+                queue,
+                &mut encoder,
+                &primitives,
+                &descriptor,
+            );
+            if !matches!(pass, Pass::Discarded) {
+                let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("i18"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    ..Default::default()
+                });
+                let mut render_pass = render_pass.forget_lifetime();
+                self.renderer
+                    .render(&mut render_pass, &primitives, &descriptor);
+            }
+            commands.push(encoder.finish());
+            queue.submit(commands);
+        }
+
+        /// The root epoch of the next pass: an ack of every pass so far.
+        pub(crate) fn epoch(&self) -> u64 {
+            self.ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use kinewright_core::FrameTexture;
 
-    use super::*;
+    use super::{
+        paint_support::{Painted, Pass, SIDE},
+        *,
+    };
 
     fn frame(epoch: u64, seq: u64, at: i64) -> PreviewFrame {
         let rgba = Arc::new(vec![0; 4]);
@@ -266,15 +431,16 @@ mod tests {
         }
     }
 
-    /// The engine's latest epoch, as the marker reads it at paint time.
-    fn engine_epoch(epoch: u64) -> (Arc<AtomicU64>, impl Fn() -> Latest) {
+    /// The engine's latest epoch, as the marker reads it at paint time
+    /// (paused: no clock).
+    fn engine_epoch(epoch: u64) -> (Arc<AtomicU64>, impl Fn() -> Now) {
         let shared = Arc::new(AtomicU64::new(epoch));
         let reader = Arc::clone(&shared);
-        let latest = move || -> Latest {
+        let latest = move || -> Now {
             let reader = Arc::clone(&reader);
-            Box::new(move || FrameStamp {
-                epoch: reader.load(Ordering::Acquire),
-                seq: 0,
+            Box::new(move || {
+                let epoch = reader.load(Ordering::Acquire);
+                (FrameStamp { epoch, seq: 0 }, None)
             })
         };
         (shared, latest)
@@ -295,7 +461,7 @@ mod tests {
     }
 
     fn ack(presenter: &mut Presenter, now: u64) -> Option<(FrameStamp, TimeCode)> {
-        presenter.take_ack(now).map(|(stamp, at, _)| (stamp, at))
+        presenter.take_ack(now).map(|ack| (ack.stamp, ack.at))
     }
 
     /// I18 witnesses. A-layout/B-bind: the marker laid out before a binding
@@ -386,135 +552,12 @@ mod tests {
         assert_eq!(bound, Some(TimeCode(11)));
     }
 
-    /// Review A S2: I18 through the real `CallbackTrait::paint`, run by
-    /// egui-wgpu's `Renderer` on a headless device (lavapipe by default).
-    struct Painted {
-        gpu: kinewright_media::GpuContext,
-        renderer: egui_wgpu::Renderer,
-        view: egui_wgpu::wgpu::TextureView,
-        ctx: egui::Context,
-    }
-
-    /// How a laid-out pass reaches the GPU.
-    #[derive(Clone, Copy)]
-    enum Pass {
-        /// Tessellated, prepared and rendered in a submitted pass.
-        Rendered,
-        /// Prepared, but the pass is never recorded (no surface texture).
-        Discarded,
-        /// eframe skips tessellating and painting an invisible root.
-        Invisible,
-    }
-
-    const SIDE: f32 = 64.0;
-
-    impl Painted {
-        fn new() -> Self {
-            use egui_wgpu::wgpu;
-            let gpu = kinewright_media::GpuContext::headless(true).expect("a headless device");
-            let format = wgpu::TextureFormat::Rgba8Unorm;
-            let renderer = egui_wgpu::Renderer::new(
-                &gpu.device,
-                format,
-                egui_wgpu::RendererOptions::default(),
-            );
-            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("i18-target"),
-                size: wgpu::Extent3d {
-                    width: 64,
-                    height: 64,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            Self {
-                gpu,
-                renderer,
-                view,
-                ctx: egui::Context::default(),
-            }
-        }
-
-        /// One root pass: the production marker over `image`, inside a
-        /// viewer clipped to `clip`, then `pass`.
-        fn pass(
-            &mut self,
-            presenter: &Presenter,
-            latest: Latest,
-            clip: egui::Rect,
-            image: egui::Rect,
-            pass: Pass,
-        ) {
-            use egui_wgpu::wgpu;
-            let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIDE, SIDE));
-            let input = egui::RawInput {
-                screen_rect: Some(screen),
-                ..Default::default()
-            };
-            let epoch = self.ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-            let mut latest = Some(latest);
-            let output = self.ctx.run_ui(input, |ui| {
-                let viewer = ui.painter().with_clip_rect(clip);
-                if let Some(latest) = latest.take() {
-                    presenter.marker(epoch, latest).add_to(&viewer, image);
-                }
-            });
-            if matches!(pass, Pass::Invisible) {
-                return;
-            }
-            let primitives = self.ctx.tessellate(output.shapes, output.pixels_per_point);
-            let descriptor = egui_wgpu::ScreenDescriptor {
-                size_in_pixels: [64, 64],
-                pixels_per_point: output.pixels_per_point,
-            };
-            let (device, queue) = (&self.gpu.device, &self.gpu.queue);
-            let mut encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-            let mut commands = (self.renderer).update_buffers(
-                device,
-                queue,
-                &mut encoder,
-                &primitives,
-                &descriptor,
-            );
-            if matches!(pass, Pass::Rendered) {
-                let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("i18"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    ..Default::default()
-                });
-                let mut render_pass = render_pass.forget_lifetime();
-                self.renderer
-                    .render(&mut render_pass, &primitives, &descriptor);
-            }
-            commands.push(encoder.finish());
-            queue.submit(commands);
-        }
-
-        fn epoch(&self) -> u64 {
-            self.ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT)
-        }
-    }
-
     /// Review A S2/F3: a rendered pass acks its bound image once, at the
-    /// paint instant; a discarded pass, an invisible root and a viewer
-    /// whose positive clip misses the image (review A F3) ack nothing. A
-    /// no-op `paint` fails the first assertion; the old viewer-rect clip
-    /// fails the clipped-image one.
+    /// paint instant; a discarded pass, an invisible root, a viewer whose
+    /// positive clip misses the image (review A F3) and a layout pass egui
+    /// discarded (`request_discard`, review A N1) ack nothing. A no-op
+    /// `paint` fails the first assertion; the old viewer-rect clip fails
+    /// the clipped-image one.
     #[test]
     fn the_real_paint_callback_acks_only_painted_images() {
         let mut painted = Painted::new();
@@ -530,29 +573,73 @@ mod tests {
 
         bind(&mut presenter, 1);
         let before = Instant::now();
-        painted.pass(&presenter, latest(), whole, image, Pass::Rendered);
-        let (stamp, at, when) = presenter.take_ack(painted.epoch()).expect("painted");
-        assert_eq!((stamp, at), acked(0, 1, 1));
-        assert!(when >= before, "the paint instant");
+        painted.pass(&presenter, &latest, whole, image, Pass::Rendered);
+        let first = presenter.take_ack(painted.epoch()).expect("painted");
+        assert_eq!((first.stamp, first.at), acked(0, 1, 1));
+        assert!(
+            first.painted >= before && !first.expired,
+            "the paint instant"
+        );
         assert_eq!(ack(&mut presenter, painted.epoch() + 1), None, "once");
 
         for (seq, clip, pass, case) in [
             (2, whole, Pass::Discarded, "discarded pass"),
             (3, whole, Pass::Invisible, "invisible root"),
             (4, top_strip, Pass::Rendered, "clipped image"),
+            (5, whole, Pass::EguiDiscard { again: false }, "egui discard"),
         ] {
             bind(&mut presenter, seq);
             assert!(top_strip.is_positive() && !top_strip.intersects(image));
-            painted.pass(&presenter, latest(), clip, image, pass);
-            painted.pass(&presenter, latest(), clip, image, Pass::Invisible);
+            painted.pass(&presenter, &latest, clip, image, pass);
+            painted.pass(&presenter, &latest, clip, image, Pass::Invisible);
             assert_eq!(ack(&mut presenter, painted.epoch()), None, "{case}");
         }
-        painted.pass(&presenter, latest(), whole, image, Pass::Rendered);
+        let again = Pass::EguiDiscard { again: true };
+        painted.pass(&presenter, &latest, whole, image, again);
         assert_eq!(
             ack(&mut presenter, painted.epoch()),
-            Some(acked(0, 1, 4)),
-            "the same image, painted"
+            Some(acked(0, 1, 5)),
+            "the same image, painted by egui's second pass"
         );
+    }
+
+    /// R33 (re-review A D1): the clock passes frame 10 after `finalize`'s
+    /// last check, before the binding is written (the residual window) or
+    /// before the paint. The frame binds, and its paint is acked expired, so
+    /// R-5 counts it late; a paint while it is still current is not.
+    #[test]
+    fn a_frame_expiring_after_its_last_check_is_acked_expired() {
+        let stamp = FrameStamp { epoch: 1, seq: 1 };
+        let clock = Arc::new(std::sync::atomic::AtomicI64::new(10));
+        let checks = std::sync::atomic::AtomicU32::new(0);
+        let now = || {
+            let position = TimeCode(clock.load(Ordering::Acquire));
+            if checks.fetch_add(1, Ordering::AcqRel) == 1 {
+                clock.store(11, Ordering::Release); // after the last check
+            }
+            (stamp, Some(position))
+        };
+        let paint_now = || -> Now {
+            let clock = Arc::clone(&clock);
+            Box::new(move || (stamp, Some(TimeCode(clock.load(Ordering::Acquire)))))
+        };
+        let mut presenter = Presenter::default();
+        presenter.collect(frame(1, 1, 10));
+        let bound = presenter.finalize(now, |_| ()).map(|(frame, ())| frame.at);
+        assert_eq!(bound, Some(TimeCode(10)), "checked current, then expired");
+        presenter.marker(1, paint_now()).record();
+        let ack = presenter.take_ack(2).expect("painted");
+        assert!(ack.expired, "{ack:?}");
+
+        clock.store(20, Ordering::Release);
+        presenter.collect(frame(1, 1, 20));
+        assert!(
+            presenter
+                .finalize(|| (stamp, Some(TimeCode(20))), |_| ())
+                .is_some()
+        );
+        presenter.marker(2, paint_now()).record();
+        assert!(!presenter.take_ack(3).expect("painted").expired, "current");
     }
 
     /// R-2 while playing: only the clock's own frame binds; an expired one

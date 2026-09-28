@@ -2165,9 +2165,18 @@ pub trait Playback: Send + Sync {
         PlaybackStats::default()
     }
     /// PF1 R-5: the frame stamped `stamp` at `at` was painted and submitted
-    /// at `painted`; R-5 judges it by that instant. Called once per bound
-    /// frame, at a later root epoch. Default: ignore.
-    fn ack_presented(&self, _stamp: FrameStamp, _at: TimeCode, _painted: std::time::Instant) {}
+    /// at `painted`, `expired` if playback's clock had already passed `at`
+    /// at that paint; R-5 judges it by that instant (an expired paint is
+    /// late, never on time). Called once per bound frame, at a later root
+    /// epoch. Default: ignore.
+    fn ack_presented(
+        &self,
+        _stamp: FrameStamp,
+        _at: TimeCode,
+        _painted: std::time::Instant,
+        _expired: bool,
+    ) {
+    }
 }
 
 pub trait Analysis: Send + Sync {

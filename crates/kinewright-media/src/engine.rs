@@ -1023,6 +1023,14 @@ enum Call {
     Frame(TimeCode),
 }
 
+/// `Playback::ack_presented` (re-review A D3 / B D1): the ack settles its
+/// due record and reads no clock. The caller-side clock may show a seek the
+/// worker has not applied, so only the worker registers due frames, from
+/// the applied position.
+fn acknowledge(lane: &Lane, stamp: FrameStamp, at: TimeCode, painted: Instant, expired: bool) {
+    (lane.counters()).ack(painted, stamp.epoch, at.0, expired);
+}
+
 impl Playback for FfmpegMediaEngine {
     fn set_document(&self, doc: Arc<Document>) {
         let next_id = doc
@@ -1093,10 +1101,8 @@ impl Playback for FfmpegMediaEngine {
     /// R-5: an ack of the image of `at` in `stamp`'s epoch, painted at
     /// `painted`. Only a due frame of that epoch counts (review A F5: an
     /// image painted before a stop still counts when acked after it).
-    fn ack_presented(&self, stamp: FrameStamp, at: TimeCode, painted: Instant) {
-        let position = self.clock.position().0;
-        let now = Instant::now();
-        (self.lane.counters()).ack(now, painted, stamp.epoch, at.0, position);
+    fn ack_presented(&self, stamp: FrameStamp, at: TimeCode, painted: Instant, expired: bool) {
+        acknowledge(&self.lane, stamp, at, painted, expired);
     }
 
     fn position(&self) -> TimeCode {
@@ -4454,6 +4460,34 @@ mod tests {
         );
     }
 
+    /// R33 (re-review A D3 / B D1): frame 10 of the playing epoch is
+    /// painted, a caller issues `seek(900)`, and the paint is acknowledged
+    /// through the production ack path before the worker applies the seek.
+    /// No frames 11..=900 become due and the offset stays within a frame
+    /// (the old ack sampled the caller-side clock: 890 frames due, 29.7 s
+    /// off); the applied seek then registers only its own first frame.
+    #[test]
+    fn an_ack_racing_an_unapplied_seek_manufactures_no_due_frames() {
+        let fps = Rational::new(30, 1).unwrap();
+        let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(1_000));
+        while worker.clock.position() < TimeCode(10) {
+            audio.advance(CALLBACK_FRAMES);
+            worker.tick();
+        }
+        let at = worker.clock.position();
+        let painted = Instant::now();
+        let due = worker.lane.counters().stats.due_frames;
+        worker.lock_coalesced().seek(TimeCode(900), &worker.clock);
+        acknowledge(&worker.lane, FrameStamp::default(), at, painted, false);
+        let stats = worker.lane.counters().stats;
+        assert_eq!(stats.due_frames, due, "no jump: {stats:?}");
+        assert_eq!(stats.on_time + stats.late, 1, "the paint counts");
+        assert!(stats.max_av_offset_ms < 34.0, "{stats:?}");
+        worker.handle_coalesced_requests();
+        assert!(worker.playing);
+        assert_eq!(worker.lane.counters().stats.due_frames, due + 1);
+    }
+
     /// Review A F5: the starting frame is due at `play`, and a one-frame
     /// programme drained before its first tick, stopped by a pause, still
     /// counts it.
@@ -4482,9 +4516,8 @@ mod tests {
         assert!(play_out(&mut worker, &audio, 400) < 400);
         assert!(!worker.playing);
         assert_eq!(worker.lane.counters().stats.due_frames, 5);
-        let now = std::time::Instant::now();
-        let epoch = FrameStamp::default().epoch;
-        worker.lane.counters().ack(now, painted, epoch, 4, 5);
+        let stamp = FrameStamp::default();
+        acknowledge(&worker.lane, stamp, TimeCode(4), painted, false);
         let stats = worker.lane.counters().stats;
         assert_eq!(stats.on_time + stats.late, 1, "{stats:?}");
         assert_eq!(stats.dropped, 4);

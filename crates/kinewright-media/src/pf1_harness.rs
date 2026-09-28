@@ -509,7 +509,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
             // epoch and the clock's own frame; then the R-5 ack, with the
             // receipt standing for the paint.
             if stamp.epoch == session.engine.stamp().epoch && at.0 == position {
-                session.engine.ack_presented(stamp, at, received);
+                session.engine.ack_presented(stamp, at, received, false);
             } else {
                 rejected += 1;
             }

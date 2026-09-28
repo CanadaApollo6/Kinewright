@@ -1008,8 +1008,7 @@ impl KinewrightApp {
         let program = picture.is_some() && picture == texture.as_ref();
         if let (true, Some(image_rect)) = (program, frame.image_rect) {
             let epoch = ui.ctx().cumulative_frame_nr_for(egui::ViewportId::ROOT);
-            let playback = Arc::clone(&self.playback);
-            let marker = (self.presenter).marker(epoch, Box::new(move || playback.stamp()));
+            let marker = (self.presenter).marker(epoch, self.paint_clock());
             marker.add_to(&ui.painter_at(frame.response.rect), image_rect);
             // Nit: the caption is decided by `finalize_preview`, after every
             // transport call of the pass; it describes the finalized binding.

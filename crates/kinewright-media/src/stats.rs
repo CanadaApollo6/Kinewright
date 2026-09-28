@@ -16,6 +16,60 @@ pub(crate) const DUE_RECORDS: usize = 65_536;
 /// a playback epoch never re-registers a frame, and a later epoch is newer.
 type DueKey = (u64, i64);
 
+/// Re-review A D4 / B D5: the frames of one epoch evicted by
+/// `DUE_RECORDS`. An epoch registers a contiguous run of frames and the
+/// oldest record goes first, so its evicted frames are `frames` less those
+/// already settled: acknowledged before or after eviction.
+struct Evicted {
+    frames: std::ops::Range<i64>,
+    settled: Ranges,
+}
+
+/// Disjoint half-open frame ranges, `start → end` (acks run in order, so
+/// they coalesce).
+#[derive(Default)]
+struct Ranges(BTreeMap<i64, i64>);
+
+impl Ranges {
+    fn contains(&self, frame: i64) -> bool {
+        (self.0.range(..=frame).next_back()).is_some_and(|(_, end)| frame < *end)
+    }
+
+    /// Add `[start, end)`, merging neighbours.
+    fn insert(&mut self, mut start: i64, mut end: i64) {
+        if start >= end {
+            return;
+        }
+        if let Some((&before, &before_end)) = self.0.range(..=start).next_back()
+            && before_end >= start
+        {
+            start = before;
+            end = end.max(before_end);
+        }
+        while let Some((&next, &next_end)) = self.0.range(start..).next()
+            && next <= end
+        {
+            end = end.max(next_end);
+            self.0.remove(&next);
+        }
+        self.0.insert(start, end);
+    }
+
+    fn covers(&self, frames: &std::ops::Range<i64>) -> bool {
+        (self.0.range(..=frames.start).next_back()).is_some_and(|(_, end)| *end >= frames.end)
+    }
+}
+
+/// Re-review B D3: the due frames registered in one playback epoch while
+/// an agent job runs, and the newest of them.
+#[derive(Clone, Copy)]
+struct AgentWindow {
+    epoch: u64,
+    generation: u64,
+    registered: u64,
+    newest: Option<i64>,
+}
+
 /// The counters since the latest explicit `play` (a seek while playing only
 /// re-anchors them).
 pub(crate) struct Counters {
@@ -27,13 +81,17 @@ pub(crate) struct Counters {
     frame_ms: f64,
     /// The applied playback epoch the due frames below are registered in.
     epoch: u64,
+    /// The latest applied position the worker sampled in `epoch`.
+    position: i64,
+    /// Bumped by every `clear`: an agent window from before it charges
+    /// nothing.
+    generation: u64,
     /// Due frames awaiting an ack, with the instant the clock reached them.
     /// They outlive a stop (review A F5): an image painted before it can be
     /// acknowledged after it.
     due: BTreeMap<DueKey, Instant>,
-    /// Records evicted by `DUE_RECORDS` and not acknowledged since, and the
-    /// newest evicted key.
-    evicted: (u64, Option<DueKey>),
+    /// Evicted frames per epoch, each acknowledged at most once.
+    evicted: BTreeMap<u64, Evicted>,
     next_due: i64,
     /// The programme's end (its duration in frames): the clock reaches it,
     /// but no frame there is due.
@@ -41,6 +99,7 @@ pub(crate) struct Counters {
     /// When the image on screen was painted, and its frame; held age runs
     /// from the latest paint of a newer frame.
     shown: (Instant, i64),
+    agent: Option<AgentWindow>,
 }
 
 impl Default for Counters {
@@ -51,11 +110,14 @@ impl Default for Counters {
             playing: false,
             frame_ms: 0.0,
             epoch: 0,
+            position: 0,
+            generation: 0,
             due: BTreeMap::new(),
-            evicted: (0, None),
+            evicted: BTreeMap::new(),
             next_due: 0,
             end_frame: i64::MAX,
             shown: (Instant::now(), -1),
+            agent: None,
         }
     }
 }
@@ -66,7 +128,9 @@ impl Counters {
     pub(crate) fn clear(&mut self, underruns: [u64; 4]) {
         (self.stats, self.underrun_base) = (PlaybackStats::default(), underruns);
         self.due.clear();
-        self.evicted = (0, None);
+        self.evicted.clear();
+        self.generation += 1;
+        self.agent = None;
     }
 
     /// Playback (re)started at `position` of a programme `end_frame` long,
@@ -81,7 +145,7 @@ impl Counters {
         epoch: u64,
     ) {
         (self.playing, self.frame_ms, self.end_frame) = (true, frame_ms, end_frame);
-        (self.epoch, self.next_due) = (epoch, position);
+        (self.epoch, self.next_due, self.position) = (epoch, position, position);
         self.shown = (now, position - 1);
         self.register(now, position);
     }
@@ -98,16 +162,34 @@ impl Counters {
 
     fn register(&mut self, now: Instant, position: i64) {
         while self.next_due <= position && self.next_due < self.end_frame {
-            self.due.insert((self.epoch, self.next_due), now);
+            let frame = self.next_due;
+            self.due.insert((self.epoch, frame), now);
             self.next_due += 1;
             self.stats.due_frames += 1;
-            if self.due.len() > DUE_RECORDS
-                && let Some((key, _)) = self.due.pop_first()
+            if let Some(window) = &mut self.agent
+                && (window.epoch, window.generation) == (self.epoch, self.generation)
             {
-                self.evicted = (self.evicted.0 + 1, Some(key));
+                window.registered += 1;
+                window.newest = Some(frame);
+            }
+            if self.due.len() > DUE_RECORDS
+                && let Some(((epoch, frame), _)) = self.due.pop_first()
+            {
+                self.evict(epoch, frame);
             }
         }
         self.settle();
+    }
+
+    /// Frames of `epoch` between the last evicted one and `frame` left the
+    /// records by an ack: they are settled.
+    fn evict(&mut self, epoch: u64, frame: i64) {
+        let evicted = self.evicted.entry(epoch).or_insert_with(|| Evicted {
+            frames: frame..frame,
+            settled: Ranges::default(),
+        });
+        evicted.settled.insert(evicted.frames.end, frame);
+        evicted.frames.end = frame + 1;
     }
 
     fn settle(&mut self) {
@@ -115,54 +197,78 @@ impl Counters {
         stats.dropped = (stats.due_frames).saturating_sub(stats.on_time + stats.late);
     }
 
-    /// Each worker tick (5 ms) while playing, and each ack: newly due frames
-    /// and held age.
+    /// The worker, each tick (5 ms) while playing, from the applied
+    /// position only (review B F3): newly due frames and held age.
     pub(crate) fn sample(&mut self, now: Instant, position: i64) {
         if !self.playing {
             return;
         }
+        self.position = position;
         self.register(now, position);
         let held = now.saturating_duration_since(self.shown.0).as_secs_f64() * 1e3;
         self.stats.max_held_ms = self.stats.max_held_ms.max(held);
     }
 
     /// The image of frame `at` in playback epoch `epoch`, painted at
-    /// `painted`, acknowledged with the clock at `position` (R-5): counted
-    /// once per due frame, on time if painted within due + 1 frame, else
-    /// late. A frame acknowledged after its record was evicted is late.
-    pub(crate) fn ack(
-        &mut self,
-        now: Instant,
-        painted: Instant,
-        epoch: u64,
-        at: i64,
-        position: i64,
-    ) {
-        let current = self.playing && epoch == self.epoch;
-        if current {
-            self.sample(now, position);
-        }
-        let key = (epoch, at);
-        if let Some(due) = self.due.remove(&key) {
+    /// `painted` (R-5), `expired` if the clock had passed `at` by then.
+    /// Counted once per due frame: on time if painted current within due + 1
+    /// frame, else late; an evicted frame's first ack is late. An ack only
+    /// settles records: it never samples the clock, whose caller-side
+    /// position a seek the worker has not applied may already have moved
+    /// (re-review A D3 / B D1). The offset is against the worker's latest
+    /// applied sample.
+    pub(crate) fn ack(&mut self, painted: Instant, epoch: u64, at: i64, expired: bool) {
+        if let Some(due) = self.due.remove(&(epoch, at)) {
             let waited = painted.saturating_duration_since(due).as_secs_f64() * 1e3;
-            if waited <= self.frame_ms {
+            if !expired && waited <= self.frame_ms {
                 self.stats.on_time += 1;
             } else {
                 self.stats.late += 1;
             }
-        } else if self.evicted.0 > 0 && self.evicted.1.is_some_and(|newest| key <= newest) {
-            self.evicted.0 -= 1;
+        } else if let Some(evicted) = self.evicted.get_mut(&epoch)
+            && evicted.frames.contains(&at)
+            && !evicted.settled.contains(at)
+        {
+            evicted.settled.insert(at, at + 1);
+            if evicted.settled.covers(&evicted.frames) {
+                self.evicted.remove(&epoch);
+            }
             self.stats.late += 1;
         }
         self.settle();
-        if current {
-            let frames = u32::try_from(position.abs_diff(at)).map_or(f64::MAX, f64::from);
+        if self.playing && epoch == self.epoch {
+            let frames = u32::try_from(self.position.abs_diff(at)).map_or(f64::MAX, f64::from);
             let offset = frames * self.frame_ms;
             self.stats.max_av_offset_ms = self.stats.max_av_offset_ms.max(offset);
             if at > self.shown.1 {
+                let held = painted.saturating_duration_since(self.shown.0);
+                let held = held.as_secs_f64() * 1e3;
+                self.stats.max_held_ms = self.stats.max_held_ms.max(held);
                 self.shown = (painted, at);
             }
         }
+    }
+
+    /// Re-review B D3: an agent job starts while playback runs.
+    pub(crate) fn agent_started(&mut self) {
+        self.agent = self.playing.then_some(AgentWindow {
+            epoch: self.epoch,
+            generation: self.generation,
+            registered: 0,
+            newest: None,
+        });
+    }
+
+    /// The job ended: the due frames registered in its playback epoch
+    /// meanwhile are displaced by it, counted in `dropped_agent` (unless
+    /// an explicit `play` cleared the counters). Returns the newest.
+    pub(crate) fn agent_finished(&mut self) -> Option<DueKey> {
+        let window = self.agent.take()?;
+        if window.generation != self.generation {
+            return None;
+        }
+        self.stats.dropped_agent += window.registered;
+        window.newest.map(|frame| (window.epoch, frame))
     }
 
     pub(crate) const fn playing(&self) -> bool {
@@ -184,22 +290,22 @@ mod tests {
 
     /// R-5 with an injected clock: outcomes per due frame, one count per
     /// frame, judged by the paint instant, held age from the latest paint of
-    /// a newer frame.
+    /// a newer frame, the offset against the latest applied sample.
     #[test]
     fn due_frames_are_counted_once_by_their_ack() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut counters = Counters::default();
-        counters.ack(at(0), at(0), 1, 0, 0);
+        counters.ack(at(0), 1, 0, false);
         assert_eq!(counters.stats, PlaybackStats::default(), "never due");
         counters.begin(at(0), 0, 33.0, 5, 1);
         assert_eq!(counters.stats.due_frames, 1, "the first frame is due");
         counters.sample(at(5), 1);
-        counters.ack(at(40), at(30), 1, 0, 1);
-        counters.ack(at(41), at(30), 1, 0, 1);
-        counters.ack(at(100), at(90), 1, 1, 1);
-        counters.sample(at(300), 1);
-        counters.ack(at(301), at(301), 1, 3, 4);
+        counters.ack(at(30), 1, 0, false);
+        counters.ack(at(30), 1, 0, false);
+        counters.ack(at(90), 1, 1, false);
+        counters.sample(at(300), 4);
+        counters.ack(at(301), 1, 3, false);
         let stats = &counters.stats;
         let outcomes = (stats.due_frames, stats.on_time, stats.late, stats.dropped);
         assert_eq!(outcomes, (5, 2, 1, 2));
@@ -210,8 +316,8 @@ mod tests {
     }
 
     /// Review A/B F6: the ack is judged by its paint, not by when the next
-    /// root epoch acknowledges it (100 ms later here), and an ack 2.1 s
-    /// later still counts: late, never dropped.
+    /// root epoch acknowledges it, and an ack 2.1 s later still counts:
+    /// late, never dropped.
     #[test]
     fn a_late_acknowledgment_is_judged_by_its_paint_and_never_expires() {
         let t0 = Instant::now();
@@ -219,15 +325,30 @@ mod tests {
         let mut counters = Counters::default();
         counters.begin(at(0), 0, 33.0, 900, 1);
         counters.sample(at(33), 1);
-        counters.ack(at(130), at(30), 1, 0, 4);
+        counters.ack(at(30), 1, 0, false);
         assert_eq!(counters.stats.on_time, 1, "painted on time, acked late");
         for ms in (0..2_200).step_by(5) {
             counters.sample(at(33 + ms), 1 + i64::try_from(ms).unwrap() / 33);
         }
-        counters.ack(at(2_233), at(2_232), 1, 1, 67);
+        counters.ack(at(2_232), 1, 1, false);
         let stats = counters.stats;
         assert_eq!((stats.on_time, stats.late), (1, 1), "{stats:?}");
         assert_eq!(stats.dropped, stats.due_frames - 2);
+    }
+
+    /// R33 (re-review A D1): an image bound just before its frame expired
+    /// and painted after is judged at its paint: late, never on time, even
+    /// within due + 1 frame.
+    #[test]
+    fn a_frame_expired_at_its_paint_is_late() {
+        let t0 = Instant::now();
+        let mut counters = Counters::default();
+        counters.begin(t0, 10, 33.0, 900, 1);
+        counters.sample(t0, 11);
+        counters.ack(t0 + Duration::from_millis(1), 1, 10, true);
+        counters.ack(t0 + Duration::from_millis(1), 1, 11, false);
+        let stats = counters.stats;
+        assert_eq!((stats.on_time, stats.late), (1, 1), "{stats:?}");
     }
 
     /// Review A F5: the terminal stop registers the last frames, and an ack
@@ -240,26 +361,88 @@ mod tests {
         counters.begin(at(0), 0, 100.0, 3, 7);
         counters.end(at(10), 2);
         assert_eq!(counters.stats.due_frames, 3, "0, 1 and 2 are due");
-        counters.ack(at(20), at(12), 7, 2, 3);
-        counters.ack(at(21), at(12), 7, 1, 3);
+        counters.ack(at(12), 7, 2, false);
+        counters.ack(at(12), 7, 1, false);
         let stats = counters.stats;
         assert_eq!((stats.on_time, stats.dropped), (2, 1), "{stats:?}");
     }
 
-    /// The E11.8 bound: past `DUE_RECORDS` pending records the oldest is
-    /// evicted; its ack is late, and a frame never acknowledged is dropped.
+    /// The E11.8 bound (re-review A D4 / B D5): past `DUE_RECORDS` pending
+    /// records the oldest is evicted, keeping its identity. Its first ack is
+    /// late; a duplicate ack, a key never due and a key of an epoch that
+    /// registered nothing count nothing, so the next evicted frame's own ack
+    /// still counts; a frame acked before its eviction is not counted again.
     #[test]
     fn an_evicted_record_acknowledged_later_is_late() {
         let t0 = Instant::now();
+        let outcomes = |counters: &Counters| (counters.stats.on_time, counters.stats.late);
         let mut counters = Counters::default();
         let over = i64::try_from(DUE_RECORDS).unwrap() + 1;
         counters.begin(t0, 0, 16.0, over + 1, 1);
         counters.sample(t0, over);
-        assert_eq!(counters.pending(), DUE_RECORDS);
-        counters.ack(t0, t0, 1, 0, over);
-        counters.ack(t0, t0, 1, over, over);
+        assert_eq!(counters.pending(), DUE_RECORDS, "frames 0 and 1 evicted");
+        counters.ack(t0, 1, 0, false);
+        assert_eq!(outcomes(&counters), (0, 1));
+        for (epoch, frame, case) in [
+            (1, 0, "a duplicate"),
+            (1, over + 5, "never due: past the clock"),
+            (1, -3, "never due: before the start"),
+            (0, 1, "an epoch that registered nothing"),
+        ] {
+            counters.ack(t0, epoch, frame, false);
+            assert_eq!(outcomes(&counters), (0, 1), "{case}");
+        }
+        counters.ack(t0, 1, 1, false);
+        counters.ack(t0, 1, 1, false);
+        assert_eq!(outcomes(&counters), (0, 2), "frame 1's own ack, once");
+        counters.ack(t0, 1, over, false);
+        assert_eq!(outcomes(&counters), (1, 2));
         let stats = counters.stats;
-        assert_eq!((stats.on_time, stats.late), (1, 1), "{stats:?}");
-        assert_eq!(stats.dropped, stats.due_frames - 2);
+        assert_eq!(stats.dropped, stats.due_frames - 3);
+
+        let mut counters = Counters::default();
+        let records = i64::try_from(DUE_RECORDS).unwrap();
+        counters.begin(t0, 0, 16.0, records + 10, 2);
+        counters.sample(t0, 2);
+        counters.ack(t0, 2, 1, false);
+        counters.sample(t0, records + 3);
+        assert_eq!(counters.pending(), DUE_RECORDS, "0, 2 and 3 evicted");
+        counters.ack(t0, 2, 1, false);
+        assert_eq!(outcomes(&counters), (1, 0), "acked before its eviction");
+        for frame in [2, 0, 3, 3, 2] {
+            counters.ack(t0, 2, frame, false);
+        }
+        assert_eq!(outcomes(&counters), (1, 3), "each evicted frame once");
+        assert!(counters.evicted.is_empty(), "all settled");
+    }
+
+    /// Re-review B D3: an agent job is charged the due frames registered in
+    /// its playback epoch while it runs: not a seek's jump, and nothing once
+    /// an explicit `play` cleared the counters.
+    #[test]
+    fn an_agent_job_is_charged_only_its_epochs_registered_frames() {
+        let t0 = Instant::now();
+        let mut counters = Counters::default();
+        counters.begin(t0, 10, 33.0, 1_000, 1);
+        counters.agent_started();
+        counters.sample(t0, 12);
+        counters.begin(t0, 900, 33.0, 1_000, 2);
+        counters.sample(t0, 905);
+        assert_eq!(counters.agent_finished(), Some((1, 12)));
+        assert_eq!(counters.stats.dropped_agent, 2, "11 and 12, not the seek");
+
+        counters.agent_started();
+        counters.end(t0, 907);
+        assert_eq!(counters.agent_finished(), Some((2, 907)), "a pause");
+        assert_eq!(counters.stats.dropped_agent, 4, "906 and 907");
+
+        counters.begin(t0, 910, 33.0, 1_000, 3);
+        counters.agent_started();
+        counters.sample(t0, 912);
+        counters.clear([0; 4]);
+        counters.begin(t0, 0, 33.0, 1_000, 4);
+        counters.sample(t0, 5);
+        assert_eq!(counters.agent_finished(), None, "a replay");
+        assert_eq!(counters.stats.dropped_agent, 0);
     }
 }

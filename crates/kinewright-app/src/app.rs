@@ -2848,6 +2848,32 @@ impl KinewrightApp {
             .expect("failed to spawn a UI request worker");
     }
 
+    /// PF1 R-5 at root epoch `epoch`: ack the bound image painted in an
+    /// earlier pass. Re-review A D2: a released scrub resumes from its
+    /// target's own paint, acked here: a binding alone (a discarded pass,
+    /// an abandoned surface) resumes nothing.
+    pub(crate) fn acknowledge_paint(&mut self, epoch: u64) {
+        let Some(ack) = self.presenter.take_ack(epoch) else {
+            return;
+        };
+        (self.playback).ack_presented(ack.stamp, ack.at, ack.painted, ack.expired);
+        if let Some((since, target)) = self.pending_resume
+            && ack.at == target
+            && ack.stamp.seq >= since.seq
+            && ack.stamp.epoch == self.playback.stamp().epoch
+        {
+            self.pending_resume = None;
+            self.playback.play(target);
+        }
+    }
+
+    /// `finalize_preview`'s eligibility inputs (the latest stamp and, while
+    /// playing, the clock), for the paint marker to read at paint time.
+    pub(crate) fn paint_clock(&self) -> crate::presenter::Now {
+        let (playback, playing) = (Arc::clone(&self.playback), self.playing);
+        Box::new(move || (playback.stamp(), playing.then(|| playback.position())))
+    }
+
     /// The preview texture is gone: nothing describes or marks it (R-2).
     pub(crate) fn clear_preview(&mut self) {
         self.texture = None;
@@ -2858,10 +2884,12 @@ impl KinewrightApp {
     /// PF1 R-2: the last step of `ui`, after every transport call in the
     /// pass, binds the newest valid candidate and writes the display cell.
     fn finalize_preview(&mut self, ctx: &egui::Context) {
-        let (playback, playing) = (Arc::clone(&self.playback), self.playing);
         // Review A F2: the CPU image is prepared before the final stamp and
-        // clock check; the cell and the texture then bind together.
-        let now = || (playback.stamp(), playing.then(|| playback.position()));
+        // clock check; the cell and the texture then bind together. The
+        // check and the binding cannot be one step against the free-running
+        // audio clock (R33): a frame that expires between them is bound, and
+        // its paint is acked expired (`PaintMarker::record`).
+        let now = self.paint_clock();
         let prepare = |frame: &PreviewFrame| {
             let texture = &frame.texture;
             let size = [texture.width, texture.height]
@@ -3045,9 +3073,7 @@ impl eframe::App for KinewrightApp {
     /// per bound image.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
-        if let Some((stamp, at, painted)) = self.presenter.take_ack(epoch) {
-            self.playback.ack_presented(stamp, at, painted);
-        }
+        self.acknowledge_paint(epoch);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -3055,7 +3081,6 @@ impl eframe::App for KinewrightApp {
         self.update_window_title(ui.ctx());
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
-        self.resume_released_scrub();
         self.keyboard_shortcuts(ui.ctx());
         self.import_dropped_files(ui.ctx());
         let outcome = self.projects.first_mut().map(|project| {
@@ -5809,18 +5834,33 @@ pub(crate) mod in1_tests {
         }
     }
 
-    /// Review A F4: a scrub released at the last frame while playing shows
-    /// the release target before playback resumes. The old release issued
-    /// `seek` then `play` at once, so the seek's image was never current and
-    /// playback, starting one frame ahead, rendered nothing at the end.
-    /// Another transport call while waiting cancels the resume.
+    /// Review A F4, re-review A D2: a scrub released at the last frame
+    /// (duration − 1) while playing resumes only from its target's own
+    /// paint, acked at a later root epoch: not from an older epoch's image,
+    /// a neighbour's paint, or a binding whose pass egui-wgpu never rendered
+    /// (a discarded pass, egui's `request_discard`, an invisible root). The
+    /// old resume played once the target was bound. Playback then runs to
+    /// EOS and nothing resumes again; another transport call while waiting
+    /// cancels the resume.
     #[test]
-    fn a_released_scrub_resumes_only_once_its_target_is_shown() {
+    fn a_released_scrub_resumes_only_once_its_target_is_painted() {
+        use crate::presenter::paint_support::{Painted, Pass, SIDE};
+        let (duration, last) = (30, 29);
         let (mut app, _engine) = in1_harness(Document::default());
+        let ctx = egui::Context::default();
+        app.poll_background(&ctx); // the session's opening events
+        // Only the transport reads it: the recorder renders nothing.
+        Arc::make_mut(&mut app.focused_mut().document).duration = TimeCode(duration);
         let recorder = Arc::new(RecordingPlayback::default());
         app.playback = recorder.clone();
-        let ctx = egui::Context::default();
-        let last = 29;
+        let (events, media_events) = crossbeam_channel::unbounded();
+        app.media_events = media_events;
+        let mut painted = Painted::new();
+        let whole = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIDE, SIDE));
+        let mut paint = |app: &mut KinewrightApp, pass: Pass| {
+            painted.pass(&app.presenter, &|| app.paint_clock(), whole, whole, pass);
+            app.acknowledge_paint(painted.epoch());
+        };
         let before = recorder.stamp();
         app.resume_after_scrub = true; // the drag paused playback
         app.release_scrub(TimeCode(last));
@@ -5829,16 +5869,40 @@ pub(crate) mod in1_tests {
         for early in [preview_frame(before, last), preview_frame(since, last - 1)] {
             app.presenter.collect(early);
             app.finalize_preview(&ctx);
-            app.resume_released_scrub();
+            paint(&mut app, Pass::Rendered);
             assert_eq!(recorder.calls(), [("seek", last)], "not before the target");
         }
         app.presenter.collect(preview_frame(since, last));
         app.finalize_preview(&ctx);
-        assert!(app.presenter.shows(since, TimeCode(last), since), "bound");
-        app.resume_released_scrub();
+        for pass in [
+            Pass::Discarded,
+            Pass::EguiDiscard { again: false },
+            Pass::Invisible,
+        ] {
+            paint(&mut app, pass);
+            assert_eq!(recorder.calls(), [("seek", last)], "bound, never painted");
+        }
+        paint(&mut app, Pass::Rendered);
         assert_eq!(recorder.calls(), [("seek", last), ("play", last)]);
-        app.resume_released_scrub();
+        paint(&mut app, Pass::Rendered);
         assert_eq!(recorder.calls().len(), 2, "resumed once");
+
+        // Terminal playback: the last frame plays, then EOS.
+        for event in [
+            MediaEvent::PlaybackStateChanged(PlaybackState::Playing),
+            MediaEvent::Position(TimeCode(last)),
+            MediaEvent::PlaybackStateChanged(PlaybackState::Paused),
+            MediaEvent::Position(TimeCode(duration)),
+        ] {
+            events.send(event).unwrap();
+        }
+        app.poll_background(&ctx);
+        assert!(!app.playing && app.pending_resume.is_none());
+        assert_eq!(app.focused().position, TimeCode(duration));
+        app.presenter.collect(preview_frame(recorder.stamp(), last));
+        app.finalize_preview(&ctx);
+        paint(&mut app, Pass::Rendered);
+        assert_eq!(recorder.calls().len(), 2, "EOS resumes nothing");
 
         app.resume_after_scrub = true;
         app.release_scrub(TimeCode(3));
@@ -5846,7 +5910,7 @@ pub(crate) mod in1_tests {
         let now = recorder.stamp();
         app.presenter.collect(preview_frame(now, 3));
         app.finalize_preview(&ctx);
-        app.resume_released_scrub();
+        paint(&mut app, Pass::Rendered);
         assert!(
             recorder
                 .calls()
