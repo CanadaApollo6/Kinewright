@@ -439,6 +439,43 @@ not physically presented (unobservable here). Per due frame: *on time* if acked
 within [due, due + 1 frame + 1 epoch], *late* if later, *dropped* if never. Held age is the time since the last ack of a newer frame,
 sampled every 5 ms (harness) or at each `App::logic` (app).
 
+*Amendment R34 (single-writer accounting; re-review 2 of S2a, D1–D4).*
+1. *One writer.* The worker is the only writer of due-frame outcomes. It
+   registers due frames only from its own applied transport: the position
+   of the samples its audio callback consumed (never the shared clock,
+   which a caller's `seek`/`play`/`set_document` and the worker's own
+   transitions write). It registers at every tick (5 ms) and at each of its
+   clock writes: the terminal stop through the last frame; a pause, a new
+   document, a playing seek and a `play` first end the outgoing epoch
+   through the position its runtime reached.
+2. *An ack only queues.* `ack_presented` pushes (epoch, frame, paint
+   instant, expired) onto a bounded queue (256) under the counters' leaf
+   lock, O(1), never behind a render. It samples no clock and registers
+   nothing. A full queue drops its oldest and counts `acks_overflowed`;
+   the UI never blocks.
+3. *Settlement.* The worker drains the queue every tick and at every
+   transport change. An ack settles its due record: on time if painted
+   current within due + 1 frame, else late. An ack ahead of the
+   registrations in the open epoch is held until a registration reaches
+   its frame or the epoch closes. An ack that matches nothing (a duplicate,
+   a frame never due, a closed epoch, history past the caps) is dropped
+   and counted in `acks_unmatched`. The A/V offset is the whole frames the
+   paint trailed its frame's due instant (at least one if expired at
+   paint).
+4. *Agent attribution.* A due frame the worker registers in an agent job's
+   playback epoch while the job runs, past the newest frame the preview
+   had published before it, is charged to `dropped_agent`; a later paint of
+   it settles it and removes the charge. `dropped_agent` is therefore the
+   job-window frames never painted.
+5. *Hard caps.* Due records 65,536 (the oldest is evicted, keeping its
+   identity); evicted epochs 8; settled ranges per evicted epoch 64 (the
+   two oldest merge); the ack queue 256. History past a cap stays in the
+   aggregate counters. The approximation: a forgotten epoch's evicted
+   frames, and the frames inside a merged gap, stay dropped even if acked
+   later (the ack is unmatched); an evicted frame charged to an agent job
+   stays charged; a due instant is the registering tick's, up to 5 ms
+   after the frame became current.
+
 ## 8 Seek and scrub
 
 **S-1 [S2a] Coalescing.** The paused slot keeps the newest stamp. At most one
