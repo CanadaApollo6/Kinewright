@@ -291,6 +291,11 @@ pub(crate) struct Lane {
     /// I10: preview threads an engine started.
     #[cfg(test)]
     pub(crate) previews: std::sync::atomic::AtomicUsize,
+    /// Review A F3's barrier: called by a permit waiter each time it wakes,
+    /// with `Permits` unlocked.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub(crate) woke: Mutex<Option<Arc<dyn Fn(u64) + Send + Sync>>>,
     /// H-5: the `Permits` monitor, a leaf never taken with `state` (H-4).
     permits: Mutex<PermitBook>,
     permits_cv: Condvar,
@@ -337,6 +342,8 @@ impl Lane {
             cancelled: std::sync::atomic::AtomicUsize::default(),
             #[cfg(test)]
             previews: std::sync::atomic::AtomicUsize::default(),
+            #[cfg(test)]
+            woke: Mutex::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
             permits_cv: Condvar::new(),
             counters: Mutex::default(),
@@ -370,11 +377,22 @@ impl Lane {
                         .permits_cv
                         .wait(book)
                         .unwrap_or_else(PoisonError::into_inner);
+                    #[cfg(test)]
+                    {
+                        let hook = self.woke.lock().expect("woke").clone();
+                        if let Some(hook) = hook {
+                            drop(book);
+                            hook(id);
+                            book = self.book();
+                        }
+                    }
                 }
             }
         };
         drop(book);
-        // The next head may be granted from what is left.
+        // The next head may be granted from what is left (M58: a waiter
+        // that woke before this grant and slept again has no other wake;
+        // `a_grant_wakes_the_next_ticket`).
         self.permits_cv.notify_all();
         granted
     }
@@ -2202,6 +2220,51 @@ pub(crate) mod tests {
         let rings = lane.lock().readers.ring_bytes();
         // Source 0 at 0 and 14 (two layers), source 1 at 7.
         assert_eq!(rings.0, 3, "retirement keeps the frames");
+    }
+
+    /// Review A F3 (M58), on the real condvar: at P = 3, A holds every
+    /// permit; B then C queue for one each. A exits and notifies; C wakes
+    /// first, sees B at the head and sleeps again; only then does B wake and
+    /// take one. B's grant must wake C: two permits are free, and nothing
+    /// else notifies `Permits`.
+    #[test]
+    fn a_grant_wakes_the_next_ticket() {
+        let lane = Arc::new(Lane::with_parallelism(3));
+        lane.permits_change(|book| {
+            book.enqueue(0, 3);
+            assert_eq!(book.poll(0), Poll::Granted(3));
+        });
+        let polls = |lane: &Lane, id| lane.book().polls.get(&id).copied().unwrap_or(0);
+        let until = |what: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !what() {
+                assert!(Instant::now() < deadline, "the barrier was never reached");
+                thread::yield_now();
+            }
+        };
+        let weak = Arc::downgrade(&lane);
+        let barrier: Arc<dyn Fn(u64) + Send + Sync> = Arc::new(move |id| {
+            // B waits, unlocked, until C has woken and polled again.
+            if let Some(lane) = weak.upgrade().filter(|_| id == 1) {
+                until(&|| polls(&lane, 2) >= 2);
+            }
+        });
+        *lane.woke.lock().expect("woke") = Some(barrier);
+        let acquire = |id| {
+            let (lane, (granted, grant)) = (Arc::clone(&lane), bounded(1));
+            thread::spawn(move || granted.send(lane.acquire(id, 1)));
+            grant
+        };
+        let b = acquire(1);
+        until(&|| polls(&lane, 1) >= 1);
+        let c = acquire(2);
+        until(&|| polls(&lane, 2) >= 1);
+        lane.permits_change(|book| book.forget(0));
+        assert_eq!(b.recv_timeout(Duration::from_secs(60)), Ok(Some(1)));
+        let granted = c.recv_timeout(Duration::from_secs(10));
+        lane.permits_change(|book| book.shutdown = true);
+        assert_eq!(granted, Ok(Some(1)), "C slept through B's grant (M58)");
+        assert!(polls(&lane, 2) >= 3, "C woke first, then at B's grant");
     }
 
     /// G13 / I11 (S2b-2): four active sources at P = 20 hold 5 × 4 frame

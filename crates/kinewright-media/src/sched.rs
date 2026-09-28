@@ -941,6 +941,9 @@ pub(crate) struct PermitBook {
     /// precede the ticket) or exits.
     cancelled: BTreeSet<u64>,
     pub(crate) shutdown: bool,
+    /// Polls per reader (review A F3's witness).
+    #[cfg(test)]
+    pub(crate) polls: BTreeMap<u64, usize>,
 }
 
 /// A queued request's outcome.
@@ -959,6 +962,8 @@ impl PermitBook {
             tickets: VecDeque::new(),
             cancelled: BTreeSet::new(),
             shutdown: false,
+            #[cfg(test)]
+            polls: BTreeMap::new(),
         }
     }
 
@@ -977,6 +982,10 @@ impl PermitBook {
     /// Only the head is granted, min(want, free) once one is free; a
     /// cancelled or stopped request leaves the queue.
     pub(crate) fn poll(&mut self, id: u64) -> Poll {
+        #[cfg(test)]
+        {
+            *self.polls.entry(id).or_default() += 1;
+        }
         if self.shutdown || self.cancelled.remove(&id) {
             self.tickets.retain(|(ticket, _)| *ticket != id);
             return Poll::Cancelled;
