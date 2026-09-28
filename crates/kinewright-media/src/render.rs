@@ -198,12 +198,12 @@ impl VideoSourceKey {
 /// Generated content cached in working space: titles and (MO2 R3) solids,
 /// both through `WorkingFrame::from_display_frame`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Generated {
+pub(crate) enum Generated {
     Title(Title),
     Solid([u8; 3]),
 }
 
-type TitleCacheKey = (ClipId, (u32, u32), Generated);
+pub(crate) type TitleCacheKey = (ClipId, (u32, u32), Generated);
 
 /// PF1 S2b-1: the readers' frames for one render, by (source, time).
 pub(crate) type SuppliedFrames = HashMap<(VideoSourceKey, i64), Result<WorkingFrame, MediaError>>;
@@ -321,6 +321,19 @@ pub(crate) struct ReaderDemand {
     /// The rasters G counts (review B S2: only those not resident are
     /// reserved).
     generated_keys: Vec<TitleCacheKey>,
+}
+
+impl ReaderDemand {
+    /// K-2 (review B S2, R38 D3): the bytes of the job's generated rasters
+    /// that `charged` does not hold. A raster that another path cached (a
+    /// thumbnail, K-3's synchronous render) but nothing charges counts as
+    /// missing: cache membership is not a charge.
+    pub(crate) fn generated_uncharged(&self, charged: &HashSet<TitleCacheKey>) -> usize {
+        (self.generated_keys.iter())
+            .filter(|key| !charged.contains(key))
+            .map(|key| working_bytes(key.1))
+            .fold(0, usize::saturating_add)
+    }
 }
 
 /// K-1 (review B F1): each source's frame size, measured once from the
@@ -768,13 +781,17 @@ impl FrameRenderer {
         self.title_cache_bytes()
     }
 
-    /// K-2 (review B S2): the bytes of `demand`'s generated rasters not
-    /// cached now; those cached are already charged to the preview's titles.
-    pub(crate) fn generated_missing(&self, demand: &ReaderDemand) -> usize {
-        (demand.generated_keys.iter())
-            .filter(|key| !self.title_cache.contains_key(key))
-            .map(|key| working_bytes(key.1))
-            .fold(0, usize::saturating_add)
+    /// R38 D3: each cached generated raster and its bytes.
+    pub(crate) fn title_entries(&self) -> Vec<(TitleCacheKey, usize)> {
+        (self.title_cache.iter())
+            .map(|(key, frame)| (key.clone(), frame.byte_len()))
+            .collect()
+    }
+
+    /// R38 D3: drop these cached rasters (never called under `Sched`).
+    pub(crate) fn drop_titles(&mut self, keys: &HashSet<TitleCacheKey>) {
+        self.title_cache.retain(|key, _| !keys.contains(key));
+        self.title_order.retain(|key| !keys.contains(key));
     }
 
     /// The cached generated rasters' buffers (review B S2's witness).

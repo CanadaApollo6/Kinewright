@@ -340,6 +340,13 @@ impl<K, F> Readers<K, F> {
         self.live = self.live.saturating_sub(bytes);
     }
 
+    /// R38 D3: charge `bytes` of rasters another path already cached, if
+    /// they fit in C beside everything live and no required set is
+    /// draining; `false`: the caller drops them instead.
+    pub(crate) fn adopt(&mut self, bytes: usize) -> bool {
+        !self.draining && self.reserve(bytes, self.budget)
+    }
+
     /// K-1: reserve `bytes` if live stays ≤ `limit`.
     fn reserve(&mut self, bytes: usize, limit: usize) -> bool {
         let fits = self
