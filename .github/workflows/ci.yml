@@ -68,8 +68,8 @@ jobs:
           # for the readelf soname gate on the non-test binary.
           # slow_tests.py runs `cargo test --workspace` (the slow tests are
           # ignored without their feature) and fails unless the tests it
-          # skipped are exactly ci/slow-tests.txt plus the hardware and
-          # on-demand ignores listed in ci/ignored-tests.txt.
+          # skipped are exactly ci/slow-tests.txt plus the ignores that
+          # ci/ignored-tests.txt lists for this OS, each observed as ignored.
           python scripts/slow_tests.py fast
           if ($LASTEXITCODE -ne 0) { throw "slow_tests.py fast (cargo test --workspace) exited $LASTEXITCODE" }
           cargo clippy --workspace --all-targets -- -D warnings
@@ -138,7 +138,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Check the slow-test manifest and ignored-test allowlist against the source, and the parser
+      - name: Check the slow-test manifest and ignored-test allowlist format against the source, and the parser
         run: |
           python3 scripts/slow_tests.py lint
           python3 scripts/slow_tests_selftest.py
@@ -157,8 +157,8 @@ jobs:
           readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]' || exit 1
           # slow_tests.py runs `cargo test --workspace` (the slow tests are
           # ignored without their feature) and fails unless the tests it
-          # skipped are exactly ci/slow-tests.txt plus the hardware and
-          # on-demand ignores listed in ci/ignored-tests.txt.
+          # skipped are exactly ci/slow-tests.txt plus the ignores that
+          # ci/ignored-tests.txt lists for this OS, each observed as ignored.
           python3 scripts/slow_tests.py fast || exit 1
           cargo clippy --workspace --all-targets -- -D warnings || exit 1
 

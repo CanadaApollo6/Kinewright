@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 """Slow-tier tooling for CI and local runs (standard library only).
 
-    python3 scripts/slow_tests.py lint          manifest <-> source markers agree
+    python3 scripts/slow_tests.py lint          manifest <-> source markers agree; allowlist
+                                                format (a cheap early check only)
     python3 scripts/slow_tests.py fast          cargo test --workspace, then check the
                                                 manifest was skipped and nothing else
                                                 unexpected (ci/ignored-tests.txt) was
     python3 scripts/slow_tests.py slow          run exactly the manifest, check all
                                                 of it ran and passed
-    python3 scripts/slow_tests.py verify-fast FILE   the check `fast` applies, on a saved log
+    python3 scripts/slow_tests.py verify-fast FILE [--os linux|windows]
+                                                the check `fast` applies, on a saved log
     python3 scripts/slow_tests.py verify-slow FILE   the check `slow` applies, on a saved log
     python3 scripts/slow_tests.py features      print the --features list for the slow tier
 
 The manifest is ci/slow-tests.txt; ci/ignored-tests.txt allowlists the hardware,
-audio-device, live-subscription, manual and on-demand tests that carry a plain
-`#[ignore]`. The fast tier fails on any other skipped test. A slow test carries
+audio-device, live-subscription, manual and on-demand tests, each with the OS it
+applies to (any, linux or windows). The authoritative check is the compiled run's own
+output: on each OS the fast tier must have skipped exactly the manifest plus the
+allowlist entries for that OS, every one observed as ignored under its exact binary
+and test path (doctests too), and nothing else. A stale, fabricated or conditionally
+ignored entry is never observed ignored on every OS it claims, so it fails. A slow
+test carries
 
     #[cfg_attr(not(feature = "slow-tests"), ignore = "slow tier: cargo test --features slow-tests")]
 
@@ -48,7 +55,9 @@ MARKER = re.compile(
 ATTRIBUTE_OR_COMMENT = re.compile(r"\s*(?:#\[[^\]]*\]|//[^\n]*)")
 FN_NAME = re.compile(r"\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?fn\s+(\w+)")
 MACRO_ENTRY = re.compile(r"\s*(\w+)\s*=>")
-RUNNING = re.compile(r"^\s*Running (?:unittests |tests[/\\])?(.*)$")
+# cargo prints `Running unittests src/lib.rs (target/debug/deps/x-<hash>)`; requiring the
+# parenthesised executable keeps unrelated text such as "Running kernel ..." out.
+RUNNING = re.compile(r"^\s*Running (?:unittests |tests[/\\])?(.*\([^)]*\))\s*$")
 # A doctest name contains spaces (`path/lib.rs - item (line 3)`), and a should_panic
 # test prints `name - should panic`; the outcome starts at the first " ... ".
 TEST_LINE = re.compile(r"^test (.+?) \.\.\. (.*)$")
@@ -81,13 +90,14 @@ def read_manifest() -> list[tuple[str, str, str]]:
 
 
 CATEGORIES = ("hardware", "on-demand", "inherited-gap")
+OSES = ("any", "linux", "windows")
 
 
 def read_allowlist() -> list[dict]:
-    """`<binary> <test path> <source file> <category>  # reason` lines of ci/ignored-tests.txt.
+    """`<binary> <test path> <source file> <os> <category>  # reason` lines of ci/ignored-tests.txt.
 
     The test path may contain spaces (a doctest name), so the binary is the first
-    token and the file and category are the last two.
+    token and the file, os and category are the last three.
     """
     entries = []
     for number, raw in enumerate(IGNORED.read_text(encoding="utf-8").splitlines(), 1):
@@ -96,17 +106,18 @@ def read_allowlist() -> list[dict]:
         if not code:
             continue
         binary, _, rest = code.partition(" ")
-        parts = rest.rsplit(None, 2)
-        if not binary or len(parts) != 3:
+        parts = rest.rsplit(None, 3)
+        if not binary or len(parts) != 4:
             sys.exit(
-                f"{IGNORED}:{number}: want '<binary> <test path> <source file> <category>', got {raw!r}"
+                f"{IGNORED}:{number}: want '<binary> <test path> <source file> <os> <category>', got {raw!r}"
             )
         entries.append(
             {
                 "binary": binary,
                 "path": parts[0],
                 "file": parts[1],
-                "category": parts[2],
+                "os": parts[2],
+                "category": parts[3],
                 "reason": reason.strip(),
                 "line": number,
             }
@@ -118,6 +129,19 @@ def read_allowlist() -> list[dict]:
             sys.exit(f"{IGNORED}: duplicate entry {key[0]} {key[1]}")
         seen.add(key)
     return entries
+
+
+def host_os() -> str:
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform.startswith("linux"):
+        return "linux"
+    sys.exit(f"unsupported platform {sys.platform!r}: the allowlist knows only linux and windows")
+
+
+def allowlist_for(os_name: str) -> set[tuple[str, str]]:
+    """(binary, test path) of every entry that must be observed ignored on `os_name`."""
+    return {(e["binary"], e["path"]) for e in read_allowlist() if e["os"] in ("any", os_name)}
 
 
 def read_ignored() -> list[tuple[str, str, str]]:
@@ -169,143 +193,18 @@ def feature_list(entries) -> str:
     return ",".join(sorted({f"{crate_of(f)}/slow-tests" for _, _, f in entries}))
 
 
-def mask_source(text: str) -> str:
-    """`text` with comments blanked and string/char literal contents replaced by `x`.
-
-    Line structure and offsets are kept, so a search on the result finds real code
-    only: an `#[ignore]` inside a comment, a doc string or a string literal is gone.
-    Handles nested block comments, escapes, raw strings and lifetimes.
-    """
-    out = list(text)
-    n = len(text)
-    i = 0
-
-    def blank(start: int, end: int, keep_quotes: bool = False) -> None:
-        for k in range(start, min(end, n)):
-            if out[k] != "\n":
-                out[k] = "x" if keep_quotes else " "
-
-    while i < n:
-        c = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-        if c == "/" and nxt == "/":
-            end = text.find("\n", i)
-            end = n if end < 0 else end
-            blank(i, end)
-            i = end
-        elif c == "/" and nxt == "*":
-            depth, j = 1, i + 2
-            while j < n and depth:
-                if text.startswith("/*", j):
-                    depth += 1
-                    j += 2
-                elif text.startswith("*/", j):
-                    depth -= 1
-                    j += 2
-                else:
-                    j += 1
-            blank(i, j)
-            i = j
-        elif c == "r" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_") or text[i - 1] == "b"):
-            hashes = 0
-            while i + 1 + hashes < n and text[i + 1 + hashes] == "#":
-                hashes += 1
-            if i + 1 + hashes < n and text[i + 1 + hashes] == '"':
-                close = '"' + "#" * hashes
-                end = text.find(close, i + 2 + hashes)
-                end = n if end < 0 else end
-                blank(i + 2 + hashes, end, keep_quotes=True)
-                i = end + len(close)
-            else:
-                i += 1
-        elif c == '"':
-            j = i + 1
-            while j < n and text[j] != '"':
-                j += 2 if text[j] == "\\" else 1
-            blank(i + 1, j, keep_quotes=True)
-            i = j + 1
-        elif c == "'":
-            if nxt == "\\":
-                end = text.find("'", i + 3)
-                end = n if end < 0 else end
-                blank(i + 1, end, keep_quotes=True)
-                i = end + 1
-            elif i + 2 < n and text[i + 2] == "'":
-                blank(i + 1, i + 2, keep_quotes=True)
-                i += 3
-            else:
-                i += 1  # a lifetime or label
-        else:
-            i += 1
-    return "".join(out)
-
-
-QUALIFIERS = re.compile(r'(?:pub(?:\s*\([^)]*\))?|async|unsafe|const|extern(?:\s*"[^"]*")?)\s*$')
-PLAIN_IGNORE = re.compile(r'#\s*\[\s*ignore\s*(?:=\s*"[^"]*"\s*)?\]')
-
-
-def attributes_of_fn(masked: str, name: str) -> list[list[str]]:
-    """For every `fn <name>` in comment-free source: the attributes attached to it."""
-    found = []
-    for match in re.finditer(rf"\bfn\s+{re.escape(name)}\b", masked):
-        head = masked[: match.start()].rstrip()
-        while (qualifier := QUALIFIERS.search(head)) is not None:
-            head = head[: qualifier.start()].rstrip()
-        attributes = []
-        while head.endswith("]"):
-            depth, k = 0, len(head) - 1
-            while k >= 0:
-                depth += {"]": 1, "[": -1}.get(head[k], 0)
-                if depth == 0:
-                    break
-                k -= 1
-            if k < 1 or head[:k].rstrip()[-1:] != "#":
-                break
-            hash_at = head[:k].rstrip().rfind("#")
-            attributes.append(head[hash_at:])
-            head = head[:hash_at].rstrip()
-        found.append(attributes)
-    return found
-
-
-DOC_NAME = re.compile(r"^(?P<file>.+?) - (?P<item>.*?)\s*\(line (?P<line>\d+)\)$")
-FENCE = re.compile(r"^\s*(?:///|//!|\*)?\s*(`{3,}|~{3,})\s*(?P<info>[^`]*)$")
-
-
-def check_doctest(entry: dict) -> str | None:
-    """A problem with a doctest entry, or None if it names a real ignored doctest."""
-    named = DOC_NAME.match(entry["path"])
-    if not named:
-        return "doctest name is not '<file> - <item> (line <n>)'"
-    if Path(named["file"]).as_posix() != Path(entry["file"]).as_posix():
-        return f"doctest names {named['file']}, not {entry['file']}"
-    lines = (ROOT / entry["file"]).read_text(encoding="utf-8").splitlines()
-    number = int(named["line"])
-    if not 1 <= number <= len(lines):
-        return f"line {number} is outside {entry['file']}"
-    line = lines[number - 1]
-    if not re.match(r"^\s*(///|//!)", line):
-        return f"line {number} of {entry['file']} is not a doc comment"
-    fence = FENCE.match(line)
-    if not fence:
-        return f"line {number} of {entry['file']} does not open a code fence"
-    if "ignore" not in re.split(r"[,\s]+", fence["info"].strip()):
-        return f"the fence at line {number} of {entry['file']} is not ignored"
-    if line.lstrip().startswith("///"):
-        # An outer doc comment documents the next item: it must be the named one.
-        following = number
-        while following < len(lines) and re.match(r"^\s*(///|#\[|//)", lines[following]):
-            following += 1
-        segment = re.sub(r"<.*", "", named["item"].rsplit("::", 1)[-1]).strip()
-        if following >= len(lines) or not re.search(rf"\b{re.escape(segment)}\b", lines[following]):
-            return f"the doc comment at line {number} of {entry['file']} does not document {named['item']}"
-    return None
-
-
 def lint_ignored(problems: list[str], slow_keys: set[tuple[str, str]]) -> None:
+    """Cheap early checks on the allowlist's format. Not the authority on its truth.
+
+    Whether an entry is really an ignored test is established by `verify-fast`, on the
+    compiled run's output, on every OS: an entry the run does not report as ignored
+    (a stale name, a conditional ignore, a fabricated doctest) fails there.
+    """
     for entry in read_allowlist():
         binary, path, file = entry["binary"], entry["path"], entry["file"]
         where = f"ci/ignored-tests.txt:{entry['line']}: {binary} {path}"
+        if entry["os"] not in OSES:
+            problems.append(f"{where}: os {entry['os']!r} is not one of {', '.join(OSES)}")
         if entry["category"] not in CATEGORIES:
             problems.append(
                 f"{where}: category {entry['category']!r} is not one of {', '.join(CATEGORIES)}"
@@ -314,23 +213,8 @@ def lint_ignored(problems: list[str], slow_keys: set[tuple[str, str]]) -> None:
             problems.append(f"{where}: an inherited-gap entry needs a one-line reason after '#'")
         if (binary, path) in slow_keys:
             problems.append(f"{where}: also in ci/slow-tests.txt")
-        source = ROOT / file
-        if not source.is_file():
+        if not (ROOT / file).is_file():
             problems.append(f"{where}: {file} does not exist")
-            continue
-        if binary.startswith("doc-tests:"):
-            problem = check_doctest(entry)
-            if problem:
-                problems.append(f"{where}: {problem}")
-            continue
-        name = path.rsplit("::", 1)[-1]
-        candidates = attributes_of_fn(mask_source(source.read_text(encoding="utf-8")), name)
-        if not candidates:
-            problems.append(f"{where}: {file} has no fn {name}")
-        elif not all(any(PLAIN_IGNORE.fullmatch(a) for a in attrs) for attrs in candidates):
-            problems.append(
-                f"{where}: fn {name} in {file} has no unconditional #[ignore] / #[ignore = \"...\"] attribute"
-            )
 
 
 def lint() -> int:
@@ -358,7 +242,7 @@ def lint() -> int:
         return 1
     print(
         f"slow-test manifest and markers agree: {len(entries)} tests, "
-        f"features {feature_list(entries)}; {len(read_ignored())} allowlisted ignores checked"
+        f"features {feature_list(entries)}; {len(read_ignored())} allowlist entries well-formed"
     )
     return 0
 
@@ -373,6 +257,11 @@ def binary_label(running_target: str) -> str:
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 UNPARSABLE = "could not parse cargo test output"
+RUNNING_COUNT = re.compile(r"^running (\d+) tests?$")
+SUMMARY = re.compile(
+    r"^test result: (?:ok|FAILED)\. (\d+) passed; (\d+) failed; (\d+) ignored; "
+    r"(\d+) measured; (\d+) filtered out\b"
+)
 
 
 class UnparsableLog(Exception):
@@ -382,47 +271,102 @@ class UnparsableLog(Exception):
 def parse(log: str) -> list[tuple[str, str, str]]:
     """(binary, test path, outcome) for every `test x ... y` line, after stripping ANSI.
 
-    Raises UnparsableLog when the output has no `Running`/`Doc-tests` header or no test
-    line at all: that is a format problem, and must not read as "every skip is missing".
+    The output is a series of sections, each `Running ...` or `Doc-tests ...`, then
+    `running N tests`, the test lines, and libtest's `test result:` summary. The result
+    is trusted only if every test line sits inside a section and every section's own
+    counts (tests seen, passed, failed, ignored) equal its summary: a lost header, an
+    orphan test line or a dropped line then raises UnparsableLog instead of letting
+    tests be attributed to the wrong binary or silently vanish.
     """
-    binary = None
-    headers = 0
-    rows = []
-    for line in ANSI.sub("", log).splitlines():
+    rows: list[tuple[str, str, str]] = []
+    section = None  # {"binary", "rows", "running"} while a section is open
+    sections = 0
+
+    def fail(number: int, message: str):
+        raise UnparsableLog(f"line {number}: {message}")
+
+    for number, line in enumerate(ANSI.sub("", log).splitlines(), 1):
         running = RUNNING.match(line)
-        if running:
-            binary = binary_label(running.group(1))
-            headers += 1
-            continue
         doc = DOC_TESTS.match(line)
-        if doc:
-            binary = f"doc-tests:{doc.group(1)}"
-            headers += 1
+        if running or doc:
+            if section is not None:
+                fail(number, f"{section['binary']} has no `test result:` summary before the next section")
+            binary = binary_label(running.group(1)) if running else f"doc-tests:{doc.group(1)}"
+            section = {"binary": binary, "rows": [], "running": None}
+            sections += 1
+            continue
+        count = RUNNING_COUNT.match(line)
+        if count:
+            if section is None:
+                fail(number, "`running N tests` outside any section")
+            section["running"] = int(count.group(1))
             continue
         test = TEST_LINE.match(line)
-        if test and binary:
-            rows.append((binary, test.group(1), test.group(2).strip()))
-    if not headers:
+        if test:
+            if section is None:
+                fail(number, f"test result outside any `Running`/`Doc-tests` section: {line.strip()}")
+            section["rows"].append((section["binary"], test.group(1), test.group(2).strip()))
+            continue
+        summary = SUMMARY.match(line)
+        if summary:
+            if section is None:
+                fail(number, "`test result:` summary outside any section")
+            passed, failed, ignored, measured, _filtered = map(int, summary.groups())
+            seen = section["rows"]
+            seen_counts = (
+                sum(1 for _, _, o in seen if o == "ok"),
+                sum(1 for _, _, o in seen if o.startswith("FAILED")),
+                sum(1 for _, _, o in seen if o.startswith("ignored")),
+                sum(1 for _, _, o in seen if o.startswith("bench")),
+            )
+            if seen_counts != (passed, failed, ignored, measured):
+                fail(
+                    number,
+                    f"{section['binary']}: saw {seen_counts[0]} passed, {seen_counts[1]} failed, "
+                    f"{seen_counts[2]} ignored, {seen_counts[3]} measured, "
+                    f"but its summary says {passed}, {failed}, {ignored}, {measured}",
+                )
+            if section["running"] is not None and section["running"] != len(seen):
+                fail(number, f"{section['binary']}: `running {section['running']} tests` but {len(seen)} test lines")
+            rows.extend(seen)
+            section = None
+    if section is not None:
+        raise UnparsableLog(f"{section['binary']} has no `test result:` summary (truncated output?)")
+    if not sections:
         raise UnparsableLog("no `Running` or `Doc-tests` line found")
     if not rows:
-        raise UnparsableLog(f"{headers} binaries started but no `test ... ok|ignored` line found")
+        raise UnparsableLog(f"{sections} sections but no `test ... ok|ignored` line found")
     return rows
 
 
-def verify_fast(log: str) -> int:
+def verify_fast(log: str, os_name: str | None = None) -> int:
+    """The authoritative check of the skipped set, on the compiled run's own output.
+
+    On `os_name` (default: this machine) the run must have skipped exactly the manifest
+    (as slow) plus the allowlist entries that apply to that OS (as plain ignores), each
+    under its exact binary and test path, doctests included. An allowlist entry the run
+    does not report as ignored (stale, misnamed, fabricated, or only conditionally
+    ignored on another OS) fails, as does any skip the two files do not name.
+    """
+    os_name = os_name or host_os()
     try:
         rows = parse(log)
     except UnparsableLog as error:
         return unparsable(error)
     expected = {(b, p) for b, p, _ in read_manifest()}
-    allowed = {(b, p) for b, p, _ in read_ignored()}
+    allowed = allowlist_for(os_name)
     ignored = {(b, p, outcome) for b, p, outcome in rows if outcome.startswith("ignored")}
     skipped = {(b, p) for b, p, outcome in ignored if REASON in outcome}
     others = {(b, p): outcome for b, p, outcome in ignored if REASON not in outcome}
     problems = [f"not skipped by the fast tier: {b} {p}" for b, p in sorted(expected - skipped)]
     problems += [f"skipped as slow but not in the manifest: {b} {p}" for b, p in sorted(skipped - expected)]
     problems += [
-        f"unexpected skip, in neither ci/slow-tests.txt nor ci/ignored-tests.txt: {b} {p} ({outcome})"
+        f"allowlisted but not observed as ignored on {os_name}: {b} {p}"
+        for b, p in sorted(allowed - set(others))
+    ]
+    problems += [
+        f"unexpected skip on {os_name}, not in ci/slow-tests.txt and not in ci/ignored-tests.txt "
+        f"for {os_name}: {b} {p} ({outcome})"
         for (b, p), outcome in sorted(others.items())
         if (b, p) not in allowed
     ]
@@ -431,8 +375,8 @@ def verify_fast(log: str) -> int:
         print("\n".join("  " + p for p in problems))
         return 1
     print(
-        f"fast tier skipped exactly the {len(expected)} manifest tests and "
-        f"{len(others)} allowlisted ignores (ci/ignored-tests.txt), nothing else"
+        f"fast tier on {os_name} skipped exactly the {len(expected)} manifest tests and "
+        f"{len(others)} allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else"
     )
     return 0
 
@@ -510,7 +454,12 @@ def main(argv: list[str]) -> int:
         return 0
     if command in ("verify-fast", "verify-slow"):
         log = Path(argv[2]).read_text(encoding="utf-8", errors="replace")
-        return verify_fast(log) if command == "verify-fast" else verify_slow(log)
+        if command == "verify-slow":
+            return verify_slow(log)
+        os_name = argv[argv.index("--os") + 1] if "--os" in argv else None
+        if os_name not in (None, "linux", "windows"):
+            sys.exit("--os must be linux or windows")
+        return verify_fast(log, os_name)
     if command == "fast":
         code, log = run_cargo(["cargo", "test", "--workspace", *extra])
         if code != 0:
