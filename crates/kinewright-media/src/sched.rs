@@ -701,11 +701,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let Some(slot) = self.slot(id) else {
             return (result.as_ref().ok().cloned(), result.err());
         };
-        // A reader retired while it decoded stays retiring (H-6).
-        if slot.state != ReaderState::Retiring {
-            slot.state = ReaderState::Idle { since: now };
-        }
+        // A reader retired while it decoded stays retiring (H-6), and its
+        // result comes back: the preview is going and has cleared the rings
+        // (review A S1), so nothing may repopulate them.
         slot.flight = 0;
+        if slot.state == ReaderState::Retiring {
+            return (result.as_ref().ok().cloned(), result.err());
+        }
+        slot.state = ReaderState::Idle { since: now };
         let key = slot.key.clone();
         match result {
             Ok(frame) => {
@@ -2014,6 +2017,8 @@ mod tests {
 
     /// H-6: a reader retired while its decode ran (the preview went) stays
     /// retiring when the result arrives, though its required frame is gone.
+    /// Review A S1: that late frame comes back (it is not kept in the
+    /// cleared rings), and its bytes are released with it.
     #[test]
     fn a_reader_retired_mid_decode_stays_retiring() {
         let mut world = World::new(20);
@@ -2028,13 +2033,21 @@ mod tests {
             panic!("the reader decodes");
         };
         world.readers.retire_all();
-        drop(world.readers.clear_rings());
+        let cleared = world.readers.clear_rings();
+        world.drop_frames(cleared);
+        let (_, _, _, _, bytes) = world.flight.remove(0);
         let fr = Fr {
             value: frame(0, at),
-            bytes: F,
+            bytes,
             pinned: false,
         };
-        drop(world.readers.deliver(id, at, version, Ok(fr), world.now));
+        let (back, _) = world.readers.deliver(id, at, version, Ok(fr), world.now);
+        let back = back.expect("the late frame comes back");
+        assert_eq!(back.value, frame(0, at));
+        world.drop_frames(vec![back]);
+        assert!(world.readers.rings.is_empty(), "the rings stay empty");
+        let owners = world.granted + world.titles;
+        assert_eq!(world.readers.live().0, owners, "its bytes were released");
         assert_eq!(world.readers.next(id, world.now, false), Next::Retire);
     }
 
