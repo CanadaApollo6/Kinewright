@@ -903,6 +903,18 @@ fn rotation_from_degrees(degrees: i32) -> Result<VideoRotation, MediaError> {
     }
 }
 
+/// PF1 S2c C-4: `(first_grid_frame, best_effort_timestamp)` of a held frame,
+/// and the rest of the S-2 state, as the witnesses observe them.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecoderState {
+    pub(crate) pending: Option<(i64, Option<i64>)>,
+    pub(crate) lookahead: Option<(i64, Option<i64>)>,
+    pub(crate) continuation_at: Option<i64>,
+    pub(crate) eof_sent: bool,
+    pub(crate) fallback_index: i64,
+}
+
 struct PendingVideoFrame {
     first_grid_frame: i64,
     decoded: Option<ffmpeg::frame::Video>,
@@ -1404,6 +1416,24 @@ impl VideoDecoder {
     #[cfg(test)]
     pub(crate) fn seek_count(&self) -> u64 {
         self.seek_count
+    }
+
+    /// PF1 S2c C-4: the fields §8 S-2 names, for the witnesses to compare.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> DecoderState {
+        let frame = |f: &PendingVideoFrame| {
+            (
+                f.first_grid_frame,
+                f.decoded.as_ref().and_then(|d| d.timestamp()),
+            )
+        };
+        DecoderState {
+            pending: self.pending.as_ref().map(frame),
+            lookahead: self.lookahead.as_ref().map(frame),
+            continuation_at: self.continuation_at.map(|t| t.0),
+            eof_sent: self.eof_sent,
+            fallback_index: self.fallback_index,
+        }
     }
 
     fn decode_from_cursor<T: DecoderFrame>(
