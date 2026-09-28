@@ -228,6 +228,20 @@ then lookahead; clips starting inside the horizon are pre-rolled).
 preview clears its renderer's `video_sources` after a synchronous job unless
 another is queued, so none outlives a park (G15).
 
+**Amendment R37 [S2b] Regions (G1/G14 (iv), review B F3).** A reader's plan
+is one *region* of its source's demand. Regions merge only across real decoder
+continuation: a reader decodes its required times, then its lookahead, each
+ascending, and the decoder continues without a seek only at exactly the next
+frame (`decode_window_sequential`). So a new region starts at a time more than
+one frame after the previous one (`REGION_GAP` = 1, was 16) and at a required
+time after lookahead. Two same-source playheads (`typical_1080p`'s layers 14
+frames apart) are therefore two readers, each decoding forward with one seek
+(its open); the R36 probe measured ≈ 184 seeks per LH run, was ≈ 2,470.
+*Residual:* a source keeps ≤ 2 readers (H-1), so a third region merges into the
+second, whose reader then seeks between its playheads; no W workload has three
+simultaneous playheads on one source. *G14 margin:* the probe's held maximum
+was 91.1 ms against 100 ms; S4's pinned run is the verdict.
+
 **H-2 [S2b-1] `Sched`: shared state and participant states.** A
 `Mutex<SchedState>` with condvars `work` (readers) and `ready` (preview) holds
 `shutdown`; the single-slot `transport: Option<Job>` + `version`; `agent:
@@ -393,6 +407,18 @@ Playback renders at = clock + lead (EWMA of render time, ≤ 2 frames), holds th
 result until `position()` ≥ at (never early), and drops it, counted, once the
 clock passes at + 1 frame. A frame missing a required layer at its deadline is
 **held**: the previous image stays and its held age grows.
+
+*Amendment R37 (start-up).* A playback version's first target is its start
+frame (`from`, or the clock if it has already passed `from`), not clock +
+lead; later targets are clock + lead as above. A `Paused` job whose stamp's
+epoch precedes the newest issued `play` is superseded by it in issuance order
+(R-1's `take_requests_before`, applied at the preview): the preview drops it
+untaken; once taken, it posts no plan; and a FrameWait it abandons withdraws
+its demand (an empty plan, as K-3's) and stops the readers' decodes at the next
+packet boundary, so no reader seeks to or keeps decoding its stale frame. The
+`play` records its epoch on the lane as it is issued, before the worker
+applies it. The clock (V-1/V-2) and the R34/R35 accounting are unchanged; frame 0
+is due, registered and counted like any other.
 
 **R-4 [S2a] Agent lane (RS7).**
 - *Push:* the worker resolves `document: None` to its current document, binds
