@@ -525,15 +525,21 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             return Next::Retire;
         }
         let blocked = matches!(work, Err(true));
+        let shrink = slot.threads > want && (ticket || short);
         if let Ok((at, required)) = work {
             if slot.threads == 0 {
                 slot.state = ReaderState::PermitWait;
                 return Next::Open { want };
             }
+            // Review A F2: a needed shrink is served at the decode boundary
+            // before more lookahead, so a waiting ticket (required work) is
+            // not queued behind this reader's horizon (H-3, H-5).
+            if shrink && !required {
+                return Next::Close;
+            }
             return self.decode(id, at, required);
         }
         // Inactive: H-5 rebalancing, then retirement.
-        let shrink = slot.threads > want && (ticket || short);
         let grow = slot.threads > 0 && slot.threads < want && free > 0;
         if shrink || grow {
             return Next::Close;
@@ -2021,6 +2027,77 @@ mod tests {
         };
         drop(world.readers.deliver(id, at, version, Ok(fr), world.now));
         assert_eq!(world.readers.next(id, world.now, false), Next::Retire);
+    }
+
+    /// Review A F2 (H-3/H-5): at P = 2, reader A holds both permits; the
+    /// plan widens to A (its required frame cached, lookahead admissible)
+    /// and B (required, waiting for a permit). A closes at its decode
+    /// boundary instead of decoding lookahead, and B is granted.
+    #[test]
+    fn a_needed_shrink_comes_before_more_lookahead() {
+        let mut readers = Model::new(2).with_budget(1_000 * F);
+        let mut book = PermitBook::new(2);
+        let sizes = || HashMap::from([(0, F), (1, F)]);
+        let post = |readers: &mut Model, demand: &[(u8, Vec<i64>, Vec<i64>)]| {
+            let regions = plan_regions(demand, readers.limit()).expect("readers");
+            let posted = readers.post(regions, (sizes(), 0), Duration::ZERO);
+            assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+            posted.spawn
+        };
+        post(&mut readers, &[(0, vec![0], vec![])]);
+        let a = readers.slots[0].id;
+        assert_eq!(
+            readers.next(a, Duration::ZERO, false),
+            Next::Open { want: 2 }
+        );
+        book.enqueue(a, 2);
+        assert_eq!(book.poll(a), Poll::Granted(2));
+        readers.granted(a, Some(2), Duration::ZERO);
+        let Next::Decode { at, version, bytes } = readers.next(a, Duration::ZERO, false) else {
+            panic!("A decodes its required frame");
+        };
+        let fr = Fr {
+            value: frame(0, at),
+            bytes,
+            pinned: false,
+        };
+        assert!(
+            readers
+                .deliver(a, at, version, Ok(fr), Duration::ZERO)
+                .0
+                .is_none()
+        );
+        let spawned = post(
+            &mut readers,
+            &[(0, vec![0], vec![1, 2, 3, 4, 5]), (1, vec![5], vec![])],
+        );
+        let [(b, 1)] = spawned[..] else {
+            panic!("B starts: {spawned:?}");
+        };
+        assert_eq!(
+            readers.next(b, Duration::ZERO, false),
+            Next::Open { want: 1 }
+        );
+        book.enqueue(b, 1);
+        assert_eq!(book.poll(b), Poll::Wait, "A holds the pool");
+        assert!(readers.admissible(&0), "A's lookahead is admissible");
+        assert_eq!(readers.next(a, Duration::ZERO, false), Next::Close);
+        book.release(a);
+        readers.closed(a);
+        assert_eq!(
+            book.poll(b),
+            Poll::Granted(1),
+            "B's required frame goes next"
+        );
+        readers.granted(b, Some(1), Duration::ZERO);
+        assert!(matches!(
+            readers.next(b, Duration::ZERO, false),
+            Next::Decode { at: 5, .. }
+        ));
+        assert_eq!(
+            readers.next(a, Duration::ZERO, false),
+            Next::Open { want: 1 }
+        );
     }
 
     /// Run every reader of `readers` until each waits: grants in full,
