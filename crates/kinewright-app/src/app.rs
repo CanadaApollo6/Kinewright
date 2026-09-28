@@ -404,6 +404,10 @@ pub(crate) struct KinewrightApp {
     /// Review B (UI blocking): replies of agent-lane requests made off the
     /// UI thread, applied on it by `poll_background`.
     pub(crate) ui_replies: (mpsc::Sender<UiReply>, mpsc::Receiver<UiReply>),
+    /// Re-review B D2: the newest cache-inventory refresh and branch-frame
+    /// review; an off-UI reply of an older one is discarded.
+    pub(crate) cache_inventory_generation: u64,
+    pub(crate) branch_review_generation: u64,
     pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
     pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
@@ -665,6 +669,8 @@ impl KinewrightApp {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            cache_inventory_generation: 0,
+            branch_review_generation: 0,
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
@@ -5707,6 +5713,8 @@ pub(crate) mod in1_tests {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            cache_inventory_generation: 0,
+            branch_review_generation: 0,
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
@@ -5948,6 +5956,28 @@ pub(crate) mod in1_tests {
         reply(&mut app, &ctx);
         assert!(app.media_cache_inventory.is_some());
         release.join().unwrap();
+        in1_shutdown(&mut app);
+    }
+
+    /// Re-review B D2: an older inventory refresh completing after a newer
+    /// one was issued is discarded; the newer one's reply applies.
+    #[test]
+    fn a_superseded_cache_inventory_reply_is_discarded() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let ctx = egui::Context::default();
+        let reply = |app: &KinewrightApp| {
+            (app.ui_replies.1)
+                .recv_timeout(IN1_APP_DEADLINE)
+                .expect("a reply")
+        };
+        app.open_media_cache_dialog(&ctx);
+        let older = reply(&app);
+        app.refresh_cache_inventory(&ctx);
+        let newer = reply(&app);
+        older(&mut app, &ctx);
+        assert!(app.media_cache_inventory.is_none(), "superseded");
+        newer(&mut app, &ctx);
+        assert!(app.media_cache_inventory.is_some());
         in1_shutdown(&mut app);
     }
 
@@ -10542,6 +10572,8 @@ mod in2b_tests {
             media_cache_dialog_open: false,
             media_cache_inventory: None,
             ui_replies: std::sync::mpsc::channel(),
+            cache_inventory_generation: 0,
+            branch_review_generation: 0,
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,

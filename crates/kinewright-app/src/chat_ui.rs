@@ -369,6 +369,16 @@ enum EditCardAction {
     Undo,
 }
 
+/// Re-review B D2: what a branch-frame review was asked for.
+pub(crate) struct BranchReview {
+    generation: u64,
+    /// Unique in the process: found in the focused project only if that
+    /// is still the requester.
+    thread_id: u64,
+    stamp: kinewright_core::FrameStamp,
+    document: Arc<Document>,
+}
+
 enum BranchReviewAction {
     Review(Arc<Document>),
     Merge,
@@ -439,7 +449,13 @@ pub(crate) fn chat_panel_observation(
     (Some(observation), Some(message))
 }
 
+/// Re-review B D2: thread identities, unique in the process and never
+/// reused, so a reply finds its thread whatever was removed before it.
+static NEXT_THREAD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub(crate) struct AgentThread {
+    /// Stable identity (an index shifts when an earlier thread closes).
+    pub(crate) id: u64,
     pub(crate) name: String,
     pub(crate) harness: AgentHarnessChoice,
     pub(crate) session: Option<Box<dyn AgentSession>>,
@@ -542,6 +558,7 @@ impl AgentThread {
         };
         let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
         Ok(Self {
+            id: NEXT_THREAD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             name,
             harness,
             session: None,
@@ -1169,24 +1186,44 @@ impl KinewrightApp {
                 .0
                 .clamp(0, document.duration.0.saturating_sub(1)),
         );
-        // Review B (UI blocking): the frame proof renders off the UI thread;
-        // its reply applies to the same project's thread, if still open.
-        let (analysis, project_id) = (Arc::clone(&self.analysis), self.projects[project_index].id);
+        // Review B (UI blocking): the frame proof renders off the UI thread.
+        // Re-review B D2: its reply binds only into the viewer it was asked
+        // for (`branch_review_target`).
+        self.branch_review_generation += 1;
+        let request = BranchReview {
+            generation: self.branch_review_generation,
+            thread_id: self.projects[project_index].threads[thread_index].id,
+            stamp: self.playback.stamp(),
+            document: Arc::clone(&document),
+        };
+        let analysis = Arc::clone(&self.analysis);
         self.off_ui(
             ctx,
             move || analysis.thumbnail_for_document(document, at, 1_280),
             move |app, ctx, result| {
-                let project = app
-                    .projects
-                    .iter()
-                    .position(|project| project.id == project_id);
-                if let Some(project_index) = project
-                    && thread_index < app.projects[project_index].threads.len()
-                {
-                    app.show_branch_frame(ctx, (project_index, thread_index), at, result);
+                if let Some(target) = app.branch_review_target(&request) {
+                    app.show_branch_frame(ctx, target, at, result);
                 }
             },
         );
+    }
+
+    /// Where a branch-frame reply binds, if anywhere: its thread found by
+    /// identity in the focused project (so the viewer is still the
+    /// requester's), that thread's branch still at the document rendered, no
+    /// transport call since (a newer image belongs in the viewer) and no
+    /// newer review. Otherwise the reply is discarded.
+    pub(crate) fn branch_review_target(&self, request: &BranchReview) -> Option<(usize, usize)> {
+        let project_index = self.focused_project;
+        let project = self.projects.get(project_index)?;
+        let current = request.generation == self.branch_review_generation
+            && self.playback.stamp() == request.stamp;
+        if !current {
+            return None;
+        }
+        let thread_index = (project.threads.iter()).position(|t| t.id == request.thread_id)?;
+        let branch = project.threads[thread_index].branch.compare().ok()?;
+        Arc::ptr_eq(&branch.document, &request.document).then_some((project_index, thread_index))
     }
 
     fn show_branch_frame(
@@ -3058,5 +3095,123 @@ mod tests {
             2,
             "only the harnesses the probe reported are settled"
         );
+    }
+
+    /// Re-review B D2: a branch-frame reply completing late binds only
+    /// into the viewer it was asked for. It binds to its thread by identity
+    /// when an earlier thread closed meanwhile (the old index pointed at the
+    /// next thread), and is discarded after a project switch, its thread's
+    /// removal, a newer review, a transport call or an edit of its branch.
+    #[test]
+    fn a_delayed_branch_frame_binds_only_into_its_own_viewer() {
+        use kinewright_core::{
+            AssetId, BlendMode, Clip, ClipContent, ClipId, SolidColor, Track, TrackId, TrackKind,
+        };
+
+        use crate::app::in1_tests::{in1_harness, in1_shutdown};
+        let solid = Clip {
+            id: ClipId(1),
+            asset: AssetId(0),
+            content: ClipContent::Solid(SolidColor {
+                r: 20,
+                g: 90,
+                b: 160,
+            }),
+            timeline_start: TimeCode(0),
+            source_range: TimeCode(0)..TimeCode(30),
+            effects: vec![],
+            transition_in: None,
+            link: None,
+            enabled: true,
+            enabled_curve: None,
+            audio_gain_tenth_db: 0,
+            audio_fade_in_frames: TimeCode(0),
+            audio_fade_out_frames: TimeCode(0),
+            speed_percent: 100,
+            audio_gain_curve: None,
+            blend_mode: BlendMode::Normal,
+        };
+        let document = Document {
+            resolution: (64, 36),
+            duration: TimeCode(30),
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![solid],
+            }],
+            ..Document::default()
+        };
+        let (mut app, _engine) = in1_harness(document);
+        let ctx = egui::Context::default();
+        app.add_agent_thread();
+        app.add_agent_thread();
+        let deadline = std::time::Duration::from_secs(20);
+        // The reply of a review of focused thread `thread`, held.
+        let review = |app: &mut KinewrightApp, thread: usize| {
+            let project = app.focused_project;
+            let branch = &app.projects[project].threads[thread].branch;
+            let document = branch.compare().expect("the branch").document;
+            app.review_agent_branch(&ctx, project, thread, document);
+            app.ui_replies.1.recv_timeout(deadline).expect("a reply")
+        };
+        let reviewed = |app: &KinewrightApp, thread_id: u64| {
+            let project = &app.projects[0];
+            let thread = project.threads.iter().find(|t| t.id == thread_id);
+            thread.map_or(0, |t| {
+                t.provenance.json().matches("reviewed branch frame").count()
+            })
+        };
+        let ids: Vec<u64> = app.projects[0].threads.iter().map(|t| t.id).collect();
+        assert_eq!(ids.len(), 3);
+
+        // Its thread by identity: thread 1 is at index 0 once 0 closes.
+        let reply = review(&mut app, 1);
+        app.close_agent_thread(0);
+        reply(&mut app, &ctx);
+        assert!(app.texture.is_some(), "bound");
+        assert_eq!((reviewed(&app, ids[1]), reviewed(&app, ids[2])), (1, 0));
+
+        // Its thread removed: nothing binds.
+        app.texture = None;
+        let reply = review(&mut app, 1);
+        app.close_agent_thread(1);
+        reply(&mut app, &ctx);
+        assert!(app.texture.is_none(), "the thread closed");
+
+        // A newer review supersedes it.
+        let (older, newer) = (review(&mut app, 0), review(&mut app, 0));
+        older(&mut app, &ctx);
+        assert!(app.texture.is_none(), "superseded");
+        newer(&mut app, &ctx);
+        assert_eq!(reviewed(&app, ids[1]), 2, "the newer binds");
+
+        // A transport call since: the viewer moved on.
+        app.texture = None;
+        let reply = review(&mut app, 0);
+        app.seek_to(TimeCode(3));
+        reply(&mut app, &ctx);
+        assert!(app.texture.is_none(), "a transport call since");
+
+        // Its branch edited since: the frame shows a document gone.
+        let reply = review(&mut app, 0);
+        let edit = kinewright_core::Operation::SetClipEnabled {
+            clip: ClipId(1),
+            enabled: false,
+        };
+        let core = app.projects[0].threads[0].branch.core();
+        core.request(kinewright_core::Command::Do(edit))
+            .expect("the edit");
+        reply(&mut app, &ctx);
+        assert!(app.texture.is_none(), "the branch moved on");
+
+        // Another project focused: its viewer is not the requester's.
+        let reply = review(&mut app, 0);
+        app.new_project();
+        assert_eq!(app.focused_project, 1);
+        reply(&mut app, &ctx);
+        assert!(app.texture.is_none(), "another project's viewer");
+        assert_eq!(reviewed(&app, ids[1]), 2);
+        in1_shutdown(&mut app);
     }
 }

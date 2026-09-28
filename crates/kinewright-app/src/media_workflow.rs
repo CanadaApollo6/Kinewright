@@ -1585,12 +1585,20 @@ impl KinewrightApp {
 
     /// The inventory is read off the UI thread (its request can wait behind
     /// a render); the dialog reads "Reading cache inventory…" until then.
-    fn refresh_cache_inventory(&self, ctx: &egui::Context) {
+    /// Re-review B D2: only the newest refresh's reply applies; an older
+    /// one completing later is discarded.
+    pub(crate) fn refresh_cache_inventory(&mut self, ctx: &egui::Context) {
+        self.cache_inventory_generation += 1;
+        let generation = self.cache_inventory_generation;
         let media = Arc::clone(&self.analysis);
         self.off_ui(
             ctx,
             move || media.cache_inventory(),
-            |app, _, inventory| app.media_cache_inventory = Some(inventory),
+            move |app, _, inventory| {
+                if app.cache_inventory_generation == generation {
+                    app.media_cache_inventory = Some(inventory);
+                }
+            },
         );
     }
 
