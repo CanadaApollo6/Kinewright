@@ -191,14 +191,17 @@ fn regions(required: &[i64], lookahead: &[i64]) -> Vec<Region> {
     runs
 }
 
-/// H-1/H-5: the regions a job's demand needs, within `limit` readers:
-/// pre-roll-only regions go first, then each source keeps one reader.
-/// `None` means more distinct sources than readers: the frame renders
-/// synchronously (K-3).
+/// H-1/H-5: the regions a job's demand needs, within `limit` readers, and
+/// how many merges fitting them took. Over the limit (R38, review B F3),
+/// lookahead-only regions go first; only then, as a last resort, are two of
+/// one source's required regions merged, the nearest pair first, keeping
+/// only the lookahead past the merged region's last required time, so its
+/// reader still decodes forward only. `None` means more distinct required
+/// sources than readers: the frame renders synchronously (K-3).
 pub(crate) fn plan_regions<K: Clone>(
     demand: &[(K, Vec<i64>, Vec<i64>)],
     limit: usize,
-) -> Option<Vec<(K, Region)>> {
+) -> Option<(Vec<(K, Region)>, u64)> {
     let needed = demand
         .iter()
         .filter(|(_, required, _)| !required.is_empty());
@@ -214,24 +217,44 @@ pub(crate) fn plan_regions<K: Clone>(
             runs.retain(|run| !run.required.is_empty());
         }
     }
-    if count(&per_source) > limit {
-        for (_, runs) in &mut per_source {
-            let mut rest = runs.split_off(1.min(runs.len()));
-            if let Some(first) = runs.first_mut() {
-                for run in rest.drain(..) {
-                    first.required.extend(run.required);
-                    first.lookahead.extend(run.lookahead);
-                }
-                first.required.sort_unstable();
-                first.lookahead.sort_unstable();
-            }
-        }
+    let mut merged = 0u64;
+    while count(&per_source) > limit {
+        let Some((source, index)) = nearest_pair(&per_source) else {
+            break; // unreachable: one region per required source fits
+        };
+        let runs = &mut per_source[source].1;
+        let later = runs.remove(index);
+        let earlier = &mut runs[index - 1];
+        earlier.required.extend(later.required);
+        earlier.required.sort_unstable();
+        let last = earlier.required.last().copied().unwrap_or(i64::MIN);
+        earlier.lookahead.extend(later.lookahead);
+        earlier.lookahead.retain(|t| *t > last);
+        earlier.lookahead.sort_unstable();
+        merged += 1;
     }
     let mut all: Vec<(K, Region)> = (per_source.into_iter())
         .flat_map(|(key, runs)| runs.into_iter().map(move |run| (key.clone(), run)))
         .collect();
     all.sort_by_key(|(_, run)| run.required.is_empty());
-    Some(all)
+    Some((all, merged))
+}
+
+/// R38: the two adjacent required regions of one source nearest in time
+/// (the later's first required time less the earlier's last), as the
+/// source's index and the later region's; ties go to the earliest.
+fn nearest_pair<K>(per_source: &[(K, Vec<Region>)]) -> Option<(usize, usize)> {
+    let pairs = per_source
+        .iter()
+        .enumerate()
+        .flat_map(|(source, (_, runs))| {
+            (1..runs.len()).map(move |index| {
+                let earlier = runs[index - 1].required.last().copied().unwrap_or(0);
+                let later = runs[index].required.first().copied().unwrap_or(0);
+                (later.saturating_sub(earlier).max(0), source, index)
+            })
+        });
+    pairs.min().map(|(_, source, index)| (source, index))
 }
 
 /// H-2/H-3: the readers' shared state: plans, states, the rings of decoded
@@ -268,6 +291,8 @@ pub(crate) struct Readers<K, F> {
     required_bytes: usize,
     /// K-2: lookahead refusals, once per source per plan.
     pub(crate) starved: u64,
+    /// R38 (review B F3): required regions merged to fit the reader limit.
+    pub(crate) regions_merged: u64,
     starved_keys: HashSet<K>,
     /// K-5 (review B F4): per source, its last required times and the
     /// direction its demand travels, for eviction.
@@ -304,6 +329,7 @@ impl<K, F> Readers<K, F> {
             generated: 0,
             required_bytes: 0,
             starved: 0,
+            regions_merged: 0,
             starved_keys: HashSet::new(),
             travel: HashMap::new(),
         }
@@ -1597,7 +1623,7 @@ mod tests {
                 .iter()
                 .flat_map(|(k, r, _)| r.iter().map(|t| (*k, *t)))
                 .collect();
-            let regions = plan_regions(demand, self.readers.limit());
+            let regions = plan_regions(demand, self.readers.limit()).map(|(regions, _)| regions);
             let over = !self.readers.fits(required.len() * F + generated);
             let fallback = regions.is_none() || over;
             let sizes = if fallback {
@@ -2029,7 +2055,7 @@ mod tests {
     fn lookahead_stops_at_its_share_of_c_less_g() {
         let mut readers = Model::new(20).with_budget(10 * F);
         let demand = [(0, vec![0], vec![1, 2, 3, 4])];
-        let regions = plan_regions(&demand, readers.limit()).expect("a reader");
+        let regions = plan_regions(&demand, readers.limit()).expect("a reader").0;
         readers.post(regions, (HashMap::from([(0, F)]), 6 * F), Duration::ZERO);
         // share = (10 − 6 − 1) f = 3f; C − H = 9f.
         for at in 1..=3 {
@@ -2052,7 +2078,9 @@ mod tests {
     fn eviction_takes_over_share_sources_then_the_farthest() {
         let mut readers = Model::new(20).with_budget(10 * F);
         let demand = [(0, vec![0], vec![1, 2, 3, 4, 5]), (1, vec![0], vec![1, 2])];
-        let regions = plan_regions(&demand, readers.limit()).expect("two readers");
+        let regions = plan_regions(&demand, readers.limit())
+            .expect("two readers")
+            .0;
         let sizes = HashMap::from([(0, F), (1, F)]);
         readers.post(regions, (sizes, 4 * F), Duration::ZERO);
         let fr = |key: u8, at: i64| Fr {
@@ -2159,7 +2187,7 @@ mod tests {
         let mut book = PermitBook::new(2);
         let sizes = || HashMap::from([(0, F), (1, F)]);
         let post = |readers: &mut Model, demand: &[(u8, Vec<i64>, Vec<i64>)]| {
-            let regions = plan_regions(demand, readers.limit()).expect("readers");
+            let regions = plan_regions(demand, readers.limit()).expect("readers").0;
             let posted = readers.post(regions, (sizes(), 0), Duration::ZERO);
             assert!(matches!(readers.admit(0), Admission::Ready { .. }));
             posted.spawn
@@ -2278,7 +2306,7 @@ mod tests {
         for t in 0..40 {
             let lookahead = (t + 1..=t + 9).chain(t + 15..=t + 23).collect();
             let demand = [(0u8, vec![t, t + 14], lookahead)];
-            let regions = plan_regions(&demand, readers.limit()).expect("readers");
+            let regions = plan_regions(&demand, readers.limit()).expect("readers").0;
             let posted = readers.post(regions, (HashMap::from([(0, F)]), 0), Duration::ZERO);
             let dropped: usize = posted.dropped.0.iter().map(|fr| fr.bytes).sum();
             readers.release(dropped);
@@ -2293,6 +2321,44 @@ mod tests {
             let seeks = 1 + times.windows(2).filter(|w| w[1] != w[0] + 1).count();
             assert_eq!(seeks, 1, "reader {id} seeks once (its open): {times:?}");
         }
+    }
+
+    /// R38 (review B F3, the reader limit): at P = 2, A requires 0 and 14
+    /// (lookahead 1, 2, 15, 16) and B requires 7: three required regions,
+    /// two readers. The last resort merges A's two regions, keeps only the
+    /// lookahead past 14 and counts one merge; every reader decodes forward
+    /// only (the old fallback kept 1 and 2 and read A 0 → 14 → 1).
+    #[test]
+    fn over_the_reader_limit_a_merged_region_still_reads_forward() {
+        let mut readers = Model::new(2).with_budget(1_000 * F);
+        assert_eq!(readers.limit(), 2);
+        let demand = [(0u8, vec![0, 14], vec![1, 2, 15, 16]), (1, vec![7], vec![])];
+        let (regions, merged) = plan_regions(&demand, readers.limit()).expect("two readers");
+        let shapes: Vec<(u8, Vec<i64>, Vec<i64>)> = (regions.iter())
+            .map(|(key, run)| (*key, run.required.clone(), run.lookahead.clone()))
+            .collect();
+        assert_eq!(
+            shapes,
+            [(0, vec![0, 14], vec![15, 16]), (1, vec![7], vec![])],
+            "A's regions merged forward only"
+        );
+        assert_eq!(merged, 1, "the last resort is counted");
+        let sizes = HashMap::from([(0, F), (1, F)]);
+        readers.post(regions, (sizes, 0), Duration::ZERO);
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        let mut decoded = BTreeMap::new();
+        drive(&mut readers, &mut decoded);
+        assert!(readers.resolve(&[(0, 0), (0, 14), (1, 7)]).is_some());
+        assert_eq!(decoded.len(), 2, "two readers: {decoded:?}");
+        for (id, times) in &decoded {
+            assert!(
+                times.windows(2).all(|w| w[1] > w[0]),
+                "reader {id} decodes forward only: {times:?}"
+            );
+        }
+        // Without the pressure nothing merges and nothing is counted.
+        let (_, merged) = plan_regions(&demand, 3).expect("three readers");
+        assert_eq!(merged, 0, "no merge within the limit");
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10

@@ -1163,8 +1163,11 @@ impl Preview {
             return Ok(self.fell_back(posted, demand));
         }
         let plan = (sizes, demand.generated);
+        let (regions, merged) = regions.unwrap_or_default();
+        // R38: last-resort merges are counted (drained with `starved`).
+        state.readers.regions_merged += merged;
         // The set is admitted under the post's lock, before a reader starts.
-        let mut posted = Some(state.readers.post(regions.unwrap_or_default(), plan, now));
+        let mut posted = Some(state.readers.post(regions, plan, now));
         // Review B S2: only the rasters not resident are reserved.
         let mut generated = Some(demand.generated_uncharged(&self.charged));
         let mut granted = None;
@@ -1212,9 +1215,7 @@ impl Preview {
                     return Err(Halt::Held { agent });
                 }
                 WaitStep::Ready => {
-                    let starved = std::mem::take(&mut state.readers.starved);
-                    drop(state);
-                    self.lane.counters().stats.lookahead_starved += starved;
+                    self.drain_counts(state);
                     let (frames, pins) = supplied(demand, resolved.unwrap_or_default());
                     return Ok(Some((frames, pins, granted)));
                 }
@@ -1245,6 +1246,17 @@ impl Preview {
                 WaitStep::Wait => state = self.wait_ready(state, wait),
             }
         }
+    }
+
+    /// K-2 / R38: the plans' refusal and merge counts, taken under `Sched`,
+    /// join the engine's stats after unlock.
+    fn drain_counts(&self, mut state: Sched<'_>) {
+        let starved = std::mem::take(&mut state.readers.starved);
+        let merged = std::mem::take(&mut state.readers.regions_merged);
+        drop(state);
+        let mut counters = self.lane.counters();
+        counters.stats.lookahead_starved += starved;
+        counters.stats.regions_merged += merged;
     }
 
     /// Amendment R37: a paused wait a `play` superseded withdraws its
@@ -2778,6 +2790,29 @@ pub(crate) mod tests {
         assert_eq!(shown.expect("the paused frame").at, TimeCode(0));
         lane.shut_down();
         join_within(thread);
+    }
+
+    /// R38 (review B F3): the reader-limit merge is counted end to end. At
+    /// P = 2, cut frame 0 needs source 0 at 0 and 14 and source 1 at 7; the
+    /// frame renders the synchronous bytes with one merge in the engine's
+    /// `regions_merged`, and at P = 3 with none.
+    #[test]
+    fn a_reader_limit_merge_is_counted() {
+        let (document, _workload) = cut_document();
+        let expected = reference(&document, 0).0;
+        for (parallelism, merges) in [(2, 1), (3, 0)] {
+            let lane = Arc::new(Lane::with_parallelism(parallelism));
+            let (mut preview, _frames) =
+                test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+            let shown = render_paused(&mut preview, &document, 0);
+            let Ok(Some(shown)) = shown else {
+                panic!("P = {parallelism}: frame 0 did not render");
+            };
+            assert_eq!(*shown.rgba, expected, "C-5 at P = {parallelism}");
+            assert_eq!(lane.lock().fallbacks, [0, 0], "no K-3 fallback");
+            let merged = lane.counters().stats.regions_merged;
+            assert_eq!(merged, merges, "P = {parallelism}: merges counted");
+        }
     }
 
     /// R38 D2: two documents whose managed look (the same `LutAssetId`)

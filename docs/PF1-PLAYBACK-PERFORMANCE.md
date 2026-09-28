@@ -239,8 +239,16 @@ frames apart) are therefore two readers, each decoding forward with one seek
 (its open); the R36 probe measured ≈ 184 seeks per LH run, was ≈ 2,470.
 *Residual:* a source keeps ≤ 2 readers (H-1), so a third region merges into the
 second, whose reader then seeks between its playheads; no W workload has three
-simultaneous playheads on one source. *G14 margin:* the probe's held maximum
-was 91.1 ms against 100 ms; S4's pinned run is the verdict.
+simultaneous playheads on one source. *Reader limit (R38, review B F3):* when
+all sources' regions exceed the reader limit R, lookahead-only regions go
+first. Only as a last resort are two required regions of one source merged,
+the nearest pair first (the later region's first required time less the
+earlier's last), until the regions fit; a merged region keeps only the
+lookahead past its last required time, so its reader still decodes forward
+only (it seeks forward between the merged playheads, never back). Each such
+merge is counted in `PlaybackStats::regions_merged`. More required sources
+than R remain K-3's synchronous fallback. *G14 margin:* the probe's held
+maximum was 91.1 ms against 100 ms; S4's pinned run is the verdict.
 
 **H-2 [S2b-1] `Sched`: shared state and participant states.** A
 `Mutex<SchedState>` with condvars `work` (readers) and `ready` (preview) holds

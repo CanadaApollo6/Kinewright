@@ -475,6 +475,9 @@ pub struct PlaybackStats {
     pub post_end_underrun_events: u64,
     pub post_end_underrun_frames: u64,
     pub lookahead_starved: u64,
+    /// R38 (review B F3): required reader regions merged, as a last
+    /// resort, to fit the reader limit (each merge of each job).
+    pub regions_merged: u64,
     pub sync_fallback_frames: u64,
     /// Decoders open now in this engine's renderers (preview, proofs,
     /// export).
