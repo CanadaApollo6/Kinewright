@@ -235,6 +235,15 @@ class PartialParse(unittest.TestCase):
         del lines[max(i for i, line in enumerate(lines) if line.startswith("test result:"))]
         self.assert_unparsable(lines, "no `test result:` summary")
 
+    def test_an_empty_section_merged_into_the_next_by_a_lost_summary_and_header_is_rejected(self):
+        # Review 3: an empty section loses its summary, the next binary loses its header, and
+        # the second `running N tests` overwrote the first, so both tiers accepted the merge.
+        lines = self.lines()
+        at = self.index_of(lines, "kinewright_media-")
+        merged = [header("au3_fixtures", False, False), "", "running 0 tests", ""]
+        lines[at:at + 1] = merged
+        self.assert_unparsable(lines, "second `running N tests`")
+
     def test_unrelated_text_starting_with_running_is_not_a_header(self):
         lines = ["Running kernel seems to be up-to-date.", *self.lines()]
         code, out = check(st.verify_fast, "\n".join(lines) + "\n", "linux")

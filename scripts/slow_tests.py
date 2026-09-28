@@ -275,7 +275,8 @@ def parse(log: str) -> list[tuple[str, str, str]]:
     `running N tests`, the test lines, and libtest's `test result:` summary. The result
     is trusted only if every test line sits inside a section and every section's own
     counts (tests seen, passed, failed, ignored) equal its summary: a lost header, an
-    orphan test line or a dropped line then raises UnparsableLog instead of letting
+    orphan test line, a dropped line or a repeated
+    `running N tests` then raises UnparsableLog instead of letting
     tests be attributed to the wrong binary or silently vanish.
     """
     rows: list[tuple[str, str, str]] = []
@@ -299,6 +300,8 @@ def parse(log: str) -> list[tuple[str, str, str]]:
         if count:
             if section is None:
                 fail(number, "`running N tests` outside any section")
+            if section["running"] is not None or section["rows"]:
+                fail(number, f"{section['binary']}: second `running N tests`, or one after its test lines")
             section["running"] = int(count.group(1))
             continue
         test = TEST_LINE.match(line)
@@ -326,7 +329,9 @@ def parse(log: str) -> list[tuple[str, str, str]]:
                     f"{seen_counts[2]} ignored, {seen_counts[3]} measured, "
                     f"but its summary says {passed}, {failed}, {ignored}, {measured}",
                 )
-            if section["running"] is not None and section["running"] != len(seen):
+            if section["running"] is None:
+                fail(number, f"{section['binary']}: no `running N tests` line before its summary")
+            if section["running"] != len(seen):
                 fail(number, f"{section['binary']}: `running {section['running']} tests` but {len(seen)} test lines")
             rows.extend(seen)
             section = None
