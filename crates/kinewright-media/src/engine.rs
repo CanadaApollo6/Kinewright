@@ -50,6 +50,7 @@ use crate::{
     },
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     sha256::source_fingerprint,
+    stats::Transport,
     transcript::{TranscriptService, default_data_dir},
 };
 
@@ -1044,12 +1045,31 @@ enum Call {
     Frame(TimeCode),
 }
 
-/// `Playback::ack_presented` (re-review A D3 / B D1): the ack settles its
-/// due record and reads no clock. The caller-side clock may show a seek the
-/// worker has not applied, so only the worker registers due frames, from
-/// the applied position.
-fn acknowledge(lane: &Lane, stamp: FrameStamp, at: TimeCode, painted: Instant, expired: bool) {
-    (lane.counters()).ack(painted, stamp.epoch, at.0, expired);
+/// The caller-side transport at an ack: the newest issued epoch and the
+/// clock, read together under the coalesced lock, where every call that
+/// moves the clock bumps the epoch.
+fn transport(coalesced: &Mutex<Coalesced>, clock: &SharedClock) -> Transport {
+    let coalesced = coalesced.lock().unwrap_or_else(PoisonError::into_inner);
+    Transport {
+        now: Instant::now(),
+        epoch: coalesced.latest.epoch,
+        position: clock.position().0,
+    }
+}
+
+/// `Playback::ack_presented` (re-review A D3 / B D1): the ack samples the
+/// caller-side clock only if its snapshot is of the applied epoch. A clock
+/// a seek the worker has not applied moved is never sampled; an image
+/// painted before the worker's tick reached its frame still counts.
+fn acknowledge(
+    lane: &Lane,
+    transport: Transport,
+    stamp: FrameStamp,
+    at: TimeCode,
+    painted: Instant,
+    expired: bool,
+) {
+    (lane.counters()).ack(painted, stamp.epoch, at.0, expired, Some(transport));
 }
 
 impl Playback for FfmpegMediaEngine {
@@ -1123,7 +1143,8 @@ impl Playback for FfmpegMediaEngine {
     /// `painted`. Only a due frame of that epoch counts (review A F5: an
     /// image painted before a stop still counts when acked after it).
     fn ack_presented(&self, stamp: FrameStamp, at: TimeCode, painted: Instant, expired: bool) {
-        acknowledge(&self.lane, stamp, at, painted, expired);
+        let transport = transport(&self.coalesced, &self.clock);
+        acknowledge(&self.lane, transport, stamp, at, painted, expired);
     }
 
     fn position(&self) -> TimeCode {
@@ -4507,7 +4528,15 @@ mod tests {
         let painted = Instant::now();
         let due = worker.lane.counters().stats.due_frames;
         worker.lock_coalesced().seek(TimeCode(900), &worker.clock);
-        acknowledge(&worker.lane, FrameStamp::default(), at, painted, false);
+        let clock = transport(&worker.coalesced, &worker.clock);
+        acknowledge(
+            &worker.lane,
+            clock,
+            FrameStamp::default(),
+            at,
+            painted,
+            false,
+        );
         let stats = worker.lane.counters().stats;
         assert_eq!(stats.due_frames, due, "no jump: {stats:?}");
         assert_eq!(stats.on_time + stats.late, 1, "the paint counts");
@@ -4515,6 +4544,35 @@ mod tests {
         worker.handle_coalesced_requests();
         assert!(worker.playing);
         assert_eq!(worker.lane.counters().stats.due_frames, due + 1);
+    }
+
+    /// R33 (E11.11.4): an image painted before the worker's tick reached its
+    /// frame (the clock moved; no call was issued) is acked through the
+    /// production path with a snapshot of the applied epoch: its frame is
+    /// due and on time, with no offset, and the next tick does not make it
+    /// dropped. The settle-only ack found no record, and the tick then
+    /// registered the frame unacknowledged: 124 on time of 1,800 against
+    /// the harness's 574 on the first P-play LL rerun.
+    #[test]
+    fn an_ack_ahead_of_the_workers_tick_counts_on_time() {
+        let fps = Rational::new(30, 1).unwrap();
+        let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(1_000));
+        while worker.clock.position() < TimeCode(10) {
+            audio.advance(CALLBACK_FRAMES);
+            worker.tick();
+        }
+        let sampled = worker.clock.position();
+        while worker.clock.position() == sampled {
+            audio.advance(CALLBACK_FRAMES);
+        }
+        let at = worker.clock.position();
+        let clock = transport(&worker.coalesced, &worker.clock);
+        let stamp = FrameStamp::default();
+        acknowledge(&worker.lane, clock, stamp, at, Instant::now(), false);
+        worker.tick();
+        let stats = worker.lane.counters().stats;
+        assert_eq!(stats.on_time, 1, "{stats:?}");
+        assert!(stats.max_av_offset_ms < 0.1, "{stats:?}");
     }
 
     /// Review A F5: the starting frame is due at `play`, and a one-frame
@@ -4546,7 +4604,8 @@ mod tests {
         assert!(!worker.playing);
         assert_eq!(worker.lane.counters().stats.due_frames, 5);
         let stamp = FrameStamp::default();
-        acknowledge(&worker.lane, stamp, TimeCode(4), painted, false);
+        let clock = transport(&worker.coalesced, &worker.clock);
+        acknowledge(&worker.lane, clock, stamp, TimeCode(4), painted, false);
         let stats = worker.lane.counters().stats;
         assert_eq!(stats.on_time + stats.late, 1, "{stats:?}");
         assert_eq!(stats.dropped, 4);

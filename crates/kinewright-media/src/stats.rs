@@ -12,6 +12,18 @@ use kinewright_core::PlaybackStats;
 /// dropped.
 pub(crate) const DUE_RECORDS: usize = 65_536;
 
+/// A caller-side transport snapshot taken at an ack, under the coalesced
+/// lock: the newest issued epoch and the clock's position then. Every call
+/// that moves the clock bumps the epoch as it does, under that lock, so the
+/// position is playback of that epoch. Only a snapshot of the applied
+/// epoch is sampled (re-review A D3 / B D1).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Transport {
+    pub(crate) now: Instant,
+    pub(crate) epoch: u64,
+    pub(crate) position: i64,
+}
+
 /// A due frame's key: its playback epoch and frame. Keys only increase:
 /// a playback epoch never re-registers a frame, and a later epoch is newer.
 type DueKey = (u64, i64);
@@ -212,12 +224,26 @@ impl Counters {
     /// The image of frame `at` in playback epoch `epoch`, painted at
     /// `painted` (R-5), `expired` if the clock had passed `at` by then.
     /// Counted once per due frame: on time if painted current within due + 1
-    /// frame, else late; an evicted frame's first ack is late. An ack only
-    /// settles records: it never samples the clock, whose caller-side
-    /// position a seek the worker has not applied may already have moved
-    /// (re-review A D3 / B D1). The offset is against the worker's latest
-    /// applied sample.
-    pub(crate) fn ack(&mut self, painted: Instant, epoch: u64, at: i64, expired: bool) {
+    /// frame, else late; an evicted frame's first ack is late.
+    ///
+    /// The ack first samples `transport`, as the worker's tick does, but
+    /// only if it is a snapshot of the applied epoch: a caller-side clock a
+    /// call the worker has not applied moved (a seek) is never sampled
+    /// (re-review A D3 / B D1). An image painted before the tick reached
+    /// its frame is then still counted. The A/V offset is taken against
+    /// that snapshot only.
+    pub(crate) fn ack(
+        &mut self,
+        painted: Instant,
+        epoch: u64,
+        at: i64,
+        expired: bool,
+        transport: Option<Transport>,
+    ) {
+        let applied = transport.filter(|clock| self.playing && clock.epoch == self.epoch);
+        if let Some(clock) = applied {
+            self.sample(clock.now, clock.position.max(self.position));
+        }
         if let Some(due) = self.due.remove(&(epoch, at)) {
             let waited = painted.saturating_duration_since(due).as_secs_f64() * 1e3;
             if !expired && waited <= self.frame_ms {
@@ -237,9 +263,11 @@ impl Counters {
         }
         self.settle();
         if self.playing && epoch == self.epoch {
-            let frames = u32::try_from(self.position.abs_diff(at)).map_or(f64::MAX, f64::from);
-            let offset = frames * self.frame_ms;
-            self.stats.max_av_offset_ms = self.stats.max_av_offset_ms.max(offset);
+            if let Some(clock) = applied {
+                let frames = u32::try_from(clock.position.abs_diff(at)).map_or(f64::MAX, f64::from);
+                let offset = frames * self.frame_ms;
+                self.stats.max_av_offset_ms = self.stats.max_av_offset_ms.max(offset);
+            }
             if at > self.shown.1 {
                 let held = painted.saturating_duration_since(self.shown.0);
                 let held = held.as_secs_f64() * 1e3;
@@ -290,22 +318,27 @@ mod tests {
 
     /// R-5 with an injected clock: outcomes per due frame, one count per
     /// frame, judged by the paint instant, held age from the latest paint of
-    /// a newer frame, the offset against the latest applied sample.
+    /// a newer frame, the offset against the ack's applied snapshot.
     #[test]
     fn due_frames_are_counted_once_by_their_ack() {
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut counters = Counters::default();
-        counters.ack(at(0), 1, 0, false);
+        counters.ack(at(0), 1, 0, false, None);
         assert_eq!(counters.stats, PlaybackStats::default(), "never due");
         counters.begin(at(0), 0, 33.0, 5, 1);
         assert_eq!(counters.stats.due_frames, 1, "the first frame is due");
         counters.sample(at(5), 1);
-        counters.ack(at(30), 1, 0, false);
-        counters.ack(at(30), 1, 0, false);
-        counters.ack(at(90), 1, 1, false);
+        counters.ack(at(30), 1, 0, false, None);
+        counters.ack(at(30), 1, 0, false, None);
+        counters.ack(at(90), 1, 1, false, None);
         counters.sample(at(300), 4);
-        counters.ack(at(301), 1, 3, false);
+        let transport = Transport {
+            now: at(301),
+            epoch: 1,
+            position: 4,
+        };
+        counters.ack(at(301), 1, 3, false, Some(transport));
         let stats = &counters.stats;
         let outcomes = (stats.due_frames, stats.on_time, stats.late, stats.dropped);
         assert_eq!(outcomes, (5, 2, 1, 2));
@@ -325,12 +358,12 @@ mod tests {
         let mut counters = Counters::default();
         counters.begin(at(0), 0, 33.0, 900, 1);
         counters.sample(at(33), 1);
-        counters.ack(at(30), 1, 0, false);
+        counters.ack(at(30), 1, 0, false, None);
         assert_eq!(counters.stats.on_time, 1, "painted on time, acked late");
         for ms in (0..2_200).step_by(5) {
             counters.sample(at(33 + ms), 1 + i64::try_from(ms).unwrap() / 33);
         }
-        counters.ack(at(2_232), 1, 1, false);
+        counters.ack(at(2_232), 1, 1, false, None);
         let stats = counters.stats;
         assert_eq!((stats.on_time, stats.late), (1, 1), "{stats:?}");
         assert_eq!(stats.dropped, stats.due_frames - 2);
@@ -345,10 +378,41 @@ mod tests {
         let mut counters = Counters::default();
         counters.begin(t0, 10, 33.0, 900, 1);
         counters.sample(t0, 11);
-        counters.ack(t0 + Duration::from_millis(1), 1, 10, true);
-        counters.ack(t0 + Duration::from_millis(1), 1, 11, false);
+        counters.ack(t0 + Duration::from_millis(1), 1, 10, true, None);
+        counters.ack(t0 + Duration::from_millis(1), 1, 11, false, None);
         let stats = counters.stats;
         assert_eq!((stats.on_time, stats.late), (1, 1), "{stats:?}");
+    }
+
+    /// R33 (E11.11.4): an image painted before the worker's tick reached its
+    /// frame is acked with a snapshot of the applied epoch, which the ack
+    /// samples: the frame is due and counted on time, with no offset (the
+    /// settle-only ack found no record, and the tick then made it dropped).
+    /// A snapshot of a newer epoch (a seek not yet applied) is not sampled.
+    #[test]
+    fn an_ack_ahead_of_the_tick_samples_its_applied_snapshot() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let snapshot = |ms: u64, epoch: u64, position: i64| {
+            Some(Transport {
+                now: at(ms),
+                epoch,
+                position,
+            })
+        };
+        let mut counters = Counters::default();
+        counters.begin(at(0), 10, 33.0, 900, 1);
+        counters.ack(at(34), 1, 11, false, snapshot(35, 1, 11));
+        let stats = counters.stats;
+        let outcomes = (stats.due_frames, stats.on_time, stats.dropped);
+        assert_eq!(outcomes, (2, 1, 1), "{stats:?}");
+        assert!(stats.max_av_offset_ms < 0.1, "{stats:?}");
+        counters.ack(at(40), 1, 11, false, snapshot(41, 2, 900));
+        let stats = counters.stats;
+        assert_eq!(stats.due_frames, 2, "a seek not applied: {stats:?}");
+        counters.sample(at(70), 12);
+        let stats = counters.stats;
+        assert_eq!((stats.due_frames, stats.on_time), (3, 1), "{stats:?}");
     }
 
     /// Review A F5: the terminal stop registers the last frames, and an ack
@@ -361,8 +425,8 @@ mod tests {
         counters.begin(at(0), 0, 100.0, 3, 7);
         counters.end(at(10), 2);
         assert_eq!(counters.stats.due_frames, 3, "0, 1 and 2 are due");
-        counters.ack(at(12), 7, 2, false);
-        counters.ack(at(12), 7, 1, false);
+        counters.ack(at(12), 7, 2, false, None);
+        counters.ack(at(12), 7, 1, false, None);
         let stats = counters.stats;
         assert_eq!((stats.on_time, stats.dropped), (2, 1), "{stats:?}");
     }
@@ -381,7 +445,7 @@ mod tests {
         counters.begin(t0, 0, 16.0, over + 1, 1);
         counters.sample(t0, over);
         assert_eq!(counters.pending(), DUE_RECORDS, "frames 0 and 1 evicted");
-        counters.ack(t0, 1, 0, false);
+        counters.ack(t0, 1, 0, false, None);
         assert_eq!(outcomes(&counters), (0, 1));
         for (epoch, frame, case) in [
             (1, 0, "a duplicate"),
@@ -389,13 +453,13 @@ mod tests {
             (1, -3, "never due: before the start"),
             (0, 1, "an epoch that registered nothing"),
         ] {
-            counters.ack(t0, epoch, frame, false);
+            counters.ack(t0, epoch, frame, false, None);
             assert_eq!(outcomes(&counters), (0, 1), "{case}");
         }
-        counters.ack(t0, 1, 1, false);
-        counters.ack(t0, 1, 1, false);
+        counters.ack(t0, 1, 1, false, None);
+        counters.ack(t0, 1, 1, false, None);
         assert_eq!(outcomes(&counters), (0, 2), "frame 1's own ack, once");
-        counters.ack(t0, 1, over, false);
+        counters.ack(t0, 1, over, false, None);
         assert_eq!(outcomes(&counters), (1, 2));
         let stats = counters.stats;
         assert_eq!(stats.dropped, stats.due_frames - 3);
@@ -404,13 +468,13 @@ mod tests {
         let records = i64::try_from(DUE_RECORDS).unwrap();
         counters.begin(t0, 0, 16.0, records + 10, 2);
         counters.sample(t0, 2);
-        counters.ack(t0, 2, 1, false);
+        counters.ack(t0, 2, 1, false, None);
         counters.sample(t0, records + 3);
         assert_eq!(counters.pending(), DUE_RECORDS, "0, 2 and 3 evicted");
-        counters.ack(t0, 2, 1, false);
+        counters.ack(t0, 2, 1, false, None);
         assert_eq!(outcomes(&counters), (1, 0), "acked before its eviction");
         for frame in [2, 0, 3, 3, 2] {
-            counters.ack(t0, 2, frame, false);
+            counters.ack(t0, 2, frame, false, None);
         }
         assert_eq!(outcomes(&counters), (1, 3), "each evicted frame once");
         assert!(counters.evicted.is_empty(), "all settled");
