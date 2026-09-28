@@ -3385,7 +3385,7 @@ Per file:
       reader frames with `render_scheduled`;
     - the renderer split that keeps C-5 byte-identical (`render.rs`, 178);
     - the reader thread's packet-boundary stop (`decode.rs`).
-  - Tests: the H-8 exhaustive model, the owed-reader and FrameWait tables, and real-thread C-5, quiescence, E-2,
+  - Tests: the H-8 model (a bounded exploration, E12.13), the owed-reader and FrameWait tables, and real-thread C-5, quiescence, E-2,
     agent-suspension and shutdown-in-every-phase witnesses.
 - **S2b-2:**
   - Production is on budget (202).
@@ -3407,7 +3407,7 @@ Every mutation was applied alone to the committed code, and the named tests were
 
 | Item | Evidence (tests, all green at `cce86e1`) | Mutations killed (witness) | Survived, with disposition |
 |---|---|---|---|
-| **I15 model** (S2b-1+) | `sched::tests::the_reader_model_holds_for_every_short_sequence` (exhaustive depth 5, P ∈ {1, 2, 3, 20}, 1.07–1.1 M states, liveness from every leaf, step-budgeted); `…_for_seeded_sequences`; `an_owed_reader_outlives_the_quiescence_deadline`; `frame_wait_steps_follow_the_table`; `a_reader_retired_mid_decode_stays_retiring` | M41 stale failure recorded, M42, M43 rings not pruned, M45 no per-source cap, M46 double decode (model); M44 (owed-reader test); M47 (agent push); M48 relabelled frame (C-5 witness); M83 `deliver` overwrites Retiring (the new test) | — |
+| **I15 model** (S2b-1+) | `sched::tests::the_reader_model_holds_for_every_short_sequence` (bounded exploration, not exhaustive: every sequence of five events from each P's start, four from the two targeted starts, P ∈ {1, 2, 3, 20}, 1.07–1.1 M states, liveness from every leaf, step-budgeted; condvar wake-ups and cache clears are not modelled, and have real-thread witnesses; R37 qualification, review A S2); `…_for_seeded_sequences`; `an_owed_reader_outlives_the_quiescence_deadline`; `frame_wait_steps_follow_the_table`; `a_reader_retired_mid_decode_stays_retiring` | M41 stale failure recorded, M42, M43 rings not pruned, M45 no per-source cap, M46 double decode (model); M44 (owed-reader test); M47 (agent push); M48 relabelled frame (C-5 witness); M83 `deliver` overwrites Retiring (the new test) | — |
 | **I11 / G13** (S2b-2) | the model with the permit book; `permits_split_the_pool_by_the_plan`; `a_widening_plan_rebalances_the_permits`; `shutdown_wakes_the_readers_waiting_for_permits`; four sources at P = 20 hold 5 × 4 = 20 while a thumbnail completes | M49 FIFO bypass, M50 lost cancel, M51 no shrink, M52 no growth, M53 release keeps permits, M54, M55, M56 shutdown does not end a wait, M57 grant over free; M59, M60 (real threads) | **M58** (a grant does not wake the next head): survives. It slows the dense stress 2.9×, because every release, close and cancel also notifies `permits_cv`. Recorded as masked, as at S2b-2. |
 | **I12** (S2b-3) | the model's I12 bound and K-2 oracles; `admission_drains_lookahead_to_fit_the_required_set`; `a_required_set_over_c_falls_back_to_the_synchronous_renderer`; `lookahead_stops_at_its_share_of_c_less_g`; `eviction_takes_over_share_sources_then_the_farthest`; `a_drain_stops_lookahead_and_holds_the_render_for_its_titles`; `title_rasters_are_trimmed_to_the_job`; `a_release_under_sched_panics` (H-4); the stress | M61, M64 beyond C, M65 H ignored, M66 share ignored, M67 lookahead kept while draining, M68 share ignores G, M69, M70 eviction order, M71, M72 reservations kept; M62 and M76 (K-3 check, count); M73 and M79 (drop guard, H-4 flag); M74 (H-4); M75 and M77 (drain stop, render waits); M78 (title trim); M82 (halt under Sched) | **M80** (a drain that unlocked waits without re-admitting): equivalent in the reachable states. The first unlock is followed by the post's own `continue`. After it, draining admits no lookahead and drops delivered lookahead, so a later wait has nothing to evict. **M63 and M81** are void: M63's target branch was dead code and was removed; M81's target check was reverted. |
 | **I10** (S2b-4) | `engine::tests::an_idle_engine_holds_no_preview_reader_or_decoder` (sequence below); `a_preview_spawn_failure_is_prefixed` | M84 eager preview spawn ("+0 threads at construction", 0.14 s); M85 parked preview keeps decoders; M86 `release_sources` keeps decoders; M87 idle reader never quiesces; M88 spawn failure not reported | — |
@@ -3480,7 +3480,7 @@ callbacks.
 | `feed_4x5` | LH | 1799 / 0 / 1 | 1799 / 0 / 1 | 41.8 / 43.2–43.3 / 43.8–45.8 | 1.0 | 45.3–45.9 | 45.6–46.5 / 22.6–23.6 | 0 / 512 | 0 | 464–466 |
 | `talk_recut` | LH | 7199 / 0 / 1 of 7200 | 7199 / 0 / 1 | 42.0–42.1 / 43.2–43.3 / 43.9–44.2 | 1.0 | 60.1–60.4 | 45.6–60.0 / 22.0–42.9 | 0 / 0 | 0 | 0 |
 
-**`typical_1080p` on LH, run by run (G1).** Neither part of G1 holds in any run: ≤ 1% late/held/dropped, and p95 ≤
+**`typical_1080p` on LH, run by run (G1).** No run satisfies both conditions: ≤ 1% late/held/dropped, and p95 ≤
 50 ms. Run 0's p95 of 45.6 ms is within 50 ms, but its 7.5% is not within 1%.
 
 | Build | On time / late / dropped of 1800 | Late + dropped | Present p50 / p95 ms | Held max ms |
@@ -3642,6 +3642,9 @@ is taken at S4 with Riel. Fresh child process per workload, as E9.5. Each cell i
 
 - **What the evidence shows.** The lookahead is capped by K-2's share. `lookahead_starved` is 1,017–1,093 per
   `typical_1080p` LH run.
+  - **Qualification (R37, review B S4).** `lookahead_starved` (the scheduler's `starved_keys`) counts K-2 refusals,
+    at most once per source per plan. It does not count stalled presentations: a refusal need not delay any frame.
+    It shows the share binding often, not that a refusal caused a drop.
 - **E8's arithmetic** gives `typical_1080p` 13 frames of lookahead per source: (224 − 21.09 − 14.06) / 2 MiB at
   7.03 MiB per 1280×720 working frame.
   - Three tracks share two sources, so one source serves two regions. That leaves ≈6–7 frames (≈0.2 s) ahead per
@@ -3663,6 +3666,11 @@ is taken at S4 with Riel. Fresh child process per workload, as E9.5. Each cell i
 - **Recommendation:** a short probe of (a) against (b) on `typical_1080p` LH before choosing.
 - **G14 on `blend_heavy_1080p` and `explainer_16x9`** (110–125 ms, 3 drops per run) may be a start-up or single-cut
   gap. The probe should localise it.
+  - **Qualification (R37, review B S4).** Their `present_max_ms` is below 45 ms, while their held maxima exceed
+    110 ms. The long held interval therefore lies at a measurement boundary, not between two recorded presentations:
+    `Trace::metrics` measures held age from the trace's start until the first presentation, and from the last
+    presentation until the window's end. The three drops are not attributed to a cut until that interval is
+    localised.
 
 **D2: drag regression (not an S2b gate; G8/L-5 is S2c).**
 
