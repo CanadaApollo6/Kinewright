@@ -1507,6 +1507,8 @@ mod tests {
                                 || slot.threads > 0 && slot.threads < self.readers.want
                         });
                     if deferred {
+                        // Review A F2: only a required decode defers a shrink.
+                        assert!(required, "lookahead decoded before a needed shrink");
                         return format!("step×{state}→decode-shrink-deferred");
                     }
                     format!("step×{state}→decode")
@@ -1857,8 +1859,10 @@ mod tests {
         "done",
     ];
 
-    /// I15 (S2b-1): every sequence of four events from each P's start, then
-    /// the liveness run from every leaf.
+    /// I15 (S2b-1): every sequence of five events from each P's start (four
+    /// from the two targeted starts below), then the liveness run from every
+    /// leaf. Bounded exploration of the pure transitions: condvar wake-ups
+    /// and cache clears are not modelled (their witnesses are in preview).
     #[test]
     fn the_reader_model_holds_for_every_short_sequence() {
         let mut cells = BTreeSet::new();
