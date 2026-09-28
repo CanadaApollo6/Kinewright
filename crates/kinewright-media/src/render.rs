@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::Path,
     sync::Arc,
 };
@@ -31,7 +31,7 @@ pub(crate) const PREVIEW_MAX_WIDTH: u32 = 1280;
 
 const FRAME_CACHE_CAPACITY: usize = 32;
 pub(crate) const PREFETCH_FRAMES: i64 = 15;
-const FRAME_CACHE_BYTE_BUDGET: usize = 224 * 1024 * 1024;
+pub(crate) const FRAME_CACHE_BYTE_BUDGET: usize = 224 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DecodeStrategy {
@@ -291,6 +291,8 @@ pub(crate) struct ReaderDemand {
     pub(crate) required: Vec<(VideoSourceKey, i64)>,
     /// Per source: what opens it, and its lookahead times, nearest first.
     pub(crate) sources: HashMap<VideoSourceKey, (SourceSpec, Vec<i64>)>,
+    /// K-1: G, the job's generated raster bytes (titles and solids).
+    pub(crate) generated: usize,
 }
 
 /// The job's required frames at `at`, then up to `horizon` frames of
@@ -364,6 +366,7 @@ pub(crate) fn reader_demand(
             .filter(|(k, t)| k == key && !required.contains(t));
         lookahead.extend(own.map(|(_, t)| *t).take(room));
     }
+    demand.generated = generated;
     demand
 }
 
@@ -470,6 +473,9 @@ pub(crate) struct FrameRenderer {
     title_rasterizer: crate::title::TitleRasterizer,
     title_cache: HashMap<TitleCacheKey, WorkingFrame>,
     title_order: VecDeque<TitleCacheKey>,
+    /// K-1: during a scheduled render, the title rasters it used; the
+    /// cache keeps only these after it (the preview accounts for them).
+    used_titles: Option<HashSet<TitleCacheKey>>,
     cache_budget: usize,
     /// PF1 K-6: `Some` for the preview renderer (window cap and eviction by
     /// distance); `None` keeps today's policy for proofs, export and benches.
@@ -502,6 +508,7 @@ impl FrameRenderer {
             title_rasterizer: crate::title::TitleRasterizer::new(),
             title_cache: HashMap::new(),
             title_order: VecDeque::new(),
+            used_titles: None,
             cache_budget: FRAME_CACHE_BYTE_BUDGET,
             preview: None,
             lut_library: Arc::new(LutLibrary::default()),
@@ -672,8 +679,23 @@ impl FrameRenderer {
     ) -> Result<FrameTexture, MediaError> {
         let purpose = MonitorPurpose::LiveMonitor;
         let video = (scale, Video::Supplied(frames));
+        self.used_titles = Some(HashSet::new());
         let rendered = self.render_monitor_from(document, project_at, resolution, video, purpose);
+        let used = self.used_titles.take().unwrap_or_default();
+        self.title_cache.retain(|key, _| used.contains(key));
+        self.title_order.retain(|key| used.contains(key));
         rendered.map(|(frame, _)| frame)
+    }
+
+    /// K-1: the bytes of the title rasters cached now.
+    pub(crate) fn title_bytes(&self) -> usize {
+        self.title_cache_bytes()
+    }
+
+    /// K-5: drop the cached title rasters (the preview is draining).
+    pub(crate) fn clear_titles(&mut self) {
+        self.title_cache.clear();
+        self.title_order.clear();
     }
 
     fn render_monitor_from(
@@ -948,6 +970,9 @@ impl FrameRenderer {
         content: Generated,
     ) -> Result<WorkingFrame, MediaError> {
         let key = (clip, resolution, content);
+        if let Some(used) = &mut self.used_titles {
+            used.insert(key.clone());
+        }
         if let Some(frame) = self.title_cache.get(&key).cloned() {
             self.touch_title(key);
             return Ok(frame);

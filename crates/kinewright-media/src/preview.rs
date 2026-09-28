@@ -11,9 +11,11 @@
 //! sends or wakes while holding it.
 
 use std::{
-    collections::VecDeque,
+    cell::Cell,
+    collections::{HashMap, HashSet, VecDeque},
+    ops::{Deref, DerefMut},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, PoisonError,
+        Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -29,13 +31,16 @@ use crate::{
     decode::VideoDecoder,
     derived_cache::CacheStats,
     engine::{SharedClock, monitor_max_width, send_latest},
-    frame::WorkingFrame,
+    frame::{CachedFrame, WorkingFrame},
     lut_store::LutLibrary,
     render::{
-        DecodeStrategy, FrameRenderer, PREFETCH_FRAMES, ReaderDemand, RenderScale, SourceSpec,
-        SuppliedFrames, VideoSourceKey, reader_demand,
+        DecodeStrategy, FRAME_CACHE_BYTE_BUDGET, FrameRenderer, PREFETCH_FRAMES, ReaderDemand,
+        RenderScale, SourceSpec, SuppliedFrames, VideoSourceKey, reader_demand,
     },
-    sched::{Next, PermitBook, Poll, Posted, Readers, WaitStep, WaitView, plan_regions, wait_step},
+    sched::{
+        Admission, Next, PermitBook, Poll, Posted, Readers, WaitStep, WaitView, Weighed,
+        plan_regions, wait_step,
+    },
     stats::{ACK_QUEUE, Ack, Counters},
 };
 
@@ -49,6 +54,130 @@ pub(crate) fn worker_stopped() -> MediaError {
 }
 
 pub(crate) type Wakeup = Arc<dyn Fn() + Send + Sync>;
+
+thread_local! {
+    /// H-4: this thread holds `Sched` (a drop guard asserts it does not).
+    static HOLDING_SCHED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The `Sched` (lane state) guard; it marks its thread as holding the lock
+/// so K-1's drop guard can assert it never releases under it (H-4).
+pub(crate) struct Sched<'a>(Option<MutexGuard<'a, LaneState>>);
+
+impl<'a> Sched<'a> {
+    fn new(guard: MutexGuard<'a, LaneState>) -> Self {
+        HOLDING_SCHED.set(true);
+        Self(Some(guard))
+    }
+
+    fn take(&mut self) -> MutexGuard<'a, LaneState> {
+        HOLDING_SCHED.set(false);
+        self.0.take().expect("Sched is held")
+    }
+
+    /// Wait on `condvar`, `Sched` released meanwhile.
+    pub(crate) fn wait(mut self, condvar: &Condvar) -> Self {
+        let waited = condvar.wait(self.take());
+        Self::new(waited.unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub(crate) fn wait_timeout(mut self, condvar: &Condvar, timeout: Duration) -> Self {
+        let waited = condvar.wait_timeout(self.take(), timeout);
+        Self::new(waited.unwrap_or_else(PoisonError::into_inner).0)
+    }
+}
+
+impl Deref for Sched<'_> {
+    type Target = LaneState;
+
+    fn deref(&self) -> &LaneState {
+        self.0.as_ref().expect("Sched is held")
+    }
+}
+
+impl DerefMut for Sched<'_> {
+    fn deref_mut(&mut self) -> &mut LaneState {
+        self.0.as_mut().expect("Sched is held")
+    }
+}
+
+impl Drop for Sched<'_> {
+    fn drop(&mut self) {
+        if self.0.take().is_some() {
+            HOLDING_SCHED.set(false);
+        }
+    }
+}
+
+/// K-1's drop guard: bytes of the scheduler's live count, released under
+/// `Sched` when the last owner drops, never by a thread holding it (H-4).
+pub(crate) struct Hold {
+    bytes: usize,
+    lane: Weak<Lane>,
+}
+
+impl Hold {
+    /// Adopt `bytes` already reserved under `Sched`.
+    fn adopt(lane: &Arc<Lane>, bytes: usize) -> Self {
+        let lane = Arc::downgrade(lane);
+        Self { bytes, lane }
+    }
+
+    /// Release all but `bytes` (the title rasters still cached).
+    fn shrink_to(&mut self, bytes: usize) {
+        let excess = self.bytes.saturating_sub(bytes);
+        self.bytes -= excess;
+        release(&self.lane, excess);
+    }
+}
+
+fn release(lane: &Weak<Lane>, bytes: usize) {
+    debug_assert!(
+        !HOLDING_SCHED.get(),
+        "H-4: a reservation released under Sched"
+    );
+    let Some(lane) = lane.upgrade().filter(|_| bytes > 0) else {
+        return;
+    };
+    lane.lock().readers.release(bytes);
+    // H-3: a reservation release wakes both.
+    lane.notify();
+    lane.work.notify_all();
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        release(&self.lane, self.bytes);
+    }
+}
+
+/// A reader's frame and its reservation: the bytes stay live while any
+/// clone does (ring, handoff, a render's pin).
+#[derive(Clone)]
+pub(crate) struct Pinned {
+    pub(crate) frame: WorkingFrame,
+    hold: Arc<Hold>,
+}
+
+impl Weighed for Pinned {
+    fn bytes(&self) -> usize {
+        self.hold.bytes
+    }
+
+    fn pinned(&self) -> bool {
+        Arc::strong_count(&self.hold) > 1
+    }
+}
+
+impl CachedFrame for Pinned {
+    fn byte_len(&self) -> usize {
+        self.frame.byte_len()
+    }
+
+    fn shared_buffer_id(&self) -> usize {
+        self.frame.shared_buffer_id()
+    }
+}
 
 /// What a transport job renders: the document and LUT library current at
 /// its stamp, bound by the worker when it posts (R-1).
@@ -123,8 +252,22 @@ pub(crate) struct LaneState {
     /// Stamped transport failures, for the worker's R-2 test.
     pub(crate) failures: Vec<(FrameStamp, MediaError)>,
     pub(crate) wakeup: Option<Wakeup>,
-    /// H-2/H-3 (S2b-1): the readers' plans, states, rings and failures.
-    pub(crate) readers: Readers<VideoSourceKey, WorkingFrame>,
+    /// H-2/H-3 (S2b-1): the readers' plans, states, rings and failures;
+    /// K-1 (S2b-3): the scheduler's live bytes.
+    pub(crate) readers: Readers<VideoSourceKey, Pinned>,
+    /// K-3: synchronous fallback frames by reason: more sources than
+    /// readers, and a required set over C.
+    pub(crate) fallbacks: [u64; 2],
+}
+
+impl LaneState {
+    /// K-3: an empty plan (every unpinned lookahead drops, to drop after
+    /// unlock), counted by `reason`: 0 more sources than readers, 1 a
+    /// required set over C.
+    fn fall_back(&mut self, reason: usize, now: Duration) -> Posted<VideoSourceKey, Pinned> {
+        self.fallbacks[reason] += 1;
+        self.readers.post(Vec::new(), (HashMap::new(), 0), now)
+    }
 }
 
 /// The worker/preview hand-off: one leaf lock and the `ready` condvar.
@@ -142,6 +285,9 @@ pub(crate) struct Lane {
     /// gate (or proceeds once its sender is gone).
     #[cfg(test)]
     pub(crate) gate: Mutex<Option<Receiver<()>>>,
+    /// K-2: reader decodes that ended `Cancelled`.
+    #[cfg(test)]
+    pub(crate) cancelled: std::sync::atomic::AtomicUsize,
     /// H-5: the `Permits` monitor, a leaf never taken with `state` (H-4).
     permits: Mutex<PermitBook>,
     permits_cv: Condvar,
@@ -162,8 +308,13 @@ impl Default for Lane {
 impl Lane {
     /// A lane for P = `parallelism`: R readers, a pool of P permits (H-5).
     pub(crate) fn with_parallelism(parallelism: usize) -> Self {
+        Self::with_budget(parallelism, FRAME_CACHE_BYTE_BUDGET)
+    }
+
+    /// K-1: C = `budget` for the scheduler path (tests shrink it).
+    pub(crate) fn with_budget(parallelism: usize, budget: usize) -> Self {
         let state = LaneState {
-            readers: Readers::new(parallelism),
+            readers: Readers::new(parallelism).with_budget(budget),
             ..LaneState::default()
         };
         Self {
@@ -175,6 +326,8 @@ impl Lane {
             skew: Mutex::default(),
             #[cfg(test)]
             gate: Mutex::default(),
+            #[cfg(test)]
+            cancelled: std::sync::atomic::AtomicUsize::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
             permits_cv: Condvar::new(),
             counters: Mutex::default(),
@@ -221,8 +374,8 @@ impl Lane {
         self.book().in_use()
     }
 
-    pub(crate) fn lock(&self) -> MutexGuard<'_, LaneState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    pub(crate) fn lock(&self) -> Sched<'_> {
+        Sched::new(self.state.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     pub(crate) fn counters(&self) -> MutexGuard<'_, Counters> {
@@ -405,6 +558,49 @@ enum Halt {
     },
 }
 
+/// A scheduled render's inputs: the frames, their pins (K-1: live until the
+/// render is done) and the job's generated-raster reservation.
+type Scheduled = (SuppliedFrames, Vec<Pinned>, Option<Hold>);
+
+/// The job's frames by (source, time), and the pins that keep them live.
+fn supplied(
+    demand: &ReaderDemand,
+    results: Vec<Result<Pinned, MediaError>>,
+) -> (SuppliedFrames, Vec<Pinned>) {
+    let pins = results.iter().flatten().cloned().collect();
+    let frames = (demand.required.iter().cloned())
+        .zip(results.into_iter().map(|r| r.map(|pin| pin.frame)))
+        .collect();
+    (frames, pins)
+}
+
+/// H-5/K-3: per source its required and lookahead times, each source's
+/// frame bytes, and the required set's bytes (distinct frames plus G).
+#[allow(clippy::type_complexity)]
+fn demand_plan(
+    demand: &ReaderDemand,
+) -> (
+    Vec<(VideoSourceKey, Vec<i64>, Vec<i64>)>,
+    HashMap<VideoSourceKey, usize>,
+    usize,
+) {
+    let per_source = (demand.sources.iter())
+        .map(|(key, (_, lookahead))| {
+            let required = demand.required.iter().filter(|(k, _)| k == key);
+            let times = required.map(|(_, t)| *t).collect();
+            (key.clone(), times, lookahead.clone())
+        })
+        .collect();
+    let sizes: HashMap<_, _> = (demand.sources.iter())
+        .map(|(key, (spec, _))| (key.clone(), spec.frame_bytes))
+        .collect();
+    let distinct: HashSet<_> = demand.required.iter().collect();
+    let set = (distinct.iter())
+        .map(|(key, _)| sizes.get(key).copied().unwrap_or(0))
+        .fold(demand.generated, usize::saturating_add);
+    (per_source, sizes, set)
+}
+
 /// A transport render's `FrameWait` terms (H-2): its lane version, and for
 /// playback the agent deadline (lead + 1 frames, R-4).
 struct FrameWait {
@@ -422,7 +618,7 @@ thread_local! {
 fn spawn_reader(
     lane: &Arc<Lane>,
     (id, spec): (u64, SourceSpec),
-    halt: &Arc<AtomicBool>,
+    stop: &Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>, MediaError> {
     #[cfg(test)]
     if FAIL_READER_SPAWN.with(std::cell::Cell::take) {
@@ -430,17 +626,17 @@ fn spawn_reader(
             "decode-reader: spawn failed: injected".to_owned(),
         ));
     }
-    let (lane, halt) = (Arc::clone(lane), Arc::clone(halt));
+    let (lane, stop) = (Arc::clone(lane), Arc::clone(stop));
     let spawned = thread::Builder::new().name(format!("kinewright-decode-{id}"));
     spawned
-        .spawn(move || read(&lane, id, &spec, &halt))
+        .spawn(move || read(&lane, id, &spec, &stop))
         .map_err(|error| MediaError::Backend(format!("decode-reader: spawn failed: {error}")))
 }
 
 /// A reader's loop (H-2): every step is decided under the lock; decoding,
 /// opening and closing run outside it, and what `deliver` returns is
 /// dropped after unlock (H-4).
-fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
+fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
     let mut decoder: Option<VideoDecoder> = None;
     let mut threads = 0;
     let mut state = lane.lock();
@@ -450,9 +646,7 @@ fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
         match state.readers.next(id, now, shutdown) {
             Next::Retire => break,
             Next::Wait { until } => {
-                let timeout = until.saturating_sub(now);
-                let waited = lane.work.wait_timeout(state, timeout);
-                state = waited.unwrap_or_else(PoisonError::into_inner).0;
+                state = state.wait_timeout(&lane.work, until.saturating_sub(now));
             }
             // H-5: permits before a decoder exists (X-5), outside `Sched`.
             Next::Open { want } => {
@@ -466,6 +660,8 @@ fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
                 state = lane.lock();
                 state.readers.granted(id, granted, lane.now());
                 lane.work.notify_all();
+                #[cfg(test)]
+                lane.notify(); // a test waiting for a grant
             }
             Next::Close => {
                 drop(state);
@@ -476,8 +672,11 @@ fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
                 #[cfg(test)]
                 lane.notify(); // a test waiting for a reopen
             }
-            Next::Decode { at, version } => {
+            Next::Decode { at, version, bytes } => {
+                // A stop meant for an earlier lookahead decode (K-2) lapses.
+                stop.store(false, Ordering::Release);
                 drop(state);
+                let hold = Hold::adopt(lane, bytes);
                 #[cfg(test)]
                 {
                     let gate = lane.gate.lock().expect("gate").clone();
@@ -489,23 +688,32 @@ fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
                 let result = match &mut decoder {
                     Some(decoder) => spec.decode(decoder, at),
                     None => spec.open(threads).and_then(|mut opened| {
-                        opened.set_stop(Arc::clone(halt));
+                        opened.set_stop(Arc::clone(stop));
                         spec.decode(decoder.insert(opened), at)
                     }),
                 };
-                // Cancelled only once the reader is retiring.
-                let cancelled = matches!(result, Err(MediaError::Cancelled));
-                let dropped = (!cancelled).then(|| {
-                    let now = lane.now();
-                    let delivered = lane.lock().readers.deliver(id, at, version, result, now);
-                    lane.notify();
-                    // H-3: a dropped failure's time is re-demanded.
-                    if delivered.1.is_some() {
-                        lane.work.notify_all();
-                    }
-                    delivered
+                // Stopped: the reader retires, or K-2 stopped its lookahead.
+                if matches!(result, Err(MediaError::Cancelled)) {
+                    #[cfg(test)]
+                    lane.cancelled.fetch_add(1, Ordering::AcqRel);
+                    lane.lock().readers.stopped(id, lane.now());
+                    drop(hold);
+                    state = lane.lock();
+                    continue;
+                }
+                let result = result.map(|frame| {
+                    debug_assert!(bytes == 0 || frame.byte_len() == bytes, "K-1: f is exact");
+                    let hold = Arc::new(hold);
+                    Pinned { frame, hold }
                 });
-                drop(dropped);
+                let now = lane.now();
+                let delivered = lane.lock().readers.deliver(id, at, version, result, now);
+                lane.notify();
+                // H-3: a dropped failure's time is re-demanded.
+                if delivered.1.is_some() {
+                    lane.work.notify_all();
+                }
+                drop(delivered);
                 state = lane.lock();
             }
         }
@@ -567,8 +775,11 @@ pub(crate) struct Preview {
     published: Option<(u64, i64)>,
     /// H-1: this preview's reader threads, joined when it goes.
     readers: Vec<JoinHandle<()>>,
-    /// H-2: stops this preview's readers at a packet boundary.
-    halt: Arc<AtomicBool>,
+    /// H-2/K-2: each reader's stop flag (a packet boundary): set for all
+    /// when the preview goes, for one to stop its lookahead decode.
+    stops: HashMap<u64, Arc<AtomicBool>>,
+    /// K-1: the title rasters this path keeps cached (G).
+    titles: Option<Hold>,
     #[cfg(test)]
     pub(crate) faults: Arc<crate::engine::Faults>,
 }
@@ -577,14 +788,18 @@ impl Drop for Preview {
     /// H-6 (3)/(5): every reader retires, closes its decoder and exits
     /// before the preview does (the worker joins the preview).
     fn drop(&mut self) {
-        self.halt.store(true, Ordering::Release);
         let frames = {
             let mut state = self.lane.lock();
             state.readers.retire_all();
+            // Under `Sched`, so no reader resets its flag after (K-2).
+            for stop in self.stops.values() {
+                stop.store(true, Ordering::Release);
+            }
             state.readers.clear_rings()
         };
         self.lane.work.notify_all();
         drop(frames);
+        self.titles = None;
         for reader in self.readers.drain(..) {
             let _ = reader.join();
         }
@@ -614,7 +829,8 @@ impl Preview {
             agent_turn: false,
             published: None,
             readers: Vec::new(),
-            halt: Arc::default(),
+            stops: HashMap::new(),
+            titles: None,
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -711,13 +927,7 @@ impl Preview {
                         .map(|job| Work::Playback(job, version));
                 }
                 None if !wait => break None,
-                None => {
-                    state = self
-                        .lane
-                        .ready
-                        .wait(state)
-                        .unwrap_or_else(PoisonError::into_inner);
-                }
+                None => state = state.wait(&self.lane.ready),
             }
         };
         drop(state);
@@ -729,6 +939,7 @@ impl Preview {
     fn bind(&mut self, generation: Option<u64>, lut: &Arc<LutLibrary>) {
         if generation.is_some() && generation != self.generation {
             self.renderer.clear();
+            self.titles = None;
             self.generation = generation;
         }
         if !Arc::ptr_eq(&self.lut, lut) {
@@ -773,8 +984,20 @@ impl Preview {
         let frames = self.schedule(&demand, at, wait)?;
         self.bind(Some(scene.generation), &scene.lut);
         let frame = match frames {
-            Some(frames) => {
-                (self.renderer).render_scheduled(document, at, resolution, scale, &frames)
+            Some((frames, pins, generated)) => {
+                let frame =
+                    (self.renderer).render_scheduled(document, at, resolution, scale, &frames);
+                drop((frames, pins));
+                // K-1: the job's generated bytes join the titles kept,
+                // then shrink to the rasters still cached.
+                let titles = self
+                    .titles
+                    .get_or_insert_with(|| Hold::adopt(&self.lane, 0));
+                if let Some(mut generated) = generated {
+                    titles.bytes += std::mem::take(&mut generated.bytes);
+                }
+                titles.shrink_to(self.renderer.title_bytes());
+                frame
             }
             // More sources than readers: today's synchronous render (K-3).
             None if wait.playback.is_some() => {
@@ -794,48 +1017,56 @@ impl Preview {
         Ok(Some(frame))
     }
 
-    /// H-2/H-3: post the job's plan, start the readers it needs, then
-    /// `FrameWait` until every required frame has a result or a current
-    /// failure. `None`: the plan needs more sources than readers.
+    /// H-2/H-3: post the job's plan, start the readers it needs, admit its
+    /// required set (K-2), then `FrameWait` until every required frame has
+    /// a result or a current failure. `None`: K-3's synchronous fallback.
     fn schedule(
         &mut self,
         demand: &ReaderDemand,
         at: TimeCode,
         wait: &FrameWait,
-    ) -> Result<Option<SuppliedFrames>, Halt> {
-        let per_source: Vec<_> = (demand.sources.iter())
-            .map(|(key, (_, lookahead))| {
-                let required = demand.required.iter().filter(|(k, _)| k == key);
-                (
-                    key.clone(),
-                    required.map(|(_, t)| *t).collect(),
-                    lookahead.clone(),
-                )
-            })
-            .collect();
-        let now = self.lane.now();
-        let posted = {
-            let mut state = self.lane.lock();
-            if state.shutdown || state.version != wait.version {
-                return Err(Halt::Superseded);
-            }
-            // More sources than readers: an empty plan (the readers go
-            // idle and their frames drop), then a synchronous render.
-            let regions = plan_regions(&per_source, state.readers.limit());
-            let fallback = regions.is_none();
-            (
-                fallback,
-                state.readers.post(regions.unwrap_or_default(), now),
-            )
-        };
-        let (fallback, posted) = posted;
-        self.started(posted, demand);
-        if fallback {
-            return Ok(None);
+    ) -> Result<Option<Scheduled>, Halt> {
+        let (per_source, sizes, set) = demand_plan(demand);
+        let lane = Arc::clone(&self.lane);
+        let now = lane.now();
+        let mut state = lane.lock();
+        if state.shutdown || state.version != wait.version {
+            return Err(Halt::Superseded);
         }
-        let mut state = self.lane.lock();
+        // K-3: more sources than readers, or a required set over C.
+        let regions = plan_regions(&per_source, state.readers.limit());
+        let reason = match &regions {
+            None => Some(0),
+            Some(_) if !state.readers.fits(set) => Some(1),
+            Some(_) => None,
+        };
+        if let Some(reason) = reason {
+            let posted = state.fall_back(reason, now);
+            drop(state);
+            return Ok(self.fell_back(posted, demand));
+        }
+        let plan = (sizes, demand.generated);
+        // The set is admitted under the post's lock, before a reader starts.
+        let mut posted = Some(state.readers.post(regions.unwrap_or_default(), plan, now));
+        let mut generated = Some(demand.generated);
+        let mut granted = None;
         loop {
-            let resolved = state.readers.resolve(&demand.required);
+            if generated.is_some() || state.readers.unreserved() {
+                let unlocked;
+                (state, unlocked) = self.admit((&lane, state), &mut generated, &mut granted);
+                if unlocked {
+                    continue; // a release while unlocked woke no one
+                }
+            }
+            if let Some(posted) = posted.take() {
+                drop(state);
+                self.started(posted, demand);
+                state = lane.lock();
+                continue;
+            }
+            // K-2: nothing renders before its whole set is reserved.
+            let resolved =
+                (state.readers.resolve(&demand.required)).filter(|_| generated.is_none());
             let agent = |job: &AgentJob| !job.cancel.load(Ordering::Acquire);
             let view = WaitView {
                 shutdown: state.shutdown,
@@ -847,12 +1078,21 @@ impl Preview {
                 agent_due: wait.playback.is_some_and(|due| Instant::now() >= due),
             };
             match wait_step(view) {
-                WaitStep::Shutdown | WaitStep::Superseded => return Err(Halt::Superseded),
-                WaitStep::Held { agent } => return Err(Halt::Held { agent }),
-                WaitStep::Ready => {
+                // H-4: `granted` drops after unlock.
+                WaitStep::Shutdown | WaitStep::Superseded => {
                     drop(state);
-                    let results = resolved.unwrap_or_default();
-                    return Ok(Some(demand.required.iter().cloned().zip(results).collect()));
+                    return Err(Halt::Superseded);
+                }
+                WaitStep::Held { agent } => {
+                    drop(state);
+                    return Err(Halt::Held { agent });
+                }
+                WaitStep::Ready => {
+                    let starved = std::mem::take(&mut state.readers.starved);
+                    drop(state);
+                    self.lane.counters().stats.lookahead_starved += starved;
+                    let (frames, pins) = supplied(demand, resolved.unwrap_or_default());
+                    return Ok(Some((frames, pins, granted)));
                 }
                 WaitStep::Suspend => {
                     // R-4: a paused wait runs the agent job, demands posted.
@@ -864,7 +1104,7 @@ impl Preview {
                     if let Some(job) = job {
                         self.run_agent(job);
                     }
-                    state = self.lane.lock();
+                    state = lane.lock();
                 }
                 WaitStep::Wait if state.readers.waiting() => {
                     let assigned = state.readers.assign(self.lane.now());
@@ -874,7 +1114,7 @@ impl Preview {
                     } else {
                         drop(state);
                         self.started(assigned, demand);
-                        state = self.lane.lock();
+                        state = lane.lock();
                     }
                 }
                 WaitStep::Wait => state = self.wait_ready(state, wait),
@@ -882,24 +1122,71 @@ impl Preview {
         }
     }
 
-    fn wait_ready<'a>(
-        &self,
-        state: MutexGuard<'a, LaneState>,
-        wait: &FrameWait,
-    ) -> MutexGuard<'a, LaneState> {
+    /// K-2: admit the job's set (its G once). Draining stops the lookahead
+    /// decodes, then drops the evicted frames and title rasters (K-5) after
+    /// unlock; `true` if it unlocked.
+    fn admit<'a>(
+        &mut self,
+        (lane, mut state): (&'a Lane, Sched<'a>),
+        generated: &mut Option<usize>,
+        granted: &mut Option<Hold>,
+    ) -> (Sched<'a>, bool) {
+        match state.readers.admit(generated.unwrap_or(0)) {
+            Admission::Ready { generated: bytes } => {
+                if generated.take().is_some() {
+                    *granted = Some(Hold::adopt(&self.lane, bytes));
+                }
+                self.lane.work.notify_all();
+                (state, false)
+            }
+            Admission::Wait { evicted, stop } => {
+                self.stop(&stop);
+                if evicted.is_empty() && self.titles.is_none() {
+                    return (state, false); // wait under this same lock
+                }
+                drop(state);
+                drop(evicted);
+                self.renderer.clear_titles();
+                self.titles = None;
+                (lane.lock(), true)
+            }
+        }
+    }
+
+    /// K-5: ask the named readers to stop at their next packet boundary.
+    fn stop(&self, readers: &[u64]) {
+        for id in readers {
+            if let Some(flag) = self.stops.get(id) {
+                flag.store(true, Ordering::Release);
+            }
+        }
+    }
+
+    /// K-3, after unlock: count the frame and drop what the empty plan
+    /// removed; the synchronous renderer takes it.
+    fn fell_back(
+        &mut self,
+        posted: Posted<VideoSourceKey, Pinned>,
+        demand: &ReaderDemand,
+    ) -> Option<Scheduled> {
+        self.lane.counters().stats.sync_fallback_frames += 1;
+        self.started(posted, demand);
+        None
+    }
+
+    fn wait_ready<'a>(&self, state: Sched<'a>, wait: &FrameWait) -> Sched<'a> {
         let ready = &self.lane.ready;
         if wait.playback.is_some() {
-            let waited = ready.wait_timeout(state, HOLD_POLL);
-            waited.unwrap_or_else(PoisonError::into_inner).0
+            state.wait_timeout(ready, HOLD_POLL)
         } else {
-            ready.wait(state).unwrap_or_else(PoisonError::into_inner)
+            state.wait(ready)
         }
     }
 
     /// After a post or an assignment, outside the lock: wake the readers
     /// (plans changed, obsolete ones retire), cancel obsolete tickets
     /// (H-5), drop what the plan removed (H-4) and start new readers.
-    fn started(&mut self, posted: Posted<VideoSourceKey, WorkingFrame>, demand: &ReaderDemand) {
+    fn started(&mut self, posted: Posted<VideoSourceKey, Pinned>, demand: &ReaderDemand) {
         let Posted {
             spawn,
             cancel,
@@ -919,13 +1206,26 @@ impl Preview {
     /// required frames in the current plan (E-2).
     fn spawn(&mut self, spawn: Vec<(u64, VideoSourceKey)>, demand: &ReaderDemand) {
         self.readers.retain(|reader| !reader.is_finished());
+        let live: Vec<u64> = self
+            .lane
+            .lock()
+            .readers
+            .slots
+            .iter()
+            .map(|slot| slot.id)
+            .collect();
+        self.stops.retain(|id, _| live.contains(id));
         for (id, key) in spawn {
             let spec = demand.sources.get(&key).map(|(spec, _)| spec.clone());
+            let stop = Arc::<AtomicBool>::default();
             let started = spec
                 .ok_or_else(|| MediaError::Backend("decode-reader: no source".to_owned()))
-                .and_then(|spec| spawn_reader(&self.lane, (id, spec), &self.halt));
+                .and_then(|spec| spawn_reader(&self.lane, (id, spec), &stop));
             match started {
-                Ok(reader) => self.readers.push(reader),
+                Ok(reader) => {
+                    self.readers.push(reader);
+                    self.stops.insert(id, stop);
+                }
                 Err(error) => {
                     self.lane.lock().readers.fail_start(id, &error);
                     self.lane.notify();
@@ -1077,12 +1377,7 @@ impl Preview {
             if self.faults.step_hold.load(Ordering::Acquire) {
                 return Attempt::Pending;
             }
-            state = self
-                .lane
-                .ready
-                .wait_timeout(state, HOLD_POLL)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
+            state = state.wait_timeout(&self.lane.ready, HOLD_POLL);
         }
     }
 
@@ -1123,6 +1418,7 @@ impl Preview {
                 };
                 drop(frames);
                 let mut stats = if clear {
+                    self.titles = None;
                     self.renderer.clear()
                 } else {
                     self.renderer.cache_stats()
@@ -1612,8 +1908,7 @@ pub(crate) mod tests {
         while !what(&state) {
             let left = deadline.checked_duration_since(Instant::now());
             let left = left.expect("the lane never reached the condition");
-            let waited = lane.ready.wait_timeout(state, left);
-            state = waited.unwrap_or_else(PoisonError::into_inner).0;
+            state = state.wait_timeout(&lane.ready, left);
         }
     }
 
@@ -1777,7 +2072,9 @@ pub(crate) mod tests {
             let waiting = slots.filter(|slot| slot.state == crate::sched::ReaderState::PermitWait);
             waiting.map(|slot| slot.id).collect()
         };
-        wait_until(&lane, |state| queued(state).len() == 2);
+        // The newcomer's grant is in the book before its slot records it.
+        let granted = |state: &LaneState| state.readers.slots.iter().any(|slot| slot.threads == 4);
+        wait_until(&lane, |state| queued(state).len() == 2 && granted(state));
         let waiters = queued(&lane.lock());
         assert_eq!(lane.permits_in_use(), 20, "the newcomer is granted 4");
         lane.shut_down();
@@ -1834,6 +2131,228 @@ pub(crate) mod tests {
         assert!(lane.take_failures().is_empty());
         lane.shut_down();
         join_within(thread);
+    }
+
+    /// A playback-horizon render of `at` on the test thread (lookahead on).
+    fn render_ahead(preview: &mut Preview, document: &Arc<Document>, at: i64) -> FrameTexture {
+        let scene = job(document, JobKind::Paused(TimeCode(at)), stamp(1, 1)).scene;
+        let wait = FrameWait {
+            version: preview.lane.lock().version,
+            playback: Some(Instant::now() + Duration::from_secs(60)),
+        };
+        let rendered = preview.render_monitor(&scene, TimeCode(at), &wait);
+        let Ok(Some(frame)) = rendered else {
+            panic!("frame {at} did not render");
+        };
+        frame
+    }
+
+    /// The synchronous renderer's bytes for `at` (C-5's reference), and f.
+    fn reference(document: &Document, at: i64) -> (Vec<u8>, usize) {
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let demand = reader_demand(document, TimeCode(at), resolution, scale, 0);
+        assert_eq!(demand.generated, 0, "no generated rasters here");
+        let f = demand
+            .sources
+            .values()
+            .map(|(spec, _)| spec.frame_bytes)
+            .max();
+        let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let frame = renderer.render_live(
+            document,
+            TimeCode(at),
+            resolution,
+            scale,
+            DecodeStrategy::Seek,
+        );
+        (
+            frame.expect("reference").rgba.to_vec(),
+            f.expect("a source"),
+        )
+    }
+
+    /// I12 / C-5 (S2b-3): with C a few frames, playback-horizon renders
+    /// over cuts keep live bytes ≤ C, render the synchronous bytes, and every
+    /// reservation returns when the preview goes.
+    #[test]
+    fn scheduler_live_bytes_stay_within_c() {
+        let (document, _workload) = cut_document();
+        let f = reference(&document, 0).1;
+        // C − H = 5 f: one required set (3 f) plus about two lookahead.
+        let budget = 8 * f;
+        let lane = Arc::new(Lane::with_budget(20, budget));
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        for at in [0, 1, 2, 3, 8, 9, 10, 11, 25, 26, 4] {
+            let shown = render_ahead(&mut preview, &document, at);
+            assert_eq!(*shown.rgba, reference(&document, at).0, "C-5: frame {at}");
+            let (live, peak) = lane.lock().readers.live();
+            assert!(live <= budget && peak <= budget, "I12: {peak} > {budget}");
+        }
+        assert_eq!(lane.lock().fallbacks, [0, 0], "no K-3 fallback");
+        // Not vacuous: lookahead runs past the required set, within C.
+        wait_until(&lane, |state| state.readers.live().0 > 3 * f);
+        assert!(lane.lock().readers.live().1 <= budget, "I12");
+        drop(preview);
+        assert_eq!(lane.lock().readers.live().0, 0, "K-1: a reservation leaked");
+    }
+
+    /// K-2 / K-5 (S2b-3): a job whose required set does not fit beside the
+    /// last job's lookahead drains: the farthest unpinned lookahead goes,
+    /// no new lookahead starts, and the set is admitted within C.
+    #[test]
+    fn admission_drains_lookahead_to_fit_the_required_set() {
+        let workload = crate::perf_fixtures::four_sources((160, 90), 30);
+        let (mut one, mut three) = (workload.0.clone(), workload.0.clone());
+        one.tracks.truncate(1);
+        three.tracks.truncate(3);
+        let (one, three) = (Arc::new(one), Arc::new(three));
+        let f = reference(&one, 3).1;
+        // C − H = 2.5 f: one lookahead frame fits beside source 0's frame.
+        let budget = 7 * f / 2;
+        let lane = Arc::new(Lane::with_budget(20, budget));
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        render_ahead(&mut preview, &one, 3);
+        let key = lane.lock().readers.slots[0].key.clone();
+        let times = |state: &LaneState| -> Vec<i64> { state.readers.ring_times(&key) };
+        wait_until(&lane, |state| times(state) == [3, 4] && !decoding(state));
+        let shown = render_ahead(&mut preview, &three, 3);
+        assert_eq!(*shown.rgba, reference(&three, 3).0, "C-5");
+        let state = lane.lock();
+        assert_eq!(times(&state), [3], "the lookahead was evicted for the set");
+        assert!(state.readers.live().1 <= budget, "I12");
+        drop(state);
+        let starved = lane.counters().stats.lookahead_starved;
+        assert!(starved > 0, "lookahead_starved counts the refusals");
+    }
+
+    /// K-2 / K-1 (S2b-3): a drain stops the lookahead decode in flight, and
+    /// a job whose frame is resolved still waits for its titles' G: once
+    /// admitted, live bytes are exactly the ring and the title rasters.
+    #[test]
+    fn a_drain_stops_lookahead_and_holds_the_render_for_its_titles() {
+        let workload = crate::perf_fixtures::titled((160, 90), 30, 2);
+        let mut one = workload.0.clone();
+        one.tracks.truncate(1);
+        let (one, titled) = (Arc::new(one), Arc::new(workload.0.clone()));
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(titled.resolution),
+        };
+        let size = scale.output_resolution(titled.resolution);
+        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0);
+        let f = (demand.sources.values())
+            .map(|(spec, _)| spec.frame_bytes)
+            .max();
+        let (f, g) = (f.expect("a source"), demand.generated);
+        assert!(g > f, "two title rasters outweigh a frame: {g} vs {f}");
+        // One lookahead frame fits beside frame 3 (C − H ≥ 2f); with it in
+        // flight the titles do not (2f + G > C), without it they do.
+        let budget = (3 * f).max(f + g);
+        let lane = Arc::new(Lane::with_budget(20, budget));
+        let (gate, gated) = bounded(0);
+        *lane.gate.lock().expect("gate") = Some(gated);
+        let feeder = {
+            let lane = Arc::clone(&lane);
+            thread::spawn(move || {
+                gate.send(()).expect("frame 3 decodes");
+                // Draining notifies no one: poll it (60 s is a hang).
+                let deadline = Instant::now() + Duration::from_secs(60);
+                while !lane.lock().readers.draining() {
+                    assert!(Instant::now() < deadline, "the titled job never drained");
+                    thread::yield_now();
+                }
+                drop(gate); // frame 4, stopped, proceeds
+            })
+        };
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        render_ahead(&mut preview, &one, 3);
+        wait_until(&lane, decoding);
+        render_ahead(&mut preview, &titled, 3);
+        feeder.join().expect("the feeder");
+        wait_until(&lane, |state| !decoding(state));
+        assert!(
+            lane.cancelled.load(Ordering::Acquire) >= 1,
+            "K-2: the lookahead stopped"
+        );
+        let key = lane.lock().readers.slots[0].key.clone();
+        let state = lane.lock();
+        let ring = state.readers.ring_times(&key).len() * f;
+        let (live, peak) = state.readers.live();
+        drop(state);
+        assert_eq!(
+            live,
+            ring + preview.renderer.title_bytes(),
+            "K-1: G was reserved"
+        );
+        assert!(peak <= budget, "I12");
+    }
+
+    /// H-4 (S2b-3): the drop guard asserts it never releases under `Sched`
+    /// (without the assertion it would deadlock: a watchdog fails that).
+    #[test]
+    #[cfg(debug_assertions)]
+    fn a_release_under_sched_panics() {
+        let (done, finished) = bounded(1);
+        thread::spawn(move || {
+            let lane = Arc::new(Lane::default());
+            let hold = Hold::adopt(&lane, 1);
+            let state = lane.lock();
+            let released = std::panic::AssertUnwindSafe(|| drop(hold));
+            let panicked = std::panic::catch_unwind(released).is_err();
+            drop(state);
+            let _ = done.send(panicked);
+        });
+        let panicked = finished.recv_timeout(Duration::from_secs(10));
+        assert_eq!(panicked, Ok(true), "H-4: a release under Sched must panic");
+    }
+
+    /// K-1 (S2b-3): the renderer keeps only the rasters of the job it just
+    /// rendered, so the titles' reservation shrinks to that job's G.
+    #[test]
+    fn title_rasters_are_trimmed_to_the_job() {
+        let two = crate::perf_fixtures::titled((160, 90), 30, 2);
+        let mut one = two.0.clone();
+        one.tracks.truncate(2);
+        let (one, two) = (Arc::new(one), Arc::new(two.0.clone()));
+        let lane = Arc::new(Lane::with_parallelism(20));
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        render_ahead(&mut preview, &two, 3);
+        let both = preview.renderer.title_bytes();
+        render_ahead(&mut preview, &one, 3);
+        let kept = preview.renderer.title_bytes();
+        assert!(
+            0 < kept && kept < both,
+            "one raster of two is kept: {kept} of {both}"
+        );
+    }
+
+    /// K-3 (S2b-3): a required set over C renders synchronously, counted
+    /// by reason, with the synchronous renderer's bytes.
+    #[test]
+    fn a_required_set_over_c_falls_back_to_the_synchronous_renderer() {
+        let workload = crate::perf_fixtures::four_sources((160, 90), 30);
+        let mut three = workload.0.clone();
+        three.tracks.truncate(3);
+        let three = Arc::new(three);
+        let (expected, f) = reference(&three, 3);
+        let lane = Arc::new(Lane::with_budget(20, 5 * f / 2));
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        let shown = render_ahead(&mut preview, &three, 3);
+        assert_eq!(*shown.rgba, expected, "C-5");
+        assert_eq!(lane.lock().fallbacks, [0, 1], "one budget fallback");
+        assert_eq!(lane.counters().stats.sync_fallback_frames, 1);
+        assert!(lane.lock().readers.slots.is_empty(), "no reader started");
+        assert!(
+            preview.renderer.cache_stats().file_count > 0,
+            "the synchronous path decoded"
+        );
     }
 
     /// E-2 (S2b-1): a reader that cannot start fails its required frame

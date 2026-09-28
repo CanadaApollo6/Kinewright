@@ -187,6 +187,22 @@ pub(crate) fn four_sources(resolution: (u32, u32), frames: i64) -> Workload {
     Workload(document(resolution, &media, lanes), media.into())
 }
 
+/// K-1 (S2b-3): one source with `titles` full-length titles over it.
+pub(crate) fn titled(resolution: (u32, u32), frames: i64, titles: u64) -> Workload {
+    let media = [source("testsrc2", resolution, frames, 1)];
+    let base = clip(1, ClipContent::Media, BlendMode::Normal, Vec::new());
+    let mut lanes = vec![vec![span(base, &media[0].1, 0, frames, 0)]];
+    let positions = [
+        TitlePosition::Top,
+        TitlePosition::Center,
+        TitlePosition::LowerThird,
+    ];
+    for (id, position) in (0..titles).zip(positions.into_iter().cycle()) {
+        lanes.push(vec![title(10 + id, "Over", position, 0, frames)]);
+    }
+    Workload(document(resolution, &media, lanes), media.into())
+}
+
 /// R28 `blend_heavy`: 4-track 1080p — presenter, picture-in-picture, a `Screen` leak whose
 /// 30-frame clips each enter by a full-length `push_left`, and an adjustment.
 pub(crate) fn blend_heavy(frames: i64) -> Workload {

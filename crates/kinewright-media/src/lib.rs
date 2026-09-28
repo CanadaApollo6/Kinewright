@@ -125,6 +125,9 @@ mod mo2_perf_fixtures;
 /// PF1 W-0/W-1: the shared performance workloads (MO2 R28's and PF1's).
 #[cfg(test)]
 mod perf_fixtures;
+/// PF1 G18: the export lane.
+#[cfg(test)]
+mod pf1_export_lane;
 /// PF1 S0: the playback measurement harness (P-play, P-seek, P-rss), its
 /// V-4 consumer metrics, `process_memory()` and the Q-3 controls.
 #[cfg(test)]

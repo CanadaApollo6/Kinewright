@@ -5,6 +5,12 @@
 //! Every method runs under the `Sched` lock (the preview lane's state). What a
 //! method removes (frames, errors) comes back to the caller, which drops it
 //! after unlock (H-4).
+//!
+//! S2b-3 (K-1…K-5): `live` counts every byte the scheduler path owns: the
+//! required set reserved at admission, lookahead admitted per decode, the
+//! frames those became (their drop guards release them) and generated
+//! rasters. Every increase is a check against C here, under the lock, so
+//! live ≤ C at all times (I12).
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
@@ -38,6 +44,8 @@ fn want(pool: usize, readers: usize) -> usize {
 pub(crate) enum ReaderState {
     /// Waiting on `work`, timed to `since` + [`QUIESCENCE`].
     Idle { since: Duration },
+    /// Lookahead only, not admissible (K-2); timed like `Idle`.
+    BudgetWait { since: Duration },
     /// Queued for permits in `Permits`, holding none and no decoder.
     PermitWait,
     /// Decoding `at` for plan `version`, outside the lock.
@@ -68,6 +76,8 @@ pub(crate) struct Slot<K> {
     pub(crate) threads: usize,
     /// Its ticket's cancel was handed out (once per `PermitWait`).
     cancelled: bool,
+    /// K-1: the bytes reserved for its decode in flight (a handoff).
+    flight: usize,
 }
 
 /// One region of demand on a source, served by one reader.
@@ -87,9 +97,12 @@ impl Region {
 /// What a reader does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Next {
+    /// Decode `at` under `bytes` reserved (K-1): the reader's drop guard
+    /// owns them from here.
     Decode {
         at: i64,
         version: u64,
+        bytes: usize,
     },
     /// H-5: queue for `want` permits, then open at the grant.
     Open {
@@ -114,6 +127,22 @@ pub(crate) struct Posted<K, F> {
     /// Idle readers the assignment retired (they need a `work` wake).
     pub(crate) retired: bool,
     pub(crate) dropped: (Vec<F>, Vec<MediaError>),
+}
+
+/// K-1: what the scheduler reads of a frame: its reservation's bytes, and
+/// whether anything besides the ring holds it (pinned, K-5).
+pub(crate) trait Weighed: Clone {
+    fn bytes(&self) -> usize;
+    fn pinned(&self) -> bool;
+}
+
+/// K-2's outcome for the current job's required set.
+pub(crate) enum Admission<F> {
+    /// Reserved; `generated` bytes (K-1's rasters) now belong to the caller.
+    Ready { generated: usize },
+    /// Draining: evicted lookahead (drop after unlock) and the readers
+    /// whose lookahead decodes to stop; wait on `ready`, then admit again.
+    Wait { evicted: Vec<F>, stop: Vec<u64> },
 }
 
 /// Split one source's demand into at most two regions (required ones
@@ -212,6 +241,23 @@ pub(crate) struct Readers<K, F> {
     wanted: HashMap<K, HashSet<i64>>,
     /// Required regions no reader could take yet (no free slot).
     pending: Vec<(K, Region)>,
+    /// K-1: C, and the bytes reserved now (every owner's); `peak` is I12's
+    /// witness.
+    budget: usize,
+    live: usize,
+    peak: usize,
+    /// The current plan's frame bytes per source (f at the proxy raster).
+    sizes: HashMap<K, usize>,
+    /// K-2: required frames reserved and not yet decoding.
+    reserved: HashMap<(K, i64), usize>,
+    /// K-2: no lookahead is admitted while the required set waits.
+    draining: bool,
+    /// The job's generated rasters (G) and required bytes (H).
+    generated: usize,
+    required_bytes: usize,
+    /// K-2: lookahead refusals, once per source per plan.
+    pub(crate) starved: u64,
+    starved_keys: HashSet<K>,
 }
 
 impl<K, F> Default for Readers<K, F> {
@@ -235,11 +281,61 @@ impl<K, F> Readers<K, F> {
             required: HashSet::new(),
             wanted: HashMap::new(),
             pending: Vec::new(),
+            budget: usize::MAX,
+            live: 0,
+            peak: 0,
+            sizes: HashMap::new(),
+            reserved: HashMap::new(),
+            draining: false,
+            generated: 0,
+            required_bytes: 0,
+            starved: 0,
+            starved_keys: HashSet::new(),
         }
+    }
+
+    /// K-1: C for this path.
+    pub(crate) const fn with_budget(mut self, budget: usize) -> Self {
+        self.budget = budget;
+        self
     }
 
     pub(crate) const fn limit(&self) -> usize {
         self.limit
+    }
+
+    /// K-1: bytes reserved now, and the most ever (I12: both ≤ C).
+    #[cfg(test)]
+    pub(crate) const fn live(&self) -> (usize, usize) {
+        (self.live, self.peak)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn draining(&self) -> bool {
+        self.draining
+    }
+
+    /// K-3: whether a required set of `bytes` fits in C at all.
+    pub(crate) const fn fits(&self, bytes: usize) -> bool {
+        bytes <= self.budget
+    }
+
+    /// K-1: a drop guard's bytes come back (its last owner went).
+    pub(crate) const fn release(&mut self, bytes: usize) {
+        self.live = self.live.saturating_sub(bytes);
+    }
+
+    /// K-1: reserve `bytes` if live stays ≤ `limit`.
+    fn reserve(&mut self, bytes: usize, limit: usize) -> bool {
+        let fits = self
+            .live
+            .checked_add(bytes)
+            .is_some_and(|next| next <= limit);
+        if fits {
+            self.live += bytes;
+            self.peak = self.peak.max(self.live);
+        }
+        fits
     }
 
     #[cfg(test)]
@@ -248,18 +344,26 @@ impl<K, F> Readers<K, F> {
     }
 }
 
-impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
+impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     fn slot(&mut self, id: u64) -> Option<&mut Slot<K>> {
         self.slots.iter_mut().find(|slot| slot.id == id)
     }
 
-    /// H-3: a new plan version for a job's regions. Every older failure and
-    /// every ring frame outside the new plan is removed (returned); regions
-    /// go to the nearest free reader of their source, then to new readers.
-    pub(crate) fn post(&mut self, regions: Vec<(K, Region)>, now: Duration) -> Posted<K, F> {
+    /// H-3: a new plan version for a job's regions, with its sources' f
+    /// and G (K-2). Every older failure and every ring frame outside the new
+    /// plan is removed (returned); regions go to the nearest free reader of
+    /// their source, then to new readers.
+    pub(crate) fn post(
+        &mut self,
+        regions: Vec<(K, Region)>,
+        (sizes, generated): (HashMap<K, usize>, usize),
+        now: Duration,
+    ) -> Posted<K, F> {
         self.version += 1;
         let version = self.version;
         (self.required, self.wanted) = (HashSet::new(), HashMap::new());
+        (self.sizes, self.generated) = (sizes, generated);
+        self.starved_keys.clear();
         for (key, region) in &regions {
             let wanted = self.wanted.entry(key.clone()).or_default();
             wanted.extend(region.required.iter().chain(&region.lookahead));
@@ -267,6 +371,16 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
             self.required.extend(required);
         }
         let errors = self.failures.drain().map(|(_, (_, error))| error).collect();
+        // Reservations of frames no longer required return at once.
+        let required = &self.required;
+        let gone = self
+            .reserved
+            .extract_if(|frame, _| !required.contains(frame));
+        let released: usize = gone.map(|(_, bytes)| bytes).sum();
+        self.release(released);
+        self.required_bytes = (self.required.iter())
+            .map(|(key, _)| self.sizes.get(key).copied().unwrap_or(0))
+            .sum();
         let mut frames = Vec::new();
         let wanted = &self.wanted;
         self.rings.retain(|key, ring| {
@@ -326,6 +440,7 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
                 lookahead_failed: None,
                 threads: 0,
                 cancelled: false,
+                flight: 0,
             });
             spawn.push((id, key));
         }
@@ -400,14 +515,13 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
             slot.state = ReaderState::Retiring;
             return Next::Retire;
         }
-        if let Some(at) = work {
+        let blocked = matches!(work, Err(true));
+        if let Ok((at, required)) = work {
             if slot.threads == 0 {
                 slot.state = ReaderState::PermitWait;
                 return Next::Open { want };
             }
-            let version = slot.plan.version;
-            slot.state = ReaderState::Decoding { at, version };
-            return Next::Decode { at, version };
+            return self.decode(id, at, required);
         }
         // Inactive: H-5 rebalancing, then retirement.
         let shrink = slot.threads > want && (ticket || short);
@@ -416,7 +530,7 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
             return Next::Close;
         }
         let since = match slot.state {
-            ReaderState::Idle { since } => since,
+            ReaderState::Idle { since } | ReaderState::BudgetWait { since } => since,
             ReaderState::Decoding { .. } | ReaderState::PermitWait | ReaderState::Retiring => now,
         };
         // A required time another reader is decoding stays owed: if that
@@ -426,7 +540,11 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
             slot.state = ReaderState::Retiring;
             return Next::Retire;
         }
-        slot.state = ReaderState::Idle { since };
+        slot.state = if blocked {
+            ReaderState::BudgetWait { since }
+        } else {
+            ReaderState::Idle { since }
+        };
         let until = since + QUIESCENCE;
         Next::Wait {
             until: if until > now { until } else { now + QUIESCENCE },
@@ -446,9 +564,13 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
         })
     }
 
-    /// The first time in `id`'s plan nobody has: required, then lookahead.
-    fn work_for(&self, id: u64) -> Option<i64> {
-        let slot = self.slots.iter().find(|slot| slot.id == id)?;
+    /// The first time in `id`'s plan nobody has: a reserved required one,
+    /// then admissible lookahead (K-2). `Err(true)`: lookahead waits on the
+    /// budget.
+    fn work_for(&mut self, id: u64) -> Result<(i64, bool), bool> {
+        let Some(slot) = self.slots.iter().find(|slot| slot.id == id) else {
+            return Err(false);
+        };
         let ring = self.rings.get(&slot.key);
         let taken = |t: &&i64| {
             ring.is_some_and(|ring| ring.contains_key(t))
@@ -459,11 +581,91 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
                         && matches!(other.state, ReaderState::Decoding { at, .. } if at == **t)
                 })
         };
-        let required = slot.plan.required.iter().find(|t| !taken(t));
+        let key = slot.key.clone();
+        let reserved = |t: &&i64| self.reserved.contains_key(&(key.clone(), **t));
+        let required = slot
+            .plan
+            .required
+            .iter()
+            .filter(reserved)
+            .find(|t| !taken(t));
+        if let Some(at) = required {
+            return Ok((*at, true));
+        }
         let lookahead = (slot.lookahead_failed != Some(slot.plan.version))
             .then(|| slot.plan.lookahead.iter().find(|t| !taken(t)))
-            .flatten();
-        required.or(lookahead).copied()
+            .flatten()
+            .copied();
+        let Some(at) = lookahead else {
+            return Err(false);
+        };
+        if self.admissible(&key) {
+            return Ok((at, false));
+        }
+        if self.starved_keys.insert(key) {
+            self.starved += 1;
+        }
+        Err(true)
+    }
+
+    /// K-2: lookahead for `key` while not draining, live + f ≤ C − H and
+    /// its lookahead below share = (C − G − H) / n.
+    fn admissible(&self, key: &K) -> bool {
+        let f = self.sizes.get(key).copied().unwrap_or(0);
+        let headroom = self.budget.saturating_sub(self.required_bytes);
+        let share = headroom.saturating_sub(self.generated) / self.sizes.len().max(1);
+        let fits = self
+            .live
+            .checked_add(f)
+            .is_some_and(|next| next <= headroom);
+        !self.draining && fits && self.lookahead_bytes(key).saturating_add(f) <= share
+    }
+
+    /// K-5: `key`'s lookahead bytes: ring frames and decodes in flight that
+    /// the job does not require.
+    fn lookahead_bytes(&self, key: &K) -> usize {
+        let lookahead = |at: &i64| !self.required.contains(&(key.clone(), *at));
+        let ring = self.rings.get(key).into_iter().flatten();
+        let resident: usize = ring
+            .filter(|(at, _)| lookahead(at))
+            .map(|(_, f)| f.bytes())
+            .sum();
+        let flying = self
+            .slots
+            .iter()
+            .filter(|slot| &slot.key == key)
+            .filter_map(|slot| {
+                let ReaderState::Decoding { at, .. } = slot.state else {
+                    return None;
+                };
+                lookahead(&at).then_some(slot.flight)
+            });
+        resident + flying.sum::<usize>()
+    }
+
+    /// Start decoding `at`: a required frame takes its reservation; a
+    /// lookahead one reserves f now (checked by `admissible`).
+    fn decode(&mut self, id: u64, at: i64, required: bool) -> Next {
+        let Some(key) = self
+            .slots
+            .iter()
+            .find(|slot| slot.id == id)
+            .map(|slot| slot.key.clone())
+        else {
+            return Next::Retire;
+        };
+        let bytes = if required {
+            self.reserved.remove(&(key, at)).unwrap_or(0)
+        } else {
+            let f = self.sizes.get(&key).copied().unwrap_or(0);
+            let reserved = self.reserve(f, self.budget);
+            debug_assert!(reserved, "admissible lookahead fits");
+            f
+        };
+        let slot = self.slot(id).expect("the reader's slot");
+        let version = slot.plan.version;
+        (slot.state, slot.flight) = (ReaderState::Decoding { at, version }, bytes);
+        Next::Decode { at, version, bytes }
     }
 
     /// H-3: a reader's result for `at`, decoded under plan `version`. A frame
@@ -484,16 +686,21 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
         let Some(slot) = self.slot(id) else {
             return (result.as_ref().ok().cloned(), result.err());
         };
-        slot.state = ReaderState::Idle { since: now };
+        // A reader retired while it decoded stays retiring (H-6).
+        if slot.state != ReaderState::Retiring {
+            slot.state = ReaderState::Idle { since: now };
+        }
+        slot.flight = 0;
         let key = slot.key.clone();
         match result {
             Ok(frame) => {
                 slot.cursor = Some(at + 1);
-                if self
-                    .wanted
-                    .get(&key)
-                    .is_some_and(|wanted| wanted.contains(&at))
-                {
+                let wanted = (self.wanted.get(&key)).is_some_and(|wanted| wanted.contains(&at));
+                // K-2: while draining, only required frames are kept.
+                if wanted && (required || !self.draining) {
+                    if let Some(bytes) = self.reserved.remove(&(key.clone(), at)) {
+                        self.release(bytes);
+                    }
                     let ring = self.rings.entry(key).or_default();
                     (ring.insert(at, frame), None)
                 } else {
@@ -514,6 +721,110 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
                 }
             }
         }
+    }
+
+    /// K-2: the reader `id`'s lookahead decode stopped (its guard releases
+    /// the bytes).
+    pub(crate) fn stopped(&mut self, id: u64, now: Duration) {
+        if let Some(slot) = self.slot(id) {
+            (slot.flight, slot.cursor) = (0, None);
+            if slot.state != ReaderState::Retiring {
+                slot.state = ReaderState::Idle { since: now };
+            }
+        }
+    }
+
+    /// K-2: whether a required frame has no frame, failure, reservation or
+    /// decode in flight (admission, again).
+    pub(crate) fn unreserved(&self) -> bool {
+        self.required.iter().any(|(key, at)| self.missing(key, *at))
+    }
+
+    fn missing(&self, key: &K, at: i64) -> bool {
+        let frame = (key.clone(), at);
+        let flying = (self.slots.iter()).any(|slot| {
+            &slot.key == key && matches!(slot.state, ReaderState::Decoding { at: t, .. } if t == at)
+        });
+        !(self.rings.get(key)).is_some_and(|ring| ring.contains_key(&at))
+            && !self.failures.contains_key(&frame)
+            && !self.reserved.contains_key(&frame)
+            && !flying
+    }
+
+    /// K-2: reserve the job's missing required frames and `generated`
+    /// bytes atomically. If they do not fit, drain: no lookahead is
+    /// admitted, unpinned lookahead is evicted (K-5) and lookahead decodes
+    /// stop; the caller waits for live ownership and admits again.
+    /// A set over C never gets here (K-3 is decided before the post).
+    pub(crate) fn admit(&mut self, generated: usize) -> Admission<F> {
+        let set = self.required_bytes.saturating_add(generated);
+        debug_assert!(set <= self.budget, "K-3: a set over C was posted");
+        let size = |key: &K| self.sizes.get(key).copied().unwrap_or(0);
+        let missing: Vec<(K, i64)> = (self.required.iter())
+            .filter(|(key, at)| self.missing(key, *at))
+            .cloned()
+            .collect();
+        let missing: Vec<((K, i64), usize)> = (missing.into_iter())
+            .map(|frame| {
+                let bytes = size(&frame.0);
+                (frame, bytes)
+            })
+            .collect();
+        let q = missing.iter().map(|(_, bytes)| bytes).sum::<usize>() + generated;
+        if self.reserve(q, self.budget) {
+            self.reserved.extend(missing);
+            self.draining = false;
+            return Admission::Ready { generated };
+        }
+        self.draining = true;
+        let evicted = self.evict(self.live.saturating_add(q) - self.budget);
+        let required = &self.required;
+        let stop = (self.slots.iter())
+            .filter(|slot| {
+                matches!(slot.state, ReaderState::Decoding { at, .. }
+                    if !required.contains(&(slot.key.clone(), at)))
+            })
+            .map(|slot| slot.id)
+            .collect();
+        Admission::Wait { evicted, stop }
+    }
+
+    /// K-5: unpinned lookahead, sources over their share first, then the
+    /// frame farthest from its source's required times, until `need` bytes
+    /// will be released.
+    fn evict(&mut self, need: usize) -> Vec<F> {
+        let headroom = self.budget.saturating_sub(self.required_bytes);
+        let share = headroom.saturating_sub(self.generated) / self.sizes.len().max(1);
+        let mut victims: Vec<(bool, std::cmp::Reverse<u64>, K, i64)> = Vec::new();
+        for (key, ring) in &self.rings {
+            let over = self.lookahead_bytes(key) > share;
+            let near = |at: i64| {
+                let required = self.required.iter().filter(|(k, _)| k == key);
+                required
+                    .map(|(_, t)| t.abs_diff(at))
+                    .min()
+                    .unwrap_or(u64::MAX)
+            };
+            for (at, frame) in ring {
+                if !self.required.contains(&(key.clone(), *at)) && !frame.pinned() {
+                    victims.push((!over, std::cmp::Reverse(near(*at)), key.clone(), *at));
+                }
+            }
+        }
+        victims.sort_by_key(|(under, far, _, _)| (*under, *far));
+        let mut freed = 0;
+        let mut evicted = Vec::new();
+        for (_, _, key, at) in victims {
+            if freed >= need {
+                break;
+            }
+            if let Some(frame) = self.rings.get_mut(&key).and_then(|ring| ring.remove(&at)) {
+                freed += frame.bytes();
+                evicted.push(frame);
+            }
+        }
+        self.rings.retain(|_, ring| !ring.is_empty());
+        evicted
     }
 
     /// A reader that could not start records its required times as failed
@@ -548,18 +859,30 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
         required.iter().map(resolved).collect()
     }
 
-    /// Every reader retires (the preview is going).
+    /// Every reader retires (the preview is going); the reservations of
+    /// frames not yet decoding return.
     pub(crate) fn retire_all(&mut self) {
         for slot in &mut self.slots {
             slot.state = ReaderState::Retiring;
         }
         self.pending.clear();
+        let reserved: usize = self.reserved.drain().map(|(_, bytes)| bytes).sum();
+        self.release(reserved);
     }
 
     /// Every ring frame, removed (a preview cache clear).
     pub(crate) fn clear_rings(&mut self) -> Vec<F> {
         let rings = self.rings.drain().flat_map(|(_, ring)| ring.into_values());
         rings.collect()
+    }
+
+    /// The times `key`'s ring holds.
+    #[cfg(test)]
+    pub(crate) fn ring_times(&self, key: &K) -> Vec<i64> {
+        self.rings
+            .get(key)
+            .map(|ring| ring.keys().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Ring frames, each shared allocation counted once: (frames, bytes).
@@ -722,32 +1045,58 @@ pub(crate) const fn wait_step(view: WaitView) -> WaitStep {
 
 #[cfg(test)]
 mod tests {
-    //! H-8 / I15 (S2b-1), I11 (S2b-2): an exhaustive (event × state) model
-    //! of the readers' shared state and the permit book, then seeded
-    //! sequences; every loop has a step budget, the clock is injected and
-    //! nothing sleeps.
+    //! H-8 / I15 (S2b-1), I11 (S2b-2), I12 (S2b-3): an exhaustive
+    //! (event × state) model of the readers' shared state, the permit book
+    //! and the preview's admission, then seeded sequences; every loop has a
+    //! step budget, the clock is injected and nothing sleeps.
     use std::collections::BTreeSet;
 
     use super::*;
 
-    type Model = Readers<u8, u32>;
-    /// A job: per source, its required and lookahead times.
-    type Job = &'static [(u8, &'static [i64], &'static [i64])];
+    /// A model frame: its value, its reservation, and whether a render
+    /// pins it (the preview's `Arc` count).
+    #[derive(Clone, Debug)]
+    struct Fr {
+        value: u32,
+        bytes: usize,
+        pinned: bool,
+    }
 
-    const JOBS: [Job; 6] = [
-        &[(0, &[0], &[1, 2])],
-        &[(0, &[0], &[1]), (1, &[5], &[6])],
+    impl Weighed for Fr {
+        fn bytes(&self) -> usize {
+            self.bytes
+        }
+
+        fn pinned(&self) -> bool {
+            self.pinned
+        }
+    }
+
+    type Model = Readers<u8, Fr>;
+    /// A job: per source, its required and lookahead times; then G.
+    type Job = (&'static [(u8, &'static [i64], &'static [i64])], usize);
+
+    const JOBS: [Job; 8] = [
+        (&[(0, &[0], &[1, 2])], 0),
+        (&[(0, &[0], &[1]), (1, &[5], &[6])], F),
         // A same-source jump: two regions of source 0.
-        &[(0, &[0, 40], &[41])],
-        &[(1, &[5], &[]), (2, &[9], &[]), (0, &[1], &[])],
+        (&[(0, &[0, 40], &[41])], 0),
+        (&[(1, &[5], &[]), (2, &[9], &[]), (0, &[1], &[])], 0),
         // Title only.
-        &[],
+        (&[], F),
         // Pre-roll: a lookahead-only region.
-        &[(0, &[3], &[30, 31])],
+        (&[(0, &[3], &[30, 31])], 0),
+        // K-3: a required set over C.
+        (&[(0, &[0, 1, 2, 3, 4, 5], &[])], 0),
+        // K-2: job 0's lookahead still wanted beside a wider set: it drains.
+        (&[(0, &[0], &[1, 2]), (1, &[5], &[]), (2, &[9], &[])], 2 * F),
     ];
     const BUDGET: usize = 512;
+    /// f, each source's frame bytes, and C (K-1) for the model.
+    const F: usize = 10;
+    const C: usize = 50;
 
-    /// The bytes of (source, time): any reader decodes the same value, so a
+    /// The value of (source, time): any reader decodes the same value, so a
     /// relabelled frame is visible.
     fn frame(key: u8, at: i64) -> u32 {
         u32::from(key) << 16 | u32::try_from(at).expect("time")
@@ -765,14 +1114,26 @@ mod tests {
         shutdown: bool,
         /// Reader threads running (spawned, not yet exited).
         live: Vec<u64>,
-        /// Decodes in flight: (reader, key, time, version).
-        flight: Vec<(u64, u8, i64, u64)>,
+        /// Decodes in flight: (reader, key, time, version, reserved bytes).
+        flight: Vec<(u64, u8, i64, u64, usize)>,
         /// Readers that returned `Retire` and are closing.
         closing: Vec<u64>,
         /// The newest job's required set, if it went to the readers.
         job: Option<Vec<(u8, i64)>>,
         /// (source, frame threads) of every decode started.
         decodes: Vec<(u8, usize)>,
+        /// K-2: the job's G and sources (n), and whether it still waits for
+        /// admission.
+        generated: usize,
+        sources: usize,
+        admitting: bool,
+        /// K-1's other owners: the admitted G, the kept title rasters, and
+        /// a render's pins (and its G).
+        granted: usize,
+        titles: usize,
+        render: Option<(Vec<(u8, i64)>, usize)>,
+        /// Readers whose stop flag is set (K-2).
+        stops: BTreeSet<u64>,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -780,10 +1141,19 @@ mod tests {
         Post(usize),
         Step(usize),
         Finish(usize, bool),
+        /// A stopped lookahead decode returns `Cancelled` (K-2).
+        Cancel(usize),
+        /// The preview admits the job's set (again).
+        Admit,
+        /// The job renders (pins its frames), then is done (unpins).
+        Render,
+        Done,
         Exit(usize),
         Poll(usize),
         Release(usize),
-        Assign { fail: bool },
+        Assign {
+            fail: bool,
+        },
         Tick,
         Shutdown,
     }
@@ -791,7 +1161,7 @@ mod tests {
     impl World {
         fn new(parallelism: usize) -> Self {
             Self {
-                readers: Model::new(parallelism),
+                readers: Model::new(parallelism).with_budget(C),
                 book: PermitBook::new(parallelism),
                 waiting: Vec::new(),
                 releasing: Vec::new(),
@@ -802,14 +1172,35 @@ mod tests {
                 closing: Vec::new(),
                 job: None,
                 decodes: Vec::new(),
+                generated: 0,
+                sources: 0,
+                admitting: false,
+                granted: 0,
+                titles: 0,
+                render: None,
+                stops: BTreeSet::new(),
             }
         }
 
         fn events(&self) -> Vec<Event> {
-            let mut events: Vec<Event> = (0..JOBS.len()).map(Event::Post).collect();
+            // The preview renders synchronously: no post while it renders.
+            let mut events: Vec<Event> = if self.render.is_none() {
+                (0..JOBS.len()).map(Event::Post).collect()
+            } else {
+                vec![Event::Done]
+            };
             events.extend(self.stepping().into_iter().map(Event::Step));
-            for index in 0..self.flight.len() {
+            for (index, (id, ..)) in self.flight.iter().enumerate() {
                 events.extend([Event::Finish(index, true), Event::Finish(index, false)]);
+                if self.stops.contains(id) {
+                    events.push(Event::Cancel(index));
+                }
+            }
+            if self.admits() {
+                events.push(Event::Admit);
+            }
+            if self.renders() {
+                events.push(Event::Render);
             }
             events.extend((0..self.closing.len()).map(Event::Exit));
             events.extend((0..self.waiting.len()).map(Event::Poll));
@@ -832,10 +1223,33 @@ mod tests {
                 .collect()
         }
 
+        /// The preview admits while its job has G or a frame unreserved.
+        fn admits(&self) -> bool {
+            let pending = self.admitting || self.readers.unreserved();
+            !self.shutdown && self.render.is_none() && self.job.is_some() && pending
+        }
+
+        /// The job renders once admitted and resolved.
+        fn renders(&self) -> bool {
+            let resolved =
+                (self.job.as_ref()).is_some_and(|job| self.readers.resolve(job).is_some());
+            self.render.is_none() && !self.admitting && resolved
+        }
+
+        /// Frames handed back release their bytes (the last owner went):
+        /// never one a render pins.
+        fn drop_frames(&mut self, frames: Vec<Fr>) {
+            for frame in frames {
+                assert!(!frame.pinned, "K-5: a pinned frame left the rings");
+                self.readers.release(frame.bytes);
+            }
+        }
+
         fn state_of(&self, id: u64) -> &'static str {
             match self.readers.slots.iter().find(|slot| slot.id == id) {
                 Some(slot) => match slot.state {
                     ReaderState::Idle { .. } => "idle",
+                    ReaderState::BudgetWait { .. } => "budget-wait",
                     ReaderState::PermitWait => "permit-wait",
                     ReaderState::Decoding { .. } => "decoding",
                     ReaderState::Retiring => "retiring",
@@ -845,34 +1259,92 @@ mod tests {
         }
 
         /// Apply `event`; returns the (event × state) cell it covered.
+        #[allow(clippy::too_many_lines)] // one arm per event
         fn apply(&mut self, event: Event) -> String {
             match event {
                 Event::Post(job) => {
-                    let demand: Vec<(u8, Vec<i64>, Vec<i64>)> = (JOBS[job].iter())
+                    let demand: Vec<(u8, Vec<i64>, Vec<i64>)> = (JOBS[job].0.iter())
                         .map(|(k, r, l)| (*k, r.to_vec(), l.to_vec()))
                         .collect();
-                    self.post(&demand)
+                    self.post(&demand, JOBS[job].1)
                 }
                 Event::Step(index) => self.step(index),
                 Event::Finish(index, ok) => {
-                    let (id, key, at, version) = self.flight.remove(index);
+                    let (id, key, at, version, bytes) = self.flight.remove(index);
                     let current = version == self.readers.version();
                     let required = self
                         .job
                         .as_ref()
                         .is_some_and(|job| job.contains(&(key, at)));
+                    let draining = self.readers.draining;
                     let result = if ok {
-                        Ok(frame(key, at))
+                        let value = frame(key, at);
+                        Ok(Fr {
+                            value,
+                            bytes,
+                            pinned: false,
+                        })
                     } else {
+                        // The reader's guard releases (after unlock).
                         Err(MediaError::Backend(format!("decode {key}@{at} v{version}")))
                     };
                     let (frame_back, _) = self.readers.deliver(id, at, version, result, self.now);
-                    if let Some(value) = frame_back {
-                        assert_eq!(value, frame(key, at), "a returned frame was relabelled");
+                    let kept = ok && frame_back.is_none();
+                    assert!(
+                        !(kept && draining && !required),
+                        "K-2: lookahead kept draining"
+                    );
+                    if let Some(back) = &frame_back {
+                        assert_eq!(
+                            back.value,
+                            frame(key, at),
+                            "a returned frame was relabelled"
+                        );
+                    }
+                    self.drop_frames(frame_back.into_iter().collect());
+                    if !ok {
+                        self.readers.release(bytes);
                     }
                     let fresh = if current { "current" } else { "stale" };
                     let need = if required { "required" } else { "lookahead" };
-                    format!("finish-{}×{fresh}-{need}", if ok { "ok" } else { "err" })
+                    let drain = if draining { "-draining" } else { "" };
+                    format!(
+                        "finish-{}×{fresh}-{need}{drain}",
+                        if ok { "ok" } else { "err" }
+                    )
+                }
+                Event::Cancel(index) => {
+                    let (id, .., bytes) = self.flight.remove(index);
+                    self.readers.stopped(id, self.now);
+                    self.readers.release(bytes);
+                    "cancel".into()
+                }
+                Event::Admit => self.admit(),
+                Event::Render => {
+                    let job = self.job.clone().expect("a job");
+                    for (key, at) in &job {
+                        let ring = self.readers.rings.get_mut(key);
+                        if let Some(frame) = ring.and_then(|ring| ring.get_mut(at)) {
+                            frame.pinned = true;
+                        }
+                    }
+                    self.render = Some((job, std::mem::take(&mut self.granted)));
+                    "render".into()
+                }
+                Event::Done => {
+                    let (job, generated) = self.render.take().expect("a render");
+                    for (key, at) in &job {
+                        let ring = self.readers.rings.get_mut(key);
+                        if let Some(frame) = ring.and_then(|ring| ring.get_mut(at)) {
+                            frame.pinned = false;
+                        }
+                    }
+                    // The renderer keeps only this job's rasters (G).
+                    self.titles += generated;
+                    let excess = self.titles.saturating_sub(self.generated);
+                    self.titles -= excess;
+                    self.readers.release(excess);
+                    "done".into()
                 }
                 Event::Exit(index) => {
                     let id = self.closing.remove(index);
@@ -930,6 +1402,8 @@ mod tests {
                     let states: BTreeSet<_> =
                         self.live.iter().map(|id| self.state_of(*id)).collect();
                     (self.shutdown, self.book.shutdown) = (true, true);
+                    // The preview goes: its drop retires every reader.
+                    self.readers.retire_all();
                     format!("shutdown×{states:?}")
                 }
             }
@@ -939,10 +1413,29 @@ mod tests {
         fn step(&mut self, index: usize) -> String {
             let id = self.live[index];
             let state = self.state_of(id);
+            let slot = self.readers.slots.iter().find(|slot| slot.id == id);
+            let ahead = slot.map_or(0, |slot| self.lookahead(slot.key));
+            let before = (self.readers.draining, self.readers.live);
             match self.readers.next(id, self.now, self.shutdown) {
-                Next::Decode { at, version } => {
+                Next::Decode { at, version, bytes } => {
                     let key = self.key(id);
-                    self.flight.push((id, key, at, version));
+                    let required = self
+                        .job
+                        .as_ref()
+                        .is_some_and(|job| job.contains(&(key, at)));
+                    if !required {
+                        // K-2, independently: ¬draining, live + f ≤ C − H
+                        // and the source's lookahead + f ≤ its share.
+                        let h = self.job.as_ref().map_or(0, Vec::len) * F;
+                        let share = (C - h).saturating_sub(self.generated) / self.sources.max(1);
+                        let (draining, live) = before;
+                        assert!(!draining, "K-2: lookahead started draining");
+                        assert!(live + F <= C - h, "K-2: lookahead over C − H");
+                        assert!(ahead + F <= share, "K-2: lookahead over its share");
+                    }
+                    // The reader clears its stop flag under `Sched`.
+                    self.stops.remove(&id);
+                    self.flight.push((id, key, at, version, bytes));
                     let threads = self.slot(id).threads;
                     assert!(threads >= 1, "a decoder without permits");
                     self.decodes.push((key, threads));
@@ -974,7 +1467,11 @@ mod tests {
                 }
                 Next::Wait { until } => {
                     assert!(until > self.now, "a wait that never sleeps");
-                    format!("step×{state}→wait")
+                    let blocked = self.state_of(id) == "budget-wait";
+                    format!(
+                        "step×{state}→{}",
+                        if blocked { "budget-wait" } else { "wait" }
+                    )
                 }
                 Next::Retire => {
                     self.live.remove(index);
@@ -991,29 +1488,78 @@ mod tests {
         }
 
         /// Post `demand` as the monitor's `schedule` does.
-        fn post(&mut self, demand: &[(u8, Vec<i64>, Vec<i64>)]) -> String {
+        fn post(&mut self, demand: &[(u8, Vec<i64>, Vec<i64>)], generated: usize) -> String {
             if self.shutdown {
                 return "post×shutdown".into();
             }
+            // The last job's unrendered G returns (it was superseded).
+            self.readers.release(std::mem::take(&mut self.granted));
             let quiet = self.flight.is_empty();
+            let required: BTreeSet<(u8, i64)> = demand
+                .iter()
+                .flat_map(|(k, r, _)| r.iter().map(|t| (*k, *t)))
+                .collect();
             let regions = plan_regions(demand, self.readers.limit());
-            let fallback = regions.is_none();
-            let posted = self.readers.post(regions.unwrap_or_default(), self.now);
+            let over = !self.readers.fits(required.len() * F + generated);
+            let fallback = regions.is_none() || over;
+            let sizes = if fallback {
+                HashMap::new()
+            } else {
+                demand.iter().map(|(k, ..)| (*k, F)).collect()
+            };
+            let regions = regions.filter(|_| !over).unwrap_or_default();
+            let posted = self.readers.post(regions, (sizes, generated), self.now);
             self.live.extend(posted.spawn.iter().map(|(id, _)| *id));
             let cancelled = !posted.cancel.is_empty();
             posted.cancel.iter().for_each(|id| self.book.cancel(*id));
-            let required = demand
-                .iter()
-                .flat_map(|(k, r, _)| r.iter().map(|t| (*k, *t)));
-            self.job = (!fallback).then(|| required.collect());
+            self.drop_frames(posted.dropped.0);
+            self.job = (!fallback).then(|| required.into_iter().collect());
+            (self.generated, self.admitting) = (generated, !fallback);
+            self.sources = demand.len();
             if fallback {
-                // More sources than readers: synchronous (K-3).
-                return "post→fallback".into();
+                // More sources than readers, or a set over C: K-3.
+                return format!("post→fallback-{}", if over { "budget" } else { "readers" });
             }
             if cancelled {
                 return "post→cancel-ticket".into();
             }
             format!("post×{}", if quiet { "quiet" } else { "decoding" })
+        }
+
+        /// K-2 as the preview's `schedule` loop does it.
+        fn admit(&mut self) -> String {
+            let generated = if self.admitting { self.generated } else { 0 };
+            match self.readers.admit(generated) {
+                Admission::Ready { generated } => {
+                    self.granted += generated;
+                    self.admitting = false;
+                    "admit→ready".into()
+                }
+                Admission::Wait { evicted, stop } => {
+                    let label = format!(
+                        "admit→wait{}{}",
+                        if evicted.is_empty() { "" } else { "-evict" },
+                        if stop.is_empty() { "" } else { "-stop" }
+                    );
+                    self.drop_frames(evicted);
+                    self.stops.extend(stop);
+                    // The title rasters go too.
+                    self.readers.release(std::mem::take(&mut self.titles));
+                    label
+                }
+            }
+        }
+
+        /// K-5, independently: `key`'s lookahead bytes, resident and in
+        /// flight (frames the job does not require).
+        fn lookahead(&self, key: u8) -> usize {
+            let job = self.job.as_deref().unwrap_or_default();
+            let ring = self.readers.rings.get(&key).into_iter().flatten();
+            let resident = ring.filter(|(at, _)| !job.contains(&(key, **at)));
+            let flying = (self.flight.iter())
+                .filter(|(_, k, at, ..)| *k == key && !job.contains(&(key, *at)));
+            resident.map(|(_, f)| f.bytes).sum::<usize>()
+                + flying.map(|(.., bytes)| bytes).sum::<usize>()
         }
 
         fn slot(&self, id: u64) -> &Slot<u8> {
@@ -1031,6 +1577,23 @@ mod tests {
         /// The safety invariants, after every event.
         fn check(&self) {
             let readers = &self.readers;
+            // K-1/I12: live counts every owner exactly, and never passes C.
+            let rings: usize = readers
+                .rings
+                .values()
+                .flat_map(BTreeMap::values)
+                .map(|f| f.bytes)
+                .sum();
+            let reserved: usize = readers.reserved.values().sum();
+            let flying: usize = self.flight.iter().map(|(.., bytes)| bytes).sum();
+            let rendering = self.render.as_ref().map_or(0, |(_, generated)| *generated);
+            let owners = rings + reserved + flying + self.granted + self.titles;
+            assert_eq!(
+                readers.live,
+                owners + rendering,
+                "K-1: live bytes and their owners"
+            );
+            assert!(readers.live().1 <= C, "I12: live bytes over C");
             assert!(
                 readers.slots.len() <= readers.limit(),
                 "more readers than R"
@@ -1070,7 +1633,7 @@ mod tests {
                         wanted.is_some_and(|w| w.contains(at)),
                         "an unwanted ring frame"
                     );
-                    assert_eq!(*value, frame(*key, *at), "a relabelled ring frame");
+                    assert_eq!(value.value, frame(*key, *at), "a relabelled ring frame");
                 }
             }
             let mut decoding = HashSet::new();
@@ -1110,8 +1673,8 @@ mod tests {
                     && self.closing.is_empty()
                     && self.waiting.is_empty()
                     && self.releasing.is_empty();
-                let resolved =
-                    (self.job.as_ref()).is_none_or(|job| self.readers.resolve(job).is_some());
+                let resolved = !self.admitting
+                    && (self.job.as_ref()).is_none_or(|job| self.readers.resolve(job).is_some());
                 let quiet = self.live.iter().all(|id| {
                     let mut probe = self.readers.clone();
                     matches!(probe.next(*id, self.now, self.shutdown), Next::Wait { .. })
@@ -1121,6 +1684,12 @@ mod tests {
                 }
                 if !self.shutdown {
                     self.apply(Event::Assign { fail: false });
+                }
+                if self.render.is_some() {
+                    self.apply(Event::Done);
+                }
+                if self.admits() {
+                    self.apply(Event::Admit);
                 }
                 for index in self.stepping().into_iter().rev() {
                     self.apply(Event::Step(index));
@@ -1183,8 +1752,8 @@ mod tests {
     }
 
     /// The (event × state) cells the model must reach, or it is vacuous.
-    const CELLS: [&str; 27] = [
-        "post→fallback",
+    const CELLS: [&str; 38] = [
+        "post→fallback-readers",
         "post×decoding",
         "step×idle→decode",
         "step×idle→wait",
@@ -1212,6 +1781,18 @@ mod tests {
         "poll→wait-none-free",
         "poll→cancelled",
         "post→cancel-ticket",
+        // S2b-3 (K-1…K-5, I12).
+        "post→fallback-budget",
+        "admit→ready",
+        "admit→wait-evict",
+        "admit→wait-stop",
+        "cancel",
+        "finish-ok×stale-lookahead-draining",
+        "step×idle→budget-wait",
+        "step×budget-wait→decode",
+        "step×budget-wait→wait",
+        "render",
+        "done",
     ];
 
     /// I15 (S2b-1): every sequence of four events from each P's start, then
@@ -1232,6 +1813,18 @@ mod tests {
         world.apply(Event::Post(0));
         world.settle();
         world.apply(Event::Post(3));
+        world.apply(Event::Admit);
+        explore(&world, 4, &mut cells, &mut visited);
+        // K-2: job 0's reader decodes its lookahead when a wider set that
+        // still wants it arrives: admission drains, stops and evicts.
+        let mut world = World::new(20);
+        for event in [Event::Post(0), Event::Admit, Event::Step(0), Event::Poll(0)] {
+            world.apply(event);
+        }
+        for event in [Event::Step(0), Event::Finish(0, true), Event::Step(0)] {
+            world.apply(event);
+        }
+        assert_eq!(world.flight.len(), 1, "a lookahead decode in flight");
         explore(&world, 4, &mut cells, &mut visited);
         let missing: Vec<_> = CELLS
             .iter()
@@ -1282,6 +1875,7 @@ mod tests {
     fn an_owed_reader_outlives_the_quiescence_deadline() {
         let mut world = World::new(20);
         world.apply(Event::Post(2));
+        world.apply(Event::Admit);
         let (near, far) = (world.live[0], world.live[1]);
         for index in [0, 1] {
             assert_eq!(world.apply(Event::Step(index)), "step×idle→open");
@@ -1300,8 +1894,12 @@ mod tests {
                 lookahead: vec![],
             },
         )];
-        world.readers.post(regions, world.now);
+        let posted = world
+            .readers
+            .post(regions, (HashMap::from([(0, F)]), 0), world.now);
+        world.drop_frames(posted.dropped.0);
         world.job = Some(vec![(0, 0)]);
+        world.apply(Event::Admit);
         let plan = |world: &World, id| {
             let slot = world.readers.slots.iter().find(|slot| slot.id == id);
             slot.expect("slot").plan.required.clone()
@@ -1319,8 +1917,90 @@ mod tests {
         let label = world.apply(Event::Finish(0, false));
         assert_eq!(label, "finish-err×stale-required");
         assert!(world.readers.failures.is_empty());
+        // Unreserved again: the preview re-admits it (K-2).
+        assert_eq!(world.apply(Event::Admit), "admit→ready");
         assert_eq!(world.apply(Event::Step(1)), "step×idle→decode");
         world.check_live();
+    }
+
+    /// K-2 (S2b-3): a source's lookahead stops at its share
+    /// (C − G − H) / n, here below C − H: G counts from the post.
+    #[test]
+    fn lookahead_stops_at_its_share_of_c_less_g() {
+        let mut readers = Model::new(20).with_budget(10 * F);
+        let demand = [(0, vec![0], vec![1, 2, 3, 4])];
+        let regions = plan_regions(&demand, readers.limit()).expect("a reader");
+        readers.post(regions, (HashMap::from([(0, F)]), 6 * F), Duration::ZERO);
+        // share = (10 − 6 − 1) f = 3f; C − H = 9f.
+        for at in 1..=3 {
+            assert!(readers.admissible(&0), "lookahead {at} is within the share");
+            let fr = Fr {
+                value: frame(0, at),
+                bytes: F,
+                pinned: false,
+            };
+            readers.rings.entry(0).or_default().insert(at, fr);
+            assert!(readers.reserve(F, usize::MAX));
+        }
+        assert!(!readers.admissible(&0), "a fourth frame passes the share");
+    }
+
+    /// K-5 (S2b-3): a drain evicts unpinned lookahead of sources over
+    /// their share first, farthest from the required times first, and only
+    /// what the set needs; required and pinned frames stay.
+    #[test]
+    fn eviction_takes_over_share_sources_then_the_farthest() {
+        let mut readers = Model::new(20).with_budget(10 * F);
+        let demand = [(0, vec![0], vec![1, 2, 3, 4, 5]), (1, vec![0], vec![1, 2])];
+        let regions = plan_regions(&demand, readers.limit()).expect("two readers");
+        let sizes = HashMap::from([(0, F), (1, F)]);
+        readers.post(regions, (sizes, 4 * F), Duration::ZERO);
+        let fr = |key: u8, at: i64| Fr {
+            value: frame(key, at),
+            bytes: F,
+            pinned: key == 0 && at == 5,
+        };
+        for (key, ats) in [(0u8, 1..=6), (1, 1..=2)] {
+            let ring = readers.rings.entry(key).or_default();
+            ring.extend(ats.map(|at| (at, fr(key, at))));
+        }
+        assert!(readers.reserve(8 * F, usize::MAX));
+        // H = 2f, G = 4f: share = (10 − 2 − 4) f / 2 = 2f. Source 0 holds
+        // 6f (over), source 1 2f (not over). Live 8f + the missing 2f + G
+        // = 14f: 4f must go.
+        let Admission::Wait { evicted, stop } = readers.admit(4 * F) else {
+            panic!("the set does not fit beside the lookahead");
+        };
+        let order: Vec<u32> = evicted.iter().map(|f| f.value).collect();
+        assert_eq!(order, [frame(0, 6), frame(0, 4), frame(0, 3), frame(0, 2)]);
+        assert!(stop.is_empty());
+        assert!(!readers.admissible(&1), "no lookahead while draining");
+    }
+
+    /// H-6: a reader retired while its decode ran (the preview went) stays
+    /// retiring when the result arrives, though its required frame is gone.
+    #[test]
+    fn a_reader_retired_mid_decode_stays_retiring() {
+        let mut world = World::new(20);
+        world.apply(Event::Post(1));
+        world.apply(Event::Admit);
+        let id = world.live[0];
+        assert_eq!(world.apply(Event::Step(0)), "step×idle→open");
+        world.apply(Event::Poll(0));
+        world.apply(Event::Step(0));
+        let slot = world.readers.slots.iter().find(|slot| slot.id == id);
+        let Some(ReaderState::Decoding { at, version }) = slot.map(|slot| slot.state) else {
+            panic!("the reader decodes");
+        };
+        world.readers.retire_all();
+        drop(world.readers.clear_rings());
+        let fr = Fr {
+            value: frame(0, at),
+            bytes: F,
+            pinned: false,
+        };
+        drop(world.readers.deliver(id, at, version, Ok(fr), world.now));
+        assert_eq!(world.readers.next(id, world.now, false), Next::Retire);
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10
@@ -1350,7 +2030,7 @@ mod tests {
                         .collect()
                 };
                 world.decodes.clear();
-                world.post(&demand);
+                world.post(&demand, 0);
                 world.settle();
                 world.check();
             }
