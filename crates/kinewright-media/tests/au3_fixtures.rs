@@ -608,10 +608,6 @@ fn assert_encode_identical(left: &[u8], right: &[u8], claim: &str) {
 /// normalization hands `encode_audio` the untouched mix — is the audio
 /// stream, and that is what is compared.
 #[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow tier: cargo test --features slow-tests"
-)]
 fn au3_an_export_that_does_not_normalize_is_byte_identical() {
     let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
     let directory = TempDirectory::new("au3-off");

@@ -1222,7 +1222,7 @@ fn cc8_g2_sdr_identity_on(gpu: GpuContext) {
 /// its §13-named test, and all of them run on the physical adapter in one
 /// `--ignored` test (the NVIDIA lane).
 ///
-/// An entry may carry attributes (the slow tier marks two probes this way);
+/// An entry may carry attributes (the slow tier marks a probe this way);
 /// they sit on the generated default-lane test only.
 macro_rules! gpu_lanes {
     ($($(#[$meta:meta])* $name:ident => $body:ident),* $(,)?) => {

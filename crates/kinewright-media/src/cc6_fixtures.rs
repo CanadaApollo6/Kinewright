@@ -1725,10 +1725,6 @@ fn emit_cc6_lane_evidence(
 /// the seventeen-candidate truncation, and the byte-identical document — is
 /// `cc6_core.rs`'s, because that arithmetic is core's and needs no GPU.
 #[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow tier: cargo test --features slow-tests"
-)]
 fn cc6_per_node_contribution_order_matches_production_z_order() {
     use kinewright_core::{Clip, ClipContent, Track, TrackId, TrackKind};
 

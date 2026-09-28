@@ -836,10 +836,6 @@ fn rev3_actual_upload_callsite_count() {
 /// completed readback's map callback and run it after this thread's wait
 /// returned. Readbacks on threads sharing one device must never refuse.
 #[test]
-#[cfg_attr(
-    not(feature = "slow-tests"),
-    ignore = "slow tier: cargo test --features slow-tests"
-)]
 fn rev3_concurrent_readbacks_never_refuse() {
     let Some(gpu) = fixture_gpu_or_skip() else {
         return;

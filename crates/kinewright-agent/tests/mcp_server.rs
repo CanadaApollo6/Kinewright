@@ -11553,10 +11553,6 @@ mod mo2_solo_review {
     /// Incompressible odd sizes either fit every budget after degrading or
     /// refuse typed; oversized report metadata refuses on `report_bytes`.
     #[test]
-    #[cfg_attr(
-        not(feature = "slow-tests"),
-        ignore = "slow tier: cargo test --features slow-tests"
-    )]
     fn adversarial_budgets() {
         let mut refusals = 0;
         for (width, height, paired) in [
@@ -12105,10 +12101,6 @@ mod mo2_solo_review {
     /// the minimal refusal: bytes on the wire never exceed the measure,
     /// and the measure never exceeds R25 below that residual edge.
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg_attr(
-        not(feature = "slow-tests"),
-        ignore = "slow tier: cargo test --features slow-tests"
-    )]
     async fn final_request_id_residual_matrix() {
         let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
         let raw = RawSession::open(&server).await;
@@ -12244,10 +12236,6 @@ mod mo2_solo_review {
     /// but its edges need not be reached (N24); the exact success edge is
     /// pinned without timing by `solo_bound_tests` in the server.
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg_attr(
-        not(feature = "slow-tests"),
-        ignore = "slow tier: cargo test --features slow-tests"
-    )]
     async fn final_exact_wire_limit_edges_and_escaped_ids() {
         let (server, service) = mo2_solo_start(doc(2, 2, 1, false)).await;
         let raw = RawSession::open(&server).await;

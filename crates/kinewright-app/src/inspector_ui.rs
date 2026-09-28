@@ -13358,10 +13358,6 @@ pub(crate) mod mo2_parity {
     /// delivered operation is a registry operation (the agent's path);
     /// `preview_solo` is a registry capability whose Solo sender renders it.
     #[test]
-    #[cfg_attr(
-        not(feature = "slow-tests"),
-        ignore = "slow tier: cargo test --features slow-tests"
-    )]
     #[allow(clippy::too_many_lines)]
     fn mo2_parity_checklist_is_complete() {
         let registry = kinewright_agent::operation_tools().expect("the registry builds");
