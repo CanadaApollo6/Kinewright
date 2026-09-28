@@ -347,6 +347,7 @@ pub(crate) fn reader_demand(
     let mut demand = ReaderDemand::default();
     let mut generated = 0usize;
     let mut ahead: Vec<(VideoSourceKey, i64)> = Vec::new();
+    let mut unmeasured: Vec<VideoSourceKey> = Vec::new();
     let last = (at.0.saturating_add(horizon)).min(document.duration.0 - 1);
     for frame in at.0..=last.max(at.0) {
         let Ok(layers) = visual_layers_at(document, TimeCode(frame)) else {
@@ -378,6 +379,9 @@ pub(crate) fn reader_demand(
             };
             let key = source_key(asset, scale);
             let max_width = key.max_width;
+            if unmeasured.contains(&key) {
+                continue;
+            }
             if !demand.sources.contains_key(&key) {
                 let mut spec = SourceSpec {
                     asset: asset.id,
@@ -387,7 +391,18 @@ pub(crate) fn reader_demand(
                     max_width,
                     frame_bytes: 0,
                 };
-                spec.frame_bytes = working_bytes(spec.measure(&key, sizes)?);
+                // R38 D1: only a required source's failure is the job's.
+                // A lookahead-only source that cannot be measured is left
+                // out of this job's plan; it is measured again when a later
+                // job requires it, and fails that job then.
+                match spec.measure(&key, sizes) {
+                    Ok(size) => spec.frame_bytes = working_bytes(size),
+                    Err(_) if frame != at.0 => {
+                        unmeasured.push(key);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
                 demand.sources.insert(key.clone(), (spec, Vec::new()));
             }
             let time = video.source.source_at.0;

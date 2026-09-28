@@ -3266,6 +3266,45 @@ pub(crate) mod tests {
         assert_eq!(lane.permits_in_use(), 0, "H-5: permits leaked");
     }
 
+    /// R38 D1: a lookahead-only source that cannot be read does not fail the
+    /// frame being shown. A valid source plays at frame 0 while an unreadable
+    /// source B starts ten frames later, inside the playback horizon; frame 0
+    /// renders the synchronous bytes, and B fails only the job that requires
+    /// it (frame 10).
+    #[test]
+    fn an_unreadable_lookahead_source_does_not_fail_the_current_frame() {
+        let (document, _workload) = cut_document();
+        let directory = TempDirectory::new("pf1-r38-d1");
+        let garbage = directory.path("unreadable.mp4");
+        std::fs::write(&garbage, b"not a video").expect("the file");
+        let mut with_b = (*document).clone();
+        let mut asset = with_b.media_pool[0].clone();
+        (asset.id, asset.path) = (kinewright_core::AssetId(99), garbage);
+        let mut clip = with_b.tracks[0].clips[0].clone();
+        clip.id = kinewright_core::ClipId(99);
+        (clip.asset, clip.timeline_start) = (asset.id, TimeCode(10));
+        clip.source_range = TimeCode(0)..TimeCode(10);
+        let mut track = with_b.tracks[0].clone();
+        (track.id, track.clips) = (kinewright_core::TrackId(99), vec![clip]);
+        with_b.media_pool.push(asset);
+        with_b.tracks.push(track);
+        with_b.validate().expect("B is valid as a document");
+        let with_b = Arc::new(with_b);
+        let lane = Arc::new(Lane::with_budget(20, FRAME_CACHE_BYTE_BUDGET));
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        // Frame 0's horizon reaches frame 10, where B is the top layer.
+        let shown = render_ahead(&mut preview, &with_b, 0);
+        assert_eq!(*shown.rgba, reference(&with_b, 0).0, "C-5: frame 0");
+        assert!(lane.take_failures().is_empty(), "no reader failed");
+        // Not vacuous: B is required at frame 10, and that job fails.
+        let failed = render_paused(&mut preview, &with_b, 10);
+        assert!(
+            matches!(failed, Err(Halt::Failed(_))),
+            "frame 10 requires the unreadable source"
+        );
+    }
+
     /// Review B S2: a paused frame shown again reserves nothing for its
     /// cached title rasters (the preview's titles already hold them), so at
     /// C = f + G + f/2 it neither drains nor re-rasterizes them.
