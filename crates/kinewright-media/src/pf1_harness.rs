@@ -931,7 +931,8 @@ fn pf1_rss_baseline() {
 
 /// One P-rss measurement: before the engine, constructed (no document), first
 /// render, settled idle after 6 s, and 10 s of playback (rss MiB/threads),
-/// which must have advanced at least 5 s without an engine error.
+/// which must have advanced at least 5 s without an engine error; then the
+/// engine's teardown record (`teardown`), before the process exits.
 #[test]
 #[ignore = "PF1 P-rss child: spawned by pf1_rss_baseline"]
 fn pf1_rss_child() {
@@ -962,9 +963,13 @@ fn pf1_rss_child() {
         "P-rss playback advanced only {played} ms"
     );
     session.engine.pause();
+    // E12.10 D3(a): wait for the engine's teardown record, as P-play does,
+    // so the process never exits while the worker is still destroying the
+    // GPU device.
+    let teardown = teardown(session);
     println!(
         "PF1 rss before={} constructed={} first_render={} settled_idle={} playing={} \
-         playing_peak_mib={:.1}{} played_s={:.1}",
+         playing_peak_mib={:.1}{} played_s={:.1} {teardown}",
         show(before),
         show(constructed),
         show(first),
