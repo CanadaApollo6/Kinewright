@@ -4577,6 +4577,37 @@ mod tests {
         );
     }
 
+    /// R33 (re-review A D5 / B D4): the whole programme is in the ring (the
+    /// producer is done) but the callbacks freeze with its tail queued: the
+    /// ongoing stall is measured until they consume it (the old measurement
+    /// stopped at the producer's last push and reported none). Once the
+    /// tail is consumed, the idle time before EOS is no stall.
+    #[test]
+    fn a_freeze_with_the_tail_queued_is_a_stall() {
+        let fps = Rational::new(10, 1).unwrap();
+        let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(5));
+        worker.tick();
+        let queued = worker.audio.as_ref().is_some_and(AudioRuntime::pushed_all);
+        assert!(queued, "the producer pushed the whole programme");
+        let diagnostics = Arc::clone(&worker.audio_diagnostics);
+        audio.advance(CALLBACK_FRAMES);
+        diagnostics.reset_stall();
+        thread::sleep(Duration::from_millis(100));
+        let frozen = diagnostics.max_stall_ms(true);
+        assert!(frozen >= 100.0, "frozen with the tail queued: {frozen} ms");
+        for _ in 0..30 {
+            audio.advance(CALLBACK_FRAMES);
+        }
+        let [.., post_events, _] = diagnostics.underruns();
+        assert!(post_events > 0, "consumed through the end");
+        thread::sleep(Duration::from_millis(300));
+        let after = diagnostics.max_stall_ms(true);
+        assert!(
+            (100.0..250.0).contains(&after),
+            "the freeze counts; the idle after the end does not: {after} ms"
+        );
+    }
+
     /// Review B F4: `sync_decoders` counts the decoders this engine's
     /// renderers hold: open after a render, closed by a cache clear, and
     /// none after teardown.
