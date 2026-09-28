@@ -280,6 +280,21 @@ impl SourceSpec {
         )
     }
 
+    /// K-1 (review B F1): the size this source's frames convert to, read
+    /// from the decoder a reader would open (one thread) and kept in
+    /// `sizes`; an open's failure is the reader's, wrapped as it wraps.
+    fn measure(
+        &self,
+        key: &VideoSourceKey,
+        sizes: &mut FrameSizes,
+    ) -> Result<(u32, u32), MediaError> {
+        if let Some(size) = sizes.get(key) {
+            return Ok(*size);
+        }
+        let size = self.open(1)?.frame_size();
+        Ok(*sizes.entry(key.clone()).or_insert(size))
+    }
+
     /// The frame at `at`, exactly as the renderer's Seek or Sequential
     /// window would cache it (continuing from the decoder's cursor).
     pub(crate) fn decode(
@@ -308,17 +323,27 @@ pub(crate) struct ReaderDemand {
     generated_keys: Vec<TitleCacheKey>,
 }
 
+/// K-1 (review B F1): each source's frame size, measured once from the
+/// decoder a reader opens and kept for the preview's life.
+pub(crate) type FrameSizes = HashMap<VideoSourceKey, (u32, u32)>;
+
 /// The job's required frames at `at`, then up to `horizon` frames of
 /// lookahead, each source's ring holding S1d's window
 /// clamp(⌊(C − G) / (n·f)⌋, 1, `PREFETCH_FRAMES` + 1). A document the
 /// render will refuse gives no demand (the render reports why).
+///
+/// K-1 (review B F1): f is the size the source's decoder converts to,
+/// measured into `sizes`; the asset's optional resolution is never
+/// trusted, so a missing or mismatched one charges the actual bytes. A
+/// source that cannot be opened fails the job with the open's error.
 pub(crate) fn reader_demand(
     document: &Document,
     at: TimeCode,
     resolution: (u32, u32),
     scale: RenderScale,
     horizon: i64,
-) -> ReaderDemand {
+    sizes: &mut FrameSizes,
+) -> Result<ReaderDemand, MediaError> {
     let mut demand = ReaderDemand::default();
     let mut generated = 0usize;
     let mut ahead: Vec<(VideoSourceKey, i64)> = Vec::new();
@@ -353,19 +378,18 @@ pub(crate) fn reader_demand(
             };
             let key = source_key(asset, scale);
             let max_width = key.max_width;
-            demand.sources.entry(key.clone()).or_insert_with(|| {
-                let frame_bytes = (asset.resolution)
-                    .map_or(0, |size| working_bytes(bounded_resolution(size, max_width)));
-                let spec = SourceSpec {
+            if !demand.sources.contains_key(&key) {
+                let mut spec = SourceSpec {
                     asset: asset.id,
                     path: asset.path.clone(),
                     fps: asset.fps,
                     description: asset.color_description.clone(),
                     max_width,
-                    frame_bytes,
+                    frame_bytes: 0,
                 };
-                (spec, Vec::new())
-            });
+                spec.frame_bytes = working_bytes(spec.measure(&key, sizes)?);
+                demand.sources.insert(key.clone(), (spec, Vec::new()));
+            }
             let time = video.source.source_at.0;
             if frame == at.0 {
                 demand.required.push((key, time));
@@ -392,7 +416,7 @@ pub(crate) fn reader_demand(
         lookahead.extend(own.map(|(_, t)| *t).take(room));
     }
     demand.generated = generated;
-    demand
+    Ok(demand)
 }
 
 struct VideoSource {
@@ -2523,7 +2547,9 @@ mod k1_allocation {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
-        let demand = reader_demand(&document, TimeCode(0), resolution, scale, 0);
+        let sizes = &mut FrameSizes::default();
+        let demand = reader_demand(&document, TimeCode(0), resolution, scale, 0, sizes);
+        let demand = demand.expect("the demand");
         let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
         let supplied = SuppliedFrames::new();
         let video = Video::Supplied(&supplied);

@@ -34,8 +34,8 @@ use crate::{
     frame::{CachedFrame, WorkingFrame},
     lut_store::LutLibrary,
     render::{
-        DecodeStrategy, FRAME_CACHE_BYTE_BUDGET, FrameRenderer, PREFETCH_FRAMES, ReaderDemand,
-        RenderScale, SourceSpec, SuppliedFrames, VideoSourceKey, reader_demand,
+        DecodeStrategy, FRAME_CACHE_BYTE_BUDGET, FrameRenderer, FrameSizes, PREFETCH_FRAMES,
+        ReaderDemand, RenderScale, SourceSpec, SuppliedFrames, VideoSourceKey, reader_demand,
     },
     sched::{
         Admission, Next, PermitBook, Poll, Posted, Readers, WaitStep, WaitView, Weighed,
@@ -768,8 +768,15 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                     state = lane.lock();
                     continue;
                 }
+                // K-1 (review B F1): f is exact; a frame of any other size
+                // is a failure `deliver` cleans up, never an undercharge.
+                let result = result.and_then(|frame| match frame.byte_len() {
+                    len if len == bytes => Ok(frame),
+                    len => Err(MediaError::Backend(format!(
+                        "decode-reader: a frame of {len} bytes, {bytes} reserved (K-1)"
+                    ))),
+                });
                 let result = result.map(|frame| {
-                    debug_assert!(bytes == 0 || frame.byte_len() == bytes, "K-1: f is exact");
                     let hold = Arc::new(hold);
                     Pinned { frame, hold }
                 });
@@ -847,6 +854,8 @@ pub(crate) struct Preview {
     stops: HashMap<u64, Arc<AtomicBool>>,
     /// K-1: the title rasters this path keeps cached (G).
     titles: Option<Hold>,
+    /// K-1 (review B F1): each source's measured frame size.
+    sizes: FrameSizes,
     #[cfg(test)]
     pub(crate) faults: Arc<crate::engine::Faults>,
 }
@@ -898,6 +907,7 @@ impl Preview {
             readers: Vec::new(),
             stops: HashMap::new(),
             titles: None,
+            sizes: FrameSizes::new(),
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -1064,7 +1074,8 @@ impl Preview {
         } else {
             0
         };
-        let demand = reader_demand(document, at, resolution, scale, horizon);
+        let demand = reader_demand(document, at, resolution, scale, horizon, &mut self.sizes);
+        let demand = demand.map_err(Halt::Failed)?;
         // Bound first: a new generation's cleared titles are not resident
         // when admission counts them (review B S2).
         self.bind(Some(scene.generation), &scene.lut);
@@ -2538,7 +2549,15 @@ pub(crate) mod tests {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
-        let demand = reader_demand(document, TimeCode(at), resolution, scale, 0);
+        let demand = reader_demand(
+            document,
+            TimeCode(at),
+            resolution,
+            scale,
+            0,
+            &mut FrameSizes::new(),
+        )
+        .expect("the demand");
         assert_eq!(demand.generated, 0, "no generated rasters here");
         let f = demand
             .sources
@@ -2640,7 +2659,8 @@ pub(crate) mod tests {
             max_width: monitor_max_width(titled.resolution),
         };
         let size = scale.output_resolution(titled.resolution);
-        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0);
+        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0, &mut FrameSizes::new())
+            .expect("the demand");
         let f = (demand.sources.values())
             .map(|(spec, _)| spec.frame_bytes)
             .max();
@@ -2836,6 +2856,90 @@ pub(crate) mod tests {
         );
     }
 
+    /// A paused render of `at` on the test thread (no lookahead).
+    fn render_paused(
+        preview: &mut Preview,
+        document: &Arc<Document>,
+        at: i64,
+    ) -> Result<Option<FrameTexture>, Halt> {
+        let scene = job(document, JobKind::Paused(TimeCode(at)), stamp(1, 1)).scene;
+        let version = preview.lane.lock().version;
+        let (playback, paused) = (None, None);
+        let wait = FrameWait {
+            version,
+            playback,
+            paused,
+        };
+        preview.render_monitor(&scene, TimeCode(at), &wait)
+    }
+
+    /// Review B F1: f is measured from the file, never the asset's optional
+    /// resolution. With it missing or wrong, every frame the readers hold
+    /// is reserved at exactly its allocation (live bytes = ring bytes, each
+    /// frame f) and the frame is the synchronous renderer's.
+    #[test]
+    fn reservations_measure_frames_not_metadata() {
+        let (document, _workload) = cut_document();
+        let (expected, f) = reference(&document, 0);
+        for resolution in [None, Some((64, 36))] {
+            let mut misdescribed = (*document).clone();
+            for asset in &mut misdescribed.media_pool {
+                asset.resolution = resolution;
+            }
+            misdescribed.validate().expect("the metadata is optional");
+            let misdescribed = Arc::new(misdescribed);
+            let lane = Arc::new(Lane::with_budget(20, FRAME_CACHE_BYTE_BUDGET));
+            let (mut preview, _frames) =
+                test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+            let shown = render_paused(&mut preview, &misdescribed, 0);
+            let Ok(Some(shown)) = shown else {
+                panic!("{resolution:?}: the frame did not render");
+            };
+            assert_eq!(*shown.rgba, expected, "C-5 with {resolution:?}");
+            let state = lane.lock();
+            let (count, bytes) = state.readers.ring_bytes();
+            assert!(count > 0, "not vacuous: the readers hold frames");
+            assert_eq!(bytes, count * f, "{resolution:?}: each frame is f");
+            assert_eq!(state.readers.live().0, bytes, "{resolution:?}: K-1");
+            drop(state);
+            drop(preview);
+            assert_eq!(lane.lock().readers.live().0, 0, "K-1: a reservation leaked");
+        }
+    }
+
+    /// Review B F1: a decoded frame whose size is not its reservation fails
+    /// the job through `deliver` (no assertion, no undercharge), and the
+    /// reader's slot, permits and bytes are all released when it goes.
+    #[test]
+    fn a_frame_larger_than_its_reservation_fails_and_cleans_up() {
+        let (document, _workload) = cut_document();
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let sizes = &mut FrameSizes::new();
+        let demand = reader_demand(&document, TimeCode(0), resolution, scale, 0, sizes);
+        assert!(demand.is_ok(), "the demand");
+        let lane = Arc::new(Lane::with_budget(20, FRAME_CACHE_BYTE_BUDGET));
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        // Seed a size one row short: the reservation undercharges.
+        preview.sizes = (sizes.iter())
+            .map(|(key, (width, height))| (key.clone(), (*width, height - 1)))
+            .collect();
+        let failed = render_paused(&mut preview, &document, 0);
+        let Err(Halt::Failed(MediaError::Backend(message))) = failed else {
+            panic!("the undercharged frame was accepted");
+        };
+        assert!(message.contains("decode-reader: a frame of"), "{message}");
+        drop(preview);
+        let state = lane.lock();
+        assert!(state.readers.slots.is_empty(), "every reader exited");
+        assert_eq!(state.readers.live().0, 0, "K-1: a reservation leaked");
+        drop(state);
+        assert_eq!(lane.permits_in_use(), 0, "H-5: permits leaked");
+    }
+
     /// Review B S2: a paused frame shown again reserves nothing for its
     /// cached title rasters (the preview's titles already hold them), so at
     /// C = f + G + f/2 it neither drains nor re-rasterizes them.
@@ -2847,7 +2951,8 @@ pub(crate) mod tests {
             max_width: monitor_max_width(titled.resolution),
         };
         let size = scale.output_resolution(titled.resolution);
-        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0);
+        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0, &mut FrameSizes::new())
+            .expect("the demand");
         let f = (demand.sources.values())
             .map(|(spec, _)| spec.frame_bytes)
             .max();

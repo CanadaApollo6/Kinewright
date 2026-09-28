@@ -1395,6 +1395,12 @@ impl VideoDecoder {
         self.stop = Some(stop);
     }
 
+    /// PF1 K-1 (review B F1): the (display) size every frame this decoder
+    /// converts has, its orientation and proxy bound applied.
+    pub(crate) fn frame_size(&self) -> (u32, u32) {
+        (self.rotation).display_dimensions(self.scaled_width, self.scaled_height)
+    }
+
     #[cfg(test)]
     pub(crate) fn seek_count(&self) -> u64 {
         self.seek_count
@@ -2496,6 +2502,38 @@ mod tests {
     fn still_pixel(frame: &FrameTexture, x: u32, y: u32) -> &[u8] {
         let index = usize::try_from((y * frame.width + x) * 4).unwrap();
         &frame.rgba[index..index + 4]
+    }
+
+    /// PF1 K-1 (review B F1): `frame_size` is the size the decoder's frames
+    /// convert to, orientation and proxy bound included (what admission
+    /// charges), for a plain and an EXIF-rotated still at three widths.
+    #[test]
+    fn frame_size_is_what_the_decoder_converts() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("frame-size");
+        let source = "color=c=black:size=64x36:rate=1:duration=1";
+        let plain = still_fixture(&directory, "plain.png", source, "png");
+        let rotated = still_fixture(&directory, "rotated.png", source, "png");
+        insert_png_chunk_after_ihdr(&rotated, &png_chunk(*b"eXIf", &tiff_orientation(6)));
+        let cases = [
+            (&plain, None, (64, 36)),
+            (&plain, Some(20), (20, 11)),
+            (&rotated, None, (36, 64)),
+            (&rotated, Some(20), (20, 35)),
+            (&rotated, Some(99), (36, 64)),
+        ];
+        for (path, max_width, expected) in cases {
+            let mut decoder = VideoDecoder::open_scaled(path, Rational::default(), max_width)
+                .expect("the still opens");
+            let size = decoder.frame_size();
+            assert_eq!(size, expected, "{} at {max_width:?}", path.display());
+            let mut cache: FrameCache<FrameTexture> = FrameCache::new(2);
+            decoder
+                .decode_window(TimeCode::ZERO, TimeCode::ZERO, &mut cache)
+                .expect("the frame decodes");
+            let frame = cache.frame_at_or_before(TimeCode::ZERO).expect("cached");
+            assert_eq!((frame.width, frame.height), size, "the decoded frame");
+        }
     }
 
     /// MO1 R7: EXIF orientation applies at decode. The fixture's vertical
