@@ -3973,13 +3973,17 @@ test modules count as production.
   - The cost: the first render of each source pays one extra open.
   - What stays: the synchronous decode path (`decode_video_frame`) still sizes its cache from asset metadata, as it did
     before S2b.
-- **The timing lanes run the release test binary,** so test-only (`cfg(test)`) hooks are compiled into what is timed.
-  R37 adds three, all uncontended and cheap:
-  - a lock per decode (R37-6's per-time gate);
-  - a lock per permit wake (R37-4);
-  - a notify on a decode stop (R37-2).
+- **The timing lanes run the release test binary** (`cargo test --release … --no-run`), not a production build, so
+  the `cfg(test)` hooks are compiled into what is timed. Their blocking hooks stay unset in every timing lane, but the
+  checks around them still execute (R38, review B's overhead nit):
+  - per decode, a `gate` and a `hold_at` mutex check (`hold_at` is R37-6's per-time gate);
+  - per permit wake, a `woke` mutex check (R37-4);
+  - per permit poll, a `PermitBook::polls` map update;
+  - per permit wait, grant and reopen, an extra `ready` notification;
+  - per cancelled decode, a counter increment and a notification (R37-2).
 
-  Every earlier PF1 lane carried hooks of the same kind.
+  All are uncontended. No timing impact is inferred from them either way: none was measured. Every earlier PF1 lane
+  carried hooks of the same kind. Production builds, release or debug, contain none of them.
 
 #### E12.13.4 Provenance note on E9–E12: the screensaver
 
