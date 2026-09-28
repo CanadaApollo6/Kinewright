@@ -50,7 +50,7 @@ use crate::{
     },
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
     sha256::source_fingerprint,
-    stats::Transport,
+    stats::Ack,
     transcript::{TranscriptService, default_data_dir},
 };
 
@@ -1045,31 +1045,17 @@ enum Call {
     Frame(TimeCode),
 }
 
-/// The caller-side transport at an ack: the newest issued epoch and the
-/// clock, read together under the coalesced lock, where every call that
-/// moves the clock bumps the epoch.
-fn transport(coalesced: &Mutex<Coalesced>, clock: &SharedClock) -> Transport {
-    let coalesced = coalesced.lock().unwrap_or_else(PoisonError::into_inner);
-    Transport {
-        now: Instant::now(),
-        epoch: coalesced.latest.epoch,
-        position: clock.position().0,
-    }
-}
-
-/// `Playback::ack_presented` (re-review A D3 / B D1): the ack samples the
-/// caller-side clock only if its snapshot is of the applied epoch. A clock
-/// a seek the worker has not applied moved is never sampled; an image
-/// painted before the worker's tick reached its frame still counts.
-fn acknowledge(
-    lane: &Lane,
-    transport: Transport,
-    stamp: FrameStamp,
-    at: TimeCode,
-    painted: Instant,
-    expired: bool,
-) {
-    (lane.counters()).ack(painted, stamp.epoch, at.0, expired, Some(transport));
+/// `Playback::ack_presented` (R34): the ack is queued for the worker,
+/// which alone settles it against the due frames it registered. It reads
+/// no clock and registers nothing.
+fn acknowledge(lane: &Lane, stamp: FrameStamp, at: TimeCode, painted: Instant, expired: bool) {
+    let (epoch, at) = (stamp.epoch, at.0);
+    (lane.counters()).ack(Ack {
+        epoch,
+        at,
+        painted,
+        expired,
+    });
 }
 
 impl Playback for FfmpegMediaEngine {
@@ -1143,8 +1129,7 @@ impl Playback for FfmpegMediaEngine {
     /// `painted`. Only a due frame of that epoch counts (review A F5: an
     /// image painted before a stop still counts when acked after it).
     fn ack_presented(&self, stamp: FrameStamp, at: TimeCode, painted: Instant, expired: bool) {
-        let transport = transport(&self.coalesced, &self.clock);
-        acknowledge(&self.lane, transport, stamp, at, painted, expired);
+        acknowledge(&self.lane, stamp, at, painted, expired);
     }
 
     fn position(&self) -> TimeCode {
@@ -2348,11 +2333,28 @@ impl Worker {
             .push(issued);
     }
 
-    /// Review B F3: the clock, if it shows the applied transport. A caller's
-    /// seek or control moves the clock when it is issued, under the
-    /// coalesced lock; until the worker applies it, the clock shows a jump
-    /// playback never made, so R-5 does not sample it.
+    /// R34 (review B F3, re-review 2 D1): the playback the worker applied,
+    /// from its own runtime. A caller's seek or play moves the shared clock
+    /// when it is issued, and a worker transition writes it too; neither
+    /// touches the samples the runtime's callback consumed, so R-5 registers
+    /// only playback that happened.
+    fn runtime_position(&self) -> Option<TimeCode> {
+        let audio = self.audio.as_ref()?;
+        let samples = self.clock.position_samples.load(Ordering::Acquire);
+        Some(samples_to_frame(
+            samples,
+            audio.sample_rate(),
+            self.document.fps,
+        ))
+    }
+
+    /// The runtime's position; without one (the I8 model's fake audio,
+    /// whose clock the model advances), the clock if every issued call is
+    /// applied.
     fn applied_position(&self) -> Option<TimeCode> {
+        if self.audio.is_some() {
+            return self.runtime_position();
+        }
         let coalesced = self.lock_coalesced();
         let settled = coalesced.seek.is_none() && coalesced.controls == self.applied_controls;
         settled.then(|| self.clock.position())
@@ -2586,6 +2588,10 @@ impl Worker {
 
     fn start_playback(&mut self, from: TimeCode, stamp: FrameStamp) {
         self.resume_after_eos = false;
+        // R34 (re-review 2 D2): the outgoing epoch is due through where its
+        // runtime reached, so a paint of it acked later still matches.
+        let outgoing = self.runtime_position().map(|at| at.0);
+        (self.lane.counters()).end(Instant::now(), outgoing);
         self.audio = None;
         self.meter.clear();
         if let Ok(meters) = self.mix_meters.read() {
@@ -2652,8 +2658,9 @@ impl Worker {
             self.stop_at_end();
             self.resume_after_eos = false;
         } else if seek_before {
-            // The seek moved the clock when it was issued: no playback there.
-            self.pause_through(None);
+            // The seek moved the clock when it was issued: playback ran
+            // through where the runtime's own samples reached (R34).
+            self.pause_through(self.runtime_position());
         } else {
             self.pause();
         }
@@ -2701,7 +2708,7 @@ impl Worker {
         self.install_mix_meters(Arc::new(MixMeters::empty(Arc::clone(&self.meter))));
         self.clock.sample_rate.store(0, Ordering::Release);
         let now = Instant::now();
-        (self.lane.counters()).end(now, through.map_or(i64::MIN, |at| at.0));
+        (self.lane.counters()).end(now, through.map(|at| at.0));
         if self.playing {
             self.playing = false;
             self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Paused));
@@ -2733,13 +2740,15 @@ impl Worker {
         self.clock.sample_rate.store(0, Ordering::Release);
         self.playing = false;
         // Review A F5: the frames through the last are due.
-        self.lane.counters().end(Instant::now(), end.0);
+        self.lane.counters().end(Instant::now(), Some(end.0));
         self.emit(MediaEvent::PlaybackStateChanged(PlaybackState::Paused));
         self.emit(MediaEvent::Position(end));
     }
 
     fn tick(&mut self) {
         if !self.playing {
+            // R34: acks queued after a stop are settled all the same.
+            self.lane.counters().sample(Instant::now(), None);
             return;
         }
         #[cfg(test)]
@@ -2761,9 +2770,8 @@ impl Worker {
         // AU3 §3.9: publish by the device clock's audible position.
         self.loudness
             .publish_at(self.clock.position_samples.load(Ordering::Acquire));
-        if let Some(applied) = self.applied_position() {
-            (self.lane.counters()).sample(Instant::now(), applied.0);
-        }
+        let applied = self.applied_position().map(|at| at.0);
+        (self.lane.counters()).sample(Instant::now(), applied);
         let position = self.clock.position();
         // Review B F1: a seek pending since `handle_coalesced_requests` is
         // applied, still playing, on the next pass instead of the stop.
@@ -4514,8 +4522,9 @@ mod tests {
     /// painted, a caller issues `seek(900)`, and the paint is acknowledged
     /// through the production ack path before the worker applies the seek.
     /// No frames 11..=900 become due and the offset stays within a frame
-    /// (the old ack sampled the caller-side clock: 890 frames due, 29.7 s
+    /// (the R32 ack sampled the caller-side clock: 890 frames due, 29.7 s
     /// off); the applied seek then registers only its own first frame.
+    /// R34: the ack is queued, and the worker's next tick settles it.
     #[test]
     fn an_ack_racing_an_unapplied_seek_manufactures_no_due_frames() {
         let fps = Rational::new(30, 1).unwrap();
@@ -4528,15 +4537,8 @@ mod tests {
         let painted = Instant::now();
         let due = worker.lane.counters().stats.due_frames;
         worker.lock_coalesced().seek(TimeCode(900), &worker.clock);
-        let clock = transport(&worker.coalesced, &worker.clock);
-        acknowledge(
-            &worker.lane,
-            clock,
-            FrameStamp::default(),
-            at,
-            painted,
-            false,
-        );
+        acknowledge(&worker.lane, FrameStamp::default(), at, painted, false);
+        worker.tick();
         let stats = worker.lane.counters().stats;
         assert_eq!(stats.due_frames, due, "no jump: {stats:?}");
         assert_eq!(stats.on_time + stats.late, 1, "the paint counts");
@@ -4546,17 +4548,9 @@ mod tests {
         assert_eq!(worker.lane.counters().stats.due_frames, due + 1);
     }
 
-    /// R33 (E11.11.4): an image painted before the worker's tick reached its
-    /// frame (the clock moved; no call was issued) is acked through the
-    /// production path with a snapshot of the applied epoch: its frame is
-    /// due and on time, with no offset, and the next tick does not make it
-    /// dropped. The settle-only ack found no record, and the tick then
-    /// registered the frame unacknowledged: 124 on time of 1,800 against
-    /// the harness's 574 on the first P-play LL rerun.
-    #[test]
-    fn an_ack_ahead_of_the_workers_tick_counts_on_time() {
-        let fps = Rational::new(30, 1).unwrap();
-        let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(1_000));
+    /// Plays to frame 10, then lets the runtime reach a frame the worker's
+    /// tick has not registered yet, and returns it.
+    fn painted_ahead_of_the_tick(worker: &mut Worker, audio: &SimulatedAudio) -> TimeCode {
         while worker.clock.position() < TimeCode(10) {
             audio.advance(CALLBACK_FRAMES);
             worker.tick();
@@ -4565,14 +4559,80 @@ mod tests {
         while worker.clock.position() == sampled {
             audio.advance(CALLBACK_FRAMES);
         }
-        let at = worker.clock.position();
-        let clock = transport(&worker.coalesced, &worker.clock);
-        let stamp = FrameStamp::default();
-        acknowledge(&worker.lane, clock, stamp, at, Instant::now(), false);
+        worker.clock.position()
+    }
+
+    /// R33 (E11.11.4): an image painted before the worker's tick reached its
+    /// frame (the clock moved; no call was issued) is acked through the
+    /// production path: its frame is due and on time, with no offset, and
+    /// the next tick does not make it dropped. The settle-only ack found no
+    /// record, and the tick then registered the frame unacknowledged: 124
+    /// on time of 1,800 against the harness's 574 on the first P-play LL
+    /// rerun. R34: the ack waits in the queue until the tick registers it.
+    #[test]
+    fn an_ack_ahead_of_the_workers_tick_counts_on_time() {
+        let fps = Rational::new(30, 1).unwrap();
+        let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(1_000));
+        let at = painted_ahead_of_the_tick(&mut worker, &audio);
+        acknowledge(
+            &worker.lane,
+            FrameStamp::default(),
+            at,
+            Instant::now(),
+            false,
+        );
         worker.tick();
         let stats = worker.lane.counters().stats;
         assert_eq!(stats.on_time, 1, "{stats:?}");
         assert!(stats.max_av_offset_ms < 0.1, "{stats:?}");
+    }
+
+    /// R34 (re-review 2 D2): a frame painted ahead of the worker's tick,
+    /// whose ack arrives after a caller issued a pause, a seek or a new
+    /// document and before the worker applied it, counts on time: the
+    /// applied transition ends the epoch through its runtime's position,
+    /// which registers the frame, and the held ack settles it. (R33's ack
+    /// saw the newer issuance, sampled nothing and was lost; the frame was
+    /// then registered unacknowledged.)
+    #[test]
+    fn an_ack_ahead_of_the_tick_counts_across_a_pause_seek_or_document() {
+        let fps = Rational::new(30, 1).unwrap();
+        for transition in ["pause", "seek", "document"] {
+            let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(1_000));
+            let at = painted_ahead_of_the_tick(&mut worker, &audio);
+            let painted = Instant::now();
+            let due = worker.lane.counters().stats.due_frames;
+            let control = match transition {
+                "pause" => Some(worker.lock_coalesced().pause()),
+                "seek" => {
+                    worker.lock_coalesced().seek(TimeCode(900), &worker.clock);
+                    None
+                }
+                _ => {
+                    let document = Arc::clone(&worker.document);
+                    Some(
+                        worker
+                            .lock_coalesced()
+                            .set_document(document, &worker.clock),
+                    )
+                }
+            };
+            acknowledge(&worker.lane, FrameStamp::default(), at, painted, false);
+            match control {
+                Some(control) => worker.handle_control(control),
+                None => worker.handle_coalesced_requests(),
+            }
+            let stats = worker.lane.counters().stats;
+            let seeked = u64::from(transition == "seek");
+            assert_eq!(
+                stats.due_frames,
+                due + 1 + seeked,
+                "{transition}: {stats:?}"
+            );
+            let outcomes = (stats.on_time, stats.acks_unmatched);
+            assert_eq!(outcomes, (1, 0), "{transition}: {stats:?}");
+            assert!(stats.max_av_offset_ms < 0.1, "{transition}: {stats:?}");
+        }
     }
 
     /// Review A F5: the starting frame is due at `play`, and a one-frame
@@ -4603,9 +4663,14 @@ mod tests {
         assert!(play_out(&mut worker, &audio, 400) < 400);
         assert!(!worker.playing);
         assert_eq!(worker.lane.counters().stats.due_frames, 5);
-        let stamp = FrameStamp::default();
-        let clock = transport(&worker.coalesced, &worker.clock);
-        acknowledge(&worker.lane, clock, stamp, TimeCode(4), painted, false);
+        acknowledge(
+            &worker.lane,
+            FrameStamp::default(),
+            TimeCode(4),
+            painted,
+            false,
+        );
+        worker.tick();
         let stats = worker.lane.counters().stats;
         assert_eq!(stats.on_time + stats.late, 1, "{stats:?}");
         assert_eq!(stats.dropped, 4);
@@ -5357,6 +5422,37 @@ mod tests {
         let events: Vec<_> = events.try_iter().collect();
         let resumed = MediaEvent::PlaybackStateChanged(PlaybackState::Playing);
         assert!(events.contains(&resumed), "{events:?}");
+    }
+
+    /// R34 (re-review 2 D1): the R29 terminal-race ordering. `seek(10)` is
+    /// issued before the 50-frame programme's terminal stop, which writes
+    /// clock 50; the ack of an old paint (frame 48, the played epoch) is
+    /// delayed across the stop and the resumed seek. The worker registered
+    /// only playback that ran, 0..=49 by the stop and then the seek's own
+    /// first frame, and the ack settles frame 48 and registers nothing.
+    /// (R33's ack sampled the seek's issued epoch with clock 50, and once
+    /// the seek was applied registered 11..=49 of it.)
+    #[test]
+    fn an_old_paints_ack_delayed_across_a_raced_stop_registers_nothing() {
+        let (mut worker, _audio, _events) = drained_before_the_tick();
+        let painted = Instant::now();
+        seek(&worker, TimeCode(10));
+        worker.stop_at_end();
+        assert_eq!(worker.lane.counters().stats.due_frames, 50);
+        worker.handle_coalesced_requests();
+        assert!(worker.playing, "resumed");
+        acknowledge(
+            &worker.lane,
+            FrameStamp::default(),
+            TimeCode(48),
+            painted,
+            false,
+        );
+        worker.tick();
+        let stats = worker.lane.counters().stats;
+        assert_eq!(stats.due_frames, 51, "0..=49, then 10: {stats:?}");
+        assert_eq!(stats.on_time + stats.late, 1, "{stats:?}");
+        assert_eq!(stats.acks_unmatched, 0, "{stats:?}");
     }
 
     /// PF1 V-2 (review B F1, the controls): a seek after the published stop,

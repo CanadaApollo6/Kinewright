@@ -485,6 +485,12 @@ pub struct PlaybackStats {
     /// Stamped preview failures suppressed as superseded or old-epoch (R-2).
     pub stale_errors: u64,
     pub permits_in_use: u64,
+    /// R34: paint acks dropped because the engine's bounded ack queue was
+    /// full.
+    pub acks_overflowed: u64,
+    /// R34: paint acks that matched no due frame: a duplicate, a frame
+    /// never due, or history past the engine's caps.
+    pub acks_unmatched: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
