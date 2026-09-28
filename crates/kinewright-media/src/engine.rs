@@ -4652,22 +4652,38 @@ mod tests {
         }
     }
 
+    /// Re-review A D6: the consumer's view of the transport, as the App
+    /// keeps it: the state events received, never `Worker::playing`. Returns
+    /// the stamped errors among them.
+    fn observe(events: &Receiver<MediaEvent>, playing: &mut bool) -> Vec<FrameStamp> {
+        let mut errors = Vec::new();
+        for event in events.try_iter() {
+            match event {
+                MediaEvent::PlaybackStateChanged(state) => {
+                    *playing = state == PlaybackState::Playing;
+                }
+                MediaEvent::StampedError(stamp, _) => errors.push(stamp),
+                _ => {}
+            }
+        }
+        errors
+    }
+
     /// R-2's error gate on one worker pass: only current, unsuperseded
     /// failures stop playback; the rest count `stale_errors`. Returns the
     /// (current, stale) failures it saw.
-    fn error_gate(worker: &mut Worker, events: &Receiver<MediaEvent>) -> (u64, u64) {
+    fn error_gate(
+        worker: &mut Worker,
+        events: &Receiver<MediaEvent>,
+        observed: &mut bool,
+    ) -> (u64, u64) {
         let latest = worker.lock_coalesced().latest;
         let stamps: Vec<_> = worker.lane.lock().failures.iter().map(|f| f.0).collect();
         let current = stamps.iter().any(|stamp| stamp.is_current(latest));
         let (playing, stale) = (worker.playing, worker.lane.counters().stats.stale_errors);
-        let _ = events.try_iter().count();
+        observe(events, observed);
         worker.handle_preview_failures();
-        let stopped: Vec<_> = (events.try_iter())
-            .filter_map(|event| match event {
-                MediaEvent::StampedError(stamp, _) => Some(stamp),
-                _ => None,
-            })
-            .collect();
+        let stopped = observe(events, observed);
         assert!(stopped.iter().all(|stamp| stamp.is_current(latest)));
         if current {
             assert!(!worker.playing && !stopped.is_empty());
@@ -4691,6 +4707,9 @@ mod tests {
         superseded: u64,
         /// Published frames the consumer rejected as not current (R-2).
         stale_rejected: u64,
+        /// Re-review A D6: current playback frames the consumer rejected
+        /// because the clock had passed them by consumption.
+        expired_rejected: u64,
         playback_published: u64,
         paused_published: u64,
         /// A taken job executed after other steps ran in between.
@@ -4723,6 +4742,8 @@ mod tests {
         since_take: u32,
         published: VecDeque<PreviewFrame>,
         shown: Option<PreviewFrame>,
+        /// The transport as the consumer tracks it: from the state events.
+        playing: bool,
         documents: i64,
         coverage: &'a mut Coverage,
     }
@@ -4787,14 +4808,24 @@ mod tests {
             self.worker.handle_control(self.pending.remove(index));
             self.coverage.stashed += u64::from(self.worker.stashed.len() > stashed);
             self.worker.fill_audio();
+            self.observe();
             true
+        }
+
+        /// Receive the worker's events: the consumer's transport view, which
+        /// the state events keep equal to the worker's.
+        fn observe(&mut self) {
+            observe(&self.events, &mut self.playing);
+            assert_eq!(self.playing, self.worker.playing, "the state events");
         }
 
         fn worker_pass(&mut self) {
             self.worker.handle_coalesced_requests();
-            let (current, stale) = error_gate(&mut self.worker, &self.events);
+            let events = (&mut self.worker, &self.events);
+            let (current, stale) = error_gate(events.0, events.1, &mut self.playing);
             self.coverage.current_failures += current;
             self.coverage.stale_failures += stale;
+            self.observe();
         }
 
         fn take(&mut self) {
@@ -4854,16 +4885,24 @@ mod tests {
             }
         }
 
-        /// R-2 at the consumer: only a current frame is shown.
+        /// R-2 at the consumer: only a current frame is shown and, while
+        /// the consumer's own transport view says playing, only the clock's
+        /// frame (re-review A D6: one published at frame 10 and consumed
+        /// after the clock reached 11 is expired). A current frame is never
+        /// ahead of the clock: it published at the clock's frame.
         fn consume(&mut self) -> bool {
             let Some(frame) = self.published.pop_front() else {
                 return false;
             };
             let latest = self.worker.lock_coalesced().latest;
-            if frame.stamp.is_current(latest) {
-                self.shown = Some(frame);
-            } else {
+            let position = self.worker.clock.position();
+            if !frame.stamp.is_current(latest) {
                 self.coverage.stale_rejected += 1;
+            } else if self.playing && frame.at != position {
+                assert!(frame.at < position, "{frame:?} ahead of {position:?}");
+                self.coverage.expired_rejected += 1;
+            } else {
+                self.shown = Some(frame);
             }
             true
         }
@@ -4877,6 +4916,7 @@ mod tests {
                 self.worker.clock.set_frame(TimeCode(next));
             }
             self.worker.tick();
+            self.observe();
         }
 
         fn idle(&self) -> bool {
@@ -4940,6 +4980,7 @@ mod tests {
             since_take: 0,
             published: VecDeque::new(),
             shown: None,
+            playing: false,
             documents: 0,
             coverage,
         };
@@ -4972,6 +5013,11 @@ mod tests {
         for _ in 0..12 {
             model.take();
             model.execute();
+            // Re-review A D6: the clock can pass a frame between its
+            // publication and its consumption.
+            if rng.below(3) == 0 {
+                model.advance();
+            }
             while model.consume() {}
             model.advance();
         }
@@ -5029,6 +5075,7 @@ mod tests {
             coverage.stashed,
             coverage.superseded,
             coverage.stale_rejected,
+            coverage.expired_rejected,
             coverage.playback_published,
             coverage.paused_published,
             coverage.interleaved_takes,
