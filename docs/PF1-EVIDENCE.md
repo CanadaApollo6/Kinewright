@@ -3833,3 +3833,48 @@ PF1 export lane=LH workload=typical_1080p frames=120 runs=3 median_ms=35993.9 mi
 PF1 rss before=34.2/2 constructed=162.7/11 first_render=551.2/94 settled_idle=486.7/12 playing=807.6/95 playing_peak_mib=807.8 played_s=10.0 lane=LH workload=typical_1080p
 PF1 rss before=33.9/2 constructed=162.5/11 first_render=535.4/123 settled_idle=434.1/12 playing=814.9/124 playing_peak_mib=816.9 played_s=10.0
 ```
+
+### E12.12 Addendum: D3(a) landed, P-rss LH completes
+
+`e6a6e27` lands E12.10 D3(a). The P-rss child ends with the same `teardown` as P-play:
+- it drops the session;
+- it waits (≤ 30 s) for the engine's worker to finish its whole teardown;
+- it drops the GPU context;
+- it appends the teardown record to its `PF1 rss` line.
+
+D3(b), the engine joining its worker on drop, is deferred to S3b.
+
+The P-rss LH lane was rerun once on `e6a6e27`: release test binary sha256 `3f485a11…e9d1f7`, 10:52:31–10:56:38 EDT,
+alone, with the screensaver's two `foot` processes at 91% and 52% (R26). **All seven workloads complete, with exit 0.**
+The rerun hit no SIGSEGV, and every child reports `teardown_complete=true`. LH is recorded, not gated (G15 is LL's).
+
+| Workload (LH) | Constructed | First render | Settled idle | Playing | Playing peak MiB | Teardown RSS MiB / threads |
+|---|---|---|---|---|---|---|
+| `typical_1080p` | 162.3/11 | 551.6/94 | 451.8/12 | 834.8/95 | 839.8 | 297.6/2 |
+| `blend_heavy_1080p` | 162.9/11 | 536.0/123 | 458.6/12 | 824.6/124 | 825.2 | 279.5/2 |
+| `explainer_16x9` | 163.0/11 | 521.1/94 | 447.5/12 | 806.6/95 | 868.2 | 267.7/2 |
+| `reel_9x16` | 162.6/11 | 456.0/59 | 433.9/12 | 1016.1/37 | 1031.0 | 302.4/2 |
+| `feed_4x5` | 162.8/11 | 443.8/59 | 433.1/12 | 1063.5/37 | 1099.5 | 340.3/2 |
+| `talk_recut` | 162.6/11 | 449.8/59 | 428.3/12 | 782.1/95 | 782.1 | 292.8/2 |
+| `title_only` | 162.4/11 | 306.7/12 | 306.7/12 | 329.0/13 | 329.0 | 133.6/2 |
+
+- **Every child's teardown record:**
+  - 0 ledger KiB live and 0 decoders;
+  - 128 KiB of conversion tables (0 for `title_only`);
+  - 2 threads.
+- **Settled idle** for `typical_1080p` (451.8/12) and `blend_heavy_1080p` (458.6/12) is in line with E12.8's partial
+  LH readings (443.6–486.7 and 434.1–436.6). Against S0's LH readings:
+  - `typical_1080p`: 451.8/12, against 624.9/103;
+  - `blend_heavy_1080p`: 458.6/12, against 711.0/149.
+
+Raw lines:
+
+```
+PF1 rss before=33.8/2 constructed=162.3/11 first_render=551.6/94 settled_idle=451.8/12 playing=834.8/95 playing_peak_mib=839.8 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=297.6 threads=2 lane=LH workload=typical_1080p
+PF1 rss before=34.1/2 constructed=162.9/11 first_render=536.0/123 settled_idle=458.6/12 playing=824.6/124 playing_peak_mib=825.2 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=279.5 threads=2 lane=LH workload=blend_heavy_1080p
+PF1 rss before=34.2/2 constructed=163.0/11 first_render=521.1/94 settled_idle=447.5/12 playing=806.6/95 playing_peak_mib=868.2 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=267.7 threads=2 lane=LH workload=explainer_16x9
+PF1 rss before=34.0/2 constructed=162.6/11 first_render=456.0/59 settled_idle=433.9/12 playing=1016.1/37 playing_peak_mib=1031.0 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=302.4 threads=2 lane=LH workload=reel_9x16
+PF1 rss before=34.2/2 constructed=162.8/11 first_render=443.8/59 settled_idle=433.1/12 playing=1063.5/37 playing_peak_mib=1099.5 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=340.3 threads=2 lane=LH workload=feed_4x5
+PF1 rss before=33.9/2 constructed=162.6/11 first_render=449.8/59 settled_idle=428.3/12 playing=782.1/95 playing_peak_mib=782.1 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=292.8 threads=2 lane=LH workload=talk_recut
+PF1 rss before=33.9/2 constructed=162.4/11 first_render=306.7/12 settled_idle=306.7/12 playing=329.0/13 playing_peak_mib=329.0 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=0 teardown_rss_mib=133.6 threads=2 lane=LH workload=title_only
+```
