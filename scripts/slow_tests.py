@@ -29,6 +29,7 @@ arguments come from the environment (RUST_TEST_THREADS).
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -370,27 +371,52 @@ def binary_label(running_target: str) -> str:
     return re.sub(r"-[0-9a-f]{16}$", "", exe)
 
 
-def parse(log: str):
-    """Yield (binary, test path, outcome) for every `test x ... y` line."""
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+UNPARSABLE = "could not parse cargo test output"
+
+
+class UnparsableLog(Exception):
+    pass
+
+
+def parse(log: str) -> list[tuple[str, str, str]]:
+    """(binary, test path, outcome) for every `test x ... y` line, after stripping ANSI.
+
+    Raises UnparsableLog when the output has no `Running`/`Doc-tests` header or no test
+    line at all: that is a format problem, and must not read as "every skip is missing".
+    """
     binary = None
-    for line in log.splitlines():
+    headers = 0
+    rows = []
+    for line in ANSI.sub("", log).splitlines():
         running = RUNNING.match(line)
         if running:
             binary = binary_label(running.group(1))
+            headers += 1
             continue
         doc = DOC_TESTS.match(line)
         if doc:
             binary = f"doc-tests:{doc.group(1)}"
+            headers += 1
             continue
         test = TEST_LINE.match(line)
         if test and binary:
-            yield binary, test.group(1), test.group(2).strip()
+            rows.append((binary, test.group(1), test.group(2).strip()))
+    if not headers:
+        raise UnparsableLog("no `Running` or `Doc-tests` line found")
+    if not rows:
+        raise UnparsableLog(f"{headers} binaries started but no `test ... ok|ignored` line found")
+    return rows
 
 
 def verify_fast(log: str) -> int:
+    try:
+        rows = parse(log)
+    except UnparsableLog as error:
+        return unparsable(error)
     expected = {(b, p) for b, p, _ in read_manifest()}
     allowed = {(b, p) for b, p, _ in read_ignored()}
-    ignored = {(b, p, outcome) for b, p, outcome in parse(log) if outcome.startswith("ignored")}
+    ignored = {(b, p, outcome) for b, p, outcome in rows if outcome.startswith("ignored")}
     skipped = {(b, p) for b, p, outcome in ignored if REASON in outcome}
     others = {(b, p): outcome for b, p, outcome in ignored if REASON not in outcome}
     problems = [f"not skipped by the fast tier: {b} {p}" for b, p in sorted(expected - skipped)]
@@ -411,10 +437,22 @@ def verify_fast(log: str) -> int:
     return 0
 
 
+def unparsable(error: UnparsableLog) -> int:
+    print(
+        f"{UNPARSABLE}: {error}. The test output format may have changed "
+        "(ANSI colour, --format, -q, --nocapture); this is not a report about missing skips."
+    )
+    return 1
+
+
 def verify_slow(log: str) -> int:
+    try:
+        rows = parse(log)
+    except UnparsableLog as error:
+        return unparsable(error)
     expected = {(b, p) for b, p, _ in read_manifest()}
     outcomes = {}
-    for b, p, outcome in parse(log):
+    for b, p, outcome in rows:
         outcomes.setdefault((b, p), []).append(outcome)
     ran = {key for key in outcomes if any(o == "ok" for o in outcomes[key])}
     problems = [f"did not run (or did not pass): {b} {p} {outcomes.get((b, p), '')}" for b, p in sorted(expected - ran)]
@@ -434,9 +472,13 @@ def verify_slow(log: str) -> int:
 
 def run_cargo(args: list[str]) -> tuple[int, str]:
     print("+ " + " ".join(args), flush=True)
+    # dtolnay/rust-toolchain exports CARGO_TERM_COLOR=always; the output is parsed, so ask
+    # for plain text. (parse() also strips ANSI, for saved logs and other callers.)
+    env = {**os.environ, "CARGO_TERM_COLOR": "never"}
     process = subprocess.Popen(
         args,
         cwd=ROOT,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

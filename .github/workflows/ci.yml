@@ -138,8 +138,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Check the slow-test manifest and ignored-test allowlist against the source
-        run: python3 scripts/slow_tests.py lint
+      - name: Check the slow-test manifest and ignored-test allowlist against the source, and the parser
+        run: |
+          python3 scripts/slow_tests.py lint
+          python3 scripts/slow_tests_selftest.py
 
       - name: Provision FFmpeg, build, test (fast tier), and lint
         run: |
