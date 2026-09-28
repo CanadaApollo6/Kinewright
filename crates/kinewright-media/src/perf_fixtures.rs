@@ -163,6 +163,30 @@ pub(crate) fn cuts(
     Workload(document(resolution, &media, lanes), media.into())
 }
 
+/// PF1 G13: four sources, one per track, each whole and screened over the
+/// last, so every frame decodes all four.
+pub(crate) fn four_sources(resolution: (u32, u32), frames: i64) -> Workload {
+    let filters = [
+        ("testsrc2", 1),
+        ("smptebars", 2),
+        ("gradients", 3),
+        ("testsrc", 4),
+    ];
+    let media = filters.map(|(filter, id)| source(filter, resolution, frames, id));
+    let lanes = (media.iter().enumerate())
+        .map(|(index, (_, asset))| {
+            let blend = if index == 0 {
+                BlendMode::Normal
+            } else {
+                BlendMode::Screen
+            };
+            let base = clip(index as u64 + 1, ClipContent::Media, blend, Vec::new());
+            vec![span(base, asset, 0, frames, 0)]
+        })
+        .collect();
+    Workload(document(resolution, &media, lanes), media.into())
+}
+
 /// R28 `blend_heavy`: 4-track 1080p — presenter, picture-in-picture, a `Screen` leak whose
 /// 30-frame clips each enter by a full-length `push_left`, and an adjustment.
 pub(crate) fn blend_heavy(frames: i64) -> Workload {

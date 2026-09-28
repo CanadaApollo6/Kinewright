@@ -1122,6 +1122,7 @@ impl Playback for FfmpegMediaEngine {
         stats.post_end_underrun_frames = since(3);
         stats.max_clock_stall_ms = self.diagnostics.max_stall_ms(playing);
         stats.sync_decoders = self.decoders.open();
+        stats.permits_in_use = u64::try_from(self.lane.permits_in_use()).unwrap_or(u64::MAX);
         stats.live_table_bytes =
             u64::try_from(crate::conversion::live_table_bytes()).unwrap_or(u64::MAX);
         stats

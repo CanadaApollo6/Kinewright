@@ -35,7 +35,7 @@ use crate::{
         DecodeStrategy, FrameRenderer, PREFETCH_FRAMES, ReaderDemand, RenderScale, SourceSpec,
         SuppliedFrames, VideoSourceKey, reader_demand,
     },
-    sched::{Next, Posted, Readers, WaitStep, WaitView, plan_regions, reader_limit, wait_step},
+    sched::{Next, PermitBook, Poll, Posted, Readers, WaitStep, WaitView, plan_regions, wait_step},
     stats::{ACK_QUEUE, Ack, Counters},
 };
 
@@ -142,6 +142,9 @@ pub(crate) struct Lane {
     /// gate (or proceeds once its sender is gone).
     #[cfg(test)]
     pub(crate) gate: Mutex<Option<Receiver<()>>>,
+    /// H-5: the `Permits` monitor, a leaf never taken with `state` (H-4).
+    permits: Mutex<PermitBook>,
+    permits_cv: Condvar,
     /// R-5's counters: a separate leaf, never taken with `state`.
     counters: Mutex<Counters>,
     /// R35 (re-review 3 D3): paint acks, handed to the worker without a
@@ -152,8 +155,19 @@ pub(crate) struct Lane {
 
 impl Default for Lane {
     fn default() -> Self {
+        Self::with_parallelism(thread::available_parallelism().map_or(1, usize::from))
+    }
+}
+
+impl Lane {
+    /// A lane for P = `parallelism`: R readers, a pool of P permits (H-5).
+    pub(crate) fn with_parallelism(parallelism: usize) -> Self {
+        let state = LaneState {
+            readers: Readers::new(parallelism),
+            ..LaneState::default()
+        };
         Self {
-            state: Mutex::default(),
+            state: Mutex::new(state),
             ready: Condvar::new(),
             work: Condvar::new(),
             epoch: Instant::now(),
@@ -161,14 +175,52 @@ impl Default for Lane {
             skew: Mutex::default(),
             #[cfg(test)]
             gate: Mutex::default(),
+            permits: Mutex::new(PermitBook::new(parallelism)),
+            permits_cv: Condvar::new(),
             counters: Mutex::default(),
             acks: crossbeam_channel::bounded(ACK_QUEUE),
             acks_overflowed: AtomicU64::new(0),
         }
     }
-}
 
-impl Lane {
+    fn book(&self) -> MutexGuard<'_, PermitBook> {
+        self.permits.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// H-5 `PermitWait`: queue for `want` permits and wait at the FIFO; `None`
+    /// once the request is cancelled or the lane stops.
+    fn acquire(&self, id: u64, want: usize) -> Option<usize> {
+        let mut book = self.book();
+        book.enqueue(id, want);
+        let granted = loop {
+            match book.poll(id) {
+                Poll::Granted(granted) => break Some(granted),
+                Poll::Cancelled => break None,
+                Poll::Wait => {
+                    book = self
+                        .permits_cv
+                        .wait(book)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            }
+        };
+        drop(book);
+        // The next head may be granted from what is left.
+        self.permits_cv.notify_all();
+        granted
+    }
+
+    /// H-5: a book change (release, exit, cancel), then the waiters look.
+    fn permits_change(&self, change: impl FnOnce(&mut PermitBook)) {
+        change(&mut self.book());
+        self.permits_cv.notify_all();
+    }
+
+    /// R-5 permits in use: reader frame threads (≤ P, I11).
+    pub(crate) fn permits_in_use(&self) -> usize {
+        self.book().in_use()
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, LaneState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -296,6 +348,7 @@ impl Lane {
         };
         self.notify();
         self.work.notify_all();
+        self.permits_change(|book| book.shutdown = true);
         moved
     }
 
@@ -384,17 +437,12 @@ fn spawn_reader(
         .map_err(|error| MediaError::Backend(format!("decode-reader: spawn failed: {error}")))
 }
 
-/// Before S2b-2's permits, a reader opens with ⌊P / R⌋ frame threads.
-fn reader_threads() -> usize {
-    let parallelism = thread::available_parallelism().map_or(1, usize::from);
-    (parallelism / reader_limit(parallelism)).max(1)
-}
-
 /// A reader's loop (H-2): every step is decided under the lock; decoding,
 /// opening and closing run outside it, and what `deliver` returns is
 /// dropped after unlock (H-4).
 fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
     let mut decoder: Option<VideoDecoder> = None;
+    let mut threads = 0;
     let mut state = lane.lock();
     loop {
         let now = lane.now();
@@ -405,6 +453,28 @@ fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
                 let timeout = until.saturating_sub(now);
                 let waited = lane.work.wait_timeout(state, timeout);
                 state = waited.unwrap_or_else(PoisonError::into_inner).0;
+            }
+            // H-5: permits before a decoder exists (X-5), outside `Sched`.
+            Next::Open { want } => {
+                drop(state);
+                // A ticket waits: inactive readers shrink or retire (H-5).
+                lane.work.notify_all();
+                #[cfg(test)]
+                lane.notify(); // a test waiting for `PermitWait`
+                let granted = lane.acquire(id, want);
+                threads = granted.unwrap_or(0);
+                state = lane.lock();
+                state.readers.granted(id, granted, lane.now());
+                lane.work.notify_all();
+            }
+            Next::Close => {
+                drop(state);
+                drop(decoder.take());
+                lane.permits_change(|book| book.release(id));
+                state = lane.lock();
+                state.readers.closed(id);
+                #[cfg(test)]
+                lane.notify(); // a test waiting for a reopen
             }
             Next::Decode { at, version } => {
                 drop(state);
@@ -418,7 +488,7 @@ fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
                 }
                 let result = match &mut decoder {
                     Some(decoder) => spec.decode(decoder, at),
-                    None => spec.open(reader_threads()).and_then(|mut opened| {
+                    None => spec.open(threads).and_then(|mut opened| {
                         opened.set_stop(Arc::clone(halt));
                         spec.decode(decoder.insert(opened), at)
                     }),
@@ -442,6 +512,7 @@ fn read(lane: &Lane, id: u64, spec: &SourceSpec, halt: &Arc<AtomicBool>) {
     }
     drop(state);
     drop(decoder);
+    lane.permits_change(|book| book.forget(id));
     lane.lock().readers.exited(id);
     lane.notify();
 }
@@ -757,13 +828,11 @@ impl Preview {
                 state.readers.post(regions.unwrap_or_default(), now),
             )
         };
-        self.lane.work.notify_all();
-        let (fallback, Posted { spawn, dropped }) = posted;
-        drop(dropped);
+        let (fallback, posted) = posted;
+        self.started(posted, demand);
         if fallback {
             return Ok(None);
         }
-        self.spawn(spawn, demand);
         let mut state = self.lane.lock();
         loop {
             let resolved = state.readers.resolve(&demand.required);
@@ -798,12 +867,13 @@ impl Preview {
                     state = self.lane.lock();
                 }
                 WaitStep::Wait if state.readers.waiting() => {
-                    let spawn = state.readers.assign(self.lane.now());
-                    if spawn.is_empty() {
+                    let assigned = state.readers.assign(self.lane.now());
+                    if assigned.spawn.is_empty() && assigned.cancel.is_empty() && !assigned.retired
+                    {
                         state = self.wait_ready(state, wait);
                     } else {
                         drop(state);
-                        self.spawn(spawn, demand);
+                        self.started(assigned, demand);
                         state = self.lane.lock();
                     }
                 }
@@ -824,6 +894,25 @@ impl Preview {
         } else {
             ready.wait(state).unwrap_or_else(PoisonError::into_inner)
         }
+    }
+
+    /// After a post or an assignment, outside the lock: wake the readers
+    /// (plans changed, obsolete ones retire), cancel obsolete tickets
+    /// (H-5), drop what the plan removed (H-4) and start new readers.
+    fn started(&mut self, posted: Posted<VideoSourceKey, WorkingFrame>, demand: &ReaderDemand) {
+        let Posted {
+            spawn,
+            cancel,
+            dropped,
+            ..
+        } = posted;
+        self.lane.work.notify_all();
+        if !cancel.is_empty() {
+            self.lane
+                .permits_change(|book| cancel.iter().for_each(|id| book.cancel(*id)));
+        }
+        drop(dropped);
+        self.spawn(spawn, demand);
     }
 
     /// Start readers outside the lock; one that cannot start fails its
@@ -1617,6 +1706,134 @@ pub(crate) mod tests {
         let rings = lane.lock().readers.ring_bytes();
         // Source 0 at 0 and 14 (two layers), source 1 at 7.
         assert_eq!(rings.0, 3, "retirement keeps the frames");
+    }
+
+    /// G13 / I11 (S2b-2): four active sources at P = 20 hold 5 × 4 frame
+    /// threads, never more than P; a synchronous decoder (a thumbnail) is
+    /// outside the pool and completes while every permit is held.
+    #[test]
+    fn four_sources_share_the_permit_pool() {
+        let workload = crate::perf_fixtures::four_sources((160, 90), 30);
+        let document = Arc::new(workload.0.clone());
+        let lane = Arc::new(Lane::with_parallelism(20));
+        let (gate, frames, thread) = gated_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(3)),
+            stamp(1, 1),
+        )));
+        let four = |state: &LaneState| {
+            let slots = &state.readers.slots;
+            let decoding = slots
+                .iter()
+                .filter(|slot| matches!(slot.state, crate::sched::ReaderState::Decoding { .. }));
+            decoding.count() == 4
+        };
+        wait_until(&lane, four);
+        let threads: Vec<usize> = (lane.lock().readers.slots.iter())
+            .map(|slot| slot.threads)
+            .collect();
+        assert_eq!(threads, [5, 5, 5, 5], "w = ⌊20 / 4⌋");
+        assert_eq!(lane.permits_in_use(), 20, "G13: reader threads ≤ P");
+        let (_, asset) = &workload.1[0];
+        let thumbnail = crate::decode::thumbnail(&asset.path, asset.fps, TimeCode(3), 64);
+        assert!(thumbnail.is_ok(), "a synchronous decoder waited on permits");
+        drop(gate);
+        let shown = frames
+            .recv_timeout(Duration::from_secs(60))
+            .expect("published");
+        assert_eq!(shown.at, TimeCode(3));
+        assert!(lane.take_failures().is_empty());
+        lane.shut_down();
+        join_within(thread);
+        assert_eq!(
+            lane.permits_in_use(),
+            0,
+            "the readers released every permit"
+        );
+    }
+
+    /// H-5 / H-6 (S2b-2): a reader holding 16 of 20 permits while the plan
+    /// widens to four sources leaves a newcomer short and others queued;
+    /// shutdown wakes the queued readers, which exit while it still decodes.
+    #[test]
+    fn shutdown_wakes_the_readers_waiting_for_permits() {
+        let workload = crate::perf_fixtures::four_sources((160, 90), 30);
+        let four = Arc::new(workload.0.clone());
+        let mut one = workload.0.clone();
+        one.tracks.truncate(1);
+        let lane = Arc::new(Lane::with_parallelism(20));
+        let (gate, _frames, thread) = gated_preview(&lane);
+        lane.post(Some(job(
+            &Arc::new(one),
+            JobKind::Paused(TimeCode(3)),
+            stamp(1, 1),
+        )));
+        wait_until(&lane, decoding);
+        assert_eq!(lane.permits_in_use(), 16);
+        lane.post(Some(job(&four, JobKind::Paused(TimeCode(3)), stamp(2, 2))));
+        let queued = |state: &LaneState| -> Vec<u64> {
+            let slots = state.readers.slots.iter();
+            let waiting = slots.filter(|slot| slot.state == crate::sched::ReaderState::PermitWait);
+            waiting.map(|slot| slot.id).collect()
+        };
+        wait_until(&lane, |state| queued(state).len() == 2);
+        let waiters = queued(&lane.lock());
+        assert_eq!(lane.permits_in_use(), 20, "the newcomer is granted 4");
+        lane.shut_down();
+        // The queued readers exit while the two granted ones still decode
+        // (gated): no permit was freed.
+        wait_until(&lane, |state| {
+            let slots = &state.readers.slots;
+            !slots.iter().any(|slot| waiters.contains(&slot.id))
+        });
+        drop(gate);
+        join_within(thread);
+        assert!(lane.lock().readers.slots.is_empty());
+        assert_eq!(lane.permits_in_use(), 0);
+    }
+
+    /// H-5 (S2b-2): on real threads, one source reads on 16 threads; when
+    /// the plan widens to two, the wide reader closes (shrink) and the
+    /// short newcomer closes (close-before-growth); fresh work reopens both
+    /// on 10 + 10.
+    #[test]
+    fn a_widening_plan_rebalances_the_permits() {
+        let workload = crate::perf_fixtures::four_sources((160, 90), 30);
+        let (mut one, mut two) = (workload.0.clone(), workload.0.clone());
+        one.tracks.truncate(1);
+        two.tracks.truncate(2);
+        let (one, two) = (Arc::new(one), Arc::new(two));
+        let lane = Arc::new(Lane::with_parallelism(20));
+        let (gate, frames, thread) = gated_preview(&lane);
+        *lane.gate.lock().expect("gate") = None;
+        drop(gate);
+        let threads = |lane: &Lane| -> Vec<usize> {
+            let mut threads: Vec<usize> = (lane.lock().readers.slots.iter())
+                .map(|slot| slot.threads)
+                .collect();
+            threads.sort_unstable();
+            threads
+        };
+        let show = |document: &Arc<Document>, at: i64, seq: u64| {
+            let paused = JobKind::Paused(TimeCode(at));
+            lane.post(Some(job(document, paused, stamp(1, seq))));
+            let shown = frames.recv_timeout(Duration::from_secs(60));
+            assert_eq!(shown.expect("published").at, TimeCode(at));
+        };
+        show(&one, 3, 1);
+        assert_eq!((threads(&lane), lane.permits_in_use()), (vec![16], 16));
+        show(&two, 3, 2);
+        wait_until(&lane, |state| {
+            let slots = &state.readers.slots;
+            slots.len() == 2 && slots.iter().all(|slot| slot.threads == 0)
+        });
+        assert_eq!(lane.permits_in_use(), 0, "both closed and released");
+        show(&two, 4, 3);
+        assert_eq!((threads(&lane), lane.permits_in_use()), (vec![10, 10], 20));
+        assert!(lane.take_failures().is_empty());
+        lane.shut_down();
+        join_within(thread);
     }
 
     /// E-2 (S2b-1): a reader that cannot start fails its required frame

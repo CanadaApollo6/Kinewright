@@ -7,7 +7,7 @@
 //! after unlock (H-4).
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     hash::Hash,
     time::Duration,
 };
@@ -27,11 +27,19 @@ pub(crate) fn reader_limit(parallelism: usize) -> usize {
     parallelism.clamp(1, 8)
 }
 
-/// H-2's reader states (S2b-1: Idle, Decoding, Retiring).
+/// H-5: a reader wants w = clamp(⌊P / n⌋, 1, 16) frame threads, n being the
+/// readers the current plan needs.
+fn want(pool: usize, readers: usize) -> usize {
+    (pool / readers.max(1)).clamp(1, 16)
+}
+
+/// H-2's reader states (S2b-2: Idle, `PermitWait`, Decoding, Retiring).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ReaderState {
     /// Waiting on `work`, timed to `since` + [`QUIESCENCE`].
     Idle { since: Duration },
+    /// Queued for permits in `Permits`, holding none and no decoder.
+    PermitWait,
     /// Decoding `at` for plan `version`, outside the lock.
     Decoding { at: i64, version: u64 },
     /// Closing its decoder outside all locks, then exiting.
@@ -56,6 +64,10 @@ pub(crate) struct Slot<K> {
     cursor: Option<i64>,
     /// A plan version whose lookahead failed: no more lookahead in it.
     lookahead_failed: Option<u64>,
+    /// H-5: the permits (frame threads) its decoder holds; 0 when closed.
+    pub(crate) threads: usize,
+    /// Its ticket's cancel was handed out (once per `PermitWait`).
+    cancelled: bool,
 }
 
 /// One region of demand on a source, served by one reader.
@@ -75,8 +87,20 @@ impl Region {
 /// What a reader does next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Next {
-    Decode { at: i64, version: u64 },
-    Wait { until: Duration },
+    Decode {
+        at: i64,
+        version: u64,
+    },
+    /// H-5: queue for `want` permits, then open at the grant.
+    Open {
+        want: usize,
+    },
+    /// H-5: close the decoder and release its permits (a `shrink`, or a
+    /// short reader closing before it grows).
+    Close,
+    Wait {
+        until: Duration,
+    },
     Retire,
 }
 
@@ -84,6 +108,11 @@ pub(crate) enum Next {
 /// was removed, to drop after unlock.
 pub(crate) struct Posted<K, F> {
     pub(crate) spawn: Vec<(u64, K)>,
+    /// H-5: readers in `PermitWait` whose demand is obsolete: their
+    /// tickets are cancelled in `Permits`, after unlock.
+    pub(crate) cancel: Vec<u64>,
+    /// Idle readers the assignment retired (they need a `work` wake).
+    pub(crate) retired: bool,
     pub(crate) dropped: (Vec<F>, Vec<MediaError>),
 }
 
@@ -170,7 +199,11 @@ pub(crate) fn plan_regions<K: Clone>(
 #[derive(Clone)]
 pub(crate) struct Readers<K, F> {
     version: u64,
+    /// H-5: P, the permit pool.
+    pool: usize,
     limit: usize,
+    /// H-5: the current plan's w.
+    want: usize,
     next_id: u64,
     pub(crate) slots: Vec<Slot<K>>,
     rings: HashMap<K, BTreeMap<i64, F>>,
@@ -183,16 +216,18 @@ pub(crate) struct Readers<K, F> {
 
 impl<K, F> Default for Readers<K, F> {
     fn default() -> Self {
-        let parallelism = std::thread::available_parallelism().map_or(1, usize::from);
-        Self::new(reader_limit(parallelism))
+        Self::new(std::thread::available_parallelism().map_or(1, usize::from))
     }
 }
 
 impl<K, F> Readers<K, F> {
-    pub(crate) fn new(limit: usize) -> Self {
+    /// Readers for P = `pool`: R = clamp(P, 1, 8).
+    pub(crate) fn new(pool: usize) -> Self {
         Self {
             version: 0,
-            limit: limit.max(1),
+            pool: pool.max(1),
+            limit: reader_limit(pool),
+            want: 1,
             next_id: 0,
             slots: Vec::new(),
             rings: HashMap::new(),
@@ -247,6 +282,7 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
             };
         }
         self.pending.clear();
+        let regions_len = regions.len();
         for (key, region) in regions {
             let free = (self.slots.iter_mut())
                 .filter(|slot| slot.key == key && slot.state != ReaderState::Retiring)
@@ -257,17 +293,18 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
                 None => self.pending.push((key, region)),
             }
         }
-        let spawn = self.assign(now);
+        self.want = want(self.pool, regions_len);
         Posted {
-            spawn,
             dropped: (frames, errors),
+            ..self.assign(now)
         }
     }
 
     /// Give waiting regions new readers while slots are free; while one
     /// still waits, obsolete idle readers retire at once. Returns the
-    /// readers to start.
-    pub(crate) fn assign(&mut self, now: Duration) -> Vec<(u64, K)> {
+    /// readers to start, and the obsolete `PermitWait` readers whose
+    /// tickets to cancel (H-5).
+    pub(crate) fn assign(&mut self, now: Duration) -> Posted<K, F> {
         let mut spawn = Vec::new();
         let mut index = 0;
         while self.slots.len() < self.limit && index < self.pending.len() {
@@ -287,20 +324,54 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
                 state: ReaderState::Idle { since: now },
                 cursor: None,
                 lookahead_failed: None,
+                threads: 0,
+                cancelled: false,
             });
             spawn.push((id, key));
         }
         // Lookahead-only regions never wait for a reader.
         self.pending
             .retain(|(_, region)| !region.required.is_empty());
+        let mut retired = false;
         if !self.pending.is_empty() {
             for slot in &mut self.slots {
                 if obsolete(slot) && matches!(slot.state, ReaderState::Idle { .. }) {
                     slot.state = ReaderState::Retiring;
+                    retired = true;
                 }
             }
         }
-        spawn
+        let mut cancel = Vec::new();
+        for slot in &mut self.slots {
+            if slot.state == ReaderState::PermitWait && obsolete(slot) && !slot.cancelled {
+                slot.cancelled = true;
+                cancel.push(slot.id);
+            }
+        }
+        Posted {
+            spawn,
+            cancel,
+            retired,
+            dropped: (Vec::new(), Vec::new()),
+        }
+    }
+
+    /// H-5: the reader `id` left `PermitWait` with `granted` permits
+    /// (`None`: its ticket was cancelled or the lane stopped).
+    pub(crate) fn granted(&mut self, id: u64, granted: Option<usize>, now: Duration) {
+        if let Some(slot) = self.slot(id) {
+            (slot.threads, slot.cancelled) = (granted.unwrap_or(0), false);
+            if slot.state == ReaderState::PermitWait {
+                slot.state = ReaderState::Idle { since: now };
+            }
+        }
+    }
+
+    /// H-5: the reader `id` closed its decoder and released its permits.
+    pub(crate) fn closed(&mut self, id: u64) {
+        if let Some(slot) = self.slot(id) {
+            (slot.threads, slot.cursor) = (0, None);
+        }
     }
 
     /// Whether a required region still waits for a reader.
@@ -313,6 +384,15 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
         let pending = self.waiting();
         let work = self.work_for(id);
         let owed = self.owed(id);
+        let want = self.want;
+        let others = self.slots.iter().filter(|slot| slot.id != id);
+        let ticket = others
+            .clone()
+            .any(|slot| slot.state == ReaderState::PermitWait);
+        let short = others
+            .clone()
+            .any(|slot| slot.threads > 0 && slot.threads < want);
+        let free = (self.pool).saturating_sub(self.slots.iter().map(|slot| slot.threads).sum());
         let Some(slot) = self.slot(id) else {
             return Next::Retire;
         };
@@ -321,18 +401,28 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
             return Next::Retire;
         }
         if let Some(at) = work {
+            if slot.threads == 0 {
+                slot.state = ReaderState::PermitWait;
+                return Next::Open { want };
+            }
             let version = slot.plan.version;
             slot.state = ReaderState::Decoding { at, version };
             return Next::Decode { at, version };
         }
+        // Inactive: H-5 rebalancing, then retirement.
+        let shrink = slot.threads > want && (ticket || short);
+        let grow = slot.threads > 0 && slot.threads < want && free > 0;
+        if shrink || grow {
+            return Next::Close;
+        }
         let since = match slot.state {
             ReaderState::Idle { since } => since,
-            ReaderState::Decoding { .. } | ReaderState::Retiring => now,
+            ReaderState::Decoding { .. } | ReaderState::PermitWait | ReaderState::Retiring => now,
         };
         // A required time another reader is decoding stays owed: if that
         // result is stale and fails, this reader re-demands it (H-3).
         let quiet = now >= since + QUIESCENCE && !owed;
-        if (pending && obsolete(slot)) || quiet {
+        if ((pending || ticket) && obsolete(slot)) || quiet {
             slot.state = ReaderState::Retiring;
             return Next::Retire;
         }
@@ -490,6 +580,86 @@ impl<K: Clone + Eq + Hash, F: Clone> Readers<K, F> {
     }
 }
 
+/// H-5's `Permits` monitor state: a pool of P frame threads that only
+/// readers hold, granted strictly FIFO. Pure; the lane wraps it in its own
+/// leaf lock and condvar (H-4: never taken with `Sched`).
+#[derive(Clone, Debug)]
+pub(crate) struct PermitBook {
+    pool: usize,
+    held: BTreeMap<u64, usize>,
+    tickets: VecDeque<(u64, usize)>,
+    /// Cancelled requests, kept until their reader polls (a cancel can
+    /// precede the ticket) or exits.
+    cancelled: BTreeSet<u64>,
+    pub(crate) shutdown: bool,
+}
+
+/// A queued request's outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Poll {
+    Granted(usize),
+    Wait,
+    Cancelled,
+}
+
+impl PermitBook {
+    pub(crate) fn new(pool: usize) -> Self {
+        Self {
+            pool: pool.max(1),
+            held: BTreeMap::new(),
+            tickets: VecDeque::new(),
+            cancelled: BTreeSet::new(),
+            shutdown: false,
+        }
+    }
+
+    /// Permits held by readers (≤ P, I11).
+    pub(crate) fn in_use(&self) -> usize {
+        self.held.values().sum()
+    }
+
+    /// Queue `id` for `want` permits, behind every waiter.
+    pub(crate) fn enqueue(&mut self, id: u64, want: usize) {
+        if !self.tickets.iter().any(|(ticket, _)| *ticket == id) {
+            self.tickets.push_back((id, want.max(1)));
+        }
+    }
+
+    /// Only the head is granted, min(want, free) once one is free; a
+    /// cancelled or stopped request leaves the queue.
+    pub(crate) fn poll(&mut self, id: u64) -> Poll {
+        if self.shutdown || self.cancelled.remove(&id) {
+            self.tickets.retain(|(ticket, _)| *ticket != id);
+            return Poll::Cancelled;
+        }
+        let free = self.pool.saturating_sub(self.in_use());
+        match self.tickets.front() {
+            Some(&(head, want)) if head == id && free > 0 => {
+                self.tickets.pop_front();
+                let granted = want.min(free);
+                self.held.insert(id, granted);
+                Poll::Granted(granted)
+            }
+            _ => Poll::Wait,
+        }
+    }
+
+    pub(crate) fn cancel(&mut self, id: u64) {
+        self.cancelled.insert(id);
+    }
+
+    pub(crate) fn release(&mut self, id: u64) {
+        self.held.remove(&id);
+    }
+
+    /// The reader `id` exited: nothing of it stays.
+    pub(crate) fn forget(&mut self, id: u64) {
+        self.held.remove(&id);
+        self.cancelled.remove(&id);
+        self.tickets.retain(|(ticket, _)| *ticket != id);
+    }
+}
+
 fn plan(version: u64, region: Region) -> Plan {
     Plan {
         version,
@@ -552,9 +722,10 @@ pub(crate) const fn wait_step(view: WaitView) -> WaitStep {
 
 #[cfg(test)]
 mod tests {
-    //! H-8 / I15 (S2b-1): an exhaustive (event × state) model of the
-    //! readers' shared state, then seeded sequences; every loop has a step
-    //! budget, the clock is injected and nothing sleeps.
+    //! H-8 / I15 (S2b-1), I11 (S2b-2): an exhaustive (event × state) model
+    //! of the readers' shared state and the permit book, then seeded
+    //! sequences; every loop has a step budget, the clock is injected and
+    //! nothing sleeps.
     use std::collections::BTreeSet;
 
     use super::*;
@@ -585,6 +756,11 @@ mod tests {
     #[derive(Clone)]
     struct World {
         readers: Model,
+        book: PermitBook,
+        /// Readers queued in `Permits` (`PermitWait`).
+        waiting: Vec<u64>,
+        /// Readers closing their decoder to release (a `Close`).
+        releasing: Vec<u64>,
         now: Duration,
         shutdown: bool,
         /// Reader threads running (spawned, not yet exited).
@@ -595,6 +771,8 @@ mod tests {
         closing: Vec<u64>,
         /// The newest job's required set, if it went to the readers.
         job: Option<Vec<(u8, i64)>>,
+        /// (source, frame threads) of every decode started.
+        decodes: Vec<(u8, usize)>,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -603,45 +781,62 @@ mod tests {
         Step(usize),
         Finish(usize, bool),
         Exit(usize),
+        Poll(usize),
+        Release(usize),
         Assign { fail: bool },
         Tick,
         Shutdown,
     }
 
     impl World {
-        fn new(limit: usize) -> Self {
+        fn new(parallelism: usize) -> Self {
             Self {
-                readers: Model::new(limit),
+                readers: Model::new(parallelism),
+                book: PermitBook::new(parallelism),
+                waiting: Vec::new(),
+                releasing: Vec::new(),
                 now: Duration::ZERO,
                 shutdown: false,
                 live: Vec::new(),
                 flight: Vec::new(),
                 closing: Vec::new(),
                 job: None,
+                decodes: Vec::new(),
             }
         }
 
         fn events(&self) -> Vec<Event> {
             let mut events: Vec<Event> = (0..JOBS.len()).map(Event::Post).collect();
-            // A decoding reader is outside the lock: it does not step.
-            let stepping = |index: &usize| {
-                let id = self.live[*index];
-                !self.flight.iter().any(|(reader, ..)| *reader == id)
-            };
-            events.extend((0..self.live.len()).filter(stepping).map(Event::Step));
+            events.extend(self.stepping().into_iter().map(Event::Step));
             for index in 0..self.flight.len() {
                 events.extend([Event::Finish(index, true), Event::Finish(index, false)]);
             }
             events.extend((0..self.closing.len()).map(Event::Exit));
+            events.extend((0..self.waiting.len()).map(Event::Poll));
+            events.extend((0..self.releasing.len()).map(Event::Release));
             events.extend([Event::Assign { fail: false }, Event::Assign { fail: true }]);
             events.extend([Event::Tick, Event::Shutdown]);
             events
+        }
+
+        /// Live readers that step: not decoding, queued or releasing
+        /// (those are outside the lock).
+        fn stepping(&self) -> Vec<usize> {
+            let busy = |id: &u64| {
+                self.flight.iter().any(|(reader, ..)| reader == id)
+                    || self.waiting.contains(id)
+                    || self.releasing.contains(id)
+            };
+            (0..self.live.len())
+                .filter(|index| !busy(&self.live[*index]))
+                .collect()
         }
 
         fn state_of(&self, id: u64) -> &'static str {
             match self.readers.slots.iter().find(|slot| slot.id == id) {
                 Some(slot) => match slot.state {
                     ReaderState::Idle { .. } => "idle",
+                    ReaderState::PermitWait => "permit-wait",
                     ReaderState::Decoding { .. } => "decoding",
                     ReaderState::Retiring => "retiring",
                 },
@@ -653,47 +848,12 @@ mod tests {
         fn apply(&mut self, event: Event) -> String {
             match event {
                 Event::Post(job) => {
-                    if self.shutdown {
-                        return "post×shutdown".into();
-                    }
-                    let quiet = self.flight.is_empty();
                     let demand: Vec<(u8, Vec<i64>, Vec<i64>)> = (JOBS[job].iter())
                         .map(|(k, r, l)| (*k, r.to_vec(), l.to_vec()))
                         .collect();
-                    let regions = plan_regions(&demand, self.readers.limit());
-                    let fallback = regions.is_none();
-                    let posted = self.readers.post(regions.unwrap_or_default(), self.now);
-                    self.live.extend(posted.spawn.iter().map(|(id, _)| *id));
-                    let required = demand
-                        .iter()
-                        .flat_map(|(k, r, _)| r.iter().map(|t| (*k, *t)));
-                    self.job = (!fallback).then(|| required.collect());
-                    if fallback {
-                        // More sources than readers: synchronous (K-3).
-                        return "post→fallback".into();
-                    }
-                    format!("post×{}", if quiet { "quiet" } else { "decoding" })
+                    self.post(&demand)
                 }
-                Event::Step(index) => {
-                    let id = self.live[index];
-                    let state = self.state_of(id);
-                    match self.readers.next(id, self.now, self.shutdown) {
-                        Next::Decode { at, version } => {
-                            let key = self.key(id);
-                            self.flight.push((id, key, at, version));
-                            format!("step×{state}→decode")
-                        }
-                        Next::Wait { until } => {
-                            assert!(until > self.now, "a wait that never sleeps");
-                            format!("step×{state}→wait")
-                        }
-                        Next::Retire => {
-                            self.live.remove(index);
-                            self.closing.push(id);
-                            format!("step×{state}→retire")
-                        }
-                    }
-                }
+                Event::Step(index) => self.step(index),
                 Event::Finish(index, ok) => {
                     let (id, key, at, version) = self.flight.remove(index);
                     let current = version == self.readers.version();
@@ -716,13 +876,41 @@ mod tests {
                 }
                 Event::Exit(index) => {
                     let id = self.closing.remove(index);
+                    self.book.forget(id);
                     self.readers.exited(id);
                     "exit×retiring".into()
                 }
+                Event::Poll(index) => {
+                    let id = self.waiting[index];
+                    let head = self.book.tickets.front().map(|(ticket, _)| *ticket);
+                    match self.book.poll(id) {
+                        Poll::Granted(granted) => {
+                            assert_eq!(head, Some(id), "a grant bypassed the FIFO head");
+                            self.waiting.remove(index);
+                            self.readers.granted(id, Some(granted), self.now);
+                            let short = granted < self.readers.want;
+                            format!("poll→granted{}", if short { "-short" } else { "" })
+                        }
+                        Poll::Cancelled => {
+                            self.waiting.remove(index);
+                            self.readers.granted(id, None, self.now);
+                            "poll→cancelled".into()
+                        }
+                        Poll::Wait if head == Some(id) => "poll→wait-none-free".into(),
+                        Poll::Wait => "poll→wait-behind".into(),
+                    }
+                }
+                Event::Release(index) => {
+                    let id = self.releasing.remove(index);
+                    self.book.release(id);
+                    self.readers.closed(id);
+                    "release".into()
+                }
                 Event::Assign { fail } => {
-                    let spawned = self.readers.assign(self.now);
-                    let any = !spawned.is_empty();
-                    for (id, _) in spawned {
+                    let assigned = self.readers.assign(self.now);
+                    assigned.cancel.iter().for_each(|id| self.book.cancel(*id));
+                    let any = !assigned.spawn.is_empty();
+                    for (id, _) in assigned.spawn {
                         if fail {
                             let error = MediaError::Backend("decode-reader: injected".into());
                             self.readers.fail_start(id, &error);
@@ -741,10 +929,96 @@ mod tests {
                 Event::Shutdown => {
                     let states: BTreeSet<_> =
                         self.live.iter().map(|id| self.state_of(*id)).collect();
-                    self.shutdown = true;
+                    (self.shutdown, self.book.shutdown) = (true, true);
                     format!("shutdown×{states:?}")
                 }
             }
+        }
+
+        /// A reader's `next` under the lock, and what the thread does.
+        fn step(&mut self, index: usize) -> String {
+            let id = self.live[index];
+            let state = self.state_of(id);
+            match self.readers.next(id, self.now, self.shutdown) {
+                Next::Decode { at, version } => {
+                    let key = self.key(id);
+                    self.flight.push((id, key, at, version));
+                    let threads = self.slot(id).threads;
+                    assert!(threads >= 1, "a decoder without permits");
+                    self.decodes.push((key, threads));
+                    let deferred = threads > self.readers.want
+                        && (self.readers.slots.iter()).any(|slot| {
+                            slot.state == ReaderState::PermitWait
+                                || slot.threads > 0 && slot.threads < self.readers.want
+                        });
+                    if deferred {
+                        return format!("step×{state}→decode-shrink-deferred");
+                    }
+                    format!("step×{state}→decode")
+                }
+                Next::Open { want } => {
+                    let behind = !self.book.tickets.is_empty();
+                    self.book.enqueue(id, want);
+                    self.waiting.push(id);
+                    format!("step×{state}→open{}", if behind { "-behind" } else { "" })
+                }
+                Next::Close => {
+                    let threads = self.slot(id).threads;
+                    self.releasing.push(id);
+                    let why = if threads > self.readers.want {
+                        "shrink"
+                    } else {
+                        "grow"
+                    };
+                    format!("step×{state}→close-{why}")
+                }
+                Next::Wait { until } => {
+                    assert!(until > self.now, "a wait that never sleeps");
+                    format!("step×{state}→wait")
+                }
+                Next::Retire => {
+                    self.live.remove(index);
+                    self.closing.push(id);
+                    let prompt = self
+                        .readers
+                        .slots
+                        .iter()
+                        .any(|slot| slot.state == ReaderState::PermitWait)
+                        && !self.shutdown;
+                    format!("step×{state}→retire{}", if prompt { "-prompt" } else { "" })
+                }
+            }
+        }
+
+        /// Post `demand` as the monitor's `schedule` does.
+        fn post(&mut self, demand: &[(u8, Vec<i64>, Vec<i64>)]) -> String {
+            if self.shutdown {
+                return "post×shutdown".into();
+            }
+            let quiet = self.flight.is_empty();
+            let regions = plan_regions(demand, self.readers.limit());
+            let fallback = regions.is_none();
+            let posted = self.readers.post(regions.unwrap_or_default(), self.now);
+            self.live.extend(posted.spawn.iter().map(|(id, _)| *id));
+            let cancelled = !posted.cancel.is_empty();
+            posted.cancel.iter().for_each(|id| self.book.cancel(*id));
+            let required = demand
+                .iter()
+                .flat_map(|(k, r, _)| r.iter().map(|t| (*k, *t)));
+            self.job = (!fallback).then(|| required.collect());
+            if fallback {
+                // More sources than readers: synchronous (K-3).
+                return "post→fallback".into();
+            }
+            if cancelled {
+                return "post→cancel-ticket".into();
+            }
+            format!("post×{}", if quiet { "quiet" } else { "decoding" })
+        }
+
+        fn slot(&self, id: u64) -> &Slot<u8> {
+            let slot = self.readers.slots.iter().find(|slot| slot.id == id);
+            slot.expect("a live reader has a slot")
         }
 
         fn key(&self, id: u64) -> u8 {
@@ -761,7 +1035,21 @@ mod tests {
                 readers.slots.len() <= readers.limit(),
                 "more readers than R"
             );
-            for key in 0..3u8 {
+            // I11: reader frame threads ≤ P; the book and the slots agree;
+            // a ticket exactly for each reader in `PermitWait`.
+            assert!(self.book.in_use() <= self.book.pool, "permits over P");
+            for slot in &readers.slots {
+                let held = self.book.held.get(&slot.id).copied().unwrap_or(0);
+                assert_eq!(slot.threads, held, "reader {} threads", slot.id);
+            }
+            let tickets: BTreeSet<u64> = self.book.tickets.iter().map(|(id, _)| *id).collect();
+            assert_eq!(
+                tickets.len(),
+                self.book.tickets.len(),
+                "a reader queued twice"
+            );
+            assert_eq!(tickets, self.waiting.iter().copied().collect(), "tickets");
+            for key in 0..4u8 {
                 let per_key = readers.slots.iter().filter(|slot| slot.key == key).count();
                 assert!(
                     per_key <= READERS_PER_SOURCE,
@@ -818,7 +1106,10 @@ mod tests {
         /// every decode succeeds, every closing reader exits.
         fn settle(&mut self) {
             for _ in 0..BUDGET {
-                let done = self.flight.is_empty() && self.closing.is_empty();
+                let done = self.flight.is_empty()
+                    && self.closing.is_empty()
+                    && self.waiting.is_empty()
+                    && self.releasing.is_empty();
                 let resolved =
                     (self.job.as_ref()).is_none_or(|job| self.readers.resolve(job).is_some());
                 let quiet = self.live.iter().all(|id| {
@@ -831,7 +1122,7 @@ mod tests {
                 if !self.shutdown {
                     self.apply(Event::Assign { fail: false });
                 }
-                for index in (0..self.live.len()).rev() {
+                for index in self.stepping().into_iter().rev() {
                     self.apply(Event::Step(index));
                 }
                 while !self.flight.is_empty() {
@@ -839,6 +1130,12 @@ mod tests {
                 }
                 while !self.closing.is_empty() {
                     self.apply(Event::Exit(0));
+                }
+                while !self.releasing.is_empty() {
+                    self.apply(Event::Release(0));
+                }
+                for index in (0..self.waiting.len()).rev() {
+                    self.apply(Event::Poll(index));
                 }
                 self.check();
             }
@@ -849,14 +1146,25 @@ mod tests {
         /// reader exits; a quiescence tick then retires every reader.
         fn check_live(&self) {
             let mut world = self.clone();
+            if world.shutdown {
+                // H-6: shutdown ends every permit wait at once, before any
+                // holder frees a permit.
+                for id in world.waiting.clone() {
+                    let poll = world.book.clone().poll(id);
+                    assert!(matches!(poll, Poll::Cancelled), "shutdown left {id} queued");
+                }
+            }
             world.settle();
             if world.shutdown {
                 assert!(world.readers.slots.is_empty(), "a reader outlived shutdown");
+                assert_eq!(world.book.in_use(), 0, "permits outlived shutdown");
                 return;
             }
             world.apply(Event::Tick);
             world.settle();
             assert!(world.readers.slots.is_empty(), "a quiescent reader stayed");
+            assert_eq!(world.book.in_use(), 0, "a retired reader kept permits");
+            assert!(world.book.tickets.is_empty() && world.book.cancelled.is_empty());
         }
     }
 
@@ -875,7 +1183,7 @@ mod tests {
     }
 
     /// The (event × state) cells the model must reach, or it is vacuous.
-    const CELLS: [&str; 15] = [
+    const CELLS: [&str; 27] = [
         "post→fallback",
         "post×decoding",
         "step×idle→decode",
@@ -891,6 +1199,19 @@ mod tests {
         "tick×idle",
         "shutdown×{\"decoding\"}",
         "shutdown×{\"idle\"}",
+        // S2b-2 (H-5, I11).
+        "step×idle→open",
+        "step×idle→open-behind",
+        "step×idle→close-shrink",
+        "step×idle→close-grow",
+        "step×idle→decode-shrink-deferred",
+        "step×idle→retire-prompt",
+        "poll→granted",
+        "poll→granted-short",
+        "poll→wait-behind",
+        "poll→wait-none-free",
+        "poll→cancelled",
+        "post→cancel-ticket",
     ];
 
     /// I15 (S2b-1): every sequence of four events from each P's start, then
@@ -900,11 +1221,18 @@ mod tests {
         let mut cells = BTreeSet::new();
         let mut visited = 0;
         for parallelism in [1, 2, 3, 20] {
-            let mut world = World::new(reader_limit(parallelism));
+            let mut world = World::new(parallelism);
             // Start from a posted job with its readers running.
             world.apply(Event::Post(1));
             explore(&world, 5, &mut cells, &mut visited);
         }
+        // A reader holding 16 of 20 permits when the plan widens: it
+        // shrinks, and the head ticket waits with none free.
+        let mut world = World::new(20);
+        world.apply(Event::Post(0));
+        world.settle();
+        world.apply(Event::Post(3));
+        explore(&world, 4, &mut cells, &mut visited);
         let missing: Vec<_> = CELLS
             .iter()
             .filter(|cell| !cells.contains(**cell))
@@ -929,7 +1257,7 @@ mod tests {
                 state ^= state << 17;
                 usize::try_from(state % bound as u64).expect("index")
             };
-            let mut world = World::new(reader_limit([1, 2, 3, 20][below(4)]));
+            let mut world = World::new([1, 2, 3, 20][below(4)]);
             for step in 0..48 {
                 let events = world.events();
                 let mut event = events[below(events.len())];
@@ -952,9 +1280,13 @@ mod tests {
     /// plan does not quiesce; when that decode fails stale, it re-demands it.
     #[test]
     fn an_owed_reader_outlives_the_quiescence_deadline() {
-        let mut world = World::new(8);
+        let mut world = World::new(20);
         world.apply(Event::Post(2));
         let (near, far) = (world.live[0], world.live[1]);
+        for index in [0, 1] {
+            assert_eq!(world.apply(Event::Step(index)), "step×idle→open");
+            world.apply(Event::Poll(0));
+        }
         world.apply(Event::Step(0));
         world.apply(Event::Step(1));
         // `far` decodes 40 and 41, so its cursor is nearest a new region.
@@ -988,6 +1320,45 @@ mod tests {
         assert_eq!(label, "finish-err×stale-required");
         assert!(world.readers.failures.is_empty());
         assert_eq!(world.apply(Event::Step(1)), "step×idle→decode");
+        world.check_live();
+    }
+
+    /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10
+    /// after one reopen each, three on 6 + 6 + 6, four on 5 × 4, and a
+    /// same-source jump on 10 + 10; each shape reached from the last.
+    #[test]
+    fn permits_split_the_pool_by_the_plan() {
+        let mut world = World::new(20);
+        let shapes: [(&[u8], &[usize]); 6] = [
+            (&[0], &[16]),
+            (&[0, 1], &[10, 10]),
+            (&[0, 1, 2], &[6, 6, 6]),
+            (&[0, 1, 2, 3], &[5, 5, 5, 5]),
+            (&[0, 0], &[10, 10]),
+            (&[1], &[16]),
+        ];
+        let mut base = 0;
+        for (sources, expected) in shapes {
+            // The first post rebalances; the second is fresh work.
+            for _ in 0..2 {
+                base += 1000;
+                let demand: Vec<(u8, Vec<i64>, Vec<i64>)> = if sources == [0, 0] {
+                    vec![(0, vec![base, base + 100], vec![])]
+                } else {
+                    (sources.iter())
+                        .map(|key| (*key, vec![base + i64::from(*key)], vec![]))
+                        .collect()
+                };
+                world.decodes.clear();
+                world.post(&demand);
+                world.settle();
+                world.check();
+            }
+            let mut threads: Vec<usize> = world.decodes.iter().map(|(_, t)| *t).collect();
+            threads.sort_unstable();
+            assert_eq!(threads, expected, "{sources:?}");
+            assert!(world.book.in_use() <= 20);
+        }
         world.check_live();
     }
 
