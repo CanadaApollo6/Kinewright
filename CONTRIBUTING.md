@@ -30,7 +30,7 @@ cargo test --workspace --features kinewright-media/slow-tests,kinewright-agent/s
 
 `python3 scripts/slow_tests.py features` prints that feature list, and
 `python3 scripts/slow_tests.py lint` checks that the manifest and the
-`slow-tests` markers on the tests agree. Two software-renderer performance-evidence
+`slow-tests` markers on the tests agree. The fast tier also fails if any other test is skipped: a new `#[ignore]` on an ordinary test must be added, with its reason, to `ci/ignored-tests.txt` (the allowlist of hardware, audio-device, live-subscription, manual and on-demand tests), or the test fixed. Two software-renderer performance-evidence
 tests run only on demand (`-- --ignored cc5_performance_evidence`, likewise `cc6_`).
 
 CI runs the fast tier on clean Windows and Linux runners for every push and pull request that changes more than documentation (documentation-only pushes skip CI), and the slow tier on pushes to `main`, on a manual run, and on a push whose head commit message contains `[slow-tier]`. Your PR must keep both green. Kani proofs run in their own workflow, only when the files they cover change.
