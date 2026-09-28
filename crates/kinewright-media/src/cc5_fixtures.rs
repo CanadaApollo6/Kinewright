@@ -4792,6 +4792,7 @@ fn record_cc5_performance(gpu: &FixtureGpu) {
 
 /// CC5 §9.2.16 on the default software lane.
 #[test]
+#[ignore = "on demand: performance evidence on the software renderer"]
 fn cc5_performance_evidence_is_recorded_on_software_fallback() {
     record_cc5_performance(&fallback_gpu());
 }

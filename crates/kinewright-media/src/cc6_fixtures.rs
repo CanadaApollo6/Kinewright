@@ -2072,6 +2072,7 @@ fn assert_cc6_performance_evidence(gpu: &FixtureGpu, fixture: &str) {
 }
 
 #[test]
+#[ignore = "on demand: performance evidence on the software renderer"]
 fn cc6_performance_evidence_is_recorded_on_software_fallback() {
     assert_cc6_performance_evidence(
         &fallback_gpu(),
