@@ -1257,8 +1257,10 @@ gpu_lanes! {
     review2_nonfinite_inputs_and_normal_adjustment => review2_nonfinite_inputs_and_normal_adjustment_on,
     review2_representable_result_must_not_refuse => review2_representable_result_must_not_refuse_on,
     review2_independent_blend_grid => review2_independent_blend_grid_on,
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow tier: cargo test --features slow-tests")]
     review2_independent_transition_grid => review2_independent_transition_grid_on,
     review2_exact_pixel_centre_coverage => review2_exact_pixel_centre_coverage_on,
+    #[cfg_attr(not(feature = "slow-tests"), ignore = "slow tier: cargo test --features slow-tests")]
     review1_all_geometric_frames_independent_oracle => review1_all_geometric_frames_independent_oracle_on,
     review1_adjustment_mask_and_exact_order => review1_adjustment_mask_and_exact_order_on,
     review1_generated_keep_outside_enable_keys => review1_generated_keep_outside_enable_keys_on,

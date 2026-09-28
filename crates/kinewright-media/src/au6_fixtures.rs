@@ -1190,6 +1190,10 @@ fn au6_c_the_brief_levels_never_reach_the_detector() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_the_learn_gap_is_the_longest_detected_silence() {
     let scene = scene(Au6Scenario::LocationDialogue);
     let engine = engine();
@@ -1455,6 +1459,10 @@ fn interview_turn_bus_levels(document: &Document, bus: &str) -> i32 {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_a_the_interview_clears_the_bed_and_matches_the_voices() {
     let scene = scene(Au6Scenario::Interview);
     let document = scene.canonical();
@@ -1488,6 +1496,10 @@ fn au6_a_the_interview_clears_the_bed_and_matches_the_voices() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_a_the_unducked_document_does_not_clear_the_bed() {
     let scene = scene(Au6Scenario::Interview);
     let document = interview_without_duck(scene);
@@ -1502,6 +1514,10 @@ fn au6_a_the_unducked_document_does_not_clear_the_bed() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_a_the_untrimmed_voices_are_not_matched() {
     let scene = scene(Au6Scenario::Interview);
     let mut a_levels = Vec::new();
@@ -1525,6 +1541,10 @@ fn au6_a_the_untrimmed_voices_are_not_matched() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_a_the_nominal_dbfs_trim_is_worse_than_none() {
     let scene = scene(Au6Scenario::Interview);
     let mut document = scene.document.clone();
@@ -1588,6 +1608,10 @@ fn au6_a_the_unducked_bed_has_no_depth() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_a_the_duck_depth_is_invisible_at_the_track_point() {
     let scene = scene(Au6Scenario::Interview);
     let document = interview_with_bus_duck(scene);
@@ -1673,6 +1697,10 @@ fn au6_the_three_curve_owners_render_identically() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_every_scenario_mix_does_not_clip() {
     for scenario in [
         Au6Scenario::Interview,
@@ -1747,6 +1775,10 @@ fn au6_window_index_local(frame: TimeCode) -> usize {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_b_the_chain_matches_the_voices_and_reduces_the_spread() {
     let scene = scene(Au6Scenario::Podcast);
     let document = scene.canonical();
@@ -1774,6 +1806,10 @@ fn au6_b_the_chain_matches_the_voices_and_reduces_the_spread() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_b_the_raw_trims_do_not_match_the_voices() {
     let scene = scene(Au6Scenario::Podcast);
     let document = podcast_without_trims(scene);
@@ -1905,6 +1941,10 @@ fn au6_c_an_unlearned_profile_moves_no_snr() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone() {
     let scene = scene(Au6Scenario::LocationDialogue);
     let before_doc = scene.commit(&au6_c_gap_operations(
@@ -2015,6 +2055,10 @@ fn au6_c_the_declick_contribution_in_chain_is_recorded() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_c_the_dialogue_survives_the_repair() {
     let scene = scene(Au6Scenario::LocationDialogue);
     let before_doc = scene.commit(&au6_c_gap_operations(
@@ -2048,6 +2092,10 @@ fn au6_c_the_dialogue_survives_the_repair() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_c_an_over_reduced_profile_eats_the_dialogue() {
     let scene = scene(Au6Scenario::LocationDialogue);
     let before_doc = scene.commit(&au6_c_gap_operations(
@@ -2330,6 +2378,10 @@ fn au6_d_an_angle_ripple_leaves_the_master_stem_alone() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_d_the_scratch_tracks_contribute_nothing() {
     let scene = scene(Au6Scenario::Multicam);
     let document = scene.canonical();
@@ -2342,6 +2394,10 @@ fn au6_d_the_scratch_tracks_contribute_nothing() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_d_an_unmuted_scratch_track_reaches_the_mix() {
     let scene = scene(Au6Scenario::Multicam);
     let mut document = scene.canonical();
@@ -2356,6 +2412,10 @@ fn au6_d_an_unmuted_scratch_track_reaches_the_mix() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_d_the_mix_is_the_master() {
     let scene = scene(Au6Scenario::Multicam);
     let cut = scene.canonical();
@@ -2376,6 +2436,10 @@ fn au6_d_the_mix_is_the_master() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_d_the_unmuted_scratch_moves_the_master() {
     let scene = scene(Au6Scenario::Multicam);
     let mut unmuted = scene.document.clone();
@@ -2474,6 +2538,10 @@ fn run_delivery(
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_e_both_deliveries_land_on_their_targets() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
@@ -2517,6 +2585,10 @@ fn au6_e_both_deliveries_land_on_their_targets() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_e_an_unnormalized_export_misses_the_target() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
@@ -2530,6 +2602,10 @@ fn au6_e_an_unnormalized_export_misses_the_target() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au6_e_the_two_deliveries_separate_by_the_target_difference() {
     let scene = scene(Au6Scenario::Delivery);
     let document = scene.canonical();
@@ -3378,7 +3454,7 @@ fn au6_is_test_attribute(line: &str) -> bool {
 
 fn au6_declares_test(source: &str, name: &str) -> bool {
     let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = crate::cc5_fixtures::logical_lines(source);
     for (index, line) in lines.iter().enumerate() {
         if !line.contains(&needle) {
             continue;
@@ -3398,7 +3474,7 @@ fn au6_declares_test(source: &str, name: &str) -> bool {
 }
 
 fn au6_declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = crate::cc5_fixtures::logical_lines(source);
     let mut names = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !au6_is_test_attribute(line.trim()) {

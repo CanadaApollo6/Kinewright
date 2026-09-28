@@ -362,6 +362,10 @@ fn r28_end_to_end_tracked() {
 /// Full-resolution frames of each workload stay inside their ceilings, and
 /// every charge is released: the ledger returns to exactly zero.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn r28_ledger_holds_the_ceilings_and_releases_every_charge() {
     let gpu = fixture_gpu_or_skip().expect("the ledger gate needs an adapter");
     let workloads = [

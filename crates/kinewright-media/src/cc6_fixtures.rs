@@ -1160,6 +1160,10 @@ fn assert_the_delivery_grade_clips(gpu: &FixtureGpu, document: &Arc<Document>) {
 
 /// §11.2.10 — **the exit gate**, 8-bit lane.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the CC6 exit gate");
     let gpu = fallback_gpu();
@@ -1203,6 +1207,10 @@ fn cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
 /// §11.2.11 — **the exit gate**, 10-bit lane, plus the justification for the
 /// lane existing at all.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets() {
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the CC6 exit gate");
     assert_libx264_advertises_the_ten_bit_lane();
@@ -1496,6 +1504,10 @@ fn emit_cc6_starved_evidence(
 /// §11.2.13 — the failing direction of the exit gate, 8-bit lane: the same
 /// source, the same production path, at a bitrate that cannot carry it.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc6_starved_bitrate_export_trips_the_decoded_difference_budget() {
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the starved-bitrate fixture");
     let gpu = fallback_gpu();
@@ -1531,6 +1543,10 @@ fn cc6_starved_bitrate_export_trips_the_decoded_difference_budget() {
 /// at all. This is that lane's failing direction (rule 11.0.5), measured the
 /// same way on the same source.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget() {
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the starved-bitrate fixture");
     assert_libx264_advertises_the_ten_bit_lane();
@@ -1709,6 +1725,10 @@ fn emit_cc6_lane_evidence(
 /// the seventeen-candidate truncation, and the byte-identical document — is
 /// `cc6_core.rs`'s, because that arithmetic is core's and needs no GPU.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc6_per_node_contribution_order_matches_production_z_order() {
     use kinewright_core::{Clip, ClipContent, Track, TrackId, TrackKind};
 
@@ -2278,7 +2298,7 @@ fn is_test_attribute(line: &str) -> bool {
 /// literal, or a helper function is not mistaken for a fixture.
 fn declares_test(source: &str, name: &str) -> bool {
     let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = crate::cc5_fixtures::logical_lines(source);
     for (index, line) in lines.iter().enumerate() {
         if !line.contains(&needle) {
             continue;
@@ -2300,7 +2320,7 @@ fn declares_test(source: &str, name: &str) -> bool {
 /// Every `#[test]` function in `source` whose name starts with `prefix`, in
 /// declaration order.
 fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = crate::cc5_fixtures::logical_lines(source);
     let mut names = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !is_test_attribute(line.trim()) {

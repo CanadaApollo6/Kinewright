@@ -4030,6 +4030,10 @@ fn generate_cache_source(directory: &TempDirectory) -> PathBuf {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc1_managed_cache_memory_bound_is_measured_in_working_bytes() {
     initialize_ffmpeg().expect("FFmpeg must initialize for cache fixture");
     let directory = TempDirectory::new("cc1-cache-bound");

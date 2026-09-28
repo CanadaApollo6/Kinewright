@@ -659,6 +659,10 @@ pub(crate) mod tests {
         }
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn new_mo2_solo_control_argument_matrix() {
         use kinewright_core::{
             AssetId, BlendMode, Clip, ClipContent, ClipId, Document, SolidColor, TimeCode, Track,

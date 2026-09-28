@@ -5123,6 +5123,10 @@ const TRACK_SIMULATED_LAG_Y_BASIS_POINTS: i64 = 276;
 /// sample frames contains every pixel of that box at **every** frame, on the
 /// CPU reference and on the GPU, at two layer scales.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the CC5 tracking fixture");
     let media = tracking_source("cc5-tracked-shot");
@@ -5803,9 +5807,49 @@ fn is_test_attribute(line: &str) -> bool {
     line == "#[test]" || line.starts_with("#[tokio::test")
 }
 
+/// `source`'s lines, with every attribute that rustfmt wrapped over several
+/// lines joined back into one, so the scans below see `#[cfg_attr(..)]` (the
+/// slow-tier marker is too long for one line) as the single attribute it is.
+pub(crate) fn logical_lines(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pending: Option<(String, i32)> = None;
+    for line in source.lines() {
+        let depth = |text: &str| -> i32 {
+            text.chars()
+                .map(|c| match c {
+                    '[' => 1,
+                    ']' => -1,
+                    _ => 0,
+                })
+                .sum()
+        };
+        if let Some((mut joined, open)) = pending.take() {
+            joined.push(' ');
+            joined.push_str(line.trim());
+            let open = open + depth(line);
+            if open > 0 {
+                pending = Some((joined, open));
+            } else {
+                out.push(joined);
+            }
+            continue;
+        }
+        let open = depth(line);
+        if line.trim_start().starts_with("#[") && open > 0 {
+            pending = Some((line.to_owned(), open));
+        } else {
+            out.push(line.to_owned());
+        }
+    }
+    if let Some((joined, _)) = pending {
+        out.push(joined);
+    }
+    out
+}
+
 fn declares_test(source: &str, name: &str) -> bool {
     let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = logical_lines(source);
     for (index, line) in lines.iter().enumerate() {
         if !line.contains(&needle) {
             continue;
@@ -5827,7 +5871,7 @@ fn declares_test(source: &str, name: &str) -> bool {
 /// Every `#[test]` function in `source` whose name starts with `prefix`, in
 /// declaration order.
 fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = logical_lines(source);
     let mut names = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !is_test_attribute(line.trim()) {
