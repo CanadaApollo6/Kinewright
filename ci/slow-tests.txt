@@ -1,0 +1,99 @@
+# Slow-tier manifest: the tests that run only with `--features slow-tests`.
+#
+# One test per line:  <test binary> <libtest test path> <source file> # linux/windows seconds
+#
+# - <test binary> is the executable's name without hash or extension: the crate
+#   library (kinewright_media), an integration test (au3_fixtures, mcp_server)
+#   or a binary crate (kinewright_app).
+# - <libtest test path> is the name `cargo test` prints, and what `--exact` matches.
+# - The seconds are the measured CI time at 4 test threads in green run
+#   36377867892 (ubuntu-latest / windows-latest); they are the reason a test is
+#   here, not part of the contract.
+#
+# Each test carries, right after its `#[test]`:
+#   #[cfg_attr(not(feature = "slow-tests"), ignore = "slow tier: cargo test --features slow-tests")]
+# `python3 scripts/slow_tests.py lint` fails CI if this file and those markers
+# disagree in either direction; the fast job also checks that the tests it
+# ignored with that reason are exactly these, and the slow job checks that it
+# ran exactly these and that they passed.
+#
+# To add a slow test: mark it, add a line here, run the lint. To demote one to the
+# fast tier: remove both. Never delete or weaken a test to make it fast.
+#
+# Kept in the fast tier on purpose, although each takes over 60 s somewhere:
+#   cc7_fixtures::cc7_every_scenario_verifies_at_eight_bits / _at_ten_bits
+#       (97 s / 96 s Linux, 128 s / 127 s Windows). The end-to-end check that
+#       every CC7 scenario's delivered file decodes back inside its budgets at both
+#       bit depths, on the platform's own encoder and colour conversion.
+#   kinewright-project lockfile::race_tests::* (all under 31 s, most under 6 s on
+#       Linux; 1 to 30 s on Windows). The main guard for the lock-file and
+#       process-kill semantics, which differ by OS.
+#
+# On demand only (`#[ignore = "on demand: ..."]`, in neither tier; run with
+# `cargo test -p kinewright-media <name> -- --ignored`):
+#   cc5_fixtures::cc5_performance_evidence_is_recorded_on_software_fallback
+#   cc6_fixtures::cc6_performance_evidence_is_recorded_on_software_fallback
+#
+
+# au3_fixtures
+au3_fixtures au3_an_export_that_does_not_normalize_is_byte_identical crates/kinewright-media/tests/au3_fixtures.rs  # 77/101
+au3_fixtures au3_delivery_audio_verification_measures_the_written_file crates/kinewright-media/tests/au3_fixtures.rs  # 12/18
+au3_fixtures au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets crates/kinewright-media/tests/au3_fixtures.rs  # 102/128
+
+# kinewright_app
+kinewright_app inspector_ui::mo2_parity::mo2_parity_checklist_is_complete crates/kinewright-app/src/inspector_ui.rs  # 28/29
+kinewright_app preview_ui::mo2_tests::new_mo2_combined_transform_real_program_drags crates/kinewright-app/src/preview_ui.rs  # 21/20
+kinewright_app solo_ui::tests::new_mo2_solo_control_argument_matrix crates/kinewright-app/src/solo_ui.rs  # 26/12
+
+# kinewright_media
+kinewright_media au6_fixtures::au6_a_the_duck_depth_is_invisible_at_the_track_point crates/kinewright-media/src/au6_fixtures.rs  # 13/24
+kinewright_media au6_fixtures::au6_a_the_interview_clears_the_bed_and_matches_the_voices crates/kinewright-media/src/au6_fixtures.rs  # 41/39
+kinewright_media au6_fixtures::au6_a_the_nominal_dbfs_trim_is_worse_than_none crates/kinewright-media/src/au6_fixtures.rs  # 45/35
+kinewright_media au6_fixtures::au6_a_the_unducked_document_does_not_clear_the_bed crates/kinewright-media/src/au6_fixtures.rs  # 44/34
+kinewright_media au6_fixtures::au6_a_the_untrimmed_voices_are_not_matched crates/kinewright-media/src/au6_fixtures.rs  # 42/39
+kinewright_media au6_fixtures::au6_b_the_chain_matches_the_voices_and_reduces_the_spread crates/kinewright-media/src/au6_fixtures.rs  # 45/39
+kinewright_media au6_fixtures::au6_b_the_raw_trims_do_not_match_the_voices crates/kinewright-media/src/au6_fixtures.rs  # 37/32
+kinewright_media au6_fixtures::au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone crates/kinewright-media/src/au6_fixtures.rs  # 18/16
+kinewright_media au6_fixtures::au6_c_an_over_reduced_profile_eats_the_dialogue crates/kinewright-media/src/au6_fixtures.rs  # 21/22
+kinewright_media au6_fixtures::au6_c_the_dialogue_survives_the_repair crates/kinewright-media/src/au6_fixtures.rs  # 47/42
+kinewright_media au6_fixtures::au6_d_an_unmuted_scratch_track_reaches_the_mix crates/kinewright-media/src/au6_fixtures.rs  # 21/18
+kinewright_media au6_fixtures::au6_d_the_mix_is_the_master crates/kinewright-media/src/au6_fixtures.rs  # 72/58
+kinewright_media au6_fixtures::au6_d_the_scratch_tracks_contribute_nothing crates/kinewright-media/src/au6_fixtures.rs  # 35/27
+kinewright_media au6_fixtures::au6_d_the_unmuted_scratch_moves_the_master crates/kinewright-media/src/au6_fixtures.rs  # 52/41
+kinewright_media au6_fixtures::au6_e_an_unnormalized_export_misses_the_target crates/kinewright-media/src/au6_fixtures.rs  # 124/112
+kinewright_media au6_fixtures::au6_e_both_deliveries_land_on_their_targets crates/kinewright-media/src/au6_fixtures.rs  # 154/140
+kinewright_media au6_fixtures::au6_e_the_two_deliveries_separate_by_the_target_difference crates/kinewright-media/src/au6_fixtures.rs  # 121/115
+kinewright_media au6_fixtures::au6_every_scenario_mix_does_not_clip crates/kinewright-media/src/au6_fixtures.rs  # 120/113
+kinewright_media au6_fixtures::au6_the_learn_gap_is_the_longest_detected_silence crates/kinewright-media/src/au6_fixtures.rs  # 36/35
+kinewright_media audio::tests::measure_mix_levels_equals_the_meter_over_every_stem_family crates/kinewright-media/src/audio.rs  # 41/46
+kinewright_media cc1_fixtures::cc1_managed_cache_memory_bound_is_measured_in_working_bytes crates/kinewright-media/src/cc1_fixtures.rs  # 108/176
+kinewright_media cc5_fixtures::cc5_tracked_shot_window_contains_the_subject_at_every_frame crates/kinewright-media/src/cc5_fixtures.rs  # 47/91
+kinewright_media cc6_fixtures::cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets crates/kinewright-media/src/cc6_fixtures.rs  # 17/61
+kinewright_media cc6_fixtures::cc6_per_node_contribution_order_matches_production_z_order crates/kinewright-media/src/cc6_fixtures.rs  # 8/18
+kinewright_media cc6_fixtures::cc6_starved_bitrate_export_trips_the_decoded_difference_budget crates/kinewright-media/src/cc6_fixtures.rs  # 13/20
+kinewright_media cc6_fixtures::cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget crates/kinewright-media/src/cc6_fixtures.rs  # 12/20
+kinewright_media cc6_fixtures::cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets crates/kinewright-media/src/cc6_fixtures.rs  # 26/41
+kinewright_media cc7_fixtures::cc7_g_a_starved_encode_trips_the_decoded_difference_budget crates/kinewright-media/src/cc7_fixtures.rs  # 21/28
+kinewright_media compositor::ledger_probes::rev3_concurrent_readbacks_never_refuse crates/kinewright-media/src/mo2_ledger_probes.rs  # 7/16
+kinewright_media loudness::tests::tech_3341_integrated_cases_1_to_5_read_their_pinned_values crates/kinewright-media/src/loudness.rs  # 104/105
+kinewright_media loudness::tests::tech_3342_loudness_range_cases_1_to_4_read_their_pinned_values crates/kinewright-media/src/loudness.rs  # 80/84
+kinewright_media loudness::tests::the_997_hz_calibration_tone_reads_its_pinned_values crates/kinewright-media/src/loudness.rs  # 21/24
+kinewright_media loudness::tests::the_relative_gate_case_and_the_one_window_floor_hold crates/kinewright-media/src/loudness.rs  # 15/17
+kinewright_media mo2_fixtures::review_probes::review1_all_geometric_frames_independent_oracle crates/kinewright-media/src/mo2_review_probes.rs  # 61/66
+kinewright_media mo2_fixtures::review_probes::review2_independent_transition_grid crates/kinewright-media/src/mo2_review_probes.rs  # 17/34
+kinewright_media mo2_perf_fixtures::r28_ledger_holds_the_ceilings_and_releases_every_charge crates/kinewright-media/src/mo2_perf_fixtures.rs  # 197/198
+
+# mcp_server
+mcp_server au3_queue_export_normalizes_and_verifies_audio crates/kinewright-agent/tests/mcp_server.rs  # 16/18
+mcp_server au4_plan_audio_ducking_converges_through_the_real_engine crates/kinewright-agent/tests/mcp_server.rs  # 22/23
+mcp_server au5_the_repair_and_normalization_planners_agree_in_either_order crates/kinewright-agent/tests/mcp_server.rs  # 25/28
+mcp_server au6_a1_the_interview_ducks_the_bed_and_matches_the_voices crates/kinewright-agent/tests/mcp_server.rs  # 75/86
+mcp_server au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride crates/kinewright-agent/tests/mcp_server.rs  # 60/70
+mcp_server au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled crates/kinewright-agent/tests/mcp_server.rs  # 19/21
+mcp_server au6_a4_the_multicam_cuts_leave_the_master_audio_untouched crates/kinewright-agent/tests/mcp_server.rs  # 36/41
+mcp_server au6_a5a_the_delivery_lands_on_the_ebu_r128_target crates/kinewright-agent/tests/mcp_server.rs  # 74/86
+mcp_server mo2_solo_review::adversarial_budgets crates/kinewright-agent/tests/mcp_server.rs  # 37/41
+mcp_server mo2_solo_review::final_exact_wire_limit_edges_and_escaped_ids crates/kinewright-agent/tests/mcp_server.rs  # 25/23
+mcp_server mo2_solo_review::final_request_id_residual_matrix crates/kinewright-agent/tests/mcp_server.rs  # 22/22
+mcp_server r28_solo_peak_resources_and_elapsed crates/kinewright-agent/tests/mcp_server.rs  # 82/84
+mcp_server solo_strip_inside_byte_budget crates/kinewright-agent/tests/mcp_server.rs  # 103/104
