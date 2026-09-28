@@ -17,6 +17,8 @@
 > The S2a results (I4, G3, G10, G11, G16, L-6, I8, I13, I18, P-play, P-seek) are in **§E11**.
 > The S2b results (I4, G3, G1, G6, G11, G14, G15 provisional, G16, G17, G18, L-6, P-play, P-seek, and the
 > must-pass mutations) are in **§E12**. G1 and G14 fail on LH (E12.10 D1).
+> The R37 fixes, their closure table and the (partial, contaminated) timing rerun are in **§E12.13**; every LH
+> figure before it was taken with the desktop screensaver running (E12.13.4).
 
 ## E0 Diagnosis table (moved from design §1, revision 2)
 
@@ -3886,3 +3888,230 @@ PF1 rss before=34.2/2 constructed=162.8/11 first_render=443.8/59 settled_idle=43
 PF1 rss before=33.9/2 constructed=162.6/11 first_render=449.8/59 settled_idle=428.3/12 playing=782.1/95 playing_peak_mib=782.1 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=128 teardown_rss_mib=292.8 threads=2 lane=LH workload=talk_recut
 PF1 rss before=33.9/2 constructed=162.4/11 first_render=306.7/12 settled_idle=306.7/12 playing=329.0/13 playing_peak_mib=329.0 played_s=10.0 teardown_complete=true teardown_ledger_live_kib=0 teardown_decoders=0 teardown_table_live_kib=0 teardown_rss_mib=133.6 threads=2 lane=LH workload=title_only
 ```
+
+### E12.13 R37 fixes and reruns
+
+Ruling P34 (R37): the G1/G14 amendment (iv), the start-up fix, and every finding of reviews A and B, one commit per
+logical fix on `pf1/impl` from `10a2d18`. **The timing half of this section is incomplete.** The rerun's lanes were
+contaminated, and their runner died partway through (E12.13.5). The stage-gate verdicts wait for a quiet-window rerun.
+
+#### E12.13.1 Closure table
+
+Each mutation was applied alone to the committed code, and its named witnesses were run
+(`s2b-logs/r37-mutations.log.gz`; the script is `mutate_r37.py.gz`). **All 20 were killed.**
+
+| Finding | Commit | Witness | Mutation caught |
+|---|---|---|---|
+| G1/G14 amendment (iv), review B F3: regions merge only across decoder continuation (`REGION_GAP` 16 → 1; a required time after lookahead starts a region) | `2e5c7f8` R37-1 | `sched::tests::two_playheads_fourteen_apart_read_forward_on_two_readers` (two readers, forward only, one seek each; region shapes) | R37-1a `REGION_GAP` back to 16; R37-1b a required time after lookahead continues the region |
+| Start-up (amendment): a play supersedes earlier paused jobs; playback's first target is its start frame | `545a8f5` R37-2 (text: `bbc13a1`) | `preview::tests::a_play_supersedes_the_paused_job_issued_before_it`, `…::a_play_withdraws_a_waiting_paused_demand`, `…::playback_first_targets_its_start_frame`, `engine::tests::play_supersedes_earlier_paused_jobs_as_it_is_issued` | R37-2a superseded job kept; R37-2b the waiting demand ignores a play; R37-2c no withdrawal (60 s); R37-2d first target clock + lead; R37-2e `play` not issued on the lane |
+| A F2: a needed shrink waits behind lookahead | `7bfa588` R37-3 | `sched::tests::a_needed_shrink_comes_before_more_lookahead`; the H-8 model's decode-step assertion (R37-7) | R37-3 (killed by both) |
+| A F3: no witness for M58 | `58176aa` R37-4 | `preview::tests::a_grant_wakes_the_next_ticket` (a test-only wake hook forces the interleaving on the real condvar) | M58, masked at S2b-2, now killed (10 s timeout) |
+| A S1: a retired reader's late delivery kept | `f71e275` R37-5 | `sched::tests::a_reader_retired_mid_decode_stays_retiring` (extended: the frame comes back, the rings stay empty) | R37-5 |
+| A F1 and A S2 (clears): a cache clear confuses active and completed demand | `1c9ed58` R37-6 | `preview::tests::a_cleared_idle_reader_still_retires`, `…::a_clear_during_a_paused_wait_keeps_its_frames`; the seeded stress now clears | R37-6a an active clear drops the wait's frames; R37-6b an idle clear keeps the completed plan |
+| A S2 (model scope) and A's nit (depths) | `6839644` R37-7; `712d108` (E12.3 text) | the model asserts A F2 | the R37-3 mutation fails the model |
+| B F4: eviction ignores K-5's travel direction | `631ef61` R37-8 | `sched::tests::eviction_follows_the_travel_direction` | R37-8 |
+| B F2: an adjustment allocates a frame per render | `4e1679e` R37-9 | `render::k1_allocation::a_render_allocates_exactly_its_generated_reservation` | R37-9 |
+| B S2: resident rasters reserved again | `2dc3341` R37-10 | `preview::tests::a_resident_title_is_not_reserved_again` | R37-10 |
+| B F1: f charged from metadata | `6ee4672` R37-11 | `decode::tests::frame_size_is_what_the_decoder_converts`, `preview::tests::reservations_measure_frames_not_metadata`, `…::a_frame_larger_than_its_reservation_fails_and_cleans_up` | R37-11a f from metadata; R37-11b a frame of another size accepted; R37-11c orientation ignored |
+| B S3: C-5's witness shows too little | `61cb973` R37-12 | `preview::tests::scheduled_multilayer_frames_match_the_synchronous_renderer` (seven visible layers; visibility proven by removal) | R37-12a scene LUT library ignored; R37-12b every source opened as limited range. The old C-5 witness passes both. |
+| B S1: the export lane compares lengths | `2aa4e1b` R37-13 | the G18 lane asserts one SHA-256 per build and prints it | none (a lane change; it is exercised by the G18 rerun) |
+| B S4 and B's nit | `712d108` | E12.10 D1 qualifications; E12.5 "no run satisfies both conditions" | — |
+
+#### E12.13.2 Tests and line counts
+
+**Full `cargo test --workspace` at `712d108`:** every target passed (36 `test result: ok` lines), with 3,475 tests passed,
+0 failed and 42 ignored, in 389 s. Media alone: 976 passed and 21 ignored, in 224 s. The log is
+`s2b-logs/r37-workspace.log.gz`. Every R37 commit also passed the per-commit gate: build, media clippy with
+`-D warnings`, rustfmt on the touched files, and `cargo test -p kinewright-media`.
+
+Non-blank, non-comment `.rs` lines, net. They are split at every `#[cfg(test)] mod … {`, and `cfg(test)` hooks outside
+test modules count as production.
+
+| Commit | Production | Tests |
+|---|---|---|
+| R37-1 `2e5c7f8` | 3 | 64 |
+| R37-2 `545a8f5` | 51 | 123 |
+| R37-3 `7bfa588` | 3 | 66 |
+| R37-4 `58176aa` | 22 | 38 |
+| R37-5 `f71e275` | 1 | 8 |
+| R37-6 `1c9ed58` | 35 | 64 |
+| R37-7 `6839644` | 0 | 1 |
+| R37-8 `631ef61` | 24 | 30 |
+| R37-9 `4e1679e` | 1 | 58 |
+| R37-10 `2dc3341` | 44 | 30 |
+| R37-11 `6ee4672` | 23 | 112 |
+| R37-12 `61cb973` | 0 | 301 |
+| R37-13 `2aa4e1b` | 12 | 0 |
+| **R37** | **219** | **895** |
+
+- **Per file** (production + tests):
+  - `sched.rs` 62 + 169;
+  - `preview.rs` 96 + 620;
+  - `render.rs` 40 + 60;
+  - `decode.rs` 3 + 28;
+  - `engine.rs` 3 + 18;
+  - `cache.rs` 3;
+  - `pf1_export_lane.rs` 12.
+- **Docs:** +32 lines (`bbc13a1` and `712d108`).
+
+#### E12.13.3 Deviations within R37 (recorded, none changes a design number)
+
+- **Start-up.** A FrameWait a play abandons withdraws its demand and also stops the readers' decodes at the next packet
+  boundary, so no reader keeps decoding the stale frame. Amendment R37's text (`bbc13a1`) states this.
+- **A S1** is closed by returning a retired reader's delivery to the reader, which releases it, instead of keeping it in
+  the ring.
+- **B S2.** The preview binds a new generation before it schedules, so titles cleared by the rebind count as missing.
+- **A F1.** The seeded stress makes every other agent job a cache clear. Its density is unchanged.
+- **A F2.** The H-8 model gained an assertion: only a required decode defers a needed shrink.
+- **B F1** measures f with a one-thread open of the reader's own decoder, once per source per preview.
+  - Why: IN1 allows a single wrap site, `contextual_managed_decode_error`, so the measurement reuses `SourceSpec::open`.
+  - The cost: the first render of each source pays one extra open.
+  - What stays: the synchronous decode path (`decode_video_frame`) still sizes its cache from asset metadata, as it did
+    before S2b.
+- **The timing lanes run the release test binary,** so test-only (`cfg(test)`) hooks are compiled into what is timed.
+  R37 adds three, all uncontended and cheap:
+  - a lock per decode (R37-6's per-time gate);
+  - a lock per permit wake (R37-4);
+  - a notify on a decode stop (R37-2).
+
+  Every earlier PF1 lane carried hooks of the same kind.
+
+#### E12.13.4 Provenance note on E9–E12: the screensaver
+
+Every PF1 timing lane before 2026-09-28 13:00 ran with Riel's two `foot` terminal-screensaver processes busy. They
+used ≈1.4–1.6 cores (≈91% + 52% at every E11–E12 mark) and kept Hyprland drawing continuously. This covers:
+
+- the S0 baselines (E9);
+- S1 (E10);
+- S2a (E11);
+- S2b (E12.1–E12.12);
+- probe R36.
+
+Between E12.12 (10:52–10:56, present) and the R37 rerun (13:12, absent) the screensaver ended. Its processes were gone
+at every R37 mark.
+
+The earlier records called this CPU load (R26). The R37 rerun suggests a second effect: with a continuously
+redrawing desktop, the RTX 3090 probably stayed at high clocks between frames (E12.13.5). **The LH figures in E9–E12
+are therefore "screensaver running" figures. They are not idle-desktop figures, and they are not pinned figures.**
+- LL (llvmpipe) figures carried the CPU load instead.
+- No earlier verdict changes, but no LH comparison across that boundary is like for like.
+- S4's pinned run must fix and record the GPU's state (pstate and clocks), not only the CPU's.
+
+#### E12.13.5 Incident: the R37 timing rerun (partial, contaminated)
+
+**Binary:** the release test binary at `712d108` (sha256 `c4de5a15…c1945`). G18's S0 side was rebuilt from `d19bdf9`
+plus the hashing lane (sha256 `a4b501aa…82e03`). Machine and software as in E12.1.
+
+**What happened.**
+- One runner started the lanes at 13:12:54 EDT.
+- **Completed:**
+  - I4 LL and I4 LH (exit 0);
+  - G3 LH (exit 101, R28 gate 10);
+  - P-play LL with controls (exit 0, 13:18:28–13:52:20).
+- **Cut short:** P-play LH ran `typical_1080p`, `blend_heavy_1080p`, `explainer_16x9`, `reel_9x16` and `feed_4x5`
+  (3 runs each) and `talk_recut` run 0.
+- **Why it stopped:** at about 14:13 the runner died. It was killed with the agent shell that launched it. It wrote no
+  exit marker, and there is no coredump.
+- **Never run:** P-play LH's controls, P-seek, P-rss and G18.
+- **The runner has since been restructured:**
+  - it is detached with `setsid nohup` and polled;
+  - each lane has a timeout of at most 10 min;
+  - each BEGIN/END records `uptime`, the top-5 CPU processes and the GPU's pstate and clocks;
+  - a 5 s sampler flags any process other than the test and T3 Code above 20% CPU.
+
+**Contamination.**
+- The screensaver was gone (E12.13.4).
+- Riel's other interactive work ran during the lanes: other agent sessions, brakeman, Brave and Spotify.
+- Short-lived `gh` processes appeared at marks, at 11–83% CPU.
+- 1-minute load averages were 2.97–6.53.
+- The runner recorded only lifetime-average `ps` figures, so the lanes' true ambient load is unknown.
+
+**These numbers are not gate evidence.**
+
+**I4** (S0's 5% rule). It passes, but LH moved against S2b:
+
+| Build | LL mean ms | LL delta | LH mean ms | LH delta |
+|---|---|---|---|---|
+| S2b `cce86e1` (E12.4) | 76.98 / 75.54 / 77.16 | −84.6% | 73.58 / 73.46 / 73.33 | −85.1% |
+| R37 `712d108`, contaminated | 69.09 / 68.27 / 68.67 | −86.2% | 80.48 / 80.81 / 80.31 | −83.7% |
+
+**G3** (60 fps floor, LH). It **failed** in this rerun:
+
+| Build | `typical_1080p` fps | `blend_heavy_1080p` fps (p95 ms) | `heavy_4k` fps | Slowdown control |
+|---|---|---|---|---|
+| S2b `cce86e1` (E12.4) | 72.2–74.8 | 70.7 / 71.2 / 71.7 (15.46–16.31) | 58.2–59.0 | 17.7 fps (mean 56.45 ms) |
+| R37 `712d108`, 13:15–13:18 | 40.9 / 47.6 / 48.4 | 50.1 / 48.4 / 46.4 (31.1–31.8) | 29.4 / 29.1 / 29.4 | 14.1 fps (mean 71.03 ms) |
+| R37 `712d108`, the lead's rerun, 15:29 (idle start; other load rose during it) | — | 57–68 | — | — |
+
+The ME14 phases, printed by the same lane from the same binary, did **not** slow. Each cell is upload / GPU passes and
+readback / monitor encode, in ms:
+
+| Workload | S2b | R37 |
+|---|---|---|
+| `typical_1080p` | 10.18 / 1.34 / 1.75 | 10.08 / 1.11 / 1.57 |
+| `blend_heavy_1080p` | 10.08 / 1.46 / 1.66 | 10.31 / 1.27 / 1.63 |
+| `heavy_4k` | 13.27 / 1.56 / 1.64 | 13.54 / 1.35 / 1.63 |
+
+**P-play LL** (complete, 3 runs, every run valid). R37-1's effect shows:
+
+| Workload | On time / late / dropped | Present p50 / p95 / max ms | Held max ms | `lookahead_starved` |
+|---|---|---|---|---|
+| `typical_1080p` | 1796–1798 / 0 / 2–4 (S2b: 1021–1078) | 42.1–42.2 / 43.3–43.4 / 47.4–90.1 | 85.1–86.5 (S2b: 279.8–356.1) | 2342–2369 |
+| `blend_heavy_1080p` | 1798 / 0 / 2 | 41.8 / 43.2–43.3 / 43.6–43.7 | 85.1–85.3 | 3632–3679 |
+| `explainer_16x9` | 1798–1799 / 0–1 / 0–2 | 42.1 / 43.2–43.3 / 43.7 | 43.5–85.1 | 887–961 |
+| `reel_9x16` | 1796–1798 / 0 / 2–4 | 42.0 / 43.3 / 43.7–85.5 | 85.1 | 196–203 |
+| `feed_4x5` | 1767–1785 / 0–1 / 15–32 | 36.4–38.4 / 43.2–43.3 / 85.7–119.9 | 83.3–119.5 | 319–371 |
+| `talk_recut` | 7178–7199 / 0–1 / 0–22 of 7200 | 42.1 / 43.2 / 43.8–575.9 | 43.3–573.0 | 0 |
+
+- In every LL run: 0 underrun frames before the end, `sync_fallback_frames` 0 and `engine_sync_decoders` 0.
+- The four LL controls fail their gates, as they must:
+  - Slowdown: 729 on time;
+  - Freeze: held 1962.5 ms;
+  - ClockFreeze: stall 1050.1 ms;
+  - Stall: 48128 underrun frames.
+- `talk_recut` run 2 had a single 573 ms hold, with 22 drops. It is not localised.
+
+**P-play LH** (partial, 3 runs except `talk_recut`):
+
+| Workload | On time / dropped | Present p50 / p95 / max ms | Held max ms | Valid |
+|---|---|---|---|---|
+| `typical_1080p` | 1784 / 13; 1702 / 96; 1152 / 646 | 33.8–62.3 / 43.1–84.8 / 77.2–313.7 | 73.8 / 307.5 / 275.5 | run 2 invalid (1 missed callback) |
+| `blend_heavy_1080p` | 1608 / 192; 1380 / 420; 1699 / 101 (S2b: 1797 / 3) | 32.5–32.8 / 63.3–64.7 / 86.2 | 84.8–85.4 | yes |
+| `explainer_16x9` | 1800 / 0; 1799 / 0; 1796 / 4 | 39.8–42.0 / 43.3 / 43.7–64.2 | 45.5–61.7 (S2b: 110.1–120.1) | yes |
+| `reel_9x16` | 1661 / 139; 1673 / 126; 1721 / 78 (S2b: 1799 / 1) | 36.7–37.7 / 43.5–63.9 / 86.0 | 84.9–85.1 | yes |
+| `feed_4x5` | 1550 / 250; 1442 / 357; 1481 / 318 (S2b: 1799 / 1) | 36.9–40.2 / 64.3–64.7 / 86.0–103.7 | 84.9–102.4 | yes |
+| `talk_recut` (run 0 only) | 7193 / 6 of 7200 | 42.1 / 43.3 / 123.9 | 120.3 | yes |
+
+**Reading (hypothesis, not yet tested):** an idle-clocking GPU, not R37's code. The evidence:
+
+- **Only one R37 change runs on G3's timed path.** That is R37-9's shared adjustment frame, and only `blend_heavy`
+  has an adjustment; the compositor never uploads an adjustment's frame. `typical_1080p` and `heavy_4k` run no changed
+  code, yet slowed as much.
+  - `Cargo.lock`, rustc (1.98.0) and the NVIDIA driver (615.71.09) are unchanged.
+- **The per-frame work did not slow:** the ME14 phases above match S2b. What slowed is the lane's loop, where each
+  frame's decode leaves the GPU idle between composites.
+- **The slowdown control's composite doubled** with identical code: 71.03 − 41.7 ≈ 29.3 ms, against 56.45 − 41.7 ≈
+  14.7 ms at S2b. That control sleeps 41.7 ms between frames.
+- **I4 moved in opposite directions on the two lanes:** LL was 10% faster (the screensaver's CPU load was gone) and LH
+  10% slower. A change in shared code moves both lanes the same way.
+- **At idle the GPU sat at P8/P5,** 210–480 MHz against a 2,100 MHz maximum.
+- **The same binary read 57–68 fps** on the lead's rerun.
+- **In P-play LH, the workloads that regressed are the three with an adjustment layer:** `blend_heavy_1080p`,
+  `reel_9x16` and `feed_4x5`. They are the heaviest on the GPU (a snapshot copy and an extra pass). Their p95 present
+  (≈64 ms) is one frame period over. Their held maxima (≈85 ms) are two periods, while LL was unaffected.
+  - By inspection, no R37 change is LH-specific. The scheduler (R37-1, -3, -8) is shared with LL, which improved.
+  - R37-2's lead-less target applies once per play.
+- **R37-1 remains the leading code suspect.** Probe R36 measured it only on `typical_1080p` LH.
+
+**Owed, in Riel's quiet window,** with every lane's GPU state and top-5 CPU recorded:
+
+1. **Step 0: an interleaved A/B**, A B A B. A is `10a2d18`, which runs the same code as S2b; B is `712d108`. Two lanes:
+   - G3 narrowed to `typical_1080p,blend_heavy_1080p`;
+   - P-play LH `blend_heavy_1080p` with 2 runs.
+2. **If B is worse than A beyond A's own spread:** a sweep over the ten runtime-changing R37 commits, all prebuilt.
+3. **The full R37 stage gates,** on one binary with each lane alone:
+   - I4, G3;
+   - P-play LL and LH with controls;
+   - P-seek and L-6;
+   - G18 with hashes;
+   - P-rss LL.
