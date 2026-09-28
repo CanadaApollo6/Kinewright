@@ -4240,7 +4240,7 @@ mod tests {
 
     /// I10 (S2b-4, H-7): an engine with no document runs no preview thread
     /// and no reader; the first render starts the preview and a reader per
-    /// visible source; the readers retire at the injected quiescence
+    /// visible region (R37); the readers retire at the injected quiescence
     /// deadline; a synchronous job's decoders close when the preview parks.
     #[test]
     fn an_idle_engine_holds_no_preview_reader_or_decoder() {
@@ -4261,10 +4261,11 @@ mod tests {
         let frames = engine.frames();
         engine.set_document(Arc::new(workload.0.clone()));
         assert!(frames.recv_timeout(Duration::from_secs(60)).is_ok());
+        // R37: frame 0 shows source 0 at 0 and 14, two regions.
         assert_eq!(
             threads(&lane),
-            (1, 2),
-            "the preview and a reader per source"
+            (1, 3),
+            "the preview and a reader per region"
         );
         // A synchronous job (a thumbnail) opens decoders in the preview's
         // renderer; they close when it parks (it notifies `ready` after).

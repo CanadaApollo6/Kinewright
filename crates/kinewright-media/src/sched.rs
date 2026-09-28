@@ -24,9 +24,13 @@ use kinewright_core::MediaError;
 pub(crate) const QUIESCENCE: Duration = Duration::from_secs(5);
 /// H-1: at most this many readers per source.
 const READERS_PER_SOURCE: usize = 2;
-/// Times on one source further apart than this are separate regions; a
-/// reader decodes forward across a smaller gap rather than seek.
-const REGION_GAP: i64 = 16;
+/// Amendment R37 (G1/G14 (iv)): a region continues only across real decoder
+/// continuation. A reader decodes its required times, then its lookahead,
+/// each ascending, and a decoder continues without a seek only at exactly
+/// the next frame; so a time more than this after the last one, or a
+/// required time after lookahead (the reader would decode it first, then
+/// seek back), starts a new region.
+const REGION_GAP: i64 = 1;
 
 /// H-5: R = clamp(P, 1, 8).
 pub(crate) fn reader_limit(parallelism: usize) -> usize {
@@ -146,16 +150,21 @@ pub(crate) enum Admission<F> {
 }
 
 /// Split one source's demand into at most two regions (required ones
-/// first); `None`-free: an empty demand gives no region.
+/// first); `None`-free: an empty demand gives no region. Runs beyond the
+/// second merge into it (R37's third-playhead residual: that reader seeks
+/// between its playheads).
 fn regions(required: &[i64], lookahead: &[i64]) -> Vec<Region> {
     let mut times: Vec<(i64, bool)> = required.iter().map(|t| (*t, true)).collect();
     times.extend(lookahead.iter().map(|t| (*t, false)));
     times.sort_by_key(|(t, required)| (*t, !required));
     times.dedup_by_key(|(t, _)| *t);
     let mut runs: Vec<Region> = Vec::new();
-    let mut last = None;
+    let mut last: Option<(i64, bool)> = None;
     for (t, required) in times {
-        if last.is_none_or(|last| t - last > REGION_GAP) {
+        let continues = last.is_some_and(|(last, last_required)| {
+            t - last <= REGION_GAP && (last_required || !required)
+        });
+        if !continues {
             runs.push(Region::default());
         }
         let run = runs.last_mut().expect("a run");
@@ -164,7 +173,7 @@ fn regions(required: &[i64], lookahead: &[i64]) -> Vec<Region> {
         } else {
             run.lookahead.push(t);
         }
-        last = Some(t);
+        last = Some((t, required));
     }
     runs.sort_by_key(|run| run.required.is_empty());
     if runs.len() > READERS_PER_SOURCE {
@@ -2001,6 +2010,81 @@ mod tests {
         };
         drop(world.readers.deliver(id, at, version, Ok(fr), world.now));
         assert_eq!(world.readers.next(id, world.now, false), Next::Retire);
+    }
+
+    /// Run every reader of `readers` until each waits: grants in full,
+    /// decodes that succeed (recorded per reader), closes and exits.
+    fn drive(readers: &mut Model, decoded: &mut BTreeMap<u64, Vec<i64>>) {
+        for _ in 0..BUDGET {
+            let mut moved = false;
+            let ids: Vec<(u64, u8)> = (readers.slots.iter())
+                .map(|slot| (slot.id, slot.key))
+                .collect();
+            for (id, key) in ids {
+                match readers.next(id, Duration::ZERO, false) {
+                    Next::Open { want } => readers.granted(id, Some(want), Duration::ZERO),
+                    Next::Decode { at, version, bytes } => {
+                        decoded.entry(id).or_default().push(at);
+                        let value = frame(key, at);
+                        let fr = Fr {
+                            value,
+                            bytes,
+                            pinned: false,
+                        };
+                        let (back, _) = readers.deliver(id, at, version, Ok(fr), Duration::ZERO);
+                        readers.release(back.map_or(0, |back| back.bytes));
+                    }
+                    Next::Close => readers.closed(id),
+                    Next::Retire => readers.exited(id),
+                    Next::Wait { .. } => continue,
+                }
+                moved = true;
+            }
+            if !moved {
+                return;
+            }
+        }
+        panic!("the readers did not settle within {BUDGET} steps");
+    }
+
+    /// Amendment R37 (review B F3): `typical_1080p`'s two same-source
+    /// playheads 14 frames apart, each with a 10-frame window, played for
+    /// 40 frames: two readers, each decoding forward only, one seek each
+    /// (its open); a merged region would alternate between the playheads.
+    #[test]
+    fn two_playheads_fourteen_apart_read_forward_on_two_readers() {
+        let shapes = |required: &[i64], lookahead: &[i64]| -> Vec<(Vec<i64>, Vec<i64>)> {
+            let runs = regions(required, lookahead).into_iter();
+            runs.map(|run| (run.required, run.lookahead)).collect()
+        };
+        // Continuation: required then lookahead, each the exact next frame.
+        assert_eq!(shapes(&[0, 1], &[2, 3]), [(vec![0, 1], vec![2, 3])]);
+        // A gap in the lookahead (a same-source cut) is a new region.
+        let cut = shapes(&[0], &[1, 2, 3, 6, 7]);
+        assert_eq!(cut, [(vec![0], vec![1, 2, 3]), (vec![], vec![6, 7])]);
+        // A required time after lookahead is decoded first: a new region.
+        let behind = shapes(&[5], &[3, 4]);
+        assert_eq!(behind, [(vec![5], vec![]), (vec![], vec![3, 4])]);
+        let mut readers = Model::new(20).with_budget(1_000 * F);
+        let mut decoded = BTreeMap::new();
+        for t in 0..40 {
+            let lookahead = (t + 1..=t + 9).chain(t + 15..=t + 23).collect();
+            let demand = [(0u8, vec![t, t + 14], lookahead)];
+            let regions = plan_regions(&demand, readers.limit()).expect("readers");
+            let posted = readers.post(regions, (HashMap::from([(0, F)]), 0), Duration::ZERO);
+            let dropped: usize = posted.dropped.0.iter().map(|fr| fr.bytes).sum();
+            readers.release(dropped);
+            assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+            drive(&mut readers, &mut decoded);
+            let resolved = readers.resolve(&[(0, t), (0, t + 14)]);
+            assert!(resolved.is_some(), "frame {t} resolved");
+            assert_eq!(readers.slots.len(), 2, "frame {t}: one reader per playhead");
+        }
+        assert_eq!(decoded.len(), 2, "two readers decoded: {decoded:?}");
+        for (id, times) in &decoded {
+            let seeks = 1 + times.windows(2).filter(|w| w[1] != w[0] + 1).count();
+            assert_eq!(seeks, 1, "reader {id} seeks once (its open): {times:?}");
+        }
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10

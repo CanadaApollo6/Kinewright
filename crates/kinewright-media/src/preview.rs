@@ -2013,7 +2013,8 @@ pub(crate) mod tests {
             0,
         );
         let lane = Arc::clone(&preview.lane);
-        assert_eq!(lane.lock().readers.slots.len(), 2, "one reader per source");
+        // R37: source 0's two layers (0 and 14) are two regions.
+        assert_eq!(lane.lock().readers.slots.len(), 3, "one reader per region");
         *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
         lane.work.notify_all();
         wait_until(&lane, |state| state.readers.slots.is_empty());
