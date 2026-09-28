@@ -2269,6 +2269,332 @@ pub(crate) mod tests {
         );
     }
 
+    /// Review B S3's sources: an encoded 30-frame 160×90 H.264 source with
+    /// `filter`'s pixels, tagged by `vf` and in `pixel_format`.
+    fn c5_source(
+        filter: &str,
+        vf: &str,
+        pixel_format: &str,
+        id: u64,
+    ) -> (
+        crate::test_support::GeneratedMedia,
+        kinewright_core::MediaAsset,
+    ) {
+        let input = format!("{filter}=size=160x90:rate=30");
+        let args = [
+            "-f",
+            "lavfi",
+            "-i",
+            &input,
+            "-frames:v",
+            "30",
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-pix_fmt",
+            pixel_format,
+            "-g",
+            "30",
+        ];
+        let media = crate::test_support::GeneratedMedia::ffmpeg("pf1-c5", &args, "mp4");
+        let asset = crate::decode::probe_path(media.path(), kinewright_core::AssetId(id));
+        (media, asset.expect("the C-5 source probes"))
+    }
+
+    /// Review B S3: a 160×90 document whose seven layers all show — three
+    /// video sources on three accepted colour branches (Rec.709 limited
+    /// 8-bit, full-range 8-bit, limited 10-bit; each under the D65
+    /// assumption) and an sRGB-tagged PNG still (`SrgbFull`), a push and a
+    /// crossfade, Screen / Multiply / Overlay, opacity and transforms, a
+    /// managed `creative_look` and a legacy `cube_lut`, a solid, a title
+    /// and an adjustment.
+    #[allow(clippy::too_many_lines)]
+    fn c5_document(
+        directory: &TempDirectory,
+    ) -> (
+        Arc<Document>,
+        Arc<LutLibrary>,
+        Vec<crate::test_support::GeneratedMedia>,
+    ) {
+        use kinewright_core::{
+            BlendMode, ClipContent, ColorBitDepth, ColorRange, ColorTransfer, LutAssetId,
+            ParamValue, SolidColor, Title, TitlePosition, Track, TrackId, TrackKind,
+        };
+
+        use crate::mo2_fixtures::{clip, effect, with_transition};
+        let tag = "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709";
+        let limited = c5_source("testsrc2", &format!("{tag}:range=limited"), "yuv420p", 1);
+        let full = c5_source("smptebars", &format!("{tag}:range=full"), "yuv420p", 2);
+        let ten = c5_source(
+            "gradients",
+            &format!("{tag}:range=limited"),
+            "yuv420p10le",
+            3,
+        );
+        let still_path = directory.path("srgb.png");
+        crate::test_support::run_ffmpeg(
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=80x45:rate=1:duration=1",
+                "-frames:v",
+                "1",
+                "-vf",
+                "setparams=color_primaries=bt709:color_trc=iec61966-2-1",
+                "-c:v",
+                "png",
+            ],
+            &still_path,
+        );
+        let still = crate::decode::probe_path(&still_path, kinewright_core::AssetId(4));
+        let still = still.expect("the still probes");
+        let descriptions = [&limited.1, &full.1, &ten.1, &still].map(|a| &a.color_description);
+        assert_eq!(
+            descriptions[0].range,
+            ColorRange::Limited,
+            "{descriptions:?}"
+        );
+        assert_eq!(descriptions[1].range, ColorRange::Full, "{descriptions:?}");
+        assert_eq!(
+            descriptions[2].bit_depth,
+            ColorBitDepth::Ten,
+            "{descriptions:?}"
+        );
+        assert_eq!(
+            descriptions[3].transfer,
+            ColorTransfer::Srgb,
+            "{descriptions:?}"
+        );
+        for description in descriptions {
+            let assumption = crate::render::d65_assumption(description);
+            let profile = kinewright_core::classify_source_with_assumption(description, assumption);
+            assert!(
+                profile.is_ok(),
+                "an accepted branch: {description:?} {profile:?}"
+            );
+        }
+
+        // A managed LUT asset, and a legacy `.cube` on disk.
+        let store = crate::lut_store::LutStore::for_project(&directory.path("c5.kinewright"))
+            .expect("the store");
+        let cube = |scale: [f64; 3]| {
+            let rows = (0..8).map(|corner: u8| {
+                let [r, g, b] = [corner & 1, corner >> 1 & 1, corner >> 2 & 1].map(f64::from);
+                let rgb = [r * scale[0], g * scale[1] + 0.1, b * scale[2]];
+                format!("{:.6} {:.6} {:.6}\n", rgb[0], rgb[1], rgb[2])
+            });
+            std::iter::once("LUT_3D_SIZE 2\n".to_owned())
+                .chain(rows)
+                .collect::<String>()
+        };
+        let look_path = directory.path("look.cube");
+        std::fs::write(&look_path, cube([0.7, 0.8, 1.0])).expect("the look");
+        let import = store
+            .import_lut_asset(&look_path)
+            .expect("the look imports");
+        let lut_asset = import.into_lut_asset(LutAssetId(1));
+        let (library, _) = LutLibrary::build(std::slice::from_ref(&lut_asset), Some(&store));
+        assert_eq!(library.len(), 1, "the managed LUT is verified");
+        let legacy_path = directory.path("legacy.cube");
+        std::fs::write(&legacy_path, cube([1.0, 0.6, 0.8])).expect("the legacy LUT");
+
+        let linear = crate::color_pipeline::LutInputEncoding::Linear.token();
+        let look = effect(
+            1,
+            "creative_look",
+            &[
+                ("lut_asset_id", 1),
+                ("mix_basis_points", 10_000),
+                ("input_encoding_token", linear),
+            ],
+        );
+        let mut legacy = effect(2, "cube_lut", &[("intensity_percent", 100)]);
+        let legacy_text = ParamValue::Text(legacy_path.to_string_lossy().into_owned());
+        legacy.parameters.insert("path".to_owned(), legacy_text);
+        let pip = effect(3, "transform", &[("scale_percent", 50), ("x_percent", 25)]);
+        let corner = [("scale_percent", 30), ("x_percent", -30), ("y_percent", 25)];
+        let span = |mut clip: kinewright_core::Clip, asset, source, len, start| {
+            (clip.asset, clip.timeline_start) = (asset, TimeCode(start));
+            clip.source_range = TimeCode(source)..TimeCode(source + len);
+            clip
+        };
+        let media = |id, blend, effects| clip(id, ClipContent::Media, blend, effects);
+        let base = span(
+            media(1, BlendMode::Normal, vec![look]),
+            limited.1.id,
+            2,
+            24,
+            0,
+        );
+        let pushed = span(media(2, BlendMode::Screen, vec![pip]), full.1.id, 0, 20, 4);
+        let opacity = effect(4, "opacity", &[("percent", 70)]);
+        let multiplied = media(3, BlendMode::Multiply, vec![opacity, legacy]);
+        let multiplied = span(multiplied, ten.1.id, 5, 24, 0);
+        let freeze = ClipContent::Freeze(kinewright_core::FreezeFrame {
+            source_frame: TimeCode::ZERO,
+        });
+        let pinned = clip(
+            4,
+            freeze,
+            BlendMode::Normal,
+            vec![effect(5, "transform", &corner)],
+        );
+        let pinned = span(pinned, still.id, 0, 24, 0);
+        let solid = ClipContent::Solid(SolidColor {
+            r: 0xF0,
+            g: 0x90,
+            b: 0x30,
+        });
+        let solid = clip(
+            5,
+            solid,
+            BlendMode::Overlay,
+            vec![effect(6, "opacity", &[("percent", 50)])],
+        );
+        let solid = span(solid, kinewright_core::AssetId::default(), 0, 24, 0);
+        let title = ClipContent::Title(Title {
+            text: "C-5".to_owned(),
+            position: TitlePosition::Center,
+            ..Title::default()
+        });
+        let title = span(
+            clip(6, title, BlendMode::Normal, Vec::new()),
+            kinewright_core::AssetId::default(),
+            0,
+            22,
+            2,
+        );
+        let saturation = effect(7, "primary_correction", &[("saturation_percent", 40)]);
+        let adjustment = clip(
+            7,
+            ClipContent::Adjustment,
+            BlendMode::Normal,
+            vec![saturation],
+        );
+        let adjustment = span(adjustment, kinewright_core::AssetId::default(), 0, 24, 0);
+        let clips = [
+            base,
+            with_transition(pushed, "push_left", 8),
+            multiplied,
+            pinned,
+            solid,
+            with_transition(title, "crossfade", 6),
+            adjustment,
+        ];
+        let document = Document {
+            resolution: (160, 90),
+            duration: TimeCode(24),
+            tracks: (1..)
+                .zip(clips)
+                .map(|(id, clip)| Track {
+                    id: TrackId(id),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![clip],
+                })
+                .collect(),
+            media_pool: vec![limited.1, full.1, ten.1, still],
+            lut_assets: vec![lut_asset],
+            ..Document::default()
+        };
+        document.validate().expect("the C-5 document is valid");
+        (
+            Arc::new(document),
+            Arc::new(library),
+            vec![limited.0, full.0, ten.0],
+        )
+    }
+
+    /// Review B S3 / C-5: over visible multilayer frames — every layer
+    /// changes the image (removing any one of the seven changes the bytes)
+    /// — frames the readers supply composite to the synchronous renderer's
+    /// bytes, paused and at playback horizon, inside and after both
+    /// transitions and on a jump back; no K-3 fallback, and the preview's
+    /// synchronous renderer decodes nothing.
+    #[test]
+    fn scheduled_multilayer_frames_match_the_synchronous_renderer() {
+        let directory = TempDirectory::new("pf1-c5");
+        let (document, lut, _media) = c5_document(&directory);
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        reference.set_lut_library(Arc::clone(&lut));
+        let mut synchronous = |document: &Document, at: i64| {
+            let strategy = DecodeStrategy::Seek;
+            let frame = reference.render_live(document, TimeCode(at), resolution, scale, strategy);
+            frame.expect("the reference").rgba.to_vec()
+        };
+        // Visible: at 8 the push is half way and the crossfade complete.
+        let full = synchronous(&document, 8);
+        for track in 0..document.tracks.len() {
+            let mut without = (*document).clone();
+            without.tracks.remove(track);
+            assert_ne!(synchronous(&without, 8), full, "track {track} is hidden");
+            // Every effect shows too (both LUTs, opacity, transforms, grade).
+            for index in 0..document.tracks[track].clips[0].effects.len() {
+                let mut without = (*document).clone();
+                without.tracks[track].clips[0].effects.remove(index);
+                let shown = synchronous(&without, 8);
+                assert_ne!(shown, full, "track {track}'s effect {index} is inert");
+            }
+        }
+        // And both transitions, mid-way (5: the push; 4: the crossfade).
+        for (track, at) in [(1, 5), (5, 4)] {
+            let mut cut = (*document).clone();
+            cut.tracks[track].clips[0].transition_in = None;
+            let shown = synchronous(&cut, at);
+            assert_ne!(
+                shown,
+                synchronous(&document, at),
+                "track {track}'s transition"
+            );
+        }
+        let lane = Arc::new(Lane::with_budget(20, FRAME_CACHE_BYTE_BUDGET));
+        let (mut preview, frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        let scene = |at| {
+            let mut job = job(&document, JobKind::Paused(TimeCode(at)), stamp(1, 1));
+            job.scene.lut = Arc::clone(&lut);
+            job
+        };
+        for at in [0, 4, 5, 8, 12, 23, 3] {
+            preview.run_paused(&scene(at), 0);
+            assert!(preview.lane.take_failures().is_empty(), "frame {at}");
+            let shown = frames.try_recv().expect("published");
+            assert_eq!(
+                *shown.texture.rgba,
+                synchronous(&document, at),
+                "paused {at}"
+            );
+        }
+        for at in [6, 7, 9, 10, 16] {
+            let job = scene(at);
+            let wait = FrameWait {
+                version: lane.lock().version,
+                playback: Some(Instant::now() + Duration::from_secs(60)),
+                paused: None,
+            };
+            let shown = preview.render_monitor(&job.scene, TimeCode(at), &wait);
+            let Ok(Some(shown)) = shown else {
+                panic!("frame {at} did not render");
+            };
+            assert_eq!(*shown.rgba, synchronous(&document, at), "playback {at}");
+        }
+        assert_eq!(lane.lock().fallbacks, [0, 0], "no K-3 fallback");
+        assert!(
+            !lane.lock().readers.slots.is_empty(),
+            "readers decoded them"
+        );
+        let decoded = preview.renderer.has_sources();
+        assert!(!decoded, "the synchronous renderer opened no decoder");
+    }
+
     /// H-2 (S2b-1): an idle reader retires at the injected quiescence
     /// deadline, closing its decoder.
     #[test]
