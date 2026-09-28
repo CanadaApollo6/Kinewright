@@ -1,70 +1,80 @@
 # Ignored-test allowlist: every test the fast tier may skip that is not in ci/slow-tests.txt.
 #
-# One test per line:  <test binary> <libtest test path> <source file>  # the ignore reason
-# (the same columns as ci/slow-tests.txt; doctests use the binary `doc-tests:<crate>`).
+# One test per line:
+#   <test binary> <libtest test path> <source file> <category>  # the ignore reason
+# (the first three columns are those of ci/slow-tests.txt; a doctest uses the binary
+# `doc-tests:<crate>`, the rustdoc name `<file> - <item> (line <n>)` as its path, and must
+# resolve to an ignored fence at exactly that line of the source file).
 #
-# These are the existing hardware (NVIDIA lanes), audio-device, live-subscription, manual
-# measurement and on-demand tests, each carrying a plain `#[ignore = "..."]`.
+# Categories (a missing or unknown one fails the lint):
+#   hardware       needs a physical GPU or an audio device; run on the NVIDIA lanes or by hand
+#   on-demand      never meant to run in CI: manual performance measurements, live subscription
+#                  runs, prepared-fixture builders, subprocess helpers
+#   inherited-gap  a check that SHOULD run but is skipped for a pre-existing defect; needs a
+#                  one-line reason after '#'; this is coverage debt, not a justification
+#
+# `python3 scripts/slow_tests.py lint` resolves every entry to the real fn (or doctest),
+# strips comments and string literals, and requires an unconditional `#[ignore]` or
+# `#[ignore = "..."]` attribute on it: a `cfg_attr(..., ignore ...)`, a removed attribute,
+# or an `#[ignore]` mentioned only in a comment or doc string fails.
 # `python3 scripts/slow_tests.py fast` fails if the fast run skipped any test that is in
 # neither file, so a new `#[ignore]` on an ordinary test cannot pass unnoticed: either
-# fix the test, or add it here with a reason a reviewer accepts.
-# `python3 scripts/slow_tests.py lint` fails if an entry here has no plain `#[ignore` in
-# its source file.
+# fix the test, or add it here with a category and a reason a reviewer accepts.
 #
 # Source: the ignored tests of green CI run 36377867892 (identical on Linux and Windows),
 # plus the two on-demand software-renderer performance-evidence tests.
 
 # generated_media
-generated_media audio_device_play_pause_and_seek_smoke_test crates/kinewright-media/tests/generated_media.rs  # requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
-generated_media multi_track_audio_device_play_pause_and_seek_smoke_test crates/kinewright-media/tests/generated_media.rs  # requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
-generated_media timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test crates/kinewright-media/tests/generated_media.rs  # requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
+generated_media audio_device_play_pause_and_seek_smoke_test crates/kinewright-media/tests/generated_media.rs hardware  # requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
+generated_media multi_track_audio_device_play_pause_and_seek_smoke_test crates/kinewright-media/tests/generated_media.rs hardware  # requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
+generated_media timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test crates/kinewright-media/tests/generated_media.rs hardware  # requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
 
 # kinewright_agent
-kinewright_agent server::tests::served_tools_direct_vs_legacy_filtered_microbench crates/kinewright-agent/src/server.rs  # manual release performance measurement
+kinewright_agent server::tests::served_tools_direct_vs_legacy_filtered_microbench crates/kinewright-agent/src/server.rs on-demand  # manual release performance measurement
 
 # kinewright_app
-kinewright_app project::tests::is_dirty_memoized_poll_release_perf crates/kinewright-app/src/project.rs  # manual release performance measurement
-kinewright_app recovery::tests::crash_child_process crates/kinewright-app/src/recovery.rs  # invoked as the deliberately crashing subprocess
+kinewright_app project::tests::is_dirty_memoized_poll_release_perf crates/kinewright-app/src/project.rs on-demand  # manual release performance measurement
+kinewright_app recovery::tests::crash_child_process crates/kinewright-app/src/recovery.rs on-demand  # invoked as the deliberately crashing subprocess
 
 # kinewright_core
-kinewright_core actor::tests::performance_batch_workloads crates/kinewright-core/src/actor.rs  # manual release performance measurement
+kinewright_core actor::tests::performance_batch_workloads crates/kinewright-core/src/actor.rs on-demand  # manual release performance measurement
 
 # kinewright_eval
-kinewright_eval tests::cc7_every_color_fixture_builds_a_valid_document crates/kinewright-agent/src/bin/kinewright-eval.rs  # constructs a real media engine, whose process-exit teardown raises the known SIGSEGV
-kinewright_eval tests::v3_fixture_builds_with_authored_and_recognized_truth crates/kinewright-agent/src/bin/kinewright-eval.rs  # requires local speech synthesis and Whisper analysis
-kinewright_eval tests::v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels crates/kinewright-agent/src/bin/kinewright-eval.rs  # requires the explicitly prepared M40 event fixture pack
-kinewright_eval tests::v5_fixture_builds_from_verified_real_media crates/kinewright-agent/src/bin/kinewright-eval.rs  # requires the explicitly prepared M40 fixture pack and Whisper analysis
-kinewright_eval tests::v5_music_fixture_builds_with_real_media_and_pinned_beats crates/kinewright-agent/src/bin/kinewright-eval.rs  # requires the explicitly prepared M40 music fixture pack and beat analysis
+kinewright_eval tests::cc7_every_color_fixture_builds_a_valid_document crates/kinewright-agent/src/bin/kinewright-eval.rs inherited-gap  # INHERITED GAP: a regression guard skipped because the media engine it builds raises a SIGSEGV at process-exit teardown; unskip once teardown is fixed
+kinewright_eval tests::v3_fixture_builds_with_authored_and_recognized_truth crates/kinewright-agent/src/bin/kinewright-eval.rs on-demand  # requires local speech synthesis and Whisper analysis
+kinewright_eval tests::v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels crates/kinewright-agent/src/bin/kinewright-eval.rs on-demand  # requires the explicitly prepared M40 event fixture pack
+kinewright_eval tests::v5_fixture_builds_from_verified_real_media crates/kinewright-agent/src/bin/kinewright-eval.rs on-demand  # requires the explicitly prepared M40 fixture pack and Whisper analysis
+kinewright_eval tests::v5_music_fixture_builds_with_real_media_and_pinned_beats crates/kinewright-agent/src/bin/kinewright-eval.rs on-demand  # requires the explicitly prepared M40 music fixture pack and beat analysis
 
 # kinewright_media
-kinewright_media cc1_fixtures::cc1_gpu_compositor_matches_canonical_cpu_reference_on_hardware crates/kinewright-media/src/cc1_fixtures.rs  # requires a physical supported GPU; run explicitly with --ignored --nocapture
-kinewright_media cc3_fixtures::cc3_gpu_compositor_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc3_fixtures.rs  # requires a physical supported GPU; run explicitly with --ignored --nocapture
-kinewright_media cc4_fixtures::cc4_gpu_compositor_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc4_fixtures.rs  # requires a physical supported GPU; run explicitly with --ignored --nocapture
-kinewright_media cc5_fixtures::cc5_gpu_compositor_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc5_fixtures.rs  # requires a physical supported GPU; run explicitly with --ignored --nocapture
-kinewright_media cc5_fixtures::cc5_performance_evidence_is_recorded_on_hardware crates/kinewright-media/src/cc5_fixtures.rs  # requires a physical supported GPU; run explicitly with --ignored --nocapture
-kinewright_media cc5_fixtures::cc5_performance_evidence_is_recorded_on_software_fallback crates/kinewright-media/src/cc5_fixtures.rs  # on demand: performance evidence on the software renderer
-kinewright_media cc6_fixtures::cc6_performance_evidence_is_recorded_on_hardware crates/kinewright-media/src/cc6_fixtures.rs  # requires a physical supported GPU; run explicitly with --ignored --nocapture
-kinewright_media cc6_fixtures::cc6_performance_evidence_is_recorded_on_software_fallback crates/kinewright-media/src/cc6_fixtures.rs  # on demand: performance evidence on the software renderer
-kinewright_media cc7_fixtures::cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc7_fixtures.rs  # requires a real GPU adapter; the default lane is fallback_gpu()
-kinewright_media compositor::tests::cc5_matte_gpu_anchors_hold_on_hardware crates/kinewright-media/src/compositor.rs  # requires a real (non-fallback) GPU adapter
-kinewright_media compositor::tests::cc6_working_proof_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/compositor.rs  # requires a physical supported GPU; run explicitly with --ignored --nocapture
-kinewright_media media_matrix_tests::full_media_matrix_covers_4k_hevc_and_long_gop_sources crates/kinewright-media/src/media_matrix_tests.rs  # long-running 4K/HEVC matrix; run with KINEWRIGHT_MEDIA_MATRIX=1 and --ignored
-kinewright_media media_matrix_tests::proxy_preview_performance_on_heavy_matrix_media crates/kinewright-media/src/media_matrix_tests.rs  # performance measurement; run with KINEWRIGHT_PERF_TEST=1 and --ignored
-kinewright_media mo2_fixtures::mo2_gates_on_hardware crates/kinewright-media/src/mo2_fixtures.rs  # requires a physical GPU adapter; run with --ignored
-kinewright_media mo2_fixtures::review_probes::mo2_gates_on_hardware crates/kinewright-media/src/mo2_fixtures.rs  # requires a physical GPU adapter; run with --ignored
-kinewright_media mo2_perf_fixtures::blend_heavy_holds_floors_on_hardware crates/kinewright-media/src/mo2_perf_fixtures.rs  # R28 hardware lane (the RTX 3090)
-kinewright_media mo2_perf_fixtures::blend_heavy_holds_floors_on_the_fallback_adapter crates/kinewright-media/src/mo2_perf_fixtures.rs  # R28 perf lane: cargo test --release -p kinewright-media --lib blend_heavy_holds_floors -- --ignored
-kinewright_media mo2_perf_fixtures::r28_end_to_end_tracked crates/kinewright-media/src/mo2_perf_fixtures.rs  # R28 end-to-end tracked lane (decode-bound until PF1)
+kinewright_media cc1_fixtures::cc1_gpu_compositor_matches_canonical_cpu_reference_on_hardware crates/kinewright-media/src/cc1_fixtures.rs hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
+kinewright_media cc3_fixtures::cc3_gpu_compositor_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc3_fixtures.rs hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
+kinewright_media cc4_fixtures::cc4_gpu_compositor_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc4_fixtures.rs hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
+kinewright_media cc5_fixtures::cc5_gpu_compositor_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc5_fixtures.rs hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
+kinewright_media cc5_fixtures::cc5_performance_evidence_is_recorded_on_hardware crates/kinewright-media/src/cc5_fixtures.rs hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
+kinewright_media cc5_fixtures::cc5_performance_evidence_is_recorded_on_software_fallback crates/kinewright-media/src/cc5_fixtures.rs on-demand  # on demand: performance evidence on the software renderer
+kinewright_media cc6_fixtures::cc6_performance_evidence_is_recorded_on_hardware crates/kinewright-media/src/cc6_fixtures.rs hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
+kinewright_media cc6_fixtures::cc6_performance_evidence_is_recorded_on_software_fallback crates/kinewright-media/src/cc6_fixtures.rs on-demand  # on demand: performance evidence on the software renderer
+kinewright_media cc7_fixtures::cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/cc7_fixtures.rs hardware  # requires a real GPU adapter; the default lane is fallback_gpu()
+kinewright_media compositor::tests::cc5_matte_gpu_anchors_hold_on_hardware crates/kinewright-media/src/compositor.rs hardware  # requires a real (non-fallback) GPU adapter
+kinewright_media compositor::tests::cc6_working_proof_matches_the_cpu_reference_on_hardware crates/kinewright-media/src/compositor.rs hardware  # requires a physical supported GPU; run explicitly with --ignored --nocapture
+kinewright_media media_matrix_tests::full_media_matrix_covers_4k_hevc_and_long_gop_sources crates/kinewright-media/src/media_matrix_tests.rs on-demand  # long-running 4K/HEVC matrix; run with KINEWRIGHT_MEDIA_MATRIX=1 and --ignored
+kinewright_media media_matrix_tests::proxy_preview_performance_on_heavy_matrix_media crates/kinewright-media/src/media_matrix_tests.rs on-demand  # performance measurement; run with KINEWRIGHT_PERF_TEST=1 and --ignored
+kinewright_media mo2_fixtures::mo2_gates_on_hardware crates/kinewright-media/src/mo2_fixtures.rs hardware  # requires a physical GPU adapter; run with --ignored
+kinewright_media mo2_fixtures::review_probes::mo2_gates_on_hardware crates/kinewright-media/src/mo2_fixtures.rs hardware  # requires a physical GPU adapter; run with --ignored
+kinewright_media mo2_perf_fixtures::blend_heavy_holds_floors_on_hardware crates/kinewright-media/src/mo2_perf_fixtures.rs hardware  # R28 hardware lane (the RTX 3090)
+kinewright_media mo2_perf_fixtures::blend_heavy_holds_floors_on_the_fallback_adapter crates/kinewright-media/src/mo2_perf_fixtures.rs on-demand  # R28 perf lane: cargo test --release -p kinewright-media --lib blend_heavy_holds_floors -- --ignored
+kinewright_media mo2_perf_fixtures::r28_end_to_end_tracked crates/kinewright-media/src/mo2_perf_fixtures.rs on-demand  # R28 end-to-end tracked lane (decode-bound until PF1)
 
 # kinewright_project
-kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs  # S5 obligation: journal writers must hold the lock
-kinewright_project project::tests::mo2_old_reader_corpus crates/kinewright-project/src/project.rs  # manual pre-land check: scripts/mo2-old-reader-check.sh
+kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs inherited-gap  # INHERITED GAP: known journal-lock defect (S5 obligation: journal writers must hold the lock); unskip once fixed
+kinewright_project project::tests::mo2_old_reader_corpus crates/kinewright-project/src/project.rs on-demand  # manual pre-land check: scripts/mo2-old-reader-check.sh
 
 # new_harness_e2e
-new_harness_e2e copilot_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
-new_harness_e2e devin_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
-new_harness_e2e kimi_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
-new_harness_e2e kiro_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
-new_harness_e2e muse_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
-new_harness_e2e opencode_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
-new_harness_e2e qwen_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+new_harness_e2e copilot_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+new_harness_e2e devin_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+new_harness_e2e kimi_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+new_harness_e2e kiro_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+new_harness_e2e muse_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+new_harness_e2e opencode_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+new_harness_e2e qwen_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1

@@ -79,8 +79,48 @@ def read_manifest() -> list[tuple[str, str, str]]:
     return read_entries(MANIFEST)
 
 
+CATEGORIES = ("hardware", "on-demand", "inherited-gap")
+
+
+def read_allowlist() -> list[dict]:
+    """`<binary> <test path> <source file> <category>  # reason` lines of ci/ignored-tests.txt.
+
+    The test path may contain spaces (a doctest name), so the binary is the first
+    token and the file and category are the last two.
+    """
+    entries = []
+    for number, raw in enumerate(IGNORED.read_text(encoding="utf-8").splitlines(), 1):
+        code, _, reason = raw.partition("#")
+        code = code.strip()
+        if not code:
+            continue
+        binary, _, rest = code.partition(" ")
+        parts = rest.rsplit(None, 2)
+        if not binary or len(parts) != 3:
+            sys.exit(
+                f"{IGNORED}:{number}: want '<binary> <test path> <source file> <category>', got {raw!r}"
+            )
+        entries.append(
+            {
+                "binary": binary,
+                "path": parts[0],
+                "file": parts[1],
+                "category": parts[2],
+                "reason": reason.strip(),
+                "line": number,
+            }
+        )
+    seen = set()
+    for entry in entries:
+        key = (entry["binary"], entry["path"])
+        if key in seen:
+            sys.exit(f"{IGNORED}: duplicate entry {key[0]} {key[1]}")
+        seen.add(key)
+    return entries
+
+
 def read_ignored() -> list[tuple[str, str, str]]:
-    return read_entries(IGNORED)
+    return [(e["binary"], e["path"], e["file"]) for e in read_allowlist()]
 
 
 def marked_tests() -> set[tuple[str, str]]:
@@ -128,40 +168,168 @@ def feature_list(entries) -> str:
     return ",".join(sorted({f"{crate_of(f)}/slow-tests" for _, _, f in entries}))
 
 
-def attribute_run(text: str, name: str) -> str | None:
-    """The attributes and comments directly above the first `fn <name>`, or None."""
-    lines = text.splitlines()
-    for index, line in enumerate(lines):
-        if not re.search(rf"\bfn\s+{re.escape(name)}\b", line):
-            continue
-        run = []
-        for previous in reversed(lines[:index]):
-            stripped = previous.strip()
-            if stripped and not stripped.startswith("//") and stripped[-1] in "};{":
+def mask_source(text: str) -> str:
+    """`text` with comments blanked and string/char literal contents replaced by `x`.
+
+    Line structure and offsets are kept, so a search on the result finds real code
+    only: an `#[ignore]` inside a comment, a doc string or a string literal is gone.
+    Handles nested block comments, escapes, raw strings and lifetimes.
+    """
+    out = list(text)
+    n = len(text)
+    i = 0
+
+    def blank(start: int, end: int, keep_quotes: bool = False) -> None:
+        for k in range(start, min(end, n)):
+            if out[k] != "\n":
+                out[k] = "x" if keep_quotes else " "
+
+    while i < n:
+        c = text[i]
+        nxt = text[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            end = text.find("\n", i)
+            end = n if end < 0 else end
+            blank(i, end)
+            i = end
+        elif c == "/" and nxt == "*":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth += 1
+                    j += 2
+                elif text.startswith("*/", j):
+                    depth -= 1
+                    j += 2
+                else:
+                    j += 1
+            blank(i, j)
+            i = j
+        elif c == "r" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_") or text[i - 1] == "b"):
+            hashes = 0
+            while i + 1 + hashes < n and text[i + 1 + hashes] == "#":
+                hashes += 1
+            if i + 1 + hashes < n and text[i + 1 + hashes] == '"':
+                close = '"' + "#" * hashes
+                end = text.find(close, i + 2 + hashes)
+                end = n if end < 0 else end
+                blank(i + 2 + hashes, end, keep_quotes=True)
+                i = end + len(close)
+            else:
+                i += 1
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            blank(i + 1, j, keep_quotes=True)
+            i = j + 1
+        elif c == "'":
+            if nxt == "\\":
+                end = text.find("'", i + 3)
+                end = n if end < 0 else end
+                blank(i + 1, end, keep_quotes=True)
+                i = end + 1
+            elif i + 2 < n and text[i + 2] == "'":
+                blank(i + 1, i + 2, keep_quotes=True)
+                i += 3
+            else:
+                i += 1  # a lifetime or label
+        else:
+            i += 1
+    return "".join(out)
+
+
+QUALIFIERS = re.compile(r'(?:pub(?:\s*\([^)]*\))?|async|unsafe|const|extern(?:\s*"[^"]*")?)\s*$')
+PLAIN_IGNORE = re.compile(r'#\s*\[\s*ignore\s*(?:=\s*"[^"]*"\s*)?\]')
+
+
+def attributes_of_fn(masked: str, name: str) -> list[list[str]]:
+    """For every `fn <name>` in comment-free source: the attributes attached to it."""
+    found = []
+    for match in re.finditer(rf"\bfn\s+{re.escape(name)}\b", masked):
+        head = masked[: match.start()].rstrip()
+        while (qualifier := QUALIFIERS.search(head)) is not None:
+            head = head[: qualifier.start()].rstrip()
+        attributes = []
+        while head.endswith("]"):
+            depth, k = 0, len(head) - 1
+            while k >= 0:
+                depth += {"]": 1, "[": -1}.get(head[k], 0)
+                if depth == 0:
+                    break
+                k -= 1
+            if k < 1 or head[:k].rstrip()[-1:] != "#":
                 break
-            run.append(previous)
-        return "\n".join(reversed(run))
+            hash_at = head[:k].rstrip().rfind("#")
+            attributes.append(head[hash_at:])
+            head = head[:hash_at].rstrip()
+        found.append(attributes)
+    return found
+
+
+DOC_NAME = re.compile(r"^(?P<file>.+?) - (?P<item>.*?)\s*\(line (?P<line>\d+)\)$")
+FENCE = re.compile(r"^\s*(?:///|//!|\*)?\s*(`{3,}|~{3,})\s*(?P<info>[^`]*)$")
+
+
+def check_doctest(entry: dict) -> str | None:
+    """A problem with a doctest entry, or None if it names a real ignored doctest."""
+    named = DOC_NAME.match(entry["path"])
+    if not named:
+        return "doctest name is not '<file> - <item> (line <n>)'"
+    if Path(named["file"]).as_posix() != Path(entry["file"]).as_posix():
+        return f"doctest names {named['file']}, not {entry['file']}"
+    lines = (ROOT / entry["file"]).read_text(encoding="utf-8").splitlines()
+    number = int(named["line"])
+    if not 1 <= number <= len(lines):
+        return f"line {number} is outside {entry['file']}"
+    line = lines[number - 1]
+    if not re.match(r"^\s*(///|//!)", line):
+        return f"line {number} of {entry['file']} is not a doc comment"
+    fence = FENCE.match(line)
+    if not fence:
+        return f"line {number} of {entry['file']} does not open a code fence"
+    if "ignore" not in re.split(r"[,\s]+", fence["info"].strip()):
+        return f"the fence at line {number} of {entry['file']} is not ignored"
+    if line.lstrip().startswith("///"):
+        # An outer doc comment documents the next item: it must be the named one.
+        following = number
+        while following < len(lines) and re.match(r"^\s*(///|#\[|//)", lines[following]):
+            following += 1
+        segment = re.sub(r"<.*", "", named["item"].rsplit("::", 1)[-1]).strip()
+        if following >= len(lines) or not re.search(rf"\b{re.escape(segment)}\b", lines[following]):
+            return f"the doc comment at line {number} of {entry['file']} does not document {named['item']}"
     return None
 
 
 def lint_ignored(problems: list[str], slow_keys: set[tuple[str, str]]) -> None:
-    for binary, path, file in read_ignored():
+    for entry in read_allowlist():
+        binary, path, file = entry["binary"], entry["path"], entry["file"]
+        where = f"ci/ignored-tests.txt:{entry['line']}: {binary} {path}"
+        if entry["category"] not in CATEGORIES:
+            problems.append(
+                f"{where}: category {entry['category']!r} is not one of {', '.join(CATEGORIES)}"
+            )
+        if entry["category"] == "inherited-gap" and not entry["reason"]:
+            problems.append(f"{where}: an inherited-gap entry needs a one-line reason after '#'")
         if (binary, path) in slow_keys:
-            problems.append(f"in both ci/slow-tests.txt and ci/ignored-tests.txt: {binary} {path}")
+            problems.append(f"{where}: also in ci/slow-tests.txt")
         source = ROOT / file
         if not source.is_file():
-            problems.append(f"ci/ignored-tests.txt: {file} does not exist ({binary} {path})")
+            problems.append(f"{where}: {file} does not exist")
             continue
-        text = source.read_text(encoding="utf-8")
         if binary.startswith("doc-tests:"):
-            if not re.search(r"```[A-Za-z0-9_,\- ]*\bignore\b", text):
-                problems.append(f"ci/ignored-tests.txt: {file} has no ignored doctest fence ({path})")
+            problem = check_doctest(entry)
+            if problem:
+                problems.append(f"{where}: {problem}")
             continue
-        run = attribute_run(text, path.rsplit("::", 1)[-1])
-        if run is None:
-            problems.append(f"ci/ignored-tests.txt: {file} has no fn {path.rsplit('::', 1)[-1]}")
-        elif not re.search(r"#\[ignore\b", run):
-            problems.append(f"ci/ignored-tests.txt: {binary} {path} has no plain #[ignore] in {file}")
+        name = path.rsplit("::", 1)[-1]
+        candidates = attributes_of_fn(mask_source(source.read_text(encoding="utf-8")), name)
+        if not candidates:
+            problems.append(f"{where}: {file} has no fn {name}")
+        elif not all(any(PLAIN_IGNORE.fullmatch(a) for a in attrs) for attrs in candidates):
+            problems.append(
+                f"{where}: fn {name} in {file} has no unconditional #[ignore] / #[ignore = \"...\"] attribute"
+            )
 
 
 def lint() -> int:
