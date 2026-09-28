@@ -879,6 +879,17 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         self.release(reserved);
     }
 
+    /// The readers decoding now (Amendment R37: a withdrawn plan stops
+    /// them).
+    pub(crate) fn decoding(&self) -> Vec<u64> {
+        let decoding = |slot: &&Slot<K>| matches!(slot.state, ReaderState::Decoding { .. });
+        self.slots
+            .iter()
+            .filter(decoding)
+            .map(|slot| slot.id)
+            .collect()
+    }
+
     /// Every ring frame, removed (a preview cache clear).
     pub(crate) fn clear_rings(&mut self) -> Vec<F> {
         let rings = self.rings.drain().flat_map(|(_, ring)| ring.into_values());

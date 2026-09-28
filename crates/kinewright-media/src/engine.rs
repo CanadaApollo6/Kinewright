@@ -1122,6 +1122,11 @@ impl Playback for FfmpegMediaEngine {
     fn play(&self, from: TimeCode) {
         self.clear_mix_meters();
         let control = self.coalesced().play(from, &self.clock);
+        // Amendment R37: a paused job issued before this play is superseded
+        // now, before the worker applies it (R-3/S-1 issuance order).
+        if let Control::Play(_, issued) = &control {
+            self.lane.issue_play(issued.stamp.epoch);
+        }
         self.send_issued(control);
     }
 
@@ -4275,6 +4280,27 @@ mod tests {
         lane.work.notify_all();
         crate::preview::tests::wait_until(&lane, |state| state.readers.slots.is_empty());
         assert_eq!(threads(&lane), (1, 0), "settled: the parked preview alone");
+    }
+
+    /// Amendment R37 (start-up): `play` supersedes, as it is issued, every
+    /// paused job stamped before it, and none stamped with it or after.
+    #[test]
+    fn play_supersedes_earlier_paused_jobs_as_it_is_issued() {
+        let temp = TempDirectory::new("pf1-r37-play");
+        let gpu = fallback_gpu().context();
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        engine.set_document(Arc::new(crate::perf_fixtures::title_card((64, 64), 3)));
+        let before = engine.stamp();
+        assert!(!engine.lane.superseded_by_play(before));
+        engine.play(TimeCode::ZERO);
+        let played = engine.stamp();
+        assert!(
+            engine.lane.superseded_by_play(before),
+            "issued before the play"
+        );
+        assert!(!engine.lane.superseded_by_play(played), "the play's own");
+        engine.seek(TimeCode(1));
+        assert!(!engine.lane.superseded_by_play(engine.stamp()));
     }
 
     /// H-6 kill test: dropping the engine disconnects the worker, which

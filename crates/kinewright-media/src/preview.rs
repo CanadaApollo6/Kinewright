@@ -300,6 +300,10 @@ pub(crate) struct Lane {
     /// lock. A full channel drops the newest ack (`acks_overflowed`).
     acks: (Sender<Ack>, Receiver<Ack>),
     acks_overflowed: AtomicU64,
+    /// Amendment R37 (start-up): the newest epoch a `play` was issued with,
+    /// stored by the caller under `state` (R-3/S-1: a paused job issued
+    /// before it is superseded).
+    play_issued: AtomicU64,
 }
 
 impl Default for Lane {
@@ -338,6 +342,7 @@ impl Lane {
             counters: Mutex::default(),
             acks: crossbeam_channel::bounded(ACK_QUEUE),
             acks_overflowed: AtomicU64::new(0),
+            play_issued: AtomicU64::new(0),
         }
     }
 
@@ -426,6 +431,23 @@ impl Lane {
 
     fn notify(&self) {
         self.ready.notify_all();
+    }
+
+    /// Amendment R37 (start-up): a `play` was issued with `epoch`. Stored
+    /// under `state`, then `ready` is notified, so a paused `FrameWait`
+    /// cannot miss it.
+    pub(crate) fn issue_play(&self, epoch: u64) {
+        {
+            let _state = self.lock();
+            self.play_issued.fetch_max(epoch, Ordering::AcqRel);
+        }
+        self.notify();
+    }
+
+    /// Amendment R37 (start-up): a paused job stamped `stamp` was issued
+    /// before the newest `play`, which supersedes it (issuance order).
+    pub(crate) fn superseded_by_play(&self, stamp: FrameStamp) -> bool {
+        self.play_issued.load(Ordering::Acquire) > stamp.epoch
     }
 
     /// The readers' clock (H-2), advanced by tests (never a sleep).
@@ -617,6 +639,9 @@ fn demand_plan(
 struct FrameWait {
     version: u64,
     playback: Option<Instant>,
+    /// A paused job's stamp: a `play` issued after it supersedes the wait
+    /// (Amendment R37).
+    paused: Option<FrameStamp>,
 }
 
 #[cfg(test)]
@@ -709,6 +734,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                     lane.cancelled.fetch_add(1, Ordering::AcqRel);
                     lane.lock().readers.stopped(id, lane.now());
                     drop(hold);
+                    #[cfg(test)]
+                    lane.notify(); // a test waiting for the stop
                     state = lane.lock();
                     continue;
                 }
@@ -906,6 +933,7 @@ impl Preview {
     /// lane shuts down (or, without `wait`, when there is none).
     pub(crate) fn next_work(&mut self, wait: bool) -> Option<Work> {
         let mut discarded = Vec::new();
+        let mut superseded_jobs = Vec::new();
         let mut state = self.lane.lock();
         let work = loop {
             if state.shutdown {
@@ -917,6 +945,14 @@ impl Preview {
                     break;
                 }
                 discarded.push(job);
+            }
+            // Amendment R37: a paused job a `play` superseded is dropped
+            // untaken (after unlock); the worker posts the playback.
+            let superseded = (state.transport.as_ref()).is_some_and(|job| {
+                matches!(job.kind, JobKind::Paused(_)) && self.lane.superseded_by_play(job.stamp)
+            });
+            if superseded {
+                superseded_jobs.extend(state.transport.take());
             }
             let parked = self.parked == Some(state.version);
             let runnable = (state.transport.as_ref())
@@ -951,7 +987,7 @@ impl Preview {
         };
         drop(state);
         // H-4: cancelled jobs' reply senders drop after unlock, unanswered.
-        drop(discarded);
+        drop((discarded, superseded_jobs));
         work
     }
 
@@ -1049,7 +1085,11 @@ impl Preview {
         let lane = Arc::clone(&self.lane);
         let now = lane.now();
         let mut state = lane.lock();
-        if state.shutdown || state.version != wait.version {
+        let played = || {
+            wait.paused
+                .is_some_and(|stamp| lane.superseded_by_play(stamp))
+        };
+        if state.shutdown || state.version != wait.version || played() {
             return Err(Halt::Superseded);
         }
         // K-3: more sources than readers, or a required set over C.
@@ -1089,7 +1129,7 @@ impl Preview {
             let agent = |job: &AgentJob| !job.cancel.load(Ordering::Acquire);
             let view = WaitView {
                 shutdown: state.shutdown,
-                superseded: state.version != wait.version,
+                superseded: state.version != wait.version || played(),
                 resolved: resolved.is_some(),
                 playback: wait.playback.is_some(),
                 agent_waiting: state.agent.iter().any(agent),
@@ -1099,7 +1139,12 @@ impl Preview {
             match wait_step(view) {
                 // H-4: `granted` drops after unlock.
                 WaitStep::Shutdown | WaitStep::Superseded => {
+                    let withdrawn =
+                        (!state.shutdown && played()).then(|| self.withdraw(&mut state));
                     drop(state);
+                    if let Some(posted) = withdrawn {
+                        self.started(posted, demand);
+                    }
                     return Err(Halt::Superseded);
                 }
                 WaitStep::Held { agent } => {
@@ -1139,6 +1184,15 @@ impl Preview {
                 WaitStep::Wait => state = self.wait_ready(state, wait),
             }
         }
+    }
+
+    /// Amendment R37: a paused wait a `play` superseded withdraws its
+    /// demand (an empty plan, like K-3's) and stops its decodes, so no reader
+    /// seeks to the stale frame. What the plan removed drops after unlock.
+    fn withdraw(&self, state: &mut LaneState) -> Posted<VideoSourceKey, Pinned> {
+        let posted = (state.readers).post(Vec::new(), (HashMap::new(), 0), self.lane.now());
+        self.stop(&state.readers.decoding());
+        posted
     }
 
     /// K-2: admit the job's set (its G once). Draining stops the lookahead
@@ -1273,6 +1327,7 @@ impl Preview {
         let wait = FrameWait {
             version,
             playback: None,
+            paused: Some(job.stamp),
         };
         match self.render_monitor(&job.scene, at, &wait) {
             Ok(Some(texture)) => self.publish(PreviewFrame {
@@ -1318,13 +1373,17 @@ impl Preview {
         from: TimeCode,
     ) -> Result<Held, Attempt> {
         let document = Arc::clone(&job.scene.document);
-        if self.playback_version != Some(version) {
+        let first = self.playback_version != Some(version);
+        if first {
             self.playback_version = Some(version);
             self.next_at = from.0;
         }
         let frame_ms = frame_ms(document.fps);
         let lead = lead_frames(self.render_ewma_ms, frame_ms);
-        let target = (self.clock.position().0 + lead).max(self.next_at);
+        // Amendment R37: the first target is `from` (the clock's frame if it
+        // already passed it), not clock + lead.
+        let ahead = if first { 0 } else { lead };
+        let target = (self.clock.position().0 + ahead).max(self.next_at);
         if target >= document.duration.0 {
             self.parked = Some(version);
             return Err(Attempt::Parked);
@@ -1336,6 +1395,7 @@ impl Preview {
         let terms = FrameWait {
             version,
             playback: Some(started + wait),
+            paused: None,
         };
         let rendered = self.render_monitor(&job.scene, at, &terms);
         let took = started.elapsed().as_secs_f64() * 1_000.0;
@@ -1627,6 +1687,124 @@ pub(crate) mod tests {
         assert_eq!(shown, [(15, 5), (20, 6)]);
     }
 
+    /// Amendment R37 (start-up): a paused job issued before a `play` is
+    /// superseded by it: dropped untaken, or, once taken, it posts no plan
+    /// and publishes nothing; one the `play` did not precede still renders.
+    #[test]
+    fn a_play_supersedes_the_paused_job_issued_before_it() {
+        let (document, _workload) = cut_document();
+        let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+        let lane = Arc::clone(&preview.lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(9)),
+            stamp(1, 1),
+        )));
+        lane.issue_play(2);
+        assert!(preview.next_work(false).is_none(), "dropped untaken");
+        assert!(lane.lock().transport.is_none());
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(9)),
+            stamp(2, 3),
+        )));
+        let taken = preview
+            .next_work(false)
+            .expect("the play's own resting frame");
+        lane.issue_play(3);
+        preview.execute(taken);
+        assert!(
+            frames.try_recv().is_err(),
+            "a superseded job publishes nothing"
+        );
+        let state = lane.lock();
+        assert_eq!(state.readers.version(), 0, "and posts no plan");
+        assert!(state.readers.slots.is_empty(), "no reader started");
+        drop(state);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(9)),
+            stamp(3, 4),
+        )));
+        let work = preview.next_work(false).expect("issued with the play");
+        preview.execute(work);
+        assert_eq!(frames.try_recv().expect("rendered").at, TimeCode(9));
+    }
+
+    /// Amendment R37 (start-up): a `play` issued while a paused job waits
+    /// for its readers withdraws that demand and stops the decodes, so no
+    /// reader decodes the stale frame.
+    #[test]
+    fn a_play_withdraws_a_waiting_paused_demand() {
+        let (document, _workload) = cut_document();
+        let lane = Arc::new(Lane::default());
+        let (gate, frames, thread) = gated_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(0)),
+            stamp(1, 1),
+        )));
+        // Frame 0: source 0 at 0 and 14 (two regions), source 1 at 7.
+        wait_until(&lane, |state| state.readers.decoding().len() == 3);
+        lane.issue_play(2);
+        // The withdrawal notifies only the readers: poll for it.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let withdrawn = |state: &LaneState| {
+            let slots = &state.readers.slots;
+            slots.iter().all(|slot| slot.plan.required.is_empty())
+        };
+        while !withdrawn(&lane.lock()) {
+            assert!(
+                Instant::now() < deadline,
+                "the play never withdrew the demand"
+            );
+            thread::yield_now();
+        }
+        drop(gate);
+        wait_until(&lane, |state| state.readers.decoding().is_empty());
+        assert_eq!(
+            lane.cancelled.load(Ordering::Acquire),
+            3,
+            "every decode stopped"
+        );
+        let state = lane.lock();
+        assert_eq!(state.readers.ring_bytes(), (0, 0), "no stale frame decoded");
+        drop(state);
+        assert!(frames.try_recv().is_err(), "nothing published");
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R37 (start-up): playback's first target is its start
+    /// frame, not clock + lead; once the clock passed it, the clock's frame.
+    #[test]
+    fn playback_first_targets_its_start_frame() {
+        for (clock_at, from, first) in [(0, 0, 0), (12, 12, 12), (5, 3, 5)] {
+            let clock = Arc::new(SharedClock::new());
+            let (mut preview, _frames) = test_preview(Arc::clone(&clock));
+            preview.faults.fake_render.store(true, Ordering::Release);
+            preview.faults.step_hold.store(true, Ordering::Release);
+            preview.render_ewma_ms = 60.0; // a lead of two frames
+            let lane = Arc::clone(&preview.lane);
+            let document = Arc::new(title_card((64, 64), 1_000));
+            clock.set_fps(document.fps);
+            clock.set_frame(TimeCode(clock_at));
+            let playback = JobKind::Playback {
+                from: TimeCode(from),
+            };
+            lane.post(Some(job(&document, playback, stamp(2, 2))));
+            let Some(Work::Playback(job, version)) = preview.next_work(false) else {
+                panic!("the playback attempt");
+            };
+            assert_eq!(preview.run_playback(&job, version), Attempt::Published);
+            assert_eq!(preview.published, Some((2, first)), "from {from}");
+            // Later targets lead the clock again.
+            assert_eq!(preview.run_playback(&job, version), Attempt::Pending);
+            let held = preview.held.as_ref().expect("held").frame.at.0;
+            assert_eq!(held, clock_at + 2, "from {from}");
+        }
+    }
+
     /// I13: FIFO, a bound of eight with an immediate prefixed refusal, and
     /// exactly one reply per job.
     #[test]
@@ -1694,7 +1872,8 @@ pub(crate) mod tests {
         let document = Arc::new(title_card((64, 64), 100));
         clock.set_fps(document.fps);
         clock.set_frame(TimeCode(10));
-        let playback = JobKind::Playback { from: TimeCode(10) };
+        // R37: the first target is `from`, here one frame ahead of the clock.
+        let playback = JobKind::Playback { from: TimeCode(11) };
         lane.post(Some(job(&document, playback, stamp(2, 2))));
         let flags: Vec<_> = (0..4)
             .map(|_| {
@@ -1782,7 +1961,8 @@ pub(crate) mod tests {
             clock.set_fps(document.fps);
             clock.set_frame(TimeCode(10));
             lane.counters().begin(Instant::now(), 10, 33.3, 1_000, 2);
-            let playback = JobKind::Playback { from: TimeCode(10) };
+            // R37: the first target is `from`, here one frame ahead of the clock.
+            let playback = JobKind::Playback { from: TimeCode(11) };
             lane.post(Some(job(&document, playback, stamp(2, 2))));
             let Some(Work::Playback(job, version)) = preview.next_work(false) else {
                 panic!("the playback attempt");
@@ -1824,7 +2004,8 @@ pub(crate) mod tests {
         clock.set_fps(document.fps);
         clock.set_frame(TimeCode(10));
         lane.counters().begin(Instant::now(), 10, 33.3, 1_000, 2);
-        let playback = JobKind::Playback { from: TimeCode(10) };
+        // R37: the first target is `from`, here one frame ahead of the clock.
+        let playback = JobKind::Playback { from: TimeCode(11) };
         lane.post(Some(job(&document, playback, stamp(2, 2))));
         let Some(Work::Playback(job, version)) = preview.next_work(false) else {
             panic!("the playback attempt");
@@ -2159,6 +2340,7 @@ pub(crate) mod tests {
         let wait = FrameWait {
             version: preview.lane.lock().version,
             playback: Some(Instant::now() + Duration::from_secs(60)),
+            paused: None,
         };
         let rendered = preview.render_monitor(&scene, TimeCode(at), &wait);
         let Ok(Some(frame)) = rendered else {
