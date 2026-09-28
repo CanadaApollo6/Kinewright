@@ -1080,6 +1080,9 @@ impl Preview {
         // when admission counts them (review B S2).
         self.bind(Some(scene.generation), &scene.lut);
         let frames = self.schedule(&demand, at, wait)?;
+        // R38 D2: an agent job run while the wait was suspended binds its
+        // own document's LUT library; composite with this scene's.
+        self.bind(Some(scene.generation), &scene.lut);
         let frame = match frames {
             Some((frames, pins, generated)) => {
                 let frame =
@@ -2720,6 +2723,107 @@ pub(crate) mod tests {
         drop(release);
         let shown = frames.recv_timeout(Duration::from_secs(60));
         assert_eq!(shown.expect("the paused frame").at, TimeCode(0));
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// R38 D2: two documents whose managed look (the same `LutAssetId`)
+    /// resolves to different lattices. A's paused wait suspends for an agent
+    /// thumbnail of B, which binds B's library; A's frame is still A's
+    /// synchronous render, not B's.
+    #[test]
+    fn a_suspended_wait_composites_with_its_own_lut() {
+        use kinewright_core::LutAssetId;
+        let (document, _workload) = cut_document();
+        let directory = TempDirectory::new("pf1-r38-d2");
+        let store = crate::lut_store::LutStore::for_project(&directory.path("d2.kinewright"))
+            .expect("the store");
+        let look = |name: &str, scale: [f64; 3]| {
+            let rows = (0..8).map(|corner: u8| {
+                let [r, g, b] = [corner & 1, corner >> 1 & 1, corner >> 2 & 1].map(f64::from);
+                format!(
+                    "{:.6} {:.6} {:.6}\n",
+                    r * scale[0],
+                    g * scale[1],
+                    b * scale[2]
+                )
+            });
+            let text: String = std::iter::once("LUT_3D_SIZE 2\n".to_owned())
+                .chain(rows)
+                .collect();
+            let path = directory.path(name);
+            std::fs::write(&path, text).expect("the look");
+            let import = store.import_lut_asset(&path).expect("the look imports");
+            let asset = import.into_lut_asset(LutAssetId(1));
+            let (library, _) = LutLibrary::build(std::slice::from_ref(&asset), Some(&store));
+            assert_eq!(library.len(), 1, "the managed LUT is verified");
+            let mut looked = (*document).clone();
+            let linear = crate::color_pipeline::LutInputEncoding::Linear.token();
+            let effect = crate::mo2_fixtures::effect(
+                1,
+                "creative_look",
+                &[
+                    ("lut_asset_id", 1),
+                    ("mix_basis_points", 10_000),
+                    ("input_encoding_token", linear),
+                ],
+            );
+            for clip in looked.tracks.iter_mut().flat_map(|track| &mut track.clips) {
+                clip.effects.push(effect.clone());
+            }
+            looked.lut_assets = vec![asset];
+            looked.validate().expect("the looked document is valid");
+            (Arc::new(looked), Arc::new(library))
+        };
+        let (a, a_lut) = look("a.cube", [0.6, 0.9, 1.0]);
+        let (b, b_lut) = look("b.cube", [1.0, 0.5, 0.7]);
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(a.resolution),
+        };
+        let resolution = scale.output_resolution(a.resolution);
+        let reference = |library: &Arc<LutLibrary>| {
+            let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+            renderer.set_lut_library(Arc::clone(library));
+            let frame =
+                renderer.render_live(&a, TimeCode(0), resolution, scale, DecodeStrategy::Seek);
+            frame.expect("the reference").rgba.to_vec()
+        };
+        let expected = reference(&a_lut);
+        assert_ne!(expected, reference(&b_lut), "not vacuous: the looks differ");
+
+        let lane = Arc::new(Lane::default());
+        let (release, held) = bounded::<()>(0);
+        // Frame 0: source 0 at 0 and 14, source 1 at 7 (held).
+        *lane.hold_at.lock().expect("hold") = Some((7, held));
+        let (gate, frames, thread) = gated_preview(&lane);
+        drop(gate);
+        let mut paused = job(&a, JobKind::Paused(TimeCode(0)), stamp(1, 1));
+        paused.scene.lut = Arc::clone(&a_lut);
+        lane.post(Some(paused));
+        wait_until(&lane, |state| state.readers.ring_bytes().0 == 2);
+        let (reply, response) = bounded(1);
+        let thumbnail = AgentJob {
+            work: AgentWork::Thumbnail {
+                document: Arc::clone(&b),
+                lut: Arc::clone(&b_lut),
+                at: TimeCode(0),
+                max_width: 64,
+                reply,
+            },
+            cancel: Arc::default(),
+        };
+        assert!(lane.try_push(thumbnail));
+        let thumbnail = response.recv_timeout(Duration::from_secs(60));
+        assert!(thumbnail.expect("the thumbnail ran").is_ok());
+        assert_eq!(lane.lock().readers.ring_bytes().0, 2, "A is still waiting");
+        drop(release);
+        let shown = frames.recv_timeout(Duration::from_secs(60));
+        let shown = shown.expect("A's paused frame");
+        assert_eq!(shown.at, TimeCode(0));
+        assert!(
+            *shown.texture.rgba == expected,
+            "A composited with A's look"
+        );
         lane.shut_down();
         join_within(thread);
     }
