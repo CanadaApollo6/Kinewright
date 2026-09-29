@@ -194,10 +194,11 @@ pub fn initialize_ffmpeg() -> Result<(), MediaError> {
 /// Limit `FFmpeg`'s own logging to warnings and errors, once per process.
 ///
 /// `FFmpeg` logs at info level by default, straight to the process's stderr:
-/// swscale alone prints "No accelerated colorspace conversion found ..." for
-/// every scaler it builds, which is noise for users and interleaves with the
-/// test harness's output. Nothing calls `FFmpeg` without first opening an input
-/// or output, so the openers call this; it is cheap after the first call.
+/// libx264 alone prints its CPU capabilities, banner and encode statistics for
+/// every export. Warnings stay visible, including swscale's "No accelerated
+/// colorspace conversion found ..." (an `AV_LOG_WARNING` in `FFmpeg` 8). Nothing
+/// calls `FFmpeg` without first opening an input or output, so the openers call
+/// this; it is cheap after the first call.
 pub(crate) fn quiet_ffmpeg_log() {
     static QUIET: std::sync::Once = std::sync::Once::new();
     QUIET.call_once(|| ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Warning));
