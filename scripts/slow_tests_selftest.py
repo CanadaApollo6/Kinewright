@@ -181,6 +181,54 @@ class PartialParse(unittest.TestCase):
     def index_of(self, lines, fragment):
         return next(i for i, line in enumerate(lines) if fragment in line)
 
+    def test_native_ffmpeg_log_prefixes_on_result_lines_still_parse(self):
+        # CI run 36536620605: FFmpeg's av_log writes `[swscaler @ 0x...] ` to stderr without
+        # a newline, and libtest's next result line landed after it on the same line.
+        for windows in (False, True):
+            lines = self.lines(windows)
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            lines[at] = "[swscaler @ 0x7f073d6b8740] " + lines[at]
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and "ignored" in line)
+            lines[at] = "[h264 @ 0x55d1c0a1b2c0] [swscaler @ 0x7f073d6b8740] " + lines[at]
+            # Windows prints the address without 0x, and a message can also trail the outcome.
+            at = next(
+                i for i, line in enumerate(lines)
+                if line.startswith("test ") and line.endswith(" ok") and i > at
+            )
+            lines[at] = (
+                "[swscaler @ 000001F4F555A800] " + lines[at]
+                + "[swscaler @ 000001F4A934BE80] No accelerated colorspace conversion found from yuv420p to rgba64le."
+            )
+            os_name = "windows" if windows else "linux"
+            code, out = check(st.verify_fast, "\n".join(lines) + "\n", os_name)
+            self.assertEqual(code, 0, out)
+
+    def test_an_ffmpeg_fragment_before_the_outcome_keeps_the_outcome(self):
+        # Libtest writes the name and the outcome separately, so a fragment can land between them.
+        for windows in (False, True):
+            lines = self.lines(windows)
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            lines[at] = lines[at][: -len("ok")] + "[swscaler @ 0x1] ok[swscaler @ 0x2] trailing message"
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and "ignored" in line)
+            name, _, outcome = lines[at].partition(" ... ")
+            lines[at] = f"{name} ... [h264 @ 000001F4A934BE80] {outcome}"
+            code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
+            self.assertEqual(code, 0, out)
+
+    def test_ffmpeg_stripping_leaves_names_and_outcomes_intact(self):
+        self.assertEqual(st.strip_ffmpeg_log("test a::b ... [x @ 0x1] ok"), "test a::b ... ok")
+        self.assertEqual(st.strip_ffmpeg_log("test a::b ... FAILED[x @ 0x1] msg"), "test a::b ... FAILED")
+        # A fragment inside the name is not stripped, so the row no longer matches its allowlist entry.
+        self.assertEqual(st.strip_ffmpeg_log("test a[x @ 0x1] b ... ok"), "test a[x @ 0x1] b ... ok")
+        # Nothing but a fragment where the outcome belongs: the outcome is not invented.
+        self.assertEqual(st.strip_ffmpeg_log("test a::b ... [x @ 0x1] "), "test a::b ... ")
+
+    def test_foreign_text_that_is_not_an_ffmpeg_prefix_is_still_a_parse_failure(self):
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at] = "garbage " + lines[at]
+        self.assert_unparsable(lines, "summary says")
+
     def test_a_lost_header_is_rejected(self):
         for windows in (False, True):
             lines = self.lines(windows)
