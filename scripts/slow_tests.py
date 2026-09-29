@@ -88,6 +88,45 @@ def strip_ffmpeg_log(line: str) -> str:
     return head + sep + rest
 
 
+OUTCOME_LINE = re.compile(r"^(?:ok|FAILED|ignored(?:, .*)?)$")
+
+
+def result_lines(log: str):
+    """(line number, line) of `log` with FFmpeg fragments stripped (strip_ffmpeg_log), and a
+    result split by a whole FFmpeg message rejoined.
+
+    A complete message, newline included, can land after `test name ... `, which pushes the
+    outcome to a line of its own (pf1 R43 gate log: `test x ... [swscaler @ 0x..] No accelerated
+    colorspace conversion ...` then `ok`). The outcome is taken from the next line that is not
+    itself an FFmpeg message, and only if that line is nothing but an outcome; otherwise the
+    result keeps an empty outcome and the section counts reject it.
+    """
+    pending = None  # (number, "test name ... ") awaiting its outcome
+    for number, raw in enumerate(log.splitlines(), 1):
+        line = strip_ffmpeg_log(raw)
+        if pending is not None:
+            if re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line):
+                continue
+            if OUTCOME_LINE.match(line):
+                yield pending[0], pending[1] + line
+                pending = None
+                continue
+            yield pending
+            pending = None
+        head, sep, rest = FFMPEG_LOG_PREFIX.sub("", raw).partition(" ... ")
+        if (
+            sep
+            and head.startswith("test ")
+            and re.match(FFMPEG_LOG, rest)
+            and not OUTCOME.match(FFMPEG_LOG_PREFIX.sub("", rest))
+        ):
+            pending = (number, head + sep)
+            continue
+        yield number, line
+    if pending is not None:
+        yield pending
+
+
 def read_entries(path: Path) -> list[tuple[str, str, str]]:
     """`<binary> <test path> <source file>` lines; the path may not contain `#`."""
     entries = []
@@ -310,8 +349,7 @@ def parse(log: str) -> list[tuple[str, str, str]]:
     def fail(number: int, message: str):
         raise UnparsableLog(f"line {number}: {message}")
 
-    for number, line in enumerate(ANSI.sub("", log).splitlines(), 1):
-        line = strip_ffmpeg_log(line)
+    for number, line in result_lines(ANSI.sub("", log)):
         running = RUNNING.match(line)
         doc = DOC_TESTS.match(line)
         if running or doc:
