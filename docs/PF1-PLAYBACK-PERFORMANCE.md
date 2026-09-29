@@ -184,7 +184,8 @@ horizon, down to just in time, and counts `lookahead_starved`.
 C, or needs more distinct sources than R readers (H-5), is rendered as today by
 the preview's synchronous `FrameRenderer` (its own cache, the S1d window), after
 the preview drops all unpinned lookahead; the result carries the job's stamp
-(R-2). Each counts `sync_fallback_frames{reason}`; G17 requires it rare on
+(R-2). Each counts `sync_fallback_frames{reason}` (Amendment R47 adds a
+third reason, a set detained by detached readers); G17 requires it rare on
 every W workload (the largest W set, 4 sources + 4 titles, is ≈ 80 MiB at
 1024×1280, so expected 0). Bounded streaming, banding and a lazy
 `decoded_layers` are deferred (D11).
@@ -287,9 +288,12 @@ the reader's position in the current plan version (its *floor*, reset at
 each post), so a frame evicted behind it is not read again within the job.
 A stopped decode leaves the reader just before that time, so decoding it
 again is not a rewind. Hence only a reader's first decode in a plan version
-can rewind: **at most one rewind per reader per plan version**, and a job
-posts one plan version. A replan posted mid-job is the next job's version.
-The exhaustive and seeded models check this on every decode.
+can rewind: **at most one scheduled-frame rewind per reader per plan
+version**, and a job posts one plan version. A replan posted mid-job is the
+next job's version. The bound counts the scheduler's decodes, not FFmpeg's
+seeks: a decode retried after a failure or a reopen may seek again, and it
+does not bound those (Amendment R47). The exhaustive and seeded models check
+this on every decode.
 
 **H-2 [S2b-1] `Sched`: shared state and participant states.** A
 `Mutex<SchedState>` with condvars `work` (readers) and `ready` (preview) holds
@@ -385,7 +389,9 @@ preview replies "media worker stopped" to an active unreplied agent job,
 finishes any ME16 deadline-free wait, runs G-7 teardown (no epoch needed, G-4)
 and exits. (5) The worker joins readers, then the preview, without timeout; it
 stays detached from the app, as today, so the UI never blocks, and a GPU wait
-that never completes keeps its thread and charges (ME16's stance).
+that never completes keeps its thread and charges (ME16's stance). (Amendment
+R47: the preview's join of its readers ends at `RETIRE_DEADLINE`, detaching a
+reader stuck in IO.)
 
 **H-7 [S2b-4] Idle.** Engine constructed, no document: +0 threads. First render
 (`set_document` → `present(0)` → a paused job): +1 preview, plus readers of the
@@ -415,7 +421,9 @@ bounds the wait and narrows the claim to readers and the preview.)
 (re-review R41 RS-1, RS-2, RS-4, notes 1 and 2).**
 *Interrupt.* Every reader's input carries an FFmpeg `AVIOInterruptCB` that
 reads the reader's stop flag, so a retired reader's open (probing included),
-seek or packet read ends at the file's next read with `AVERROR_EXIT`. The
+seek or packet read ends at the file's next read with `AVERROR_EXIT`. This
+covers local-file IO on the reader's own thread (Amendment R47): a protocol
+that reads on a helper thread, such as FFmpeg's `async`, is not claimed. The
 reader's open checks the flag before the file opens, and after (note 1). The
 packet loop reads one packet per turn, checking the flag first.
 `ffmpeg-next`'s `packets()` retried an interrupted read forever.
@@ -427,10 +435,11 @@ milliseconds: a whole keyframe-to-target seek took 12–41 ms, and the
 pre-S1 1080×1920 conversion 81 ms. 200 ms covers that with room, and stays
 under R43's 250 ms ceiling for the stall after an edit that removes a
 source. Past the deadline, the readers still alive
-are *detached*. Later retirements do not wait for them, their permits return
-(they are blocked, so their frame threads are idle), the frame renders, and
+are *detached*. Later retirements do not wait for them, the frame renders, and
 `PlaybackStats::retire_overruns` counts the wait. A detached reader keeps its
-slot until it exits, and the reader limit counts it.
+slot, its permits and its bytes in flight until it exits (Amendment R47
+withdrew R43's return of its permits at the deadline: a reader past 200 ms
+may still be decoding or converting).
 *Degraded case.* A detached reader closes its decoder when its blocked call
 returns. Until then its file stays open, so on Windows it stays locked.
 *Exit guard.* A reader's exit is an RAII guard that runs on return and on
@@ -445,6 +454,35 @@ document's first frame (unless the retirement overran). Other holders keep a
 removed file until their own job ends, bounded by that job:
 - visual-asset jobs (`analysis.rs`, such as a waveform's audio decode);
 - proof renderers (`monitor_proof_for_document` in `engine.rs`).
+
+**Amendment R47 [S2b] Detached readers never stall a frame, and H-5's bound
+stays exact (re-review R43 blockers 1–3).**
+*K-3 for a detained set.* A detached reader may never exit. A job's
+required set is *detained* when it cannot be admitted until detached readers
+exit: its required regions need more slots than R leaves beside them (or
+more readers of a source than H-1 allows), the detached readers hold the
+whole permit pool, or the set does not fit in C beside their bytes in flight.
+Detached readers can only exit while the job waits, which frees, so the
+preview decides once, before it posts the plan: a detained frame renders by
+K-3's synchronous fallback, counted `sync_fallback_frames` and
+`detained_fallback_frames` (the timing lanes print
+`engine_detained_fallback_frames`). Each later job decides again, so readers
+serve again once the detached readers exit.
+*H-5, exactly.* Accounted reader permits never exceed P: a detached reader
+keeps its permits until its exit guard forgets them, so a stuck reader
+reduces the readers' capacity, and K-3 serves the frames it detains.
+Including detached readers, configured reader codec-thread allocations are
+bounded by min(R × min(P, 16), P + D), where D sums detached readers'
+retained allocations. Detached work may remain busy indefinitely.
+Synchronous decoders (K-3's included) remain outside this bound.
+*Shutdown.* The preview's join of its readers (H-6 (5)) is bounded by the
+same `RETIRE_DEADLINE`. A reader still alive then is detached: its thread is
+left to exit on its own (it owns a reference to the lane), and
+`PlaybackStats::shutdown_detached_readers` counts it (the timing lanes print
+`engine_shutdown_detached_readers`).
+*Windows-safe witnesses.* A witness whose reader holds a file drops the
+source from the document first and deletes the file only after the reader
+exits, since Windows cannot delete a file a reader holds open.
 
 **H-8 [S2b-1…4] Scheduler tests.** Each S2b commit extends an exhaustive
 (event × state) model of `SchedState` + `Permits`: quiescence timeout in every

@@ -4456,18 +4456,20 @@ and the survivor was rerun and killed. **Every mutation is killed at the final c
   call and one frame conversion that are already running. By E0's figures that is tens of milliseconds: a whole
   keyframe-to-target seek took 12–41 ms, and the pre-S1 1080×1920 conversion 81 ms. 200 ms covers that with room and
   stays under R43's 250 ms ceiling on the stall after an edit that removes a source.
-- **Deviation from P46's wording: detached readers' permits return at the deadline.** P46 had the reader's own exit
-  guard release its permits. At P = 2, though, a stuck reader holds the permits its replacement needs, so the "frame
-  at the deadline" never arrives: mutation 1g shows it (two witnesses time out).
-  - A detached reader is blocked inside one IO or libavcodec call, so its frame threads are idle. H-5's P is exceeded
-    only by those idle threads, and only until the reader exits.
-  - The exit guard's `forget` is then a no-op.
-  - The detached reader keeps its slot (the reader limit counts it) until it exits.
+- **Deviation from P46's wording, withdrawn by R47 (E12.17): detached readers' permits returned at the deadline.**
+  P46 had the reader's own exit guard release its permits. At P = 2, though, a stuck reader holds the permits its
+  replacement needs, so the "frame at the deadline" never arrived: mutation 1g showed it (two witnesses time out).
+  - The justification given here was wrong. It said a detached reader is blocked inside one IO or libavcodec call,
+    so its frame threads are idle and H-5's P is exceeded only by idle threads. A reader past 200 ms may still be
+    decoding or converting (re-review R43 blocker 2), so the return broke H-5's bound. It also left P = 1 (the
+    detached reader holds the only slot) and retained bytes stalling a frame (blocker 1).
+  - R47 reverts it: a detached reader keeps its permits, slot and bytes until its exit guard runs, and a frame they
+    detain renders by K-3 (E12.17).
 - **The degraded case (Windows).** A detached reader closes its decoder when its blocked call returns. Until then its
   file stays open, and on Windows it stays locked. `retire_overruns` counts each wait that ended this way.
   `PlaybackStats` gains `retire_overruns`, and the P-play lanes print it as `engine_retire_overruns`.
-- **Unchanged (H-6).** `Preview::drop` still joins every reader. A reader blocked in the OS forever would hold
-  shutdown, but not playback.
+- **Unchanged (H-6), until R47.** `Preview::drop` still joins every reader. A reader blocked in the OS forever would
+  hold shutdown, but not playback. (R47 bounds the join by the deadline: E12.17.)
 - **Item 5.** The design's R41 file-release amendment now covers only readers and the preview's synchronous renderer,
   unless the retirement overran. Visual-asset jobs (`analysis.rs`, such as a waveform's decode) and proof renderers
   (`monitor_proof_for_document`) hold a removed file until their own job ends. E12.15's "other handles" note says the
@@ -4561,3 +4563,204 @@ Nothing was timed for R43. What is ready:
   A copy is `s2b-logs/r43-plan-gates.txt.gz`.
 - **Unchanged:** the S0 side of G18 (`media-s0-g18`) and the step-0 A/B plan (`plan-ab.txt`).
 - The lanes print `engine_retire_overruns`. The W workloads remove no source mid-run, so it should read 0.
+
+### E12.17 R47 fixes: detached readers never stall a frame; H-5 exact; CI run 36547988690
+
+Ruling R47 (`rereview-r43.md`, which rejected closing S2b's non-timing part at `d041829`; orchestrator note P50)
+kept RS-2, RS-4, note 5 and RS-3's stale-failure fix closed, and raised three blockers:
+
+- (a) a stuck detached reader could stall a frame indefinitely: at P = 1 it holds the only slot, and its retained
+  `Hold` bytes can block admission with slots spare;
+- (b) R43's return of a detached reader's permits at the deadline broke H-5's P bound (E12.16.2's justification,
+  "its frame threads are idle", was unsupported);
+- (c) two witnesses deleted a file while a reader held it open, which Windows refuses.
+
+CI run 36547988690 at `d041829` failed on both OSes, and both failures are in this round:
+
+- Windows, fast tier: `a_retirement_stuck_in_io_renders_at_the_deadline` (preview.rs:3871:37) and
+  `an_interrupt_ends_a_retired_readers_open` (preview.rs:3832:37) both panicked with `the source is removed: Os {
+  code: 32, kind: Uncategorized, message: "The process cannot access the file because it is being used by another
+  process." }` (blocker c); the media line was `test result: FAILED. 961 passed; 2 failed; 56 ignored; 0 measured; 0
+  filtered out; finished in 663.09s`.
+- Linux, fast tier: `preview::tests::a_widening_plan_rebalances_the_permits` panicked at preview.rs:2482:29, "the lane
+  never reached the condition" (E12.17.3).
+
+Commits on `pf1/impl` after `d041829`: the fix `13fd3fd`, the widening witness `ae0249e`, the merge of `origin/main`
+(`1593758`, the second CI parser fix) as `9b09a30`, and the docs commit with this section. **The timing half is still
+pending: quiet window** (E12.17.5).
+
+#### E12.17.1 What changed
+
+- **Item 1, the revert.** `Preview::close` no longer forgets a detached reader's permits. A detached reader keeps its
+  slot, its permits and its bytes in flight until its own `Exit` guard runs, so accounted reader permits never exceed
+  P. The "idle threads" comment and E12.16.2's deviation are corrected.
+- **Item 2, K-3 for a detained set.** `Readers::detained(detached, planned, set)` is true when the job's required
+  regions need more slots than R leaves beside the detached readers, or more readers of a source than H-1 allows beside
+  them; when they hold the whole pool; or when the set does not fit in C beside their bytes in flight. It considers
+  slots and permits only if the plan has a required region, so an empty document is never detained. The preview
+  decides once, before the post (`Preview::plan`): detached readers can only exit while the job waits, which frees.
+  A detained frame takes K-3's synchronous fallback with reason 2 (`LaneState::fallbacks` is now `[u64; 3]`), counted
+  in `sync_fallback_frames` and the new `PlaybackStats::detained_fallback_frames`; the timing lanes print
+  `engine_detained_fallback_frames`. Each job decides again, so readers serve again once the detached readers exit.
+- **Item 3, Windows-safe witnesses.** Every witness that holds a reader in a file's IO now drops the source from the
+  document first and deletes the file only after the reader has exited, asserting the delete succeeds ("the reader
+  released its file"). No test deletes a held file (`grep remove_file` in `preview.rs`, `engine.rs`, `decode.rs` and
+  `render.rs`: only these post-exit deletes). This is verified on Windows only by CI on the push.
+- **Item 4, bounded shutdown.** `Preview::drop` waits for its readers at most `RETIRE_DEADLINE`, joins those whose
+  slot is gone (their `Exit` ran), and leaves a reader still alive detached: its thread owns an `Arc<Lane>` and exits
+  on its own. `PlaybackStats::shutdown_detached_readers` counts it; the lanes print
+  `engine_shutdown_detached_readers`. The preview's reader handles are now kept by id.
+- **Item 5, deterministic witnesses.** The supersession and shutdown escapes are witnessed on the test thread with a
+  seam-held reader, asserting `Halt::Superseded`, no overrun and nothing detached, never a time. The
+  interruptible-open witness asserts through the seam that the callback saw the flag and the open failed with
+  `AVERROR_EXIT`, and no longer prints an overrun count. RS-3's reader wake stays documented as partial (E12.16.1).
+- **Item 6, docs.** Design §6 gains Amendment R47 (K-3 for a detained set, H-5 written exactly with Astra's bound
+  min(R × min(P, 16), P + D), bounded shutdown, Windows-safe witnesses), qualifies the interrupt to local-file IO on the
+  reader's thread (FFmpeg's `async` protocol reads on a helper thread), and restates RS-3's bound as "at most one
+  scheduled-frame rewind per reader per plan version", which does not bound FFmpeg's seeks. R43's retirement
+  amendment, H-6 (5) and K-3's reasons are updated in place.
+
+#### E12.17.2 Closure table
+
+Each mutation was applied alone, with only its named witnesses run (`s2b-logs/r47-mutations.log.gz`; the script is
+`r47-mutate.sh.gz`). R47-1 and R47-7 ran first on the working tree, before `plan` was extracted from `schedule` for
+clippy's line limit and rustfmt rewrapped the join, and were rerun on `13fd3fd` (1c, 7c). The other mutated lines
+are textually identical at `13fd3fd`. **11 runs over 9 distinct mutations; every one is killed, none survived.**
+
+| Item | Witness | Mutation | Raw result under the mutation |
+|---|---|---|---|
+| 2 | `preview::tests::at_p1_a_stuck_detached_reader_leaves_its_frames_to_k3`, `at_p2_…` and `a_detached_readers_bytes_leave_its_frames_to_k3` | 1: no detained fallback | 1: `test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 1026 filtered out; finished in 60.68s`, "the frame, by K-3: Timeout" (three); 1c at `13fd3fd`: `… 0 passed; 3 failed; … finished in 60.63s` |
+| 1 | the same three | 2: R43's permit return at the deadline restored | `test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 1026 filtered out; finished in 0.83s`, "it keeps its permits" (left: 0) |
+| 2 | `sched::tests::detached_readers_detain_a_plan_by_what_they_keep` (+ the three) | 3: no slot clause | `test result: FAILED. 3 passed; 1 failed; … finished in 0.87s`, "no slot is free" |
+| 2 | as above | 4: no H-1 clause | `test result: FAILED. 3 passed; 1 failed; … finished in 0.89s`, "a third reader of 0" |
+| 2 | as above | 5: no permit clause | `test result: FAILED. 2 passed; 2 failed; … finished in 60.38s`, "no permit is free"; P = 2's "the frame, by K-3: Timeout" |
+| 2 | as above | 6: no bytes clause | `test result: FAILED. 2 passed; 2 failed; … finished in 60.68s`, "not beside f"; the bytes witness's "the frame, by K-3: Timeout" |
+| 4 | `preview::tests::shutdown_detaches_a_reader_stuck_past_the_deadline` | 7: the join unbounded again (every handle joined) | 7: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1028 filtered out; finished in 60.28s`, "the preview did not exit cleanly" (left: `Err(Timeout)`); 7c at `13fd3fd`: `… finished in 60.27s` |
+| 5 | `preview::tests::shutdown_ends_a_retirements_wait` | 8a: no shutdown escape | `test result: FAILED. 1 passed; 1 failed; … finished in 0.74s`, "no deadline" (left: 1) |
+| 5 | `preview::tests::a_newer_post_ends_a_retirements_wait` | 8b: no supersession escape | `test result: FAILED. 1 passed; 1 failed; … finished in 0.73s`, "no deadline" (left: 1) |
+
+- **Isolation.** At P = 1 the detached reader holds both the only slot and the pool, so mutation 3 alone leaves the
+  P = 1 witness green (the permit clause still detains). The pure `sched` witness isolates each clause: eight
+  one-permit detached readers at P = 9 (R = 8) for slots, a detached reader of source 0 and a plan of two regions of
+  0 for H-1, P = 2 for permits and C = 3 f − 1 for bytes, each short of that one resource only, with negatives
+  within all four, with no detached reader, with an empty plan, and after the reader exits.
+- **Without the fixes.** Each witness fails with its fix removed: mutations 1 to 7 each take out one part of
+  items 1, 2 and 4, and 8a/8b take out the escapes item 5 witnesses. The logs show every failure.
+- **Not witnessed (qualified).** RS-3's reader wake stays partial, as in E12.16.1. Windows' file release is asserted by
+  the post-exit deletes, but only CI runs them on Windows.
+
+#### E12.17.3 CI run 36547988690, Linux: `a_widening_plan_rebalances_the_permits`
+
+- **Not caused by R43.** R43 did not change the permit path (`acquire`, `Next::Open`, `Next::Close`, `next()`'s
+  shrink and grow). The test is S2b-2's and passed on every earlier pf1 run, and on Windows in this run.
+- **The cause: the test assumed one thread interleaving.** At P = 20, reader A reads one source on 16 permits; the plan
+  widens to two sources (w = 10). The wait after it required two slots with no permits, which holds only if:
+  - the newcomer B polls for permits while A still holds 16, so it is granted 4 (short);
+  - and B goes inactive after A has released, so it closes to grow at once.
+  - If A closes first (it shrinks as soon as B's ticket is queued), B is granted all 10 and never closes. If B goes
+    inactive before A's release, it re-evaluates only at its 5 s quiescence timer, where it closes and may retire at
+    once. Either way the condition is never met, and the wait times out.
+  - The product behaviour is H-5's in both interleavings: FIFO grants of min(w, free), no reader waiting with permits.
+    The second leaves a short reader short until its next wake (the next job, during playback), a latency only.
+- **Evidence** (`s2b-logs/r47-widening.log.gz`). A probe, not committed, delayed reader 1's (B's) permit poll or
+  reader 0's (A's) close by 300 ms under an environment variable:
+
+  ```
+  old test, no probe:      test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1028 filtered out; finished in 0.37s
+  old test, B's poll late: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1028 filtered out; finished in 60.58s
+  old test, A's close late: test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1028 filtered out; finished in 60.32s
+  new test, no probe:      test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1028 filtered out; finished in 0.38s
+  new test, B's poll late: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1028 filtered out; finished in 0.90s
+  new test, A's close late: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1028 filtered out; finished in 5.32s
+  ```
+
+  Both failures read "the lane never reached the condition", CI's message. Under load alone it did not reproduce
+  here: 300 runs of the old test beside 24 CPU-bound loops (all at `nice -n 19`) passed ("load loop bin-old-probe: 300
+  passed, 0 failed of up to 300"), as did 300 of the new ("load loop bin-new-probe: 300 passed, 0 failed of up to
+  300"). CI's media run took 476 s on its runner, so its scheduling is the likelier trigger; the probe shows the
+  interleavings are real, not that CI took a particular one.
+- **The fix (`ae0249e`, test only).** A is held decoding the widened job's frame (`hold_at`); a reader shrinks only
+  while inactive, so A keeps 16 until released and B's grant is 4 whatever the timing (asserted: `[4, 16]`). The wait
+  then asks only that every reader has closed, which, once reached, holds (a reader that retires at its quiescence
+  timer has also closed). The final 10 + 10 is unchanged.
+
+#### E12.17.4 Tests, the gate and line counts
+
+- **New tests: 7**, all fast tier (none marked slow, none ignored):
+  - sched: `detached_readers_detain_a_plan_by_what_they_keep`;
+  - preview: `at_p1_a_stuck_detached_reader_leaves_its_frames_to_k3`, `at_p2_a_stuck_detached_reader_leaves_its_frames_to_k3`,
+    `a_detached_readers_bytes_leave_its_frames_to_k3`, `a_newer_post_ends_a_retirements_wait`,
+    `shutdown_ends_a_retirements_wait` and `shutdown_detaches_a_reader_stuck_past_the_deadline`.
+- **Replaced:** `a_retirement_stuck_in_io_renders_at_the_deadline` became the shared `stuck_retirement(P)`, run by
+  the two `at_p…` witnesses. The media lib goes from 967 to 973 tests.
+- **Changed:** `an_interrupt_ends_a_retired_readers_open` (Windows-safe, asserts through the seam, no `eprintln`) and
+  `a_widening_plan_rebalances_the_permits` (E12.17.3). The `fallbacks` assertions now compare three reasons.
+- **The two long PF1 tests** stay in the fast tier, as ruled.
+- **Per-commit gate.**
+  - `13fd3fd`: media clippy with `-D warnings`, rustfmt on the touched files, and `cargo test -p kinewright-media
+    --lib`: `test result: ok. 973 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out; finished in 170.97s`.
+  - Its witnesses alone: `test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1019 filtered out; finished
+    in 1.02s` and `test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1027 filtered out; finished in 0.59s`.
+  - `ae0249e` (one test changed) ran with the other permit witnesses: `test result: ok. 4 passed; 0 failed; 0 ignored;
+    0 measured; 1025 filtered out; finished in 0.44s`. The stage gate below covers it in full.
+- **The merge of main (`9b09a30`).** `python3 scripts/slow_tests.py lint` read "slow-test manifest and markers agree: 47
+  tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 44 allowlist
+  entries well-formed".
+- **The local stage gate at `9b09a30`.** Every command ran at `nice -n 19`, `-j 4` and `RUST_TEST_THREADS=4`.
+  - `cargo build --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`, each with and without the
+    three `slow-tests` features: exit 0.
+  - `cargo fmt -- --check`: exit 0.
+  - `cargo build -p kinewright-app`: exit 0.
+  - `slow_tests.py lint`: the same line as above.
+  - `cargo test --workspace` (the fast tier), run twice: each gave 36 `test result: ok` lines; 3,458 passed, 0 failed,
+    91 ignored. The media lines were `test result: ok. 973 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out;
+    finished in 169.97s` and `… finished in 169.75s`.
+  - `slow_tests.py verify-fast` on the second log with `--os linux`: "fast tier on linux skipped exactly the 47
+    manifest tests and 44 allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else". Both logs are in
+    `s2b-logs/r47-gate-logs.log.gz`.
+- **A parser gap remains after `1593758`.** `verify-fast` refused the first, equally green run:
+
+  ```
+  could not parse cargo test output: line 57612: kinewright_media: saw 972 passed, 0 failed, 56 ignored, 0 measured, but its summary says 973, 0, 56, 0.
+  ```
+
+  - This is a third shape. An FFmpeg prefix came before `test` on the result's line, the message followed the `...`,
+    and the outcome `ok` came on the next line:
+
+    ```
+    [swscaler @ 0x73c2e0b48d80] test room_tone_store::tests::capture_room_tone_refuses_a_bad_or_over_long_range_before_it_decodes_anything ... No accelerated colorspace conversion found from yuv420p to rgba64le.
+    ok
+    ```
+
+  - Main's two fixes handle a fragment on the result's line (`e86c9ed`) and a whole message between the result and its
+    outcome (`1593758`), not this combination. CI can hit it too.
+  - The test run and `verify-fast` were rerun once, giving the accepted log above.
+- The slow tier and Windows were not run locally. Both run in CI on the push; Windows is where item 3 is really tested.
+
+Non-blank, non-comment `.rs` lines, net, counted as in E12.13.2 (only a `mod tests` block counts as tests):
+
+| Commit | Production | Tests |
+|---|---|---|
+| fix `13fd3fd` | 63 (+85 −22) | 226 (+246 −20) |
+| widening witness `ae0249e` | 0 | 9 (+12 −3) |
+| merge `9b09a30` | 0 | 0 |
+| **R47** | **63** | **235** |
+
+- **Per file** (production + tests): `preview.rs` 32 + 179; `sched.rs` 26 + 56; `pf1_harness.rs` 3; `media.rs` 2.
+- **Docs:** `PF1-PLAYBACK-PERFORMANCE.md` gains Amendment R47, and its RS-3 bound, interrupt scope, R43 retirement
+  text, H-6 (5) and K-3 reasons are corrected in place. E12.16.2's deviation and H-6 bullets are marked withdrawn or
+  updated by R47.
+
+#### E12.17.5 Timing: pending, quiet window
+
+Nothing was timed for R47. What is ready:
+
+- **The binary:** the release test binary at `9b09a30`, `/tmp/kinewright-r37/bins/bin-9b09a30`, sha256
+  `4dd3d04707c0f5beae15f55c9bd1a6b4185634006e6176341f7d50db37b01796`. It is in that directory's `SHA256SUMS`, and
+  `sha256sum -c` passes. It is built from the same code as this docs commit.
+- **The plan:** `plan-gates.txt` now runs every stage-gate lane on that binary: its 25 lane lines and its header are
+  repointed from `bin-3ef47d6`. G18's candidate lane is `G18 LH R47`, and the plan still ends with `@G18 verdict`.
+  A copy is `s2b-logs/r47-plan-gates.txt.gz`.
+- **Unchanged:** the S0 side of G18 (`media-s0-g18`) and the step-0 A/B plan (`plan-ab.txt`).
+- The lanes also print `engine_detained_fallback_frames` and `engine_shutdown_detached_readers`. The W workloads remove
+  no source mid-run and detach no reader, so both should read 0, as should `engine_retire_overruns`.
