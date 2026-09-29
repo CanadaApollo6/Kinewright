@@ -1,8 +1,28 @@
 name: CI
 
+# Two test tiers, both on Linux and Windows (ci/slow-tests.txt lists the slow tier):
+#   fast  every push and pull request that changes more than documentation:
+#         cargo test --workspace with the slow tests skipped, clippy and fmt.
+#   slow  the tests that each take a minute or more (end-to-end scenarios, loudness
+#         measurement, wire-limit probes): a push to main, a manual run, or a push
+#         whose head commit message contains `[slow-tier]`.
+# A push that changes only documentation runs nothing. release.yml is not
+# affected: it triggers on `v*` tags only, which paths-ignore does not filter.
+# Kani proofs moved to kani.yml.
 on:
   push:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE*'
+      - '.gitignore'
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - 'LICENSE*'
+      - '.gitignore'
+  workflow_dispatch:
 
 jobs:
   windows:
@@ -32,8 +52,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Provision FFmpeg, build, test, and lint
+      - name: Provision FFmpeg, test (fast tier), and lint
         shell: pwsh
+        env:
+          PYTHONUTF8: '1'
         run: |
           # pwsh does not stop on a native command's non-zero exit, so without
           # these checks the step's status is the last command's and a failing
@@ -44,10 +66,53 @@ jobs:
           # `cargo build --workspace` on windows-latest is several minutes of
           # MSVC work the test step then repeats. Linux keeps the extra build
           # for the readelf soname gate on the non-test binary.
-          cargo test --workspace
-          if ($LASTEXITCODE -ne 0) { throw "cargo test --workspace exited $LASTEXITCODE" }
+          # slow_tests.py runs `cargo test --workspace` (the slow tests are
+          # ignored without their feature) and fails unless the tests it
+          # skipped are exactly ci/slow-tests.txt plus the ignores that
+          # ci/ignored-tests.txt lists for this OS, each observed as ignored.
+          python scripts/slow_tests.py fast
+          if ($LASTEXITCODE -ne 0) { throw "slow_tests.py fast (cargo test --workspace) exited $LASTEXITCODE" }
           cargo clippy --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw "cargo clippy --workspace --all-targets exited $LASTEXITCODE" }
+
+  windows-slow:
+    name: Windows slow tier
+    runs-on: windows-latest
+    timeout-minutes: 45
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' ||
+        contains(github.event.head_commit.message, '[slow-tier]')))
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-msvc
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Provision FFmpeg and run the slow tier
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\setup-ffmpeg.ps1
+          # Runs exactly the tests in ci/slow-tests.txt with every crate's
+          # `slow-tests` feature on, and fails unless all of them ran and passed.
+          python scripts/slow_tests.py slow
+          if ($LASTEXITCODE -ne 0) { throw "slow_tests.py slow exited $LASTEXITCODE" }
 
   linux:
     name: Linux workspace
@@ -73,7 +138,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Provision FFmpeg, build, test, and lint
+      - name: Check the slow-test manifest and ignored-test allowlist format against the source, and the parser
+        run: |
+          python3 scripts/slow_tests.py lint
+          python3 scripts/slow_tests_selftest.py
+
+      - name: Provision FFmpeg, build, test (fast tier), and lint
         run: |
           # `set -e` alone is not enough: sourcing a script that manipulates
           # shell options can switch it back off, which is how a failing
@@ -85,13 +155,22 @@ jobs:
           set -euo pipefail
           cargo build --workspace || exit 1
           readelf -d target/debug/kinewright-eval | grep -F '[libavcodec.so.62]' || exit 1
-          cargo test --workspace || exit 1
+          # slow_tests.py runs `cargo test --workspace` (the slow tests are
+          # ignored without their feature) and fails unless the tests it
+          # skipped are exactly ci/slow-tests.txt plus the ignores that
+          # ci/ignored-tests.txt lists for this OS, each observed as ignored.
+          python3 scripts/slow_tests.py fast || exit 1
           cargo clippy --workspace --all-targets -- -D warnings || exit 1
 
-  kani:
-    name: Kani proofs
+  linux-slow:
+    name: Linux slow tier
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/main' ||
+        contains(github.event.head_commit.message, '[slow-tier]')))
 
     steps:
       - name: Check out repository
@@ -100,55 +179,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Default key includes rustc (host/release/hash) and a hash of every
-      # Cargo.lock / Cargo.toml, so a lockfile or toolchain bump misses.
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      # `cargo kani setup` downloads the pinned toolchain + CBMC bundle and
-      # no-ops when it is already present, so this cache skips the big
-      # download on warm runners. Both paths: `~/.kani/kani-<version>/
-      # toolchain` is a symlink into the rustup toolchain dir, so caching
-      # only `~/.kani` would restore a dangling link. The toolchain dir
-      # name comes with the Kani version — bump both together.
-      - name: Cache Kani
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.kani
-            ~/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu
-          key: kani-0.68.0
+      - name: Install native build dependencies
+        run: ./scripts/install-linux-deps.sh
 
-      # No native-deps step: kinewright-core is pure Rust (ab_glyph,
-      # crossbeam-channel, schemars, serde, thiserror), and the Kani bundle
-      # ships prebuilt binaries (compiler, CBMC, solvers).
-      - name: Install Kani
-        run: |
-          cargo install --locked kani-verifier --version 0.68.0
-          cargo kani setup
-
-      # Only the named, admitted harnesses (each < 5 min / < 6 GB per the
-      # admission rule in incident.rs): never bare `cargo kani`, which would
-      # also pick up future proofs that do not meet the rule.
-      # MO1 R32: H1–H4 at N=2/3/4 (twelve); ~9 min wall, tightest margin 2.1x
-      # (H1-N4 143 s). H6 translation-equivariance missed the rule (N=2
-      # timeout 900 s, erratum MR1) and rides proptest + segment-local
-      # reasoning instead — it has no harness here by design (R33).
-      - name: Verify admitted proofs
+      - name: Provision FFmpeg and run the slow tier
         run: |
           set -euo pipefail
-          cargo kani -p kinewright-core --harness kani_restore_id_resume || exit 1
-          cargo kani -p kinewright-core --harness kani_compact_json_len_anchor || exit 1
-          cargo kani -p kinewright-core --harness kani_compact_json_len_symbolic || exit 1
-          cargo kani -p kinewright-core --harness mo1_h1_n2 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h1_n3 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h1_n4 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h2_n2 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h2_n3 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h2_n4 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h3_n2 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h3_n3 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h3_n4 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h4_n2 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h4_n3 || exit 1
-          cargo kani -p kinewright-core --harness mo1_h4_n4 || exit 1
+          source ./scripts/setup-ffmpeg.sh
+          set -euo pipefail
+          # Runs exactly the tests in ci/slow-tests.txt with every crate's
+          # `slow-tests` feature on, and fails unless all of them ran and passed.
+          python3 scripts/slow_tests.py slow || exit 1

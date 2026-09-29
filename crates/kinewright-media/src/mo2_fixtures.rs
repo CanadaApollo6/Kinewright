@@ -1221,9 +1221,13 @@ fn cc8_g2_sdr_identity_on(gpu: GpuContext) {
 /// Both GPU lanes (R27): each body runs on the default lane (lavapipe) as
 /// its §13-named test, and all of them run on the physical adapter in one
 /// `--ignored` test (the NVIDIA lane).
+///
+/// An entry may carry attributes (the slow tier marks a probe this way);
+/// they sit on the generated default-lane test only.
 macro_rules! gpu_lanes {
-    ($($name:ident => $body:ident),* $(,)?) => {
+    ($($(#[$meta:meta])* $name:ident => $body:ident),* $(,)?) => {
         $(
+            $(#[$meta])*
             #[test]
             fn $name() {
                 if let Some(gpu) = fixture_gpu_or_skip() {

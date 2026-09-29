@@ -1200,6 +1200,10 @@ mod tests {
     /// −2 hundredths at 48 / 44.1 / 96 kHz; one channel only reads −301; a
     /// stereo tone at peak 0.0708 reads −2300 ±10.
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_997_hz_calibration_tone_reads_its_pinned_values() {
         for (rate, expected) in [(48_000_u32, 0_i32), (44_100, 0), (96_000, -2)] {
             let programme = tone(997.0, 1.0, frames(10.0, rate), rate, 2);
@@ -1231,6 +1235,10 @@ mod tests {
     /// AU3 §7 item A7, per EBU Tech 3341 v3: integrated loudness cases 1–5 at
     /// 1 kHz stereo read −2300 / −3300 / −2300 / −2300 / −2300 ±10.
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn tech_3341_integrated_cases_1_to_5_read_their_pinned_values() {
         let cases: [(&str, Segments, i32); 5] = [
             ("case 1", vec![(-23.0, 20.0)], -2_300),
@@ -1367,6 +1375,10 @@ mod tests {
     /// AU3 §7 item A9, per EBU Tech 3342 v3: loudness range cases 1–4 read
     /// 1 000 / 500 / 2 000 / 1 500 ±10 (case 4 ungated 3 000).
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn tech_3342_loudness_range_cases_1_to_4_read_their_pinned_values() {
         let cases: [(&str, Segments, i32, Option<i32>); 4] = [
             ("case 1", vec![(-20.0, 20.0), (-30.0, 20.0)], 1_000, None),
@@ -1408,6 +1420,10 @@ mod tests {
     /// AU3 §7 item A9 (§3.5): the −60 / −15 relative-gate case reads 176 ±10
     /// gated and 4 500 ungated; a single gated window reads `None`.
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_relative_gate_case_and_the_one_window_floor_hold() {
         let mut meter = LoudnessMeter::new(RATE, 2).unwrap();
         meter
