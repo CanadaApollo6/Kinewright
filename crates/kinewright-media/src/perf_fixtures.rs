@@ -163,6 +163,35 @@ pub(crate) fn cuts(
     Workload(document(resolution, &media, lanes), media.into())
 }
 
+/// Amendment R41 (U-1): `n` assets over one generated source (distinct ids,
+/// so distinct reader keys), one `len`-frame clip each, end to end.
+pub(crate) fn many_sources(resolution: (u32, u32), n: u64, len: i64) -> Workload {
+    let (media, asset) = source("testsrc2", resolution, len, 1);
+    let assets: Vec<MediaAsset> = (1..=n)
+        .map(|id| MediaAsset {
+            id: AssetId(id),
+            ..asset.clone()
+        })
+        .collect();
+    let clips = (assets.iter().zip(0..))
+        .map(|(asset, index)| media_clip(asset.id.0, asset, 0, len, index * len))
+        .collect();
+    let document = Document {
+        resolution,
+        duration: TimeCode(n as i64 * len),
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips,
+        }],
+        media_pool: assets,
+        ..Document::default()
+    };
+    document.validate().expect("many sources are valid");
+    Workload(document, vec![(media, asset)])
+}
+
 /// PF1 G13: four sources, one per track, each whole and screened over the
 /// last, so every frame decodes all four.
 pub(crate) fn four_sources(resolution: (u32, u32), frames: i64) -> Workload {

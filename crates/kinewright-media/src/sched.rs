@@ -45,6 +45,110 @@ fn want(pool: usize, readers: usize) -> usize {
     (pool / readers.max(1)).clamp(1, 16)
 }
 
+/// Amendment R41 (U-1): at most this many sources in a [`SourceMemory`].
+pub(crate) const SOURCE_MEMORY: usize = 256;
+
+/// Amendment R41 (U-1): what the preview remembers per source between jobs
+/// (a frame size, a travel direction). Its owner prunes a source that
+/// leaves the document or the plan; past `cap` sources the least recently
+/// used is forgotten, and is measured or followed again if it returns.
+#[derive(Clone, Debug)]
+pub(crate) struct SourceMemory<K, V> {
+    entries: HashMap<K, (V, u64)>,
+    tick: u64,
+    cap: usize,
+}
+
+impl<K, V> Default for SourceMemory<K, V> {
+    fn default() -> Self {
+        Self::with_cap(SOURCE_MEMORY)
+    }
+}
+
+impl<K, V> SourceMemory<K, V> {
+    pub(crate) fn with_cap(cap: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            tick: 0,
+            cap: cap.max(1),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &K> {
+        self.entries.keys()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter().map(|(key, (value, _))| (key, value))
+    }
+
+    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        self.entries.retain(|key, _| keep(key));
+    }
+}
+
+impl<K: Clone + Eq + Hash, V> SourceMemory<K, V> {
+    /// The value, without touching its recency.
+    pub(crate) fn peek(&self, key: &K) -> Option<&V> {
+        self.entries.get(key).map(|(value, _)| value)
+    }
+
+    /// The value, now the most recently used.
+    pub(crate) fn get(&mut self, key: &K) -> Option<&V> {
+        self.tick += 1;
+        let tick = self.tick;
+        let (value, used) = self.entries.get_mut(key)?;
+        *used = tick;
+        Some(value)
+    }
+
+    /// `key`'s value (inserted by `make` if absent), now the most recently
+    /// used; a new source past `cap` forgets the least recently used one.
+    pub(crate) fn get_or_insert_with(&mut self, key: K, make: impl FnOnce() -> V) -> &mut V {
+        self.tick += 1;
+        if !self.entries.contains_key(&key) {
+            self.make_room();
+        }
+        let entry = self.entries.entry(key).or_insert_with(|| (make(), 0));
+        entry.1 = self.tick;
+        &mut entry.0
+    }
+
+    /// `key` holds `value`, now the most recently used.
+    pub(crate) fn insert(&mut self, key: K, value: V) {
+        self.tick += 1;
+        if !self.entries.contains_key(&key) {
+            self.make_room();
+        }
+        self.entries.insert(key, (value, self.tick));
+    }
+
+    /// Past `cap`, the least recently used source is forgotten.
+    fn make_room(&mut self) {
+        if self.entries.len() < self.cap {
+            return;
+        }
+        let oldest = (self.entries.iter())
+            .min_by_key(|(_, (_, used))| *used)
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            self.entries.remove(&oldest);
+        }
+    }
+}
+
+impl<K: Clone + Eq + Hash, V> FromIterator<(K, V)> for SourceMemory<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut memory = Self::default();
+        for (key, value) in iter {
+            memory.insert(key, value);
+        }
+        memory
+    }
+}
+
 /// H-2's reader states (S2b-2: Idle, `PermitWait`, Decoding, Retiring).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ReaderState {
@@ -337,8 +441,8 @@ pub(crate) struct Readers<K, F> {
     pub(crate) merged_rewinds: u64,
     starved_keys: HashSet<K>,
     /// K-5 (review B F4): per source, its last required times and the
-    /// direction its demand travels, for eviction.
-    travel: HashMap<K, (Vec<i64>, Travel)>,
+    /// direction its demand travels, for eviction (bounded, U-1).
+    travel: SourceMemory<K, (Vec<i64>, Travel)>,
 }
 
 impl<K, F> Default for Readers<K, F> {
@@ -375,7 +479,7 @@ impl<K, F> Readers<K, F> {
             regions_folded: 0,
             merged_rewinds: 0,
             starved_keys: HashSet::new(),
-            travel: HashMap::new(),
+            travel: SourceMemory::default(),
         }
     }
 
@@ -470,8 +574,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         for (key, points) in points.into_iter().filter(|(_, p)| !p.is_empty()) {
             let (last, travel) = self
                 .travel
-                .entry(key)
-                .or_insert((Vec::new(), Travel::Forward));
+                .get_or_insert_with(key, || (Vec::new(), Travel::Forward));
             *travel = follow(*travel, last, &points);
             *last = points;
         }
@@ -931,7 +1034,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let mut victims: Vec<(Rank, K, i64)> = Vec::new();
         for (key, ring) in &self.rings {
             let over = self.lookahead_bytes(key) > share;
-            let travel = self.travel.get(key).map_or(Travel::Forward, |(_, t)| *t);
+            let travel = self.travel.peek(key).map_or(Travel::Forward, |(_, t)| *t);
             let rank = |at: i64| -> Rank {
                 let required = self.required.iter().filter(|(k, _)| k == key);
                 let nearest = (required.map(|(_, t)| *t)).min_by_key(|t| (t.abs_diff(at), *t));
@@ -1009,6 +1112,68 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         self.release(reserved);
     }
 
+    /// Amendment R41 (a source leaves the document; U-1): every reader of a
+    /// source `keep` rejects retires now, a queued ticket of theirs is
+    /// cancelled, and the source's frames, failures, reservations, waiting
+    /// regions and travel go. Returns the retired readers (to stop and wait
+    /// for: they close their decoders as they exit) and what to cancel and
+    /// drop after unlock.
+    pub(crate) fn forget(&mut self, keep: impl Fn(&K) -> bool) -> (Vec<u64>, Posted<K, F>) {
+        let (mut retired, mut cancel) = (Vec::new(), Vec::new());
+        for slot in self.slots.iter_mut().filter(|slot| !keep(&slot.key)) {
+            if slot.state == ReaderState::PermitWait && !slot.cancelled {
+                slot.cancelled = true;
+                cancel.push(slot.id);
+            }
+            slot.state = ReaderState::Retiring;
+            retired.push(slot.id);
+        }
+        let gone = self.reserved.extract_if(|(key, _), _| !keep(key));
+        let released: usize = gone.map(|(_, bytes)| bytes).sum();
+        self.release(released);
+        let mut frames = Vec::new();
+        self.rings.retain(|key, ring| {
+            let kept = keep(key);
+            if !kept {
+                frames.extend(std::mem::take(ring).into_values());
+            }
+            kept
+        });
+        let errors = (self.failures.extract_if(|(key, _), _| !keep(key)))
+            .map(|(_, (_, error))| error)
+            .collect();
+        self.required.retain(|(key, _)| keep(key));
+        self.wanted.retain(|key, _| keep(key));
+        self.sizes.retain(|key, _| keep(key));
+        self.pending.retain(|(key, _)| keep(key));
+        self.starved_keys.retain(|key| keep(key));
+        self.travel.retain(|key| keep(key));
+        let posted = Posted {
+            spawn: Vec::new(),
+            cancel,
+            retired: !retired.is_empty(),
+            dropped: (frames, errors),
+        };
+        (retired, posted)
+    }
+
+    /// Whether the current plan wants any of `key`'s frames.
+    pub(crate) fn planned(&self, key: &K) -> bool {
+        self.wanted.contains_key(key)
+    }
+
+    /// U-1's witness: the sources whose travel is remembered.
+    #[cfg(test)]
+    pub(crate) fn travel_keys(&self) -> Vec<K> {
+        self.travel.keys().cloned().collect()
+    }
+
+    /// U-1's witness: remember at most `cap` sources' travel.
+    #[cfg(test)]
+    pub(crate) fn remember(&mut self, cap: usize) {
+        self.travel = SourceMemory::with_cap(cap);
+    }
+
     /// The readers decoding now (Amendment R37: a withdrawn plan stops
     /// them).
     pub(crate) fn decoding(&self) -> Vec<u64> {
@@ -1024,10 +1189,18 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// its required frames stay (its readers, reservations and wait are
     /// unchanged) and every other ring frame goes. Otherwise the demand is
     /// complete and is invalidated with the frames: an empty plan (K-3's),
-    /// so no reader stays owed a cleared frame, and idle readers quiesce.
-    pub(crate) fn clear_cache(&mut self, active: bool, now: Duration) -> Posted<K, F> {
+    /// so no reader stays owed a cleared frame. Amendment R41: every reader
+    /// of it then retires (closing its decoder; returned, to stop and wait
+    /// for) and the travel of sources no plan wants is forgotten (U-1).
+    pub(crate) fn clear_cache(&mut self, active: bool, now: Duration) -> (Vec<u64>, Posted<K, F>) {
         if !active {
-            return self.post(Vec::new(), (HashMap::new(), 0), now);
+            let mut posted = self.post(Vec::new(), (HashMap::new(), 0), now);
+            let (retired, forgot) = self.forget(|_| false);
+            posted.cancel.extend(forgot.cancel);
+            posted.retired |= forgot.retired;
+            posted.dropped.0.extend(forgot.dropped.0);
+            posted.dropped.1.extend(forgot.dropped.1);
+            return (retired, posted);
         }
         let required = &self.required;
         let mut frames = Vec::new();
@@ -1036,12 +1209,15 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             frames.extend(gone.map(|(_, frame)| frame));
             !ring.is_empty()
         });
-        Posted {
+        let wanted = &self.wanted;
+        self.travel.retain(|key| wanted.contains_key(key));
+        let posted = Posted {
             spawn: Vec::new(),
             cancel: Vec::new(),
             retired: false,
             dropped: (frames, Vec::new()),
-        }
+        };
+        (Vec::new(), posted)
     }
 
     /// Every ring frame, removed (the preview is going).

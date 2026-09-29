@@ -36,7 +36,7 @@ use crate::{
     render::{
         DecodeStrategy, FRAME_CACHE_BYTE_BUDGET, FrameRenderer, FrameSizes, PREFETCH_FRAMES,
         ReaderDemand, RenderScale, SourceSpec, SuppliedFrames, TitleCacheKey, VideoSourceKey,
-        reader_demand,
+        document_source_keys, reader_demand,
     },
     sched::{
         Admission, Next, PermitBook, Poll, Posted, Readers, WaitStep, WaitView, Weighed,
@@ -301,6 +301,9 @@ pub(crate) struct Lane {
     #[cfg(test)]
     #[allow(clippy::type_complexity)]
     pub(crate) woke: Mutex<Option<Arc<dyn Fn(u64) + Send + Sync>>>,
+    /// Amendment R41's witness: each reader's open decoder and its source.
+    #[cfg(test)]
+    decoders: Mutex<HashMap<u64, VideoSourceKey>>,
     /// H-5: the `Permits` monitor, a leaf never taken with `state` (H-4).
     permits: Mutex<PermitBook>,
     permits_cv: Condvar,
@@ -351,6 +354,8 @@ impl Lane {
             previews: std::sync::atomic::AtomicUsize::default(),
             #[cfg(test)]
             woke: Mutex::default(),
+            #[cfg(test)]
+            decoders: Mutex::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
             permits_cv: Condvar::new(),
             counters: Mutex::default(),
@@ -364,6 +369,30 @@ impl Lane {
     #[cfg(test)]
     pub(crate) fn previews(&self) -> usize {
         self.previews.load(Ordering::Acquire)
+    }
+
+    /// Amendment R41's witness: reader `id` opened (`true`) or closed its
+    /// decoder.
+    #[cfg(test)]
+    fn decoder_open(&self, id: u64, open: bool) {
+        let key = open.then(|| {
+            let state = self.lock();
+            let slot = state.readers.slots.iter().find(|slot| slot.id == id);
+            slot.map(|slot| slot.key.clone())
+        });
+        let mut decoders = self.decoders.lock().expect("decoders");
+        match key.flatten() {
+            Some(key) => decoders.insert(id, key),
+            None => decoders.remove(&id),
+        };
+    }
+
+    /// Amendment R41's witness: the readers' open decoders on sources
+    /// `which` selects.
+    #[cfg(test)]
+    pub(crate) fn open_decoders(&self, which: impl Fn(&VideoSourceKey) -> bool) -> usize {
+        let decoders = self.decoders.lock().expect("decoders");
+        decoders.values().filter(|key| which(key)).count()
     }
 
     fn book(&self) -> MutexGuard<'_, PermitBook> {
@@ -727,6 +756,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
             Next::Close => {
                 drop(state);
                 drop(decoder.take());
+                #[cfg(test)]
+                lane.decoder_open(id, false);
                 lane.permits_change(|book| book.release(id));
                 state = lane.lock();
                 state.readers.closed(id);
@@ -755,6 +786,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                     Some(decoder) => spec.decode(decoder, at),
                     None => spec.open(threads).and_then(|mut opened| {
                         opened.set_stop(Arc::clone(stop));
+                        #[cfg(test)]
+                        lane.decoder_open(id, true);
                         spec.decode(decoder.insert(opened), at)
                     }),
                 };
@@ -795,6 +828,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
     }
     drop(state);
     drop(decoder);
+    #[cfg(test)]
+    lane.decoder_open(id, false);
     lane.permits_change(|book| book.forget(id));
     lane.lock().readers.exited(id);
     lane.notify();
@@ -913,7 +948,7 @@ impl Preview {
             stops: HashMap::new(),
             titles: None,
             charged: HashSet::new(),
-            sizes: FrameSizes::new(),
+            sizes: FrameSizes::default(),
             #[cfg(test)]
             faults: Arc::default(),
         }
@@ -1081,6 +1116,9 @@ impl Preview {
         } else {
             0
         };
+        if self.generation != Some(scene.generation) {
+            self.forget_sources(document, scale);
+        }
         let demand = reader_demand(document, at, resolution, scale, horizon, &mut self.sizes);
         let demand = demand.map_err(Halt::Failed)?;
         // Bound first: a new generation's cleared titles are not resident
@@ -1128,6 +1166,41 @@ impl Preview {
             return Ok(None);
         }
         Ok(Some(frame))
+    }
+
+    /// Amendment R41 (Windows CI run 36528931046; U-1): a new document
+    /// forgets the sources it no longer has. Their sizes and travel go, and
+    /// their readers retire and are waited for here, on the preview thread
+    /// (never the UI's), so each has closed its decoder, and released its
+    /// file, before this document's first frame is published. The
+    /// synchronous renderer's decoders close in `bind` (a new generation).
+    fn forget_sources(&mut self, document: &Document, scale: RenderScale) {
+        let keep = document_source_keys(document, scale);
+        self.sizes.retain(|key| keep.contains(key));
+        let (retired, posted) = {
+            let mut state = self.lane.lock();
+            let forgot = state.readers.forget(|key| keep.contains(key));
+            // Under `Sched`, so no reader resets its flag after (K-2).
+            self.stop(&forgot.0);
+            forgot
+        };
+        self.close(&retired, posted);
+    }
+
+    /// Amendment R41: after unlock, wake the `retired` readers, cancel
+    /// their tickets and drop what they held (`posted`), then wait until
+    /// each has closed its decoder and exited. A retired reader leaves at
+    /// its next check or packet boundary (its stop flag is set).
+    fn close(&self, retired: &[u64], posted: Posted<VideoSourceKey, Pinned>) {
+        let spawn = self.posted(posted);
+        debug_assert!(spawn.is_empty(), "a retirement starts no reader");
+        if retired.is_empty() {
+            return;
+        }
+        let mut state = self.lane.lock();
+        while (state.readers.slots.iter()).any(|slot| retired.contains(&slot.id)) {
+            state = state.wait(&self.lane.ready);
+        }
     }
 
     /// H-2/H-3: post the job's plan, start the readers it needs, admit its
@@ -1634,11 +1707,17 @@ impl Preview {
                     let mut state = self.lane.lock();
                     let rings = state.readers.ring_bytes();
                     let now = self.lane.now();
-                    (rings, clear.then(|| state.readers.clear_cache(active, now)))
+                    let cleared = clear.then(|| state.readers.clear_cache(active, now));
+                    if let Some((retired, _)) = &cleared {
+                        // Under `Sched`, so no reader resets its flag (K-2).
+                        self.stop(retired);
+                        // Amendment R41 (U-1): only the plan's sizes stay.
+                        self.sizes.retain(|key| state.readers.planned(key));
+                    }
+                    (rings, cleared)
                 };
-                if let Some(cleared) = cleared {
-                    let spawn = self.posted(cleared);
-                    debug_assert!(spawn.is_empty(), "an empty plan starts no reader");
+                if let Some((retired, posted)) = cleared {
+                    self.close(&retired, posted);
                 }
                 let mut stats = if clear {
                     self.titles = None;
@@ -3109,7 +3188,7 @@ pub(crate) mod tests {
             resolution,
             scale,
             0,
-            &mut FrameSizes::new(),
+            &mut FrameSizes::default(),
         )
         .expect("the demand");
         assert_eq!(demand.generated, 0, "no generated rasters here");
@@ -3213,8 +3292,15 @@ pub(crate) mod tests {
             max_width: monitor_max_width(titled.resolution),
         };
         let size = scale.output_resolution(titled.resolution);
-        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0, &mut FrameSizes::new())
-            .expect("the demand");
+        let demand = reader_demand(
+            &titled,
+            TimeCode(3),
+            size,
+            scale,
+            0,
+            &mut FrameSizes::default(),
+        )
+        .expect("the demand");
         let f = (demand.sources.values())
             .map(|(spec, _)| spec.frame_bytes)
             .max();
@@ -3461,6 +3547,116 @@ pub(crate) mod tests {
         }
     }
 
+    /// A paused render of `at` in the scene of `generation` (each
+    /// `set_document` is a new generation).
+    fn render_generation(
+        preview: &mut Preview,
+        document: &Arc<Document>,
+        at: i64,
+        generation: u64,
+    ) -> FrameTexture {
+        let mut scene = job(document, JobKind::Paused(TimeCode(at)), stamp(1, 1)).scene;
+        scene.generation = generation;
+        let version = preview.lane.lock().version;
+        let (playback, paused) = (None, None);
+        let wait = FrameWait {
+            version,
+            playback,
+            paused,
+        };
+        let Ok(Some(frame)) = preview.render_monitor(&scene, TimeCode(at), &wait) else {
+            panic!("frame {at} of generation {generation} did not render");
+        };
+        frame
+    }
+
+    /// `document` with only the assets `keep` selects, and their clips.
+    fn only(document: &Document, keep: impl Fn(u64) -> bool) -> Arc<Document> {
+        let mut only = document.clone();
+        only.media_pool.retain(|asset| keep(asset.id.0));
+        for track in &mut only.tracks {
+            track.clips.retain(|clip| keep(clip.asset.0));
+        }
+        let ends = (only.tracks.iter().flat_map(|track| &track.clips)).map(|clip| {
+            clip.timeline_start.0 + clip.source_range.end.0 - clip.source_range.start.0
+        });
+        only.duration = TimeCode(ends.max().unwrap_or(0));
+        only.validate().expect("a subset is valid");
+        Arc::new(only)
+    }
+
+    /// Amendment R41 (U-1): the preview's per-source memory (frame sizes,
+    /// travel) is bounded and forgets removed sources. N = 24 distinct
+    /// sources pass a cap of 3: (1) all in the document, previewed in
+    /// turn, each map stays within the cap, the newest remembered; (2) each
+    /// imported, previewed and removed in turn (a new document each), the
+    /// maps hold the current source only, and no reader or synchronous
+    /// decoder of a removed one is open; (3) a cache clear forgets both.
+    #[test]
+    fn source_memory_is_bounded_and_forgets_removed_sources() {
+        use std::collections::BTreeSet;
+        const N: u64 = 24;
+        const CAP: usize = 3;
+        let workload = crate::perf_fixtures::many_sources((160, 90), N, 2);
+        let all = Arc::new(workload.0.clone());
+        let lane = Arc::new(Lane::with_budget(4, FRAME_CACHE_BYTE_BUDGET));
+        lane.lock().readers.remember(CAP);
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        preview.sizes = FrameSizes::with_cap(CAP);
+        let ids = |keys: &[VideoSourceKey]| -> BTreeSet<u64> {
+            keys.iter().map(|key| key.asset().0).collect()
+        };
+        let remembered = |preview: &Preview| {
+            let sizes: Vec<_> = preview.sizes.keys().cloned().collect();
+            let travel = lane.lock().readers.travel_keys();
+            (ids(&sizes), ids(&travel))
+        };
+        for id in 1..=N {
+            render_generation(&mut preview, &all, (id.cast_signed() - 1) * 2, 1);
+            let (sizes, travel) = remembered(&preview);
+            let bounded = sizes.len() <= CAP && travel.len() <= CAP;
+            assert!(bounded, "(1) source {id}: {sizes:?} {travel:?}");
+            let newest = sizes.contains(&id) && travel.contains(&id);
+            assert!(
+                newest,
+                "(1) source {id} is remembered: {sizes:?} {travel:?}"
+            );
+        }
+        for id in 1..=N {
+            let document = only(&all, |asset| asset == id);
+            render_generation(&mut preview, &document, (id.cast_signed() - 1) * 2, id + 1);
+            let current = BTreeSet::from([id]);
+            let removed = |key: &VideoSourceKey| key.asset().0 != id;
+            assert_eq!(
+                remembered(&preview),
+                (current.clone(), current),
+                "(2) source {id}: a removed source is remembered"
+            );
+            assert_eq!(
+                lane.open_decoders(removed),
+                0,
+                "(2) source {id}: a removed source's reader decoder is open"
+            );
+            let alive = (lane.lock().readers.slots.iter()).any(|slot| removed(&slot.key));
+            assert!(
+                !alive,
+                "(2) source {id}: a removed source's reader is alive"
+            );
+            let synchronous = preview.renderer.source_keys();
+            assert!(!synchronous.iter().any(removed), "(2) source {id}");
+        }
+        let open = lane.open_decoders(|_| true);
+        assert!(open > 0, "not vacuous: the current source's reader is open");
+        let (clear, response) = clear_job();
+        preview.run_agent(clear, false);
+        one_reply(&response).expect("cleared");
+        let empty = (BTreeSet::new(), BTreeSet::new());
+        assert_eq!(remembered(&preview), empty, "(3) a clear forgets");
+        let open = lane.open_decoders(|_| true);
+        assert_eq!(open, 0, "(3) a clear closes the readers' decoders");
+    }
+
     /// Review B F1: a decoded frame whose size is not its reservation fails
     /// the job through `deliver` (no assertion, no undercharge), and the
     /// reader's slot, permits and bytes are all released when it goes.
@@ -3471,7 +3667,7 @@ pub(crate) mod tests {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
-        let sizes = &mut FrameSizes::new();
+        let sizes = &mut FrameSizes::default();
         let demand = reader_demand(&document, TimeCode(0), resolution, scale, 0, sizes);
         assert!(demand.is_ok(), "the demand");
         let lane = Arc::new(Lane::with_budget(20, FRAME_CACHE_BYTE_BUDGET));
@@ -3546,8 +3742,15 @@ pub(crate) mod tests {
             max_width: monitor_max_width(titled.resolution),
         };
         let size = scale.output_resolution(titled.resolution);
-        let demand = reader_demand(&titled, TimeCode(3), size, scale, 0, &mut FrameSizes::new())
-            .expect("the demand");
+        let demand = reader_demand(
+            &titled,
+            TimeCode(3),
+            size,
+            scale,
+            0,
+            &mut FrameSizes::default(),
+        )
+        .expect("the demand");
         let f = (demand.sources.values())
             .map(|(spec, _)| spec.frame_bytes)
             .max();
@@ -3618,7 +3821,7 @@ pub(crate) mod tests {
             size,
             scale,
             0,
-            &mut FrameSizes::new(),
+            &mut FrameSizes::default(),
         )
         .expect("the demand");
         let budget = demand.generated;

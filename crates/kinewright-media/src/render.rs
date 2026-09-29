@@ -175,6 +175,12 @@ impl From<&ColorDescription> for ColorDescriptionKey {
 }
 
 impl VideoSourceKey {
+    /// The asset this key reads (a test's witness).
+    #[cfg(test)]
+    pub(crate) const fn asset(&self) -> AssetId {
+        self.asset
+    }
+
     fn new(
         asset: AssetId,
         path: &Path,
@@ -293,7 +299,8 @@ impl SourceSpec {
             return Ok(*size);
         }
         let size = self.open(1)?.frame_size();
-        Ok(*sizes.entry(key.clone()).or_insert(size))
+        sizes.insert(key.clone(), size);
+        Ok(size)
     }
 
     /// The frame at `at`, exactly as the renderer's Seek or Sequential
@@ -338,8 +345,19 @@ impl ReaderDemand {
 }
 
 /// K-1 (review B F1): each source's frame size, measured once from the
-/// decoder a reader opens and kept for the preview's life.
-pub(crate) type FrameSizes = HashMap<VideoSourceKey, (u32, u32)>;
+/// decoder a reader opens. Amendment R41 (U-1): kept while the source is in
+/// the document and not cleared, for at most `SOURCE_MEMORY` sources.
+pub(crate) type FrameSizes = crate::sched::SourceMemory<VideoSourceKey, (u32, u32)>;
+
+/// Amendment R41: the reader keys of every source in `document` at `scale`.
+pub(crate) fn document_source_keys(
+    document: &Document,
+    scale: RenderScale,
+) -> HashSet<VideoSourceKey> {
+    (document.media_pool.iter())
+        .map(|asset| source_key(asset, scale))
+        .collect()
+}
 
 /// The job's required frames at `at`, then up to `horizon` frames of
 /// lookahead, each source's ring holding S1d's window
@@ -768,6 +786,12 @@ impl FrameRenderer {
         self.title_cache.retain(|key, _| used.contains(key));
         self.title_order.retain(|key| used.contains(key));
         rendered.map(|(frame, _)| frame)
+    }
+
+    /// Amendment R41's witness: the sources a synchronous decoder is open on.
+    #[cfg(test)]
+    pub(crate) fn source_keys(&self) -> Vec<VideoSourceKey> {
+        self.video_sources.keys().cloned().collect()
     }
 
     /// H-7: whether a synchronous decoder is open.

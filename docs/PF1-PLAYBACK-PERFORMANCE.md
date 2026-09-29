@@ -377,6 +377,22 @@ decoders; the preview stays parked (+1 thread) with no synchronous decoder.
 **I10** checks this on CI with an injected clock; RSS is a pinned local gate
 (G15). AW1 B5 proxy mode still constructs no engine.
 
+**Amendment R41 (proposed) [S2b] A removed source closes its decoders
+(Windows CI run 36528931046; re-review U-1).** Idle readers keep their
+decoders open until they retire, and on Windows an open decoder holds its file,
+so a source moved right after it left the document failed to rename (os error
+32). Now the first render of a new generation retires the readers of every
+source not in its media pool. It stops them at their next check or packet
+boundary, cancels their tickets, and waits on the preview thread, never the
+UI's, until each has closed its decoder and exited, before the frame renders. So
+once a frame of the new document is delivered, no decoder is open on a removed
+source: reader or synchronous (`bind` clears the renderer). A cache clear with
+no job waiting retires every reader the same way. Per-source memory between
+jobs (each source's measured frame size and its travel) forgets the sources a
+new generation removes, and keeps only the plan's sources on a cache clear. It
+is capped at 256 sources, forgetting the least recently used; a forgotten size
+is measured again, and a forgotten travel restarts forward.
+
 **H-8 [S2b-1…4] Scheduler tests.** Each S2b commit extends an exhaustive
 (event × state) model of `SchedState` + `Permits`: quiescence timeout in every
 inactive state; stale result and stale failure; `shrink` while Idle,

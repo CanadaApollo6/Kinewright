@@ -5046,6 +5046,62 @@ mod tests {
         );
     }
 
+    /// Amendment R41 (Windows CI run 36528931046, os error 32 at the relink
+    /// test's rename): a document without a source delivers no frame while a
+    /// decoder is open on that source, reader or synchronous, so once its
+    /// frame is received the file can be moved. The relink test's flow, on
+    /// every platform. Source 1's reader is held at its next decode (frame
+    /// 1), its decoder open, when the source leaves: the new document's
+    /// frame waits for it, and follows once it is released.
+    #[test]
+    fn a_removed_source_has_no_open_decoder_after_the_next_frame() {
+        let temp = TempDirectory::new("pf1-r41-close");
+        let crate::perf_fixtures::Workload(document, _media) =
+            crate::perf_fixtures::cuts((160, 90), 30, 1, 2, 10);
+        let gpu = fallback_gpu().context();
+        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        let gauge = engine.decoder_gauge();
+        let frames = engine.frames();
+        engine.set_document(Arc::new(document));
+        let first = frames
+            .recv_timeout(Duration::from_secs(60))
+            .expect("frame 0");
+        assert_eq!(first.at, TimeCode(0));
+        let open = engine.lane.open_decoders(|_| true);
+        assert_eq!(open, 1, "not vacuous: source 1's reader holds a decoder");
+        let (release, held) = crossbeam_channel::bounded::<()>(0);
+        *engine.lane.hold_at.lock().expect("hold") = Some((1, held));
+        engine.request_frame(TimeCode(1));
+        crate::preview::tests::wait_until(&engine.lane, |state| {
+            let at_one = |slot: &crate::sched::Slot<_>| {
+                matches!(
+                    slot.state,
+                    crate::sched::ReaderState::Decoding { at: 1, .. }
+                )
+            };
+            state.readers.slots.iter().any(at_one)
+        });
+        engine.set_document(Arc::new(Document::default()));
+        engine.request_frame(TimeCode::ZERO);
+        let early = frames.recv_timeout(Duration::from_secs(1));
+        assert!(
+            early.is_err(),
+            "a frame came while a removed source's decoder was open"
+        );
+        assert_eq!(engine.lane.open_decoders(|_| true), 1, "the held reader's");
+        let cancelled = || engine.lane.cancelled.load(Ordering::Acquire);
+        let before = cancelled();
+        drop(release);
+        frames
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the empty document's frame");
+        let open = engine.lane.open_decoders(|_| true);
+        assert_eq!(open, 0, "a removed source's reader decoder is open");
+        // Its decode stopped at a packet boundary (its stop flag was set).
+        assert_eq!(cancelled(), before + 1, "the retired reader decoded on");
+        assert_eq!(gauge.open(), 0, "a synchronous decoder is open");
+    }
+
     /// Review B F4: `sync_decoders` counts the decoders this engine's
     /// renderers hold: open after a render, closed by a cache clear, and
     /// none after teardown. `live_table_bytes` is nonzero after an SDR
