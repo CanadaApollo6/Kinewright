@@ -77,13 +77,19 @@ DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 def strip_ffmpeg_log(line: str) -> str:
     """`line` without FFmpeg log fragments at its start, before a result's outcome, or after it."""
+    noisy = re.search(FFMPEG_LOG, line)
     line = FFMPEG_LOG_PREFIX.sub("", line)
     head, sep, rest = line.partition(" ... ")
     if not sep or not head.startswith("test "):
         return line
     rest = FFMPEG_LOG_PREFIX.sub("", rest)
     outcome = OUTCOME.match(rest)
-    if outcome:
+    if outcome and noisy and outcome.group() != "ignored":
+        # av_log writes its prefix and its message separately, so the message text can follow
+        # `ok` with no prefix of its own (`... [swscaler @ 0x..] okNo accelerated ...`, pf1 R47
+        # media log). Libtest prints nothing after `ok` or `FAILED`; an ignore reason is kept.
+        rest = outcome.group()
+    elif outcome:
         rest = rest[: outcome.end()] + FFMPEG_LOG_SUFFIX.sub("", rest[outcome.end():])
     return head + sep + rest
 
@@ -117,11 +123,14 @@ def result_lines(log: str):
                 continue
             yield pending
             pending = None
+        # The message's `[name @ addr] ` prefix may sit after " ... " or, written before
+        # libtest's line, at the start of it (pf1 R47 gate log: `[swscaler @ 0x..] test x ...
+        # No accelerated colorspace conversion ...` then `ok`).
         head, sep, rest = FFMPEG_LOG_PREFIX.sub("", raw).partition(" ... ")
         if (
             sep
             and head.startswith("test ")
-            and re.match(FFMPEG_LOG, rest)
+            and re.search(FFMPEG_LOG, raw)
             and not OUTCOME.match(FFMPEG_LOG_PREFIX.sub("", rest))
         ):
             pending = (number, head + sep)
