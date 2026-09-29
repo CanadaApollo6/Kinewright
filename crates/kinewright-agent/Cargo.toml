@@ -23,6 +23,10 @@ eval-harness = [
     "kinewright-media/test-util",
     "dep:kinewright-project",
 ]
+# Slow tier (docs/BUILDING.md, ci/slow-tests.txt): tests marked with
+# `cfg_attr(not(feature = "slow-tests"), ignore = ...)` run only with this
+# feature, which CI's slow tier and a full local run enable.
+slow-tests = []
 
 [dependencies]
 axum.workspace = true

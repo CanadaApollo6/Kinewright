@@ -431,6 +431,10 @@ fn assert_hot_lane(lane: &Lane) {
 /// real 12 s export; splitting them into four `#[test]`s would quadruple the
 /// GPU device count for no extra evidence.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets() {
     let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
     let directory = TempDirectory::new("au3-fixtures");
@@ -675,6 +679,10 @@ fn aac_programme(label: &str, audio: &str) -> GeneratedMedia {
 /// AU3 §7 B8: the decoded verification measures the written file, streamed
 /// through `AudioDecoder::next_chunk`, and raises what its target asks for.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn au3_delivery_audio_verification_measures_the_written_file() {
     let engine = FfmpegMediaEngine::new().expect("the production media engine should start");
 

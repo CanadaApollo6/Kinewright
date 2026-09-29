@@ -4792,6 +4792,7 @@ fn record_cc5_performance(gpu: &FixtureGpu) {
 
 /// CC5 §9.2.16 on the default software lane.
 #[test]
+#[ignore = "on demand: performance evidence on the software renderer"]
 fn cc5_performance_evidence_is_recorded_on_software_fallback() {
     record_cc5_performance(&fallback_gpu());
 }
@@ -5123,6 +5124,10 @@ const TRACK_SIMULATED_LAG_Y_BASIS_POINTS: i64 = 276;
 /// sample frames contains every pixel of that box at **every** frame, on the
 /// CPU reference and on the GPU, at two layer scales.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc5_tracked_shot_window_contains_the_subject_at_every_frame() {
     crate::initialize_ffmpeg().expect("FFmpeg must initialize for the CC5 tracking fixture");
     let media = tracking_source("cc5-tracked-shot");
@@ -5803,9 +5808,233 @@ fn is_test_attribute(line: &str) -> bool {
     line == "#[test]" || line.starts_with("#[tokio::test")
 }
 
+/// `source`'s lines, with every attribute that rustfmt wrapped over several
+/// lines joined back into one, so the scans below see `#[cfg_attr(..)]` (the
+/// slow-tier marker is too long for one line) as the single attribute it is.
+///
+/// Only brackets in code count: those inside string and raw-string literals,
+/// char literals and line or block comments do not, and a line that begins
+/// inside a string or a block comment never starts an attribute. Otherwise
+/// `#[doc = "["]` would swallow the test that follows it.
+pub(crate) fn logical_lines(source: &str) -> Vec<String> {
+    let scanned = scan_brackets(source);
+    let mut out = Vec::new();
+    let mut pending: Option<(String, i32)> = None;
+    for (line, (starts_in_code, delta)) in source.lines().zip(scanned) {
+        if let Some((mut joined, open)) = pending.take() {
+            joined.push(' ');
+            joined.push_str(line.trim());
+            let open = open + delta;
+            if open > 0 {
+                pending = Some((joined, open));
+            } else {
+                out.push(joined);
+            }
+            continue;
+        }
+        if starts_in_code && line.trim_start().starts_with("#[") && delta > 0 {
+            pending = Some((line.to_owned(), delta));
+        } else {
+            out.push(line.to_owned());
+        }
+    }
+    if let Some((joined, _)) = pending {
+        out.push(joined);
+    }
+    out
+}
+
+/// For every line of `source`: whether it begins in code (not inside a string
+/// or block comment), and its net count of code brackets (`[` minus `]`).
+fn scan_brackets(source: &str) -> Vec<(bool, i32)> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        Block(u32),
+        Str,
+        Raw(usize),
+    }
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut state = State::Code;
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let chars = line.chars().collect::<Vec<_>>();
+        let starts_in_code = matches!(state, State::Code);
+        let mut delta = 0;
+        let mut index = 0;
+        while index < chars.len() {
+            let c = chars[index];
+            let next = chars.get(index + 1).copied();
+            match state {
+                State::Code => match c {
+                    '/' if next == Some('/') => break,
+                    '/' if next == Some('*') => {
+                        state = State::Block(1);
+                        index += 1;
+                    }
+                    '"' => state = State::Str,
+                    'r' if index == 0 || !is_ident(chars[index - 1]) || chars[index - 1] == 'b' => {
+                        let hashes = chars[index + 1..].iter().take_while(|c| **c == '#').count();
+                        if chars.get(index + 1 + hashes) == Some(&'"') {
+                            state = State::Raw(hashes);
+                            index += 1 + hashes;
+                        }
+                    }
+                    '\'' if next == Some('\\') => {
+                        // An escaped char literal: skip past its closing quote.
+                        let end = chars[(index + 3).min(chars.len())..]
+                            .iter()
+                            .position(|c| *c == '\'')
+                            .map_or(chars.len(), |offset| index + 3 + offset);
+                        index = end;
+                    }
+                    '\'' if chars.get(index + 2) == Some(&'\'') => index += 2,
+                    '[' => delta += 1,
+                    ']' => delta -= 1,
+                    _ => {}
+                },
+                State::Block(depth) => {
+                    if c == '*' && next == Some('/') {
+                        state = if depth == 1 {
+                            State::Code
+                        } else {
+                            State::Block(depth - 1)
+                        };
+                        index += 1;
+                    } else if c == '/' && next == Some('*') {
+                        state = State::Block(depth + 1);
+                        index += 1;
+                    }
+                }
+                State::Str => {
+                    if c == '\\' {
+                        index += 1;
+                    } else if c == '"' {
+                        state = State::Code;
+                    }
+                }
+                State::Raw(hashes) => {
+                    let closes = c == '"'
+                        && chars[index + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|c| **c == '#')
+                            .count()
+                            == hashes
+                        && chars.len() >= index + 1 + hashes;
+                    if closes {
+                        state = State::Code;
+                        index += hashes;
+                    }
+                }
+            }
+            index += 1;
+        }
+        out.push((starts_in_code, delta));
+    }
+    out
+}
+
+/// Regression cases for `logical_lines`: brackets inside strings, raw strings,
+/// char literals and comments must not open or close an attribute. Each source
+/// is one escaped string so that no line here starts with an attribute the
+/// inventory scans above would read.
+#[test]
+fn logical_lines_ignore_a_bracket_inside_a_string_literal() {
+    let source = "#[doc = \"[\"]\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        ["#[doc = \"[\"]", "#[test]", "fn a() {}"]
+    );
+    let source = "#[doc = \"]\"]\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        ["#[doc = \"]\"]", "#[test]", "fn a() {}"]
+    );
+}
+
+#[test]
+fn logical_lines_ignore_a_bracket_inside_a_raw_string() {
+    let source = "#[doc = r#\"[ \"quoted\" [\"#]\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        ["#[doc = r#\"[ \"quoted\" [\"#]", "#[test]", "fn a() {}"]
+    );
+}
+
+#[test]
+fn logical_lines_ignore_a_bracket_inside_a_char_literal() {
+    let source = "#[cfg(any())] const OPEN: char = '[';\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        [
+            "#[cfg(any())] const OPEN: char = '[';",
+            "#[test]",
+            "fn a() {}"
+        ]
+    );
+    let source = "#[cfg_attr(\n    not(x),\n    doc = \"y\"\n)]\nconst CLOSE: char = ']';\nconst QUOTE: char = '\\'';\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        [
+            "#[cfg_attr( not(x), doc = \"y\" )]",
+            "const CLOSE: char = ']';",
+            "const QUOTE: char = '\\'';",
+            "#[test]",
+            "fn a() {}"
+        ]
+    );
+    // A lifetime is not a char literal: the `[` after it still counts.
+    let source = "#[cfg_attr(\n    test,\n    allow(x)\n)]\nfn a<'a>(x: &'a [u8]) {}\n";
+    assert_eq!(
+        logical_lines(source),
+        ["#[cfg_attr( test, allow(x) )]", "fn a<'a>(x: &'a [u8]) {}"]
+    );
+}
+
+#[test]
+fn logical_lines_ignore_a_bracket_inside_a_comment() {
+    let source = "#[test] // [ an open bracket in a note\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        ["#[test] // [ an open bracket in a note", "fn a() {}"]
+    );
+    let source = "/*\n#[cfg(x)\n*/\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        ["/*", "#[cfg(x)", "*/", "#[test]", "fn a() {}"]
+    );
+    let source = "const S: &str = \"\n#[cfg(y)\n\";\n#[test]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        [
+            "const S: &str = \"",
+            "#[cfg(y)",
+            "\";",
+            "#[test]",
+            "fn a() {}"
+        ]
+    );
+}
+
+#[test]
+fn logical_lines_join_a_wrapped_attribute() {
+    let source = "#[test]\n#[cfg_attr(\n    not(feature = \"slow-tests\"),\n    ignore = \"a reason\"\n)]\nfn a() {}\n";
+    assert_eq!(
+        logical_lines(source),
+        [
+            "#[test]",
+            "#[cfg_attr( not(feature = \"slow-tests\"), ignore = \"a reason\" )]",
+            "fn a() {}"
+        ]
+    );
+    assert!(declares_test(source, "a"));
+    assert_eq!(declared_test_names(source, "a"), ["a"]);
+}
+
 fn declares_test(source: &str, name: &str) -> bool {
     let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = logical_lines(source);
     for (index, line) in lines.iter().enumerate() {
         if !line.contains(&needle) {
             continue;
@@ -5827,7 +6056,7 @@ fn declares_test(source: &str, name: &str) -> bool {
 /// Every `#[test]` function in `source` whose name starts with `prefix`, in
 /// declaration order.
 fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = logical_lines(source);
     let mut names = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !is_test_attribute(line.trim()) {

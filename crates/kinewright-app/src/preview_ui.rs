@@ -3141,6 +3141,10 @@ pub(crate) mod mo2_tests {
         in1_shutdown(&mut app);
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     #[allow(
         clippy::too_many_lines,
         clippy::cast_possible_truncation,

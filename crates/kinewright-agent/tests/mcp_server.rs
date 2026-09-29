@@ -5203,6 +5203,10 @@ async fn au3_plan_audio_normalization_engages_the_true_peak_limiter_on_hot_mater
 /// here means the media half of Part B is missing, not that this path is a
 /// stub.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::too_many_lines)]
 async fn au3_queue_export_normalizes_and_verifies_audio() {
     let generated = au3_sine_media();
@@ -7586,6 +7590,10 @@ const PLAN_DUCKING_DEPTH_BUDGET_HUNDREDTHS: i64 = 50;
 /// re-measure the music stem with `get_audio_levels` over a ducked window and
 /// an un-ducked window and assert the two differ by the requested depth.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::too_many_lines)]
 async fn au4_plan_audio_ducking_converges_through_the_real_engine() {
     let music_media = au4_music_media();
@@ -8240,6 +8248,10 @@ async fn au5_arm_the_bus_fader(client: &RunningService<RoleClient, ()>, core: &C
 /// inside AU3's own tolerance, so the four convergence iterations really did
 /// converge on the *repaired* loudness rather than on the raw one.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::too_many_lines)]
 async fn au5_the_repair_and_normalization_planners_agree_in_either_order() {
     let target = -1_600_i64;
@@ -9220,6 +9232,10 @@ async fn au6_decide_capture(broker: kinewright_agent::ConfirmationBroker, approv
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::too_many_lines)]
 async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
@@ -9305,6 +9321,10 @@ async fn au6_a1_the_interview_ducks_the_bed_and_matches_the_voices() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::too_many_lines)]
 async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
@@ -9426,6 +9446,10 @@ async fn au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::too_many_lines)]
 async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
@@ -9688,6 +9712,10 @@ async fn au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 async fn au6_a4_the_multicam_cuts_leave_the_master_audio_untouched() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Multicam);
@@ -9787,6 +9815,10 @@ async fn au6_queue_and_poll(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 async fn au6_a5a_the_delivery_lands_on_the_ebu_r128_target() {
     let media = Arc::new(FfmpegMediaEngine::new().unwrap());
     let scene = au6_agent_scene(media.as_ref(), Au6Scenario::Interview);
@@ -11094,6 +11126,10 @@ fn mo2_noise_media(width: u32, height: u32) -> GeneratedMedia {
 /// fit degrades samples, then (for pairs) bounds, and full resolution
 /// that cannot fit refuses JSON-only.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::too_many_lines)]
 async fn solo_strip_inside_byte_budget() {
     let probe = FfmpegMediaEngine::new().unwrap();
@@ -11190,6 +11226,10 @@ async fn solo_strip_inside_byte_budget() {
 /// budgets are gate 9's). A 1080p clip under an adjustment, the adjustment
 /// soloed at 16 samples and at full resolution, on the fallback adapter.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 #[allow(clippy::cast_precision_loss)]
 fn r28_solo_peak_resources_and_elapsed() {
     use kinewright_agent::{SoloArgs, preview_solo};

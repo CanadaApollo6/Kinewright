@@ -9015,6 +9015,10 @@ mod tests {
     /// `impulse_document`, and on the AU2 master-chain parity document, over
     /// whole and windowed ranges.
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn measure_mix_levels_equals_the_meter_over_every_stem_family() {
         crate::initialize_ffmpeg().unwrap();
         let fps = Rational::new(10, 1).unwrap();

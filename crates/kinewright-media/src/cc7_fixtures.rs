@@ -2726,6 +2726,10 @@ fn cc7_every_scenario_verifies_at_ten_bits() {
 /// **Error**, `technical_pass == false`, and the output file still at its
 /// original path, unrenamed and undeleted.
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
 fn cc7_g_a_starved_encode_trips_the_decoded_difference_budget() {
     let gpu = fallback_gpu();
     let plan = cc7_canonical_plan(&gpu, Cc7Scenario::MixedCamera, "g-starved");
@@ -4279,7 +4283,7 @@ fn is_test_attribute(line: &str) -> bool {
 /// here, because this file names every CC7 test in prose as well as in code.
 fn declares_test(source: &str, name: &str) -> bool {
     let needle = format!("fn {name}(");
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = crate::cc5_fixtures::logical_lines(source);
     for (index, line) in lines.iter().enumerate() {
         if !line.contains(&needle) {
             continue;
@@ -4301,7 +4305,7 @@ fn declares_test(source: &str, name: &str) -> bool {
 /// Every `#[test]` function in `source` whose name starts with `prefix`, in
 /// declaration order.
 fn declared_test_names(source: &str, prefix: &str) -> Vec<String> {
-    let lines = source.lines().collect::<Vec<_>>();
+    let lines = crate::cc5_fixtures::logical_lines(source);
     let mut names = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !is_test_attribute(line.trim()) {
