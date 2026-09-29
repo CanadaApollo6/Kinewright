@@ -224,7 +224,7 @@ class PartialParse(unittest.TestCase):
             lines[at: at + 1] = [
                 lines[at][: -len("ok")] + "[swscaler @ 0x1] [swscaler @ 0x2] No accelerated colorspace conversion.",
                 "[swscaler @ 0x3] No accelerated colorspace conversion.",
-                "ok",
+                "ok[swscaler @ 000001F4A934BE80] No accelerated colorspace conversion.",
             ]
             at = next(i for i, line in enumerate(lines) if line.startswith("test ") and "ignored" in line)
             name, _, outcome = lines[at].partition(" ... ")

@@ -105,6 +105,10 @@ def result_lines(log: str):
     for number, raw in enumerate(log.splitlines(), 1):
         line = strip_ffmpeg_log(raw)
         if pending is not None:
+            # The outcome line can carry its own FFmpeg tail, as a same-line result can.
+            outcome = OUTCOME.match(line)
+            if outcome:
+                line = line[: outcome.end()] + FFMPEG_LOG_SUFFIX.sub("", line[outcome.end():])
             if re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line):
                 continue
             if OUTCOME_LINE.match(line):
