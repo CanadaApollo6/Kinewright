@@ -7,11 +7,27 @@
 //! produced frame is `c`; give me `t`". The path must check that against its
 //! own decoder (a reset reader is not at `c`) and either continue forward or
 //! seek; the observation says which (`route`, from the decoder's seek count).
-//! [`SeekPath`] is today's fresh `decode_window(t, t)` and defines the oracle.
+//! [`SeekPath`] is today's `decode_window(t, t)` and defines the oracle;
+//! [`ReferenceContinuation`] is a correct continuation built in test code
+//! (the positive control, with one switch per rule for the mutations).
 //! The implementer wires [`ContinuationPath`] in S2c-2 and un-ignores its
-//! tests; the witnesses, the oracle and the wrong paths may not be weakened.
+//! tests; the witnesses, the oracles and the wrong paths may not be weakened.
+//!
+//! What the witnesses fix beyond "same bytes as a fresh Seek":
+//! * the run's anchor is observed (`state.first_packet`, the real seek's
+//!   first packet) and compared with the shadow's; an unknown or mismatched
+//!   anchor requires Seek (injected: `ShadowFails`, `ShadowMismatch`,
+//!   `StreamMismatch`);
+//! * retained `pending` and `lookahead` frames are compared by content hash,
+//!   and every target is followed by a second hop from the produced frame;
+//! * the route is decided by the packets actually read (`Truth`: a linear
+//!   decode from the anchor at the same thread count against the demux-order
+//!   key flags), so it is exact under frame threading;
+//! * timestamps: missing or repeated ones (injected `Tamper`) force Seek;
+//! * cancellation is asserted by produced-frame progress and stop position.
 
 use std::{
+    collections::BTreeMap,
     rc::Rc,
     sync::{
         Arc,
@@ -23,9 +39,9 @@ use kinewright_core::{MediaError, TimeCode};
 
 use crate::{
     cache::FrameCache,
-    decode::{DecoderState, VideoDecoder},
+    decode::{Anchor, DecoderState, FrameLog, Tamper, VideoDecoder, default_threads},
     frame::WorkingFrame,
-    pf1_s2c_fixtures::{Fixture, KINDS, Kind},
+    pf1_s2c_fixtures::{Facts, Fixture, KINDS, Kind},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,17 +55,22 @@ pub(super) enum Route {
 #[allow(dead_code, reason = "the seam S2c-2 reads in its ContinuationPath")]
 pub(super) struct Cursor(pub(super) i64);
 
-/// What one `produce` yields. `same` compares everything except `route`.
+/// What one `produce` yields. `same` compares everything a fresh Seek fixes.
 #[derive(Clone, Debug)]
 pub(super) struct Observation {
     /// FNV-1a of the produced frame's f16 bits (`None`: no frame cached at `t`).
     pub(super) frame: Option<u64>,
-    /// The produced frame's `best_effort_timestamp` (`state.pending.1`).
+    /// The produced frame's `best_effort_timestamp` (`state.pending.pts`).
     pub(super) pts: Option<i64>,
     pub(super) state: DecoderState,
     /// `Debug` of the `MediaError`, if the run failed (`"Cancelled"`).
     pub(super) err: Option<String>,
     pub(super) route: Route,
+    /// The frames received during this call, with the video packets read in
+    /// the run when each arrived (the produced-frame progress).
+    pub(super) frames: Vec<FrameLog>,
+    /// Video packets read in the run when the call ended (the stop position).
+    pub(super) packets: u64,
 }
 
 impl Observation {
@@ -57,15 +78,52 @@ impl Observation {
         (self.frame, self.pts, &self.state, &self.err)
             == (other.frame, other.pts, &other.state, &other.err)
     }
+
+    /// What must not depend on the thread count: the selected frame, the
+    /// retained frames, the anchor. (`eof_sent` and the frame log may.)
+    fn same_content(&self, other: &Self) -> bool {
+        let (a, b) = (&self.state, &other.state);
+        (
+            self.frame,
+            self.pts,
+            &a.pending,
+            &a.lookahead,
+            a.first_packet,
+            &self.err,
+        ) == (
+            other.frame,
+            other.pts,
+            &b.pending,
+            &b.lookahead,
+            b.first_packet,
+            &other.err,
+        )
+    }
 }
 
-/// Observe `decoder` after a run for `t` (`seeks` = its seek count before it).
+/// A decoder's counters at the start of a call.
+#[derive(Clone, Copy)]
+pub(super) struct Before {
+    seeks: u64,
+    received: u64,
+}
+
+impl Before {
+    pub(super) fn of(decoder: &VideoDecoder) -> Self {
+        Self {
+            seeks: decoder.seek_count(),
+            received: decoder.probe().received,
+        }
+    }
+}
+
+/// Observe `decoder` after a run for `t`.
 pub(super) fn observe(
     decoder: &VideoDecoder,
     cache: &mut FrameCache<WorkingFrame>,
     t: TimeCode,
     result: Result<(), MediaError>,
-    seeks: u64,
+    before: Before,
 ) -> Observation {
     let state = decoder.state();
     let hit = cache.contains(t);
@@ -74,30 +132,50 @@ pub(super) fn observe(
             (h ^ u64::from(p.to_bits())).wrapping_mul(0x0100_0000_01b3)
         })
     });
+    let probe = decoder.probe();
+    let took = usize::try_from(probe.received - before.received).unwrap();
     Observation {
         frame,
-        pts: state.pending.and_then(|p| p.1),
+        pts: state.pending.as_ref().and_then(|p| p.pts),
         state,
         err: result.err().map(|e| format!("{e:?}")),
-        route: if decoder.seek_count() > seeks {
+        route: if decoder.seek_count() > before.seeks {
             Route::Seek
         } else {
             Route::Continue
         },
+        frames: probe.frames[probe.frames.len().saturating_sub(took)..].to_vec(),
+        packets: probe.packets,
     }
 }
 
 #[derive(Clone)]
 pub(super) enum Event {
-    /// The clip is relinked to another file: a new `VideoSourceKey`.
+    /// The clip is relinked to another file (always the corpus's `b`): a new
+    /// `VideoSourceKey`.
     Relink(Rc<Fixture>),
     /// The key changes but the decoded content does not.
     KeyChange,
     ShrinkReopen,
     /// The reader's decoder hit an error (state must not survive it).
     Error,
-    /// Arm cancellation for the next `produce`, after this many produced frames.
+    /// Arm cancellation for the next `produce`: the stop flag is raised when
+    /// `n` (>= 1) frames have been received in that call.
     Cancel(usize),
+    /// From now on the demux-only shadow context fails (S-2 rule 1: unknown).
+    ShadowFails,
+    /// From now on the shadow's anchor disagrees with the real seek's.
+    ShadowMismatch,
+    /// From now on the seek's selected stream is not the decoder's video stream.
+    StreamMismatch,
+    /// From now on the shadow's A(t) for a later target differs from the run's
+    /// anchor although no key packet was read (on the fixtures every anchor
+    /// change comes with a key packet, so only this injection isolates the
+    /// A(t) = A(t0) clause of rule 2).
+    AnchorDrifts,
+    /// From now on the decoder meets this timestamp fault (`Tamper`); the
+    /// path must read timestamps as `decode.rs` does, through the probe.
+    Tamper(Tamper),
 }
 
 pub(super) trait TargetPath {
@@ -108,37 +186,63 @@ pub(super) trait TargetPath {
 /// Today's fresh `Seek`: a new decoder per call, `decode_window(t, t)`.
 pub(super) struct SeekPath {
     fx: Rc<Fixture>,
+    threads: usize,
     cancel: Option<usize>,
+    tampers: Vec<Tamper>,
 }
 
 impl SeekPath {
-    pub(super) fn new(fx: &Rc<Fixture>) -> Self {
+    pub(super) fn new(fx: &Rc<Fixture>, threads: usize) -> Self {
         Self {
             fx: fx.clone(),
+            threads,
             cancel: None,
+            tampers: Vec::new(),
         }
     }
 }
 
+/// When a call's cancellation fires (the correct one is `Exact`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CancelAt {
+    Exact,
+    Late(u64),
+    Immediate,
+}
+
+/// Arm a call's cancellation on `decoder` (with the stop flag it checks).
+fn arm(decoder: &mut VideoDecoder, cancel: Option<usize>, how: CancelAt) {
+    let stop = Arc::new(AtomicBool::new(false));
+    let n = cancel.map(|n| u64::try_from(n).unwrap());
+    let armed = match (n, how) {
+        (Some(_), CancelAt::Immediate) => {
+            stop.store(true, Ordering::Release);
+            None
+        }
+        (Some(n), CancelAt::Exact) => Some(n),
+        (Some(n), CancelAt::Late(extra)) => Some(n + extra),
+        (None, _) => None,
+    };
+    decoder.arm_cancel_after(armed);
+    decoder.set_stop(stop);
+}
+
 impl TargetPath for SeekPath {
     fn produce(&mut self, _from: Option<Cursor>, t: TimeCode) -> Observation {
-        let mut decoder = self.fx.open();
-        let stop = Arc::new(AtomicBool::new(false));
-        match self.cancel.take() {
-            Some(0) => stop.store(true, Ordering::Release),
-            Some(_) => unimplemented!("a mid-run cancel needs the S2c-2 hook"),
-            None => {}
-        }
-        decoder.set_stop(stop);
+        let mut decoder = self.fx.open(self.threads);
+        decoder.probe_mut().tampers.clone_from(&self.tampers);
+        arm(&mut decoder, self.cancel.take(), CancelAt::Exact);
+        let before = Before::of(&decoder);
         let mut cache = FrameCache::new(1);
         let result = decoder.decode_window(t, t, &mut cache);
-        observe(&decoder, &mut cache, t, result, 0)
+        observe(&decoder, &mut cache, t, result, before)
     }
 
     fn event(&mut self, event: Event) {
         match event {
             Event::Relink(fx) => self.fx = fx,
             Event::Cancel(n) => self.cancel = Some(n),
+            Event::Tamper(t) => self.tampers.push(t),
             _ => {} // stateless: every call already opens a fresh decoder
         }
     }
@@ -147,8 +251,16 @@ impl TargetPath for SeekPath {
 /// S2c-2 wires this: one reader (a `VideoDecoder` kept across calls).
 /// `produce(Some(Cursor(c)), t)` continues from `c` only in the S-2 domain
 /// and only if its decoder really is at `c`; otherwise it seeks. It must
-/// report through `observe` with the seek count taken before the call.
+/// report through `observe` with the counters taken before the call, keep
+/// the decoder's probe fed (see `DecoderProbe`), and implement every
+/// `Event` as its doc says.
 pub(super) struct ContinuationPath;
+
+impl ContinuationPath {
+    pub(super) fn new(_fx: &Rc<Fixture>, _threads: usize) -> Self {
+        Self
+    }
+}
 
 impl TargetPath for ContinuationPath {
     fn produce(&mut self, _from: Option<Cursor>, _t: TimeCode) -> Observation {
@@ -160,40 +272,88 @@ impl TargetPath for ContinuationPath {
     }
 }
 
-/// A path that is wrong on purpose: `retarget` changes what is decoded,
-/// `rewrite` changes what is reported.
-struct Wrong {
-    inner: SeekPath,
-    retarget: fn(&Fixture, i64) -> i64,
-    rewrite: fn(&mut Observation),
+/// The frame-thread counts the witnesses run at: one thread, a threaded
+/// case, and a synchronous decoder's share (`default_threads`).
+fn thread_counts() -> Vec<usize> {
+    let mut counts = vec![1, 4, default_threads()];
+    counts.sort_unstable();
+    counts.dedup();
+    counts
 }
 
-impl TargetPath for Wrong {
-    fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
-        let t = TimeCode((self.retarget)(&self.inner.fx, t.0));
-        let mut observation = self.inner.produce(from, t);
-        (self.rewrite)(&mut observation);
-        observation
-    }
-
-    fn event(&mut self, event: Event) {
-        self.inner.event(event);
-    }
-}
-
-/// One S-2 test target: the reader is at `c` and is asked for `t`.
+/// One S-2 test target: the reader is at `c`, is asked for `t`, then (if any)
+/// for `t2` from `t` (a chained continuation).
 #[derive(Debug)]
 pub(super) struct Target {
     c: i64,
     t: i64,
+    t2: Option<i64>,
     kind: &'static str,
 }
 
-/// A fixture, its 50 seeded targets and the fresh-`Seek` oracle for each.
+/// The linear decode from each anchor, at one thread count: the frames as
+/// they arrive (packets read when each did) and the packets read in all.
+pub(super) struct Truth {
+    runs: BTreeMap<isize, (Vec<FrameLog>, u64)>,
+}
+
+impl Truth {
+    fn new(fx: &Fixture, threads: usize) -> Self {
+        let mut runs = BTreeMap::new();
+        for (f, a) in fx.facts.anchors.iter().enumerate() {
+            let Some(a) = a else { continue };
+            if runs.contains_key(&a.0) {
+                continue;
+            }
+            let f = i64::try_from(f).unwrap();
+            let (mut decoder, mut cache) = (fx.open(threads), FrameCache::<WorkingFrame>::new(1));
+            decoder
+                .decode_window(TimeCode(f), TimeCode(f), &mut cache)
+                .unwrap();
+            let end = TimeCode(fx.facts.last + 100);
+            decoder
+                .decode_window_sequential(TimeCode(f + 1), end, &mut cache)
+                .unwrap();
+            assert_eq!(
+                decoder.seek_count(),
+                1,
+                "{:?}: the linear run seeked again",
+                fx.kind
+            );
+            runs.insert(
+                a.0,
+                (decoder.probe().frames.clone(), decoder.probe().packets),
+            );
+        }
+        Self { runs }
+    }
+
+    /// The packets read in a run from `anchor` when a frame past `t` arrived
+    /// (the window for `t` is complete), else all of them (end of stream).
+    /// The run's first frame is always held, whatever its position.
+    fn completion(&self, anchor: &Anchor, t: i64) -> Option<u64> {
+        let (frames, total) = self.runs.get(&anchor.0)?;
+        Some(
+            (frames.iter().enumerate())
+                .find(|(i, f)| *i >= 1 && f.grid > t)
+                .map_or(*total, |(_, f)| f.packets),
+        )
+    }
+
+    fn pts_of(&self, grid: i64) -> Option<i64> {
+        (self.runs.values().flat_map(|r| &r.0))
+            .find(|f| f.grid == grid)?
+            .ts
+    }
+}
+
+/// A fixture, its seeded targets and the fresh-`Seek` oracle for each, per
+/// thread count (the oracle is always a live `SeekPath` at that count).
 pub(super) struct Corpus {
     fx: Rc<Fixture>,
     targets: Vec<Target>,
-    oracle: Vec<Observation>,
+    oracle: BTreeMap<usize, Vec<(Observation, Option<Observation>)>>,
+    truth: BTreeMap<usize, Truth>,
 }
 
 fn splitmix(state: &mut u64) -> i64 {
@@ -204,43 +364,75 @@ fn splitmix(state: &mut u64) -> i64 {
     i64::try_from((z ^ (z >> 31)) >> 1).unwrap()
 }
 
+/// The anchor of target `t` (shadow, from the file), if known.
+fn anchor(facts: &Facts, t: i64) -> Option<Anchor> {
+    usize::try_from(t)
+        .ok()
+        .and_then(|i| facts.anchors.get(i).copied().flatten())
+}
+
 fn targets(fx: &Fixture) -> Vec<Target> {
-    let last = fx.last;
+    let facts = &fx.facts;
+    let last = facts.last;
+    let kind_seed = 0x5EED_0000 + fx.kind as u64;
     let mut out: Vec<Target> = Vec::new();
-    let mut add = |c: i64, t: i64, kind| {
+    let second = |c: i64, t: i64| {
+        let mut seed = kind_seed ^ (c * 1000 + t).unsigned_abs();
+        let t2 = t + 1 + splitmix(&mut seed) % 12;
+        (t2 <= last).then_some(t2)
+    };
+    let add = |out: &mut Vec<Target>, c: i64, t: i64, t2: Option<i64>, kind| {
         if (1..=last).contains(&t) && c >= 0 && !out.iter().any(|x| (x.c, x.t) == (c, t)) {
-            out.push(Target { c, t, kind });
+            out.push(Target { c, t, t2, kind });
         }
     };
     let mid = last / 2;
     // §8 specials: end of stream, the window's edges, c + 1.
-    add(last - 1, last, "eof");
-    add(last - 2, last - 1, "eof");
-    add(mid - 12, mid, "c+12");
-    add(mid - 13, mid, "c+13 (outside)");
+    add(&mut out, last - 1, last, None, "eof");
+    add(&mut out, last - 2, last - 1, Some(last), "eof");
+    add(&mut out, mid - 12, mid, second(mid - 12, mid), "c+12");
+    add(
+        &mut out,
+        mid - 13,
+        mid,
+        second(mid - 13, mid),
+        "c+13 (outside)",
+    );
     for t in [1, 2, 13, mid, mid + 7] {
-        add(t - 1, t, "c+1");
+        add(&mut out, t - 1, t, second(t - 1, t), "c+1");
     }
-    // ±1 frame around every corrected anchor boundary: where today's seek's
-    // anchor changes (key index timestamp + min_corrected_pts + dts_shift),
-    // and windows that end just before and just past it.
+    // ±1 frame around every corrected anchor boundary (the tick-exact
+    // boundaries are the `ticks` test's), and windows straddling it.
     for f in 1..=usize::try_from(last).unwrap() {
-        if fx.anchors[f] != fx.anchors[f - 1] {
+        if facts.anchors[f] != facts.anchors[f - 1] {
             let f = i64::try_from(f).unwrap();
             for t in [f - 1, f, f + 1] {
-                add(t - 1, t, "anchor-boundary");
+                add(&mut out, t - 1, t, second(t - 1, t), "anchor-boundary");
             }
-            add(f - 4, f - 1, "boundary-window");
-            add(f - 4, f + 1, "boundary-window");
+            add(
+                &mut out,
+                f - 4,
+                f - 1,
+                second(f - 4, f - 1),
+                "boundary-window",
+            );
+            add(
+                &mut out,
+                f - 4,
+                f + 1,
+                second(f - 4, f + 1),
+                "boundary-window",
+            );
         }
     }
-    // Just before and at each key packet, with c + 1.
-    for &(_, k) in &fx.keys {
-        add(k - 2, k - 1, "before-key");
-        add(k - 1, k, "at-key");
+    // Just before and at each key packet; and chains whose second hop crosses it.
+    for &(_, k) in &facts.keys {
+        add(&mut out, k - 2, k - 1, second(k - 2, k - 1), "before-key");
+        add(&mut out, k - 1, k, second(k - 1, k), "at-key");
+        add(&mut out, k - 5, k - 3, Some(k + 1), "second-hop-across-key");
+        add(&mut out, k - 3, k - 2, Some(k + 2), "second-hop-across-key");
     }
-    out.truncate(40);
-    let mut seed = 0x5EED_0000 + fx.kind as u64;
+    let mut seed = kind_seed;
     while out.len() < 50 {
         let t = 1 + splitmix(&mut seed) % last;
         let (pick, gap) = (splitmix(&mut seed) % 20, splitmix(&mut seed));
@@ -250,80 +442,164 @@ fn targets(fx: &Fixture) -> Vec<Target> {
             _ => t + gap % 10, // not forward at all
         };
         let c = c.max(0);
-        if !out.iter().any(|x| (x.c, x.t) == (c, t)) {
-            out.push(Target {
-                c,
-                t,
-                kind: "random",
-            });
-        }
+        add(&mut out, c, t, second(c, t), "random");
     }
     out
 }
 
 impl Corpus {
-    pub(super) fn new(kind: Kind) -> Self {
+    pub(super) fn new(kind: Kind, threads: &[usize]) -> Self {
         let fx = Rc::new(Fixture::new(kind));
         let targets = targets(&fx);
-        let oracle = (targets.iter())
-            .map(|g| SeekPath::new(&fx).produce(None, TimeCode(g.t)))
+        let oracle = threads
+            .iter()
+            .map(|&n| {
+                let fresh = |t: i64| SeekPath::new(&fx, n).produce(None, TimeCode(t));
+                (
+                    n,
+                    targets
+                        .iter()
+                        .map(|g| (fresh(g.t), g.t2.map(fresh)))
+                        .collect(),
+                )
+            })
             .collect();
+        let truth = threads.iter().map(|&n| (n, Truth::new(&fx, n))).collect();
         Self {
             fx,
             targets,
             oracle,
+            truth,
         }
     }
+
+    fn pts_of(&self, grid: i64) -> i64 {
+        self.truth
+            .values()
+            .find_map(|t| t.pts_of(grid))
+            .expect("a timestamp at that frame")
+    }
 }
 
-/// Where S-2 says the reader at `c` producing `t` seeks (`Some(Seek)`) or
-/// continues (`Some(Continue)`), from the file alone. `None`: the design
-/// leaves it open (the next key packet is within the decoder's reorder depth
-/// of `t`), so only byte and state identity is required.
-pub(super) fn expected_route(fx: &Fixture, c: i64, t: i64) -> Option<Route> {
-    let anchor = |x: i64| {
-        usize::try_from(x)
-            .ok()
-            .and_then(|i| fx.anchors.get(i).copied().flatten())
+/// Did a run from `anchor` that has read `packets` video packets read a key
+/// packet since the anchor (the anchor packet itself is packet 1)?
+fn keys_read(facts: &Facts, anchor: &Anchor, packets: u64) -> bool {
+    let Some(first) = facts.packets.iter().position(|p| p.0 == anchor.0) else {
+        return true; // an anchor that is not a packet is unknown
     };
-    if fx.kind == Kind::NoPts
-        || t <= c
-        || t > c + 12
-        || anchor(c).is_none()
-        || anchor(c) != anchor(t)
-    {
-        return Some(Route::Seek); // not the demonstrated domain: today's seek
+    let end = (first + usize::try_from(packets).unwrap()).min(facts.packets.len());
+    facts.packets[(first + 1).min(end)..end].iter().any(|p| p.1)
+}
+
+/// What S-2 says about the reader's run, tracked over a script: the anchor
+/// of the run's last seek (`None`: unknown or no run) and whether the shadow
+/// is compromised.
+pub(super) struct Model<'a> {
+    corpus: &'a Corpus,
+    threads: usize,
+    run: Option<Anchor>,
+    faulty: bool,
+}
+
+impl<'a> Model<'a> {
+    fn new(corpus: &'a Corpus, threads: usize) -> Self {
+        Self {
+            corpus,
+            threads,
+            run: None,
+            faulty: false,
+        }
     }
-    let pos = anchor(c)?.0;
-    let at = fx.keys.iter().position(|k| k.0 == pos)?;
-    let next = fx.keys.get(at + 1).map_or(i64::MAX, |k| k.1);
-    match next {
-        n if n <= t => Some(Route::Seek), // a key packet before t: abandon
-        n if n > t + 6 => Some(Route::Continue),
-        _ => None,
+
+    /// A cold seek to `t`: the run's anchor is A(t), if the shadow can say.
+    fn seeked(&mut self, t: i64) {
+        self.run = if self.faulty {
+            None
+        } else {
+            anchor(&self.corpus.fx.facts, t)
+        };
+    }
+
+    /// Where S-2 says the reader at `c` producing `t` seeks or continues.
+    /// Continue needs: the `mov` pair; a known run anchor; `c < t <= c + 12`;
+    /// A(t) equal to the run's; no key packet read since the anchor by the
+    /// time the frame past `t` arrives (exact: the packets of a linear decode
+    /// at this thread count against the file's key flags). Anything else Seek.
+    fn expected(&mut self, c: i64, t: i64) -> Route {
+        let facts = &self.corpus.fx.facts;
+        let continues = !self.faulty
+            && facts.kind != Kind::AviDtsGuess
+            && c < t
+            && t <= c + 12
+            && self.run.is_some()
+            && anchor(facts, t) == self.run
+            && self.run.as_ref().is_some_and(|a| {
+                let done = self.corpus.truth[&self.threads].completion(a, t);
+                done.is_some_and(|p| !keys_read(facts, a, p))
+            });
+        if continues {
+            return Route::Continue;
+        }
+        self.seeked(t);
+        Route::Seek
     }
 }
 
-/// Every target: the path's frame bytes, timestamps and S-2 state equal the
-/// oracle's; with `check_route`, it also seeks or continues as S-2 says.
+/// Compare one observation with its oracle (and, if `check_route`, the route).
+fn check(
+    got: &Observation,
+    want: &Observation,
+    expect: Option<Route>,
+    place: &str,
+) -> Result<(), String> {
+    if !got.same(want) {
+        return Err(format!("{place}: {got:?} != oracle {want:?}"));
+    }
+    match expect {
+        Some(r) if r != got.route => Err(format!("{place}: route {:?}, S-2 says {r:?}", got.route)),
+        _ => Ok(()),
+    }
+}
+
+/// Every target, at `threads` frame threads: the path's frame bytes,
+/// timestamps, retained frames and S-2 state equal the same-thread oracle's
+/// for the first hop and for the chained second hop; with `check_route`, it
+/// also seeks or continues as S-2 says.
 pub(super) fn witness<P: TargetPath>(
     path: &mut P,
     corpus: &Corpus,
+    threads: usize,
     check_route: bool,
 ) -> Result<(), String> {
-    for (g, want) in corpus.targets.iter().zip(&corpus.oracle) {
+    witness_hops(path, corpus, threads, check_route, true)
+}
+
+/// [`witness`], with the chained second hops optional (their absence is what
+/// the second-hop mutation shows to matter).
+pub(super) fn witness_hops<P: TargetPath>(
+    path: &mut P,
+    corpus: &Corpus,
+    threads: usize,
+    check_route: bool,
+    chain: bool,
+) -> Result<(), String> {
+    for (g, (want, want2)) in corpus.targets.iter().zip(&corpus.oracle[&threads]) {
+        let place = format!("{:?} x{threads} {g:?}", corpus.fx.kind);
         path.produce(None, TimeCode(g.c));
+        let mut model = Model::new(corpus, threads);
+        model.seeked(g.c);
+        let expect = model.expected(g.c, g.t);
         let got = path.produce(Some(Cursor(g.c)), TimeCode(g.t));
-        let place = format!("{:?} {g:?}", corpus.fx.kind);
-        if !got.same(want) {
-            return Err(format!("{place}: {got:?} != oracle {want:?}"));
-        }
-        let expect = expected_route(&corpus.fx, g.c, g.t).filter(|_| check_route);
-        if expect.is_some_and(|r| r != got.route) {
-            return Err(format!(
-                "{place}: route {:?}, S-2 says {expect:?}",
-                got.route
-            ));
+        check(&got, want, check_route.then_some(expect), &place)?;
+        if let (Some(t2), Some(want2), true) = (g.t2, want2, chain) {
+            let expect = model.expected(g.t, t2);
+            let got = path.produce(Some(Cursor(g.t)), TimeCode(t2));
+            check(
+                &got,
+                want2,
+                check_route.then_some(expect),
+                &format!("{place} then {t2}"),
+            )?;
         }
     }
     Ok(())
@@ -340,34 +616,57 @@ pub(super) enum Step {
     /// The scheduler believes the reader is at `.0` and asks for `.1`.
     Go(i64, i64, Expect),
     Do(Event),
-    /// The armed cancel fires: `Cancelled`, and no continuation state left.
-    Cancelled(i64, i64),
+    /// The armed `Cancel(n)` fires mid-run: `Cancelled`, `n` frames of
+    /// progress, stopped at the packet boundary of the `n`th, and no
+    /// continuation state left.
+    Cancelled(i64, i64, usize),
 }
 
-/// Run `steps` on `path` and on a fresh-`Seek` reference; every produced
-/// frame equals the reference's, and (with `check_route`) routes are as
-/// expected: `Auto` from S-2, `Is(..)` as stated (after any reset, Seek).
+/// The scripts' fixtures and thread count: `a` is the file the reader runs
+/// on, `b` the relink target.
+pub(super) struct Ctx<'a> {
+    pub(super) a: &'a Corpus,
+    pub(super) b: &'a Corpus,
+    pub(super) threads: usize,
+}
+
+/// Run `steps` on `path` and on a fresh-`Seek` reference (which sees the
+/// same relinks and timestamp faults); every produced frame equals the
+/// reference's, and (with `check_route`) routes are as expected: `Auto` from
+/// S-2, `Is(..)` as stated.
 pub(super) fn run_script<P: TargetPath>(
     path: &mut P,
-    first: &Rc<Fixture>,
+    cx: &Ctx,
     steps: &[Step],
     check_route: bool,
 ) -> Result<(), String> {
-    let (mut reference, mut fx) = (SeekPath::new(first), first.clone());
+    let mut reference = SeekPath::new(&cx.a.fx, cx.threads);
+    let mut model = Model::new(cx.a, cx.threads);
     for (n, step) in steps.iter().enumerate() {
         match step {
-            Step::Prime(c) => drop(path.produce(None, TimeCode(*c))),
+            Step::Prime(c) => {
+                drop(path.produce(None, TimeCode(*c)));
+                model.seeked(*c);
+            }
             Step::Go(c, t, expect) => {
                 let got = path.produce(Some(Cursor(*c)), TimeCode(*t));
                 let want = reference.produce(None, TimeCode(*t));
+                let prior = model.run;
+                let auto = model.expected(*c, *t);
+                let expect = match expect {
+                    Expect::Auto => auto,
+                    Expect::Is(r) => {
+                        model.run = prior;
+                        if *r == Route::Seek {
+                            model.seeked(*t);
+                        }
+                        *r
+                    }
+                };
                 if !got.same(&want) {
                     return Err(format!("step {n}: {got:?} != reference {want:?}"));
                 }
-                let expect = match expect {
-                    Expect::Auto => expected_route(&fx, *c, *t),
-                    Expect::Is(r) => Some(*r),
-                };
-                if check_route && expect.is_some_and(|r| r != got.route) {
+                if check_route && expect != got.route {
                     return Err(format!(
                         "step {n}: route {:?}, expected {expect:?}",
                         got.route
@@ -375,26 +674,62 @@ pub(super) fn run_script<P: TargetPath>(
                 }
             }
             Step::Do(event) => {
-                if let Event::Relink(next) = event {
-                    fx = next.clone();
-                    reference.event(event.clone());
+                match event {
+                    Event::Relink(_) => {
+                        model.corpus = cx.b;
+                        model.run = None;
+                        reference.event(event.clone());
+                    }
+                    Event::KeyChange | Event::ShrinkReopen | Event::Error => model.run = None,
+                    Event::ShadowFails
+                    | Event::ShadowMismatch
+                    | Event::StreamMismatch
+                    | Event::AnchorDrifts => {
+                        model.faulty = true;
+                        model.run = None;
+                    }
+                    Event::Tamper(_) => reference.event(event.clone()),
+                    Event::Cancel(_) => {}
                 }
                 path.event(event.clone());
             }
-            Step::Cancelled(c, t) => {
+            Step::Cancelled(c, t, frames) => {
                 let got = path.produce(Some(Cursor(*c)), TimeCode(*t));
-                if got.err.as_deref() != Some("Cancelled") || got.state.continuation_at.is_some() {
-                    return Err(format!("step {n}: cancel left {got:?}"));
-                }
+                cancelled(&got, *frames).map_err(|e| format!("step {n}: {e}"))?;
+                model.run = None; // the interrupted run is abandoned
             }
         }
     }
     Ok(())
 }
 
-/// The non-fixture cases of S-2, over `a` (default) and `b` (edit list):
-/// an edit, a relink, a same-source jump cut, cancellation, and the resets.
-pub(super) fn scripts(b: &Rc<Fixture>, cancel_after: usize) -> Vec<(&'static str, Vec<Step>)> {
+/// The cancel witness: `Cancelled`, at least `n` frames of progress, no
+/// packet read after the packet that released the `n`th frame, and no
+/// continuation state left.
+fn cancelled(got: &Observation, n: usize) -> Result<(), String> {
+    let stopped = got.err.as_deref() == Some("Cancelled") && got.state.continuation_at.is_none();
+    if !stopped {
+        return Err(format!("cancel left {got:?}"));
+    }
+    let Some(nth) = got.frames.get(n - 1) else {
+        return Err(format!(
+            "cancelled after {} frames, armed for {n}: {got:?}",
+            got.frames.len()
+        ));
+    };
+    if nth.packets != got.packets || got.frames.last().is_some_and(|l| l.packets != got.packets) {
+        return Err(format!(
+            "cancelled {} packets in, frame {n} arrived at packet {}: {:?}",
+            got.packets, nth.packets, got.frames
+        ));
+    }
+    Ok(())
+}
+
+/// The non-fixture cases of S-2, over `a` and `b`: an edit, a relink, a
+/// same-source jump cut, cancellation, the resets, and the injected
+/// failures (an unknown or mismatched anchor, timestamp faults).
+pub(super) fn scripts(cx: &Ctx, cancel_after: usize) -> Vec<(&'static str, Vec<Step>)> {
     use {Expect::*, Route::Seek, Step::*};
     let reset = |event: Event| {
         vec![
@@ -403,6 +738,34 @@ pub(super) fn scripts(b: &Rc<Fixture>, cancel_after: usize) -> Vec<(&'static str
             Do(event),
             Go(11, 12, Is(Seek)), // a reset reader is not at 11: seek
             Go(12, 13, Auto),
+        ]
+    };
+    // After a shadow fault the reader must seek, run after run (early in a
+    // GOP, so that without the fault the same hops continue).
+    let faulted = |event: Event| {
+        vec![
+            Prime(6),
+            Go(6, 7, Auto),
+            Do(event),
+            Prime(6),
+            Go(6, 7, Auto),
+            Go(7, 8, Auto),
+            Go(8, 9, Auto),
+        ]
+    };
+    // Frame 33's timestamp is missing or repeated; a run that has not met it
+    // continues, one that has must seek (S-2 rule 3), and so must every later
+    // run anchored before it; a run anchored past it continues again.
+    let stamp = |fault: fn(i64) -> Tamper| {
+        vec![
+            Do(Event::Tamper(fault(cx.a.pts_of(33)))),
+            Prime(28),
+            Go(28, 30, Auto),
+            Go(30, 34, Is(Seek)),
+            Go(34, 35, Is(Seek)),
+            Go(35, 50, Is(Seek)),
+            Go(50, 51, Auto),
+            Go(51, 52, Auto),
         ]
     };
     vec![
@@ -421,7 +784,7 @@ pub(super) fn scripts(b: &Rc<Fixture>, cancel_after: usize) -> Vec<(&'static str
             vec![
                 Prime(30),
                 Go(30, 31, Auto),
-                Do(Event::Relink(b.clone())),
+                Do(Event::Relink(cx.b.fx.clone())),
                 Go(30, 31, Is(Seek)),
                 Go(31, 32, Auto),
             ],
@@ -442,7 +805,7 @@ pub(super) fn scripts(b: &Rc<Fixture>, cancel_after: usize) -> Vec<(&'static str
             vec![
                 Prime(10),
                 Do(Event::Cancel(cancel_after)),
-                Cancelled(10, 14),
+                Cancelled(10, 14, cancel_after),
                 Go(10, 14, Is(Seek)),
                 Go(14, 15, Auto),
             ],
@@ -450,19 +813,79 @@ pub(super) fn scripts(b: &Rc<Fixture>, cancel_after: usize) -> Vec<(&'static str
         ("key change", reset(Event::KeyChange)),
         ("shrink reopen", reset(Event::ShrinkReopen)),
         ("error", reset(Event::Error)),
+        ("shadow fails", faulted(Event::ShadowFails)),
+        ("shadow mismatch", faulted(Event::ShadowMismatch)),
+        ("stream mismatch", faulted(Event::StreamMismatch)),
+        ("anchor drifts", faulted(Event::AnchorDrifts)),
+        ("missing timestamp", stamp(Tamper::Missing)),
+        ("repeated timestamp", stamp(Tamper::Repeat)),
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{pf1_s2c_fixtures::RefFrame, sha256::sha256_bytes};
 
-    fn c_has(pairs: &[(i64, i64)], c: i64, t: i64) -> bool {
-        pairs.contains(&(c, t))
+    /// The fixture and oracle-digest pins: SHA-256 of each generated file and
+    /// an FNV-1a digest of what a one-thread fresh Seek observes at every
+    /// target (decoder-level state only: timestamps, retained-plane hashes,
+    /// anchors). See `the_pinned_oracle_has_not_drifted`.
+    const PINS: [(Kind, &str, &str); 6] = [
+        (
+            Kind::Default,
+            "0bbebd9f932c9200b33f84fba32f588f4d46e790c415a2825dda3aac06d5cafc",
+            "e3adf240824b969b",
+        ),
+        (
+            Kind::Pyramid,
+            "4039f5a155610dc63dc4c83ff8f1a128bcebf5a792e330bc503cf09c19410934",
+            "bff05c7c05ec2f35",
+        ),
+        (
+            Kind::EditList,
+            "300ce14c19339777dcb358c0c3a468b9a2be6b0f31b03a5a6f5bcd7a6db29dc9",
+            "a0d54226ba3f75f2",
+        ),
+        (
+            Kind::OpenGop,
+            "9ccbc02a47796ffbbf95d760bed76f849e11b612cca4536e9acddca414447119",
+            "e7bd5a61f4a000cb",
+        ),
+        (
+            Kind::Vfr,
+            "fef2ad1e0f51ccbff506955e4eb6d0a504396b5f4dcf71bcda7af891ec73a7d7",
+            "002b5c1213d3c5d0",
+        ),
+        (
+            Kind::AviDtsGuess,
+            "f8e71b910c906fcf0cb755e9c7bcdecb6b1458ef92fc0d4479740ebd6509031c",
+            "4c8f6f2b0d2d6a5f",
+        ),
+    ];
+
+    fn corpora(threads: &[usize]) -> Vec<Corpus> {
+        KINDS.iter().map(|k| Corpus::new(*k, threads)).collect()
     }
 
-    fn corpora() -> Vec<Corpus> {
-        KINDS.map(Corpus::new).into()
+    fn fnv(text: &str) -> u64 {
+        text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// The digest pinned per file: what the one-thread Seek observed, minus
+    /// the converted-frame hash (colour conversion is not decoder state).
+    fn digest(c: &Corpus) -> u64 {
+        let rows: Vec<_> = (c.targets.iter().zip(&c.oracle[&1]))
+            .flat_map(|(g, (o, o2))| {
+                [Some((g.t, o)), g.t2.zip(o2.as_ref())]
+                    .into_iter()
+                    .flatten()
+                    .map(|(t, o)| format!("{t} {:?} {:?} {:?}", o.pts, o.state, o.err))
+            })
+            .collect();
+        fnv(&rows.join("\n"))
     }
 
     #[test]
@@ -472,86 +895,764 @@ mod tests {
         }
     }
 
-    /// The witnesses are only as strong as the oracle's coverage: 50 targets
-    /// per file, every §8 special present, real anchor boundaries, EOF hit,
-    /// no errors, varied frames (a constant oracle would pass anything).
+    /// The shape checks reject a substitute that lacks the property: each
+    /// file kind generated as another kind would be fails `assert_shape`.
+    #[test]
+    fn a_substitute_fixture_fails_the_shape_check() {
+        let substitutes = [
+            (Kind::Pyramid, Kind::Default),
+            (Kind::EditList, Kind::Default),
+            (Kind::OpenGop, Kind::Default),
+            (Kind::Vfr, Kind::Default),
+            (Kind::AviDtsGuess, Kind::Default),
+            (Kind::Default, Kind::OpenGop),
+            (Kind::Default, Kind::Pyramid),
+            (Kind::Default, Kind::Vfr),
+            (Kind::Default, Kind::EditList),
+        ];
+        for (kind, made_like) in substitutes {
+            let fx = Fixture::new_as(kind, made_like);
+            let rejected =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fx.assert_shape()));
+            let e = rejected.expect_err(&format!(
+                "{kind:?} made like {made_like:?} passed the shape check"
+            ));
+            let e = e.downcast_ref::<String>().cloned().unwrap_or_default();
+            eprintln!("pf1-c4 mutation shape {kind:?} made like {made_like:?}: {e}");
+        }
+    }
+
+    /// The witnesses are only as strong as the oracle's coverage: every §8
+    /// special present, real anchor boundaries, EOF hit, chained hops, no
+    /// errors, varied frames (a constant oracle would pass anything), and
+    /// the real seek's first packet equal to the shadow's at every target.
     #[test]
     fn the_oracle_covers_the_special_targets() {
-        for c in corpora() {
-            let kind = c.fx.kind;
-            let c_targets: Vec<(i64, i64)> = c.targets.iter().map(|g| (g.c, g.t)).collect();
-            assert_eq!(c.targets.len(), 50, "{kind:?}");
-            let pair = |c: i64, t: i64| c_has(&c_targets, c, t);
-            let has = |k: &str| c.targets.iter().any(|g| g.kind == k);
-            for k in ["eof", "c+1", "c+12", "c+13 (outside)"] {
-                assert!(has(k), "{kind:?} lacks {k}");
+        for c in corpora(&[1]) {
+            let (kind, facts) = (c.fx.kind, &c.fx.facts);
+            let pairs: Vec<(i64, i64)> = c.targets.iter().map(|g| (g.c, g.t)).collect();
+            let pair = |c: i64, t: i64| pairs.contains(&(c, t));
+            assert!(c.targets.len() >= 50, "{kind:?}");
+            for k in [
+                "eof",
+                "c+1",
+                "c+12",
+                "c+13 (outside)",
+                "second-hop-across-key",
+            ] {
+                assert!(c.targets.iter().any(|g| g.kind == k), "{kind:?} lacks {k}");
             }
-            // Read from the file: every key's before/at pair, and ±1 frame
-            // around every place today's anchor changes, is a target.
-            for &(_, k) in c.fx.keys.iter().filter(|k| k.1 > 1) {
+            assert!(
+                c.targets.iter().filter(|g| g.t2.is_some()).count() >= 40,
+                "{kind:?}"
+            );
+            for &(_, k) in facts.keys.iter().filter(|k| k.1 > 1) {
                 assert!(pair(k - 2, k - 1) && pair(k - 1, k), "{kind:?} key {k}");
             }
-            let last = usize::try_from(c.fx.last).unwrap();
+            let last = usize::try_from(facts.last).unwrap();
             let moves: Vec<i64> = (1..=last)
-                .filter(|&f| c.fx.anchors[f] != c.fx.anchors[f - 1])
+                .filter(|&f| facts.anchors[f] != facts.anchors[f - 1])
                 .map(|f| i64::try_from(f).unwrap())
                 .collect();
             assert!(moves.len() >= 3, "{kind:?}: anchor moves at {moves:?}");
             for f in moves {
-                assert!(
-                    [f - 1, f, f + 1].iter().all(|&t| pair(t - 1, t)),
-                    "{kind:?} boundary {f}"
-                );
+                let ok = [f - 1, f, f + 1].iter().all(|&t| pair(t - 1, t));
+                assert!(ok, "{kind:?} boundary {f}");
             }
-            assert!(
-                c.oracle
+            let oracle = &c.oracle[&1];
+            let all = || {
+                oracle
                     .iter()
-                    .all(|o| o.err.is_none() && o.route == Route::Seek)
-            );
+                    .flat_map(|(o, o2)| [Some(o), o2.as_ref()])
+                    .flatten()
+            };
+            assert!(all().all(|o| o.err.is_none() && o.route == Route::Seek));
             assert!(
-                c.oracle.iter().any(|o| o.state.eof_sent),
+                all().any(|o| o.state.eof_sent),
                 "{kind:?} never reaches EOF"
             );
-            assert!(
-                c.oracle.iter().any(|o| o.state.lookahead.is_some()),
-                "{kind:?}"
-            );
-            let distinct: std::collections::BTreeSet<_> =
-                c.oracle.iter().map(|o| o.frame).collect();
+            assert!(all().any(|o| o.state.lookahead.is_some()), "{kind:?}");
+            let distinct: std::collections::BTreeSet<_> = all().map(|o| o.frame).collect();
             assert!(
                 distinct.len() >= 25,
                 "{kind:?}: {} distinct frames",
                 distinct.len()
             );
-            let digest = format!(
-                "{:?}",
-                c.oracle
-                    .iter()
-                    .map(|o| (o.frame, &o.state))
-                    .collect::<Vec<_>>()
+            // Rule 1's premise, observed: the real seek's first packet is A(t).
+            for (g, (o, o2)) in c.targets.iter().zip(oracle) {
+                assert_eq!(o.state.first_packet, anchor(facts, g.t), "{kind:?} {g:?}");
+                if let (Some(t2), Some(o2)) = (g.t2, o2) {
+                    assert_eq!(o2.state.first_packet, anchor(facts, t2), "{kind:?} {g:?}");
+                }
+            }
+            eprintln!(
+                "pf1-c4 oracle-digest {kind:?} targets={} {:016x}",
+                c.targets.len(),
+                digest(&c)
             );
-            let digest = (digest.bytes()).fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-                (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-            });
-            eprintln!("pf1-c4 oracle-digest {kind:?} targets=50 {digest:016x}");
+        }
+    }
+
+    /// Compare the fresh Seek at every frame of `fx` with `reference` (the
+    /// CLI's linear decode): returns (matched, unreachable, timestamp guesses
+    /// that differ). A seek that cannot reach a frame (open-GOP leading
+    /// frames: their references are in the previous GOP) is counted, not
+    /// failed; AVI timestamps are guesses, so only the frame's content is
+    /// compared there.
+    fn cli_check(fx: &Fixture, reference: &[RefFrame]) -> Result<(usize, usize, usize), String> {
+        let kind = fx.kind;
+        let sha = |plane: &Option<Vec<u8>>| plane.as_deref().map(sha256_bytes);
+        let (mut checked, mut unreachable, mut guessed) = (0, 0, 0);
+        for t in 1..=fx.facts.last {
+            let mut decoder = fx.open(1);
+            let mut cache = FrameCache::<WorkingFrame>::new(1);
+            decoder
+                .decode_window(TimeCode(t), TimeCode(t), &mut cache)
+                .unwrap();
+            let (state, planes) = (decoder.state(), decoder.retained_planes());
+            let held = state.pending.as_ref().expect("a held frame");
+            let want = reference
+                .iter()
+                .rposition(|f| f.grid.is_some_and(|g| g <= t));
+            let place = format!("{kind:?} t={t}");
+            if kind == Kind::AviDtsGuess {
+                let found = reference
+                    .iter()
+                    .any(|f| Some(&f.sha) == sha(&planes[0]).as_ref());
+                if !found {
+                    return Err(format!("{place}: a frame the CLI never decoded"));
+                }
+                guessed += usize::from(want.map(|k| reference[k].ts) != Some(held.pts));
+                checked += 1;
+                continue;
+            }
+            let Some(k) = want.filter(|_| held.grid <= t) else {
+                unreachable += 1;
+                continue;
+            };
+            if held.pts != reference[k].ts {
+                return Err(format!(
+                    "{place}: selected timestamp {:?}, CLI {:?}",
+                    held.pts, reference[k].ts
+                ));
+            }
+            if sha(&planes[0]).as_deref() != Some(reference[k].sha.as_str()) {
+                return Err(format!("{place}: selected frame differs from the CLI's"));
+            }
+            match (&state.lookahead, reference.get(k + 1)) {
+                (Some(l), Some(next)) => {
+                    if l.pts != next.ts || sha(&planes[1]).as_deref() != Some(next.sha.as_str()) {
+                        return Err(format!(
+                            "{place}: lookahead differs from the CLI's next frame"
+                        ));
+                    }
+                }
+                (None, None) => {}
+                (l, n) => {
+                    return Err(format!(
+                        "{place}: lookahead {l:?} but CLI next {:?}",
+                        n.map(|n| n.ts)
+                    ));
+                }
+            }
+            checked += 1;
+        }
+        Ok((checked, unreachable, guessed))
+    }
+
+    /// The oracle is not the decoder agreeing with itself: for every frame,
+    /// the fresh Seek's selected frame and its retained frames equal what the
+    /// pinned `FFmpeg` CLI's own linear decode produces (`ffprobe -show_frames`
+    /// timestamps, `ffmpeg -f framehash` SHA-256 of the raw planes).
+    #[test]
+    fn the_seek_path_matches_the_cli_reference() {
+        for kind in KINDS {
+            let fx = Fixture::new(kind);
+            let reference = fx.reference();
+            let (checked, unreachable, guessed) = cli_check(&fx, &reference).unwrap();
+            eprintln!(
+                "pf1-c4 cli-reference {kind:?}: {} frames, {checked} seeks matched (AVI: found among \
+                 the CLI's frames), {unreachable} unreachable (open-GOP leading), {guessed} \
+                 timestamp guesses differ (AVI)",
+                reference.len()
+            );
+            assert!(checked >= 60, "{kind:?} checked {checked}");
+            assert_eq!(unreachable > 0, kind == Kind::OpenGop, "{kind:?}");
+        }
+    }
+
+    /// The CLI comparison fails for a wrong reference: another file's frames,
+    /// one flipped frame hash, one shifted timestamp.
+    #[test]
+    fn a_wrong_cli_reference_fails_the_comparison() {
+        let (a, b) = (Fixture::new(Kind::Default), Fixture::new(Kind::Vfr));
+        cli_check(&a, &a.reference()).unwrap();
+        let e = cli_check(&a, &b.reference()).unwrap_err();
+        eprintln!("pf1-c4 mutation cli reference of another file: {e}");
+        let mutations: [(&str, ReferenceMutation); 3] = [
+            ("flipped hash", |r| r[30].sha = "0".repeat(64)),
+            ("shifted timestamp", |r| r[30].ts = r[30].ts.map(|t| t + 1)),
+            ("dropped frame", |r| drop(r.remove(30))),
+        ];
+        for (name, mutate) in mutations {
+            let mut reference = a.reference();
+            mutate(&mut reference);
+            let e = cli_check(&a, &reference).unwrap_err();
+            eprintln!("pf1-c4 mutation cli reference {name}: {e}");
+        }
+    }
+
+    /// The pin decision for one file: `Ok(true)` compared and equal,
+    /// `Ok(false)` skipped because a different toolchain made the file.
+    fn pin_check(
+        kind: Kind,
+        pinned: (&str, &str),
+        got_file: &str,
+        got: &str,
+    ) -> Result<bool, String> {
+        if got_file != pinned.0 {
+            eprintln!(
+                "pf1-c4 SKIP pin {kind:?}: the fixture is {got_file}, pinned {}: a different \
+                 FFmpeg/x264 build made it, so its digest is not compared",
+                pinned.0
+            );
+            return Ok(false);
+        }
+        if got != pinned.1 {
+            return Err(format!(
+                "{kind:?}: the fresh-Seek oracle moved on the pinned file: {got} != {}",
+                pinned.1
+            ));
+        }
+        Ok(true)
+    }
+
+    /// Fixture and oracle pins. If this machine's FFmpeg/x264 generated the
+    /// pinned file, the oracle digest must be the pinned one (a common
+    /// decoder regression cannot move both the path and the oracle); if the
+    /// file differs, the test says so and skips that file rather than pin a
+    /// toolchain.
+    #[test]
+    fn the_pinned_oracle_has_not_drifted() {
+        for (c, (kind, file, want)) in corpora(&[1]).into_iter().zip(PINS) {
+            assert_eq!(c.fx.kind, kind);
+            let (got_file, got) = (c.fx.sha256(), format!("{:016x}", digest(&c)));
+            eprintln!("pf1-c4 pin {kind:?} sha256={got_file} digest={got}");
+            let compared = pin_check(kind, (file, want), &got_file, &got).unwrap();
+            eprintln!("pf1-c4 pin {kind:?} compared={compared}");
+        }
+    }
+
+    /// A moved oracle on the pinned file fails; a different file is skipped
+    /// with a note (not silently passed as equal).
+    #[test]
+    fn the_pin_check_fails_a_moved_oracle_and_notes_a_different_file() {
+        let (kind, file, want) = PINS[0];
+        assert_eq!(pin_check(kind, (file, want), file, want), Ok(true));
+        let e = pin_check(kind, (file, want), file, "0123456789abcdef").unwrap_err();
+        eprintln!("pf1-c4 mutation pinned digest moved: {e}");
+        assert_eq!(
+            pin_check(kind, (file, want), "another file", "0123456789abcdef"),
+            Ok(false)
+        );
+    }
+
+    fn tick_check(facts: &Facts, scratch: &mut VideoDecoder) -> Result<(), String> {
+        let mut real = |tick: i64| scratch.probe_anchor_at(facts.us_of_tick(tick));
+        for b in &facts.ticks {
+            for (tick, want) in [
+                (b.tick - 1, b.before),
+                (b.tick, b.after),
+                (b.tick + 1, b.after),
+            ] {
+                let got = real(tick);
+                if got != want {
+                    return Err(format!(
+                        "{:?} tick {tick}: real {got:?}, shadow {want:?}",
+                        facts.kind
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The corrected anchor boundaries, to the stream tick: at every place
+    /// today's anchor changes, the real context's seek (a raw timestamp,
+    /// probed on a scratch decoder) picks the shadow's anchor one tick either
+    /// side of the boundary. The boundary is where the design says it is
+    /// (key index timestamp less `min_corrected_pts + dts_shift`), measured
+    /// rather than assumed: it lies between the seek times of two adjacent
+    /// frames, and its distance from each is logged.
+    #[test]
+    fn the_anchor_boundaries_hold_at_the_tick_level() {
+        for kind in KINDS {
+            let fx = Fixture::new(kind);
+            let facts = &fx.facts;
+            assert!(
+                facts.ticks.len() >= 3,
+                "{kind:?}: {} boundaries",
+                facts.ticks.len()
+            );
+            tick_check(facts, &mut fx.open(1)).unwrap();
+            for b in &facts.ticks {
+                let f = (1..facts.seek_ticks.len())
+                    .find(|&f| facts.seek_ticks[f - 1] < b.tick && b.tick <= facts.seek_ticks[f])
+                    .unwrap_or_else(|| {
+                        panic!("{kind:?}: boundary {} between no two frames", b.tick)
+                    });
+                eprintln!(
+                    "pf1-c4 tick {kind:?} boundary tick {} between frame {} (tick {}) and {f} \
+                     (tick {}): {} ticks above the earlier, {} below the later",
+                    b.tick,
+                    f - 1,
+                    facts.seek_ticks[f - 1],
+                    facts.seek_ticks[f],
+                    b.tick - facts.seek_ticks[f - 1],
+                    facts.seek_ticks[f] - b.tick,
+                );
+            }
+        }
+    }
+
+    /// A shadow that puts a boundary one tick early or late is caught.
+    #[test]
+    fn a_shadow_boundary_one_tick_off_fails_the_tick_witness() {
+        for kind in [Kind::Default, Kind::Pyramid, Kind::EditList] {
+            let fx = Fixture::new(kind);
+            for shift in [-1, 1] {
+                let mut facts = fx.facts.clone();
+                for b in &mut facts.ticks {
+                    b.tick += shift;
+                }
+                let e = tick_check(&facts, &mut fx.open(1)).unwrap_err();
+                eprintln!("pf1-c4 mutation tick shift {shift} {kind:?}: {e}");
+            }
+        }
+    }
+
+    /// Frame threads delay the decoder's output but must not change what is
+    /// selected or held: the threaded oracles equal the one-thread oracle in
+    /// frame, timestamp, retained frames and anchor. (`eof_sent` near the end
+    /// of the stream may differ; the count is logged.)
+    #[test]
+    fn the_seek_selection_does_not_depend_on_the_thread_count() {
+        let threads = thread_counts();
+        for c in corpora(&threads) {
+            for &n in &threads {
+                let mut eof = 0;
+                for (a, b) in c.oracle[&1].iter().zip(&c.oracle[&n]) {
+                    let pairs = [(Some(&a.0), Some(&b.0)), (a.1.as_ref(), b.1.as_ref())];
+                    for (one, many) in pairs.into_iter().filter_map(|(x, y)| x.zip(y)) {
+                        assert!(
+                            one.same_content(many),
+                            "{:?} x{n}: {one:?} vs {many:?}",
+                            c.fx.kind
+                        );
+                        eof += usize::from(one.state.eof_sent != many.state.eof_sent);
+                    }
+                }
+                eprintln!(
+                    "pf1-c4 threads {:?} x{n}: eof_sent differs in {eof} observations",
+                    c.fx.kind
+                );
+            }
         }
     }
 
     #[test]
     fn the_seek_path_reproduces_the_oracle_on_every_fixture() {
-        for c in corpora() {
-            witness(&mut SeekPath::new(&c.fx), &c, false).unwrap();
+        let threads = thread_counts();
+        for c in corpora(&threads) {
+            for &n in &threads {
+                witness(&mut SeekPath::new(&c.fx, n), &c, n, false).unwrap();
+            }
         }
     }
 
-    /// The non-fixture cases already hold for the fresh Seek (cancel: before
-    /// the first packet), so they are live for the implementation too.
+    /// The non-fixture cases already hold for the fresh Seek (cancel: the
+    /// stop flag is raised after n received frames), so they are live for
+    /// the implementation too.
     #[test]
     fn the_scripted_cases_hold_for_the_seek_path() {
-        let (a, b) = (Corpus::new(Kind::Default), Corpus::new(Kind::EditList));
-        for (name, steps) in scripts(&b.fx, 0) {
-            run_script(&mut SeekPath::new(&a.fx), &a.fx, &steps, false)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let threads = thread_counts();
+        let (a, b) = (
+            Corpus::new(Kind::Default, &threads),
+            Corpus::new(Kind::EditList, &threads),
+        );
+        for &n in &threads {
+            let cx = Ctx {
+                a: &a,
+                b: &b,
+                threads: n,
+            };
+            for (name, steps) in scripts(&cx, 2) {
+                run_script(&mut SeekPath::new(&a.fx, n), &cx, &steps, false)
+                    .unwrap_or_else(|e| panic!("{name} x{n}: {e}"));
+            }
+        }
+    }
+
+    // ---- a correct continuation, built in test code (the positive control) ----
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Corrupt {
+        Never,
+        /// The held lookahead frame is damaged before the call is observed.
+        AtOnce,
+        /// It is damaged only at the end of the second continuation in a row, so
+        /// only a chained hop sees it.
+        SecondHop,
+    }
+
+    type ReferenceMutation = fn(&mut Vec<RefFrame>);
+    type RuleMutation = fn(&mut Rules);
+
+    /// One switch per S-2 rule; `Rules::ALL` is the design.
+    #[derive(Clone, Copy)]
+    #[allow(clippy::struct_excessive_bools, reason = "one switch per rule")]
+    struct Rules {
+        pair: bool,
+        shadow_known: bool,
+        real_matches: bool,
+        same_anchor: bool,
+        keys: bool,
+        timestamps: bool,
+        window: bool,
+        stream: bool,
+        events: bool,
+        /// Count the packets read as a one-thread decoder would have (ignore
+        /// the extra ones frame threads read ahead).
+        thread_blind: bool,
+        cancel: CancelAt,
+        corrupt: Corrupt,
+    }
+
+    impl Rules {
+        const ALL: Self = Self {
+            pair: true,
+            shadow_known: true,
+            real_matches: true,
+            same_anchor: true,
+            keys: true,
+            timestamps: true,
+            window: true,
+            stream: true,
+            events: true,
+            thread_blind: false,
+            cancel: CancelAt::Exact,
+            corrupt: Corrupt::Never,
+        };
+    }
+
+    #[derive(Clone, Copy)]
+    enum Fault {
+        ShadowFails,
+        ShadowMismatch,
+        StreamMismatch,
+        AnchorDrifts,
+    }
+
+    /// A reader that keeps its decoder, continues under S-2's rules and
+    /// otherwise seeks. The continuation is today's `decode_window_sequential`
+    /// judged after the fact against the packets it read; the shadow is the
+    /// fixture's `anchors`. Test-only: S2c-2's is the real one.
+    struct ReferenceContinuation {
+        fx: Rc<Fixture>,
+        threads: usize,
+        rules: Rules,
+        decoder: Option<VideoDecoder>,
+        run: Option<Anchor>,
+        fault: Option<Fault>,
+        cancel: Option<usize>,
+        tampers: Vec<Tamper>,
+        /// Continuations since the run's seek.
+        continued: u32,
+    }
+
+    impl ReferenceContinuation {
+        fn new(fx: &Rc<Fixture>, threads: usize, rules: Rules) -> Self {
+            Self {
+                fx: fx.clone(),
+                threads,
+                rules,
+                decoder: None,
+                run: None,
+                fault: None,
+                cancel: None,
+                tampers: Vec::new(),
+                continued: 0,
+            }
+        }
+
+        /// The shadow's A(t) (`None`: unknown), at a run's seek or later.
+        fn shadow(&self, t: i64, at_seek: bool) -> Option<Anchor> {
+            let a = anchor(&self.fx.facts, t)?;
+            match self.fault {
+                Some(Fault::ShadowFails) => None,
+                Some(Fault::ShadowMismatch) => Some((a.0 + 1, a.1, a.2)),
+                Some(Fault::AnchorDrifts) if !at_seek => Some((a.0 + 1, a.1, a.2)),
+                Some(Fault::StreamMismatch) if self.rules.stream => None,
+                _ => Some(a),
+            }
+        }
+
+        fn may_continue(&self, c: i64, t: i64) -> bool {
+            let (Some(d), r) = (&self.decoder, self.rules) else {
+                return false;
+            };
+            let known = self.run.is_some() || !r.shadow_known;
+            d.state().continuation_at == Some(c + 1)
+                && t > c
+                && (!r.window || t <= c + 12)
+                && (!r.pair || self.fx.facts.kind != Kind::AviDtsGuess)
+                && known
+                && (!r.real_matches || self.run.is_none() || d.state().first_packet == self.run)
+                && (!r.same_anchor || self.shadow(t, false) == self.run)
+        }
+
+        /// After a continuation: were S-2's conditions kept while it ran?
+        fn run_valid(&self, d: &VideoDecoder) -> bool {
+            if self.rules.timestamps {
+                let mut prev: Option<i64> = None;
+                for f in &d.probe().frames {
+                    let Some(ts) = f.ts else { return false };
+                    if prev.is_some_and(|p| ts <= p) {
+                        return false;
+                    }
+                    prev = Some(ts);
+                }
+            }
+            // Keys are counted from the run's real first packet (not the shadow's).
+            let lag = if self.rules.thread_blind {
+                u64::try_from(self.threads - 1).unwrap()
+            } else {
+                0
+            };
+            let key_read = d.state().first_packet.as_ref().is_none_or(|a| {
+                keys_read(&self.fx.facts, a, d.probe().packets.saturating_sub(lag))
+            });
+            !(self.rules.keys && key_read)
+        }
+
+        fn seek(&mut self, t: TimeCode, before: Option<Before>) -> Observation {
+            let mut d = self.decoder.take().unwrap_or_else(|| {
+                let mut d = self.fx.open(self.threads);
+                d.probe_mut().tampers.clone_from(&self.tampers);
+                d
+            });
+            let before = before.unwrap_or_else(|| Before::of(&d));
+            arm(&mut d, self.cancel.take(), self.rules.cancel);
+            let mut cache = FrameCache::new(1);
+            let result = d.decode_window(t, t, &mut cache);
+            (self.run, self.continued) = (self.shadow(t.0, true), 0);
+            let observation = observe(&d, &mut cache, t, result, before);
+            self.decoder = Some(d);
+            observation
+        }
+    }
+
+    impl TargetPath for ReferenceContinuation {
+        fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
+            let Some(Cursor(c)) = from.filter(|c| self.may_continue(c.0, t.0)) else {
+                return self.seek(t, None);
+            };
+            let mut d = self.decoder.take().expect("checked by may_continue");
+            arm(&mut d, self.cancel.take(), self.rules.cancel);
+            let before = Before::of(&d);
+            let mut cache = FrameCache::new(13);
+            let result = d.decode_window_sequential(TimeCode(c + 1), t, &mut cache);
+            if result.is_ok() && !self.run_valid(&d) {
+                self.decoder = Some(d);
+                return self.seek(t, Some(before)); // abandon: today's seek
+            }
+            self.continued += 1;
+            let damage = match self.rules.corrupt {
+                Corrupt::Never => false,
+                Corrupt::AtOnce => true,
+                Corrupt::SecondHop => self.continued == 2,
+            };
+            if result.is_ok() && damage {
+                d.corrupt_lookahead();
+            }
+            let observation = observe(&d, &mut cache, t, result, before);
+            self.decoder = Some(d);
+            observation
+        }
+
+        fn event(&mut self, event: Event) {
+            let reset = |this: &mut Self| {
+                if this.rules.events {
+                    (this.decoder, this.run) = (None, None);
+                }
+            };
+            match event {
+                Event::Cancel(n) => self.cancel = Some(n),
+                Event::Tamper(t) => {
+                    self.tampers.push(t);
+                    self.decoder
+                        .iter_mut()
+                        .for_each(|d| d.probe_mut().tampers.push(t));
+                }
+                Event::ShadowFails => self.fault = Some(Fault::ShadowFails),
+                Event::ShadowMismatch => self.fault = Some(Fault::ShadowMismatch),
+                Event::StreamMismatch => self.fault = Some(Fault::StreamMismatch),
+                Event::AnchorDrifts => self.fault = Some(Fault::AnchorDrifts),
+                Event::Relink(fx) => {
+                    self.fx = fx;
+                    reset(self);
+                }
+                Event::KeyChange | Event::ShrinkReopen | Event::Error => reset(self),
+            }
+        }
+    }
+
+    /// The six corpora, built once for a set of thread counts.
+    struct Suite {
+        corpora: Vec<Corpus>,
+    }
+
+    impl Suite {
+        fn new(threads: &[usize]) -> Self {
+            Self {
+                corpora: corpora(threads),
+            }
+        }
+
+        fn of(&self, kind: Kind) -> &Corpus {
+            self.corpora.iter().find(|c| c.fx.kind == kind).unwrap()
+        }
+    }
+
+    /// Run every witness (the scripts over the default and edit-list files,
+    /// then every corpus, at each thread count) on a reference continuation
+    /// with `rules`; the first failure.
+    fn run_all(
+        suite: &Suite,
+        rules: Rules,
+        cancel_after: usize,
+        threads: &[usize],
+    ) -> Result<(), String> {
+        let (a, b) = (suite.of(Kind::Default), suite.of(Kind::EditList));
+        for &n in threads {
+            let cx = Ctx { a, b, threads: n };
+            for (name, steps) in scripts(&cx, cancel_after) {
+                let mut path = ReferenceContinuation::new(&a.fx, n, rules);
+                run_script(&mut path, &cx, &steps, true)
+                    .map_err(|e| format!("script {name} x{n}: {e}"))?;
+            }
+            for c in &suite.corpora {
+                witness(&mut ReferenceContinuation::new(&c.fx, n, rules), c, n, true)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The witnesses are satisfiable: a correct continuation passes every one
+    /// (bytes, state, retained frames, routes, cancel) on every file at every
+    /// thread count, so the route truth and the design agree with a real decode.
+    #[test]
+    fn a_correct_continuation_satisfies_every_witness() {
+        let threads = thread_counts();
+        run_all(&Suite::new(&threads), Rules::ALL, 2, &threads).unwrap();
+    }
+
+    /// The same reference with exactly one rule removed fails the witnesses,
+    /// each rule at the file or script aimed at it.
+    #[test]
+    fn a_continuation_that_drops_one_rule_fails() {
+        let mutants: [(&str, RuleMutation); 12] = [
+            ("pair", |r| r.pair = false),
+            ("shadow unknown", |r| r.shadow_known = false),
+            ("real anchor unchecked", |r| r.real_matches = false),
+            ("A(t) unchecked", |r| r.same_anchor = false),
+            ("key packets", |r| r.keys = false),
+            ("timestamps", |r| r.timestamps = false),
+            ("window", |r| r.window = false),
+            ("stream", |r| r.stream = false),
+            ("events", |r| r.events = false),
+            ("cancel late", |r| r.cancel = CancelAt::Late(1)),
+            ("cancel immediate", |r| r.cancel = CancelAt::Immediate),
+            ("retained pixels", |r| r.corrupt = Corrupt::AtOnce),
+        ];
+        let suite = Suite::new(&[1, 4]);
+        for (name, mutate) in mutants {
+            let mut rules = Rules::ALL;
+            mutate(&mut rules);
+            let e = run_all(&suite, rules, 1, &[1, 4]).expect_err(name);
+            eprintln!(
+                "pf1-c4 mutation {name}: {}",
+                e.chars().take(140).collect::<String>()
+            );
+        }
+    }
+
+    /// Frame threads read packets ahead: a key packet already fed through the
+    /// decoder's buffering is one the continuation has read. A reference that
+    /// counts packets as one thread would passes at one thread and fails at four.
+    #[test]
+    fn a_continuation_blind_to_frame_threads_passes_one_thread_and_fails_four() {
+        let suite = Suite::new(&[1, 4]);
+        let mut rules = Rules::ALL;
+        rules.thread_blind = true;
+        run_all(&suite, rules, 2, &[1]).unwrap();
+        let e = run_all(&suite, rules, 2, &[4]).unwrap_err();
+        eprintln!(
+            "pf1-c4 mutation thread-blind key count (x1 passes): {}",
+            e.chars().take(140).collect::<String>()
+        );
+    }
+
+    /// Damage to the retained lookahead frame that only a later hop consumes
+    /// (the second continuation in a row) is missed without the chained hops.
+    #[test]
+    fn damage_that_only_a_chained_hop_sees_needs_the_chained_hops() {
+        let suite = Suite::new(&[1]);
+        let mut rules = Rules::ALL;
+        rules.corrupt = Corrupt::SecondHop;
+        for c in &suite.corpora {
+            let path = || ReferenceContinuation::new(&c.fx, 1, rules);
+            witness_hops(&mut path(), c, 1, true, false).unwrap();
+        }
+        let e = suite.corpora.iter().find_map(|c| {
+            witness_hops(
+                &mut ReferenceContinuation::new(&c.fx, 1, rules),
+                c,
+                1,
+                true,
+                true,
+            )
+            .err()
+        });
+        eprintln!(
+            "pf1-c4 mutation second-hop damage (first hops alone pass): {}",
+            e.expect("chained hops catch it")
+                .chars()
+                .take(140)
+                .collect::<String>()
+        );
+    }
+
+    // ---- wrong paths (kept from the first round) ----
+
+    /// A path that is wrong on purpose: `retarget` changes what is decoded,
+    /// `rewrite` changes what is reported.
+    struct Wrong {
+        inner: SeekPath,
+        retarget: fn(&Fixture, i64) -> i64,
+        rewrite: fn(&mut Observation),
+    }
+
+    impl TargetPath for Wrong {
+        fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
+            let t = TimeCode((self.retarget)(&self.inner.fx, t.0));
+            let mut observation = self.inner.produce(from, t);
+            (self.rewrite)(&mut observation);
+            observation
+        }
+
+        fn event(&mut self, event: Event) {
+            self.inner.event(event);
         }
     }
 
@@ -560,8 +1661,8 @@ mod tests {
         retarget: fn(&Fixture, i64) -> i64,
         rewrite: fn(&mut Observation),
     ) -> Result<(), String> {
-        let c = Corpus::new(kind);
-        let inner = SeekPath::new(&c.fx);
+        let c = Corpus::new(kind, &[1]);
+        let inner = SeekPath::new(&c.fx, 1);
         witness(
             &mut Wrong {
                 inner,
@@ -569,6 +1670,7 @@ mod tests {
                 rewrite,
             },
             &c,
+            1,
             false,
         )
     }
@@ -581,9 +1683,9 @@ mod tests {
 
     #[test]
     fn a_path_that_ignores_the_edit_list_offset_fails_on_the_edit_list_file_only() {
-        let ignore = |fx: &Fixture, t: i64| (t - fx.offset_frames).max(0);
+        let ignore = |fx: &Fixture, t: i64| (t - fx.facts.offset_frames).max(0);
         wrong(Kind::EditList, ignore, |_| {}).unwrap_err();
-        assert!(Fixture::new(Kind::EditList).offset_frames > 0);
+        assert!(Fixture::new(Kind::EditList).facts.offset_frames > 0);
         // Control: with no offset the same wrong path is the Seek path.
         wrong(Kind::Default, ignore, |_| {}).unwrap();
     }
@@ -591,14 +1693,21 @@ mod tests {
     #[test]
     fn a_path_that_returns_the_previous_gop_across_a_key_packet_fails() {
         let previous_gop = |fx: &Fixture, t: i64| {
-            let key = fx.keys.iter().rev().find(|k| k.1 <= t).map_or(0, |k| k.1);
+            let key = fx
+                .facts
+                .keys
+                .iter()
+                .rev()
+                .find(|k| k.1 <= t)
+                .map_or(0, |k| k.1);
             if key > 0 && t - key <= 2 { key - 1 } else { t }
         };
         wrong(Kind::Default, previous_gop, |_| {}).unwrap_err();
         wrong(Kind::OpenGop, previous_gop, |_| {}).unwrap_err();
     }
 
-    /// The state fields are compared, not just the pixels.
+    /// The state fields are compared, not just the pixels: each scalar, the
+    /// retained frames' timestamps and content hashes, and the anchor.
     #[test]
     fn a_path_with_the_right_frame_and_wrong_state_fails() {
         let same = |_: &Fixture, t: i64| t;
@@ -607,6 +1716,57 @@ mod tests {
         wrong(Kind::Vfr, same, |o| o.state.continuation_at = None).unwrap_err();
         wrong(Kind::Vfr, same, |o| o.state.fallback_index += 1).unwrap_err();
         wrong(Kind::Vfr, same, |o| o.pts = o.pts.map(|p| p + 1)).unwrap_err();
+        wrong(Kind::Vfr, same, |o| o.state.first_packet = None).unwrap_err();
+        wrong(Kind::Vfr, same, |o| {
+            o.state.pending.as_mut().unwrap().hash ^= 1;
+        })
+        .unwrap_err();
+        wrong(Kind::Vfr, same, |o| {
+            if let Some(l) = o.state.lookahead.as_mut() {
+                l.hash ^= 1;
+            }
+        })
+        .unwrap_err();
+        wrong(Kind::Vfr, same, |o| {
+            if let Some(l) = o.state.lookahead.as_mut() {
+                l.pts = l.pts.map(|p| p + 1);
+            }
+        })
+        .unwrap_err();
+    }
+
+    /// Cancellation is asserted by progress and stop position, not by the
+    /// error alone: an immediate cancel, a late one and a doctored count fail.
+    #[test]
+    fn a_cancel_that_is_early_late_or_unproductive_fails() {
+        let cancelled = |mut o: Observation, f: fn(&mut Observation)| {
+            f(&mut o);
+            super::cancelled(&o, 2)
+        };
+        let fx = Rc::new(Fixture::new(Kind::Default));
+        let mut path = SeekPath::new(&fx, 1);
+        path.event(Event::Cancel(2));
+        let real = path.produce(None, TimeCode(14));
+        super::cancelled(&real, 2).unwrap();
+        assert!(real.frames.len() >= 2 && real.frames[1].packets == real.packets);
+        for (name, f) in [
+            (
+                "no progress",
+                (|o| o.frames.clear()) as fn(&mut Observation),
+            ),
+            ("one frame", |o| o.frames.truncate(1)),
+            ("a packet after the stop", |o| o.packets += 1),
+            ("not cancelled", |o| o.err = None),
+            ("continuation state kept", |o| {
+                o.state.continuation_at = Some(15);
+            }),
+        ] {
+            let e = cancelled(real.clone(), f).unwrap_err();
+            eprintln!(
+                "pf1-c4 mutation cancel {name}: {}",
+                e.chars().take(110).collect::<String>()
+            );
+        }
     }
 
     /// Today's `decode_window_sequential` kept across calls: it continues
@@ -616,6 +1776,9 @@ mod tests {
     struct NaiveContinuation {
         fx: Rc<Fixture>,
         decoder: Option<VideoDecoder>,
+        /// Report the fresh seek's anchor instead of the run's (the state
+        /// comparison then sees the frames and timestamps alone).
+        mask_anchor: bool,
     }
 
     impl TargetPath for NaiveContinuation {
@@ -624,14 +1787,18 @@ mod tests {
                 && decoder.state().continuation_at == Some(c + 1)
                 && (c + 1..=c + 12).contains(&t.0)
             {
-                let (seeks, mut cache) = (decoder.seek_count(), FrameCache::new(13));
+                let (before, mut cache) = (Before::of(decoder), FrameCache::new(13));
                 let result = decoder.decode_window_sequential(TimeCode(c + 1), t, &mut cache);
-                return observe(decoder, &mut cache, t, result, seeks);
+                let mut o = observe(decoder, &mut cache, t, result, before);
+                if self.mask_anchor {
+                    o.state.first_packet = anchor(&self.fx.facts, t.0);
+                }
+                return o;
             }
-            let mut decoder = self.fx.open();
-            let mut cache = FrameCache::new(1);
+            let mut decoder = self.fx.open(1);
+            let (before, mut cache) = (Before::of(&decoder), FrameCache::new(1));
             let result = decoder.decode_window(t, t, &mut cache);
-            let observation = observe(&decoder, &mut cache, t, result, 0);
+            let observation = observe(&decoder, &mut cache, t, result, before);
             self.decoder = Some(decoder);
             observation
         }
@@ -644,41 +1811,67 @@ mod tests {
         }
     }
 
-    /// Continuing across an anchor change is caught by the route check on
-    /// every file; on the open-GOP file the bytes and state alone catch it
-    /// (the fresh seek yields no frame at t = 47, a continuation would); on the
-    /// missing-PTS file its timestamps do. So the byte and state witnesses
-    /// discriminate where the design says they must, not only the route.
+    /// Continuing across an anchor change or a key packet is caught by the
+    /// route check on every file, and by the bytes-and-state comparison
+    /// alone on every file too: the run's anchor is part of the state, so a
+    /// continuation that carries the old run's first packet across a
+    /// boundary differs from the fresh seek's (on the open-GOP file the
+    /// frame itself differs as well: the fresh seek yields none at t = 47).
     #[test]
     fn a_continuation_that_ignores_the_domain_fails() {
-        for c in corpora() {
-            let path = || NaiveContinuation {
+        for c in corpora(&[1]) {
+            let path = |mask_anchor| NaiveContinuation {
                 fx: c.fx.clone(),
                 decoder: None,
+                mask_anchor,
             };
-            let error = witness(&mut path(), &c, true).unwrap_err();
-            assert!(error.contains("S-2 says Some(Seek)"), "{error}");
-            let bytes = witness(&mut path(), &c, false);
-            let differs = matches!(c.fx.kind, Kind::OpenGop | Kind::NoPts);
-            assert_eq!(bytes.is_err(), differs, "{:?}: {bytes:?}", c.fx.kind);
+            witness(&mut path(false), &c, 1, true).unwrap_err();
+            let bytes = witness(&mut path(false), &c, 1, false).unwrap_err();
+            assert!(bytes.contains("!= oracle"), "{:?}: {bytes}", c.fx.kind);
+            // With the anchor masked only the frames and timestamps remain:
+            // they still differ on the open-GOP and AVI files.
+            let masked = witness(&mut path(true), &c, 1, false);
+            let differs = matches!(c.fx.kind, Kind::OpenGop | Kind::AviDtsGuess);
+            assert_eq!(masked.is_err(), differs, "{:?}: {masked:?}", c.fx.kind);
+            // And with the anchor masked the route check alone catches it.
+            let routed = witness(&mut path(true), &c, 1, true).unwrap_err();
+            assert!(
+                routed.contains("S-2 says") || differs,
+                "{:?}: {routed}",
+                c.fx.kind
+            );
         }
     }
 
     #[test]
     #[ignore = "S2c-2 wires continuation"]
     fn continuation_reproduces_seek_on_every_fixture() {
-        for c in corpora() {
-            witness(&mut ContinuationPath, &c, true).unwrap();
+        let threads = thread_counts();
+        for c in corpora(&threads) {
+            for &n in &threads {
+                witness(&mut ContinuationPath::new(&c.fx, n), &c, n, true).unwrap();
+            }
         }
     }
 
     #[test]
     #[ignore = "S2c-2 wires continuation"]
     fn continuation_holds_the_scripted_cases() {
-        let (a, b) = (Corpus::new(Kind::Default), Corpus::new(Kind::EditList));
-        for (name, steps) in scripts(&b.fx, 2) {
-            run_script(&mut ContinuationPath, &a.fx, &steps, true)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let threads = thread_counts();
+        let (a, b) = (
+            Corpus::new(Kind::Default, &threads),
+            Corpus::new(Kind::EditList, &threads),
+        );
+        for &n in &threads {
+            let cx = Ctx {
+                a: &a,
+                b: &b,
+                threads: n,
+            };
+            for (name, steps) in scripts(&cx, 2) {
+                run_script(&mut ContinuationPath::new(&a.fx, n), &cx, &steps, true)
+                    .unwrap_or_else(|e| panic!("{name} x{n}: {e}"));
+            }
         }
     }
 }

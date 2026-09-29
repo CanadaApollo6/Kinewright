@@ -903,16 +903,126 @@ fn rotation_from_degrees(degrees: i32) -> Result<VideoRotation, MediaError> {
     }
 }
 
-/// PF1 S2c C-4: `(first_grid_frame, best_effort_timestamp)` of a held frame,
-/// and the rest of the S-2 state, as the witnesses observe them.
+/// PF1 S2c C-4: the first video packet after a seek, as S-2 rule 1 defines the
+/// anchor: (`pos`, DTS, key flag).
+#[cfg(test)]
+pub(crate) type Anchor = (isize, Option<i64>, bool);
+
+/// PF1 S2c C-4: a held frame: its grid position, `best_effort_timestamp` and a
+/// hash of its decoded planes (so retained pixels are compared, not counted).
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Retained {
+    pub(crate) grid: i64,
+    pub(crate) pts: Option<i64>,
+    pub(crate) hash: u64,
+}
+
+/// PF1 S2c C-4: the S-2 state the witnesses compare, plus the run's anchor.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DecoderState {
-    pub(crate) pending: Option<(i64, Option<i64>)>,
-    pub(crate) lookahead: Option<(i64, Option<i64>)>,
+    pub(crate) pending: Option<Retained>,
+    pub(crate) lookahead: Option<Retained>,
     pub(crate) continuation_at: Option<i64>,
     pub(crate) eof_sent: bool,
     pub(crate) fallback_index: i64,
+    /// The first video packet the real context read after the run's seek.
+    pub(crate) first_packet: Option<Anchor>,
+}
+
+/// PF1 S2c C-4: a test-injected timestamp fault, keyed by the frame's true
+/// `best_effort_timestamp` so a fresh decoder and a continuing one meet the
+/// same fault at the same frame.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tamper {
+    /// The frame with this timestamp has none (S-2 rule 3: falls back to the index).
+    Missing(i64),
+    /// The frame with this timestamp repeats its predecessor's timestamp.
+    Repeat(i64),
+}
+
+/// PF1 S2c C-4: one received frame: `packets` read in the run when it arrived,
+/// its grid position and the timestamp the decoder acted on (after any tamper).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameLog {
+    pub(crate) packets: u64,
+    pub(crate) grid: i64,
+    pub(crate) ts: Option<i64>,
+}
+
+/// PF1 S2c C-4: counters the witnesses read (test builds only). Whatever
+/// implements S-2 continuation must keep feeding them: `on_packet` for every
+/// video packet read, `on_frame` for every frame received (with the
+/// timestamp selection acted on, after `tampered`), and it must leave
+/// `first_packet` alone (it is the run's anchor).
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct DecoderProbe {
+    pub(crate) first_packet: Option<Anchor>,
+    awaiting_first: bool,
+    /// Frames received over the decoder's lifetime (a seek does not reset it).
+    pub(crate) received: u64,
+    /// Video packets read since the run's seek (the anchor packet is 1).
+    pub(crate) packets: u64,
+    /// The frames received since the run's seek, in arrival order.
+    pub(crate) frames: Vec<FrameLog>,
+    cancel_at_received: Option<u64>,
+    pub(crate) tampers: Vec<Tamper>,
+    last_ts: Option<i64>,
+}
+
+#[cfg(test)]
+impl DecoderProbe {
+    pub(crate) fn on_seek(&mut self) {
+        self.first_packet = None;
+        (self.awaiting_first, self.packets, self.last_ts) = (true, 0, None);
+        self.frames.clear();
+    }
+
+    pub(crate) fn on_packet(&mut self, packet: &ffmpeg::Packet) {
+        self.packets += 1;
+        if std::mem::take(&mut self.awaiting_first) {
+            self.first_packet = Some((packet.position(), packet.dts(), packet.is_key()));
+        }
+    }
+
+    /// The timestamp the decoder acts on for a frame whose true one is `ts`.
+    pub(crate) fn tampered(&mut self, ts: Option<i64>) -> Option<i64> {
+        let out = match ts {
+            Some(true_ts) => self.tampers.iter().find_map(|t| match *t {
+                Tamper::Missing(at) if at == true_ts => Some(None),
+                Tamper::Repeat(at) if at == true_ts => Some(self.last_ts),
+                _ => None,
+            }),
+            None => None,
+        };
+        let out = out.unwrap_or(ts);
+        self.last_ts = out.or(self.last_ts);
+        out
+    }
+
+    /// Count a received frame; a cancel armed for it raises the stop flag.
+    pub(crate) fn on_frame(
+        &mut self,
+        grid: i64,
+        ts: Option<i64>,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.received += 1;
+        self.frames.push(FrameLog {
+            packets: self.packets,
+            grid,
+            ts,
+        });
+        if self.cancel_at_received.is_some_and(|n| self.received >= n)
+            && let Some(stop) = stop
+        {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
 }
 
 struct PendingVideoFrame {
@@ -1170,6 +1280,8 @@ pub(crate) struct VideoDecoder {
     seek_count: u64,
     /// PF1 H-2: a reader's decode stops at the next packet boundary once set.
     stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    probe: DecoderProbe,
 }
 
 impl VideoDecoder {
@@ -1361,6 +1473,8 @@ impl VideoDecoder {
             eof_sent: false,
             seek_count: 0,
             stop: None,
+            #[cfg(test)]
+            probe: DecoderProbe::default(),
         })
     }
 
@@ -1383,6 +1497,8 @@ impl VideoDecoder {
         self.continuation_at = None;
         self.eof_sent = false;
         self.seek_count = self.seek_count.saturating_add(1);
+        #[cfg(test)]
+        self.probe.on_seek();
 
         self.decode_from_cursor(start, end, cache)
     }
@@ -1421,11 +1537,10 @@ impl VideoDecoder {
     /// PF1 S2c C-4: the fields §8 S-2 names, for the witnesses to compare.
     #[cfg(test)]
     pub(crate) fn state(&self) -> DecoderState {
-        let frame = |f: &PendingVideoFrame| {
-            (
-                f.first_grid_frame,
-                f.decoded.as_ref().and_then(|d| d.timestamp()),
-            )
+        let frame = |f: &PendingVideoFrame| Retained {
+            grid: f.first_grid_frame,
+            pts: f.decoded.as_ref().and_then(|d| d.timestamp()),
+            hash: f.decoded.as_ref().map_or(0, plane_hash),
         };
         DecoderState {
             pending: self.pending.as_ref().map(frame),
@@ -1433,7 +1548,51 @@ impl VideoDecoder {
             continuation_at: self.continuation_at.map(|t| t.0),
             eof_sent: self.eof_sent,
             fallback_index: self.fallback_index,
+            first_packet: self.probe.first_packet,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe(&self) -> &DecoderProbe {
+        &self.probe
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_mut(&mut self) -> &mut DecoderProbe {
+        &mut self.probe
+    }
+
+    /// Raise the stop flag once `frames` more frames have been received.
+    #[cfg(test)]
+    pub(crate) fn arm_cancel_after(&mut self, frames: Option<u64>) {
+        self.probe.cancel_at_received = frames.map(|n| self.probe.received + n);
+    }
+
+    /// Flip one bit of the held lookahead frame's luma (a corrupted retained frame).
+    #[cfg(test)]
+    pub(crate) fn corrupt_lookahead(&mut self) {
+        if let Some(frame) = self.lookahead.as_mut().and_then(|f| f.decoded.as_mut()) {
+            frame.data_mut(0)[0] ^= 1;
+        }
+    }
+
+    /// The tightly packed decoded planes of the held frames, exactly the bytes
+    /// `ffmpeg -f framehash` hashes (8-bit planar), for the independent oracle.
+    #[cfg(test)]
+    pub(crate) fn retained_planes(&self) -> [Option<Vec<u8>>; 2] {
+        [&self.pending, &self.lookahead]
+            .map(|f| f.as_ref().and_then(|f| f.decoded.as_ref()).map(plane_bytes))
+    }
+
+    /// The anchor of a raw `avformat_seek_file` target on the real context
+    /// (the test-only seam for S-2's tick boundaries). Use on a scratch
+    /// decoder: it moves the demuxer.
+    #[cfg(test)]
+    pub(crate) fn probe_anchor_at(&mut self, timestamp: i64) -> Option<Anchor> {
+        self.input.seek(timestamp, ..timestamp).ok()?;
+        let index = self.stream_index;
+        let (_, packet) = self.input.packets().find(|(s, _)| s.index() == index)?;
+        Some((packet.position(), packet.dts(), packet.is_key()))
     }
 
     fn decode_from_cursor<T: DecoderFrame>(
@@ -1482,6 +1641,8 @@ impl VideoDecoder {
             if stream_index != self.stream_index {
                 continue;
             }
+            #[cfg(test)]
+            self.probe.on_packet(&packet);
             self.decoder
                 .send_packet(&packet)
                 .map_err(|error| media_error(&self.path, "video decode failed", error))?;
@@ -1511,7 +1672,12 @@ impl VideoDecoder {
             if self.decoder.receive_frame(&mut decoded).is_err() {
                 break;
             }
-            let first_grid_frame = decoded.timestamp().map_or_else(
+            // PF1 S2c C-4: test builds may inject a timestamp fault (`Tamper`).
+            #[cfg(test)]
+            let timestamp = self.probe.tampered(decoded.timestamp());
+            #[cfg(not(test))]
+            let timestamp = decoded.timestamp();
+            let first_grid_frame = timestamp.map_or_else(
                 || {
                     let index = self.fallback_index;
                     self.fallback_index = self.fallback_index.saturating_add(1);
@@ -1525,6 +1691,9 @@ impl VideoDecoder {
                     )
                 },
             );
+            #[cfg(test)]
+            self.probe
+                .on_frame(first_grid_frame, timestamp, self.stop.as_ref());
             let next = PendingVideoFrame {
                 first_grid_frame,
                 decoded: Some(decoded),
@@ -1630,6 +1799,31 @@ impl VideoDecoder {
             self.managed_source.as_ref(),
         )
     }
+}
+
+/// PF1 S2c C-4: a decoded frame's visible plane bytes, tightly packed
+/// (8-bit planar formats, as the witness fixtures are).
+#[cfg(test)]
+fn plane_bytes(frame: &ffmpeg::frame::Video) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for plane in 0..frame.planes() {
+        let (width, height) = (frame.plane_width(plane), frame.plane_height(plane));
+        let stride = frame.stride(plane);
+        let data = frame.data(plane);
+        for row in 0..height as usize {
+            bytes.extend_from_slice(&data[row * stride..row * stride + width as usize]);
+        }
+    }
+    bytes
+}
+
+#[cfg(test)]
+fn plane_hash(frame: &ffmpeg::frame::Video) -> u64 {
+    plane_bytes(frame)
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+        })
 }
 
 fn read_plane(
