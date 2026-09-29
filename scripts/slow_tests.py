@@ -61,6 +61,11 @@ RUNNING = re.compile(r"^\s*Running (?:unittests |tests[/\\])?(.*\([^)]*\))\s*$")
 # A doctest name contains spaces (`path/lib.rs - item (line 3)`), and a should_panic
 # test prints `name - should panic`; the outcome starts at the first " ... ".
 TEST_LINE = re.compile(r"^test (.+?) \.\.\. (.*)$")
+# FFmpeg's av_log writes `[name @ 0xADDR] ` to the (uncaptured) native stderr before its
+# message, sometimes without a newline, so a libtest line can land after it on the same line
+# (CI run 36536620605). Only this exact prefix shape is stripped; any other foreign text still
+# breaks the per-section counts and fails the parse.
+FFMPEG_LOG_PREFIX = re.compile(r"^(?:\[[^\]\s]+ @ 0x[0-9a-fA-F]+\] )+")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 
@@ -287,6 +292,7 @@ def parse(log: str) -> list[tuple[str, str, str]]:
         raise UnparsableLog(f"line {number}: {message}")
 
     for number, line in enumerate(ANSI.sub("", log).splitlines(), 1):
+        line = FFMPEG_LOG_PREFIX.sub("", line)
         running = RUNNING.match(line)
         doc = DOC_TESTS.match(line)
         if running or doc:
