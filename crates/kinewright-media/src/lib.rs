@@ -187,7 +187,21 @@ pub use verify::{DELIVERY_REFERENCE_DENOMINATOR, EBU_R103_TOLERANCE_CODES_8BIT, 
 ///
 /// Returns a media error when `FFmpeg` initialization fails.
 pub fn initialize_ffmpeg() -> Result<(), MediaError> {
+    quiet_ffmpeg_log();
     ffmpeg::init().map_err(|error| MediaError::Backend(error.to_string()))
+}
+
+/// Limit `FFmpeg`'s own logging to warnings and errors, once per process.
+///
+/// `FFmpeg` logs at info level by default, straight to the process's stderr:
+/// libx264 alone prints its CPU capabilities, banner and encode statistics for
+/// every export. Warnings stay visible, including swscale's "No accelerated
+/// colorspace conversion found ..." (an `AV_LOG_WARNING` in `FFmpeg` 8). Nothing
+/// calls `FFmpeg` without first opening an input or output, so the openers call
+/// this; it is cheap after the first call.
+pub(crate) fn quiet_ffmpeg_log() {
+    static QUIET: std::sync::Once = std::sync::Once::new();
+    QUIET.call_once(|| ffmpeg::util::log::set_level(ffmpeg::util::log::Level::Warning));
 }
 
 #[cfg(test)]
