@@ -67,9 +67,25 @@ TEST_LINE = re.compile(r"^test (.+?) \.\.\. (.*)$")
 # breaks the per-section counts and fails the parse.
 FFMPEG_LOG = r"\[[^\]\s]+ @ (?:0x)?[0-9a-fA-F]+\]"  # Windows prints the address without 0x
 FFMPEG_LOG_PREFIX = re.compile(r"^(?:" + FFMPEG_LOG + r" )+")
-# ... and a message can also trail a result on the same line (Windows run 36536620605).
+# On a result line a fragment can also sit before the outcome, and a message can trail the
+# outcome (Windows run 36536620605). The tail is cut only after a recognised outcome word, so a
+# fragment can never swallow the outcome itself.
 FFMPEG_LOG_SUFFIX = re.compile(FFMPEG_LOG + r" .*$")
+OUTCOME = re.compile(r"^(?:ok|FAILED|ignored)")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
+
+
+def strip_ffmpeg_log(line: str) -> str:
+    """`line` without FFmpeg log fragments at its start, before a result's outcome, or after it."""
+    line = FFMPEG_LOG_PREFIX.sub("", line)
+    head, sep, rest = line.partition(" ... ")
+    if not sep or not head.startswith("test "):
+        return line
+    rest = FFMPEG_LOG_PREFIX.sub("", rest)
+    outcome = OUTCOME.match(rest)
+    if outcome:
+        rest = rest[: outcome.end()] + FFMPEG_LOG_SUFFIX.sub("", rest[outcome.end():])
+    return head + sep + rest
 
 
 def read_entries(path: Path) -> list[tuple[str, str, str]]:
@@ -295,9 +311,7 @@ def parse(log: str) -> list[tuple[str, str, str]]:
         raise UnparsableLog(f"line {number}: {message}")
 
     for number, line in enumerate(ANSI.sub("", log).splitlines(), 1):
-        line = FFMPEG_LOG_PREFIX.sub("", line)
-        if line.startswith("test "):
-            line = FFMPEG_LOG_SUFFIX.sub("", line)
+        line = strip_ffmpeg_log(line)
         running = RUNNING.match(line)
         doc = DOC_TESTS.match(line)
         if running or doc:
