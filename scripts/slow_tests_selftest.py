@@ -255,6 +255,13 @@ class PartialParse(unittest.TestCase):
         self.assertEqual(st.strip_ffmpeg_log("test a::b ... FAILED[x @ 0x1]"), "test a::b ... FAILED")
         # Without any fragment on the line nothing is cut, so `okay` stays a non-outcome.
         self.assertEqual(st.strip_ffmpeg_log("test a::b ... okay"), "test a::b ... okay")
+        # review-c4: a fragment elsewhere on the line, or lower-case text after the outcome,
+        # does not license the cut.
+        self.assertEqual(st.strip_ffmpeg_log("[x @ 0x1] test a::b ... okay"), "test a::b ... okay")
+        self.assertEqual(st.strip_ffmpeg_log("test a::b ... [x @ 0x1] okay"), "test a::b ... okay")
+        self.assertEqual(
+            st.strip_ffmpeg_log("test a::b ... [x @ 0x1] okay FAILED"), "test a::b ... okay FAILED"
+        )
         # An ignore reason is never cut without a fragment in it.
         self.assertEqual(
             st.strip_ffmpeg_log("[x @ 0x1] test a::b ... ignored, slow tier"), "test a::b ... ignored, slow tier"
@@ -264,6 +271,17 @@ class PartialParse(unittest.TestCase):
         lines = self.lines()
         at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
         lines[at: at + 1] = [lines[at][: -len("ok")] + "some message", "ok"]
+        self.assert_unparsable(lines, "summary says")
+
+    def test_foreign_text_before_a_fragment_is_not_rejoined(self):
+        # review-c4: `test x ... unexpected [swscaler @ 0x1] message` then `ok` must not join.
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at: at + 1] = [lines[at][: -len("ok")] + "unexpected [swscaler @ 0x1] message", "ok"]
+        self.assert_unparsable(lines, "summary says")
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at] = "[x @ 0x1] " + lines[at][: -len("ok")] + "okay"
         self.assert_unparsable(lines, "summary says")
 
     def test_a_split_result_whose_next_line_is_not_an_outcome_still_fails(self):

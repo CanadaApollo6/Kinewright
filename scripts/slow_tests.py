@@ -70,24 +70,27 @@ FFMPEG_LOG_PREFIX = re.compile(r"^(?:" + FFMPEG_LOG + r" )+")
 # On a result line a fragment can also sit before the outcome, and a message can trail the
 # outcome (Windows run 36536620605). The tail is cut only after a recognised outcome word, so a
 # fragment can never swallow the outcome itself.
-FFMPEG_LOG_SUFFIX = re.compile(FFMPEG_LOG + r" .*$")
+FFMPEG_LOG_SUFFIX = re.compile(FFMPEG_LOG + r"(?: .*)?$")
 OUTCOME = re.compile(r"^(?:ok|FAILED|ignored)")
+GLUED_MESSAGE = re.compile(r"[A-Z]")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 
 def strip_ffmpeg_log(line: str) -> str:
     """`line` without FFmpeg log fragments at its start, before a result's outcome, or after it."""
-    noisy = re.search(FFMPEG_LOG, line)
     line = FFMPEG_LOG_PREFIX.sub("", line)
     head, sep, rest = line.partition(" ... ")
     if not sep or not head.startswith("test "):
         return line
-    rest = FFMPEG_LOG_PREFIX.sub("", rest)
+    stripped = FFMPEG_LOG_PREFIX.sub("", rest)
+    glued = stripped != rest  # an av_log prefix sat right before the outcome
+    rest = stripped
     outcome = OUTCOME.match(rest)
-    if outcome and noisy and outcome.group() != "ignored":
-        # av_log writes its prefix and its message separately, so the message text can follow
-        # `ok` with no prefix of its own (`... [swscaler @ 0x..] okNo accelerated ...`, pf1 R47
-        # media log). Libtest prints nothing after `ok` or `FAILED`; an ignore reason is kept.
+    if outcome and glued and outcome.group() != "ignored" and GLUED_MESSAGE.match(rest, outcome.end()):
+        # av_log writes its prefix and its message separately, so libtest's `ok` can land
+        # between them: `... [swscaler @ 0x..] okNo accelerated ...` (pf1 R47 media log). Only
+        # that shape is cut: the prefix right before the outcome, and the message's capital
+        # right after it, so `okay` or `ok extra` stay non-outcomes.
         rest = outcome.group()
     elif outcome:
         rest = rest[: outcome.end()] + FFMPEG_LOG_SUFFIX.sub("", rest[outcome.end():])
@@ -123,14 +126,15 @@ def result_lines(log: str):
                 continue
             yield pending
             pending = None
-        # The message's `[name @ addr] ` prefix may sit after " ... " or, written before
-        # libtest's line, at the start of it (pf1 R47 gate log: `[swscaler @ 0x..] test x ...
-        # No accelerated colorspace conversion ...` then `ok`).
+        # The message's `[name @ addr] ` prefix sits either right after " ... " or, written
+        # before libtest's line, at its very start (pf1 R47 gate log: `[swscaler @ 0x..] test x
+        # ... No accelerated colorspace conversion ...` then `ok`). Text before a fragment
+        # elsewhere on the line is not recognised, and the line keeps its non-outcome.
         head, sep, rest = FFMPEG_LOG_PREFIX.sub("", raw).partition(" ... ")
         if (
             sep
             and head.startswith("test ")
-            and re.search(FFMPEG_LOG, raw)
+            and (re.match(FFMPEG_LOG, rest) or re.match(FFMPEG_LOG, raw))
             and not OUTCOME.match(FFMPEG_LOG_PREFIX.sub("", rest))
         ):
             pending = (number, head + sep)
