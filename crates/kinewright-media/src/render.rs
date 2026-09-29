@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::Path,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use kinewright_core::{
@@ -252,13 +255,21 @@ fn open_managed(
     fps: Rational,
     max_width: Option<u32>,
     description: &ColorDescription,
-    threads: usize,
+    (threads, stop): (usize, Option<&Arc<AtomicBool>>),
 ) -> Result<VideoDecoder, MediaError> {
     let assumption = d65_assumption(description);
-    VideoDecoder::open_managed_threads(path, fps, max_width, description, assumption, threads)
-        .map_err(|error| {
-            contextual_managed_decode_error(asset, path, description, assumption, error)
-        })
+    let opened = VideoDecoder::open_managed_threads(
+        path,
+        fps,
+        max_width,
+        description,
+        assumption,
+        threads,
+        stop,
+    );
+    opened.map_err(|error| {
+        contextual_managed_decode_error(asset, path, description, assumption, error)
+    })
 }
 
 /// PF1 S2b-1: what a reader opens: today's managed decoder for one source.
@@ -275,16 +286,32 @@ pub(crate) struct SourceSpec {
 
 impl SourceSpec {
     /// Open with `threads` frame threads; errors as the renderer's open.
-    pub(crate) fn open(&self, threads: usize) -> Result<VideoDecoder, MediaError> {
+    /// Amendment R43 (RS-1, note 1): a reader's open. A set `stop` flag
+    /// cancels it before the file opens, interrupts its IO (and every later
+    /// seek and read), and turns whatever the open returns into
+    /// `Cancelled`, so a retired reader keeps no file it opened.
+    pub(crate) fn open(
+        &self,
+        threads: usize,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<VideoDecoder, MediaError> {
+        let stopped = || stop.load(Ordering::Acquire);
+        if stopped() {
+            return Err(MediaError::Cancelled);
+        }
         let (path, description) = (&self.path, &self.description);
-        open_managed(
+        let opened = open_managed(
             self.asset,
             path,
             self.fps,
             self.max_width,
             description,
-            threads,
-        )
+            (threads, Some(stop)),
+        );
+        if stopped() {
+            return Err(MediaError::Cancelled);
+        }
+        opened
     }
 
     /// K-1 (review B F1): the size this source's frames convert to, read
@@ -298,7 +325,17 @@ impl SourceSpec {
         if let Some(size) = sizes.get(key) {
             return Ok(*size);
         }
-        let size = self.open(1)?.frame_size();
+        // The preview thread's open: no reader flag to interrupt it.
+        let (path, description) = (&self.path, &self.description);
+        let opened = open_managed(
+            self.asset,
+            path,
+            self.fps,
+            self.max_width,
+            description,
+            (1, None),
+        );
+        let size = opened?.frame_size();
         sizes.insert(key.clone(), size);
         Ok(size)
     }
@@ -1150,7 +1187,14 @@ impl FrameRenderer {
             self.video_sources.entry(key.clone())
         {
             let threads = crate::decode::default_threads();
-            let decoder = open_managed(asset, path, fps, key.max_width, description, threads)?;
+            let decoder = open_managed(
+                asset,
+                path,
+                fps,
+                key.max_width,
+                description,
+                (threads, None),
+            )?;
             let mut cache = FrameCache::new(FRAME_CACHE_CAPACITY);
             let demand = self
                 .preview

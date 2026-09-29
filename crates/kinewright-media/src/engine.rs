@@ -5052,7 +5052,10 @@ mod tests {
     /// frame is received the file can be moved. The relink test's flow, on
     /// every platform. Source 1's reader is held at its next decode (frame
     /// 1), its decoder open, when the source leaves: the new document's
-    /// frame waits for it, and follows once it is released.
+    /// frame waits for it. Amendment R43 (RS-1): up to the deadline, then it
+    /// renders with the reader detached (the degraded case: its decoder, and
+    /// on Windows its file, stay until it exits), counting an overrun; once
+    /// released the reader stops at its packet boundary and closes.
     #[test]
     fn a_removed_source_has_no_open_decoder_after_the_next_frame() {
         let temp = TempDirectory::new("pf1-r41-close");
@@ -5081,20 +5084,19 @@ mod tests {
             };
             state.readers.slots.iter().any(at_one)
         });
+        let deadline = crate::preview::RETIRE_DEADLINE;
+        let posted = std::time::Instant::now();
         engine.set_document(Arc::new(Document::default()));
         engine.request_frame(TimeCode::ZERO);
-        let early = frames.recv_timeout(Duration::from_secs(1));
-        assert!(
-            early.is_err(),
-            "a frame came while a removed source's decoder was open"
-        );
+        let frame = frames.recv_timeout(deadline + Duration::from_secs(30));
+        frame.expect("the empty document's frame, at the deadline");
+        assert!(posted.elapsed() >= deadline, "it waited for the reader");
         assert_eq!(engine.lane.open_decoders(|_| true), 1, "the held reader's");
+        assert_eq!(engine.stats().retire_overruns, 1, "the overrun counts");
         let cancelled = || engine.lane.cancelled.load(Ordering::Acquire);
         let before = cancelled();
         drop(release);
-        frames
-            .recv_timeout(Duration::from_secs(60))
-            .expect("the empty document's frame");
+        crate::preview::tests::wait_until(&engine.lane, |state| state.readers.slots.is_empty());
         let open = engine.lane.open_decoders(|_| true);
         assert_eq!(open, 0, "a removed source's reader decoder is open");
         // Its decode stopped at a packet boundary (its stop flag was set).

@@ -804,6 +804,221 @@ pub(crate) fn media_input(path: &Path) -> Result<ffmpeg::format::context::Input,
     })
 }
 
+thread_local! {
+    /// Amendment R43 (RS-1): the stop flag of the reader running on this
+    /// thread, which the FFmpeg interrupt callback reads. A reader's decoder
+    /// opens, seeks and reads only on its reader's thread, and FFmpeg calls
+    /// the callback on the thread doing the IO, so the callback needs no
+    /// pointer of its own: `ffmpeg-next` leaks the callback's box, and a
+    /// zero-sized one allocates nothing (and the workspace forbids `unsafe`).
+    static READER_STOP: std::cell::RefCell<Option<ReaderStop>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct ReaderStop {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    path: std::path::PathBuf,
+}
+
+/// Amendment R43 (RS-1): libavformat's `AVIOInterruptCB`, called before each
+/// real read of the file (open, stream probing, seek, packet read): true
+/// ends that IO with `AVERROR_EXIT`.
+fn reader_interrupted() -> bool {
+    READER_STOP.with_borrow(|reader| {
+        reader.as_ref().is_some_and(|reader| {
+            #[cfg(test)]
+            interrupt_seam::hold(&reader.path, &reader.stop);
+            let stopped = reader.stop.load(std::sync::atomic::Ordering::Acquire);
+            #[cfg(test)]
+            interrupt_seam::interrupted(&reader.path, stopped);
+            stopped
+        })
+    })
+}
+
+/// Amendment R43 (RS-1): a reader's input, its format context carrying
+/// the interrupt callback tied to `stop` (the reader's flag).
+fn reader_input(
+    path: &Path,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<ffmpeg::format::context::Input, MediaError> {
+    READER_STOP.set(Some(ReaderStop {
+        stop: Arc::clone(stop),
+        #[cfg(test)]
+        path: path.to_path_buf(),
+    }));
+    ffmpeg::format::input_with_interrupt(path, reader_interrupted).map_err(|error| {
+        #[cfg(test)]
+        interrupt_seam::exited(path, error);
+        MediaError::Backend(format!(
+            "could not open media {}: {error}; the file may be truncated or its format may be unsupported",
+            path.display()
+        ))
+    })
+}
+
+/// Amendment R43 (RS-1) test seam: hold a reader inside the interrupt
+/// callback's first call for an armed path, that is inside its open's IO
+/// with the file open. `Interruptible` returns once the reader's flag is
+/// set (libavformat then ends the IO); `Stuck` ignores the flag until released,
+/// as a read blocked in the OS would.
+#[cfg(test)]
+pub(crate) mod interrupt_seam {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            Condvar, Mutex, PoisonError,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Mode {
+        Interruptible,
+        Stuck,
+    }
+
+    struct Armed {
+        path: PathBuf,
+        mode: Mode,
+        entered: bool,
+        released: bool,
+        interrupted: u32,
+        exits: u32,
+    }
+
+    static ARMED: Mutex<Vec<Armed>> = Mutex::new(Vec::new());
+    static CHANGED: Condvar = Condvar::new();
+
+    fn armed() -> std::sync::MutexGuard<'static, Vec<Armed>> {
+        ARMED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn arm(path: &Path, mode: Mode) {
+        let path = path.to_path_buf();
+        let (entered, released, interrupted, exits) = (false, false, 0, 0);
+        armed().push(Armed {
+            path,
+            mode,
+            entered,
+            released,
+            interrupted,
+            exits,
+        });
+    }
+
+    pub(crate) fn disarm(path: &Path) {
+        armed().retain(|armed| armed.path != path);
+    }
+
+    /// A reader's flag changed: held readers look again.
+    pub(crate) fn poke() {
+        let _armed = armed();
+        CHANGED.notify_all();
+    }
+
+    pub(crate) fn release(path: &Path) {
+        let mut armed = armed();
+        for armed in armed.iter_mut().filter(|armed| armed.path == path) {
+            armed.released = true;
+        }
+        CHANGED.notify_all();
+    }
+
+    /// Wait (bounded) until a reader is held in `path`'s callback.
+    pub(crate) fn wait_entered(path: &Path, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        let mut armed = armed();
+        loop {
+            if armed
+                .iter()
+                .any(|armed| armed.path == path && armed.entered)
+            {
+                return true;
+            }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            armed = CHANGED
+                .wait_timeout(armed, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Whether a reader was ever held in `path`'s callback.
+    pub(crate) fn entered(path: &Path) -> bool {
+        armed()
+            .iter()
+            .any(|armed| armed.path == path && armed.entered)
+    }
+
+    /// Opens, seeks and reads of `path` that failed with `AVERROR_EXIT`
+    /// (the interrupt ended them) while it was armed.
+    pub(crate) fn exits(path: &Path) -> u32 {
+        armed()
+            .iter()
+            .filter(|armed| armed.path == path)
+            .map(|armed| armed.exits)
+            .sum()
+    }
+
+    pub(super) fn exited(path: &Path, error: ffmpeg_next::Error) {
+        if matches!(error, ffmpeg_next::Error::Exit) {
+            let mut armed = armed();
+            for armed in armed.iter_mut().filter(|armed| armed.path == path) {
+                armed.exits += 1;
+            }
+        }
+    }
+
+    /// Callbacks for `path` that returned true while it was armed.
+    pub(crate) fn interrupts(path: &Path) -> u32 {
+        armed()
+            .iter()
+            .filter(|armed| armed.path == path)
+            .map(|armed| armed.interrupted)
+            .sum()
+    }
+
+    /// Runs inside the callback, where a panic aborts the process
+    /// (`ffmpeg-next`): it never indexes a list another test may change.
+    pub(super) fn hold(path: &Path, stop: &AtomicBool) {
+        let mut armed = armed();
+        let first = |armed: &Armed| armed.path == path && !armed.entered;
+        let Some(entry) = armed.iter_mut().find(|armed| first(armed)) else {
+            return;
+        };
+        entry.entered = true;
+        CHANGED.notify_all();
+        loop {
+            let Some(entry) = armed.iter().find(|armed| armed.path == path) else {
+                return; // disarmed
+            };
+            let done = match entry.mode {
+                Mode::Interruptible => stop.load(Ordering::Acquire),
+                Mode::Stuck => entry.released,
+            };
+            if done {
+                return;
+            }
+            armed = CHANGED.wait(armed).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    pub(super) fn interrupted(path: &Path, stopped: bool) {
+        if stopped {
+            let mut armed = armed();
+            for armed in armed.iter_mut().filter(|armed| armed.path == path) {
+                armed.interrupted += 1;
+            }
+            CHANGED.notify_all();
+        }
+    }
+}
+
 pub(crate) fn media_error(path: &Path, action: &str, error: impl std::fmt::Display) -> MediaError {
     MediaError::Backend(format!(
         "{action} for {}: {error}; the file may be truncated",
@@ -1156,7 +1371,9 @@ pub(crate) struct VideoDecoder {
     continuation_at: Option<TimeCode>,
     eof_sent: bool,
     seek_count: u64,
-    /// PF1 H-2: a reader's decode stops at the next packet boundary once set.
+    /// PF1 H-2: a reader's decode stops at the next packet boundary once
+    /// set; Amendment R43 (RS-1): and its IO (seek, packet read) at the next
+    /// read of the file, through `input`'s interrupt callback.
     stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -1171,7 +1388,7 @@ impl VideoDecoder {
         fps: Rational,
         max_width: Option<u32>,
     ) -> Result<Self, MediaError> {
-        Self::open_scaled_internal(path, fps, max_width, None, default_threads())
+        Self::open_scaled_internal(path, fps, max_width, None, default_threads(), None)
     }
 
     #[cfg(test)]
@@ -1189,11 +1406,14 @@ impl VideoDecoder {
             description,
             assumption,
             default_threads(),
+            None,
         )
     }
 
     /// PF1 S2b H-5: a managed open with `threads` frame threads (a reader's
-    /// share; synchronous decoders keep min(P, 16)).
+    /// share; synchronous decoders keep min(P, 16)). Amendment R43 (RS-1):
+    /// a reader passes its `stop` flag, which interrupts the open's IO and
+    /// every later seek and read.
     pub(crate) fn open_managed_threads(
         path: &Path,
         fps: Rational,
@@ -1201,6 +1421,7 @@ impl VideoDecoder {
         description: &ColorDescription,
         assumption: Option<ColorSourceProfileAssumption>,
         threads: usize,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Self, MediaError> {
         // IN1 §4.2 rule 8: the typed refusal leaves the decoder intact. The
         // contextual sentence this site used to build by hand is rebuilt by
@@ -1218,7 +1439,8 @@ impl VideoDecoder {
                 format!("managed source depth rejected: {error}"),
             )
         })?;
-        Self::open_scaled_internal(path, fps, max_width, Some(source), threads.max(1))
+        let managed = Some(source);
+        Self::open_scaled_internal(path, fps, max_width, managed, threads.max(1), stop)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1228,8 +1450,12 @@ impl VideoDecoder {
         max_width: Option<u32>,
         managed_source: Option<ManagedSource>,
         threads: usize,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Self, MediaError> {
-        let input = media_input(path)?;
+        let input = match stop {
+            Some(stop) => reader_input(path, stop)?,
+            None => media_input(path)?,
+        };
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Video)
@@ -1348,7 +1574,7 @@ impl VideoDecoder {
             continuation_at: None,
             eof_sent: false,
             seek_count: 0,
-            stop: None,
+            stop: stop.cloned(),
         })
     }
 
@@ -1361,9 +1587,16 @@ impl VideoDecoder {
         let timestamp = frame_to_global_timestamp(start, self.fps).saturating_add(
             stream_timestamp_to_global(self.stream_start, self.stream_time_base),
         );
-        self.input
-            .seek(timestamp, ..timestamp)
-            .map_err(|error| media_error(&self.path, "video seek failed", error))?;
+        if let Err(error) = self.input.seek(timestamp, ..timestamp) {
+            // Amendment R43 (RS-1): the reader's interrupt ended the seek.
+            #[cfg(test)]
+            interrupt_seam::exited(&self.path, error);
+            self.continuation_at = None;
+            if self.stopped() {
+                return Err(MediaError::Cancelled);
+            }
+            return Err(media_error(&self.path, "video seek failed", error));
+        }
         self.decoder.flush();
         self.fallback_index = start.0;
         self.pending = None;
@@ -1390,9 +1623,10 @@ impl VideoDecoder {
         self.decode_from_cursor(start, end, cache)
     }
 
-    /// PF1 H-2: stop decoding at a packet boundary once `stop` is set.
-    pub(crate) fn set_stop(&mut self, stop: Arc<std::sync::atomic::AtomicBool>) {
-        self.stop = Some(stop);
+    /// PF1 H-2: a reader asked this decoder to stop.
+    fn stopped(&self) -> bool {
+        let stop = self.stop.as_ref();
+        stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire))
     }
 
     /// PF1 K-1 (review B F1): the (display) size every frame this decoder
@@ -1406,7 +1640,23 @@ impl VideoDecoder {
         self.seek_count
     }
 
+    /// Amendment R43 (RS-1): a failed or stopped window leaves no cursor, so
+    /// the next window seeks (and flushes) rather than continuing from a
+    /// read the interrupt may have cut short.
     fn decode_from_cursor<T: DecoderFrame>(
+        &mut self,
+        start: TimeCode,
+        end: TimeCode,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        let result = self.decode_cursor(start, end, cache);
+        if result.is_err() {
+            self.continuation_at = None;
+        }
+        result
+    }
+
+    fn decode_cursor<T: DecoderFrame>(
         &mut self,
         start: TimeCode,
         end: TimeCode,
@@ -1423,6 +1673,11 @@ impl VideoDecoder {
         }
 
         loop {
+            // Amendment R43 (RS-1): checked first, so no frame is taken
+            // after a read the reader's interrupt ended.
+            if self.stopped() {
+                return Err(MediaError::Cancelled);
+            }
             if self.receive_frames(start, end, cache)? {
                 self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
                 return Ok(());
@@ -1432,24 +1687,30 @@ impl VideoDecoder {
                 self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
                 return Ok(());
             }
-            let stop = self.stop.as_ref();
-            if stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire)) {
-                self.continuation_at = None;
-                return Err(MediaError::Cancelled);
+            // Amendment R43 (RS-1): one read per turn, not `packets()`,
+            // whose iterator retries a failed read forever: an interrupted
+            // read fails with `AVERROR_EXIT` until the flag clears, so the
+            // flag's check above ends it. Other failures retry, as before.
+            // A demuxer may report the interrupted read as the end: while
+            // stopped, that is no end.
+            let mut packet = ffmpeg::Packet::empty();
+            match packet.read(&mut self.input) {
+                Ok(()) => {}
+                Err(ffmpeg::Error::Eof) if !self.stopped() => {
+                    self.decoder.send_eof().map_err(|error| {
+                        media_error(&self.path, "video decoder flush failed", error)
+                    })?;
+                    self.eof_sent = true;
+                    continue;
+                }
+                #[cfg_attr(not(test), allow(unused_variables))]
+                Err(error) => {
+                    #[cfg(test)]
+                    interrupt_seam::exited(&self.path, error);
+                    continue;
+                }
             }
-            let next = self
-                .input
-                .packets()
-                .next()
-                .map(|(stream, packet)| (stream.index(), packet));
-            let Some((stream_index, packet)) = next else {
-                self.decoder.send_eof().map_err(|error| {
-                    media_error(&self.path, "video decoder flush failed", error)
-                })?;
-                self.eof_sent = true;
-                continue;
-            };
-            if stream_index != self.stream_index {
+            if packet.stream() != self.stream_index {
                 continue;
             }
             self.decoder
@@ -1834,6 +2095,7 @@ pub(crate) fn backend(error: impl std::fmt::Display) -> MediaError {
 mod tests {
     use super::*;
     use kinewright_core::classify_source_with_assumption;
+    use std::time::Duration;
 
     #[test]
     fn ffmpeg_color_enums_map_known_and_unspecified_values() {
@@ -2483,6 +2745,69 @@ mod tests {
             Some((36, 64)),
             "a 90° orientation swaps the probed dimensions"
         );
+    }
+
+    /// Amendment R43 (RS-1): a reader's decoder carries its interrupt into
+    /// every packet read. Held inside a read's IO (the seam) and its flag
+    /// then set, the read fails with `AVERROR_EXIT` and the decode ends
+    /// `Cancelled`; `packets()` retried that read forever. The source is
+    /// noisy, so reads past the open do real IO (the seam must be entered).
+    #[test]
+    fn an_interrupt_ends_a_readers_packet_read() {
+        use interrupt_seam::{Mode, arm, disarm, exits, poke, wait_entered};
+        let media = crate::test_support::GeneratedMedia::ffmpeg(
+            "r43-read",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30",
+                "-frames:v",
+                "60",
+                "-vf",
+                "noise=alls=40:allf=t",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "60",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            "mp4",
+        );
+        let path = media.path().to_path_buf();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (opened, open) = crossbeam_channel::bounded::<()>(0);
+        let (go, went) = crossbeam_channel::bounded::<()>(0);
+        let (done, result) = crossbeam_channel::bounded(1);
+        let (reader_path, reader_stop) = (path.clone(), Arc::clone(&stop));
+        // The reader's thread: the callback reads its thread's flag.
+        std::thread::spawn(move || {
+            let fps = Rational::new(30, 1).expect("fps");
+            let flag = Some(&reader_stop);
+            let decoder =
+                VideoDecoder::open_scaled_internal(&reader_path, fps, None, None, 1, flag);
+            let mut decoder = decoder.expect("the source opens");
+            opened.send(()).expect("opened");
+            went.recv().expect("go");
+            let mut cache: FrameCache<FrameTexture> = FrameCache::new(2);
+            let window = decoder.decode_window(TimeCode(59), TimeCode(59), &mut cache);
+            let _ = done.send(window);
+        });
+        open.recv().expect("the reader opened");
+        arm(&path, Mode::Interruptible);
+        go.send(()).expect("go");
+        let held = wait_entered(&path, Duration::from_secs(60));
+        assert!(held, "not vacuous: a packet read did IO past the open");
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        poke();
+        let decoded = result.recv_timeout(Duration::from_secs(60));
+        let decoded = decoded.expect("the interrupted read ended");
+        assert!(matches!(decoded, Err(MediaError::Cancelled)), "{decoded:?}");
+        assert!(exits(&path) >= 1, "the read failed with AVERROR_EXIT");
+        disarm(&path);
     }
 
     /// Decode one still frame through the legacy path (RGBA8) for content

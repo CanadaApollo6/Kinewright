@@ -484,6 +484,10 @@ pub struct PlaybackStats {
     /// Amendment R41: backward seeks by a merged region's reader, at most
     /// one per job per merged region (the degraded mode's cost).
     pub merged_rewinds: u64,
+    /// Amendment R43 (RS-1): retirements whose readers were still alive at
+    /// the deadline, so the frame rendered with them detached (each wait,
+    /// of each new document or cache clear).
+    pub retire_overruns: u64,
     pub sync_fallback_frames: u64,
     /// Decoders open now in this engine's renderers (preview, proofs,
     /// export).
