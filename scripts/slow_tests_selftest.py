@@ -215,6 +215,34 @@ class PartialParse(unittest.TestCase):
             code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
             self.assertEqual(code, 0, out)
 
+    def test_a_result_split_by_a_whole_ffmpeg_message_is_rejoined(self):
+        # pf1 R43 gate log: a complete message (newline included) landed after `test x ... `,
+        # and libtest's `ok` followed on a line of its own, sometimes after further messages.
+        for windows in (False, True):
+            lines = self.lines(windows)
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            lines[at: at + 1] = [
+                lines[at][: -len("ok")] + "[swscaler @ 0x1] [swscaler @ 0x2] No accelerated colorspace conversion.",
+                "[swscaler @ 0x3] No accelerated colorspace conversion.",
+                "ok[swscaler @ 000001F4A934BE80] No accelerated colorspace conversion.",
+            ]
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and "ignored" in line)
+            name, _, outcome = lines[at].partition(" ... ")
+            lines[at: at + 1] = [f"{name} ... [h264 @ 000001F4A934BE80] late frame", outcome]
+            code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
+            self.assertEqual(code, 0, out)
+
+    def test_a_split_result_whose_next_line_is_not_an_outcome_still_fails(self):
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at: at + 1] = [lines[at][: -len("ok")] + "[swscaler @ 0x1] message", "garbage ok"]
+        self.assert_unparsable(lines, "summary says")
+        # ... and a split result never borrows the outcome of the next test line.
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at] = lines[at][: -len("ok")] + "[swscaler @ 0x1] message"
+        self.assert_unparsable(lines, "summary says")
+
     def test_ffmpeg_stripping_leaves_names_and_outcomes_intact(self):
         self.assertEqual(st.strip_ffmpeg_log("test a::b ... [x @ 0x1] ok"), "test a::b ... ok")
         self.assertEqual(st.strip_ffmpeg_log("test a::b ... FAILED[x @ 0x1] msg"), "test a::b ... FAILED")
