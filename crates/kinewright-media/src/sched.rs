@@ -182,9 +182,13 @@ pub(crate) struct Slot<K> {
     pub(crate) state: ReaderState,
     /// The time its decoder continues from without a seek.
     cursor: Option<i64>,
-    /// Amendment R41: the time it last started decoding, kept across
-    /// closes; a decode at or before it is a rewind.
+    /// Amendment R41: its position, the time it last started decoding
+    /// (just before it, if that decode stopped), kept across closes and
+    /// plans; a decode at or before it is a rewind.
     last: Option<i64>,
+    /// Amendment R43: its position within the current plan version (`None`
+    /// before its first decode in it); its lookahead stays past it.
+    floor: Option<i64>,
     /// A plan version whose lookahead failed: no more lookahead in it.
     lookahead_failed: Option<u64>,
     /// H-5: the permits (frame threads) its decoder holds; 0 when closed.
@@ -602,6 +606,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 version,
                 ..Plan::default()
             };
+            slot.floor = None;
         }
         self.pending.clear();
         let regions_len = regions.len();
@@ -659,6 +664,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 state: ReaderState::Idle { since: now },
                 cursor: None,
                 last: None,
+                floor: None,
                 lookahead_failed: None,
                 threads: 0,
                 cancelled: false,
@@ -792,36 +798,58 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         })
     }
 
-    /// The first time in `id`'s plan nobody has: a reserved required one,
-    /// then admissible lookahead (K-2). `Err(true)`: lookahead waits on the
-    /// budget.
+    /// Amendment R43: whether a reader other than `id` requires `at` of
+    /// `id`'s source (it waits for `id`'s result: wake it).
+    pub(crate) fn awaited(&self, id: u64, at: i64) -> bool {
+        let Some(key) = self
+            .slots
+            .iter()
+            .find(|slot| slot.id == id)
+            .map(|slot| &slot.key)
+        else {
+            return false;
+        };
+        (self.slots.iter())
+            .any(|slot| slot.id != id && &slot.key == key && slot.plan.required.contains(&at))
+    }
+
+    /// The next time in `id`'s plan (Amendment R43: in order, R37's
+    /// forward walk). Its first required time without a frame or a failure
+    /// is decoded once reserved; until then (another reader decodes it, or
+    /// it waits for admission again) the reader waits rather than passing
+    /// it, so no required time it passed can come back. Once every required
+    /// time has a result, the first admissible lookahead past its position
+    /// in this plan that nobody has (K-2). `Err(true)`: lookahead waits on
+    /// the budget.
     fn work_for(&mut self, id: u64) -> Result<(i64, bool), bool> {
         let Some(slot) = self.slots.iter().find(|slot| slot.id == id) else {
             return Err(false);
         };
         let ring = self.rings.get(&slot.key);
-        let taken = |t: &&i64| {
+        let resolved = |t: &i64| {
             ring.is_some_and(|ring| ring.contains_key(t))
-                || self.failures.contains_key(&(slot.key.clone(), **t))
+                || self.failures.contains_key(&(slot.key.clone(), *t))
+        };
+        let taken = |t: &i64| {
+            resolved(t)
                 || self.slots.iter().any(|other| {
                     other.id != id
                         && other.key == slot.key
-                        && matches!(other.state, ReaderState::Decoding { at, .. } if at == **t)
+                        && matches!(other.state, ReaderState::Decoding { at, .. } if at == *t)
                 })
         };
         let key = slot.key.clone();
-        let reserved = |t: &&i64| self.reserved.contains_key(&(key.clone(), **t));
-        let required = slot
-            .plan
-            .required
-            .iter()
-            .filter(reserved)
-            .find(|t| !taken(t));
-        if let Some(at) = required {
-            return Ok((*at, true));
+        if let Some(at) = slot.plan.required.iter().find(|t| !resolved(t)) {
+            let reserved = self.reserved.contains_key(&(key, *at));
+            return if reserved {
+                Ok((*at, true))
+            } else {
+                Err(false)
+            };
         }
+        let past = |t: &&i64| slot.floor.is_none_or(|floor| **t > floor);
         let lookahead = (slot.lookahead_failed != Some(slot.plan.version))
-            .then(|| slot.plan.lookahead.iter().find(|t| !taken(t)))
+            .then(|| (slot.plan.lookahead.iter()).find(|t| past(t) && !taken(t)))
             .flatten()
             .copied();
         let Some(at) = lookahead else {
@@ -893,8 +921,8 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let slot = self.slot(id).expect("the reader's slot");
         let version = slot.plan.version;
         let rewind = slot.plan.merged && slot.last.is_some_and(|last| at <= last);
-        (slot.state, slot.flight, slot.last) =
-            (ReaderState::Decoding { at, version }, bytes, Some(at));
+        (slot.state, slot.flight) = (ReaderState::Decoding { at, version }, bytes);
+        (slot.last, slot.floor) = (Some(at), Some(at));
         self.merged_rewinds += u64::from(rewind);
         Next::Decode { at, version, bytes }
     }
@@ -961,6 +989,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// the bytes).
     pub(crate) fn stopped(&mut self, id: u64, now: Duration) {
         if let Some(slot) = self.slot(id) {
+            // Amendment R43: a stopped decode leaves its reader just before
+            // it: decoding that time again is no rewind.
+            if let ReaderState::Decoding { at, version } = slot.state {
+                slot.last = Some(at - 1);
+                if version == slot.plan.version {
+                    slot.floor = Some(at - 1);
+                }
+            }
             (slot.flight, slot.cursor) = (0, None);
             if slot.state != ReaderState::Retiring {
                 slot.state = ReaderState::Idle { since: now };
@@ -1342,7 +1378,10 @@ impl PermitBook {
     }
 }
 
-fn plan(version: u64, region: Region) -> Plan {
+fn plan(version: u64, mut region: Region) -> Plan {
+    // Amendment R43: a reader walks its plan in order.
+    region.required.sort_unstable();
+    region.lookahead.sort_unstable();
     Plan {
         version,
         required: region.required,
@@ -1494,6 +1533,8 @@ mod tests {
         render: Option<(Vec<(u8, i64)>, usize)>,
         /// Readers whose stop flag is set (K-2).
         stops: BTreeSet<u64>,
+        /// Amendment R43: (reader, plan version) of every decode started.
+        started: BTreeSet<(u64, u64)>,
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -1539,6 +1580,7 @@ mod tests {
                 titles: 0,
                 render: None,
                 stops: BTreeSet::new(),
+                started: BTreeSet::new(),
             }
         }
 
@@ -1775,9 +1817,19 @@ mod tests {
             let state = self.state_of(id);
             let slot = self.readers.slots.iter().find(|slot| slot.id == id);
             let ahead = slot.map_or(0, |slot| self.lookahead(slot.key));
+            let position = slot.and_then(|slot| slot.last);
             let before = (self.readers.draining, self.readers.live);
             match self.readers.next(id, self.now, self.shutdown) {
                 Next::Decode { at, version, bytes } => {
+                    // Amendment R43: after its first decode in a plan
+                    // version a reader only moves past its position: at
+                    // most one rewind per job, that first decode.
+                    if !self.started.insert((id, version)) {
+                        assert!(
+                            position.is_none_or(|last| at > last),
+                            "R43: reader {id} rewound to {at} from {position:?} within v{version}"
+                        );
+                    }
                     let key = self.key(id);
                     let required = self
                         .job
@@ -2189,6 +2241,16 @@ mod tests {
             world.apply(event);
         }
         assert_eq!(world.flight.len(), 1, "a lookahead decode in flight");
+        explore(&world, 4, &mut cells, &mut visited);
+        // K-2: readers whose required frames are decoded wait on the
+        // budget for their lookahead (Amendment R43: a reader walks its
+        // required times before any lookahead).
+        let mut world = World::new(20);
+        world.apply(Event::Post(1));
+        world.apply(Event::Admit);
+        world.settle();
+        let states: Vec<_> = world.live.iter().map(|id| world.state_of(*id)).collect();
+        assert!(states.contains(&"budget-wait"), "{states:?}");
         explore(&world, 4, &mut cells, &mut visited);
         let missing: Vec<_> = CELLS
             .iter()
@@ -2767,6 +2829,232 @@ mod tests {
             "each job's fold is counted, no merge: {seen:?}"
         );
         bounded(&seen, readers.merged_rewinds);
+    }
+
+    /// Step reader `id` once as its thread would, granting in full;
+    /// returns what it was told.
+    fn step_reader(readers: &mut Model, id: u64) -> Next {
+        let next = readers.next(id, Duration::ZERO, false);
+        match next {
+            Next::Open { want } => readers.granted(id, Some(want), Duration::ZERO),
+            Next::Close => readers.closed(id),
+            Next::Retire => readers.exited(id),
+            Next::Decode { .. } | Next::Wait { .. } => {}
+        }
+        next
+    }
+
+    /// Deliver reader `id`'s decode of `at` as a frame.
+    fn deliver_ok(readers: &mut Model, id: u64, key: u8, (at, version, bytes): (i64, u64, usize)) {
+        let value = frame(key, at);
+        let fr = Fr {
+            value,
+            bytes,
+            pinned: false,
+        };
+        let (back, _) = readers.deliver(id, at, version, Ok(fr), Duration::ZERO);
+        readers.release(back.map_or(0, |back| back.bytes));
+    }
+
+    /// Step `id` until it waits, delivering each decode as a frame; the
+    /// times it decoded.
+    fn walk(readers: &mut Model, id: u64, key: u8) -> Vec<i64> {
+        let mut times = Vec::new();
+        for _ in 0..BUDGET {
+            match step_reader(readers, id) {
+                Next::Decode { at, version, bytes } => {
+                    times.push(at);
+                    deliver_ok(readers, id, key, (at, version, bytes));
+                }
+                Next::Wait { .. } | Next::Retire => return times,
+                Next::Open { .. } | Next::Close => {}
+            }
+        }
+        panic!("reader {id} did not settle within {BUDGET} steps");
+    }
+
+    /// Amendment R43 (re-review R41 BF3-2, Astra's counterexample): A's
+    /// readers are at 4 and decoding 14 when a replan, posted mid-job,
+    /// merges A to required 0 and 14 (lookahead 15, 16) beside B's 7 at
+    /// P = 2. The merged reader rewinds 4 → 0 once. It does not pass 14,
+    /// which the other reader's older decode holds: it waits. That decode
+    /// fails (stale, dropped), 14 is admitted again, and the merged reader
+    /// continues forward: 0, 14, 15, 16, one rewind counted. (Before R43 it
+    /// read 0, 15, 16, then 14: a second rewind in one job.)
+    #[test]
+    fn a_mid_job_replan_with_a_failing_decode_rewinds_once() {
+        let mut readers = Model::new(2).with_budget(1_000 * F);
+        let first = plan_regions(&[(0u8, vec![4, 14], vec![])], readers.limit());
+        let first = first.expect("two readers").regions;
+        readers.post(first, (HashMap::from([(0, F)]), 0), Duration::ZERO);
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        let (near, far) = (readers.slots[0].id, readers.slots[1].id);
+        assert_eq!(walk(&mut readers, near, 0), [4], "the near reader is at 4");
+        assert!(matches!(step_reader(&mut readers, far), Next::Open { .. }));
+        let Next::Decode {
+            at: 14,
+            version,
+            bytes,
+        } = step_reader(&mut readers, far)
+        else {
+            panic!("the far reader decodes 14");
+        };
+        // The replan arrives while 14 is in flight.
+        let demand = [(0u8, vec![0, 14], vec![15, 16]), (1, vec![7], vec![])];
+        let planned = plan_regions(&demand, readers.limit()).expect("two readers");
+        assert_eq!(planned.merged, 1, "A's playheads merge");
+        let sizes = HashMap::from([(0, F), (1, F)]);
+        let posted = readers.post_planned(planned, (sizes, 0), Duration::ZERO);
+        readers.release(posted.dropped.0.iter().map(|fr| fr.bytes).sum());
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        let merged = readers.slots.iter().find(|slot| slot.id == near);
+        let plan = merged
+            .map(|slot| slot.plan.clone())
+            .expect("the near reader");
+        assert!(plan.merged, "the near reader takes the merged region");
+        assert_eq!((plan.required, plan.lookahead), (vec![0, 14], vec![15, 16]));
+        let mut decoded = walk(&mut readers, near, 0);
+        assert_eq!(decoded, [0], "it rewinds to 0, then waits at 14");
+        // The older decode of 14 fails: dropped, and owed again (H-3).
+        let error = MediaError::Backend("decode 0@14: injected".into());
+        let (_, dropped) = readers.deliver(far, 14, version, Err(error), Duration::ZERO);
+        assert!(dropped.is_some(), "a stale failure is dropped");
+        readers.release(bytes);
+        assert!(readers.unreserved(), "14 is owed again");
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        decoded.extend(walk(&mut readers, near, 0));
+        assert_eq!(decoded, [0, 14, 15, 16], "forward after its one rewind");
+        assert_eq!(readers.merged_rewinds, 1, "one rewind, counted");
+        // The far reader leaves; B's reader starts and the job resolves.
+        assert_eq!(step_reader(&mut readers, far), Next::Retire);
+        let spawned = readers.assign(Duration::ZERO).spawn;
+        assert_eq!(spawned.len(), 1, "B's reader starts");
+        assert_eq!(walk(&mut readers, spawned[0].0, 1), [7]);
+        assert!(readers.resolve(&[(0, 0), (0, 14), (1, 7)]).is_some());
+    }
+
+    /// Amendment R43: lookahead evicted behind a reader within a job (the
+    /// preview admits again for G owed, drains, and K-5 evicts the farthest)
+    /// is not read again in that job: the reader continues past its
+    /// position.
+    #[test]
+    fn evicted_lookahead_behind_a_reader_is_not_read_again_within_the_job() {
+        let mut readers = Model::new(20).with_budget(10 * F);
+        let demand = [(0u8, vec![0], vec![1, 2, 3])];
+        let regions = plan_regions(&demand, readers.limit()).expect("a reader");
+        let sizes = HashMap::from([(0, F)]);
+        readers.post(regions.regions, (sizes, 0), Duration::ZERO);
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        let id = readers.slots[0].id;
+        let mut decoded = Vec::new();
+        while decoded.len() < 3 {
+            if let Next::Decode { at, version, bytes } = step_reader(&mut readers, id) {
+                decoded.push(at);
+                deliver_ok(&mut readers, id, 0, (at, version, bytes));
+            }
+        }
+        assert_eq!(decoded, [0, 1, 2]);
+        // 8f of G owed again do not fit beside 3f: 1f of lookahead goes.
+        let Admission::Wait { evicted, .. } = readers.admit(8 * F) else {
+            panic!("admission drains");
+        };
+        let values: Vec<u32> = evicted.iter().map(|fr| fr.value).collect();
+        assert_eq!(values, [frame(0, 2)], "the farthest lookahead is evicted");
+        readers.release(evicted.iter().map(|fr| fr.bytes).sum());
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        decoded.extend(walk(&mut readers, id, 0));
+        assert_eq!(decoded, [0, 1, 2, 3], "2 is behind it: not read again");
+    }
+
+    /// Amendment R43: a lookahead decode K-2 stops leaves its reader just
+    /// before that time. Once admission is ready again the merged reader
+    /// decodes it again, and that is no rewind.
+    #[test]
+    fn a_stopped_lookahead_decode_is_decoded_again_without_a_rewind() {
+        let mut readers = Model::new(2).with_budget(10 * F);
+        let demand = [(0u8, vec![0, 14], vec![15, 16]), (1, vec![7], vec![])];
+        let planned = plan_regions(&demand, readers.limit()).expect("two readers");
+        let sizes = HashMap::from([(0, F), (1, F)]);
+        readers.post_planned(planned, (sizes, 0), Duration::ZERO);
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        let merged = readers.slots.iter().find(|slot| slot.plan.merged);
+        let id = merged.expect("A's merged reader").id;
+        let mut decoded = Vec::new();
+        loop {
+            match step_reader(&mut readers, id) {
+                Next::Decode { at: 15, .. } => {
+                    decoded.push(15);
+                    break;
+                }
+                Next::Decode { at, version, bytes } => {
+                    decoded.push(at);
+                    deliver_ok(&mut readers, id, 0, (at, version, bytes));
+                }
+                Next::Open { .. } => {}
+                next => panic!("the merged reader walks to 15: {next:?}"),
+            }
+        }
+        // 7f of G do not fit beside 4f live: its lookahead decode stops.
+        let Admission::Wait { stop, .. } = readers.admit(7 * F) else {
+            panic!("admission drains");
+        };
+        assert_eq!(stop, [id], "the lookahead decode stops");
+        readers.stopped(id, Duration::ZERO);
+        readers.release(F);
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        decoded.extend(walk(&mut readers, id, 0));
+        assert_eq!(decoded, [0, 14, 15, 15, 16], "15 is decoded again");
+        assert_eq!(readers.merged_rewinds, 0, "and that is no rewind");
+    }
+
+    /// Amendment R43: replans posted mid-job at random, between reader
+    /// steps, decodes that succeed or fail (stale ones included), stops and
+    /// admissions, at P = 2 (A's playheads merge every job) and P = 3.
+    /// Every decode is checked in [`World::step`]: after its first decode
+    /// in a plan version, a reader only moves past its position.
+    #[test]
+    fn mid_job_replans_rewind_at_most_once_per_job() {
+        let (mut merged, mut stale_failures, mut rewinds, mut decodes) = (0, 0, 0, 0);
+        for seed in 1..=300u64 {
+            let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            let mut below = |bound: usize| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                usize::try_from(state % bound as u64).expect("index")
+            };
+            let mut world = World::new([2, 3][below(2)]);
+            let mut t = 0;
+            for _ in 0..64 {
+                let posts = world.render.is_none() && (world.job.is_none() || below(5) == 0);
+                if posts {
+                    t += i64::try_from(below(3)).expect("small");
+                    let lookahead = vec![t + 1, t + 2, t + 15, t + 16];
+                    let demand = [(0u8, vec![t, t + 14], lookahead), (1, vec![t + 7], vec![])];
+                    world.post(&demand, 0);
+                    merged += (world.readers.slots.iter())
+                        .filter(|slot| slot.plan.merged)
+                        .count();
+                } else {
+                    let events: Vec<Event> = (world.events().into_iter())
+                        .filter(|event| !matches!(event, Event::Post(_) | Event::Shutdown))
+                        .collect();
+                    let label = world.apply(events[below(events.len())]);
+                    stale_failures += usize::from(label.starts_with("finish-err×stale-required"));
+                }
+                world.check();
+            }
+            world.check_live();
+            rewinds += world.readers.merged_rewinds;
+            decodes += world.decodes.len();
+        }
+        let seen = format!(
+            "{decodes} decodes, {merged} merged regions, {stale_failures} stale required \
+             failures, {rewinds} merged rewinds"
+        );
+        eprintln!("{seen}");
+        assert!(decodes > 500 && merged > 100, "{seen}");
+        assert!(stale_failures > 10 && rewinds > 10, "{seen}");
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10

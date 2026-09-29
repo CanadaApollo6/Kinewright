@@ -814,14 +814,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                     let hold = Arc::new(hold);
                     Pinned { frame, hold }
                 });
-                let now = lane.now();
-                let delivered = lane.lock().readers.deliver(id, at, version, result, now);
-                lane.notify();
-                // H-3: a dropped failure's time is re-demanded.
-                if delivered.1.is_some() {
-                    lane.work.notify_all();
-                }
-                drop(delivered);
+                deliver(lane, id, (at, version), result);
                 state = lane.lock();
             }
         }
@@ -833,6 +826,24 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
     lane.permits_change(|book| book.forget(id));
     lane.lock().readers.exited(id);
     lane.notify();
+}
+
+/// A reader's result for `at` (H-3), then the wakes: the preview, and the
+/// readers if a dropped failure's time is re-demanded or (Amendment R43)
+/// another reader walking its plan waits for it. What `deliver` returns
+/// drops after unlock (H-4).
+fn deliver(lane: &Lane, id: u64, (at, version): (i64, u64), result: Result<Pinned, MediaError>) {
+    let now = lane.now();
+    let (delivered, awaited) = {
+        let mut state = lane.lock();
+        let delivered = state.readers.deliver(id, at, version, result, now);
+        (delivered, state.readers.awaited(id, at))
+    };
+    lane.notify();
+    if delivered.1.is_some() || awaited {
+        lane.work.notify_all();
+    }
+    drop(delivered);
 }
 
 /// How a playback attempt ended (R-4's "attempt").
