@@ -1248,15 +1248,17 @@ impl Preview {
         }
     }
 
-    /// K-2 / R38: the plans' refusal and merge counts, taken under `Sched`,
-    /// join the engine's stats after unlock.
+    /// K-2 / R38 / R41: the plans' refusal, merge and rewind counts, taken
+    /// under `Sched`, join the engine's stats after unlock.
     fn drain_counts(&self, mut state: Sched<'_>) {
         let starved = std::mem::take(&mut state.readers.starved);
         let merged = std::mem::take(&mut state.readers.regions_merged);
+        let rewinds = std::mem::take(&mut state.readers.merged_rewinds);
         drop(state);
         let mut counters = self.lane.counters();
         counters.stats.lookahead_starved += starved;
         counters.stats.regions_merged += merged;
+        counters.stats.merged_rewinds += rewinds;
     }
 
     /// Amendment R37: a paused wait a `play` superseded withdraws its
@@ -2812,6 +2814,31 @@ pub(crate) mod tests {
             assert_eq!(lane.lock().fallbacks, [0, 0], "no K-3 fallback");
             let merged = lane.counters().stats.regions_merged;
             assert_eq!(merged, merges, "P = {parallelism}: merges counted");
+        }
+    }
+
+    /// Amendment R41: a merged reader's rewinds reach the engine's stats.
+    /// Played ahead for 8 frames at P = 2, the cut document's two
+    /// same-source playheads share a reader, which rewinds as they advance
+    /// (at most once per job per merged region); at P = 3 nothing rewinds.
+    #[test]
+    fn merged_rewinds_reach_the_engine_stats() {
+        let (document, _workload) = cut_document();
+        for parallelism in [2, 3] {
+            let lane = Arc::new(Lane::with_parallelism(parallelism));
+            let (mut preview, _frames) =
+                test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+            for at in 0..8 {
+                render_ahead(&mut preview, &document, at);
+            }
+            let stats = lane.counters().stats;
+            let (merged, rewinds) = (stats.regions_merged, stats.merged_rewinds);
+            if parallelism == 2 {
+                assert!(rewinds > 0, "P = 2: rewinds counted ({merged} merges)");
+                assert!(rewinds <= merged, "P = 2: ≤ 1 per merged region per job");
+            } else {
+                assert_eq!((merged, rewinds), (0, 0), "P = 3: no merge, no rewind");
+            }
         }
     }
 

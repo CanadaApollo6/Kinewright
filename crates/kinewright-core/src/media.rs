@@ -478,6 +478,9 @@ pub struct PlaybackStats {
     /// R38 (review B F3): required reader regions merged, as a last
     /// resort, to fit the reader limit (each merge of each job).
     pub regions_merged: u64,
+    /// Amendment R41: backward seeks by a merged region's reader, at most
+    /// one per job per merged region (the degraded mode's cost).
+    pub merged_rewinds: u64,
     pub sync_fallback_frames: u64,
     /// Decoders open now in this engine's renderers (preview, proofs,
     /// export).

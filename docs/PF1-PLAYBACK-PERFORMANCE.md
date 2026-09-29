@@ -244,11 +244,29 @@ all sources' regions exceed the reader limit R, lookahead-only regions go
 first. Only as a last resort are two required regions of one source merged,
 the nearest pair first (the later region's first required time less the
 earlier's last), until the regions fit; a merged region keeps only the
-lookahead past its last required time, so its reader still decodes forward
-only (it seeks forward between the merged playheads, never back). Each such
-merge is counted in `PlaybackStats::regions_merged`. More required sources
-than R remain K-3's synchronous fallback. *G14 margin:* the probe's held
-maximum was 91.1 ms against 100 ms; S4's pinned run is the verdict.
+lookahead past its last required time, so within a job its reader decodes
+forward only (it seeks forward between the merged playheads). Across jobs it
+does not: see Amendment R41. Each such merge is counted in
+`PlaybackStats::regions_merged`. More required sources than R remain K-3's
+synchronous fallback. *G14 margin:* the probe's held maximum was 91.1 ms
+against 100 ms; S4's pinned run is the verdict.
+
+**Amendment R41 (proposed) [S2b] Fallback regions rewind across jobs
+(re-review BF3-2).** A *merged* region puts two or more of one source's
+playheads on one reader. Within a job it decodes forward only: its required
+times ascending, then only the lookahead past the last of them. Across jobs it
+cannot. When the playheads advance, the earlier one's next frame lies behind
+the reader, which must seek back to it. At P = 2, with A requiring 0 and 14 and
+B requiring 7, A's reader decodes 0 → 14 → 15 → 16, then 1 → 15 → 16 → 17, and
+so on. Decoding the gap forward instead would cost as much as the seek, so no
+order is cheaper. This is the degraded mode, and the documented cost of
+exceeding R. A merged region's reader rewinds at most once per job. A *rewind*
+is a decode at or before the reader's previous decode. Each rewind is counted
+in `PlaybackStats::merged_rewinds`, which the timing lanes print as
+`engine_merged_rewinds` beside `engine_regions_merged`. R37's rule, that regions
+merge only across real decoder continuation, governs every region that is not
+such a fallback. With enough readers, no reader rewinds as its playheads
+advance.
 
 **H-2 [S2b-1] `Sched`: shared state and participant states.** A
 `Mutex<SchedState>` with condvars `work` (readers) and `ready` (preview) holds

@@ -66,6 +66,8 @@ pub(crate) struct Plan {
     pub(crate) version: u64,
     pub(crate) required: Vec<i64>,
     pub(crate) lookahead: Vec<i64>,
+    /// Amendment R41: a fallback region (see [`Region::merged`]).
+    pub(crate) merged: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +78,9 @@ pub(crate) struct Slot<K> {
     pub(crate) state: ReaderState,
     /// The time its decoder continues from without a seek.
     cursor: Option<i64>,
+    /// Amendment R41: the time it last started decoding, kept across
+    /// closes; a decode at or before it is a rewind.
+    last: Option<i64>,
     /// A plan version whose lookahead failed: no more lookahead in it.
     lookahead_failed: Option<u64>,
     /// H-5: the permits (frame threads) its decoder holds; 0 when closed.
@@ -91,6 +96,10 @@ pub(crate) struct Slot<K> {
 pub(crate) struct Region {
     pub(crate) required: Vec<i64>,
     pub(crate) lookahead: Vec<i64>,
+    /// Amendment R41: a fallback region, two or more of one source's
+    /// playheads on one reader. Within a job it decodes forward only;
+    /// across jobs it may rewind once (`merged_rewinds`).
+    pub(crate) merged: bool,
 }
 
 impl Region {
@@ -196,8 +205,10 @@ fn regions(required: &[i64], lookahead: &[i64]) -> Vec<Region> {
 /// lookahead-only regions go first; only then, as a last resort, are two of
 /// one source's required regions merged, the nearest pair first, keeping
 /// only the lookahead past the merged region's last required time, so its
-/// reader still decodes forward only. `None` means more distinct required
-/// sources than readers: the frame renders synchronously (K-3).
+/// reader decodes forward only within the job. Across jobs its playheads
+/// advance, so it may rewind once per job (Amendment R41: counted in
+/// `merged_rewinds`). `None` means more distinct required sources than
+/// readers: the frame renders synchronously (K-3).
 pub(crate) fn plan_regions<K: Clone>(
     demand: &[(K, Vec<i64>, Vec<i64>)],
     limit: usize,
@@ -231,6 +242,7 @@ pub(crate) fn plan_regions<K: Clone>(
         earlier.lookahead.extend(later.lookahead);
         earlier.lookahead.retain(|t| *t > last);
         earlier.lookahead.sort_unstable();
+        earlier.merged = true;
         merged += 1;
     }
     let mut all: Vec<(K, Region)> = (per_source.into_iter())
@@ -293,6 +305,9 @@ pub(crate) struct Readers<K, F> {
     pub(crate) starved: u64,
     /// R38 (review B F3): required regions merged to fit the reader limit.
     pub(crate) regions_merged: u64,
+    /// Amendment R41: decodes by a merged region's reader at or before the
+    /// time it decoded last (a backward seek).
+    pub(crate) merged_rewinds: u64,
     starved_keys: HashSet<K>,
     /// K-5 (review B F4): per source, its last required times and the
     /// direction its demand travels, for eviction.
@@ -330,6 +345,7 @@ impl<K, F> Readers<K, F> {
             required_bytes: 0,
             starved: 0,
             regions_merged: 0,
+            merged_rewinds: 0,
             starved_keys: HashSet::new(),
             travel: HashMap::new(),
         }
@@ -498,6 +514,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 plan: plan(self.version, region),
                 state: ReaderState::Idle { since: now },
                 cursor: None,
+                last: None,
                 lookahead_failed: None,
                 threads: 0,
                 cancelled: false,
@@ -731,7 +748,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         };
         let slot = self.slot(id).expect("the reader's slot");
         let version = slot.plan.version;
-        (slot.state, slot.flight) = (ReaderState::Decoding { at, version }, bytes);
+        let rewind = slot.plan.merged && slot.last.is_some_and(|last| at <= last);
+        (slot.state, slot.flight, slot.last) =
+            (ReaderState::Decoding { at, version }, bytes, Some(at));
+        self.merged_rewinds += u64::from(rewind);
         Next::Decode { at, version, bytes }
     }
 
@@ -1110,6 +1130,7 @@ fn plan(version: u64, region: Region) -> Plan {
         version,
         required: region.required,
         lookahead: region.lookahead,
+        merged: region.merged,
     }
 }
 
@@ -2017,7 +2038,7 @@ mod tests {
             0u8,
             Region {
                 required: vec![0],
-                lookahead: vec![],
+                ..Region::default()
             },
         )];
         let posted = world
@@ -2118,6 +2139,7 @@ mod tests {
                 let region = Region {
                     required: required.to_vec(),
                     lookahead: lookahead.to_vec(),
+                    ..Region::default()
                 };
                 vec![(0u8, region)]
             };
@@ -2359,6 +2381,119 @@ mod tests {
         // Without the pressure nothing merges and nothing is counted.
         let (_, merged) = plan_regions(&demand, 3).expect("three readers");
         assert_eq!(merged, 0, "no merge within the limit");
+    }
+
+    /// One job's demand: per source, its required and lookahead times.
+    type Demand = Vec<(u8, Vec<i64>, Vec<i64>)>;
+
+    /// What [`drive_jobs`] saw, per job: rewinds within the job (any
+    /// reader), rewinds across jobs (a job's first decode at or before the
+    /// reader's previous one) by merged readers and by the rest, and the
+    /// merged regions; with the merges counted.
+    #[derive(Debug, Default)]
+    struct Rewinds {
+        within: Vec<usize>,
+        merged: Vec<usize>,
+        unmerged: Vec<usize>,
+        groups: Vec<usize>,
+        merges: u64,
+    }
+
+    /// Post `jobs` demands in turn on `readers` (f = F each, admitted in
+    /// full) and run each to completion. A rewind is a decode at or before
+    /// the reader's previous decode.
+    fn drive_jobs(readers: &mut Model, jobs: &[Demand]) -> Rewinds {
+        let mut seen = Rewinds::default();
+        let mut decoded: BTreeMap<u64, Vec<i64>> = BTreeMap::new();
+        for demand in jobs {
+            let (regions, merges) = plan_regions(demand, readers.limit()).expect("readers");
+            seen.merges += merges;
+            let groups = regions.iter().filter(|(_, run)| run.merged).count();
+            let sizes = demand.iter().map(|(key, ..)| (*key, F)).collect();
+            let posted = readers.post(regions, (sizes, 0), Duration::ZERO);
+            readers.release(posted.dropped.0.iter().map(|fr| fr.bytes).sum());
+            assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+            let before: BTreeMap<u64, usize> =
+                decoded.iter().map(|(id, t)| (*id, t.len())).collect();
+            drive(readers, &mut decoded);
+            let required: Vec<(u8, i64)> = (demand.iter())
+                .flat_map(|(key, required, _)| required.iter().map(|t| (*key, *t)))
+                .collect();
+            assert!(readers.resolve(&required).is_some(), "every job resolves");
+            let (mut within, mut by_merged, mut by_rest) = (0, 0, 0);
+            for (id, times) in &decoded {
+                let start = before.get(id).copied().unwrap_or(0);
+                let job = &times[start..];
+                within += job.windows(2).filter(|w| w[1] <= w[0]).count();
+                let previous = start.checked_sub(1).map(|index| times[index]);
+                let across = job
+                    .first()
+                    .zip(previous)
+                    .is_some_and(|(at, last)| at <= &last);
+                let slot = readers.slots.iter().find(|slot| slot.id == *id);
+                if slot.is_some_and(|slot| slot.plan.merged) {
+                    by_merged += usize::from(across);
+                } else {
+                    by_rest += usize::from(across);
+                }
+            }
+            seen.within.push(within);
+            seen.merged.push(by_merged);
+            seen.unmerged.push(by_rest);
+            seen.groups.push(groups);
+        }
+        seen
+    }
+
+    /// Amendment R41 (re-review BF3-2): the reviewer's two advancing
+    /// playheads over 24 jobs. A requires t and t + 14 (lookahead t + 1,
+    /// t + 2, t + 15, t + 16) and B requires t + 7. At P = 2 A's regions
+    /// merge every job: within a job every reader decodes forward only;
+    /// across jobs A's reader rewinds at most once per job, every rewind is
+    /// counted, and no other reader rewinds. At P = 3 the readers suffice:
+    /// nothing merges and no reader ever rewinds.
+    #[test]
+    fn a_merged_reader_rewinds_at_most_once_per_job() {
+        let jobs: Vec<_> = (0..24)
+            .map(|t| {
+                let lookahead = vec![t + 1, t + 2, t + 15, t + 16];
+                vec![(0u8, vec![t, t + 14], lookahead), (1, vec![t + 7], vec![])]
+            })
+            .collect();
+        let mut readers = Model::new(2).with_budget(1_000 * F);
+        let seen = drive_jobs(&mut readers, &jobs);
+        assert_eq!(seen.merges, 24, "A merges every job: {seen:?}");
+        let within = seen.within.iter().sum::<usize>();
+        assert_eq!(
+            within, 0,
+            "within a job every reader decodes forward: {seen:?}"
+        );
+        for (job, (rewinds, groups)) in seen.merged.iter().zip(&seen.groups).enumerate() {
+            assert!(
+                rewinds <= groups,
+                "job {job}: ≤ 1 rewind per merged group: {seen:?}"
+            );
+        }
+        assert!(
+            seen.unmerged.iter().all(|r| *r == 0),
+            "only merged readers rewind: {seen:?}"
+        );
+        let rewinds: usize = seen.merged.iter().sum();
+        assert!(
+            rewinds > 0,
+            "two advancing playheads on one reader rewind: {seen:?}"
+        );
+        let counted = usize::try_from(readers.merged_rewinds).expect("count");
+        assert_eq!(counted, rewinds, "every rewind is counted");
+        let mut readers = Model::new(3).with_budget(1_000 * F);
+        let seen = drive_jobs(&mut readers, &jobs);
+        assert_eq!(seen.merges, 0, "within the limit nothing merges");
+        let rewinds = (seen.within.iter())
+            .chain(&seen.merged)
+            .chain(&seen.unmerged)
+            .sum::<usize>();
+        assert_eq!(rewinds, 0, "readers suffice: no rewind: {seen:?}");
+        assert_eq!(readers.merged_rewinds, 0);
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10
