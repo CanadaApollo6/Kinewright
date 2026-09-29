@@ -5,8 +5,9 @@
 //! linear decode (`ffprobe -show_frames`, `ffmpeg -f framehash`). Generated
 //! with the CLI into the temp directory (deleted on drop), the way
 //! `perf_fixtures` does; nothing is bundled. Every number is read from the
-//! generated file; x264 runs single-threaded and bit-exact so the files are
-//! reproducible (their SHA-256 is pinned in the witness module).
+//! generated file; x264 runs single-threaded, bit-exact and CPU-independent so
+//! the files are reproducible across machines' SIMD levels (their SHA-256 is
+//! pinned in the witness module).
 
 use std::process::Command;
 
@@ -132,11 +133,28 @@ pub(super) struct RefFrame {
 pub(super) const CONVERSION: &str = "scale=w=320:h=180:flags=bicubic:in_color_matrix=bt709:\
      out_color_matrix=bt709:in_range=mpeg:out_range=jpeg,format=rgba64le";
 
+/// The same conversion with swscale's bit-exact flags: the CPU-invariant
+/// reference. `CONVERSION` (the production flags) picks CPU-specific scalers,
+/// so its bytes are only comparable on the machine that produced them; this
+/// one is byte-identical with and without SIMD
+/// (`the_canonical_conversion_does_not_depend_on_the_cpu`).
+pub(super) const CANONICAL: &str = "scale=w=320:h=180:flags=bicubic+bitexact+accurate_rnd+\
+     full_chroma_int:in_color_matrix=bt709:out_color_matrix=bt709:in_range=mpeg:out_range=jpeg,\
+     format=rgba64le";
+
 /// The CLI arguments per file (the VUI colour tags let the managed decoder open).
-fn arguments(kind: Kind) -> (Vec<String>, &'static str) {
+///
+/// CPU-independent generation: x264 runs in its `cpu-independent` mode (no
+/// CPU-selected algorithms) and the RGB-to-YUV conversion of the test source
+/// uses swscale's bit-exact flags, so the bytes do not depend on the machine's
+/// SIMD level. `limited` runs the same recipe with every assembly path
+/// switched off (`FFmpeg` `-cpuflags 0`, x264 `asm=0`) to show it
+/// (`the_fixture_files_do_not_depend_on_the_cpu`).
+fn arguments(kind: Kind, limited: bool) -> (Vec<String>, &'static str) {
     let params = |extra: &str| {
         format!(
-            "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv:keyint=24:min-keyint=24:threads=1{extra}"
+            "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=tv:keyint=24:min-keyint=24:threads=1:cpu-independent=1{extra}{}",
+            if limited { ":asm=0" } else { "" }
         )
     };
     // The CLI has no `-b_pyramid` here: x264's own parameter is the same knob.
@@ -174,17 +192,22 @@ fn arguments(kind: Kind) -> (Vec<String>, &'static str) {
     };
     let base = "-f lavfi -i testsrc2=size=320x180:rate=RATE -frames:v 90 -c:v libx264 -preset \
                 veryfast -pix_fmt yuv420p -color_primaries bt709 -color_trc bt709 -colorspace \
-                bt709 -color_range tv -fflags +bitexact -flags:v +bitexact -x264-params";
-    let args = (base
-        .replace("RATE", rate)
-        .split(' ')
-        .filter(|a| !a.is_empty())
-        .map(str::to_owned))
-    .collect::<Vec<_>>()
-    .into_iter()
-    .chain([x264])
-    .chain(extra.iter().map(|a| (*a).to_owned()))
-    .collect();
+                bt709 -color_range tv -fflags +bitexact -flags:v +bitexact -sws_flags \
+                +bitexact+accurate_rnd+full_chroma_int -x264-params";
+    let args = (limited.then(|| ["-cpuflags", "0"].map(str::to_owned)))
+        .into_iter()
+        .flatten()
+        .chain(
+            (base
+                .replace("RATE", rate)
+                .split(' ')
+                .filter(|a| !a.is_empty())
+                .map(str::to_owned))
+            .collect::<Vec<_>>(),
+        )
+        .chain([x264])
+        .chain(extra.iter().map(|a| (*a).to_owned()))
+        .collect();
     (args, ext)
 }
 
@@ -209,6 +232,15 @@ fn shadow_anchor(
     Some((packet.position(), packet.dts(), packet.is_key()))
 }
 
+/// SHA-256 of the file `kind`'s recipe generates, with all CPU-specific
+/// assembly available (`limited` false) or switched off (`limited` true).
+pub(super) fn generated_sha256(kind: Kind, limited: bool) -> String {
+    let (args, ext) = arguments(kind, limited);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let media = GeneratedMedia::ffmpeg(&format!("pf1-s2c-{kind:?}-cpu"), &args, ext);
+    sha256_file(media.path()).expect("hash the fixture")
+}
+
 impl Fixture {
     pub(super) fn new(kind: Kind) -> Self {
         Self::new_as(kind, kind)
@@ -217,7 +249,7 @@ impl Fixture {
     /// A `kind` file generated as `made_like` would be: the substitute the
     /// shape checks must reject when the two differ.
     pub(super) fn new_as(kind: Kind, made_like: Kind) -> Self {
-        let (args, ext) = arguments(made_like);
+        let (args, ext) = arguments(made_like, false);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let media = GeneratedMedia::ffmpeg(&format!("pf1-s2c-{kind:?}"), &args, ext);
         let asset = probe_path(media.path(), AssetId(1)).expect("the S-2 fixture probes");
@@ -336,10 +368,14 @@ impl Fixture {
 
     /// `ffmpeg -f framehash` SHA-256 of each output frame (of the raw decode,
     /// or of `filter`'s output), in output order.
-    fn framehashes(&self, filter: Option<&str>) -> Vec<String> {
+    fn framehashes(&self, filter: Option<&str>, limited: bool) -> Vec<String> {
         let mut command = Command::new(ffmpeg_executable());
+        command.args(["-hide_banner", "-v", "error"]);
+        if limited {
+            command.args(["-cpuflags", "0"]); // no SIMD in FFmpeg's own code
+        }
         command
-            .args(["-hide_banner", "-v", "error", "-i"])
+            .arg("-i")
             .arg(self.media.path())
             .args(["-map", "0:v:0"]);
         if let Some(filter) = filter {
@@ -368,6 +404,12 @@ impl Fixture {
             .collect()
     }
 
+    /// The framehashes of the file's converted frames with `filter`, with
+    /// `FFmpeg`'s assembly on or (`limited`) off.
+    pub(super) fn converted(&self, filter: &str, limited: bool) -> Vec<String> {
+        self.framehashes(Some(filter), limited)
+    }
+
     /// The CLI's own linear decode of the file, in display order: timestamps
     /// from `ffprobe -show_frames`, frame hashes from `ffmpeg -f framehash`.
     pub(super) fn reference(&self) -> Vec<RefFrame> {
@@ -389,8 +431,8 @@ impl Fixture {
             String::from_utf8_lossy(&probe.stderr)
         );
         let json: serde_json::Value = serde_json::from_slice(&probe.stdout).expect("ffprobe json");
-        let shas = self.framehashes(None);
-        let outs = self.framehashes(Some(CONVERSION));
+        let shas = self.framehashes(None, false);
+        let outs = self.framehashes(Some(CONVERSION), false);
         let frames = json["frames"].as_array().expect("ffprobe frames");
         assert!(
             frames.len() == shas.len() && shas.len() == outs.len(),

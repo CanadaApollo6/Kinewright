@@ -1006,6 +1006,8 @@ pub(crate) enum OutputFault {
     Conversion,
     /// The working-frame stage receives wrong RGBA64 (the conversion was right).
     WorkingFrame,
+    /// The working frame comes out with one sample replaced by NaN.
+    Nan,
 }
 
 #[cfg(test)]
@@ -1247,6 +1249,11 @@ pub(crate) trait DecoderFrame: CachedFrame {
         flip_horizontal: bool,
         managed_source: Option<&ManagedSource>,
     ) -> Result<Self, MediaError>;
+
+    /// PF1 S2c C-4: replace one sample with NaN (the test-only shared-path
+    /// fault `OutputFault::Nan`); frames without float samples ignore it.
+    #[cfg(test)]
+    fn poison_sample(&mut self) {}
 }
 
 impl DecoderFrame for FrameTexture {
@@ -1313,6 +1320,11 @@ impl DecoderFrame for WorkingFrame {
             &source.description,
             source.assumption,
         )
+    }
+
+    #[cfg(test)]
+    fn poison_sample(&mut self) {
+        Arc::make_mut(&mut self.pixels)[2] = half::f16::NAN; // pixel 0, blue
     }
 }
 
@@ -1878,14 +1890,23 @@ impl VideoDecoder {
                 (self.scaled_width, self.scaled_height),
             );
         }
-        T::from_rgba_frame(
+        let frame = T::from_rgba_frame(
             &rgba,
             self.scaled_width,
             self.scaled_height,
             self.rotation,
             self.flip_horizontal,
             self.managed_source.as_ref(),
-        )
+        )?;
+        #[cfg(test)]
+        let frame = {
+            let mut frame = frame;
+            if OUTPUT_FAULT.with(std::cell::Cell::get) == Some(OutputFault::Nan) {
+                frame.poison_sample();
+            }
+            frame
+        };
+        Ok(frame)
     }
 }
 

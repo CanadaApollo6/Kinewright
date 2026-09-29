@@ -90,6 +90,9 @@ pub(super) struct Observation {
     /// The returned frame's conversion, for the independent output oracle
     /// (not part of `same`: `frame` already covers the pixels).
     pub(super) output: Option<Output>,
+    /// The behavioural cancel seam was armed on the decoder (see
+    /// `TargetPath::POSITIVE_CONTROL`); not part of `same`.
+    pub(super) seam: bool,
 }
 
 /// The pixels a call returned, and the RGBA64 the shared conversion handed
@@ -196,6 +199,7 @@ pub(super) fn observe(
         frames: probe.frames[probe.frames.len().saturating_sub(took)..].to_vec(),
         packets: probe.packets,
         output,
+        seam: probe.check_between_frames,
     }
 }
 
@@ -297,7 +301,12 @@ impl OutputOracle {
                 table[usize::from(code)]
             };
             let got = f64::from(got.to_f32());
-            if (got - want).abs() > want.abs() * 2f64.powi(-10) + 2f64.powi(-24) {
+            // Every value must be finite first: a NaN fails every comparison,
+            // so `NaN > tolerance` alone would wave it through.
+            let within = got.is_finite()
+                && want.is_finite()
+                && (got - want).abs() <= want.abs() * 2f64.powi(-10) + 2f64.powi(-24);
+            if !within {
                 return Err(format!(
                     "value {i} of frame {:?} is {got}, the independent table gives {want} (code {code})",
                     o.pts
@@ -346,6 +355,14 @@ pub(super) enum Event {
 }
 
 pub(super) trait TargetPath {
+    /// Only the reference continuation (the positive control) is one: it may
+    /// arm the behavioural cancel seam (`DecoderProbe::check_between_frames`).
+    /// A path over production code injects the stop signal alone and keeps
+    /// the default, so its per-frame check is its own and is what the
+    /// exact-stop witnesses observe. The harness fails a path that is not the
+    /// positive control and has the seam armed (`produced`).
+    const POSITIVE_CONTROL: bool = false;
+
     fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation;
     fn event(&mut self, event: Event);
 }
@@ -380,10 +397,12 @@ pub(super) enum CancelAt {
     Drain,
 }
 
-/// Arm a call's cancellation on `decoder` (with the stop flag it checks).
-/// `between_frames`: the run checks the flag after every received frame (S-2)
-/// rather than only between packets (today's decoder).
-fn arm(decoder: &mut VideoDecoder, cancel: Option<usize>, how: CancelAt, between_frames: bool) {
+/// Arm a call's cancellation on `decoder`: inject the stop signal (the flag
+/// the decoder checks, raised when the armed frame is received) and nothing
+/// else. It never touches the behavioural seam, so it is what a path over
+/// production code uses; only the positive control adds the seam
+/// (`tests::between_frames`).
+fn arm(decoder: &mut VideoDecoder, cancel: Option<usize>, how: CancelAt) {
     let stop = Arc::new(AtomicBool::new(false));
     let n = cancel.map(|n| u64::try_from(n).unwrap());
     let armed = match (n, how) {
@@ -396,7 +415,6 @@ fn arm(decoder: &mut VideoDecoder, cancel: Option<usize>, how: CancelAt, between
         (None, _) => None,
     };
     decoder.arm_cancel_after(armed);
-    decoder.probe_mut().check_between_frames = between_frames && how != CancelAt::Drain;
     decoder.set_stop(stop);
 }
 
@@ -405,7 +423,7 @@ impl TargetPath for SeekPath {
         let mut decoder = self.fx.open(self.threads);
         decoder.probe_mut().tampers.clone_from(&self.tampers);
         // Today's decoder: the flag is checked between packets only.
-        arm(&mut decoder, self.cancel.take(), CancelAt::Exact, false);
+        arm(&mut decoder, self.cancel.take(), CancelAt::Exact);
         let before = Before::of(&decoder);
         let mut cache = FrameCache::new(1);
         let result = decoder.decode_window(t, t, &mut cache);
@@ -428,8 +446,11 @@ impl TargetPath for SeekPath {
 /// report through `observe` with the counters taken before the call, keep
 /// the decoder's probe fed (see `DecoderProbe`), and implement every
 /// `Event` as its doc says. Cancellation is checked between produced frames
-/// (`arm(.., true)` sets the test seam that models it, `check_between_frames`;
-/// the real check belongs in `receive_frames`), a mismatch between the real
+/// by the path's own production code (the real check belongs in
+/// `receive_frames`): the adapter injects the stop signal with `arm` and must
+/// NOT arm the `check_between_frames` seam, which models that check for the
+/// positive control only (the harness fails a path that leaves it armed).
+/// A mismatch between the real
 /// seek's first packet and the shadow's disables continuation for the decoder
 /// until it is replaced (`Event::MismatchOnce`), and the frames it returns
 /// are checked against the CLI's own conversion (`Corpus::out`).
@@ -766,6 +787,23 @@ fn check(
     }
 }
 
+/// `path.produce`, and the harness check that only the positive control has
+/// the behavioural cancel seam armed.
+fn produced<P: TargetPath>(
+    path: &mut P,
+    from: Option<Cursor>,
+    t: i64,
+) -> Result<Observation, String> {
+    let got = path.produce(from, TimeCode(t));
+    if got.seam && !P::POSITIVE_CONTROL {
+        return Err(format!(
+            "produce({from:?}, {t}): the adapter armed the test-only check_between_frames seam; \
+             a path over production code injects the stop signal only"
+        ));
+    }
+    Ok(got)
+}
+
 /// Every target, at `threads` frame threads: the path's frame bytes,
 /// timestamps, retained frames and S-2 state equal the same-thread oracle's
 /// for the first hop and for the chained second hop; with `check_route`, it
@@ -790,11 +828,11 @@ pub(super) fn witness_hops<P: TargetPath>(
 ) -> Result<(), String> {
     for (g, (want, want2)) in corpus.targets.iter().zip(&corpus.oracle[&threads]) {
         let place = format!("{:?} x{threads} {g:?}", corpus.fx.kind);
-        path.produce(None, TimeCode(g.c));
+        produced(path, None, g.c)?;
         let mut model = Model::new(corpus, threads);
         model.seeked(g.c);
         let expect = model.expected(g.c, g.t);
-        let got = path.produce(Some(Cursor(g.c)), TimeCode(g.t));
+        let got = produced(path, Some(Cursor(g.c)), g.t)?;
         check(
             &got,
             want,
@@ -804,7 +842,7 @@ pub(super) fn witness_hops<P: TargetPath>(
         )?;
         if let (Some(t2), Some(want2), true) = (g.t2, want2, chain) {
             let expect = model.expected(g.t, t2);
-            let got = path.produce(Some(Cursor(g.t)), TimeCode(t2));
+            let got = produced(path, Some(Cursor(g.t)), t2)?;
             check(
                 &got,
                 want2,
@@ -861,11 +899,12 @@ pub(super) fn run_script<P: TargetPath>(
     for (n, step) in steps.iter().enumerate() {
         match step {
             Step::Prime(c) => {
-                drop(path.produce(None, TimeCode(*c)));
+                produced(path, None, *c).map_err(|e| format!("step {n}: {e}"))?;
                 model.seeked(*c);
             }
             Step::Go(c, t, expect) => {
-                let got = path.produce(Some(Cursor(*c)), TimeCode(*t));
+                let got =
+                    produced(path, Some(Cursor(*c)), *t).map_err(|e| format!("step {n}: {e}"))?;
                 let want = reference.produce(None, TimeCode(*t));
                 let prior = model.run;
                 let auto = model.expected(*c, *t);
@@ -917,7 +956,8 @@ pub(super) fn run_script<P: TargetPath>(
                 path.event(event.clone());
             }
             Step::Cancelled(c, t, frames) => {
-                let got = path.produce(Some(Cursor(*c)), TimeCode(*t));
+                let got =
+                    produced(path, Some(Cursor(*c)), *t).map_err(|e| format!("step {n}: {e}"))?;
                 cancelled(&got, *frames, check_route).map_err(|e| format!("step {n}: {e}"))?;
                 model.run = None; // the interrupted run is abandoned
             }
@@ -1116,20 +1156,31 @@ pub(super) fn scripts(cx: &Ctx, cancel_after: usize) -> Vec<(&'static str, Vec<S
 mod tests {
     use super::*;
     use crate::decode::{OUTPUT_FAULT, OutputFault};
+    use crate::{
+        ffmpeg,
+        pf1_s2c_fixtures::{CANONICAL, CONVERSION, generated_sha256},
+    };
 
     /// One fixture's pins on one OS: SHA-256 of the generated file, an FNV-1a
     /// digest of what a one-thread fresh Seek observes at every target
-    /// (decoder-level state only: timestamps, retained-plane hashes, anchors)
-    /// and an FNV-1a digest of the returned pixels at those targets (the f16
-    /// bits after the shared conversion). An empty `file` is a pin still to
-    /// be taken on that OS. See `the_pinned_oracle_has_not_drifted`.
+    /// (decoder-level state only: timestamps, retained-plane hashes, anchors),
+    /// an FNV-1a digest of the returned pixels at those targets (the f16 bits
+    /// after the shared conversion), and the `FFmpeg` build (`build_id`) the
+    /// state digest was taken with. An empty `file` is a pin still to be
+    /// taken on that OS. Policy, see `pin_check`: the file hash is enforced
+    /// on Linux CI and advisory elsewhere, the state digest is enforced when
+    /// the file and the build match, the output digest is advisory.
     struct Pin {
         kind: Kind,
         os: &'static str,
         file: &'static str,
         digest: &'static str,
         output: &'static str,
+        build: &'static str,
     }
+
+    /// The `FFmpeg` build the Linux pins were taken with.
+    const LINUX_BUILD: &str = "avcodec 0x3e0b64 avformat 0x3e0364 avfilter 0xb0464 swscale 0x90164";
 
     const fn pin(
         kind: Kind,
@@ -1143,6 +1194,7 @@ mod tests {
             file,
             digest,
             output,
+            build: LINUX_BUILD,
         }
     }
 
@@ -1155,45 +1207,58 @@ mod tests {
             file: "",
             digest: "",
             output: "",
+            build: "",
         }
+    }
+
+    /// The linked `FFmpeg` libraries' versions: what the state digest depends
+    /// on besides the file.
+    fn build_id() -> String {
+        format!(
+            "avcodec {:#x} avformat {:#x} avfilter {:#x} swscale {:#x}",
+            ffmpeg::codec::version(),
+            ffmpeg::format::version(),
+            ffmpeg::filter::version(),
+            ffmpeg::software::scaling::version(),
+        )
     }
 
     const PINS: [Pin; 12] = [
         pin(
             Kind::Default,
-            "0bbebd9f932c9200b33f84fba32f588f4d46e790c415a2825dda3aac06d5cafc",
-            "e3adf240824b969b",
-            "df255db2e11924c2",
+            "a7b4e147a02e9bd9beb6cf953356f09eebf0e8c19b8c44d72a79664289e40946",
+            "cf7bdfbdfae6dc80",
+            "78df7ac42d41d2ac",
         ),
         pin(
             Kind::Pyramid,
-            "4039f5a155610dc63dc4c83ff8f1a128bcebf5a792e330bc503cf09c19410934",
-            "bff05c7c05ec2f35",
-            "86147d16a758a5ff",
+            "8731e441728d8d862f29ffcb9b457407d4b34da51c6d9137d836b804caa96ac4",
+            "5d808e839b1f37ab",
+            "e6917eb44ee9a7b0",
         ),
         pin(
             Kind::EditList,
-            "300ce14c19339777dcb358c0c3a468b9a2be6b0f31b03a5a6f5bcd7a6db29dc9",
-            "a0d54226ba3f75f2",
-            "53d5944fecb5673e",
+            "61f8c4028e9a8d28d29cff97cf13219c367c2bd5308037f1f893781eadb84f7d",
+            "3b36d3396bb99343",
+            "66275c01e8f692fb",
         ),
         pin(
             Kind::OpenGop,
-            "9ccbc02a47796ffbbf95d760bed76f849e11b612cca4536e9acddca414447119",
-            "e7bd5a61f4a000cb",
-            "b9488e63192b88ba",
+            "2ba78079067b3fcceab67b6a0d860bd48a92d8d19c2bdf3f1d51e9aa02d8a9a9",
+            "14694f55cd0d355b",
+            "dfb48baf4f89ec08",
         ),
         pin(
             Kind::Vfr,
-            "fef2ad1e0f51ccbff506955e4eb6d0a504396b5f4dcf71bcda7af891ec73a7d7",
-            "002b5c1213d3c5d0",
-            "06e78e8d83e3eb1c",
+            "68e21cfe209d739d56091fdb2baa1b47db4e11a4fa039de26a73d138956f2a7f",
+            "9f17e10c9c5ee744",
+            "6d54cc1039c3d0d7",
         ),
         pin(
             Kind::AviDtsGuess,
-            "f8e71b910c906fcf0cb755e9c7bcdecb6b1458ef92fc0d4479740ebd6509031c",
-            "4c8f6f2b0d2d6a5f",
-            "23aa8f79ebb20674",
+            "73eb51ed1e3a59d3c50c18cbe503fb9891e119edfda0bd739471bc3b1afba967",
+            "97ddeeddc1a749c3",
+            "6d9188ca1ed4507f",
         ),
         windows_todo(Kind::Default),
         windows_todo(Kind::Pyramid),
@@ -1462,10 +1527,13 @@ mod tests {
         }
     }
 
-    /// What a pin comparison did: pins compared and equal, and pins skipped.
+    /// What a pin comparison did, over the three pins of one file (file hash,
+    /// state digest, output digest): compared and equal, compared and
+    /// different but only advisory, and not compared.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
     struct Pinned {
         verified: usize,
+        mismatched: usize,
         skipped: usize,
     }
 
@@ -1474,57 +1542,85 @@ mod tests {
         file: &'a str,
         digest: &'a str,
         output: &'a str,
+        build: &'a str,
     }
 
-    /// The pin decision for one file on one OS. A moved digest on the pinned
-    /// file always fails. A file that is not the pinned one (a different
-    /// FFmpeg/x264 build made it) or a pin not yet taken on this OS skips its
-    /// three pins with a loud stdout line carrying the observed values; but
-    /// with `ci` set the miss FAILS, except on Windows, where the pins are
-    /// still to be taken and the miss may skip.
-    fn pin_check(pin: &Pin, seen: &Seen, ci: bool) -> Result<Pinned, String> {
+    /// The pin policy for one file on one OS.
+    ///
+    /// - The file hash is enforced when `enforce_file` (Linux CI, where the
+    ///   recipe is CPU-independent and the `FFmpeg` build is the pinned one:
+    ///   `the_fixture_files_do_not_depend_on_the_cpu`); elsewhere a
+    ///   difference is an advisory line and a count, never a failure.
+    /// - The state digest is compared only when the file and the `FFmpeg`
+    ///   build are the pinned ones; then a difference fails (a decoder
+    ///   regression cannot move both the path and the oracle). Otherwise it
+    ///   is skipped, loudly.
+    /// - The output digest (the returned pixels after the production
+    ///   conversion) is advisory: the decoder's pixels are already checked
+    ///   live against the CLI's conversion and the f64 table on every run.
+    ///
+    /// Not pins, and enforced everywhere: the live CLI conversion check, the
+    /// finite f64 table comparison, and same-machine thread equality.
+    fn pin_check(pin: &Pin, seen: &Seen, enforce_file: bool) -> Result<Pinned, String> {
         let observed = format!(
-            "{:?} on {}: file {} digest {} output {}",
-            pin.kind, pin.os, seen.file, seen.digest, seen.output
+            "{:?} on {}: file {} digest {} output {} build [{}]",
+            pin.kind, pin.os, seen.file, seen.digest, seen.output, seen.build
         );
-        if pin.file.is_empty() || seen.file != pin.file {
-            let why = if pin.file.is_empty() {
-                "no pin taken on this OS yet"
-            } else {
-                "the fixture is not the pinned file (another FFmpeg/x264 build made it)"
-            };
-            println!("pf1-c4 PIN-MISS ({why}): observed {observed}");
-            if ci && pin.os != "windows" {
-                return Err(format!("CI pin miss ({why}): observed {observed}"));
+        let mut done = Pinned::default();
+        if pin.file.is_empty() {
+            println!("pf1-c4 PIN-MISS (no pin taken on this OS yet): observed {observed}");
+            done.skipped = 3;
+            return Ok(done);
+        }
+        let same_file = seen.file == pin.file;
+        if same_file {
+            done.verified += 1;
+        } else {
+            done.mismatched += 1;
+            println!(
+                "pf1-c4 PIN-ADVISORY file hash differs (another FFmpeg/x264 build made it): \
+                 observed {observed}"
+            );
+            if enforce_file {
+                return Err(format!("CI file pin differs: observed {observed}"));
             }
-            return Ok(Pinned {
-                verified: 0,
-                skipped: 3,
-            });
         }
-        if seen.digest != pin.digest || seen.output != pin.output {
-            return Err(format!(
-                "{:?}: the fresh-Seek oracle moved on the pinned file: digest {} (pinned {}), \
-                 output {} (pinned {}); observed {observed}",
-                pin.kind, seen.digest, pin.digest, seen.output, pin.output
-            ));
+        if same_file && seen.build == pin.build {
+            if seen.digest != pin.digest {
+                return Err(format!(
+                    "{:?}: the fresh-Seek oracle moved on the pinned file and build: digest {} \
+                     (pinned {}); observed {observed}",
+                    pin.kind, seen.digest, pin.digest
+                ));
+            }
+            done.verified += 1;
+        } else {
+            println!(
+                "pf1-c4 PIN-SKIP state digest not compared (file or FFmpeg build is not the \
+                 pinned one): observed {observed}"
+            );
+            done.skipped += 1;
         }
-        Ok(Pinned {
-            verified: 3,
-            skipped: 0,
-        })
+        if seen.output == pin.output {
+            done.verified += 1;
+        } else {
+            done.mismatched += 1;
+            println!(
+                "pf1-c4 PIN-ADVISORY output digest differs (historical digest; the live CLI \
+                 and table checks are what is enforced): observed {observed}, pinned {}",
+                pin.output
+            );
+        }
+        Ok(done)
     }
 
-    /// Fixture, oracle and returned-pixel pins, per OS. If this machine's
-    /// FFmpeg/x264 generated the pinned file, the oracle and output digests
-    /// must be the pinned ones (a common decoder or conversion regression
-    /// cannot move both the path and the oracle). A different file is a
-    /// loud skip locally and a failure with `CI` set (Windows: a loud skip
-    /// until its pins are taken). The verified and skipped counts are
-    /// printed, and on Linux under `CI` every fixture must have verified pins.
+    /// Fixture, oracle and returned-pixel pins, per OS, under the policy of
+    /// `pin_check`. Prints the verified, mismatched and skipped counts.
     #[test]
     fn the_pinned_oracle_has_not_drifted() {
         let (os, ci) = (std::env::consts::OS, std::env::var_os("CI").is_some());
+        let build = build_id();
+        println!("pf1-c4 build [{build}]");
         let (mut total, mut failures) = (Pinned::default(), Vec::new());
         for c in corpora(&[1]) {
             let kind = c.fx.kind;
@@ -1534,6 +1630,7 @@ mod tests {
                 file: "",
                 digest: "",
                 output: "",
+                build: "",
             };
             let pin = PINS
                 .iter()
@@ -1549,74 +1646,171 @@ mod tests {
                 file: &file,
                 digest: &digest,
                 output: &output,
+                build: &build,
             };
             // Every fixture reports before the test fails, so one CI run
             // prints all the observed values to pin.
-            let done = pin_check(pin, &seen, ci).unwrap_or_else(|e| {
+            let done = pin_check(pin, &seen, ci && os == "linux").unwrap_or_else(|e| {
                 println!("pf1-c4 PIN-FAIL {e}");
                 failures.push(e);
                 Pinned::default()
             });
             println!("pf1-c4 pin {kind:?}: {done:?}");
-            if ci && os == "linux" {
-                assert!(done.verified >= 1, "{kind:?}: no verified pin on Linux CI");
-            }
             total.verified += done.verified;
+            total.mismatched += done.mismatched;
             total.skipped += done.skipped;
+            // The production-flags CLI conversion against the bit-exact one:
+            // advisory, printed so a portable pixel pin can be judged from
+            // CI logs (they are different scalers, so they may differ).
+            let (production, canonical) = (
+                c.fx.converted(CONVERSION, false),
+                c.fx.converted(CANONICAL, false),
+            );
+            let same = production.iter().zip(&canonical).filter(|(a, b)| a == b);
+            println!(
+                "pf1-c4 advisory {kind:?}: production-flags CLI conversion equals the bit-exact \
+                 one for {} of {} frames",
+                same.count(),
+                canonical.len()
+            );
         }
         println!(
-            "pf1-c4 pins on {os} (CI {ci}): {} verified, {} skipped",
-            total.verified, total.skipped
+            "pf1-c4 pins on {os} (CI {ci}): {} verified, {} advisory mismatches, {} skipped",
+            total.verified, total.mismatched, total.skipped
         );
         assert!(failures.is_empty(), "{failures:#?}");
-        assert_eq!(total.verified + total.skipped, 3 * KINDS.len());
+        assert_eq!(
+            total.verified + total.mismatched + total.skipped,
+            3 * KINDS.len()
+        );
+        if ci && os == "linux" {
+            assert!(
+                total.verified >= KINDS.len(),
+                "Linux CI verified no file pin"
+            );
+        }
     }
 
-    /// A moved oracle or output digest on the pinned file fails; a different
-    /// file skips with a loud line locally and fails on CI (Windows: skips);
-    /// a pin not yet taken is a skip, never a pass.
+    /// The fixture recipe is CPU-independent: with every assembly path off
+    /// (`FFmpeg` `-cpuflags 0`, x264 `asm=0`) each file is byte-identical to
+    /// the one generated with the CPU's own SIMD. This is what lets the file
+    /// hash be enforced on Linux CI. Evidence is from x86-64 with and without
+    /// asm only; it is not a claim about other architectures.
     #[test]
-    fn the_pin_check_fails_a_moved_oracle_and_notes_a_different_file() {
+    fn the_fixture_files_do_not_depend_on_the_cpu() {
+        for kind in KINDS {
+            let (full, limited) = (generated_sha256(kind, false), generated_sha256(kind, true));
+            println!("pf1-c4 cpu {kind:?}: asm on {full}, asm off {limited}");
+            assert_eq!(full, limited, "{kind:?}: generation depends on the CPU");
+        }
+    }
+
+    /// The bit-exact CLI conversion gives the same bytes with and without
+    /// `FFmpeg`'s assembly, on every fixture. The production-flags conversion
+    /// (`CONVERSION`) is compared the same way and reported, not asserted
+    /// (swscale has no accelerated yuv420p to rgba64le path here, so it is
+    /// expected to match on x86-64; other architectures are untested).
+    #[test]
+    fn the_canonical_conversion_does_not_depend_on_the_cpu() {
+        for kind in KINDS {
+            let fx = Fixture::new(kind);
+            let (on, off) = (
+                fx.converted(CANONICAL, false),
+                fx.converted(CANONICAL, true),
+            );
+            assert_eq!(
+                on, off,
+                "{kind:?}: the bit-exact conversion depends on the CPU"
+            );
+            let (p_on, p_off) = (
+                fx.converted(CONVERSION, false),
+                fx.converted(CONVERSION, true),
+            );
+            let same = p_on.iter().zip(&p_off).filter(|(a, b)| a == b).count();
+            println!(
+                "pf1-c4 cpu {kind:?}: canonical conversion identical for {} of {} frames with asm \
+                 on and off; production-flags conversion identical for {same} of {}",
+                on.len(),
+                on.len(),
+                p_on.len()
+            );
+        }
+    }
+
+    /// The policy of `pin_check`: a moved state digest on the pinned file and
+    /// build fails; a different file fails only when enforced (Linux CI) and
+    /// otherwise skips the state digest and counts the file as advisory; a
+    /// different build skips the state digest; the output digest never
+    /// fails; a pin not yet taken is a skip, never a pass.
+    #[test]
+    fn the_pin_check_follows_the_policy() {
         let pin = &PINS[0];
         let good = Seen {
             file: pin.file,
             digest: pin.digest,
             output: pin.output,
+            build: pin.build,
         };
         let verified = Pinned {
             verified: 3,
+            mismatched: 0,
             skipped: 0,
         };
-        let skipped = Pinned {
-            verified: 0,
-            skipped: 3,
-        };
-        for ci in [false, true] {
-            assert_eq!(pin_check(pin, &good, ci), Ok(verified));
+        for enforce in [false, true] {
+            assert_eq!(pin_check(pin, &good, enforce), Ok(verified));
         }
         let moved = Seen {
             digest: "0123456789abcdef",
             ..good
         };
-        let e = pin_check(pin, &moved, false).unwrap_err();
-        eprintln!("pf1-c4 mutation pinned digest moved: {e}");
+        for enforce in [false, true] {
+            let e = pin_check(pin, &moved, enforce).unwrap_err();
+            eprintln!("pf1-c4 mutation pinned digest moved (enforce file {enforce}): {e}");
+        }
         let moved = Seen {
             output: "0123456789abcdef",
             ..good
         };
-        let e = pin_check(pin, &moved, false).unwrap_err();
-        eprintln!("pf1-c4 mutation pinned output moved: {e}");
+        let advisory = Pinned {
+            verified: 2,
+            mismatched: 1,
+            skipped: 0,
+        };
+        assert_eq!(pin_check(pin, &moved, true), Ok(advisory));
         let other = Seen {
             file: "another file",
+            digest: "0123456789abcdef",
+            output: "0123456789abcdef",
             ..good
         };
-        assert_eq!(pin_check(pin, &other, false), Ok(skipped));
+        let file_advisory = Pinned {
+            verified: 0,
+            mismatched: 2,
+            skipped: 1,
+        };
+        assert_eq!(pin_check(pin, &other, false), Ok(file_advisory));
         let e = pin_check(pin, &other, true).unwrap_err();
         assert!(e.contains("another file"), "{e}");
         eprintln!("pf1-c4 mutation pinned file differs on CI: {e}");
+        let elsewhere = Seen {
+            build: "another build",
+            digest: "0123456789abcdef",
+            ..good
+        };
+        let skipped_digest = Pinned {
+            verified: 2,
+            mismatched: 0,
+            skipped: 1,
+        };
+        assert_eq!(pin_check(pin, &elsewhere, true), Ok(skipped_digest));
         let windows = PINS.iter().find(|p| p.os == "windows").unwrap();
-        assert_eq!(pin_check(windows, &other, true), Ok(skipped));
-        assert_eq!(pin_check(windows, &other, false), Ok(skipped));
+        let untaken = Pinned {
+            verified: 0,
+            mismatched: 0,
+            skipped: 3,
+        };
+        assert_eq!(pin_check(windows, &other, true), Ok(untaken));
+        assert_eq!(pin_check(windows, &other, false), Ok(untaken));
     }
 
     fn tick_check(facts: &Facts, scratch: &mut VideoDecoder) -> Result<(), String> {
@@ -1863,6 +2057,13 @@ mod tests {
         AnchorDrifts,
     }
 
+    /// The positive control's model of S-2's "checked between produced
+    /// frames": arm the behavioural seam on its decoder. Private to this
+    /// module, and the harness fails any other path that has it armed.
+    fn between_frames(decoder: &mut VideoDecoder, on: bool) {
+        decoder.probe_mut().check_between_frames = on;
+    }
+
     /// A reader that keeps its decoder, continues under S-2's rules and
     /// otherwise seeks. The continuation is today's `decode_window_sequential`
     /// judged after the fact against the packets it read; the shadow is the
@@ -1960,7 +2161,8 @@ mod tests {
                 d
             });
             let before = before.unwrap_or_else(|| Before::of(&d));
-            arm(&mut d, self.cancel.take(), self.rules.cancel, true);
+            arm(&mut d, self.cancel.take(), self.rules.cancel);
+            between_frames(&mut d, self.rules.cancel != CancelAt::Drain);
             let mut cache = FrameCache::new(1);
             let result = d.decode_window(t, t, &mut cache);
             let shadow = match anchor(&self.fx.facts, t.0) {
@@ -1985,12 +2187,15 @@ mod tests {
     }
 
     impl TargetPath for ReferenceContinuation {
+        const POSITIVE_CONTROL: bool = true;
+
         fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
             let Some(Cursor(c)) = from.filter(|c| self.may_continue(c.0, t.0)) else {
                 return self.seek(t, None);
             };
             let mut d = self.decoder.take().expect("checked by may_continue");
-            arm(&mut d, self.cancel.take(), self.rules.cancel, true);
+            arm(&mut d, self.cancel.take(), self.rules.cancel);
+            between_frames(&mut d, self.rules.cancel != CancelAt::Drain);
             let before = Before::of(&d);
             let mut cache = FrameCache::new(13);
             let result = d.decode_window_sequential(TimeCode(c + 1), t, &mut cache);
@@ -2244,6 +2449,7 @@ mod tests {
         for (name, fault) in [
             ("conversion", OutputFault::Conversion),
             ("working frame", OutputFault::WorkingFrame),
+            ("NaN sample", OutputFault::Nan),
         ] {
             let _fault = FaultGuard::set(fault);
             for kind in [Kind::Default, Kind::AviDtsGuess] {
@@ -2280,6 +2486,58 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A path over production code that arms the test-only cancel seam
+    /// (instead of relying on its own per-frame check) is not the positive
+    /// control, and the harness fails it: here the reference continuation,
+    /// which arms the seam, presented as a production adapter.
+    struct ArmsTheSeam(ReferenceContinuation);
+
+    impl TargetPath for ArmsTheSeam {
+        fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
+            self.0.produce(from, t)
+        }
+
+        fn event(&mut self, event: Event) {
+            self.0.event(event);
+        }
+    }
+
+    #[test]
+    fn a_production_adapter_may_not_arm_the_cancel_seam() {
+        let c = Corpus::new(Kind::Default, &[1]);
+        // The positive control passes with the seam (it is the control).
+        witness(
+            &mut ReferenceContinuation::new(&c.fx, 1, Rules::ALL),
+            &c,
+            1,
+            true,
+        )
+        .unwrap();
+        let e = witness(
+            &mut ArmsTheSeam(ReferenceContinuation::new(&c.fx, 1, Rules::ALL)),
+            &c,
+            1,
+            true,
+        )
+        .unwrap_err();
+        assert!(e.contains("check_between_frames"), "{e}");
+        eprintln!("pf1-c4 mutation adapter arms the seam (witness): {e}");
+        let (a, b) = (c, Corpus::new(Kind::EditList, &[1]));
+        let cx = Ctx {
+            a: &a,
+            b: &b,
+            threads: 1,
+        };
+        let (name, steps) = scripts(&cx, 2)
+            .into_iter()
+            .find(|(name, _)| *name == "cancel with frames waiting")
+            .expect("the exact-stop script");
+        let mut path = ArmsTheSeam(ReferenceContinuation::new(&a.fx, 1, Rules::ALL));
+        let e = run_script(&mut path, &cx, &steps, true).unwrap_err();
+        assert!(e.contains("check_between_frames"), "{name}: {e}");
+        eprintln!("pf1-c4 mutation adapter arms the seam ({name}): {e}");
     }
 
     // ---- wrong paths (kept from the first round) ----
@@ -2532,6 +2790,8 @@ mod tests {
         }
     }
 
+    /// See the note on `continuation_holds_the_scripted_cases`: the real path
+    /// runs with the cancel seam off and its own per-frame check.
     #[test]
     #[ignore = "S2c-2 wires continuation"]
     fn continuation_reproduces_seek_on_every_fixture() {
@@ -2543,6 +2803,12 @@ mod tests {
         }
     }
 
+    /// S2c-2 MUST also show, against the real `ContinuationPath` (which runs
+    /// with the `check_between_frames` seam off; the harness enforces that),
+    /// that deleting its own production per-frame stop check in
+    /// `receive_frames` fails the `cancel with frames waiting` script of
+    /// `continuation_holds_the_scripted_cases`. The seam models that check
+    /// for the positive control only; it cannot stand in for it.
     #[test]
     #[ignore = "S2c-2 wires continuation"]
     fn continuation_holds_the_scripted_cases() {
