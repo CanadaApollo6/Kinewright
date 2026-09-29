@@ -1105,14 +1105,17 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         evicted
     }
 
-    /// A reader that could not start records its required times as failed
-    /// in the current version (E-2) and leaves.
+    /// A reader that could not start (or, Amendment R43, panicked) records
+    /// its required times the current job still requires as failed in the
+    /// current version (E-2) and leaves.
     pub(crate) fn fail_start(&mut self, id: u64, error: &MediaError) {
         if let Some(index) = self.slots.iter().position(|slot| slot.id == id) {
             let slot = self.slots.remove(index);
             for at in slot.plan.required {
-                let failure = (self.version, error.clone());
-                self.failures.insert((slot.key.clone(), at), failure);
+                let frame = (slot.key.clone(), at);
+                if self.required.contains(&frame) {
+                    self.failures.insert(frame, (self.version, error.clone()));
+                }
             }
         }
     }

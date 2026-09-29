@@ -304,6 +304,12 @@ pub(crate) struct Lane {
     /// Amendment R41's witness: each reader's open decoder and its source.
     #[cfg(test)]
     decoders: Mutex<HashMap<u64, VideoSourceKey>>,
+    /// Amendment R43's witness: the next reader decode of this time panics,
+    /// and the reader's id is recorded.
+    #[cfg(test)]
+    pub(crate) panic_at: Mutex<Option<i64>>,
+    #[cfg(test)]
+    pub(crate) panicked: Mutex<Vec<u64>>,
     /// H-5: the `Permits` monitor, a leaf never taken with `state` (H-4).
     permits: Mutex<PermitBook>,
     permits_cv: Condvar,
@@ -356,6 +362,10 @@ impl Lane {
             woke: Mutex::default(),
             #[cfg(test)]
             decoders: Mutex::default(),
+            #[cfg(test)]
+            panic_at: Mutex::default(),
+            #[cfg(test)]
+            panicked: Mutex::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
             permits_cv: Condvar::new(),
             counters: Mutex::default(),
@@ -380,7 +390,8 @@ impl Lane {
             let slot = state.readers.slots.iter().find(|slot| slot.id == id);
             slot.map(|slot| slot.key.clone())
         });
-        let mut decoders = self.decoders.lock().expect("decoders");
+        // Poison-tolerant: a panicking reader's exit calls this (R43).
+        let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
         match key.flatten() {
             Some(key) => decoders.insert(id, key),
             None => decoders.remove(&id),
@@ -727,6 +738,9 @@ fn spawn_reader(
 /// opening and closing run outside it, and what `deliver` returns is
 /// dropped after unlock (H-4).
 fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
+    // Amendment R43: declared first, so it runs last (after `Sched` is
+    // released and the decoder closed), on return and on unwind alike.
+    let _exit = Exit { lane, id };
     let mut decoder: Option<VideoDecoder> = None;
     let mut threads = 0;
     let mut state = lane.lock();
@@ -781,6 +795,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                         lane.notify(); // a test waiting for `Decoding`
                         let _ = release.recv();
                     }
+                    let panics = (lane.panic_at.lock().expect("panic")).take_if(|time| *time == at);
+                    if panics.is_some() {
+                        lane.panicked.lock().expect("panicked").push(id);
+                        panic!("injected: reader {id} panics decoding {at} (Amendment R43)");
+                    }
                 }
                 let result = match &mut decoder {
                     Some(decoder) => spec.decode(decoder, at),
@@ -819,13 +838,33 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
             }
         }
     }
-    drop(state);
-    drop(decoder);
-    #[cfg(test)]
-    lane.decoder_open(id, false);
-    lane.permits_change(|book| book.forget(id));
-    lane.lock().readers.exited(id);
-    lane.notify();
+}
+
+/// Amendment R43 (re-review R41 blocker 2): a reader's exit, on return and
+/// on unwind, after its decoder closed: its permits return (`forget`, once),
+/// its slot goes and the preview wakes. A reader that panicked also fails
+/// its required times (E-2), so no job, and no retirement, waits on it.
+struct Exit<'a> {
+    lane: &'a Lane,
+    id: u64,
+}
+
+impl Drop for Exit<'_> {
+    fn drop(&mut self) {
+        let (lane, id) = (self.lane, self.id);
+        #[cfg(test)]
+        lane.decoder_open(id, false);
+        lane.permits_change(|book| book.forget(id));
+        let mut state = lane.lock();
+        if thread::panicking() {
+            let error = MediaError::Backend("decode-reader: the reader panicked".to_owned());
+            state.readers.fail_start(id, &error);
+        } else {
+            state.readers.exited(id);
+        }
+        drop(state);
+        lane.notify();
+    }
 }
 
 /// A reader's result for `at` (H-3), then the wakes: the preview, and the
@@ -3603,6 +3642,64 @@ pub(crate) mod tests {
         only.duration = TimeCode(ends.max().unwrap_or(0));
         only.validate().expect("a subset is valid");
         Arc::new(only)
+    }
+
+    /// Amendment R43 (re-review R41 blocker 2): a reader that panics in its
+    /// decode returns its permits exactly once and leaves no slot; its job
+    /// gets the failure instead of waiting, and a new document that removes
+    /// its source is not held by it.
+    #[test]
+    fn a_panicking_reader_releases_its_permits_and_its_slot() {
+        let crate::perf_fixtures::Workload(document, _media) =
+            crate::perf_fixtures::cuts((160, 90), 30, 1, 2, 10);
+        let document = Arc::new(document);
+        let lane = Arc::new(Lane::with_parallelism(2));
+        *lane.panic_at.lock().expect("panic") = Some(0);
+        let (frames, thread) = threaded_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(0)),
+            stamp(1, 1),
+        )));
+        let panicked = || lane.panicked.lock().expect("panicked").first().copied();
+        wait_until(&lane, |state| {
+            panicked().is_some_and(|id| state.readers.slots.iter().all(|slot| slot.id != id))
+        });
+        let id = panicked().expect("a reader panicked");
+        let book = lane.book();
+        assert_eq!(book.forgets.get(&id), Some(&1), "its permits return once");
+        assert_eq!(book.in_use(), 0, "no permit stays held");
+        drop(book);
+        // Its job gets the failure (E-2) rather than waiting on it.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let failures = loop {
+            let failures = lane.take_failures();
+            if !failures.is_empty() {
+                break failures;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the job waited on a panicked reader"
+            );
+            thread::yield_now();
+        };
+        let [(failed, MediaError::Backend(message))] = &failures[..] else {
+            panic!("one failure: {failures:?}");
+        };
+        assert_eq!(*failed, stamp(1, 1));
+        assert!(message.contains("the reader panicked"), "{message}");
+        // A new document without its source: no retirement waits on it.
+        let mut removed = job(
+            &only(&document, |asset| asset != 1),
+            JobKind::Paused(TimeCode(10)),
+            stamp(2, 2),
+        );
+        removed.scene.generation = 2;
+        lane.post(Some(removed));
+        let frame = frames.recv_timeout(Duration::from_secs(60));
+        assert_eq!(frame.expect("the new document's frame").at, TimeCode(10));
+        lane.shut_down();
+        join_within(thread);
     }
 
     /// Amendment R43 (re-review R41 blocker 4): at P = 2 reader A holds
