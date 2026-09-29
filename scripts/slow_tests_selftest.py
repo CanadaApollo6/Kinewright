@@ -232,6 +232,58 @@ class PartialParse(unittest.TestCase):
             code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
             self.assertEqual(code, 0, out)
 
+    def test_a_result_split_with_the_message_prefix_before_test_is_rejoined(self):
+        # pf1 R47 gate log: the prefix landed before `test`, the message after " ... ", and `ok`
+        # on the next line.
+        for windows in (False, True):
+            lines = self.lines(windows)
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            lines[at: at + 1] = [
+                "[swscaler @ 0x73c2e0b48d80] " + lines[at][: -len("ok")]
+                + "No accelerated colorspace conversion found from yuv420p to rgba64le.",
+                "ok",
+            ]
+            code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
+            self.assertEqual(code, 0, out)
+
+    def test_a_message_glued_to_ok_without_its_prefix_is_cut(self):
+        # pf1 R47 media log: `[swscaler @ A] test x ... [swscaler @ B] okNo accelerated ...`.
+        self.assertEqual(
+            st.strip_ffmpeg_log("[swscaler @ 0x1] test a::b ... [swscaler @ 0x2] okNo accelerated conversion."),
+            "test a::b ... ok",
+        )
+        self.assertEqual(st.strip_ffmpeg_log("test a::b ... FAILED[x @ 0x1]"), "test a::b ... FAILED")
+        # Without any fragment on the line nothing is cut, so `okay` stays a non-outcome.
+        self.assertEqual(st.strip_ffmpeg_log("test a::b ... okay"), "test a::b ... okay")
+        # review-c4: a fragment elsewhere on the line, or lower-case text after the outcome,
+        # does not license the cut.
+        self.assertEqual(st.strip_ffmpeg_log("[x @ 0x1] test a::b ... okay"), "test a::b ... okay")
+        self.assertEqual(st.strip_ffmpeg_log("test a::b ... [x @ 0x1] okay"), "test a::b ... okay")
+        self.assertEqual(
+            st.strip_ffmpeg_log("test a::b ... [x @ 0x1] okay FAILED"), "test a::b ... okay FAILED"
+        )
+        # An ignore reason is never cut without a fragment in it.
+        self.assertEqual(
+            st.strip_ffmpeg_log("[x @ 0x1] test a::b ... ignored, slow tier"), "test a::b ... ignored, slow tier"
+        )
+
+    def test_a_result_line_with_no_ffmpeg_fragment_and_no_outcome_is_not_joined(self):
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at: at + 1] = [lines[at][: -len("ok")] + "some message", "ok"]
+        self.assert_unparsable(lines, "summary says")
+
+    def test_foreign_text_before_a_fragment_is_not_rejoined(self):
+        # review-c4: `test x ... unexpected [swscaler @ 0x1] message` then `ok` must not join.
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at: at + 1] = [lines[at][: -len("ok")] + "unexpected [swscaler @ 0x1] message", "ok"]
+        self.assert_unparsable(lines, "summary says")
+        lines = self.lines()
+        at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+        lines[at] = "[x @ 0x1] " + lines[at][: -len("ok")] + "okay"
+        self.assert_unparsable(lines, "summary says")
+
     def test_a_split_result_whose_next_line_is_not_an_outcome_still_fails(self):
         lines = self.lines()
         at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
