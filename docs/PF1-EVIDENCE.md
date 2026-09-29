@@ -19,6 +19,8 @@
 > must-pass mutations) are in **§E12**. G1 and G14 fail on LH (E12.10 D1).
 > The R37 fixes, their closure table and the (partial, contaminated) timing rerun are in **§E12.13**; every LH
 > figure before it was taken with the desktop screensaver running (E12.13.4).
+> The R38 fixes and the merge of main are in **§E12.14**. The R41 fixes, including the Windows file-lock catch, are
+> in **§E12.15**.
 
 ## E0 Diagnosis table (moved from design §1, revision 2)
 
@@ -4135,7 +4137,9 @@ and the plan are ready (E12.14.3).
 #### E12.14.1 Closure table
 
 Each mutation was applied alone to the committed code, and only its named witness was run
-(`s2b-logs/r38-mutations.log.gz`). **All 10 were killed.** Each row's raw lines are the failing test's summary and
+(`s2b-logs/r38-mutations.log.gz`). **Every one was killed:** 9 failing witness runs over 8 distinct code mutations
+(R38-1, 2, 3a, 3b, 4, 5a, 5b and 7; 5b ran against two witnesses), plus G18's synthetic checks (R38-6), which mutate
+no code. (Corrected in R41; this line first said "all 10".) Each row's raw lines are the failing test's summary and
 its panic message, verbatim.
 
 | Finding | Commit | Witness | Mutation | Raw result under the mutation |
@@ -4146,13 +4150,14 @@ its panic message, verbatim.
 | D4: the shared adjustment frame still owns an uncharged eight-byte buffer (C + 8 during composition) | `c2cb734` R38-4 | `render::k1_allocation::a_render_allocates_exactly_its_generated_reservation` (now unfiltered; asserts the adjustments' capacity is 0) | R38-4: the 1 × 1 frame restored | `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 999 filtered out; finished in 0.23s`; "no pixel buffer" |
 | B F3: at the global reader limit, `plan_regions` merges independent playheads and a merged reader decodes backwards (`0→14→1`) | `a25fc80` R38-5 (text in Amendment R37: *Reader limit*) | `sched::tests::over_the_reader_limit_a_merged_region_still_reads_forward`; `preview::tests::a_reader_limit_merge_is_counted` | R38-5a: a merged region keeps the earlier region's lookahead; R38-5b: `merged += 0` (run against both witnesses) | 5a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.00s`, "A's regions merged forward only"; 5b (sched): `… finished in 0.00s`, "the last resort is counted"; 5b (preview): `… finished in 4.13s`, "P = 2: merges counted" |
 | B S1: G18's identity rests on equal lengths | `572f768` R38-6 (E12.9 qualified) | `g18_verdict.py`, the gate plan's last step (outside the repository, like the runner) | R38-6: synthetic logs with S0 hashing `aaaa…` and the candidate varied | same hash: "identity: **IDENTICAL**"; another hash: "**DIFFERENT**"; candidate lane exit 124: "**INCOMPLETE** (`G18 LH R38` exit 124)"; no candidate: "**INCOMPLETE** (no candidate G18 lane)"; the runner's `@` step printed the verdict into the lane log |
-| B S2 and its nit: the resident-title witness compares buffer addresses, which freed buffers can reuse | `cae3385` R38-7 | `preview::tests::a_resident_title_is_not_reserved_again` (counts rasterizations, `[2, 0]`) | R38-7: every generated raster reserved again (`Some(demand.generated)`) | `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.32s`; "two rasters made once, then reused" |
+| B S2 and its nit: the resident-title witness compares buffer addresses, which freed buffers can reuse | `cae3385` R38-7 | `preview::tests::a_resident_title_is_not_reserved_again` (counts rasterizations, `[2, 0]`) | R38-7: every generated raster reserved again (`Some(demand.generated)`). This reverts review B S2's earlier reservation fix (`generated_uncharged`), so the witness also detects that revert | `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.32s`; "two rasters made once, then reused" |
 | B nit: the timing binaries' `cfg(test)` overhead is unstated | `32022ee` R38-8 | E12.13.3 lists every check the timing binaries execute | — | — |
 
 - **B F3's stat.** `PlaybackStats::regions_merged` counts each last-resort merge. The preview drains it at Ready with
   `lookahead_starved`, and the P-play lane prints it as `engine_regions_merged`.
 - **Still open (documented, not a regression):** `regions()` keeps a per-source cap residual. A source's third
-  required region past the cap is folded before `plan_regions` sees it, so it is not counted as a merge.
+  required region past the cap is folded before `plan_regions` sees it, so it is not counted as a merge. (Closed in
+  E12.15: R41-2.)
 
 #### E12.14.2 Merge of main, tests and line counts
 
@@ -4219,3 +4224,157 @@ Nothing was timed for R38. What is ready:
 - **Unchanged:** the S0 side of G18 (`media-s0-g18`, sha256 `a4b501aa…82e03`) and the step-0 A/B plan (`plan-ab.txt`,
   `10a2d18` against R37's `712d108`).
 - Every stage-gate verdict of E12.13.5's owed list therefore still waits for the quiet window, now on this binary.
+
+### E12.15 R41 fixes and the Windows file-lock catch
+
+Ruling R41 (`rereview-r38.md`; orchestrator note P43) covered five items:
+
+- BF3-2: a merged reader rewinds across jobs;
+- the H-1 cap residual;
+- U-1: unbounded per-source metadata;
+- the E12.14 count, corrected in place;
+- R41-5, added after Windows CI failed on `573a803`.
+
+There is one commit per fix on `pf1/impl`, after `573a803`, and this section is in the docs commit after them. **The
+timing half is pending: quiet window.** No lane was run for R41. The binary and the plan are ready (E12.15.4).
+
+- **Windows catch (E12.15 line).** CI run 36528931046 on `573a803` failed on Windows only, in
+  `generated_media::relinked_moved_source_round_trip_renders_identical_frame` (`generated_media.rs:1026`). The
+  `std::fs::rename` of a source that had just left the document returned os error 32.
+  - Cause: an idle S2b reader keeps its decoder, and so its file handle, open until its 5 s quiescence. Linux allows
+    the rename, so no Linux lane could see it.
+  - This is the first Windows-only S2b catch. It is logged in `target/review/ci/ledger.md` under `pf1/impl`, class
+    "Windows platform (file lock)".
+  - Fixed by R41-5 below. The witness is state-based and runs on every OS. Whether the relink test itself passes on
+    Windows is for the CI run on the push.
+
+#### E12.15.1 Closure table
+
+Each mutation was applied alone to the committed code, and only its named witness was run
+(`s2b-logs/r41-mutations.log.gz`, which also keeps every earlier run). The table has 16 witness runs over 14 distinct
+code mutations, and **every one was killed**:
+
+- R41-1a–d;
+- R41-2a–d;
+- R41-3a–d;
+- R41-5a–c, with 5a run against both witnesses.
+
+Two mutations survived first, and each witness was strengthened before its commit was amended. See the notes under
+the table.
+
+| Finding | Commit | Witness | Mutation | Raw result under the mutation |
+|---|---|---|---|---|
+| BF3-2: a merged reader rewinds across jobs | `74781d9` R41-1 (Amendment R41) | `sched::tests::a_merged_reader_rewinds_at_most_once_per_job` (24 jobs, two advancing playheads on one source, at P = 2 and P = 3); `preview::tests::merged_rewinds_reach_the_engine_stats` | 1a: `merged_rewinds += …*0`; 1b: the merged region keeps the earlier region's lookahead; 1c: `merged = true` removed; 1d: the preview drain `*0` | 1a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1008 filtered out; finished in 0.00s`, "every rewind is counted"; 1b: `… finished in 0.00s`, "within a job every reader decodes forward: Rewinds { within: [1, 0, …"; 1c: `… finished in 0.00s`, "only merged readers rewind: Rewinds { …, unmerged: [0, 1, 1, …"; 1d: `… finished in 0.39s`, "P = 2: rewinds counted (8 merges)" |
+| The H-1 cap residual: a fold past two readers per source is uncounted and reads 14 → 28 → 15 | `4c3a222` R41-2 | `sched::tests::the_h1_fold_reads_forward_within_a_job` (the fold's shape, and 24 jobs of three playheads at P = 8); `preview::tests::merged_rewinds_reach_the_engine_stats` | 2a: the fold keeps every lookahead; 2b: folds not counted; 2c: the fold not flagged merged; 2d: the preview drain of `regions_folded` `*0` | 2a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1009 filtered out; finished in 0.00s`, "the fold keeps only the lookahead past 28"; 2b: `… 0.00s`, "the fold is counted"; 2c: `… 0.00s`, "the fold keeps only the lookahead past 28"; 2d: `… 0.38s`, "P = 2: 8 merged, 0 folded, 7 rewinds: the pre-roll folds are counted" |
+| U-1: `Preview::sizes` and `Readers::travel` grow without bound | `c9076a7` R41-3 | `preview::tests::source_memory_is_bounded_and_forgets_removed_sources` (24 sources through a cap of 3: (1) kept, (2) removed one at a time, (3) cleared) | 3a: no cap (`make_room` never evicts); 3b: a new generation keeps every size; 3c: `forget` keeps a removed source's travel; 3d: a cache clear keeps every size | 3a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1011 filtered out; finished in 0.32s`, "(1) source 4: {1, 2, 3, 4} {1, 2, 3, 4}"; 3b: `… 0.52s` and 3c: `… 0.51s`, both "(2) source 1: a removed source is remembered"; 3d: `… 0.72s`, "(3) a clear forgets" |
+| R41-5: a removed source's reader keeps its file open (Windows run 36528931046) | `c9076a7` R41-5 | `engine::tests::a_removed_source_has_no_open_decoder_after_the_next_frame` (the relink flow; source 1's reader is held at its next decode when the source leaves); U-1's witness, phases 2 and 3 | 5a: a removed source's readers are not retired; 5b: retired readers are not waited for; 5c: no stop flag for a retired reader | 5a (engine): `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1011 filtered out; finished in 0.41s`, "a frame came while a removed source's decoder was open"; 5a (U-1): `… 0.68s`, "(3) a clear closes the readers' decoders"; 5b: `… 0.41s`, the same message as 5a (engine); 5c: `… 1.42s`, "the retired reader decoded on" |
+
+- **Two first survivals.**
+  - R41-1b survived at `c96c9aa`. That witness counted only rewinds per job. Removing the lookahead retain moves the
+    one rewind per job to within the job; it does not add one. The witness now separates within-job rewinds from
+    across-job rewinds (`74781d9`).
+  - R41-5b survived at `404b85e`. The retired idle reader exited before the empty frame arrived: a race the witness
+    could not lose. The engine witness now holds source 1's reader at its next decode, with its decoder open, when the
+    source leaves. It asserts that no frame arrives within 1 s, that the decoder is still open, and, after release,
+    that the frame follows with nothing open (`447f758`).
+  - R41-5c then survived at `447f758`. A one-frame decode completes and the reader retires at its next check without
+    the flag; the flag only shortens its exit. The witness now also asserts that the retired reader's decode ended
+    `Cancelled` (`c9076a7`).
+  - Each survivor was rerun against the amended witness and killed, as were its siblings: 1a–1d at `74781d9`, 5a–5c
+    at `c9076a7`. 3a–3d ran at `404b85e`; its U-1 code and witness are unchanged in `c9076a7`.
+- **U-1's phase 2 does not by itself witness R41-5.** Under 5a it passed. Each later document spawns a reader, and
+  H-5's rule retires obsolete idle readers while a ticket waits. The engine witness spawns no reader for the empty
+  document, so it is the deterministic one.
+- **The design text.**
+  - **Amendment R41 (proposed), "Fallback regions rewind across jobs"** (design §6). A merged region reads forward
+    within a job. It rewinds at most once per job per merged group. That is the degraded mode, the documented cost of
+    exceeding R or H-1. Rewinds are counted in the new `PlaybackStats::merged_rewinds`. R37's continuation rule
+    governs every non-fallback region.
+  - **Amendment R41 (proposed), "A removed source closes its decoders"** (design §6, after H-7).
+  - `PlaybackStats` gains `regions_folded` and `merged_rewinds`. The P-play lanes print them as
+    `engine_regions_folded` and `engine_merged_rewinds`, beside `engine_regions_merged`, whose R38 meaning is kept
+    (merges at the reader limit only).
+- **Trade-off (R41-1).** In the degraded mode, the merged region's lookahead is only what lies past its last required
+  time. So the earlier playhead's next frame is never prefetched, and it decodes on demand in every job, after one
+  seek back.
+  - The alternative keeps the earlier lookahead. It has the same count in steady state, one rewind per job, but it
+    rewinds within the job.
+  - Only the retain guarantees at most one rewind per job when the playheads seek or jump.
+- **Other handles on a removed source (by reading; not run on Windows):**
+  - The preview's synchronous renderer serves thumbnails and K-3. It closes its decoders in `bind` on a new
+    generation, before the frame renders, and at every park (H-7).
+  - `SourceSpec::measure` opens a decoder and drops it at once.
+  - The worker's `set_document` pauses first. `quiesce` drops the audio runtime, and with it the mix sources'
+    `AudioDecoder`s.
+  - There are no other demux contexts in `engine.rs`. The U-1 maps hold keys and numbers, never handles.
+- **The wait.** Retiring readers are waited for on the preview thread, never the UI's. `set_document` only sends. A
+  reader leaves at its next check or packet boundary, but an open in progress runs to its end. The cost is one such
+  delay before the first frame of a document that removed a source with a live reader.
+
+#### E12.15.2 Tests, the stage gate and line counts
+
+- **New tests:** 5, all fast tier (none marked slow, none ignored):
+  - `sched::tests::a_merged_reader_rewinds_at_most_once_per_job`;
+  - `sched::tests::the_h1_fold_reads_forward_within_a_job`;
+  - `preview::tests::merged_rewinds_reach_the_engine_stats`;
+  - `preview::tests::source_memory_is_bounded_and_forgets_removed_sources`;
+  - `engine::tests::a_removed_source_has_no_open_decoder_after_the_next_frame`.
+- **The two long PF1 tests** (`the_reader_model_holds_for_every_short_sequence` and
+  `the_scheduler_survives_a_seeded_stress_on_real_threads`) stay in the fast tier, as ruled.
+- **Per-commit gate.** Each R41 commit passed build, media clippy with `-D warnings`, rustfmt on the touched files
+  and `cargo test -p kinewright-media --lib`. The last such media run, at R41-3/5 before its witness was
+  strengthened, read `test result: ok. 956 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out; finished in
+  165.95s`.
+- **The local stage gate at `c9076a7`** (every command at `nice -n 19`, `-j 4`, `RUST_TEST_THREADS=4`):
+  - `cargo build --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`, each with and without the
+    three `slow-tests` features: exit 0;
+  - `cargo fmt -- --check`: exit 0;
+  - `cargo build -p kinewright-app`: exit 0;
+  - `python3 scripts/slow_tests.py lint`: "slow-test manifest and markers agree: 47 tests, features
+    kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 44 allowlist entries
+    well-formed";
+  - `cargo test --workspace` (the fast tier): 36 `test result: ok` lines, 3,441 passed, 0 failed, 91 ignored.
+    Media: `test result: ok. 956 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out; finished in 165.98s`.
+    The log is `s2b-logs/r41-workspace-fast.log.gz`;
+  - `slow_tests.py verify-fast` on that log with `--os linux`: "fast tier on linux skipped exactly the 47 manifest
+    tests and 44 allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else".
+  - The slow tier and Windows were not run locally. Both run in CI on the push.
+
+Non-blank, non-comment `.rs` lines, net, counted as in E12.13.2. Fixture files count as tests.
+
+| Commit | Production | Tests |
+|---|---|---|
+| R41-1 `74781d9` | 16 | 115 |
+| R41-2 `4c3a222` | 33 | 52 |
+| R41-3/5 `c9076a7` | 211 | 184 |
+| **R41** | **260** (+289 −29) | **351** (+367 −16) |
+
+- **Per file** (production + tests):
+  - `sched.rs` 178 + 140;
+  - `preview.rs` 60 + 138;
+  - `render.rs` 17;
+  - `engine.rs` 47 (tests);
+  - `perf_fixtures.rs` 26 (tests);
+  - `pf1_harness.rs` 3;
+  - `media.rs` 2.
+- `sched.rs`'s production share is mostly `SourceMemory` (the bounded map) and `Readers::forget`.
+- **Docs before this section:** `PF1-PLAYBACK-PERFORMANCE.md` +48 −8. This commit adds E12.15 and corrects E12.14's
+  count.
+
+#### E12.15.3 E12.14 correction
+
+E12.14.1 said "All 10 were killed". It was 9 failing witness runs over 8 distinct code mutations, plus G18's synthetic
+checks. R38-7's mutation (`Some(demand.generated)`) reverts review B S2's earlier reservation fix, so its witness also
+detects that revert. Both are corrected in place.
+
+#### E12.15.4 Timing: pending, quiet window
+
+Nothing was timed for R41. What is ready:
+
+- **The binary:** the release test binary at `c9076a7`, `/tmp/kinewright-r37/bins/bin-c9076a7`, sha256
+  `f1e835d8e2124c656f19acac3cf43874f3b9caff436ec1d93b9b8b535152de2b` (in that directory's `SHA256SUMS`, which
+  `sha256sum -c` passes). It is built from the same code as this docs commit.
+- **The plan:** `plan-gates.txt` now runs every stage-gate lane on that binary (26 lines repointed from
+  `bin-b980b4e`). G18's candidate lane is `G18 LH R41`, and the plan still ends with `@G18 verdict`.
+- **Unchanged:** the S0 side of G18 (`media-s0-g18`) and the step-0 A/B plan (`plan-ab.txt`).
+- The lanes print the new counters. A fallback region's rewinds on the W workloads are measured with the rest.
