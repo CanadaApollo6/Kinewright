@@ -3304,7 +3304,14 @@ pub(crate) mod tests {
     /// H-5 (S2b-2): on real threads, one source reads on 16 threads; when
     /// the plan widens to two, the wide reader closes (shrink) and the
     /// short newcomer closes (close-before-growth); fresh work reopens both
-    /// on 10 + 10.
+    /// on 10 + 10. Amendment R47 (CI run 36547988690): the wide reader is
+    /// held decoding the widened job's frame, and a reader shrinks only
+    /// while inactive, so the newcomer's ticket is granted the 4 free
+    /// permits (short) whatever the threads' timing. Unheld, the wide
+    /// reader could close before the newcomer polled, granting it all 10
+    /// (no close follows); and a newcomer that went inactive before the
+    /// wide reader's release grows only at its quiescence timer, where it
+    /// may retire, so waiting for two slots could miss the state.
     #[test]
     fn a_widening_plan_rebalances_the_permits() {
         let workload = crate::perf_fixtures::four_sources((160, 90), 30);
@@ -3331,13 +3338,25 @@ pub(crate) mod tests {
         };
         show(&one, 3, 1);
         assert_eq!((threads(&lane), lane.permits_in_use()), (vec![16], 16));
-        show(&two, 3, 2);
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((4, held));
+        lane.post(Some(job(&two, JobKind::Paused(TimeCode(4)), stamp(1, 2))));
         wait_until(&lane, |state| {
             let slots = &state.readers.slots;
-            slots.len() == 2 && slots.iter().all(|slot| slot.threads == 0)
+            slots.len() == 2 && slots.iter().any(|slot| slot.threads == 4)
+        });
+        assert_eq!(threads(&lane), vec![4, 16], "the newcomer is short");
+        drop(release);
+        let shown = frames.recv_timeout(Duration::from_secs(60));
+        assert_eq!(shown.expect("published").at, TimeCode(4));
+        // Both close: the wide one to shrink, the short one before growth.
+        // (A reader idle for `QUIESCENCE` may retire instead; it also
+        // closes, so this holds from then on whatever the timing.)
+        wait_until(&lane, |state| {
+            state.readers.slots.iter().all(|slot| slot.threads == 0)
         });
         assert_eq!(lane.permits_in_use(), 0, "both closed and released");
-        show(&two, 4, 3);
+        show(&two, 5, 3);
         assert_eq!((threads(&lane), lane.permits_in_use()), (vec![10, 10], 20));
         assert!(lane.take_failures().is_empty());
         lane.shut_down();
