@@ -471,10 +471,12 @@ serve again once the detached readers exit.
 *H-5, exactly.* Accounted reader permits never exceed P: a detached reader
 keeps its permits until its exit guard forgets them, so a stuck reader
 reduces the readers' capacity, and K-3 serves the frames it detains.
-Including detached readers, configured reader codec-thread allocations are
-bounded by min(R × min(P, 16), P + D), where D sums detached readers'
-retained allocations. Detached work may remain busy indefinitely.
-Synchronous decoders (K-3's included) remain outside this bound.
+Including detached readers, accounted permits and configured reader
+codec-thread allocations are bounded by min(R × min(P, 16), P): a detached
+reader's allocation is part of P, not added to it. Detached work may remain
+busy indefinitely. Synchronous decoders (K-3's included) remain outside this
+bound, each adding up to min(P, 16) configured codec threads. This is a bound
+on configured allocations, not on the process's total threads.
 *Shutdown.* The preview's join of its readers (H-6 (5)) is bounded by the
 same `RETIRE_DEADLINE`. A reader still alive then is detached: its thread is
 left to exit on its own (it owns a reference to the lane), and

@@ -4614,8 +4614,9 @@ pending: quiet window** (E12.17.5).
   seam-held reader, asserting `Halt::Superseded`, no overrun and nothing detached, never a time. The
   interruptible-open witness asserts through the seam that the callback saw the flag and the open failed with
   `AVERROR_EXIT`, and no longer prints an overrun count. RS-3's reader wake stays documented as partial (E12.16.1).
-- **Item 6, docs.** Design §6 gains Amendment R47 (K-3 for a detained set, H-5 written exactly with Astra's bound
-  min(R × min(P, 16), P + D), bounded shutdown, Windows-safe witnesses), qualifies the interrupt to local-file IO on the
+- **Item 6, docs.** Design §6 gains Amendment R47 (K-3 for a detained set, H-5 written exactly as
+  min(R × min(P, 16), P), since detached readers keep their permits; the draft's `P + D` double-counted them
+  (rereview-r47.md), bounded shutdown, Windows-safe witnesses), qualifies the interrupt to local-file IO on the
   reader's thread (FFmpeg's `async` protocol reads on a helper thread), and restates RS-3's bound as "at most one
   scheduled-frame rewind per reader per plan version", which does not bound FFmpeg's seeks. R43's retirement
   amendment, H-6 (5) and K-3's reasons are updated in place.
