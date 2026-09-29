@@ -65,7 +65,10 @@ TEST_LINE = re.compile(r"^test (.+?) \.\.\. (.*)$")
 # message, sometimes without a newline, so a libtest line can land after it on the same line
 # (CI run 36536620605). Only this exact prefix shape is stripped; any other foreign text still
 # breaks the per-section counts and fails the parse.
-FFMPEG_LOG_PREFIX = re.compile(r"^(?:\[[^\]\s]+ @ 0x[0-9a-fA-F]+\] )+")
+FFMPEG_LOG = r"\[[^\]\s]+ @ (?:0x)?[0-9a-fA-F]+\]"  # Windows prints the address without 0x
+FFMPEG_LOG_PREFIX = re.compile(r"^(?:" + FFMPEG_LOG + r" )+")
+# ... and a message can also trail a result on the same line (Windows run 36536620605).
+FFMPEG_LOG_SUFFIX = re.compile(FFMPEG_LOG + r" .*$")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 
@@ -293,6 +296,8 @@ def parse(log: str) -> list[tuple[str, str, str]]:
 
     for number, line in enumerate(ANSI.sub("", log).splitlines(), 1):
         line = FFMPEG_LOG_PREFIX.sub("", line)
+        if line.startswith("test "):
+            line = FFMPEG_LOG_SUFFIX.sub("", line)
         running = RUNNING.match(line)
         doc = DOC_TESTS.match(line)
         if running or doc:

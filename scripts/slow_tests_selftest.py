@@ -190,6 +190,15 @@ class PartialParse(unittest.TestCase):
             lines[at] = "[swscaler @ 0x7f073d6b8740] " + lines[at]
             at = next(i for i, line in enumerate(lines) if line.startswith("test ") and "ignored" in line)
             lines[at] = "[h264 @ 0x55d1c0a1b2c0] [swscaler @ 0x7f073d6b8740] " + lines[at]
+            # Windows prints the address without 0x, and a message can also trail the outcome.
+            at = next(
+                i for i, line in enumerate(lines)
+                if line.startswith("test ") and line.endswith(" ok") and i > at
+            )
+            lines[at] = (
+                "[swscaler @ 000001F4F555A800] " + lines[at]
+                + "[swscaler @ 000001F4A934BE80] No accelerated colorspace conversion found from yuv420p to rgba64le."
+            )
             os_name = "windows" if windows else "linux"
             code, out = check(st.verify_fast, "\n".join(lines) + "\n", os_name)
             self.assertEqual(code, 0, out)
