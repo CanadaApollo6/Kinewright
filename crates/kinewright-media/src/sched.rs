@@ -1120,6 +1120,39 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         }
     }
 
+    /// Amendment R47 (K-3): whether `planned`, a required set of `set`
+    /// bytes, cannot be admitted until readers in `detached` (retired, alive
+    /// past a retirement's deadline, perhaps never exiting) exit. A detached
+    /// reader keeps its slot (and its place in H-1's count of its source),
+    /// its permits and the bytes of its decode in flight, so the plan is
+    /// detained if its required regions need more slots than R leaves
+    /// beside them (or more readers of a source than H-1 does), if they
+    /// hold the whole pool (no reader could open), or if the set does not
+    /// fit in C beside their bytes. Everything else a plan waits for is
+    /// held by readers that exit at their next check.
+    pub(crate) fn detained(&self, detached: &[u64], planned: &Planned<K>, set: usize) -> bool {
+        let stuck: Vec<&Slot<K>> = (self.slots.iter())
+            .filter(|slot| detached.contains(&slot.id))
+            .collect();
+        if stuck.is_empty() {
+            return false;
+        }
+        let required: Vec<&K> = (planned.regions.iter())
+            .filter(|(_, region)| !region.required.is_empty())
+            .map(|(key, _)| key)
+            .collect();
+        let of = |key: &K| stuck.iter().filter(|slot| slot.key == *key).count();
+        let per_source = (required.iter()).any(|key| {
+            let regions = required.iter().filter(|other| *other == key).count();
+            regions + of(key) > READERS_PER_SOURCE
+        });
+        let slots = !required.is_empty() && required.len() + stuck.len() > self.limit;
+        let threads: usize = stuck.iter().map(|slot| slot.threads).sum();
+        let permits = !required.is_empty() && threads >= self.pool;
+        let flight = (stuck.iter()).fold(set, |bytes, slot| bytes.saturating_add(slot.flight));
+        slots || per_source || permits || flight > self.budget
+    }
+
     /// The reader `id` closed its decoder and exits.
     pub(crate) fn exited(&mut self, id: u64) {
         self.slots.retain(|slot| slot.id != id);
@@ -1350,6 +1383,12 @@ impl PermitBook {
     /// Permits held by readers (≤ P, I11).
     pub(crate) fn in_use(&self) -> usize {
         self.held.values().sum()
+    }
+
+    /// The permits reader `id` holds (Amendment R47's witness).
+    #[cfg(test)]
+    pub(crate) fn held(&self, id: u64) -> usize {
+        self.held.get(&id).copied().unwrap_or(0)
     }
 
     /// Queue `id` for `want` permits, behind every waiter.
@@ -3146,6 +3185,78 @@ mod tests {
         eprintln!("{seen}");
         assert!(decodes > 500 && merged > 100, "{seen}");
         assert!(stale_failures > 10 && rewinds > 10, "{seen}");
+    }
+
+    /// Amendment R47: at P = `pool` and C = `budget`, one reader per
+    /// source in `sources` (each required at 0) opened and decoding, f in
+    /// flight; then the sources in `gone` leave the document. Returns the
+    /// retired readers (still alive: as if detached at the deadline).
+    fn detach(pool: usize, budget: usize, sources: &[u8], gone: &[u8]) -> (Model, Vec<u64>) {
+        let mut readers = Model::new(pool).with_budget(budget);
+        let demand: Vec<(u8, Vec<i64>, Vec<i64>)> =
+            sources.iter().map(|key| (*key, vec![0], vec![])).collect();
+        let planned = plan_regions(&demand, readers.limit()).expect("one reader each");
+        let sizes = sources.iter().map(|key| (*key, F)).collect();
+        let posted = readers.post_planned(planned, (sizes, 0), Duration::ZERO);
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        for (id, _) in &posted.spawn {
+            assert!(matches!(step_reader(&mut readers, *id), Next::Open { .. }));
+            assert!(matches!(
+                step_reader(&mut readers, *id),
+                Next::Decode { .. }
+            ));
+        }
+        let (retired, _) = readers.forget(|key| !gone.contains(key));
+        assert_eq!(retired.len(), gone.len(), "one reader per source gone");
+        (readers, retired)
+    }
+
+    /// Amendment R47: a plan is detained by detached readers exactly when
+    /// what they keep leaves it short: slots (R), H-1's readers of a
+    /// source, the whole permit pool, or C beside their bytes in flight.
+    /// Each case is short of one resource only, and a plan within all four
+    /// (or with no detached reader) is not detained.
+    #[test]
+    fn detached_readers_detain_a_plan_by_what_they_keep() {
+        let plan = |readers: &Model, demand: &[(u8, Vec<i64>, Vec<i64>)]| {
+            plan_regions(demand, readers.limit()).expect("within R")
+        };
+        let at = |key: u8, times: &[i64]| vec![(key, times.to_vec(), Vec::new())];
+        // Slots: at P = 9 (R = 8), eight detached readers of one permit each.
+        let all: Vec<u8> = (0..8).collect();
+        let (readers, detached) = detach(9, 100 * F, &all, &all);
+        let threads: usize = readers.slots.iter().map(|slot| slot.threads).sum();
+        assert_eq!(threads, 8, "a permit is free");
+        let one = plan(&readers, &at(9, &[0]));
+        assert!(readers.detained(&detached, &one, F), "no slot is free");
+        assert!(!readers.detained(&[], &one, F), "nothing detached");
+        let none = plan(&readers, &[]);
+        assert!(!readers.detained(&detached, &none, 0), "no reader needed");
+        // H-1: source 0's detached reader, and a plan of two regions of 0.
+        let (readers, detached) = detach(4, 100 * F, &[0, 1], &[0]);
+        let two = plan(&readers, &at(0, &[0, 1000]));
+        assert_eq!(two.regions.len(), 2, "two regions of source 0");
+        assert!(
+            readers.detained(&detached, &two, 2 * F),
+            "a third reader of 0"
+        );
+        let one = plan(&readers, &at(0, &[0]));
+        assert!(!readers.detained(&detached, &one, F), "within H-1");
+        // Permits: at P = 2 the detached reader holds the pool; R has room.
+        let (readers, detached) = detach(2, 100 * F, &[0], &[0]);
+        let one = plan(&readers, &at(1, &[0]));
+        assert!(readers.detained(&detached, &one, F), "no permit is free");
+        // Bytes: C = 3 f − 1 and a detached decode of f in flight.
+        let (readers, detached) = detach(4, 3 * F - 1, &[0, 1], &[0]);
+        let two = plan(&readers, &at(1, &[0, 1]));
+        assert!(readers.fits(2 * F), "the set alone fits in C");
+        assert!(readers.detained(&detached, &two, 2 * F), "not beside f");
+        let one = plan(&readers, &at(1, &[0]));
+        assert!(!readers.detained(&detached, &one, F), "f fits beside it");
+        // Once a detached reader exits it detains nothing.
+        let mut readers = readers;
+        readers.exited(detached[0]);
+        assert!(!readers.detained(&detached, &two, 2 * F), "it exited");
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10

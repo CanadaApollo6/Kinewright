@@ -488,6 +488,13 @@ pub struct PlaybackStats {
     /// the deadline, so the frame rendered with them detached (each wait,
     /// of each new document or cache clear).
     pub retire_overruns: u64,
+    /// Amendment R47: K-3 frames whose required set detached readers
+    /// detained (their slots, permits or bytes), so it rendered
+    /// synchronously rather than waiting; also in `sync_fallback_frames`.
+    pub detained_fallback_frames: u64,
+    /// Amendment R47: readers a preview's shutdown left running (alive at
+    /// its deadline, stuck in IO), detached rather than joined.
+    pub shutdown_detached_readers: u64,
     pub sync_fallback_frames: u64,
     /// Decoders open now in this engine's renderers (preview, proofs,
     /// export).

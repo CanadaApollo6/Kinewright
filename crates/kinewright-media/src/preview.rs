@@ -39,7 +39,7 @@ use crate::{
         document_source_keys, reader_demand,
     },
     sched::{
-        Admission, Next, PermitBook, Poll, Posted, Readers, WaitStep, WaitView, Weighed,
+        Admission, Next, PermitBook, Planned, Poll, Posted, Readers, WaitStep, WaitView, Weighed,
         plan_regions, wait_step,
     },
     stats::{ACK_QUEUE, Ack, Counters},
@@ -266,14 +266,15 @@ pub(crate) struct LaneState {
     /// K-1 (S2b-3): the scheduler's live bytes.
     pub(crate) readers: Readers<VideoSourceKey, Pinned>,
     /// K-3: synchronous fallback frames by reason: more sources than
-    /// readers, and a required set over C.
-    pub(crate) fallbacks: [u64; 2],
+    /// readers, a required set over C, and (Amendment R47) a set detained
+    /// by detached readers.
+    pub(crate) fallbacks: [u64; 3],
 }
 
 impl LaneState {
     /// K-3: an empty plan (every unpinned lookahead drops, to drop after
     /// unlock), counted by `reason`: 0 more sources than readers, 1 a
-    /// required set over C.
+    /// required set over C, 2 (Amendment R47) a set detached readers detain.
     fn fall_back(&mut self, reason: usize, now: Duration) -> Posted<VideoSourceKey, Pinned> {
         self.fallbacks[reason] += 1;
         self.readers.post(Vec::new(), (HashMap::new(), 0), now)
@@ -953,8 +954,9 @@ pub(crate) struct Preview {
     /// Re-review 2 D4: the newest playback frame (epoch, frame) published;
     /// an agent job never displaces it.
     published: Option<(u64, i64)>,
-    /// H-1: this preview's reader threads, joined when it goes.
-    readers: Vec<JoinHandle<()>>,
+    /// H-1: this preview's reader threads by id, joined when it goes
+    /// (Amendment R47: within `RETIRE_DEADLINE`).
+    readers: Vec<(u64, JoinHandle<()>)>,
     /// H-2/K-2: each reader's stop flag (a packet boundary): set for all
     /// when the preview goes, for one to stop its lookahead decode.
     stops: HashMap<u64, Arc<AtomicBool>>,
@@ -976,7 +978,11 @@ pub(crate) struct Preview {
 
 impl Drop for Preview {
     /// H-6 (3)/(5): every reader retires, closes its decoder and exits
-    /// before the preview does (the worker joins the preview).
+    /// before the preview does (the worker joins the preview). Amendment
+    /// R47: the wait ends at `RETIRE_DEADLINE`, like a retirement's; a
+    /// reader still alive then (stuck in IO the interrupt cannot end) is
+    /// detached, its thread left to exit on its own (it owns its `Lane`),
+    /// and counted in `shutdown_detached_readers`.
     fn drop(&mut self) {
         let frames = {
             let mut state = self.lane.lock();
@@ -992,8 +998,27 @@ impl Drop for Preview {
         self.lane.work.notify_all();
         drop(frames);
         self.titles = None;
-        for reader in self.readers.drain(..) {
+        let deadline = Instant::now() + RETIRE_DEADLINE;
+        let mut state = self.lane.lock();
+        let alive = |state: &LaneState, id: u64| state.readers.slots.iter().any(|s| s.id == id);
+        let ids: Vec<u64> = self.readers.iter().map(|(id, _)| *id).collect();
+        while ids.iter().any(|id| alive(&state, *id)) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            state = state.wait_timeout(&self.lane.ready, left);
+        }
+        // A reader whose slot is gone has run its `Exit`: it returns now.
+        let (stuck, exited): (Vec<_>, Vec<_>) =
+            (self.readers.drain(..)).partition(|(id, _)| alive(&state, *id));
+        drop(state);
+        for (_, reader) in exited {
             let _ = reader.join();
+        }
+        if !stuck.is_empty() {
+            let detached = stuck.len() as u64;
+            self.lane.counters().stats.shutdown_detached_readers += detached;
         }
     }
 }
@@ -1282,10 +1307,12 @@ impl Preview {
     /// Amendment R43 (RS-1): the wait ends at `RETIRE_DEADLINE`, at
     /// shutdown, or when `wait`'s job is superseded (`Superseded`). Past the
     /// deadline the readers still alive are detached (no later retirement
-    /// waits for them) and their permits return, `retire_overruns` counts
-    /// the wait, and the frame renders. A detached reader keeps its slot
-    /// (the reader limit counts it) and still closes its file when its IO
-    /// returns; on Windows the file stays locked until then.
+    /// waits for them), `retire_overruns` counts the wait, and the frame
+    /// renders. Amendment R47: a detached reader may still be decoding or
+    /// converting, so it keeps its slot, its permits and its bytes until its
+    /// own `Exit` (H-5's P stays exact); a job those detain renders by K-3
+    /// (`schedule`). It closes its file when its IO returns; on Windows the
+    /// file stays locked until then.
     fn close(
         &mut self,
         retired: &[u64],
@@ -1318,15 +1345,9 @@ impl Preview {
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
-                let alive: Vec<u64> = retired.into_iter().filter(|id| live(&state, id)).collect();
-                drop(state);
-                // Its permits return now (its `Exit` forgets again, a
-                // no-op): a reader past the deadline is blocked inside one
-                // IO or libavcodec call, so its frame threads are idle and
-                // the readers that replace it can decode (H-5's P is
-                // exceeded only by idle threads, until it exits).
-                lane.permits_change(|book| alive.iter().for_each(|id| book.forget(*id)));
+                let alive = retired.into_iter().filter(|id| live(&state, id));
                 self.detached.extend(alive);
+                drop(state);
                 lane.counters().stats.retire_overruns += 1;
                 return Ok(());
             }
@@ -1354,20 +1375,15 @@ impl Preview {
         if state.shutdown || state.version != wait.version || played() {
             return Err(Halt::Superseded);
         }
-        // K-3: more sources than readers, or a required set over C.
-        let regions = plan_regions(&per_source, state.readers.limit());
-        let reason = match &regions {
-            None => Some(0),
-            Some(_) if !state.readers.fits(set) => Some(1),
-            Some(_) => None,
+        let planned = match self.plan(&state, &per_source, set) {
+            Ok(planned) => planned,
+            Err(reason) => {
+                let posted = state.fall_back(reason, now);
+                drop(state);
+                return Ok(self.fell_back(posted, demand, reason));
+            }
         };
-        if let Some(reason) = reason {
-            let posted = state.fall_back(reason, now);
-            drop(state);
-            return Ok(self.fell_back(posted, demand));
-        }
         let plan = (sizes, demand.generated);
-        let planned = regions.expect("K-3 returned above");
         // The set is admitted under the post's lock, before a reader starts.
         let mut posted = Some(state.readers.post_planned(planned, plan, now));
         // Review B S2: only the rasters not resident are reserved.
@@ -1572,14 +1588,38 @@ impl Preview {
         crate::decode::interrupt_seam::poke();
     }
 
-    /// K-3, after unlock: count the frame and drop what the empty plan
-    /// removed; the synchronous renderer takes it.
+    /// The job's regions (H-1/H-5), or K-3's reason (`LaneState::fall_back`):
+    /// more sources than readers, a required set over C, or (Amendment R47)
+    /// a set that detached readers detain. They can only exit, freeing,
+    /// while the job waits, so deciding once, before the post, holds.
+    fn plan(
+        &mut self,
+        state: &LaneState,
+        per_source: &[(VideoSourceKey, Vec<i64>, Vec<i64>)],
+        set: usize,
+    ) -> Result<Planned<VideoSourceKey>, usize> {
+        let slots = &state.readers.slots;
+        (self.detached).retain(|id| slots.iter().any(|slot| slot.id == *id));
+        match plan_regions(per_source, state.readers.limit()) {
+            None => Err(0),
+            Some(_) if !state.readers.fits(set) => Err(1),
+            Some(planned) if state.readers.detained(&self.detached, &planned, set) => Err(2),
+            Some(planned) => Ok(planned),
+        }
+    }
+
+    /// K-3, after unlock: count the frame (by `reason`) and drop what the
+    /// empty plan removed; the synchronous renderer takes it.
     fn fell_back(
         &mut self,
         posted: Posted<VideoSourceKey, Pinned>,
         demand: &ReaderDemand,
+        reason: usize,
     ) -> Option<Scheduled> {
-        self.lane.counters().stats.sync_fallback_frames += 1;
+        let mut counters = self.lane.counters();
+        counters.stats.sync_fallback_frames += 1;
+        counters.stats.detained_fallback_frames += u64::from(reason == 2);
+        drop(counters);
         self.started(posted, demand);
         None
     }
@@ -1622,7 +1662,7 @@ impl Preview {
     /// Start readers outside the lock; one that cannot start fails its
     /// required frames in the current plan (E-2).
     fn spawn(&mut self, spawn: Vec<(u64, VideoSourceKey)>, demand: &ReaderDemand) {
-        self.readers.retain(|reader| !reader.is_finished());
+        self.readers.retain(|(_, reader)| !reader.is_finished());
         let live: Vec<u64> = self
             .lane
             .lock()
@@ -1642,7 +1682,7 @@ impl Preview {
                 .and_then(|spec| spawn_reader(&self.lane, (id, spec), &stop));
             match started {
                 Ok(reader) => {
-                    self.readers.push(reader);
+                    self.readers.push((id, reader));
                     self.stops.insert(id, stop);
                 }
                 Err(error) => {
@@ -2878,7 +2918,7 @@ pub(crate) mod tests {
             };
             assert_eq!(*shown.rgba, synchronous(&document, at), "playback {at}");
         }
-        assert_eq!(lane.lock().fallbacks, [0, 0], "no K-3 fallback");
+        assert_eq!(lane.lock().fallbacks, [0, 0, 0], "no K-3 fallback");
         assert!(
             !lane.lock().readers.slots.is_empty(),
             "readers decoded them"
@@ -3033,7 +3073,7 @@ pub(crate) mod tests {
                 panic!("P = {parallelism}: frame 0 did not render");
             };
             assert_eq!(*shown.rgba, expected, "C-5 at P = {parallelism}");
-            assert_eq!(lane.lock().fallbacks, [0, 0], "no K-3 fallback");
+            assert_eq!(lane.lock().fallbacks, [0, 0, 0], "no K-3 fallback");
             let merged = lane.counters().stats.regions_merged;
             assert_eq!(merged, merges, "P = {parallelism}: merges counted");
         }
@@ -3372,7 +3412,7 @@ pub(crate) mod tests {
             let (live, peak) = lane.lock().readers.live();
             assert!(live <= budget && peak <= budget, "I12: {peak} > {budget}");
         }
-        assert_eq!(lane.lock().fallbacks, [0, 0], "no K-3 fallback");
+        assert_eq!(lane.lock().fallbacks, [0, 0, 0], "no K-3 fallback");
         // Not vacuous: lookahead runs past the required set, within C.
         wait_until(&lane, |state| state.readers.live().0 > 3 * f);
         assert!(lane.lock().readers.live().1 <= budget, "I12");
@@ -3729,17 +3769,27 @@ pub(crate) mod tests {
     }
 
     /// Amendment R43 (RS-1) witnesses: `cuts` with source 1 at frame 0 and
-    /// source 2 at frame 10, P = 2, its source-1 file, and a generation-2
-    /// job at frame 10 over the document without source 1.
-    fn retirement_fixture() -> (
+    /// source 2 at frame 10, P = `parallelism`, its source-1 file, and a
+    /// generation-2 job at frame 10 over the document without source 1.
+    fn retirement_fixture(
+        parallelism: usize,
+    ) -> (
         crate::perf_fixtures::Workload,
         std::path::PathBuf,
         Arc<Lane>,
     ) {
         let workload = crate::perf_fixtures::cuts((160, 90), 30, 1, 2, 10);
-        let asset = workload.0.media_pool.iter().find(|asset| asset.id.0 == 1);
-        let path = asset.expect("source 1").path.clone();
-        (workload, path, Arc::new(Lane::with_parallelism(2)))
+        let path = source_path(&workload.0, 1);
+        (
+            workload,
+            path,
+            Arc::new(Lane::with_parallelism(parallelism)),
+        )
+    }
+
+    fn source_path(document: &Document, id: u64) -> std::path::PathBuf {
+        let asset = document.media_pool.iter().find(|asset| asset.id.0 == id);
+        asset.expect("the source").path.clone()
     }
 
     fn without_source_one(document: &Arc<Document>, at: i64, generation: u64) -> TransportJob {
@@ -3773,7 +3823,7 @@ pub(crate) mod tests {
     #[test]
     fn a_reader_retired_before_its_open_never_opens_the_file() {
         use crate::decode::interrupt_seam::{Mode, arm, disarm, entered};
-        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture();
+        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture(2);
         let document = Arc::new(document);
         arm(&path, Mode::Interruptible);
         let (release, held) = bounded::<()>(0);
@@ -3815,7 +3865,7 @@ pub(crate) mod tests {
     #[test]
     fn an_interrupt_ends_a_retired_readers_open() {
         use crate::decode::interrupt_seam::{Mode, arm, disarm, exits, interrupts, wait_entered};
-        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture();
+        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture(2);
         let document = Arc::new(document);
         arm(&path, Mode::Interruptible);
         let (frames, thread) = threaded_preview(&lane);
@@ -3829,7 +3879,8 @@ pub(crate) mod tests {
             "held in its open"
         );
         let id = reader_at(&lane, 0);
-        std::fs::remove_file(&path).expect("the source is removed");
+        // Amendment R47: the document drops the source; its file is
+        // deleted only once the reader exits (Windows keeps an open file).
         lane.post(Some(without_source_one(&document, 10, 2)));
         let frame = frames.recv_timeout(Duration::from_secs(60));
         assert_eq!(frame.expect("the new document's frame").at, TimeCode(10));
@@ -3838,23 +3889,25 @@ pub(crate) mod tests {
         });
         assert!(interrupts(&path) >= 1, "the callback saw the flag");
         assert!(exits(&path) >= 1, "the open failed with AVERROR_EXIT");
-        let overruns = lane.counters().stats.retire_overruns;
-        eprintln!("R43 RS-1: interruptible open, retire_overruns={overruns}");
+        std::fs::remove_file(&path).expect("the reader released its file");
         disarm(&path);
         lane.shut_down();
         join_within(thread);
     }
 
-    /// Amendment R43 (RS-1): a reader stuck inside its open's IO (the seam
-    /// ignores its flag, as a read blocked in the OS would) with its source
-    /// removed: the new document's frame renders at the deadline, the
-    /// overrun is counted once (a later document does not wait for the
-    /// detached reader again), and once the IO returns the interrupt ends
-    /// the open and the reader exits.
-    #[test]
-    fn a_retirement_stuck_in_io_renders_at_the_deadline() {
+    /// Amendment R47 (re-review R43 blocker 1): at P = `parallelism`,
+    /// source 1's reader is stuck inside its open's IO (the seam ignores its
+    /// flag, as a read blocked in the OS would) when a new document drops
+    /// source 1. Its retirement ends at the deadline with the reader
+    /// detached, keeping its slot and its permits (the book never exceeds
+    /// P), so the frame it detains renders by K-3, counted as detained;
+    /// so does the next document's, without a second wait. Once the IO
+    /// returns, the interrupt ends the open, the reader exits with its
+    /// permits and releases its file, and readers serve the next frame.
+    fn stuck_retirement(parallelism: usize) {
         use crate::decode::interrupt_seam::{Mode, arm, disarm, exits, release, wait_entered};
-        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture();
+        let (crate::perf_fixtures::Workload(document, _media), path, lane) =
+            retirement_fixture(parallelism);
         let document = Arc::new(document);
         arm(&path, Mode::Stuck);
         let (frames, thread) = threaded_preview(&lane);
@@ -3868,30 +3921,222 @@ pub(crate) mod tests {
             "held in its open"
         );
         let id = reader_at(&lane, 0);
-        std::fs::remove_file(&path).expect("the source is removed");
+        assert_eq!(lane.book().held(id), parallelism, "it holds the pool");
         let posted = Instant::now();
         lane.post(Some(without_source_one(&document, 10, 2)));
-        let frame = frames.recv_timeout(RETIRE_DEADLINE + Duration::from_secs(30));
-        assert_eq!(frame.expect("the frame, at the deadline").at, TimeCode(10));
+        let frame = frames.recv_timeout(Duration::from_secs(60));
+        assert_eq!(frame.expect("the frame, by K-3").at, TimeCode(10));
         assert!(
             posted.elapsed() >= RETIRE_DEADLINE,
             "it waited for the reader"
         );
         assert!(alive(&lane, id), "detached, still stuck");
-        assert_eq!(lane.counters().stats.retire_overruns, 1);
-        // A later document: the detached reader is not waited for again.
+        assert_eq!(lane.book().held(id), parallelism, "it keeps its permits");
+        assert!(lane.permits_in_use() <= parallelism, "H-5: at most P");
+        assert_eq!(lane.lock().readers.slots.len(), 1, "its slot only");
+        assert_eq!(lane.lock().fallbacks, [0, 0, 1], "K-3, detained");
+        let stats = lane.counters().stats;
+        assert_eq!(stats.retire_overruns, 1);
+        assert_eq!(stats.detained_fallback_frames, 1);
+        assert_eq!(stats.sync_fallback_frames, 1);
+        // A later document: not waited for again, and still detained.
         lane.post(Some(without_source_one(&document, 11, 3)));
         let frame = frames.recv_timeout(Duration::from_secs(60));
         assert_eq!(frame.expect("the next document's frame").at, TimeCode(11));
         assert_eq!(lane.counters().stats.retire_overruns, 1, "waited once");
+        assert_eq!(lane.lock().fallbacks, [0, 0, 2], "K-3, detained");
+        assert!(lane.permits_in_use() <= parallelism, "H-5: at most P");
         release(&path);
         wait_until(&lane, |state| {
             state.readers.slots.iter().all(|slot| slot.id != id)
         });
         assert!(exits(&path) >= 1, "the open failed with AVERROR_EXIT");
+        assert_eq!(lane.book().held(id), 0, "its permits return at its exit");
+        std::fs::remove_file(&path).expect("the reader released its file");
+        // Readers serve again.
+        lane.post(Some(without_source_one(&document, 12, 4)));
+        let frame = frames.recv_timeout(Duration::from_secs(60));
+        assert_eq!(frame.expect("a frame by the readers").at, TimeCode(12));
+        assert_eq!(lane.lock().fallbacks, [0, 0, 2], "no K-3");
         disarm(&path);
         lane.shut_down();
         join_within(thread);
+    }
+
+    /// Amendment R47: at P = 1 the detached reader holds the only slot
+    /// (and the pool).
+    #[test]
+    fn at_p1_a_stuck_detached_reader_leaves_its_frames_to_k3() {
+        stuck_retirement(1);
+    }
+
+    /// Amendment R47: at P = 2 a slot is free, but the detached reader
+    /// holds the pool (R43's scenario, whose permits no longer return at
+    /// the deadline).
+    #[test]
+    fn at_p2_a_stuck_detached_reader_leaves_its_frames_to_k3() {
+        stuck_retirement(2);
+    }
+
+    /// Amendment R47 (re-review R43 blocker 1): at P = 4 and C = 3 f − 1,
+    /// source 1's and source 2's readers take two permits each, and source
+    /// 1's is stuck in its open's IO with f in flight when a new document
+    /// shows source 2 in source 1's place: frame 10 requires two frames of
+    /// source 2 (2 f fits in C), but not beside the detached reader's f.
+    /// Slots and permits are free; the retained bytes detain the frame,
+    /// and it renders by K-3.
+    #[test]
+    fn a_detached_readers_bytes_leave_its_frames_to_k3() {
+        use crate::decode::interrupt_seam::{Mode, arm, disarm, release, wait_entered};
+        let crate::perf_fixtures::Workload(document, _media) =
+            crate::perf_fixtures::cuts((160, 90), 30, 2, 4, 10);
+        let path = source_path(&document, 1);
+        let mut swapped = document.clone();
+        swapped.media_pool.retain(|asset| asset.id.0 != 1);
+        let clips = swapped.tracks.iter_mut().flat_map(|track| &mut track.clips);
+        for clip in clips.filter(|clip| clip.asset.0 == 1) {
+            clip.asset = kinewright_core::AssetId(2);
+        }
+        swapped.validate().expect("source 2 in source 1's place");
+        let (document, swapped) = (Arc::new(document), Arc::new(swapped));
+        let f = reference(&document, 0).1;
+        assert_eq!(reference(&swapped, 10).1, f, "one frame size");
+        let lane = Arc::new(Lane::with_budget(4, 3 * f - 1));
+        arm(&path, Mode::Stuck);
+        let (frames, thread) = threaded_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(0)),
+            stamp(1, 1),
+        )));
+        assert!(
+            wait_entered(&path, Duration::from_secs(60)),
+            "held in its open"
+        );
+        let id = reader_at(&lane, 0);
+        assert_eq!(lane.book().held(id), 2, "half the pool");
+        let mut next = job(&swapped, JobKind::Paused(TimeCode(10)), stamp(2, 2));
+        next.scene.generation = 2;
+        lane.post(Some(next));
+        let frame = frames.recv_timeout(Duration::from_secs(60));
+        assert_eq!(frame.expect("the frame, by K-3").at, TimeCode(10));
+        assert!(alive(&lane, id), "detached, still stuck");
+        let state = lane.lock();
+        assert!(
+            state.readers.slots.len() < state.readers.limit(),
+            "a free slot"
+        );
+        assert!(state.readers.live().0 >= f, "its f stays charged");
+        assert_eq!(state.fallbacks, [0, 0, 1], "K-3, detained");
+        drop(state);
+        assert!(lane.permits_in_use() <= 4, "H-5: at most P");
+        assert_eq!(lane.book().held(id), 2, "it keeps its permits");
+        release(&path);
+        wait_until(&lane, |state| {
+            state.readers.slots.iter().all(|slot| slot.id != id)
+        });
+        std::fs::remove_file(&path).expect("the reader released its file");
+        disarm(&path);
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R47 (item 5): generation 1's job at frame 0, its source-1
+    /// reader stuck in its open, is superseded; generation 2 drops source
+    /// 1, and `end` (a newer post, or shutdown) has already come, so the
+    /// retirement's wait ends with `Superseded` at once: nothing detached,
+    /// no overrun, generation 2 left unbound, the reader still stuck (and
+    /// released after).
+    fn retirement_escape(end: impl FnOnce(&Lane)) {
+        use crate::decode::interrupt_seam::{Mode, arm, disarm, release, wait_entered};
+        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture(2);
+        let document = Arc::new(document);
+        arm(&path, Mode::Stuck);
+        let (mut preview, _frames) =
+            test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
+        let supersede = {
+            let (lane, path) = (Arc::clone(&lane), path.clone());
+            thread::spawn(move || {
+                assert!(wait_entered(&path, Duration::from_secs(60)), "held");
+                lane.lock().version += 1;
+                lane.notify();
+            })
+        };
+        let at_zero = job(&document, JobKind::Paused(TimeCode(0)), stamp(1, 1));
+        let wait = |lane: &Lane| FrameWait {
+            version: lane.lock().version,
+            playback: None,
+            paused: None,
+        };
+        let halted = preview.render_monitor(&at_zero.scene, TimeCode(0), &wait(&lane));
+        assert!(matches!(halted, Err(Halt::Superseded)), "superseded");
+        supersede.join().expect("the supersession");
+        let id = reader_at(&lane, 0);
+        let waited = wait(&lane);
+        end(&lane);
+        let removed = without_source_one(&document, 10, 2);
+        let halted = preview.render_monitor(&removed.scene, TimeCode(10), &waited);
+        assert!(matches!(halted, Err(Halt::Superseded)), "the wait ended");
+        assert_eq!(lane.counters().stats.retire_overruns, 0, "no deadline");
+        assert!(preview.detached.is_empty(), "nothing detached");
+        assert_eq!(preview.generation, Some(1), "generation 2 unbound");
+        assert!(alive(&lane, id), "still stuck");
+        release(&path);
+        wait_until(&lane, |state| {
+            state.readers.slots.iter().all(|slot| slot.id != id)
+        });
+        drop(preview);
+        std::fs::remove_file(&path).expect("the reader released its file");
+        disarm(&path);
+    }
+
+    #[test]
+    fn a_newer_post_ends_a_retirements_wait() {
+        retirement_escape(|lane| {
+            lane.lock().version += 1;
+            lane.notify();
+        });
+    }
+
+    #[test]
+    fn shutdown_ends_a_retirements_wait() {
+        retirement_escape(|lane| drop(lane.shut_down()));
+    }
+
+    /// Amendment R47 (item 4): shutdown with a reader stuck in its open's
+    /// IO returns within the deadline and a margin; the reader, detached
+    /// and counted, keeps its permits until it exits.
+    #[test]
+    fn shutdown_detaches_a_reader_stuck_past_the_deadline() {
+        use crate::decode::interrupt_seam::{Mode, arm, disarm, exits, release, wait_entered};
+        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture(2);
+        let document = Arc::new(document);
+        arm(&path, Mode::Stuck);
+        let (_frames, thread) = threaded_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(0)),
+            stamp(1, 1),
+        )));
+        assert!(
+            wait_entered(&path, Duration::from_secs(60)),
+            "held in its open"
+        );
+        let id = reader_at(&lane, 0);
+        let started = Instant::now();
+        drop(lane.shut_down());
+        join_within(thread);
+        let took = started.elapsed();
+        assert!(took < RETIRE_DEADLINE + Duration::from_secs(10), "{took:?}");
+        assert!(alive(&lane, id), "detached, still stuck");
+        assert_eq!(lane.counters().stats.shutdown_detached_readers, 1);
+        assert_eq!(lane.book().held(id), 2, "it keeps its permits");
+        release(&path);
+        wait_until(&lane, |state| state.readers.slots.is_empty());
+        assert_eq!(lane.permits_in_use(), 0, "its permits return at its exit");
+        assert!(exits(&path) >= 1, "the open failed with AVERROR_EXIT");
+        std::fs::remove_file(&path).expect("the reader released its file");
+        disarm(&path);
     }
 
     /// Amendment R43 (re-review R41 blocker 2): a reader that panics in its
@@ -4319,7 +4564,7 @@ pub(crate) mod tests {
             test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
         let shown = render_ahead(&mut preview, &three, 3);
         assert_eq!(*shown.rgba, expected, "C-5");
-        assert_eq!(lane.lock().fallbacks, [0, 1], "one budget fallback");
+        assert_eq!(lane.lock().fallbacks, [0, 1, 0], "one budget fallback");
         assert_eq!(lane.counters().stats.sync_fallback_frames, 1);
         assert!(lane.lock().readers.slots.is_empty(), "no reader started");
         assert!(
