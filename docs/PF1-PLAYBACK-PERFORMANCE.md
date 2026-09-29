@@ -274,6 +274,23 @@ in `PlaybackStats::merged_rewinds`, which the timing lanes print as
 decoder continuation, governs every region that is not such a fallback. With
 enough readers, no reader rewinds as its playheads advance.
 
+**Amendment R43 [S2b] A reader walks its plan in order (re-review R41
+RS-3).** R41's bound failed when a replan was posted while another reader
+was decoding: the merged reader passed the in-flight time, and when that
+older decode failed stale and the time was admitted again, it sought back a
+second time in one job. Now a reader decodes its *first* required time that
+has neither a frame nor a failure, once reserved. Until then (another reader
+has it in flight, or it waits for admission again) it waits rather than
+passing it, and a delivery another reader waits for wakes the readers.
+Lookahead follows only once every required time has a result, and only past
+the reader's position in the current plan version (its *floor*, reset at
+each post), so a frame evicted behind it is not read again within the job.
+A stopped decode leaves the reader just before that time, so decoding it
+again is not a rewind. Hence only a reader's first decode in a plan version
+can rewind: **at most one rewind per reader per plan version**, and a job
+posts one plan version. A replan posted mid-job is the next job's version.
+The exhaustive and seeded models check this on every decode.
+
 **H-2 [S2b-1] `Sched`: shared state and participant states.** A
 `Mutex<SchedState>` with condvars `work` (readers) and `ready` (preview) holds
 `shutdown`; the single-slot `transport: Option<Job>` + `version`; `agent:
@@ -391,7 +408,43 @@ no job waiting retires every reader the same way. Per-source memory between
 jobs (each source's measured frame size and its travel) forgets the sources a
 new generation removes, and keeps only the plan's sources on a cache clear. It
 is capped at 256 sources, forgetting the least recently used; a forgotten size
-is measured again, and a forgotten travel restarts forward.
+is measured again, and a forgotten travel restarts forward. (Amendment R43
+bounds the wait and narrows the claim to readers and the preview.)
+
+**Amendment R43 [S2b] Retirement is bounded, interruptible and panic-safe
+(re-review R41 RS-1, RS-2, RS-4, notes 1 and 2).**
+*Interrupt.* Every reader's input carries an FFmpeg `AVIOInterruptCB` that
+reads the reader's stop flag, so a retired reader's open (probing included),
+seek or packet read ends at the file's next read with `AVERROR_EXIT`. The
+reader's open checks the flag before the file opens, and after (note 1). The
+packet loop reads one packet per turn, checking the flag first.
+`ffmpeg-next`'s `packets()` retried an interrupted read forever.
+*Deadline.* The preview waits for retired readers for at most
+`RETIRE_DEADLINE` = 200 ms, and less on shutdown or when its job is
+superseded. The flag and the interrupt cannot end one libavcodec call and
+one frame conversion already running. By E0's figures that is tens of
+milliseconds: a whole keyframe-to-target seek took 12–41 ms, and the
+pre-S1 1080×1920 conversion 81 ms. 200 ms covers that with room, and stays
+under R43's 250 ms ceiling for the stall after an edit that removes a
+source. Past the deadline, the readers still alive
+are *detached*. Later retirements do not wait for them, their permits return
+(they are blocked, so their frame threads are idle), the frame renders, and
+`PlaybackStats::retire_overruns` counts the wait. A detached reader keeps its
+slot until it exits, and the reader limit counts it.
+*Degraded case.* A detached reader closes its decoder when its blocked call
+returns. Until then its file stays open, so on Windows it stays locked.
+*Exit guard.* A reader's exit is an RAII guard that runs on return and on
+unwind. Once the decoder has closed, it forgets the reader's permits (once),
+removes its slot and wakes the preview. A reader that panicked also fails its
+required times, so no job and no retirement waits on it.
+*Tickets.* A cancel of a reader that already exited is a no-op, so the
+`Permits` book keeps cancels only for live readers, capped at 64.
+*Scope of the file-release claim (note 2).* Readers and the preview's
+synchronous renderer close a removed source's files before the new
+document's first frame (unless the retirement overran). Other holders keep a
+removed file until their own job ends, bounded by that job:
+- visual-asset jobs (`analysis.rs`, such as a waveform's audio decode);
+- proof renderers (`monitor_proof_for_document` in `engine.rs`).
 
 **H-8 [S2b-1…4] Scheduler tests.** Each S2b commit extends an exhaustive
 (event × state) model of `SchedState` + `Permits`: quiescence timeout in every

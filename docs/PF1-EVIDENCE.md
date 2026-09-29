@@ -20,7 +20,8 @@
 > The R37 fixes, their closure table and the (partial, contaminated) timing rerun are in **§E12.13**; every LH
 > figure before it was taken with the desktop screensaver running (E12.13.4).
 > The R38 fixes and the merge of main are in **§E12.14**. The R41 fixes, including the Windows file-lock catch, are
-> in **§E12.15**.
+> in **§E12.15**. The R43 fixes (bounded, interruptible and panic-safe retirement; the in-order walk) are in
+> **§E12.16**.
 
 ## E0 Diagnosis table (moved from design §1, revision 2)
 
@@ -4251,16 +4252,16 @@ timing half is pending: quiet window.** No lane was run for R41. The binary and 
 #### E12.15.1 Closure table
 
 Each mutation was applied alone to the committed code, and only its named witness was run
-(`s2b-logs/r41-mutations.log.gz`, which also keeps every earlier run). The table has 16 witness runs over 14 distinct
-code mutations, and **every one was killed**:
+(`s2b-logs/r41-mutations.log.gz`, which also keeps every earlier run). The table has 16 witness runs over 15 distinct
+code mutations (corrected in R43, E12.16; it said 14), and **every one was killed**:
 
 - R41-1a–d;
 - R41-2a–d;
 - R41-3a–d;
 - R41-5a–c, with 5a run against both witnesses.
 
-Two mutations survived first, and each witness was strengthened before its commit was amended. See the notes under
-the table.
+Three mutations survived first (corrected in R43; it said two), and each witness was strengthened before its commit
+was amended. See the notes under the table.
 
 | Finding | Commit | Witness | Mutation | Raw result under the mutation |
 |---|---|---|---|---|
@@ -4269,7 +4270,7 @@ the table.
 | U-1: `Preview::sizes` and `Readers::travel` grow without bound | `c9076a7` R41-3 | `preview::tests::source_memory_is_bounded_and_forgets_removed_sources` (24 sources through a cap of 3: (1) kept, (2) removed one at a time, (3) cleared) | 3a: no cap (`make_room` never evicts); 3b: a new generation keeps every size; 3c: `forget` keeps a removed source's travel; 3d: a cache clear keeps every size | 3a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1011 filtered out; finished in 0.32s`, "(1) source 4: {1, 2, 3, 4} {1, 2, 3, 4}"; 3b: `… 0.52s` and 3c: `… 0.51s`, both "(2) source 1: a removed source is remembered"; 3d: `… 0.72s`, "(3) a clear forgets" |
 | R41-5: a removed source's reader keeps its file open (Windows run 36528931046) | `c9076a7` R41-5 | `engine::tests::a_removed_source_has_no_open_decoder_after_the_next_frame` (the relink flow; source 1's reader is held at its next decode when the source leaves); U-1's witness, phases 2 and 3 | 5a: a removed source's readers are not retired; 5b: retired readers are not waited for; 5c: no stop flag for a retired reader | 5a (engine): `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1011 filtered out; finished in 0.41s`, "a frame came while a removed source's decoder was open"; 5a (U-1): `… 0.68s`, "(3) a clear closes the readers' decoders"; 5b: `… 0.41s`, the same message as 5a (engine); 5c: `… 1.42s`, "the retired reader decoded on" |
 
-- **Two first survivals.**
+- **Three first survivals.**
   - R41-1b survived at `c96c9aa`. That witness counted only rewinds per job. Removing the lookahead retain moves the
     one rewind per job to within the job; it does not add one. The witness now separates within-job rewinds from
     across-job rewinds (`74781d9`).
@@ -4309,7 +4310,10 @@ the table.
   - There are no other demux contexts in `engine.rs`. The U-1 maps hold keys and numbers, never handles.
 - **The wait.** Retiring readers are waited for on the preview thread, never the UI's. `set_document` only sends. A
   reader leaves at its next check or packet boundary, but an open in progress runs to its end. The cost is one such
-  delay before the first frame of a document that removed a source with a live reader.
+  delay before the first frame of a document that removed a source with a live reader. (Re-review R41 RS-1 found this
+  wait unbounded. R43 bounds it at 200 ms and makes the reader's IO interruptible: E12.16.)
+- **Narrowed in R43 (re-review R41 note 2).** Readers and the preview close a removed source's files. Visual-asset jobs
+  (`analysis.rs`) and proof renderers (`monitor_proof_for_document`) hold a removed file until their own job ends.
 
 #### E12.15.2 Tests, the stage gate and line counts
 
@@ -4378,3 +4382,182 @@ Nothing was timed for R41. What is ready:
   `bin-b980b4e`). G18's candidate lane is `G18 LH R41`, and the plan still ends with `@G18 verdict`.
 - **Unchanged:** the S0 side of G18 (`media-s0-g18`) and the step-0 A/B plan (`plan-ab.txt`).
 - The lanes print the new counters. A fallback region's rewinds on the W workloads are measured with the rest.
+
+### E12.16 R43 fixes: bounded, interruptible and panic-safe retirement; the in-order walk
+
+Ruling R43 (`rereview-r41.md`, which rejected closing S2b's code at `f68e46d`; orchestrator note P46) covered four
+blockers and the notes:
+
+- RS-1: the preview's wait for retired readers was unbounded;
+- RS-2: a reader's panic skipped its cleanup;
+- RS-3: BF3-2 still admitted two rewinds in a job;
+- RS-4: a late cancel left a tombstone;
+- item 5: the file-release claim was too broad, and E12.15's counts were wrong (corrected in place: 16 witness runs
+  over 15 distinct mutations, three first survivals).
+
+One commit per fix on `pf1/impl`, after `f68e46d`: RS-3 `95c45b4`, RS-4 `684b7cf`, the merge of `origin/main`
+(`e86c9ed`, the CI parser fix) as `963e486`, RS-2 `89f41d4` and RS-1 `3ef47d6`. This section and the design text are
+in the docs commit after them. **The timing half is pending: quiet window.** No lane was run for R43 (E12.16.4).
+
+#### E12.16.1 Closure table
+
+Each mutation was applied alone to the committed code, and only its named witnesses were run
+(`s2b-logs/r43-mutations.log.gz`; the script is `r43-mutate.sh.gz`). There are **19 witness runs over 16 distinct
+code mutations**. Three survived first (R43-3b, 3c and 4c). Each witness was strengthened, its commit was amended,
+and the survivor was rerun and killed. **Every mutation is killed at the final commits.**
+
+| Finding | Commit | Witness | Mutation | Raw result under the mutation |
+|---|---|---|---|---|
+| RS-3: a replan posted mid-job, with an older in-flight decode that fails stale, made a second rewind in one job | `95c45b4` | `sched::tests::a_mid_job_replan_with_a_failing_decode_rewinds_once` (Astra's counterexample, scripted); `mid_job_replans_rewind_at_most_once_per_job` (300 seeds at P = 2 and 3); `evicted_lookahead_behind_a_reader_is_not_read_again_within_the_job`; `a_stopped_lookahead_decode_is_decoded_again_without_a_rewind`; the exhaustive and seeded models, whose every decode checks the bound | 3a: required times skipped as before R43; 3b: lookahead ignores the reader's floor; 3c: a stopped decode keeps its position | 3a: `test result: FAILED. 12 passed; 4 failed; 0 ignored; 0 measured; 998 filtered out; finished in 0.12s`, "it rewinds to 0, then waits at 14" and "R43: reader 0 rewound to 0 from Some(1) within v3"; 3b (rerun): `test result: FAILED. 17 passed; 1 failed; 0 ignored; 0 measured; 998 filtered out; finished in 95.55s`, "2 is behind it: not read again"; 3c (rerun): `test result: FAILED. 17 passed; 1 failed; 0 ignored; 0 measured; 998 filtered out; finished in 95.49s`, "15 is decoded again" |
+| RS-4: a cancel after the reader's `forget` kept a tombstone | `684b7cf` | `sched::tests::a_cancel_after_its_reader_exited_leaves_nothing` (grant, retire, forget, then cancel; and the cap); `preview::tests::an_obsolete_ticket_is_cancelled_while_the_pool_is_held` (P = 2, real threads); the model checks `cancelled ⊆ live` | 4a: a departed reader's cancel is kept; 4b: no cap; 4c: the preview never joins its readers to the book | 4a: `test result: FAILED. 18 passed; 1 failed; 0 ignored; 0 measured; 998 filtered out; finished in 99.27s`, "a tombstone of a departed reader"; 4b: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1016 filtered out; finished in 0.00s`, "capped"; 4c (rerun): `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1017 filtered out; finished in 60.29s`, "the lane never reached the condition" |
+| RS-2: a reader's panic skipped permit release, slot removal and notify | `89f41d4` | `preview::tests::a_panicking_reader_releases_its_permits_and_its_slot` (a cfg(test) seam panics the reader at its first decode) | 2a: the guard skips an unwinding reader (the old tail); 2b: permits not forgotten on unwind; 2c: an unwinding reader leaves as if it had returned | 2a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1018 filtered out; finished in 60.28s`, "the lane never reached the condition"; 2b: `… finished in 0.29s`, "its permits return once"; 2c: `… finished in 60.27s`, "the job waited on a panicked reader" |
+| RS-1: a reader blocked in FFmpeg IO stalled every later preview job; note 1: an open after retirement | `3ef47d6` | `decode::tests::an_interrupt_ends_a_readers_packet_read`; `preview::tests::an_interrupt_ends_a_retired_readers_open`; `a_retirement_stuck_in_io_renders_at_the_deadline`; `a_reader_retired_before_its_open_never_opens_the_file`; `engine::tests::a_removed_source_has_no_open_decoder_after_the_next_frame` (updated) | 1a: the callback ignores the flag; 1b: the wait is unbounded again; 1c: no overrun counted; 1d: no flag check before the open; 1e: `packets()` again; 1f: a detached reader is waited for again; 1g: a detached reader keeps its permits | 1a: `test result: FAILED. 2 passed; 3 failed; 0 ignored; 0 measured; 1018 filtered out; finished in 0.76s`, "the read failed with AVERROR_EXIT", "the open failed with AVERROR_EXIT"; 1b: `test result: FAILED. 2 passed; 3 failed; … finished in 30.69s`, "the frame, at the deadline: Timeout" (three witnesses); 1c: `test result: FAILED. 2 passed; 3 failed; … finished in 0.75s`, "the overrun counts"; 1d: `test result: FAILED. 4 passed; 1 failed; … finished in 0.75s`, "a retired reader's open read its file"; 1e: `test result: FAILED. 4 passed; 1 failed; … finished in 60.05s`, "the interrupted read ended: Timeout"; 1f: `test result: FAILED. 4 passed; 1 failed; … finished in 0.83s`, "waited once"; 1g: `test result: FAILED. 3 passed; 2 failed; … finished in 30.64s`, "the frame, at the deadline: Timeout" |
+
+- **Three first survivals.**
+  - R43-3b and 3c survived at `cfb9966` (`test result: ok. 16 passed; …`). No witness evicted lookahead behind a
+    reader or stopped a lookahead decode. The two sched witnesses were added and RS-3 was amended to `95c45b4`. 3a's
+    code is unchanged by the amend.
+  - R43-4c survived at `a6b8c2d`. No preview test cancelled a ticket. The P = 2 preview witness was added, and RS-4 was
+    amended to `684b7cf`. 4a and 4b ran at `a6b8c2d`; their code is unchanged by the amend.
+- **What is not witnessed (qualified).**
+  - The close's shutdown and supersession escapes. Without them the wait still ends at the deadline, so only a
+    timing assertion could tell them apart, and it would be flaky.
+  - RS-3's wake of a reader waiting on another's in-flight time. Without it, the waiting reader resumes at its
+    quiescence timer (≤ 5 s): a latency, not a hang. The model has no condition variables.
+  - `an_interrupt_ends_a_retired_readers_open` prints `retire_overruns` rather than asserting 0. Its reader exits
+    within milliseconds of the flag, but an assertion against a 200 ms clock under CI load would be a flake risk.
+    `a_retirement_stuck_in_io_renders_at_the_deadline` is the deterministic one: its reader cannot exit before release.
+
+#### E12.16.2 Design choices and deviations
+
+- **RS-3, the in-order walk (Amendment R43, design §6).** A reader decodes the first required time that has neither a
+  frame nor a failure, and waits instead of passing it. Lookahead comes only after every required time is resolved,
+  and only past its floor in the current plan version. A stopped decode rolls the reader back to just before that
+  time. So only the first decode in a plan version can rewind: at most one rewind per reader per plan version, and a
+  job posts one. The trade-off: a reader no longer decodes past a time another reader has in flight. It waits for
+  that result, and the delivery wakes it.
+- **RS-4.** `PermitBook` keeps a `live` set: `join` at spawn, before the thread runs, and `forget` at exit. A `cancel`
+  of an id that is not live is a no-op. `cancelled` is capped at 64 as a backstop, dropping the lowest id; only live
+  readers' cancels are kept, and there are at most R of them.
+- **RS-2.** `read()`'s first binding is the `Exit` guard, so it drops last: after `Sched` is released and the decoder
+  has closed. It forgets the reader's permits, removes the slot and wakes the preview, on return and on unwind. On
+  unwind it also fails the reader's required times ("decode-reader: the reader panicked"), so the job answers.
+  `fail_start` now records only the times the job still requires.
+- **RS-1 (a), the interrupt.**
+  - `ffmpeg-next` 8.0's `format::input_with_interrupt` installs the `AVIOInterruptCB`. It is the crate's safe API; the
+    workspace forbids `unsafe`.
+  - That API leaks the callback's box. The callback is a zero-sized `fn`, so the box allocates nothing. It reads the
+    stop flag of the reader running on the calling thread (a thread-local set at the reader's open). A reader's
+    decoder opens, seeks and reads only on its own thread, and FFmpeg calls the callback on the thread doing the IO.
+  - `SourceSpec::measure`, on the preview thread, and every synchronous renderer keep the uninterruptible open.
+  - The packet loop reads one packet per turn and checks the flag first. An EOF seen while stopped is not treated as
+    an end. A failed or stopped window leaves no cursor, so the next window seeks.
+- **RS-1 (b), the deadline: `RETIRE_DEADLINE` = 200 ms.** Neither the flag nor the interrupt can end one libavcodec
+  call and one frame conversion that are already running. By E0's figures that is tens of milliseconds: a whole
+  keyframe-to-target seek took 12–41 ms, and the pre-S1 1080×1920 conversion 81 ms. 200 ms covers that with room and
+  stays under R43's 250 ms ceiling on the stall after an edit that removes a source.
+- **Deviation from P46's wording: detached readers' permits return at the deadline.** P46 had the reader's own exit
+  guard release its permits. At P = 2, though, a stuck reader holds the permits its replacement needs, so the "frame
+  at the deadline" never arrives: mutation 1g shows it (two witnesses time out).
+  - A detached reader is blocked inside one IO or libavcodec call, so its frame threads are idle. H-5's P is exceeded
+    only by those idle threads, and only until the reader exits.
+  - The exit guard's `forget` is then a no-op.
+  - The detached reader keeps its slot (the reader limit counts it) until it exits.
+- **The degraded case (Windows).** A detached reader closes its decoder when its blocked call returns. Until then its
+  file stays open, and on Windows it stays locked. `retire_overruns` counts each wait that ended this way.
+  `PlaybackStats` gains `retire_overruns`, and the P-play lanes print it as `engine_retire_overruns`.
+- **Unchanged (H-6).** `Preview::drop` still joins every reader. A reader blocked in the OS forever would hold
+  shutdown, but not playback.
+- **Item 5.** The design's R41 file-release amendment now covers only readers and the preview's synchronous renderer,
+  unless the retirement overran. Visual-asset jobs (`analysis.rs`, such as a waveform's decode) and proof renderers
+  (`monitor_proof_for_document`) hold a removed file until their own job ends. E12.15's "other handles" note says the
+  same.
+
+#### E12.16.3 Tests, the stage gate and line counts
+
+- **New tests: 11**, all fast tier (none marked slow, none ignored):
+  - sched: `a_mid_job_replan_with_a_failing_decode_rewinds_once`, `evicted_lookahead_behind_a_reader_is_not_read_again_within_the_job`,
+    `a_stopped_lookahead_decode_is_decoded_again_without_a_rewind`, `mid_job_replans_rewind_at_most_once_per_job` and
+    `a_cancel_after_its_reader_exited_leaves_nothing`;
+  - preview: `an_obsolete_ticket_is_cancelled_while_the_pool_is_held`, `a_panicking_reader_releases_its_permits_and_its_slot`,
+    `an_interrupt_ends_a_retired_readers_open`, `a_retirement_stuck_in_io_renders_at_the_deadline` and
+    `a_reader_retired_before_its_open_never_opens_the_file`;
+  - decode: `an_interrupt_ends_a_readers_packet_read`.
+- **Changed:** `engine::tests::a_removed_source_has_no_open_decoder_after_the_next_frame` now expects the frame at the
+  deadline, with the held reader's decoder still open and one overrun counted. After release, the reader stops and
+  closes. The exhaustive model gains a BudgetWait start state, so its coverage cells hold under the walk.
+- **The two long PF1 tests** stay in the fast tier, as ruled.
+- **Per-commit gate.** Each R43 commit passed media clippy with `-D warnings`, rustfmt on the touched files and
+  `cargo test -p kinewright-media --lib`. The runs read:
+  - RS-3 at `cfb9966`, before its two added witnesses: `test result: ok. 958 passed; 0 failed; 56 ignored; 0 measured;
+    0 filtered out; finished in 168.57s`;
+  - RS-4 at `a6b8c2d`, before its added witness: `test result: ok. 961 passed; 0 failed; 56 ignored; 0 measured; 0
+    filtered out; finished in 171.20s`;
+  - RS-2: `test result: ok. 963 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out; finished in 170.43s`;
+  - RS-1: `test result: ok. 967 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out; finished in 171.19s`.
+  - The amended RS-3 and RS-4 had no full media run of their own. Their witnesses ran in the mutation reruns, and the
+    full runs at RS-2 and RS-1 include every one of them.
+- **The merge of main (`963e486`).** `python3 scripts/slow_tests.py lint` read "slow-test manifest and markers agree: 47
+  tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 44 allowlist
+  entries well-formed".
+- **The local stage gate at `3ef47d6`.** Every command ran at `nice -n 19`, `-j 4` and `RUST_TEST_THREADS=4`.
+  - `cargo build --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`, each with and without the
+    three `slow-tests` features: exit 0.
+  - `cargo fmt -- --check`: exit 0.
+  - `cargo build -p kinewright-app`: exit 0.
+  - `slow_tests.py lint`: the same line as above.
+  - `cargo test --workspace` (the fast tier): 36 `test result: ok` lines; 3,452 passed, 0 failed, 91 ignored. The
+    media line was `test result: ok. 967 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out; finished in
+    168.86s`. The log is `s2b-logs/r43-workspace-fast.log.gz`.
+  - `slow_tests.py verify-fast` on that log with `--os linux`: "fast tier on linux skipped exactly the 47 manifest tests
+    and 44 allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else".
+- **A parser gap: the first fast-tier run.** It was equally green (3,452 passed, 0 failed, 91 ignored; media 967
+  passed), but `verify-fast` refused it:
+
+  ```
+  kinewright_media: saw 966 passed, 0 failed, 56 ignored, 0 measured, but its summary says 967, 0, 56, 0
+  ```
+
+  - A whole swscaler log line landed between `test title::tests::vertical_social_caption_pixels_stay_inside_shared_safe_bounds ...`
+    and its `ok`, which came on the next line. Main's parser fix (`e86c9ed`) handles fragments on the result's line,
+    not an outcome pushed to the next line, so CI can hit this too.
+  - The test run and `verify-fast` were rerun once, giving the log above. Both logs are in `r43-gate-logs.log.gz`.
+- The slow tier and Windows were not run locally. Both run in CI on the push.
+
+Non-blank, non-comment `.rs` lines, net, counted as in E12.13.2 (only a `mod tests` block counts as tests):
+
+| Commit | Production | Tests |
+|---|---|---|
+| RS-3 `95c45b4` | 32 | 205 |
+| RS-4 `684b7cf` | 23 | 93 |
+| merge `963e486` | 0 | 0 |
+| RS-2 `89f41d4` | 30 | 51 |
+| RS-1 `3ef47d6` | 292 | 196 |
+| **R43** | **377** (+462 −85) | **545** (+554 −9) |
+
+- **Per file** (production + tests):
+  - `decode.rs` 200 + 57;
+  - `preview.rs` 88 + 238;
+  - `sched.rs` 48 + 251;
+  - `render.rs` 39;
+  - `engine.rs` −1 (tests);
+  - `pf1_harness.rs` 1;
+  - `media.rs` 1.
+- Of `decode.rs`'s 200 production lines, 131 are the `#[cfg(test)]` `interrupt_seam` module. It is a test seam compiled
+  only into tests, but it sits outside `mod tests`.
+- **Docs:** `PF1-PLAYBACK-PERFORMANCE.md` gains the two R43 amendments (the walk; bounded, interruptible and panic-safe
+  retirement with the narrowed file-release claim). E12.15's counts and its "other handles" note are corrected in
+  place.
+
+#### E12.16.4 Timing: pending, quiet window
+
+Nothing was timed for R43. What is ready:
+
+- **The binary:** the release test binary at `3ef47d6`, `/tmp/kinewright-r37/bins/bin-3ef47d6`, sha256
+  `95658f42f9fccecf6fe6ab3cb9a1cf8dc0173dfda26a61697c014ce6c53c8068`. It is in that directory's `SHA256SUMS`, and
+  `sha256sum -c` passes. It is built from the same code as this docs commit.
+- **The plan:** `plan-gates.txt` now runs every stage-gate lane on that binary: its 25 lane lines and its header are
+  repointed from `bin-c9076a7`. G18's candidate lane is `G18 LH R43`, and the plan still ends with `@G18 verdict`.
+  A copy is `s2b-logs/r43-plan-gates.txt.gz`.
+- **Unchanged:** the S0 side of G18 (`media-s0-g18`) and the step-0 A/B plan (`plan-ab.txt`).
+- The lanes print `engine_retire_overruns`. The W workloads remove no source mid-run, so it should read 0.
