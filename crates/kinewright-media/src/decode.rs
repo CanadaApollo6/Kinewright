@@ -975,8 +975,14 @@ pub(crate) struct DecoderProbe {
     /// before any further frame is accepted. Off, the decoder is today's:
     /// it checks between packets, so frames already decoded and waiting
     /// (frame threads, the end-of-stream flush) are still drained. A test
-    /// seam standing in for the check S2c-2 puts in `receive_frames`.
-    pub(crate) check_between_frames: bool,
+    /// seam standing in for the check S2c-2 puts in `receive_frames`. Private:
+    /// only `arm_between_frames` sets it, and that needs the positive
+    /// control's `ControlToken`.
+    check_between_frames: bool,
+    /// How many times the seam has been set or cleared over the decoder's
+    /// lifetime (monotonic; there is no way to reset it), so arming and
+    /// clearing again inside one call still shows.
+    seam_arms: u64,
     pub(crate) tampers: Vec<Tamper>,
     last_ts: Option<i64>,
     /// Colour conversions run over the decoder's lifetime.
@@ -1018,6 +1024,23 @@ thread_local! {
 
 #[cfg(test)]
 impl DecoderProbe {
+    /// Set the between-frames cancel seam. Only the positive control holds a
+    /// `ControlToken` (its constructor is private to `pf1_s2c_witness::reference`),
+    /// so any other path calling this does not compile.
+    pub(crate) fn arm_between_frames(
+        &mut self,
+        on: bool,
+        _control: &crate::pf1_s2c_witness::ControlToken,
+    ) {
+        self.check_between_frames = on;
+        self.seam_arms += 1;
+    }
+
+    /// Times the seam was set or cleared over the decoder's lifetime.
+    pub(crate) fn seam_arms(&self) -> u64 {
+        self.seam_arms
+    }
+
     pub(crate) fn on_seek(&mut self) {
         self.first_packet = None;
         (self.awaiting_first, self.packets, self.last_ts) = (true, 0, None);

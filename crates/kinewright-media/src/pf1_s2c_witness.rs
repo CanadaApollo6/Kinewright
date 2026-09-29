@@ -90,9 +90,10 @@ pub(super) struct Observation {
     /// The returned frame's conversion, for the independent output oracle
     /// (not part of `same`: `frame` already covers the pixels).
     pub(super) output: Option<Output>,
-    /// The behavioural cancel seam was armed on the decoder (see
-    /// `TargetPath::POSITIVE_CONTROL`); not part of `same`.
-    pub(super) seam: bool,
+    /// How many times the behavioural cancel seam was set or cleared over the
+    /// decoder's lifetime (`DecoderProbe::seam_arms`, monotonic); not part of
+    /// `same`. Only a path holding a `ControlToken` may have it above zero.
+    pub(super) seam_arms: u64,
 }
 
 /// The pixels a call returned, and the RGBA64 the shared conversion handed
@@ -199,7 +200,7 @@ pub(super) fn observe(
         frames: probe.frames[probe.frames.len().saturating_sub(took)..].to_vec(),
         packets: probe.packets,
         output,
-        seam: probe.check_between_frames,
+        seam_arms: probe.seam_arms(),
     }
 }
 
@@ -355,13 +356,17 @@ pub(super) enum Event {
 }
 
 pub(super) trait TargetPath {
-    /// Only the reference continuation (the positive control) is one: it may
-    /// arm the behavioural cancel seam (`DecoderProbe::check_between_frames`).
-    /// A path over production code injects the stop signal alone and keeps
-    /// the default, so its per-frame check is its own and is what the
-    /// exact-stop witnesses observe. The harness fails a path that is not the
-    /// positive control and has the seam armed (`produced`).
-    const POSITIVE_CONTROL: bool = false;
+    /// The capability to arm the behavioural cancel seam
+    /// (`DecoderProbe::arm_between_frames`), held only by the positive
+    /// control. A path over production code returns `None` (the default) and
+    /// cannot obtain a token: its constructor is private to the `reference`
+    /// submodule, so claiming control elsewhere does not compile. Such a path
+    /// keeps its own per-frame check, which is what the exact-stop witnesses
+    /// observe, and the harness fails it if its decoder's `seam_arms` is
+    /// above zero (`produced`), even if it cleared the seam again.
+    fn control(&self) -> Option<&ControlToken> {
+        None
+    }
 
     fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation;
     fn event(&mut self, event: Event);
@@ -400,8 +405,8 @@ pub(super) enum CancelAt {
 /// Arm a call's cancellation on `decoder`: inject the stop signal (the flag
 /// the decoder checks, raised when the armed frame is received) and nothing
 /// else. It never touches the behavioural seam, so it is what a path over
-/// production code uses; only the positive control adds the seam
-/// (`tests::between_frames`).
+/// production code uses; only the positive control adds the seam, with its
+/// `ControlToken` (`reference::ReferenceContinuation`).
 fn arm(decoder: &mut VideoDecoder, cancel: Option<usize>, how: CancelAt) {
     let stop = Arc::new(AtomicBool::new(false));
     let n = cancel.map(|n| u64::try_from(n).unwrap());
@@ -449,7 +454,9 @@ impl TargetPath for SeekPath {
 /// by the path's own production code (the real check belongs in
 /// `receive_frames`): the adapter injects the stop signal with `arm` and must
 /// NOT arm the `check_between_frames` seam, which models that check for the
-/// positive control only (the harness fails a path that leaves it armed).
+/// positive control only: arming needs a `ControlToken`, which only the
+/// `reference` submodule can create, and the harness fails a path whose
+/// decoder's `seam_arms` is above zero.
 /// A mismatch between the real
 /// seek's first packet and the shadow's disables continuation for the decoder
 /// until it is replaced (`Event::MismatchOnce`), and the frames it returns
@@ -787,18 +794,22 @@ fn check(
     }
 }
 
-/// `path.produce`, and the harness check that only the positive control has
-/// the behavioural cancel seam armed.
+/// `path.produce`, and the harness check that only the positive control (the
+/// path that holds a `ControlToken`) ever armed the behavioural cancel seam:
+/// `seam_arms` counts every set and clear, so arming during the call and
+/// clearing before the observation still fails.
 fn produced<P: TargetPath>(
     path: &mut P,
     from: Option<Cursor>,
     t: i64,
 ) -> Result<Observation, String> {
     let got = path.produce(from, TimeCode(t));
-    if got.seam && !P::POSITIVE_CONTROL {
+    if got.seam_arms > 0 && path.control().is_none() {
         return Err(format!(
-            "produce({from:?}, {t}): the adapter armed the test-only check_between_frames seam; \
-             a path over production code injects the stop signal only"
+            "produce({from:?}, {t}): the adapter armed the test-only check_between_frames seam \
+             (seam_arms {}) without the control token; a path over production code injects the \
+             stop signal only",
+            got.seam_arms
         ));
     }
     Ok(got)
@@ -1152,10 +1163,337 @@ pub(super) fn scripts(cx: &Ctx, cancel_after: usize) -> Vec<(&'static str, Vec<S
     ]
 }
 
+/// The positive control: a correct continuation built in test code, and the
+/// only place that can create a `ControlToken`.
+mod reference {
+    use super::*;
+
+    /// The capability to arm the behavioural cancel seam. The field is private
+    /// to this module and so is `new`: no other adapter can make one without
+    /// editing this submodule, and one that tries to arm the seam without it
+    /// does not compile (`DecoderProbe::arm_between_frames` takes `&ControlToken`).
+    pub(crate) struct ControlToken(());
+
+    impl ControlToken {
+        fn new() -> Self {
+            Self(())
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Corrupt {
+        Never,
+        /// The held lookahead frame is damaged before the call is observed.
+        AtOnce,
+        /// It is damaged only at the end of the second continuation in a row, so
+        /// only a chained hop sees it.
+        SecondHop,
+    }
+
+    /// One switch per S-2 rule; `Rules::ALL` is the design.
+    #[derive(Clone, Copy)]
+    #[allow(clippy::struct_excessive_bools, reason = "one switch per rule")]
+    pub(super) struct Rules {
+        pub(super) pair: bool,
+        pub(super) shadow_known: bool,
+        pub(super) real_matches: bool,
+        /// A mismatch at a seek disables continuation for the decoder for good.
+        pub(super) latch: bool,
+        pub(super) same_anchor: bool,
+        pub(super) keys: bool,
+        pub(super) timestamps: bool,
+        pub(super) window: bool,
+        pub(super) stream: bool,
+        pub(super) events: bool,
+        /// Count the packets read as a one-thread decoder would have (ignore
+        /// the extra ones frame threads read ahead).
+        pub(super) thread_blind: bool,
+        pub(super) cancel: CancelAt,
+        pub(super) corrupt: Corrupt,
+    }
+
+    impl Rules {
+        pub(in super::super) const ALL: Self = Self {
+            pair: true,
+            shadow_known: true,
+            real_matches: true,
+            latch: true,
+            same_anchor: true,
+            keys: true,
+            timestamps: true,
+            window: true,
+            stream: true,
+            events: true,
+            thread_blind: false,
+            cancel: CancelAt::Exact,
+            corrupt: Corrupt::Never,
+        };
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) enum Fault {
+        ShadowFails,
+        ShadowMismatch,
+        StreamMismatch,
+        AnchorDrifts,
+    }
+
+    /// A reader that keeps its decoder, continues under S-2's rules and
+    /// otherwise seeks. The continuation is today's `decode_window_sequential`
+    /// judged after the fact against the packets it read; the shadow is the
+    /// fixture's `anchors`. Test-only: S2c-2's is the real one.
+    pub(super) struct ReferenceContinuation {
+        token: ControlToken,
+        fx: Rc<Fixture>,
+        threads: usize,
+        pub(super) rules: Rules,
+        decoder: Option<VideoDecoder>,
+        run: Option<Anchor>,
+        fault: Option<Fault>,
+        cancel: Option<usize>,
+        tampers: Vec<Tamper>,
+        /// Continuations since the run's seek.
+        continued: u32,
+        /// A `MismatchOnce` waits for the next seek.
+        mismatch_once: bool,
+        /// Continuation is disabled for this decoder (a seek's real first
+        /// packet disagreed with the shadow's) until it is replaced.
+        disabled: bool,
+    }
+
+    impl ReferenceContinuation {
+        pub(super) fn new(fx: &Rc<Fixture>, threads: usize, rules: Rules) -> Self {
+            Self {
+                token: ControlToken::new(),
+                fx: fx.clone(),
+                threads,
+                rules,
+                decoder: None,
+                run: None,
+                fault: None,
+                cancel: None,
+                tampers: Vec::new(),
+                continued: 0,
+                mismatch_once: false,
+                disabled: false,
+            }
+        }
+
+        /// The shadow's A(t) (`None`: unknown), at a run's seek or later.
+        fn shadow(&self, t: i64, at_seek: bool) -> Option<Anchor> {
+            let a = anchor(&self.fx.facts, t)?;
+            match self.fault {
+                Some(Fault::ShadowFails) => None,
+                Some(Fault::ShadowMismatch) => Some((a.0 + 1, a.1, a.2)),
+                Some(Fault::AnchorDrifts) if !at_seek => Some((a.0 + 1, a.1, a.2)),
+                Some(Fault::StreamMismatch) if self.rules.stream => None,
+                _ => Some(a),
+            }
+        }
+
+        fn may_continue(&self, c: i64, t: i64) -> bool {
+            let (Some(d), r) = (&self.decoder, self.rules) else {
+                return false;
+            };
+            let known = self.run.is_some() || !r.shadow_known;
+            !self.disabled
+                && d.state().continuation_at == Some(c + 1)
+                && t > c
+                && (!r.window || t <= c + 12)
+                && (!r.pair || self.fx.facts.kind != Kind::AviDtsGuess)
+                && known
+                && (!r.real_matches || self.run.is_none() || d.state().first_packet == self.run)
+                && (!r.same_anchor || self.shadow(t, false) == self.run)
+        }
+
+        /// After a continuation: were S-2's conditions kept while it ran?
+        fn run_valid(&self, d: &VideoDecoder) -> bool {
+            if self.rules.timestamps {
+                let mut prev: Option<i64> = None;
+                for f in &d.probe().frames {
+                    let Some(ts) = f.ts else { return false };
+                    if prev.is_some_and(|p| ts <= p) {
+                        return false;
+                    }
+                    prev = Some(ts);
+                }
+            }
+            // Keys are counted from the run's real first packet (not the shadow's).
+            let lag = if self.rules.thread_blind {
+                u64::try_from(self.threads - 1).unwrap()
+            } else {
+                0
+            };
+            let key_read = d.state().first_packet.as_ref().is_none_or(|a| {
+                keys_read(&self.fx.facts, a, d.probe().packets.saturating_sub(lag))
+            });
+            !(self.rules.keys && key_read)
+        }
+
+        fn seek(&mut self, t: TimeCode, before: Option<Before>) -> Observation {
+            let mut d = self.decoder.take().unwrap_or_else(|| {
+                let mut d = self.fx.open(self.threads);
+                d.probe_mut().tampers.clone_from(&self.tampers);
+                d
+            });
+            let before = before.unwrap_or_else(|| Before::of(&d));
+            arm(&mut d, self.cancel.take(), self.rules.cancel);
+            d.probe_mut()
+                .arm_between_frames(self.rules.cancel != CancelAt::Drain, &self.token);
+            let mut cache = FrameCache::new(1);
+            let result = d.decode_window(t, t, &mut cache);
+            let shadow = match anchor(&self.fx.facts, t.0) {
+                Some(a) if std::mem::take(&mut self.mismatch_once) => Some((a.0 + 1, a.1, a.2)),
+                _ => self.shadow(t.0, true),
+            };
+            // Rule 2: the real seek's first packet must be the shadow's, else
+            // continuation is disabled for the decoder.
+            if self.rules.real_matches
+                && self.rules.latch
+                && shadow.is_some()
+                && d.state().first_packet.is_some()
+                && d.state().first_packet != shadow
+            {
+                self.disabled = true;
+            }
+            (self.run, self.continued) = (shadow, 0);
+            let observation = observe(&d, &mut cache, t, result, before);
+            self.decoder = Some(d);
+            observation
+        }
+    }
+
+    impl TargetPath for ReferenceContinuation {
+        fn control(&self) -> Option<&ControlToken> {
+            Some(&self.token)
+        }
+
+        fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
+            let Some(Cursor(c)) = from.filter(|c| self.may_continue(c.0, t.0)) else {
+                return self.seek(t, None);
+            };
+            let mut d = self.decoder.take().expect("checked by may_continue");
+            arm(&mut d, self.cancel.take(), self.rules.cancel);
+            d.probe_mut()
+                .arm_between_frames(self.rules.cancel != CancelAt::Drain, &self.token);
+            let before = Before::of(&d);
+            let mut cache = FrameCache::new(13);
+            let result = d.decode_window_sequential(TimeCode(c + 1), t, &mut cache);
+            if result.is_ok() && !self.run_valid(&d) {
+                self.decoder = Some(d);
+                return self.seek(t, Some(before)); // abandon: today's seek
+            }
+            self.continued += 1;
+            let damage = match self.rules.corrupt {
+                Corrupt::Never => false,
+                Corrupt::AtOnce => true,
+                Corrupt::SecondHop => self.continued == 2,
+            };
+            if result.is_ok() && damage {
+                d.corrupt_lookahead();
+            }
+            let observation = observe(&d, &mut cache, t, result, before);
+            self.decoder = Some(d);
+            observation
+        }
+
+        fn event(&mut self, event: Event) {
+            let reset = |this: &mut Self| {
+                if this.rules.events {
+                    (this.decoder, this.run, this.disabled) = (None, None, false);
+                }
+            };
+            match event {
+                Event::Cancel(n) => self.cancel = Some(n),
+                Event::Tamper(t) => {
+                    self.tampers.push(t);
+                    self.decoder
+                        .iter_mut()
+                        .for_each(|d| d.probe_mut().tampers.push(t));
+                }
+                Event::ShadowFails => self.fault = Some(Fault::ShadowFails),
+                Event::ShadowMismatch => self.fault = Some(Fault::ShadowMismatch),
+                Event::StreamMismatch => self.fault = Some(Fault::StreamMismatch),
+                Event::AnchorDrifts => self.fault = Some(Fault::AnchorDrifts),
+                Event::MismatchOnce => self.mismatch_once = true,
+                Event::Relink(fx) => {
+                    self.fx = fx;
+                    reset(self);
+                }
+                Event::KeyChange | Event::ShrinkReopen | Event::Error => reset(self),
+            }
+        }
+    }
+
+    /// Test doubles that keep the reference's decoder behaviour but are
+    /// presented as production adapters (no token claimed): they show the
+    /// harness catching a seam that a production path must not have.
+    ///
+    /// `KeepsArmed` leaves the seam armed after the call.
+    pub(super) struct KeepsArmed(pub(super) ReferenceContinuation);
+
+    impl TargetPath for KeepsArmed {
+        fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
+            self.0.produce(from, t)
+        }
+
+        fn event(&mut self, event: Event) {
+            self.0.event(event);
+        }
+    }
+
+    /// `ArmsThenClears` arms the seam during decoding and clears it again
+    /// before `observe`, so a snapshot of the flag at observation time is off.
+    pub(super) struct ArmsThenClears {
+        token: ControlToken,
+        fx: Rc<Fixture>,
+        threads: usize,
+        cancel: Option<usize>,
+    }
+
+    impl ArmsThenClears {
+        pub(super) fn new(fx: &Rc<Fixture>, threads: usize) -> Self {
+            Self {
+                token: ControlToken::new(),
+                fx: fx.clone(),
+                threads,
+                cancel: None,
+            }
+        }
+    }
+
+    impl TargetPath for ArmsThenClears {
+        fn produce(&mut self, _from: Option<Cursor>, t: TimeCode) -> Observation {
+            let mut decoder = self.fx.open(self.threads);
+            arm(&mut decoder, self.cancel.take(), CancelAt::Exact);
+            decoder.probe_mut().arm_between_frames(true, &self.token);
+            let before = Before::of(&decoder);
+            let mut cache = FrameCache::new(1);
+            let result = decoder.decode_window(t, t, &mut cache);
+            decoder.probe_mut().arm_between_frames(false, &self.token);
+            observe(&decoder, &mut cache, t, result, before)
+        }
+
+        fn event(&mut self, event: Event) {
+            if let Event::Cancel(n) = event {
+                self.cancel = Some(n);
+            }
+        }
+    }
+}
+
+pub(crate) use reference::ControlToken;
+
 #[cfg(test)]
 mod tests {
+    use super::reference::{ArmsThenClears, Corrupt, KeepsArmed, ReferenceContinuation, Rules};
     use super::*;
     use crate::decode::{OUTPUT_FAULT, OutputFault};
+
+    type ReferenceMutation = fn(&mut Vec<RefFrame>);
+    type RuleMutation = fn(&mut Rules);
+    type ObservationEdit = fn(&mut Observation);
+
     use crate::{
         ffmpeg,
         pf1_s2c_fixtures::{CANONICAL, CONVERSION, generated_sha256},
@@ -1167,9 +1505,10 @@ mod tests {
     /// an FNV-1a digest of the returned pixels at those targets (the f16 bits
     /// after the shared conversion), and the `FFmpeg` build (`build_id`) the
     /// state digest was taken with. An empty `file` is a pin still to be
-    /// taken on that OS. Policy, see `pin_check`: the file hash is enforced
-    /// on Linux CI and advisory elsewhere, the state digest is enforced when
-    /// the file and the build match, the output digest is advisory.
+    /// taken on that OS (an error on Linux). Policy, see `pin_check`: the file
+    /// hash and the output digest are advisory, the state digest is enforced
+    /// when the file and the build match.
+    #[derive(Clone, Copy)]
     struct Pin {
         kind: Kind,
         os: &'static str,
@@ -1547,31 +1886,48 @@ mod tests {
 
     /// The pin policy for one file on one OS.
     ///
-    /// - The file hash is enforced when `enforce_file` (Linux CI, where the
-    ///   recipe is CPU-independent and the `FFmpeg` build is the pinned one:
-    ///   `the_fixture_files_do_not_depend_on_the_cpu`); elsewhere a
-    ///   difference is an advisory line and a count, never a failure.
-    /// - The state digest is compared only when the file and the `FFmpeg`
-    ///   build are the pinned ones; then a difference fails (a decoder
-    ///   regression cannot move both the path and the oracle). Otherwise it
-    ///   is skipped, loudly.
-    /// - The output digest (the returned pixels after the production
-    ///   conversion) is advisory: the decoder's pixels are already checked
-    ///   live against the CLI's conversion and the f64 table on every run.
+    /// - On Linux a complete pin entry (file hash, state digest, output
+    ///   digest and build, all non-empty) is REQUIRED for every fixture kind,
+    ///   with or without `CI`: a missing or empty entry is a failure, never a
+    ///   skip. Elsewhere (Windows, pins still to be taken) a missing entry is
+    ///   a loud skip.
+    /// - The file hash is advisory everywhere, Linux CI included: a
+    ///   difference (another x264/FFmpeg build made the file) is a
+    ///   `PIN-ADVISORY` line and a count, never a failure.
+    /// - The state digest is compared only when the file hash and the
+    ///   `FFmpeg` build match the pinned ones; then a difference fails (a
+    ///   decoder regression cannot move both the path and the oracle).
+    ///   Otherwise it is skipped, loudly, and counted.
+    /// - The output digest is advisory: the decoder's pixels are already
+    ///   checked live against the CLI's conversion and the f64 table.
     ///
-    /// Not pins, and enforced everywhere: the live CLI conversion check, the
-    /// finite f64 table comparison, and same-machine thread equality.
-    fn pin_check(pin: &Pin, seen: &Seen, enforce_file: bool) -> Result<Pinned, String> {
+    /// What is enforced whatever the pins say, per fixture (`live_oracle`):
+    /// the live CLI conversion check and the finite f64 table comparison of
+    /// every returned frame, and, in other tests, same-machine thread equality.
+    fn pin_check(kind: Kind, os: &str, pin: Option<&Pin>, seen: &Seen) -> Result<Pinned, String> {
         let observed = format!(
-            "{:?} on {}: file {} digest {} output {} build [{}]",
-            pin.kind, pin.os, seen.file, seen.digest, seen.output, seen.build
+            "{kind:?} on {os}: file {} digest {} output {} build [{}]",
+            seen.file, seen.digest, seen.output, seen.build
         );
-        let mut done = Pinned::default();
-        if pin.file.is_empty() {
+        let complete = pin.filter(|p| {
+            [p.file, p.digest, p.output, p.build]
+                .iter()
+                .all(|v| !v.is_empty())
+        });
+        let Some(pin) = complete else {
+            if os == "linux" {
+                return Err(format!(
+                    "{kind:?}: no complete Linux pin entry (file hash, state digest, output \
+                     digest and build are all required for every fixture); observed {observed}"
+                ));
+            }
             println!("pf1-c4 PIN-MISS (no pin taken on this OS yet): observed {observed}");
-            done.skipped = 3;
-            return Ok(done);
-        }
+            return Ok(Pinned {
+                skipped: 3,
+                ..Pinned::default()
+            });
+        };
+        let mut done = Pinned::default();
         let same_file = seen.file == pin.file;
         if same_file {
             done.verified += 1;
@@ -1579,18 +1935,16 @@ mod tests {
             done.mismatched += 1;
             println!(
                 "pf1-c4 PIN-ADVISORY file hash differs (another FFmpeg/x264 build made it): \
-                 observed {observed}"
+                 observed {observed}, pinned {}",
+                pin.file
             );
-            if enforce_file {
-                return Err(format!("CI file pin differs: observed {observed}"));
-            }
         }
         if same_file && seen.build == pin.build {
             if seen.digest != pin.digest {
                 return Err(format!(
-                    "{:?}: the fresh-Seek oracle moved on the pinned file and build: digest {} \
-                     (pinned {}); observed {observed}",
-                    pin.kind, seen.digest, pin.digest
+                    "{kind:?}: the fresh-Seek oracle moved on the pinned file and build: digest \
+                     {} (pinned {}); observed {observed}",
+                    seen.digest, pin.digest
                 ));
             }
             done.verified += 1;
@@ -1614,28 +1968,59 @@ mod tests {
         Ok(done)
     }
 
+    /// The fewest distinct returned frames a fixture's live oracle must have
+    /// verified (CLI conversion hash and finite f64 table) for its pin
+    /// result to count.
+    const LIVE_FLOOR: usize = 20;
+
+    /// The live-oracle floor for one fixture: every returned frame of the
+    /// one-thread Seek passes the CLI conversion check and the finite table
+    /// comparison, and at least `LIVE_FLOOR` distinct frames were verified.
+    /// Per fixture, not an aggregate: five good fixtures cannot cover a
+    /// sixth that verified nothing.
+    fn live_oracle(c: &Corpus) -> Result<usize, String> {
+        let kind = c.fx.kind;
+        let out = (c.out.as_ref()).ok_or_else(|| format!("{kind:?}: no output oracle"))?;
+        let observations = c.oracle[&1]
+            .iter()
+            .flat_map(|(o, o2)| std::iter::once(o).chain(o2));
+        for o in observations {
+            out.verify(o).map_err(|e| format!("{kind:?}: {e}"))?;
+        }
+        let checked = out.verified();
+        if checked < LIVE_FLOOR {
+            return Err(format!(
+                "{kind:?}: the live oracle verified {checked} distinct frames, fewer than \
+                 {LIVE_FLOOR}"
+            ));
+        }
+        Ok(checked)
+    }
+
+    /// Appends `line` to the CI job summary when there is one, so skips and
+    /// advisory mismatches show on a passing run (test output is captured).
+    fn summarize(line: &str) {
+        println!("{line}");
+        if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY")
+            && let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
     /// Fixture, oracle and returned-pixel pins, per OS, under the policy of
-    /// `pin_check`. Prints the verified, mismatched and skipped counts.
+    /// `pin_check`, and the per-fixture live-oracle floor. Prints the
+    /// verified, mismatched and skipped counts.
     #[test]
     fn the_pinned_oracle_has_not_drifted() {
-        let (os, ci) = (std::env::consts::OS, std::env::var_os("CI").is_some());
+        let os = std::env::consts::OS;
         let build = build_id();
         println!("pf1-c4 build [{build}]");
         let (mut total, mut failures) = (Pinned::default(), Vec::new());
         for c in corpora(&[1]) {
             let kind = c.fx.kind;
-            let fallback = Pin {
-                kind,
-                os,
-                file: "",
-                digest: "",
-                output: "",
-                build: "",
-            };
-            let pin = PINS
-                .iter()
-                .find(|p| p.kind == kind && p.os == os)
-                .unwrap_or(&fallback);
+            let pin = PINS.iter().find(|p| p.kind == kind && p.os == os);
             let (file, digest, output) = (
                 c.fx.sha256(),
                 format!("{:016x}", digest(&c)),
@@ -1648,14 +2033,21 @@ mod tests {
                 output: &output,
                 build: &build,
             };
-            // Every fixture reports before the test fails, so one CI run
-            // prints all the observed values to pin.
-            let done = pin_check(pin, &seen, ci && os == "linux").unwrap_or_else(|e| {
+            // Every fixture reports before the test fails, so one run prints
+            // all the observed values to pin.
+            let done = pin_check(kind, os, pin, &seen).unwrap_or_else(|e| {
                 println!("pf1-c4 PIN-FAIL {e}");
                 failures.push(e);
                 Pinned::default()
             });
-            println!("pf1-c4 pin {kind:?}: {done:?}");
+            match live_oracle(&c) {
+                Ok(n) => println!("pf1-c4 live oracle {kind:?}: {n} distinct frames verified"),
+                Err(e) => {
+                    println!("pf1-c4 LIVE-FAIL {e}");
+                    failures.push(e);
+                }
+            }
+            summarize(&format!("pf1-c4 pin {kind:?}: {done:?}"));
             total.verified += done.verified;
             total.mismatched += done.mismatched;
             total.skipped += done.skipped;
@@ -1674,28 +2066,23 @@ mod tests {
                 canonical.len()
             );
         }
-        println!(
-            "pf1-c4 pins on {os} (CI {ci}): {} verified, {} advisory mismatches, {} skipped",
+        summarize(&format!(
+            "pf1-c4 pins on {os}: {} verified, {} advisory mismatches, {} skipped",
             total.verified, total.mismatched, total.skipped
-        );
+        ));
         assert!(failures.is_empty(), "{failures:#?}");
         assert_eq!(
             total.verified + total.mismatched + total.skipped,
             3 * KINDS.len()
         );
-        if ci && os == "linux" {
-            assert!(
-                total.verified >= KINDS.len(),
-                "Linux CI verified no file pin"
-            );
-        }
     }
 
     /// The fixture recipe is CPU-independent: with every assembly path off
     /// (`FFmpeg` `-cpuflags 0`, x264 `asm=0`) each file is byte-identical to
-    /// the one generated with the CPU's own SIMD. This is what lets the file
-    /// hash be enforced on Linux CI. Evidence is from x86-64 with and without
-    /// asm only; it is not a claim about other architectures.
+    /// the one generated with the CPU's own SIMD, so the file hash (advisory)
+    /// and the state digest that depends on it are comparable across machines
+    /// of the same architecture. Evidence is from x86-64 with and without asm
+    /// only; it is not a claim about other architectures.
     #[test]
     fn the_fixture_files_do_not_depend_on_the_cpu() {
         for kind in KINDS {
@@ -1737,80 +2124,139 @@ mod tests {
         }
     }
 
-    /// The policy of `pin_check`: a moved state digest on the pinned file and
-    /// build fails; a different file fails only when enforced (Linux CI) and
-    /// otherwise skips the state digest and counts the file as advisory; a
-    /// different build skips the state digest; the output digest never
-    /// fails; a pin not yet taken is a skip, never a pass.
+    /// The policy of `pin_check`, one line per branch. Linux requires a
+    /// complete pin for every kind (absent, or with an empty file, digest,
+    /// output or build: failure, with or without `CI`). A moved state digest
+    /// on the pinned file and build fails. A different file hash never fails
+    /// (advisory), even where CI would have enforced it, and skips the state
+    /// digest; so does a different build. The output digest never fails. A
+    /// missing Windows entry is a skip.
     #[test]
     fn the_pin_check_follows_the_policy() {
         let pin = &PINS[0];
+        let kind = pin.kind;
         let good = Seen {
             file: pin.file,
             digest: pin.digest,
             output: pin.output,
             build: pin.build,
         };
-        let verified = Pinned {
-            verified: 3,
-            mismatched: 0,
-            skipped: 0,
+        let counts = |verified, mismatched, skipped| {
+            Ok(Pinned {
+                verified,
+                mismatched,
+                skipped,
+            })
         };
-        for enforce in [false, true] {
-            assert_eq!(pin_check(pin, &good, enforce), Ok(verified));
-        }
+        let line = |branch: &str, r: &Result<Pinned, String>| {
+            let r = r
+                .as_ref()
+                .map_or_else(|e| format!("FAILS: {e}"), |p| format!("{p:?}"));
+            eprintln!(
+                "pf1-c4 mutation pin policy, {branch}: {}",
+                r.chars().take(230).collect::<String>()
+            );
+        };
+        let r = pin_check(kind, "linux", Some(pin), &good);
+        assert_eq!(r, counts(3, 0, 0));
+        line("all match", &r);
         let moved = Seen {
             digest: "0123456789abcdef",
             ..good
         };
-        for enforce in [false, true] {
-            let e = pin_check(pin, &moved, enforce).unwrap_err();
-            eprintln!("pf1-c4 mutation pinned digest moved (enforce file {enforce}): {e}");
-        }
+        let r = pin_check(kind, "linux", Some(pin), &moved);
+        assert!(r.as_ref().unwrap_err().contains("oracle moved"));
+        line("state digest moved on the pinned file and build", &r);
         let moved = Seen {
             output: "0123456789abcdef",
             ..good
         };
-        let advisory = Pinned {
-            verified: 2,
-            mismatched: 1,
-            skipped: 0,
-        };
-        assert_eq!(pin_check(pin, &moved, true), Ok(advisory));
+        let r = pin_check(kind, "linux", Some(pin), &moved);
+        assert_eq!(r, counts(2, 1, 0));
+        line("output digest moved (advisory)", &r);
         let other = Seen {
             file: "another file",
             digest: "0123456789abcdef",
             output: "0123456789abcdef",
             ..good
         };
-        let file_advisory = Pinned {
-            verified: 0,
-            mismatched: 2,
-            skipped: 1,
-        };
-        assert_eq!(pin_check(pin, &other, false), Ok(file_advisory));
-        let e = pin_check(pin, &other, true).unwrap_err();
-        assert!(e.contains("another file"), "{e}");
-        eprintln!("pf1-c4 mutation pinned file differs on CI: {e}");
+        let r = pin_check(kind, "linux", Some(pin), &other);
+        assert_eq!(r, counts(0, 2, 1));
+        line(
+            "file hash differs (advisory, never a failure, Linux CI included)",
+            &r,
+        );
         let elsewhere = Seen {
             build: "another build",
             digest: "0123456789abcdef",
             ..good
         };
-        let skipped_digest = Pinned {
-            verified: 2,
-            mismatched: 0,
-            skipped: 1,
-        };
-        assert_eq!(pin_check(pin, &elsewhere, true), Ok(skipped_digest));
+        let r = pin_check(kind, "linux", Some(pin), &elsewhere);
+        assert_eq!(r, counts(2, 0, 1));
+        line("build differs (state digest skipped)", &r);
+        let r = pin_check(kind, "linux", None, &good);
+        assert!(r.as_ref().unwrap_err().contains("no complete Linux pin"));
+        line("Linux entry absent", &r);
+        for (field, empty) in [
+            ("file", Pin { file: "", ..*pin }),
+            ("digest", Pin { digest: "", ..*pin }),
+            ("output", Pin { output: "", ..*pin }),
+            ("build", Pin { build: "", ..*pin }),
+        ] {
+            let r = pin_check(kind, "linux", Some(&empty), &good);
+            assert!(
+                r.as_ref().unwrap_err().contains("no complete Linux pin"),
+                "{field}"
+            );
+            line(&format!("Linux entry with an empty {field}"), &r);
+        }
         let windows = PINS.iter().find(|p| p.os == "windows").unwrap();
-        let untaken = Pinned {
-            verified: 0,
-            mismatched: 0,
-            skipped: 3,
-        };
-        assert_eq!(pin_check(windows, &other, true), Ok(untaken));
-        assert_eq!(pin_check(windows, &other, false), Ok(untaken));
+        for entry in [Some(windows), None] {
+            let r = pin_check(kind, "windows", entry, &other);
+            assert_eq!(r, counts(0, 0, 3));
+            line("Windows pin not taken (skip)", &r);
+        }
+        // The table itself has a complete Linux entry for every kind.
+        for kind in KINDS {
+            let entry = PINS.iter().find(|p| p.kind == kind && p.os == "linux");
+            assert!(
+                entry.is_some_and(|p| !p.file.is_empty()
+                    && !p.digest.is_empty()
+                    && !p.output.is_empty()
+                    && !p.build.is_empty()),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// The live-oracle floor is per fixture: a fixture whose output oracle is
+    /// absent, whose reference is another file's, or that verified too few
+    /// frames fails, however many other fixtures pass.
+    #[test]
+    fn the_live_oracle_floor_is_enforced_per_fixture() {
+        let mut c = Corpus::new(Kind::Default, &[1]);
+        let n = live_oracle(&c).unwrap();
+        assert!(n >= LIVE_FLOOR);
+        eprintln!("pf1-c4 mutation live oracle floor, intact Default: {n} distinct frames");
+        let oracle = c.out.take();
+        let e = live_oracle(&c).unwrap_err();
+        eprintln!("pf1-c4 mutation live oracle floor, no oracle: {e}");
+        let other = Fixture::new(Kind::Vfr);
+        c.out = Some(OutputOracle::new(&other.reference()));
+        let e = live_oracle(&c).unwrap_err();
+        eprintln!("pf1-c4 mutation live oracle floor, another file's reference: {e}");
+        drop(oracle);
+        // Too few frames verified: a corpus whose one-thread observations carry
+        // no returned frames does not meet the floor.
+        let mut empty = Corpus::new(Kind::Default, &[1]);
+        for (o, o2) in empty.oracle.get_mut(&1).unwrap() {
+            for obs in std::iter::once(o).chain(o2.as_mut()) {
+                obs.frame = None;
+            }
+        }
+        let e = live_oracle(&empty).unwrap_err();
+        assert!(e.contains("fewer than"), "{e}");
+        eprintln!("pf1-c4 mutation live oracle floor, nothing verified: {e}");
     }
 
     fn tick_check(facts: &Facts, scratch: &mut VideoDecoder) -> Result<(), String> {
@@ -1989,258 +2435,6 @@ mod tests {
                 }
                 run_script(&mut SeekPath::new(&a.fx, n), &cx, &steps, false)
                     .unwrap_or_else(|e| panic!("{name} x{n}: {e}"));
-            }
-        }
-    }
-
-    // ---- a correct continuation, built in test code (the positive control) ----
-
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Corrupt {
-        Never,
-        /// The held lookahead frame is damaged before the call is observed.
-        AtOnce,
-        /// It is damaged only at the end of the second continuation in a row, so
-        /// only a chained hop sees it.
-        SecondHop,
-    }
-
-    type ReferenceMutation = fn(&mut Vec<RefFrame>);
-    type RuleMutation = fn(&mut Rules);
-    type ObservationEdit = fn(&mut Observation);
-
-    /// One switch per S-2 rule; `Rules::ALL` is the design.
-    #[derive(Clone, Copy)]
-    #[allow(clippy::struct_excessive_bools, reason = "one switch per rule")]
-    struct Rules {
-        pair: bool,
-        shadow_known: bool,
-        real_matches: bool,
-        /// A mismatch at a seek disables continuation for the decoder for good.
-        latch: bool,
-        same_anchor: bool,
-        keys: bool,
-        timestamps: bool,
-        window: bool,
-        stream: bool,
-        events: bool,
-        /// Count the packets read as a one-thread decoder would have (ignore
-        /// the extra ones frame threads read ahead).
-        thread_blind: bool,
-        cancel: CancelAt,
-        corrupt: Corrupt,
-    }
-
-    impl Rules {
-        const ALL: Self = Self {
-            pair: true,
-            shadow_known: true,
-            real_matches: true,
-            latch: true,
-            same_anchor: true,
-            keys: true,
-            timestamps: true,
-            window: true,
-            stream: true,
-            events: true,
-            thread_blind: false,
-            cancel: CancelAt::Exact,
-            corrupt: Corrupt::Never,
-        };
-    }
-
-    #[derive(Clone, Copy)]
-    enum Fault {
-        ShadowFails,
-        ShadowMismatch,
-        StreamMismatch,
-        AnchorDrifts,
-    }
-
-    /// The positive control's model of S-2's "checked between produced
-    /// frames": arm the behavioural seam on its decoder. Private to this
-    /// module, and the harness fails any other path that has it armed.
-    fn between_frames(decoder: &mut VideoDecoder, on: bool) {
-        decoder.probe_mut().check_between_frames = on;
-    }
-
-    /// A reader that keeps its decoder, continues under S-2's rules and
-    /// otherwise seeks. The continuation is today's `decode_window_sequential`
-    /// judged after the fact against the packets it read; the shadow is the
-    /// fixture's `anchors`. Test-only: S2c-2's is the real one.
-    struct ReferenceContinuation {
-        fx: Rc<Fixture>,
-        threads: usize,
-        rules: Rules,
-        decoder: Option<VideoDecoder>,
-        run: Option<Anchor>,
-        fault: Option<Fault>,
-        cancel: Option<usize>,
-        tampers: Vec<Tamper>,
-        /// Continuations since the run's seek.
-        continued: u32,
-        /// A `MismatchOnce` waits for the next seek.
-        mismatch_once: bool,
-        /// Continuation is disabled for this decoder (a seek's real first
-        /// packet disagreed with the shadow's) until it is replaced.
-        disabled: bool,
-    }
-
-    impl ReferenceContinuation {
-        fn new(fx: &Rc<Fixture>, threads: usize, rules: Rules) -> Self {
-            Self {
-                fx: fx.clone(),
-                threads,
-                rules,
-                decoder: None,
-                run: None,
-                fault: None,
-                cancel: None,
-                tampers: Vec::new(),
-                continued: 0,
-                mismatch_once: false,
-                disabled: false,
-            }
-        }
-
-        /// The shadow's A(t) (`None`: unknown), at a run's seek or later.
-        fn shadow(&self, t: i64, at_seek: bool) -> Option<Anchor> {
-            let a = anchor(&self.fx.facts, t)?;
-            match self.fault {
-                Some(Fault::ShadowFails) => None,
-                Some(Fault::ShadowMismatch) => Some((a.0 + 1, a.1, a.2)),
-                Some(Fault::AnchorDrifts) if !at_seek => Some((a.0 + 1, a.1, a.2)),
-                Some(Fault::StreamMismatch) if self.rules.stream => None,
-                _ => Some(a),
-            }
-        }
-
-        fn may_continue(&self, c: i64, t: i64) -> bool {
-            let (Some(d), r) = (&self.decoder, self.rules) else {
-                return false;
-            };
-            let known = self.run.is_some() || !r.shadow_known;
-            !self.disabled
-                && d.state().continuation_at == Some(c + 1)
-                && t > c
-                && (!r.window || t <= c + 12)
-                && (!r.pair || self.fx.facts.kind != Kind::AviDtsGuess)
-                && known
-                && (!r.real_matches || self.run.is_none() || d.state().first_packet == self.run)
-                && (!r.same_anchor || self.shadow(t, false) == self.run)
-        }
-
-        /// After a continuation: were S-2's conditions kept while it ran?
-        fn run_valid(&self, d: &VideoDecoder) -> bool {
-            if self.rules.timestamps {
-                let mut prev: Option<i64> = None;
-                for f in &d.probe().frames {
-                    let Some(ts) = f.ts else { return false };
-                    if prev.is_some_and(|p| ts <= p) {
-                        return false;
-                    }
-                    prev = Some(ts);
-                }
-            }
-            // Keys are counted from the run's real first packet (not the shadow's).
-            let lag = if self.rules.thread_blind {
-                u64::try_from(self.threads - 1).unwrap()
-            } else {
-                0
-            };
-            let key_read = d.state().first_packet.as_ref().is_none_or(|a| {
-                keys_read(&self.fx.facts, a, d.probe().packets.saturating_sub(lag))
-            });
-            !(self.rules.keys && key_read)
-        }
-
-        fn seek(&mut self, t: TimeCode, before: Option<Before>) -> Observation {
-            let mut d = self.decoder.take().unwrap_or_else(|| {
-                let mut d = self.fx.open(self.threads);
-                d.probe_mut().tampers.clone_from(&self.tampers);
-                d
-            });
-            let before = before.unwrap_or_else(|| Before::of(&d));
-            arm(&mut d, self.cancel.take(), self.rules.cancel);
-            between_frames(&mut d, self.rules.cancel != CancelAt::Drain);
-            let mut cache = FrameCache::new(1);
-            let result = d.decode_window(t, t, &mut cache);
-            let shadow = match anchor(&self.fx.facts, t.0) {
-                Some(a) if std::mem::take(&mut self.mismatch_once) => Some((a.0 + 1, a.1, a.2)),
-                _ => self.shadow(t.0, true),
-            };
-            // Rule 2: the real seek's first packet must be the shadow's, else
-            // continuation is disabled for the decoder.
-            if self.rules.real_matches
-                && self.rules.latch
-                && shadow.is_some()
-                && d.state().first_packet.is_some()
-                && d.state().first_packet != shadow
-            {
-                self.disabled = true;
-            }
-            (self.run, self.continued) = (shadow, 0);
-            let observation = observe(&d, &mut cache, t, result, before);
-            self.decoder = Some(d);
-            observation
-        }
-    }
-
-    impl TargetPath for ReferenceContinuation {
-        const POSITIVE_CONTROL: bool = true;
-
-        fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
-            let Some(Cursor(c)) = from.filter(|c| self.may_continue(c.0, t.0)) else {
-                return self.seek(t, None);
-            };
-            let mut d = self.decoder.take().expect("checked by may_continue");
-            arm(&mut d, self.cancel.take(), self.rules.cancel);
-            between_frames(&mut d, self.rules.cancel != CancelAt::Drain);
-            let before = Before::of(&d);
-            let mut cache = FrameCache::new(13);
-            let result = d.decode_window_sequential(TimeCode(c + 1), t, &mut cache);
-            if result.is_ok() && !self.run_valid(&d) {
-                self.decoder = Some(d);
-                return self.seek(t, Some(before)); // abandon: today's seek
-            }
-            self.continued += 1;
-            let damage = match self.rules.corrupt {
-                Corrupt::Never => false,
-                Corrupt::AtOnce => true,
-                Corrupt::SecondHop => self.continued == 2,
-            };
-            if result.is_ok() && damage {
-                d.corrupt_lookahead();
-            }
-            let observation = observe(&d, &mut cache, t, result, before);
-            self.decoder = Some(d);
-            observation
-        }
-
-        fn event(&mut self, event: Event) {
-            let reset = |this: &mut Self| {
-                if this.rules.events {
-                    (this.decoder, this.run, this.disabled) = (None, None, false);
-                }
-            };
-            match event {
-                Event::Cancel(n) => self.cancel = Some(n),
-                Event::Tamper(t) => {
-                    self.tampers.push(t);
-                    self.decoder
-                        .iter_mut()
-                        .for_each(|d| d.probe_mut().tampers.push(t));
-                }
-                Event::ShadowFails => self.fault = Some(Fault::ShadowFails),
-                Event::ShadowMismatch => self.fault = Some(Fault::ShadowMismatch),
-                Event::StreamMismatch => self.fault = Some(Fault::StreamMismatch),
-                Event::AnchorDrifts => self.fault = Some(Fault::AnchorDrifts),
-                Event::MismatchOnce => self.mismatch_once = true,
-                Event::Relink(fx) => {
-                    self.fx = fx;
-                    reset(self);
-                }
-                Event::KeyChange | Event::ShrinkReopen | Event::Error => reset(self),
             }
         }
     }
@@ -2488,26 +2682,18 @@ mod tests {
         }
     }
 
-    /// A path over production code that arms the test-only cancel seam
-    /// (instead of relying on its own per-frame check) is not the positive
-    /// control, and the harness fails it: here the reference continuation,
-    /// which arms the seam, presented as a production adapter.
-    struct ArmsTheSeam(ReferenceContinuation);
-
-    impl TargetPath for ArmsTheSeam {
-        fn produce(&mut self, from: Option<Cursor>, t: TimeCode) -> Observation {
-            self.0.produce(from, t)
-        }
-
-        fn event(&mut self, event: Event) {
-            self.0.event(event);
-        }
-    }
-
+    /// A path that is not the positive control (it holds no `ControlToken`)
+    /// but whose decoder had the test-only cancel seam armed fails the
+    /// harness, whether it left the seam armed (`KeepsArmed`) or armed it
+    /// during decoding and cleared it before the observation
+    /// (`ArmsThenClears`, invisible to a snapshot of the flag). The control
+    /// itself passes. Claiming control without a token, or arming without
+    /// one, does not compile; there is no runtime test for that.
     #[test]
     fn a_production_adapter_may_not_arm_the_cancel_seam() {
         let c = Corpus::new(Kind::Default, &[1]);
-        // The positive control passes with the seam (it is the control).
+        let control = ReferenceContinuation::new(&c.fx, 1, Rules::ALL);
+        assert!(control.control().is_some());
         witness(
             &mut ReferenceContinuation::new(&c.fx, 1, Rules::ALL),
             &c,
@@ -2516,14 +2702,19 @@ mod tests {
         )
         .unwrap();
         let e = witness(
-            &mut ArmsTheSeam(ReferenceContinuation::new(&c.fx, 1, Rules::ALL)),
+            &mut KeepsArmed(ReferenceContinuation::new(&c.fx, 1, Rules::ALL)),
             &c,
             1,
             true,
         )
         .unwrap_err();
-        assert!(e.contains("check_between_frames"), "{e}");
-        eprintln!("pf1-c4 mutation adapter arms the seam (witness): {e}");
+        assert!(e.contains("control token"), "{e}");
+        eprintln!("pf1-c4 mutation adapter keeps the seam armed (witness): {e}");
+        let mut clears = ArmsThenClears::new(&c.fx, 1);
+        assert!(clears.control().is_none());
+        let e = witness(&mut clears, &c, 1, false).unwrap_err();
+        assert!(e.contains("control token"), "{e}");
+        eprintln!("pf1-c4 mutation adapter arms then clears the seam (witness): {e}");
         let (a, b) = (c, Corpus::new(Kind::EditList, &[1]));
         let cx = Ctx {
             a: &a,
@@ -2534,10 +2725,13 @@ mod tests {
             .into_iter()
             .find(|(name, _)| *name == "cancel with frames waiting")
             .expect("the exact-stop script");
-        let mut path = ArmsTheSeam(ReferenceContinuation::new(&a.fx, 1, Rules::ALL));
+        let mut path = KeepsArmed(ReferenceContinuation::new(&a.fx, 1, Rules::ALL));
         let e = run_script(&mut path, &cx, &steps, true).unwrap_err();
-        assert!(e.contains("check_between_frames"), "{name}: {e}");
-        eprintln!("pf1-c4 mutation adapter arms the seam ({name}): {e}");
+        assert!(e.contains("control token"), "{name}: {e}");
+        eprintln!("pf1-c4 mutation adapter keeps the seam armed ({name}): {e}");
+        let e = run_script(&mut ArmsThenClears::new(&a.fx, 1), &cx, &steps, false).unwrap_err();
+        assert!(e.contains("control token"), "{name}: {e}");
+        eprintln!("pf1-c4 mutation adapter arms then clears the seam ({name}): {e}");
     }
 
     // ---- wrong paths (kept from the first round) ----
@@ -2804,7 +2998,7 @@ mod tests {
     }
 
     /// S2c-2 MUST also show, against the real `ContinuationPath` (which runs
-    /// with the `check_between_frames` seam off; the harness enforces that),
+    /// with the `check_between_frames` seam untouched; the harness enforces that),
     /// that deleting its own production per-frame stop check in
     /// `receive_frames` fails the `cancel with frames waiting` script of
     /// `continuation_holds_the_scripted_cases`. The seam models that check
