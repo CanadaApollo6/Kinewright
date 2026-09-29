@@ -4124,3 +4124,98 @@ readback / monitor encode, in ms:
    - P-seek and L-6;
    - G18 with hashes;
    - P-rss LL.
+
+### E12.14 R38 fixes and the merge of main
+
+Ruling R38: the Astra re-review of `6ea6437..712d108` (`rereview-s2b.md`) rejected R37 on four new defects (D1–D4),
+left review B's F3, S1 and S2 partial, and added two nits. One commit per item on `pf1/impl`, after `a485b57`, then
+a merge of `main`. **The timing half is pending: quiet window.** No lane was run for R38. The binary
+and the plan are ready (E12.14.3).
+
+#### E12.14.1 Closure table
+
+Each mutation was applied alone to the committed code, and only its named witness was run
+(`s2b-logs/r38-mutations.log.gz`). **All 10 were killed.** Each row's raw lines are the failing test's summary and
+its panic message, verbatim.
+
+| Finding | Commit | Witness | Mutation | Raw result under the mutation |
+|---|---|---|---|---|
+| D1: a lookahead source whose frame size cannot be measured fails the current frame | `f9cad24` R38-1 | `preview::tests::an_unreadable_lookahead_source_does_not_fail_the_current_frame` | R38-1: `Err(_) if frame != at.0` → `Err(_) if false` (every measurement failure fails the job) | `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 997 filtered out; finished in 0.36s`; the panic is `render_ahead`'s "frame 0 did not render" (`preview.rs:2867`) |
+| D2: a suspended wait composites with the LUT library of the job that ran during it | `cbec07e` R38-2 | `preview::tests::a_suspended_wait_composites_with_its_own_lut` | R38-2: the rebind after `schedule` removed | `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 998 filtered out; finished in 0.73s`; "A composited with A's look" |
+| D3: charges follow raster identities; rasters the synchronous path caches are adopted or dropped | `1d093ac` R38-3 | `preview::tests::thumbnail_rasters_are_charged_or_dropped` | R38-3a: no `settle_titles` after a thumbnail; R38-3b: adoption without a charge (`adopt` bypassed) | 3a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 999 filtered out; finished in 0.41s`; 3b: `… finished in 0.31s`; both "thumbnail: live is what the preview holds" |
+| D4: the shared adjustment frame still owns an uncharged eight-byte buffer (C + 8 during composition) | `c2cb734` R38-4 | `render::k1_allocation::a_render_allocates_exactly_its_generated_reservation` (now unfiltered; asserts the adjustments' capacity is 0) | R38-4: the 1 × 1 frame restored | `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 999 filtered out; finished in 0.23s`; "no pixel buffer" |
+| B F3: at the global reader limit, `plan_regions` merges independent playheads and a merged reader decodes backwards (`0→14→1`) | `a25fc80` R38-5 (text in Amendment R37: *Reader limit*) | `sched::tests::over_the_reader_limit_a_merged_region_still_reads_forward`; `preview::tests::a_reader_limit_merge_is_counted` | R38-5a: a merged region keeps the earlier region's lookahead; R38-5b: `merged += 0` (run against both witnesses) | 5a: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.00s`, "A's regions merged forward only"; 5b (sched): `… finished in 0.00s`, "the last resort is counted"; 5b (preview): `… finished in 4.13s`, "P = 2: merges counted" |
+| B S1: G18's identity rests on equal lengths | `572f768` R38-6 (E12.9 qualified) | `g18_verdict.py`, the gate plan's last step (outside the repository, like the runner) | R38-6: synthetic logs with S0 hashing `aaaa…` and the candidate varied | same hash: "identity: **IDENTICAL**"; another hash: "**DIFFERENT**"; candidate lane exit 124: "**INCOMPLETE** (`G18 LH R38` exit 124)"; no candidate: "**INCOMPLETE** (no candidate G18 lane)"; the runner's `@` step printed the verdict into the lane log |
+| B S2 and its nit: the resident-title witness compares buffer addresses, which freed buffers can reuse | `cae3385` R38-7 | `preview::tests::a_resident_title_is_not_reserved_again` (counts rasterizations, `[2, 0]`) | R38-7: every generated raster reserved again (`Some(demand.generated)`) | `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1001 filtered out; finished in 0.32s`; "two rasters made once, then reused" |
+| B nit: the timing binaries' `cfg(test)` overhead is unstated | `32022ee` R38-8 | E12.13.3 lists every check the timing binaries execute | — | — |
+
+- **B F3's stat.** `PlaybackStats::regions_merged` counts each last-resort merge. The preview drains it at Ready with
+  `lookahead_starved`, and the P-play lane prints it as `engine_regions_merged`.
+- **Still open (documented, not a regression):** `regions()` keeps a per-source cap residual. A source's third
+  required region past the cap is folded before `plan_regions` sees it, so it is not counted as a merge.
+
+#### E12.14.2 Merge of main, tests and line counts
+
+- **The merge.** `b980b4e` merges `origin/main` `64e5391` (CI test tiers) without conflicts. `ci/ignored-tests.txt`
+  gained the five manual release lanes `pf1/impl` adds, each `any on-demand`:
+  - `pf1_export_lane::pf1_export_lane`;
+  - `pf1_harness::pf1_play_baseline`;
+  - `pf1_harness::pf1_rss_baseline`;
+  - `pf1_harness::pf1_rss_child`;
+  - `pf1_harness::pf1_seek_baseline`.
+- **The local stage gate at `b980b4e`** (every command at `nice -n 19`, `-j 4`, `RUST_TEST_THREADS=4`):
+  - `cargo build --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`, each with and without
+    the three `slow-tests` features: exit 0;
+  - `cargo fmt -- --check`: exit 0;
+  - `cargo build -p kinewright-app`: exit 0;
+  - `python3 scripts/slow_tests.py lint`: "slow-test manifest and markers agree: 47 tests, features
+    kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 44 allowlist entries
+    well-formed";
+  - `cargo test --workspace` (the fast tier): 36 `test result: ok` lines, 3,436 passed, 0 failed, 91 ignored.
+    Media: `test result: ok. 951 passed; 0 failed; 56 ignored; 0 measured; 0 filtered out; finished in 166.18s`.
+    The log is `s2b-logs/r38-workspace-fast.log.gz`;
+  - `slow_tests.py verify-fast` on that log with `--os linux`: "fast tier on linux skipped exactly the 47 manifest
+    tests and 44 allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else".
+  - The slow tier was not run locally. It runs in CI on the push.
+- **Test durations** (debug, 4 threads, the media binary under `--report-time`; `s2b-logs/r38-media-times.log.gz`).
+  One PF1 test runs over 60 s: `sched::tests::the_reader_model_holds_for_every_short_sequence` (H-8's model),
+  94.5 s. It is a slow-tier candidate and is **not** marked. The next PF1 tests are the seeded stress (24.1 s) and
+  `decode::tests::input_tables_match_every_accepted_descriptor` (10.3 s), which needs no attention.
+- **Before the merge,** each R38 commit passed the per-commit gate: build, media clippy with `-D warnings`, rustfmt on
+  the touched files and `cargo test -p kinewright-media`. The last per-commit media run read
+  `test result: ok. 981 passed; 0 failed; 21 ignored; 0 measured; 0 filtered out; finished in 350.07s`.
+  - One per-commit media run, at a load average near 85 from unrelated processes, failed the known load flake
+    `preview::tests::a_widening_plan_rebalances_the_permits` at its 60 s wait. It passed 3 of 3 alone and in the
+    next full run. It passed in the fast-tier run above.
+
+Non-blank, non-comment `.rs` lines, net, counted as in E12.13.2:
+
+| Commit | Production | Tests |
+|---|---|---|
+| R38-1 `f9cad24` | 11 | 31 |
+| R38-2 `cbec07e` | 1 | 94 |
+| R38-3 `1d093ac` | 54 | 103 |
+| R38-4 `c2cb734` | 0 | 2 |
+| R38-5 `a25fc80` | 28 | 51 |
+| R38-7 `cae3385` | 0 | 1 |
+| **R38** | **94** (+155 −61) | **282** (+293 −11) |
+
+- **Per file** (production + tests):
+  - `preview.rs` 49 + 247;
+  - `render.rs` 22 + 2;
+  - `sched.rs` 21 + 33;
+  - `media.rs` 1;
+  - `pf1_harness.rs` 1.
+- **Docs before this section:** 2 files, +27 −10 (`a25fc80`, `572f768`, `32022ee`).
+
+#### E12.14.3 Timing: pending, quiet window
+
+Nothing was timed for R38. What is ready:
+
+- **The binary:** the release test binary at `b980b4e`, `/tmp/kinewright-r37/bins/bin-b980b4e`, sha256
+  `b3266763cc6d329d6f7161d6f150c9671881ee3a09b73d5de334e7dd66b9a895` (in that directory's `SHA256SUMS`).
+- **The plan:** `plan-gates.txt` now runs every stage-gate lane on that binary. G18's candidate lane is `G18 LH R38`,
+  and the plan ends with `@G18 verdict`, which runs `g18_verdict.py` on the lane log.
+- **Unchanged:** the S0 side of G18 (`media-s0-g18`, sha256 `a4b501aa…82e03`) and the step-0 A/B plan (`plan-ab.txt`,
+  `10a2d18` against R37's `712d108`).
+- Every stage-gate verdict of E12.13.5's owed list therefore still waits for the quiet window, now on this binary.
