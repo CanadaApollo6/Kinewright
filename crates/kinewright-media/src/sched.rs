@@ -1297,14 +1297,28 @@ pub(crate) struct PermitBook {
     pool: usize,
     held: BTreeMap<u64, usize>,
     tickets: VecDeque<(u64, usize)>,
-    /// Cancelled requests, kept until their reader polls (a cancel can
-    /// precede the ticket) or exits.
+    /// Amendment R43 (re-review R41 blocker 4): the readers started and not
+    /// yet exited. A cancel for any other reader is dropped, so a cancel
+    /// decided before its reader exited leaves nothing behind.
+    live: BTreeSet<u64>,
+    /// Cancelled requests of live readers, kept until their reader polls (a
+    /// cancel can precede the ticket) or exits; at most
+    /// [`CANCELLED_CAP`].
     cancelled: BTreeSet<u64>,
     pub(crate) shutdown: bool,
     /// Polls per reader (review A F3's witness).
     #[cfg(test)]
     pub(crate) polls: BTreeMap<u64, usize>,
+    /// Amendment R43's witness: exits (`forget`) per reader.
+    #[cfg(test)]
+    pub(crate) forgets: BTreeMap<u64, usize>,
 }
+
+/// Amendment R43: at most this many cancelled requests are kept. Only live
+/// readers' are (≤ R at a time), so the cap is a backstop: past it the
+/// lowest id's is dropped, and that reader, if it is granted, retires at its
+/// next step (its plan is obsolete) instead.
+pub(crate) const CANCELLED_CAP: usize = 64;
 
 /// A queued request's outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1320,10 +1334,13 @@ impl PermitBook {
             pool: pool.max(1),
             held: BTreeMap::new(),
             tickets: VecDeque::new(),
+            live: BTreeSet::new(),
             cancelled: BTreeSet::new(),
             shutdown: false,
             #[cfg(test)]
             polls: BTreeMap::new(),
+            #[cfg(test)]
+            forgets: BTreeMap::new(),
         }
     }
 
@@ -1362,7 +1379,20 @@ impl PermitBook {
         }
     }
 
+    /// Amendment R43: the reader `id` starts (before its thread runs, so
+    /// before any cancel of its ticket can be decided).
+    pub(crate) fn join(&mut self, id: u64) {
+        self.live.insert(id);
+    }
+
+    /// Cancel `id`'s request: a no-op once it exited (Amendment R43).
     pub(crate) fn cancel(&mut self, id: u64) {
+        if !self.live.contains(&id) {
+            return;
+        }
+        if self.cancelled.len() >= CANCELLED_CAP && !self.cancelled.contains(&id) {
+            self.cancelled.pop_first();
+        }
         self.cancelled.insert(id);
     }
 
@@ -1372,6 +1402,11 @@ impl PermitBook {
 
     /// The reader `id` exited: nothing of it stays.
     pub(crate) fn forget(&mut self, id: u64) {
+        #[cfg(test)]
+        {
+            *self.forgets.entry(id).or_default() += 1;
+        }
+        self.live.remove(&id);
         self.held.remove(&id);
         self.cancelled.remove(&id);
         self.tickets.retain(|(ticket, _)| *ticket != id);
@@ -1789,6 +1824,7 @@ mod tests {
                             let error = MediaError::Backend("decode-reader: injected".into());
                             self.readers.fail_start(id, &error);
                         } else {
+                            self.book.join(id);
                             self.live.push(id);
                         }
                     }
@@ -1923,6 +1959,9 @@ mod tests {
             };
             let regions = regions.filter(|_| !over).unwrap_or_default();
             let posted = self.readers.post(regions, (sizes, generated), self.now);
+            for (id, _) in &posted.spawn {
+                self.book.join(*id);
+            }
             self.live.extend(posted.spawn.iter().map(|(id, _)| *id));
             let cancelled = !posted.cancel.is_empty();
             posted.cancel.iter().for_each(|id| self.book.cancel(*id));
@@ -2026,6 +2065,11 @@ mod tests {
                 "a reader queued twice"
             );
             assert_eq!(tickets, self.waiting.iter().copied().collect(), "tickets");
+            // Amendment R43: only live readers' cancels are kept.
+            assert!(
+                self.book.cancelled.is_subset(&self.book.live),
+                "a cancel outlived its reader"
+            );
             for key in 0..4u8 {
                 let per_key = readers.slots.iter().filter(|slot| slot.key == key).count();
                 assert!(
@@ -3005,6 +3049,50 @@ mod tests {
         decoded.extend(walk(&mut readers, id, 0));
         assert_eq!(decoded, [0, 14, 15, 15, 16], "15 is decoded again");
         assert_eq!(readers.merged_rewinds, 0, "and that is no rewind");
+    }
+
+    /// Amendment R43 (re-review R41 blocker 4): a reader is granted, then
+    /// retires and exits (`forget`) before the preview applies the cancel
+    /// it decided while the reader still waited: nothing stays. A cancel
+    /// that precedes its reader's ticket still cancels it. Repeated, the
+    /// book stays empty; cancels of live readers stop at the cap.
+    #[test]
+    fn a_cancel_after_its_reader_exited_leaves_nothing() {
+        let mut book = PermitBook::new(4);
+        book.join(1);
+        book.enqueue(1, 2);
+        assert_eq!(book.poll(1), Poll::Granted(2));
+        book.forget(1);
+        book.cancel(1);
+        assert!(
+            book.cancelled.is_empty(),
+            "a tombstone of a departed reader"
+        );
+        book.join(2);
+        book.cancel(2);
+        book.enqueue(2, 1);
+        assert_eq!(book.poll(2), Poll::Cancelled, "a cancel before the ticket");
+        book.forget(2);
+        for id in 3..1_000 {
+            book.join(id);
+            book.enqueue(id, 1);
+            assert_eq!(book.poll(id), Poll::Granted(1));
+            book.forget(id);
+            book.cancel(id);
+        }
+        assert!(book.cancelled.is_empty() && book.live.is_empty());
+        assert_eq!(book.in_use(), 0);
+        let live = u64::try_from(CANCELLED_CAP).expect("cap") + 10;
+        for id in 1_000..1_000 + live {
+            book.join(id);
+            book.cancel(id);
+        }
+        assert_eq!(book.cancelled.len(), CANCELLED_CAP, "capped");
+        assert_eq!(
+            book.cancelled.first(),
+            Some(&1_010),
+            "the lowest went first"
+        );
     }
 
     /// Amendment R43: replans posted mid-job at random, between reader

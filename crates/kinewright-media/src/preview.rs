@@ -1513,6 +1513,8 @@ impl Preview {
         for (id, key) in spawn {
             let spec = demand.sources.get(&key).map(|(spec, _)| spec.clone());
             let stop = Arc::<AtomicBool>::default();
+            // Amendment R43: known to `Permits` before its thread runs.
+            self.lane.book().join(id);
             let started = spec
                 .ok_or_else(|| MediaError::Backend("decode-reader: no source".to_owned()))
                 .and_then(|spec| spawn_reader(&self.lane, (id, spec), &stop));
@@ -1522,6 +1524,7 @@ impl Preview {
                     self.stops.insert(id, stop);
                 }
                 Err(error) => {
+                    self.lane.permits_change(|book| book.forget(id));
                     self.lane.lock().readers.fail_start(id, &error);
                     self.lane.notify();
                 }
@@ -2371,6 +2374,12 @@ pub(crate) mod tests {
     ) -> (Sender<()>, Receiver<PreviewFrame>, thread::JoinHandle<()>) {
         let (gate, gated) = bounded(0);
         *lane.gate.lock().expect("gate") = Some(gated);
+        let (frames, thread) = threaded_preview(lane);
+        (gate, frames, thread)
+    }
+
+    /// A preview thread on `lane`.
+    fn threaded_preview(lane: &Arc<Lane>) -> (Receiver<PreviewFrame>, thread::JoinHandle<()>) {
         // The renderer is not `Send`: build the preview on its thread.
         let (lane, (handoff, frames)) = (Arc::clone(lane), bounded(1));
         let thread = thread::spawn(move || {
@@ -2378,7 +2387,7 @@ pub(crate) mod tests {
             handoff.send(frames).expect("frames");
             preview.run();
         });
-        (gate, frames.recv().expect("the preview started"), thread)
+        (frames.recv().expect("the preview started"), thread)
     }
 
     /// H-6: join within 60 s, or the test fails as a hang.
@@ -3594,6 +3603,56 @@ pub(crate) mod tests {
         only.duration = TimeCode(ends.max().unwrap_or(0));
         only.validate().expect("a subset is valid");
         Arc::new(only)
+    }
+
+    /// Amendment R43 (re-review R41 blocker 4): at P = 2 reader A holds
+    /// both permits, held in its decode of 0; B, started for a job at frame
+    /// 10, waits for permits. A third job no longer wants B's source: B's
+    /// ticket is cancelled and it leaves `PermitWait` while A still holds
+    /// the pool. So the preview's cancel reached `Permits`, which knows
+    /// each reader from before its thread runs.
+    #[test]
+    fn an_obsolete_ticket_is_cancelled_while_the_pool_is_held() {
+        let crate::perf_fixtures::Workload(document, _media) =
+            crate::perf_fixtures::cuts((160, 90), 30, 1, 2, 10);
+        let document = Arc::new(document);
+        let lane = Arc::new(Lane::with_parallelism(2));
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((0, held));
+        let (frames, thread) = threaded_preview(&lane);
+        let paused = |at, seq| job(&document, JobKind::Paused(TimeCode(at)), stamp(1, seq));
+        lane.post(Some(paused(0, 1)));
+        let decoding_zero = |slot: &crate::sched::Slot<VideoSourceKey>| {
+            matches!(
+                slot.state,
+                crate::sched::ReaderState::Decoding { at: 0, .. }
+            )
+        };
+        wait_until(&lane, |state| state.readers.slots.iter().any(decoding_zero));
+        assert_eq!(lane.permits_in_use(), 2, "A holds the pool");
+        lane.post(Some(paused(10, 2)));
+        let waiting = |slot: &crate::sched::Slot<VideoSourceKey>| {
+            slot.state == crate::sched::ReaderState::PermitWait
+        };
+        wait_until(&lane, |state| state.readers.slots.iter().any(waiting));
+        let b = (lane.lock().readers.slots.iter())
+            .find(|slot| waiting(slot))
+            .map(|slot| slot.id)
+            .expect("B waits for permits");
+        lane.post(Some(paused(0, 3)));
+        wait_until(&lane, |state| {
+            (state.readers.slots.iter()).all(|slot| slot.id != b || !waiting(slot))
+        });
+        assert_eq!(
+            lane.permits_in_use(),
+            2,
+            "cancelled, not granted: A holds the pool"
+        );
+        drop(release);
+        let frame = frames.recv_timeout(Duration::from_secs(60));
+        assert_eq!(frame.expect("frame 0").at, TimeCode(0));
+        lane.shut_down();
+        join_within(thread);
     }
 
     /// Amendment R41 (U-1): the preview's per-source memory (frame sizes,
