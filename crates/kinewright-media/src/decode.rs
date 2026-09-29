@@ -970,8 +970,48 @@ pub(crate) struct DecoderProbe {
     /// The frames received since the run's seek, in arrival order.
     pub(crate) frames: Vec<FrameLog>,
     cancel_at_received: Option<u64>,
+    /// Model S-2's "cancellation is checked between produced frames": after
+    /// a received frame raises the stop flag, the run ends with `Cancelled`
+    /// before any further frame is accepted. Off, the decoder is today's:
+    /// it checks between packets, so frames already decoded and waiting
+    /// (frame threads, the end-of-stream flush) are still drained. A test
+    /// seam standing in for the check S2c-2 puts in `receive_frames`.
+    pub(crate) check_between_frames: bool,
     pub(crate) tampers: Vec<Tamper>,
     last_ts: Option<i64>,
+    /// Colour conversions run over the decoder's lifetime.
+    pub(crate) conversions: u64,
+    /// The timestamp of the frame being converted.
+    converting_pts: Option<i64>,
+    /// The latest conversion's RGBA64 bytes (the input to the working frame).
+    pub(crate) last_conversion: Option<Converted>,
+}
+
+/// PF1 S2c C-4: what the shared conversion path handed to the working-frame
+/// stage: the source frame's own timestamp and the tightly packed RGBA64LE.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct Converted {
+    pub(crate) pts: Option<i64>,
+    pub(crate) rgba: Arc<Vec<u8>>,
+}
+
+/// PF1 S2c C-4: a deliberate fault in the shared output path (the mutation
+/// that a continuation-versus-Seek comparison cannot see, since both share
+/// the path). Per thread, so parallel tests do not meet each other's fault.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFault {
+    /// The colour conversion (graph or scaler) returns wrong RGBA64.
+    Conversion,
+    /// The working-frame stage receives wrong RGBA64 (the conversion was right).
+    WorkingFrame,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OUTPUT_FAULT: std::cell::Cell<Option<OutputFault>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -1002,6 +1042,33 @@ impl DecoderProbe {
         let out = out.unwrap_or(ts);
         self.last_ts = out.or(self.last_ts);
         out
+    }
+
+    /// Record a conversion's RGBA64 (`rgba` is the graph or scaler output),
+    /// applying the thread's `OUTPUT_FAULT`, if any, on its side of the tap.
+    pub(crate) fn tap_conversion(
+        &mut self,
+        pts: Option<i64>,
+        rgba: &mut ffmpeg::frame::Video,
+        (width, height): (u32, u32),
+    ) {
+        let fault = OUTPUT_FAULT.with(std::cell::Cell::get);
+        let flip = |rgba: &mut ffmpeg::frame::Video| rgba.data_mut(0)[1] ^= 0x10;
+        if fault == Some(OutputFault::Conversion) {
+            flip(rgba);
+        }
+        let (row, stride) = (usize::try_from(width).unwrap() * 8, rgba.stride(0));
+        let bytes = (0..usize::try_from(height).unwrap())
+            .flat_map(|y| rgba.data(0)[y * stride..y * stride + row].iter().copied())
+            .collect();
+        self.conversions += 1;
+        self.last_conversion = Some(Converted {
+            pts,
+            rgba: Arc::new(bytes),
+        });
+        if fault == Some(OutputFault::WorkingFrame) {
+            flip(rgba);
+        }
     }
 
     /// Count a received frame; a cancel armed for it raises the stop flag.
@@ -1694,6 +1761,14 @@ impl VideoDecoder {
             #[cfg(test)]
             self.probe
                 .on_frame(first_grid_frame, timestamp, self.stop.as_ref());
+            #[cfg(test)]
+            if self.probe.check_between_frames
+                && (self.stop.as_ref())
+                    .is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire))
+            {
+                self.continuation_at = None;
+                return Err(MediaError::Cancelled);
+            }
             let next = PendingVideoFrame {
                 first_grid_frame,
                 decoded: Some(decoded),
@@ -1742,6 +1817,11 @@ impl VideoDecoder {
                 .as_ref()
                 .ok_or_else(|| MediaError::Backend("pending video frame has no pixels".to_owned()))?
                 .clone();
+            // The clone drops the timestamp; the tap records the frame's own.
+            #[cfg(test)]
+            {
+                self.probe.converting_pts = pending.decoded.as_ref().and_then(|d| d.timestamp());
+            }
             let texture = self.convert::<T>(&decoded)?;
             for index in first..=last {
                 cache.insert(TimeCode(index), texture.clone());
@@ -1789,6 +1869,14 @@ impl VideoDecoder {
                     ))
                 })?;
             }
+        }
+        #[cfg(test)]
+        if matches!(self.converter, VideoConverter::Managed(_)) {
+            self.probe.tap_conversion(
+                self.probe.converting_pts,
+                &mut rgba,
+                (self.scaled_width, self.scaled_height),
+            );
         }
         T::from_rgba_frame(
             &rgba,

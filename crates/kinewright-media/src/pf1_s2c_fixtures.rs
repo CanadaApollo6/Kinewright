@@ -116,12 +116,21 @@ pub(super) struct Fixture {
 }
 
 /// A frame of the CLI's linear decode: `best_effort_timestamp`, grid frame
-/// and the SHA-256 `framehash` gives its raw planes.
+/// and the SHA-256 `framehash` gives its raw planes (`sha`) and, after the
+/// CLI's own conversion to full-range RGBA64LE with the arguments the design
+/// specifies for the managed graph (`out`, see [`CONVERSION`]).
 pub(super) struct RefFrame {
     pub(super) ts: Option<i64>,
     pub(super) grid: Option<i64>,
     pub(super) sha: String,
+    pub(super) out: String,
 }
+
+/// The managed decoder's colour conversion (decode.rs `managed_filter_graph`
+/// for these BT.709 limited-range files, no scaling), as CLI filter arguments.
+/// Written out here rather than read from the decoder: it is the oracle.
+pub(super) const CONVERSION: &str = "scale=w=320:h=180:flags=bicubic:in_color_matrix=bt709:\
+     out_color_matrix=bt709:in_range=mpeg:out_range=jpeg,format=rgba64le";
 
 /// The CLI arguments per file (the VUI colour tags let the managed decoder open).
 fn arguments(kind: Kind) -> (Vec<String>, &'static str) {
@@ -325,6 +334,40 @@ impl Fixture {
         sha256_file(self.media.path()).expect("hash the fixture")
     }
 
+    /// `ffmpeg -f framehash` SHA-256 of each output frame (of the raw decode,
+    /// or of `filter`'s output), in output order.
+    fn framehashes(&self, filter: Option<&str>) -> Vec<String> {
+        let mut command = Command::new(ffmpeg_executable());
+        command
+            .args(["-hide_banner", "-v", "error", "-i"])
+            .arg(self.media.path())
+            .args(["-map", "0:v:0"]);
+        if let Some(filter) = filter {
+            command.args(["-vf", filter]);
+        }
+        let hashes = command
+            .args([
+                "-fps_mode",
+                "passthrough",
+                "-f",
+                "framehash",
+                "-hash",
+                "sha256",
+                "-",
+            ])
+            .output()
+            .expect("run ffmpeg");
+        assert!(
+            hashes.status.success(),
+            "framehash: {}",
+            String::from_utf8_lossy(&hashes.stderr)
+        );
+        let text = String::from_utf8(hashes.stdout).unwrap();
+        (text.lines().filter(|l| !l.starts_with('#')))
+            .filter_map(|l| l.rsplit(',').next().map(|s| s.trim().to_owned()))
+            .collect()
+    }
+
     /// The CLI's own linear decode of the file, in display order: timestamps
     /// from `ffprobe -show_frames`, frame hashes from `ffmpeg -f framehash`.
     pub(super) fn reference(&self) -> Vec<RefFrame> {
@@ -346,36 +389,12 @@ impl Fixture {
             String::from_utf8_lossy(&probe.stderr)
         );
         let json: serde_json::Value = serde_json::from_slice(&probe.stdout).expect("ffprobe json");
-        let hashes = Command::new(ffmpeg_executable())
-            .args(["-hide_banner", "-v", "error", "-i"])
-            .arg(path)
-            .args([
-                "-map",
-                "0:v:0",
-                "-fps_mode",
-                "passthrough",
-                "-f",
-                "framehash",
-                "-hash",
-                "sha256",
-                "-",
-            ])
-            .output()
-            .expect("run ffmpeg");
-        assert!(
-            hashes.status.success(),
-            "framehash: {}",
-            String::from_utf8_lossy(&hashes.stderr)
-        );
-        let text = String::from_utf8(hashes.stdout).unwrap();
-        let shas: Vec<&str> = (text.lines().filter(|l| !l.starts_with('#')))
-            .filter_map(|l| l.rsplit(',').next().map(str::trim))
-            .collect();
+        let shas = self.framehashes(None);
+        let outs = self.framehashes(Some(CONVERSION));
         let frames = json["frames"].as_array().expect("ffprobe frames");
-        assert_eq!(
-            frames.len(),
-            shas.len(),
-            "{:?}: ffprobe and framehash frame counts",
+        assert!(
+            frames.len() == shas.len() && shas.len() == outs.len(),
+            "{:?}: ffprobe, framehash and converted framehash frame counts",
             self.kind
         );
         let stream_grid = |ts: i64| {
@@ -384,13 +403,14 @@ impl Fixture {
                 ffmpeg::Rational::new(i32::try_from(n).unwrap(), i32::try_from(d).unwrap());
             grid(ts - self.facts.start, time_base, self.fps)
         };
-        let mut reference: Vec<_> = (frames.iter().zip(shas))
-            .map(|(frame, sha)| {
+        let mut reference: Vec<_> = (frames.iter().zip(shas).zip(outs))
+            .map(|((frame, sha), out)| {
                 let ts = frame["best_effort_timestamp"].as_i64();
                 RefFrame {
                     ts,
                     grid: ts.map(stream_grid),
-                    sha: sha.to_owned(),
+                    sha,
+                    out,
                 }
             })
             .collect();
