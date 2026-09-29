@@ -237,9 +237,13 @@ one frame after the previous one (`REGION_GAP` = 1, was 16) and at a required
 time after lookahead. Two same-source playheads (`typical_1080p`'s layers 14
 frames apart) are therefore two readers, each decoding forward with one seek
 (its open); the R36 probe measured ≈ 184 seeks per LH run, was ≈ 2,470.
-*Residual:* a source keeps ≤ 2 readers (H-1), so a third region merges into the
-second, whose reader then seeks between its playheads; no W workload has three
-simultaneous playheads on one source. *Reader limit (R38, review B F3):* when
+*Residual (H-1's cap; Amendment R41):* a source keeps ≤ 2 readers (H-1), so
+every region past the second folds into the second, a fallback region like the
+reader limit's merge below. It keeps only the lookahead past its last required
+time, so within a job its reader seeks forward between its playheads, and each
+fold is counted in `PlaybackStats::regions_folded`. No W workload has three
+simultaneous playheads on one source; a same-source cut's pre-roll inside the
+horizon folds routinely. *Reader limit (R38, review B F3):* when
 all sources' regions exceed the reader limit R, lookahead-only regions go
 first. Only as a last resort are two required regions of one source merged,
 the nearest pair first (the later region's first required time less the
@@ -252,21 +256,23 @@ synchronous fallback. *G14 margin:* the probe's held maximum was 91.1 ms
 against 100 ms; S4's pinned run is the verdict.
 
 **Amendment R41 (proposed) [S2b] Fallback regions rewind across jobs
-(re-review BF3-2).** A *merged* region puts two or more of one source's
-playheads on one reader. Within a job it decodes forward only: its required
+(re-review BF3-2).** A *merged* region puts two or more of one source's regions
+on one reader: the reader limit's last-resort merge (`regions_merged`) or H-1's
+fold (`regions_folded`). Within a job it decodes forward only: its required
 times ascending, then only the lookahead past the last of them. Across jobs it
 cannot. When the playheads advance, the earlier one's next frame lies behind
 the reader, which must seek back to it. At P = 2, with A requiring 0 and 14 and
-B requiring 7, A's reader decodes 0 → 14 → 15 → 16, then 1 → 15 → 16 → 17, and
-so on. Decoding the gap forward instead would cost as much as the seek, so no
-order is cheaper. This is the degraded mode, and the documented cost of
-exceeding R. A merged region's reader rewinds at most once per job. A *rewind*
+B requiring 7, A's reader decodes 0, 14, 15 and 16; in the next job it seeks
+back to 1, then decodes 17 (15 and 16 are already held). Decoding the gap
+forward instead would cost as much as the seek, so no order is cheaper. This is
+the degraded mode, and the documented cost of exceeding R or H-1's two readers
+per source. A merged region's reader rewinds at most once per job. A *rewind*
 is a decode at or before the reader's previous decode. Each rewind is counted
 in `PlaybackStats::merged_rewinds`, which the timing lanes print as
-`engine_merged_rewinds` beside `engine_regions_merged`. R37's rule, that regions
-merge only across real decoder continuation, governs every region that is not
-such a fallback. With enough readers, no reader rewinds as its playheads
-advance.
+`engine_merged_rewinds` beside `engine_regions_merged` and
+`engine_regions_folded`. R37's rule, that regions merge only across real
+decoder continuation, governs every region that is not such a fallback. With
+enough readers, no reader rewinds as its playheads advance.
 
 **H-2 [S2b-1] `Sched`: shared state and participant states.** A
 `Mutex<SchedState>` with condvars `work` (readers) and `ready` (preview) holds

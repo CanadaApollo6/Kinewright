@@ -1163,11 +1163,9 @@ impl Preview {
             return Ok(self.fell_back(posted, demand));
         }
         let plan = (sizes, demand.generated);
-        let (regions, merged) = regions.unwrap_or_default();
-        // R38: last-resort merges are counted (drained with `starved`).
-        state.readers.regions_merged += merged;
+        let planned = regions.expect("K-3 returned above");
         // The set is admitted under the post's lock, before a reader starts.
-        let mut posted = Some(state.readers.post(regions, plan, now));
+        let mut posted = Some(state.readers.post_planned(planned, plan, now));
         // Review B S2: only the rasters not resident are reserved.
         let mut generated = Some(demand.generated_uncharged(&self.charged));
         let mut granted = None;
@@ -1248,16 +1246,18 @@ impl Preview {
         }
     }
 
-    /// K-2 / R38 / R41: the plans' refusal, merge and rewind counts, taken
+    /// K-2 / R38 / R41: the plans' refusal, merge, fold and rewind counts, taken
     /// under `Sched`, join the engine's stats after unlock.
     fn drain_counts(&self, mut state: Sched<'_>) {
         let starved = std::mem::take(&mut state.readers.starved);
         let merged = std::mem::take(&mut state.readers.regions_merged);
+        let folded = std::mem::take(&mut state.readers.regions_folded);
         let rewinds = std::mem::take(&mut state.readers.merged_rewinds);
         drop(state);
         let mut counters = self.lane.counters();
         counters.stats.lookahead_starved += starved;
         counters.stats.regions_merged += merged;
+        counters.stats.regions_folded += folded;
         counters.stats.merged_rewinds += rewinds;
     }
 
@@ -2817,10 +2817,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// Amendment R41: a merged reader's rewinds reach the engine's stats.
-    /// Played ahead for 8 frames at P = 2, the cut document's two
-    /// same-source playheads share a reader, which rewinds as they advance
-    /// (at most once per job per merged region); at P = 3 nothing rewinds.
+    /// Amendment R41: fallback regions' merges, folds and rewinds reach the
+    /// engine's stats. Played ahead for 8 frames at P = 2, the cut
+    /// document's two same-source playheads share a reader, which rewinds as
+    /// they advance (at most once per job per fallback region, each counted
+    /// once or more); at P = 3 nothing merges and nothing rewinds, though
+    /// the cuts' pre-roll folds past H-1's two readers per source.
     #[test]
     fn merged_rewinds_reach_the_engine_stats() {
         let (document, _workload) = cut_document();
@@ -2832,12 +2834,19 @@ pub(crate) mod tests {
                 render_ahead(&mut preview, &document, at);
             }
             let stats = lane.counters().stats;
-            let (merged, rewinds) = (stats.regions_merged, stats.merged_rewinds);
+            let (merged, folded) = (stats.regions_merged, stats.regions_folded);
+            let rewinds = stats.merged_rewinds;
+            let counts =
+                format!("P = {parallelism}: {merged} merged, {folded} folded, {rewinds} rewinds");
+            assert!(folded > 0, "{counts}: the pre-roll folds are counted");
             if parallelism == 2 {
-                assert!(rewinds > 0, "P = 2: rewinds counted ({merged} merges)");
-                assert!(rewinds <= merged, "P = 2: ≤ 1 per merged region per job");
+                assert!(rewinds > 0, "{counts}: rewinds counted");
+                assert!(
+                    rewinds <= merged + folded,
+                    "{counts}: ≤ 1 per fallback region per job"
+                );
             } else {
-                assert_eq!((merged, rewinds), (0, 0), "P = 3: no merge, no rewind");
+                assert_eq!((merged, rewinds), (0, 0), "{counts}: no merge, no rewind");
             }
         }
     }

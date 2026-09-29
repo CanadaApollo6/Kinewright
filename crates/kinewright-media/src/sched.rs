@@ -161,10 +161,12 @@ pub(crate) enum Admission<F> {
 }
 
 /// Split one source's demand into at most two regions (required ones
-/// first); `None`-free: an empty demand gives no region. Runs beyond the
-/// second merge into it (R37's third-playhead residual: that reader seeks
-/// between its playheads).
-fn regions(required: &[i64], lookahead: &[i64]) -> Vec<Region> {
+/// first); an empty demand gives no region. H-1's cap (Amendment R41):
+/// runs beyond the second fold into it, a fallback region that keeps only
+/// the lookahead past its last required time, so its reader decodes
+/// forward within a job and may rewind once per job across jobs. Returns
+/// the regions and how many runs folded.
+fn regions(required: &[i64], lookahead: &[i64]) -> (Vec<Region>, u64) {
     let mut times: Vec<(i64, bool)> = required.iter().map(|t| (*t, true)).collect();
     times.extend(lookahead.iter().map(|t| (*t, false)));
     times.sort_by_key(|(t, required)| (*t, !required));
@@ -187,21 +189,36 @@ fn regions(required: &[i64], lookahead: &[i64]) -> Vec<Region> {
         last = Some((t, required));
     }
     runs.sort_by_key(|run| run.required.is_empty());
+    let mut folds = 0;
     if runs.len() > READERS_PER_SOURCE {
         let rest = runs.split_off(READERS_PER_SOURCE);
+        folds = u64::try_from(rest.len()).unwrap_or(u64::MAX);
         let second = &mut runs[READERS_PER_SOURCE - 1];
         for run in rest {
             second.required.extend(run.required);
             second.lookahead.extend(run.lookahead);
         }
         second.required.sort_unstable();
+        let last = second.required.last().copied().unwrap_or(i64::MIN);
+        second.lookahead.retain(|t| *t > last);
         second.lookahead.sort_unstable();
+        second.merged = true;
     }
-    runs
+    (runs, folds)
+}
+
+/// What [`plan_regions`] planned: the regions, and the fallbacks taken to
+/// fit them (each a merged region, Amendment R41).
+pub(crate) struct Planned<K> {
+    pub(crate) regions: Vec<(K, Region)>,
+    /// R38: required regions merged to fit the reader limit R.
+    pub(crate) merged: u64,
+    /// Amendment R41: runs folded past H-1's two readers per source.
+    pub(crate) folded: u64,
 }
 
 /// H-1/H-5: the regions a job's demand needs, within `limit` readers, and
-/// how many merges fitting them took. Over the limit (R38, review B F3),
+/// the merges and H-1 folds fitting them took. Over the limit (R38, review B F3),
 /// lookahead-only regions go first; only then, as a last resort, are two of
 /// one source's required regions merged, the nearest pair first, keeping
 /// only the lookahead past the merged region's last required time, so its
@@ -212,16 +229,20 @@ fn regions(required: &[i64], lookahead: &[i64]) -> Vec<Region> {
 pub(crate) fn plan_regions<K: Clone>(
     demand: &[(K, Vec<i64>, Vec<i64>)],
     limit: usize,
-) -> Option<(Vec<(K, Region)>, u64)> {
+) -> Option<Planned<K>> {
     let needed = demand
         .iter()
         .filter(|(_, required, _)| !required.is_empty());
     if needed.count() > limit {
         return None;
     }
-    let mut per_source: Vec<(K, Vec<Region>)> = (demand.iter())
-        .map(|(key, required, lookahead)| (key.clone(), regions(required, lookahead)))
-        .collect();
+    let mut folded = 0u64;
+    let mut per_source: Vec<(K, Vec<Region>)> = Vec::with_capacity(demand.len());
+    for (key, required, lookahead) in demand {
+        let (runs, folds) = regions(required, lookahead);
+        folded += folds;
+        per_source.push((key.clone(), runs));
+    }
     let count = |sources: &[(K, Vec<Region>)]| sources.iter().map(|(_, r)| r.len()).sum::<usize>();
     if count(&per_source) > limit {
         for (_, runs) in &mut per_source {
@@ -249,7 +270,11 @@ pub(crate) fn plan_regions<K: Clone>(
         .flat_map(|(key, runs)| runs.into_iter().map(move |run| (key.clone(), run)))
         .collect();
     all.sort_by_key(|(_, run)| run.required.is_empty());
-    Some((all, merged))
+    Some(Planned {
+        regions: all,
+        merged,
+        folded,
+    })
 }
 
 /// R38: the two adjacent required regions of one source nearest in time
@@ -305,6 +330,8 @@ pub(crate) struct Readers<K, F> {
     pub(crate) starved: u64,
     /// R38 (review B F3): required regions merged to fit the reader limit.
     pub(crate) regions_merged: u64,
+    /// Amendment R41: runs folded past H-1's two readers per source.
+    pub(crate) regions_folded: u64,
     /// Amendment R41: decodes by a merged region's reader at or before the
     /// time it decoded last (a backward seek).
     pub(crate) merged_rewinds: u64,
@@ -345,6 +372,7 @@ impl<K, F> Readers<K, F> {
             required_bytes: 0,
             starved: 0,
             regions_merged: 0,
+            regions_folded: 0,
             merged_rewinds: 0,
             starved_keys: HashSet::new(),
             travel: HashMap::new(),
@@ -489,6 +517,19 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             dropped: (frames, errors),
             ..self.assign(now)
         }
+    }
+
+    /// R38 / R41: [`Self::post`] a planned job, counting its merges and
+    /// H-1 folds (the preview drains them at Ready).
+    pub(crate) fn post_planned(
+        &mut self,
+        planned: Planned<K>,
+        plan: (HashMap<K, usize>, usize),
+        now: Duration,
+    ) -> Posted<K, F> {
+        self.regions_merged += planned.merged;
+        self.regions_folded += planned.folded;
+        self.post(planned.regions, plan, now)
     }
 
     /// Give waiting regions new readers while slots are free; while one
@@ -1644,7 +1685,7 @@ mod tests {
                 .iter()
                 .flat_map(|(k, r, _)| r.iter().map(|t| (*k, *t)))
                 .collect();
-            let regions = plan_regions(demand, self.readers.limit()).map(|(regions, _)| regions);
+            let regions = plan_regions(demand, self.readers.limit()).map(|planned| planned.regions);
             let over = !self.readers.fits(required.len() * F + generated);
             let fallback = regions.is_none() || over;
             let sizes = if fallback {
@@ -2076,7 +2117,9 @@ mod tests {
     fn lookahead_stops_at_its_share_of_c_less_g() {
         let mut readers = Model::new(20).with_budget(10 * F);
         let demand = [(0, vec![0], vec![1, 2, 3, 4])];
-        let regions = plan_regions(&demand, readers.limit()).expect("a reader").0;
+        let regions = plan_regions(&demand, readers.limit())
+            .expect("a reader")
+            .regions;
         readers.post(regions, (HashMap::from([(0, F)]), 6 * F), Duration::ZERO);
         // share = (10 − 6 − 1) f = 3f; C − H = 9f.
         for at in 1..=3 {
@@ -2101,7 +2144,7 @@ mod tests {
         let demand = [(0, vec![0], vec![1, 2, 3, 4, 5]), (1, vec![0], vec![1, 2])];
         let regions = plan_regions(&demand, readers.limit())
             .expect("two readers")
-            .0;
+            .regions;
         let sizes = HashMap::from([(0, F), (1, F)]);
         readers.post(regions, (sizes, 4 * F), Duration::ZERO);
         let fr = |key: u8, at: i64| Fr {
@@ -2209,7 +2252,9 @@ mod tests {
         let mut book = PermitBook::new(2);
         let sizes = || HashMap::from([(0, F), (1, F)]);
         let post = |readers: &mut Model, demand: &[(u8, Vec<i64>, Vec<i64>)]| {
-            let regions = plan_regions(demand, readers.limit()).expect("readers").0;
+            let regions = plan_regions(demand, readers.limit())
+                .expect("readers")
+                .regions;
             let posted = readers.post(regions, (sizes(), 0), Duration::ZERO);
             assert!(matches!(readers.admit(0), Admission::Ready { .. }));
             posted.spawn
@@ -2312,7 +2357,7 @@ mod tests {
     #[test]
     fn two_playheads_fourteen_apart_read_forward_on_two_readers() {
         let shapes = |required: &[i64], lookahead: &[i64]| -> Vec<(Vec<i64>, Vec<i64>)> {
-            let runs = regions(required, lookahead).into_iter();
+            let runs = regions(required, lookahead).0.into_iter();
             runs.map(|run| (run.required, run.lookahead)).collect()
         };
         // Continuation: required then lookahead, each the exact next frame.
@@ -2328,7 +2373,9 @@ mod tests {
         for t in 0..40 {
             let lookahead = (t + 1..=t + 9).chain(t + 15..=t + 23).collect();
             let demand = [(0u8, vec![t, t + 14], lookahead)];
-            let regions = plan_regions(&demand, readers.limit()).expect("readers").0;
+            let regions = plan_regions(&demand, readers.limit())
+                .expect("readers")
+                .regions;
             let posted = readers.post(regions, (HashMap::from([(0, F)]), 0), Duration::ZERO);
             let dropped: usize = posted.dropped.0.iter().map(|fr| fr.bytes).sum();
             readers.release(dropped);
@@ -2355,7 +2402,8 @@ mod tests {
         let mut readers = Model::new(2).with_budget(1_000 * F);
         assert_eq!(readers.limit(), 2);
         let demand = [(0u8, vec![0, 14], vec![1, 2, 15, 16]), (1, vec![7], vec![])];
-        let (regions, merged) = plan_regions(&demand, readers.limit()).expect("two readers");
+        let planned = plan_regions(&demand, readers.limit()).expect("two readers");
+        let (regions, merged) = (planned.regions, planned.merged);
         let shapes: Vec<(u8, Vec<i64>, Vec<i64>)> = (regions.iter())
             .map(|(key, run)| (*key, run.required.clone(), run.lookahead.clone()))
             .collect();
@@ -2379,7 +2427,7 @@ mod tests {
             );
         }
         // Without the pressure nothing merges and nothing is counted.
-        let (_, merged) = plan_regions(&demand, 3).expect("three readers");
+        let merged = plan_regions(&demand, 3).expect("three readers").merged;
         assert_eq!(merged, 0, "no merge within the limit");
     }
 
@@ -2389,7 +2437,7 @@ mod tests {
     /// What [`drive_jobs`] saw, per job: rewinds within the job (any
     /// reader), rewinds across jobs (a job's first decode at or before the
     /// reader's previous one) by merged readers and by the rest, and the
-    /// merged regions; with the merges counted.
+    /// merged regions; with the merges and H-1 folds counted.
     #[derive(Debug, Default)]
     struct Rewinds {
         within: Vec<usize>,
@@ -2397,6 +2445,7 @@ mod tests {
         unmerged: Vec<usize>,
         groups: Vec<usize>,
         merges: u64,
+        folds: u64,
     }
 
     /// Post `jobs` demands in turn on `readers` (f = F each, admitted in
@@ -2406,8 +2455,9 @@ mod tests {
         let mut seen = Rewinds::default();
         let mut decoded: BTreeMap<u64, Vec<i64>> = BTreeMap::new();
         for demand in jobs {
-            let (regions, merges) = plan_regions(demand, readers.limit()).expect("readers");
-            seen.merges += merges;
+            let planned = plan_regions(demand, readers.limit()).expect("readers");
+            let regions = planned.regions;
+            (seen.merges, seen.folds) = (seen.merges + planned.merged, seen.folds + planned.folded);
             let groups = regions.iter().filter(|(_, run)| run.merged).count();
             let sizes = demand.iter().map(|(key, ..)| (*key, F)).collect();
             let posted = readers.post(regions, (sizes, 0), Duration::ZERO);
@@ -2445,6 +2495,33 @@ mod tests {
         seen
     }
 
+    /// Amendment R41's bound on what [`drive_jobs`] saw: within a job every
+    /// reader decodes forward only; across jobs a merged reader rewinds at
+    /// most once per job (and does: its playheads advance), no other reader
+    /// rewinds, and `counted` is every rewind.
+    fn bounded(seen: &Rewinds, counted: u64) {
+        let within = seen.within.iter().sum::<usize>();
+        assert_eq!(
+            within, 0,
+            "within a job every reader decodes forward: {seen:?}"
+        );
+        for (job, (rewinds, groups)) in seen.merged.iter().zip(&seen.groups).enumerate() {
+            assert!(
+                rewinds <= groups,
+                "job {job}: ≤ 1 rewind per merged group: {seen:?}"
+            );
+        }
+        let others = seen.unmerged.iter().sum::<usize>();
+        assert_eq!(others, 0, "only merged readers rewind: {seen:?}");
+        let rewinds: usize = seen.merged.iter().sum();
+        assert!(
+            rewinds > 0,
+            "advancing playheads on one reader rewind: {seen:?}"
+        );
+        let counted = usize::try_from(counted).expect("count");
+        assert_eq!(counted, rewinds, "every rewind is counted");
+    }
+
     /// Amendment R41 (re-review BF3-2): the reviewer's two advancing
     /// playheads over 24 jobs. A requires t and t + 14 (lookahead t + 1,
     /// t + 2, t + 15, t + 16) and B requires t + 7. At P = 2 A's regions
@@ -2462,29 +2539,12 @@ mod tests {
             .collect();
         let mut readers = Model::new(2).with_budget(1_000 * F);
         let seen = drive_jobs(&mut readers, &jobs);
-        assert_eq!(seen.merges, 24, "A merges every job: {seen:?}");
-        let within = seen.within.iter().sum::<usize>();
         assert_eq!(
-            within, 0,
-            "within a job every reader decodes forward: {seen:?}"
+            (seen.merges, seen.folds),
+            (24, 0),
+            "A merges every job: {seen:?}"
         );
-        for (job, (rewinds, groups)) in seen.merged.iter().zip(&seen.groups).enumerate() {
-            assert!(
-                rewinds <= groups,
-                "job {job}: ≤ 1 rewind per merged group: {seen:?}"
-            );
-        }
-        assert!(
-            seen.unmerged.iter().all(|r| *r == 0),
-            "only merged readers rewind: {seen:?}"
-        );
-        let rewinds: usize = seen.merged.iter().sum();
-        assert!(
-            rewinds > 0,
-            "two advancing playheads on one reader rewind: {seen:?}"
-        );
-        let counted = usize::try_from(readers.merged_rewinds).expect("count");
-        assert_eq!(counted, rewinds, "every rewind is counted");
+        bounded(&seen, readers.merged_rewinds);
         let mut readers = Model::new(3).with_budget(1_000 * F);
         let seen = drive_jobs(&mut readers, &jobs);
         assert_eq!(seen.merges, 0, "within the limit nothing merges");
@@ -2494,6 +2554,43 @@ mod tests {
             .sum::<usize>();
         assert_eq!(rewinds, 0, "readers suffice: no rewind: {seen:?}");
         assert_eq!(readers.merged_rewinds, 0);
+    }
+
+    /// Amendment R41 (re-review note 1): H-1's cap. Three playheads of one
+    /// source 14 apart, each with 2 frames of lookahead, fold the third
+    /// region into the second, which keeps only the lookahead past 28 (the
+    /// old fold read 14 → 28 → 15) and counts one fold. Over 24 advancing
+    /// jobs at P = 8 (no reader-limit merge) the fold keeps the same bound.
+    #[test]
+    fn the_h1_fold_reads_forward_within_a_job() {
+        let (runs, folds) = regions(&[0, 14, 28], &[1, 2, 15, 16, 29, 30]);
+        let shapes: Vec<(Vec<i64>, Vec<i64>, bool)> = (runs.into_iter())
+            .map(|run| (run.required, run.lookahead, run.merged))
+            .collect();
+        let expected = [
+            (vec![0], vec![1, 2], false),
+            (vec![14, 28], vec![29, 30], true),
+        ];
+        assert_eq!(
+            shapes, expected,
+            "the fold keeps only the lookahead past 28"
+        );
+        assert_eq!(folds, 1, "the fold is counted");
+        let jobs: Vec<Demand> = (0..24)
+            .map(|t| {
+                let lookahead = vec![t + 1, t + 2, t + 15, t + 16, t + 29, t + 30];
+                vec![(0u8, vec![t, t + 14, t + 28], lookahead)]
+            })
+            .collect();
+        let mut readers = Model::new(8).with_budget(1_000 * F);
+        let seen = drive_jobs(&mut readers, &jobs);
+        let counted = (seen.merges, seen.folds);
+        assert_eq!(
+            counted,
+            (0, 24),
+            "each job's fold is counted, no merge: {seen:?}"
+        );
+        bounded(&seen, readers.merged_rewinds);
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10

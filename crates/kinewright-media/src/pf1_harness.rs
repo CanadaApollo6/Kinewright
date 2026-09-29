@@ -633,7 +633,7 @@ fn engine_fields(stats: &PlaybackStats) -> String {
          engine_post_end_underrun_frames={} engine_sync_decoders={} engine_table_live_kib={} \
          engine_stale_errors={} engine_acks_overflowed={} engine_acks_unmatched={} \
          engine_sync_fallback_frames={} engine_lookahead_starved={} engine_regions_merged={} \
-         engine_merged_rewinds={}",
+         engine_regions_folded={} engine_merged_rewinds={}",
         stats.due_frames,
         stats.on_time,
         stats.late,
@@ -653,6 +653,7 @@ fn engine_fields(stats: &PlaybackStats) -> String {
         stats.sync_fallback_frames,
         stats.lookahead_starved,
         stats.regions_merged,
+        stats.regions_folded,
         stats.merged_rewinds,
     )
 }
