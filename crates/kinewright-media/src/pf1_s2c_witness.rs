@@ -461,23 +461,11 @@ impl TargetPath for SeekPath {
 /// seek's first packet and the shadow's disables continuation for the decoder
 /// until it is replaced (`Event::MismatchOnce`), and the frames it returns
 /// are checked against the CLI's own conversion (`Corpus::out`).
-pub(super) struct ContinuationPath;
-
-impl ContinuationPath {
-    pub(super) fn new(_fx: &Rc<Fixture>, _threads: usize) -> Self {
-        Self
-    }
-}
-
-impl TargetPath for ContinuationPath {
-    fn produce(&mut self, _from: Option<Cursor>, _t: TimeCode) -> Observation {
-        unimplemented!("S2c-2 wires continuation")
-    }
-
-    fn event(&mut self, _event: Event) {
-        unimplemented!("S2c-2 wires continuation")
-    }
-}
+///
+/// S2c-2: wired in its own file (R46), over `VideoDecoder::decode_paused`.
+#[path = "pf1_s2c_continuation.rs"]
+mod continuation;
+use continuation::ContinuationPath;
 
 /// The frame-thread counts the witnesses run at: one thread, a threaded
 /// case, and a synchronous decoder's share (`default_threads`).
@@ -2986,8 +2974,52 @@ mod tests {
 
     /// See the note on `continuation_holds_the_scripted_cases`: the real path
     /// runs with the cancel seam off and its own per-frame check.
+    /// R46 (rereview-c4d.md): the production adapter's file names none of
+    /// the positive control's capabilities and builds no `Observation` but
+    /// through `observe()` (no literal, no field edited afterwards).
     #[test]
-    #[ignore = "S2c-2 wires continuation"]
+    fn the_continuation_adapter_holds_no_control_capability() {
+        let source = include_str!("pf1_s2c_continuation.rs");
+        let banned = [
+            "reference",
+            "ReferenceContinuation",
+            "ControlToken",
+            "control(",
+            "arm_between_frames",
+            "probe_mut",
+            "seam_arms",
+        ];
+        for word in banned {
+            assert!(
+                !source.contains(word),
+                "pf1_s2c_continuation.rs mentions `{word}`"
+            );
+        }
+        // `Observation` appears once, as `produce`'s return type.
+        assert_eq!(
+            source.matches("Observation").count(),
+            source.matches("-> Observation {").count() + 1,
+            "pf1_s2c_continuation.rs names `Observation` other than in its import and \
+             `produce`'s signature"
+        );
+        assert_eq!(source.matches("-> Observation {").count(), 1);
+        let fields = [
+            ".frame", ".pts", ".state", ".err", ".route", ".frames", ".packets", ".output",
+        ];
+        for field in fields {
+            assert!(
+                !source.contains(field),
+                "pf1_s2c_continuation.rs touches an observation's `{field}`"
+            );
+        }
+        assert_eq!(
+            source.matches("observe(").count(),
+            1,
+            "the adapter reports through `observe()`, once"
+        );
+    }
+
+    #[test]
     fn continuation_reproduces_seek_on_every_fixture() {
         let threads = thread_counts();
         for c in corpora(&threads) {
@@ -3004,7 +3036,6 @@ mod tests {
     /// `continuation_holds_the_scripted_cases`. The seam models that check
     /// for the positive control only; it cannot stand in for it.
     #[test]
-    #[ignore = "S2c-2 wires continuation"]
     fn continuation_holds_the_scripted_cases() {
         let threads = thread_counts();
         let (a, b) = (

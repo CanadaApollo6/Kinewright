@@ -258,6 +258,8 @@ pub(crate) struct LaneState {
     pub(crate) transport: Option<TransportJob>,
     /// Bumped by every post, so a playback hold sees it was superseded.
     pub(crate) version: u64,
+    /// PF1 S2c S-2: the readers' plan is a paused job's.
+    pub(crate) paused_plan: bool,
     pub(crate) agent: VecDeque<AgentJob>,
     /// Stamped transport failures, for the worker's R-2 test.
     pub(crate) failures: Vec<(FrameStamp, MediaError)>,
@@ -843,6 +845,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
             Next::Decode { at, version, bytes } => {
                 // A stop meant for an earlier lookahead decode (K-2) lapses.
                 stop.store(false, Ordering::Release);
+                let paused = state.paused_plan;
                 drop(state);
                 let hold = Hold::adopt(lane, bytes);
                 #[cfg(test)]
@@ -865,11 +868,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 }
                 let seeks = decoder.as_ref().map_or(0, VideoDecoder::seek_count);
                 let result = match &mut decoder {
-                    Some(decoder) => spec.decode(decoder, at),
+                    Some(decoder) => spec.decode(decoder, at, paused),
                     None => spec.open(threads, stop).and_then(|opened| {
                         #[cfg(test)]
                         lane.decoder_open(id, true);
-                        spec.decode(decoder.insert(opened), at)
+                        spec.decode(decoder.insert(opened), at, paused)
                     }),
                 };
                 // S2c-1: P-seek's `drag_seeks`.
@@ -1430,6 +1433,7 @@ impl Preview {
         };
         let plan = (sizes, demand.generated);
         // The set is admitted under the post's lock, before a reader starts.
+        state.paused_plan = wait.playback.is_none();
         let mut posted = Some(state.readers.post_planned(planned, plan, now));
         // Review B S2: only the rasters not resident are reserved.
         let mut generated = Some(demand.generated_uncharged(&self.charged));

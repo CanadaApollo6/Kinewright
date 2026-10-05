@@ -719,6 +719,26 @@ boundary (key index timestamp + `min_corrected_pts + dts_shift`, in the
 edit-list and negative-offset files); an edit; a relink; a same-source jump
 cut; cancellation mid-run.
 
+*Implementation [S2c-2].* A reader decodes a paused plan's frame with
+`VideoDecoder::decode_paused(cursor, t)`; a playback plan keeps
+`decode_window_sequential` (rule 2 would seek at every GOP and change
+open-GOP leading frames there). The decoder tracks, since its last seek, the
+first video packet, whether a later key packet was read, and whether every
+frame's timestamp was present and increasing; a running continuation that
+reads a key packet or meets a bad timestamp before t is complete is abandoned
+for `decode_window(t, t)`. After each paused seek the shadow's A(t0) is read
+and compared with the real first packet (a mismatch latches continuation off
+until a reset: an error, or a new decoder). The shadow is opened on first
+use, with the reader's interrupt; a second demuxer context (its own copy of
+the index) per reader that has rendered a paused frame is the memory cost.
+Rule 1's stream test is read at open: the decoder's stream must not be an
+attached picture or discarded, and no other stream may be a video stream
+that is not an attached picture (`av_find_default_stream_index`'s scores).
+While `decode_paused` runs, `receive_frames` checks the stop flag after each
+received frame. The merge of C-4 (1602761) also restores a stop check
+before each packet read (R43 had moved it to the top of the loop), so a stop
+raised while decoded frames drain reads no further packet.
+
 **S-3 [S2c] Bounded backward window.** On a backward paused step to a
 non-resident target t: B = clamp(share in frames, 1, 16), start = max(source
 start, clip in-point, t − B + 1). The reader seeks to the key ≤ start, decodes

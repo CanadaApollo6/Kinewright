@@ -4951,3 +4951,104 @@ over the three runs:
   `paused_superseded` plus the deadline wake. Showing that it keeps drags, still yields to every control, and
   is bounded by the deadline took four witnesses, including witness 4's exhaustive sched model. The lead
   accepted the overrun on 2026-10-05. The follow-up commit adds 24 such lines, all of them test seam or test.
+
+### E13.2 S2c-2: S-2 forward continuation
+
+**Implementation.** Design §8 S-2's *Implementation [S2c-2]* paragraph describes it.
+- A reader decodes a paused plan's frame with `VideoDecoder::decode_paused(cursor, t)`. A playback plan keeps
+  `decode_window_sequential`.
+- The decoder tracks, since its last seek, the first video packet, any later key packet and the timestamps.
+  After each paused seek it compares the shadow's A(t0) with the real first packet and latches on a mismatch.
+  Before continuing it reads A(t) from the shadow.
+- Rule 1's stream test is read at open (`selects_stream`); rule 4's pair is `mov` with H.264.
+- `receive_frames` checks the stop flag after each frame while `decode_paused` runs.
+- The C-4 merge (9133530, from 1602761) needed four adapter edits, about 9 code lines:
+  - the probe joins R43's stop field;
+  - a test-only `set_stop`;
+  - `Fixture::open` passes the new seventh argument;
+  - a stop check before each packet read in `decode_cursor`.
+
+  R43 had moved that check to the top of the loop. Without it, "cancel with frames waiting" read one more
+  packet ("cancelled 5 packets in, frame 2 arrived at packet 4").
+- `ContinuationPath` (`pf1_s2c_continuation.rs`) adapts the production call. Both of its witnesses are no
+  longer ignored. The R46 guard test holds, as does the new open-time test
+  `decode::tests::continuation_needs_the_witnessed_pair_and_the_seek_stream`. That test covers real files:
+  plain, with audio, with a PNG cover (`attached_pic`, checked with ffprobe), two video streams, MPEG-4 Part 2
+  in MP4, and H.264 in Matroska.
+
+**Must-pass (C-4) mutations.** `s2c-logs/s2c2/mutate.py`, each mutation alone against 1a4787b's production code (this commit before its evidence was amended in; the `crates/` tree, 57ca297e, is the same).
+Each run reruns the two `ContinuationPath` witnesses and the open-time test. Logs are in `s2c-logs/s2c2/mut-*.log`;
+`pre-commit/` holds an earlier run on the uncommitted tree.
+
+| Mutation | Fails | First failure line |
+|---|---|---|
+| per-frame stop check removed (R39 item 3) | scripted | `cancel with frames waiting x1: step 2: cancel left Observation { frame: Some(..), ... }` |
+| key packets unchecked (rule 2) | scripted, oracle | `edit x1: step 1: route Continue, expected Seek`; `Default x1 Target { c: 32, t: 44, t2: Some(46), kind: "c+12" } then 46: route Continue, S-2 says Seek` |
+| timestamps unchecked (rule 3) | scripted | `missing timestamp x1: step 3: route Continue, expected Seek` |
+| A(t) not compared (rule 2) | scripted | `anchor drifts x1: step 4: route Continue, expected Seek` |
+| real first packet not compared, no latch | scripted | `mismatch once, key change x1: step 6: route Continue, expected Seek` |
+| latch removed | scripted | same |
+| window c + 12 unbounded (rule 3) | oracle | `Default x1 Target { c: 31, t: 44, t2: Some(50), kind: "c+13 (outside)" }: route Continue, S-2 says Seek` |
+| pair unchecked (rule 4) | oracle, open-time | `AviDtsGuess x1 Target { c: 87, t: 88, t2: Some(89), kind: "eof" }: route Continue, S-2 says Seek`; `s2-mpeg4: c + 1` |
+| no reset on error | scripted | `error x1: step 3: route Continue, expected Seek` |
+| stream test skipped (rule 1) | open-time | `s2-two-videos` left `(true, true)` |
+| attached pictures counted as video (rule 1) | open-time | `s2-cover` left `(true, false)` |
+
+Rule 1 is witnessed on real files only by the open-time test. The C-4 corpus injects `StreamMismatch`, which
+bypasses `selects_stream`. That makes the stream rule **partial** at the C-4 level, and complete only with the
+open-time test.
+
+**Route band (R39 item 1).** The witnesses check the route against `Model::expected`, which applies rule 2 to the
+key packets the decoder actually read. Every boundary case took the side below, and `s2c-logs/s2c2/route-band.log`
+has every target. Unless noted, the cases hold for Default, Pyramid, EditList and Vfr at 1, 4 and 16 threads.
+
+| Case | Side taken |
+|---|---|
+| c + 1 | Continue at 1 thread. Seek where a key lies within the decoder's read-ahead: at 4 threads 43 → 44 (key 48); at 16 threads also 12 → 13 (key 24) |
+| c + 12 (32 → 44) | Continue at 1 thread; Seek at 4 and 16 (key 48 read before 44 is produced) |
+| c + 13 | Seek |
+| anchor boundary (key − 2, key − 1, key) | Seek, Seek, Continue (the first step past an anchor change continues on the new run) |
+| boundary window, second hop across a key | Seek. Exception: Vfr at 1 thread continues each hop's first step |
+| open GOP: before the key (22 → 23), at the key (23 → 24) | Continue at every thread count |
+| end of file | Continue |
+| AviDtsGuess (every case) | Seek (rule 4) |
+| seeded random targets | Continue 9 / 6 / 2 of 20 on Default at 1 / 4 / 16 threads, and 0–10 of 20 across the corpus |
+
+**Finding: frame threads make rule 2 bite before each key.** A frame-threaded H.264 decoder reads about `threads`
+packets ahead of the frame it outputs. When a key packet lies within that distance after t, rule 2 abandons the
+continuation even though the anchor for t is unchanged. Readers get up to 16 frame threads (H-5). A +1 drag
+therefore seeks on about the last `threads` steps before each key, and each of those seeks decodes from the
+previous key. The probe's prediction was about 6 extra seeks per drag at GOP 60 and 1–2 at GOP 250; it assumed
+one exit per key. At 16 threads the expectation is about 16 seeks per GOP crossed. The timing run's `drag_seeks`
+measures it. This is rule 2 as written, implemented exactly per the lead's ruling. A narrower rule, for example a
+key packet whose frame presents at or before t, is a design question for the lead and was not adopted.
+
+**R39 items 5 and 6.** NoPts covers rule 4 and DTS-guessed timestamps only (`AviDtsGuess`): the product refuses
+raw streams without a probe. The ±1 tick qualification became the test author's raw-timestamp probes (R40):
+`the_anchor_boundaries_hold_at_the_tick_level` and `a_shadow_boundary_one_tick_off_fails_the_tick_witness` pass.
+The frame-grid boundary never shifts a frame.
+
+**Memory.** Each reader that has rendered a paused frame keeps a second demuxer context (the shadow) with its own
+copy of the index. P-rss's paired run records the cost.
+
+**Fast tier.** The `pf1_s2c` module takes 338 s wall at 4 threads locally (`s2c-logs/s2c2/pf1_s2c-times.log`). The
+longest tests are the test author's oracle and meta tests: 155, 130, 87, 77 and 67 s. The two witnesses this
+commit enabled take 114 s (`continuation_reproduces_seek_on_every_fixture`) and 38 s. Both stay in the fast tier.
+The first is the only witness that catches the window and pair mutations, so it falls under ci/slow-tests.txt's
+C1-R1 rule (coverage over fast time). Moving the module's longest tests to the slow tier is left to the lead.
+
+**Gates (1a4787b).** All of these passed:
+- build, `clippy --workspace --all-targets -D warnings` (1.99) and `fmt --check`;
+- `cargo build -p kinewright-app`;
+- `cargo test -p kinewright-media`: lib 1010 passed, 56 ignored (415 s); au3 3 passed / 2 ignored; au5 9; generated_media 12 passed / 3 ignored; transcript_e2e 2;
+- slow-tests lint.
+
+At 816d0c1 (the merge plus the S2c-1 follow-up), the `decode::`, `pf1_s2c`, `preview::` and `sched::` tests
+passed 125, with 2 ignored and a 6.2 GB peak RSS. The first attempt was SIGKILLed during a concurrent foreign
+build, with systemd-oomd active, and the rerun passed.
+
+**Lines (non-blank, non-comment, added).** About 428 in total, against S2c-2 and S2c-3's shared ~560:
+- decode.rs 274, including the `cfg(test)` shadow-fault seams;
+- render.rs 6 and preview.rs 5;
+- pf1_s2c_witness.rs 43 (16 removed);
+- pf1_s2c_continuation.rs 100.

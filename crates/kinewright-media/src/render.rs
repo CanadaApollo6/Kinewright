@@ -341,14 +341,20 @@ impl SourceSpec {
     }
 
     /// The frame at `at`, exactly as the renderer's Seek or Sequential
-    /// window would cache it (continuing from the decoder's cursor).
+    /// window would cache it (continuing from the decoder's cursor). PF1
+    /// S2c S-2: a `paused` job's frame continues only inside S-2's domain.
     pub(crate) fn decode(
         &self,
         decoder: &mut VideoDecoder,
         at: i64,
+        paused: bool,
     ) -> Result<WorkingFrame, MediaError> {
         let mut window = FrameCache::new(1);
-        decoder.decode_window_sequential(TimeCode(at), TimeCode(at), &mut window)?;
+        if paused {
+            decoder.decode_paused(decoder.cursor(), TimeCode(at), &mut window)?;
+        } else {
+            decoder.decode_window_sequential(TimeCode(at), TimeCode(at), &mut window)?;
+        }
         let frame = window.frame_at_or_before(TimeCode(at));
         frame.ok_or_else(|| no_frame(self.asset, TimeCode(at)))
     }

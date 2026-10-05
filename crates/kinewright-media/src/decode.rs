@@ -1122,8 +1122,131 @@ fn rotation_from_degrees(degrees: i32) -> Result<VideoRotation, MediaError> {
 
 /// PF1 S2c C-4: the first video packet after a seek, as S-2 rule 1 defines the
 /// anchor: (`pos`, DTS, key flag).
-#[cfg(test)]
 pub(crate) type Anchor = (isize, Option<i64>, bool);
+
+/// PF1 S2c S-2: what forward continuation knows about the decoder's run
+/// since its last seek (§8 S-2's four rules).
+#[derive(Default)]
+#[allow(clippy::struct_excessive_bools, reason = "one flag per S-2 rule")]
+struct Continuation {
+    /// Rule 4: the demuxer/codec pair is witnessed (`mov`/H.264).
+    pair: bool,
+    /// Rule 1: today's seek selects the decoder's video stream
+    /// (`av_find_default_stream_index` can pick no other).
+    stream: bool,
+    /// Rule 1: the demux-only shadow context, opened on first use (with the
+    /// reader's interrupt, as the real one is).
+    shadow: Option<ffmpeg::format::context::Input>,
+    /// The shadow could not be opened: the anchor is unknown for good.
+    shadow_failed: bool,
+    /// The run's anchor A(t0), from the shadow at the run's seek.
+    run: Option<Anchor>,
+    /// Rule 2: a seek's real first packet disagreed with A(t0), so
+    /// continuation is off until the decoder resets.
+    disabled: bool,
+    /// The real context's first video packet since the seek.
+    first: Option<Anchor>,
+    /// Video packets read since the seek.
+    packets: u64,
+    /// Rule 2: a key packet was read after the first.
+    key_read: bool,
+    /// Rule 3: a frame since the seek had no timestamp, or not a larger one.
+    stamps_broken: bool,
+    last_stamp: Option<i64>,
+    /// A continuation is running: a rule it breaks ends it (`abandoned`).
+    continuing: bool,
+    abandoned: bool,
+    /// S-2: cancellation is checked between produced frames (the paused
+    /// entry point; playback keeps today's check between packets).
+    frame_checks: bool,
+    #[cfg(test)]
+    fault: Option<ShadowFault>,
+    #[cfg(test)]
+    mismatch_once: bool,
+}
+
+impl Continuation {
+    /// A seek: the run starts again.
+    fn seeked(&mut self) {
+        (self.run, self.first, self.packets, self.last_stamp) = (None, None, 0, None);
+        (self.key_read, self.stamps_broken) = (false, false);
+    }
+
+    /// A video packet read; true if it ends a running continuation (rule 2).
+    fn on_packet(&mut self, packet: &ffmpeg::Packet) -> bool {
+        self.packets += 1;
+        if self.packets == 1 {
+            self.first = Some((packet.position(), packet.dts(), packet.is_key()));
+        } else if packet.is_key() {
+            self.key_read = true;
+            return self.abandon();
+        }
+        false
+    }
+
+    /// A frame received with `stamp`; true if it ends a running
+    /// continuation (rule 3).
+    fn on_frame(&mut self, stamp: Option<i64>) -> bool {
+        let increasing = stamp.is_some_and(|ts| self.last_stamp.is_none_or(|last| ts > last));
+        self.last_stamp = stamp.or(self.last_stamp);
+        if increasing {
+            return false;
+        }
+        self.stamps_broken = true;
+        self.abandon()
+    }
+
+    fn abandon(&mut self) -> bool {
+        self.abandoned |= self.continuing;
+        self.continuing
+    }
+
+    /// The injected fault applied to a shadow anchor (test builds only).
+    #[cfg(test)]
+    fn faulted(&mut self, anchor: Anchor, at_seek: bool) -> Anchor {
+        let moved = (anchor.0 + 1, anchor.1, anchor.2);
+        let once = at_seek && std::mem::take(&mut self.mismatch_once);
+        match self.fault {
+            Some(ShadowFault::Mismatch) => moved,
+            Some(ShadowFault::Drifts) if !at_seek => moved,
+            _ if once => moved,
+            _ => anchor,
+        }
+    }
+}
+
+/// PF1 S2c C-4: an injected shadow fault (test builds only).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadowFault {
+    /// The shadow fails: every anchor is unknown.
+    Fails,
+    /// The shadow's anchor never matches the real seek's.
+    Mismatch,
+    /// Today's seek would select another stream: every anchor is unknown.
+    StreamMismatch,
+    /// A(t) for a later target differs from the run's (not at the seek).
+    Drifts,
+}
+
+/// PF1 S2c S-2 rule 1: can today's seek (`av_find_default_stream_index`)
+/// select a stream other than the decoder's `index`? Video scores 25, +50
+/// with dimensions, -400 as an attached picture; audio at most 50; every
+/// stream +12 once probed and +200 unless discarded. The decoder's stream
+/// (dimensions checked at open) therefore wins whenever it is neither an
+/// attached picture nor discarded and no other stream is a video stream
+/// that is not an attached picture.
+fn selects_stream(input: &ffmpeg::format::context::Input, index: usize) -> bool {
+    use ffmpeg::format::stream::Disposition;
+    input.streams().all(|stream| {
+        let attached = stream.disposition().contains(Disposition::ATTACHED_PIC);
+        if stream.index() == index {
+            !attached && stream.discard() != ffmpeg::Discard::All
+        } else {
+            attached || stream.parameters().medium() != ffmpeg::media::Type::Video
+        }
+    })
+}
 
 /// PF1 S2c C-4: a held frame: its grid position, `best_effort_timestamp` and a
 /// hash of its decoded planes (so retained pixels are compared, not counted).
@@ -1601,6 +1724,10 @@ pub(crate) struct VideoDecoder {
     /// set; Amendment R43 (RS-1): and its IO (seek, packet read) at the next
     /// read of the file, through `input`'s interrupt callback.
     stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The decoder was opened with a reader's interrupt (the shadow is too).
+    interruptible: bool,
+    /// PF1 S2c S-2: the run since the last seek, for forward continuation.
+    s2: Continuation,
     #[cfg(test)]
     probe: DecoderProbe,
 }
@@ -1720,6 +1847,13 @@ impl VideoDecoder {
         // reaches `still_file_orientation` costs at most the 8-byte
         // signature when the container is not a still at all.
         let no_audio = input.streams().best(ffmpeg::media::Type::Audio).is_none();
+        // PF1 S2c S-2 rules 1 and 4, fixed by the file.
+        let s2 = Continuation {
+            pair: input.format().name().split(',').any(|name| name == "mov")
+                && decoder.id() == ffmpeg::codec::Id::H264,
+            stream: selects_stream(&input, stream_index),
+            ..Continuation::default()
+        };
         let flip_horizontal = if is_still_image_codec(decoder.id()) && no_audio {
             if let Some(orientation) = crate::still_orientation::still_file_orientation(path) {
                 rotation = orientation.rotation;
@@ -1803,6 +1937,8 @@ impl VideoDecoder {
             eof_sent: false,
             seek_count: 0,
             stop: stop.cloned(),
+            interruptible: stop.is_some(),
+            s2,
             #[cfg(test)]
             probe: DecoderProbe::default(),
         })
@@ -1825,6 +1961,7 @@ impl VideoDecoder {
             if self.stopped() {
                 return Err(MediaError::Cancelled);
             }
+            self.reset_continuation();
             return Err(media_error(&self.path, "video seek failed", error));
         }
         self.decoder.flush();
@@ -1834,6 +1971,7 @@ impl VideoDecoder {
         self.continuation_at = None;
         self.eof_sent = false;
         self.seek_count = self.seek_count.saturating_add(1);
+        self.s2.seeked();
         #[cfg(test)]
         self.probe.on_seek();
 
@@ -1951,10 +2089,149 @@ impl VideoDecoder {
         cache: &mut FrameCache<T>,
     ) -> Result<(), MediaError> {
         let result = self.decode_cursor(start, end, cache);
-        if result.is_err() {
-            self.continuation_at = None;
+        match &result {
+            Ok(()) => {}
+            // S-2: a stopped run leaves no cursor; an error resets the decoder.
+            Err(MediaError::Cancelled) => self.continuation_at = None,
+            Err(_) => self.reset_continuation(),
         }
         result
+    }
+
+    /// PF1 S2c S-2: a paused target `t`, the reader's last produced frame
+    /// being `from`. The decoder continues forward from `from` only inside
+    /// S-2's domain (`may_continue`), and seeks as `decode_window` does
+    /// otherwise or once a rule breaks mid-run (the frames are a fresh
+    /// seek's either way). Cancellation is checked between produced frames.
+    pub(crate) fn decode_paused<T: DecoderFrame>(
+        &mut self,
+        from: Option<i64>,
+        t: TimeCode,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        self.s2.frame_checks = true;
+        let result = self.paused(from, t, cache);
+        self.s2.frame_checks = false;
+        result
+    }
+
+    fn paused<T: DecoderFrame>(
+        &mut self,
+        from: Option<i64>,
+        t: TimeCode,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        if from.is_some_and(|c| self.may_continue(c, t.0)) {
+            self.s2.continuing = true;
+            let result = self.decode_from_cursor(t, t, cache);
+            self.s2.continuing = false;
+            if !std::mem::take(&mut self.s2.abandoned) {
+                return result;
+            }
+            self.continuation_at = None;
+        }
+        self.decode_window(t, t, cache)?;
+        // Rule 2: the run's anchor, and the real seek's first packet must be it.
+        let shadow = self.shadow_anchor(t, true);
+        if shadow.is_some() && self.s2.first.is_some() && self.s2.first != shadow {
+            self.s2.disabled = true;
+        }
+        self.s2.run = shadow;
+        Ok(())
+    }
+
+    /// The frame the decoder last produced (its cursor), if it has one.
+    pub(crate) fn cursor(&self) -> Option<i64> {
+        self.continuation_at.map(|next| next.0.saturating_sub(1))
+    }
+
+    /// PF1 S2c S-2: does every rule hold for continuing from `c` to `t`?
+    fn may_continue(&mut self, c: i64, t: i64) -> bool {
+        let s2 = &self.s2;
+        let held = !s2.disabled
+            && s2.pair
+            && s2.stream
+            && self.continuation_at == Some(TimeCode(c.saturating_add(1)))
+            && c < t
+            && t <= c.saturating_add(12)
+            && !s2.key_read
+            && !s2.stamps_broken
+            && s2.run.is_some()
+            && s2.first == s2.run;
+        held && self.shadow_anchor(TimeCode(t), false) == self.s2.run
+    }
+
+    /// PF1 S2c S-2 rule 1: A(t), the first packet of the selected stream
+    /// after today's seek to `t` on the shadow context (`None`: unknown).
+    fn shadow_anchor(&mut self, t: TimeCode, at_seek: bool) -> Option<Anchor> {
+        #[cfg(test)]
+        if matches!(
+            self.s2.fault,
+            Some(ShadowFault::Fails | ShadowFault::StreamMismatch)
+        ) {
+            return None;
+        }
+        if !(self.s2.pair && self.s2.stream) || self.s2.shadow_failed {
+            return None;
+        }
+        if self.s2.shadow.is_none() {
+            let opened = match (&self.stop, self.interruptible) {
+                (Some(stop), true) => reader_input(&self.path, stop),
+                _ => media_input(&self.path),
+            };
+            match opened {
+                Ok(input) => self.s2.shadow = Some(input),
+                // An interrupted open may succeed later; any other is final.
+                Err(_) if self.stopped() => return None,
+                Err(_) => {
+                    self.s2.shadow_failed = true;
+                    return None;
+                }
+            }
+        }
+        let timestamp = frame_to_global_timestamp(t, self.fps).saturating_add(
+            stream_timestamp_to_global(self.stream_start, self.stream_time_base),
+        );
+        let shadow = self.s2.shadow.as_mut()?;
+        shadow.seek(timestamp, ..timestamp).ok()?;
+        // One read per turn (Amendment R43): an error ends the lookup.
+        let anchor = loop {
+            let mut packet = ffmpeg::Packet::empty();
+            packet.read(shadow).ok()?;
+            if packet.stream() == self.stream_index {
+                break (packet.position(), packet.dts(), packet.is_key());
+            }
+        };
+        #[cfg(test)]
+        let anchor = self.s2.faulted(anchor, at_seek);
+        #[cfg(not(test))]
+        let _ = at_seek;
+        Some(anchor)
+    }
+
+    /// PF1 S2c S-2: the decoder resets (an error): no cursor, no run, and
+    /// continuation is allowed again after the next seek.
+    pub(crate) fn reset_continuation(&mut self) {
+        self.continuation_at = None;
+        (self.s2.run, self.s2.disabled) = (None, false);
+    }
+
+    /// PF1 S2c C-4: inject a shadow fault from now on.
+    #[cfg(test)]
+    pub(crate) fn fault_shadow(&mut self, fault: ShadowFault) {
+        self.s2.fault = Some(fault);
+    }
+
+    /// PF1 S2c C-4: at the next seek, once, the shadow's anchor disagrees.
+    #[cfg(test)]
+    pub(crate) fn mismatch_once(&mut self) {
+        self.s2.mismatch_once = true;
+    }
+
+    /// PF1 S2c C-4: the decoder meets this timestamp fault from now on.
+    #[cfg(test)]
+    pub(crate) fn tamper(&mut self, tamper: Tamper) {
+        self.probe.tampers.push(tamper);
     }
 
     fn decode_cursor<T: DecoderFrame>(
@@ -2021,6 +2298,10 @@ impl VideoDecoder {
             }
             #[cfg(test)]
             self.probe.on_packet(&packet);
+            // S-2 rule 2: a key packet read ends a running continuation.
+            if self.s2.on_packet(&packet) {
+                return Ok(());
+            }
             self.decoder
                 .send_packet(&packet)
                 .map_err(|error| media_error(&self.path, "video decode failed", error))?;
@@ -2079,6 +2360,17 @@ impl VideoDecoder {
             {
                 self.continuation_at = None;
                 return Err(MediaError::Cancelled);
+            }
+            // PF1 S2c S-2: cancellation is checked between produced frames,
+            // so frames already decoded and waiting are not drained.
+            if self.s2.frame_checks && self.stopped() {
+                self.continuation_at = None;
+                return Err(MediaError::Cancelled);
+            }
+            // S-2 rule 3: a missing or repeated timestamp ends a running
+            // continuation.
+            if self.s2.on_frame(timestamp) {
+                return Ok(true);
             }
             let next = PendingVideoFrame {
                 first_grid_frame,
@@ -3179,6 +3471,69 @@ mod tests {
         assert!(matches!(decoded, Err(MediaError::Cancelled)), "{decoded:?}");
         assert!(exits(&path) >= 1, "the read failed with AVERROR_EXIT");
         disarm(&path);
+    }
+
+    /// PF1 S2c S-2 rules 1 and 4, as the decoder reads them at open: the
+    /// witnessed pair (`mov`/H.264) and the stream today's seek selects
+    /// (an audio stream or a cover picture beside the video cannot win; a
+    /// second video stream might). Outside either, every paused frame
+    /// seeks, c + 1 included; inside both, c + 1 continues.
+    #[test]
+    fn continuation_needs_the_witnessed_pair_and_the_seek_stream() {
+        let video = "-f lavfi -t 0.4 -i testsrc2=size=64x36:rate=30";
+        let cases = [
+            ("s2-plain", "", "-c:v libx264 -g 12", "mp4", (true, true)),
+            (
+                "s2-audio",
+                "-f lavfi -t 0.4 -i sine",
+                "-c:v libx264 -g 12 -c:a aac",
+                "mp4",
+                (true, true),
+            ),
+            (
+                "s2-cover",
+                "-f lavfi -t 0.04 -i color=red:size=32x32:rate=25",
+                "-map 0 -map 1 -c:v:0 libx264 -g 12 -c:v:1 png -disposition:v:1 attached_pic",
+                "mp4",
+                (true, true),
+            ),
+            (
+                "s2-two-videos",
+                "-f lavfi -t 0.4 -i testsrc=size=64x36:rate=30",
+                "-map 0 -map 1 -c:v libx264 -g 12",
+                "mp4",
+                (true, false),
+            ),
+            ("s2-mpeg4", "", "-c:v mpeg4 -g 12", "mp4", (false, true)),
+            (
+                "s2-matroska",
+                "",
+                "-c:v libx264 -g 12",
+                "mkv",
+                (false, true),
+            ),
+        ];
+        let fps = Rational::new(30, 1).expect("fps");
+        for (label, input, output, ext, known) in cases {
+            let args = format!("{video} {input} -pix_fmt yuv420p {output}");
+            let args: Vec<&str> = args.split_whitespace().collect();
+            let media = crate::test_support::GeneratedMedia::ffmpeg(label, &args, ext);
+            let decoder =
+                VideoDecoder::open_scaled_internal(media.path(), fps, None, None, 1, None);
+            let mut decoder = decoder.expect("the source opens");
+            assert_eq!((decoder.s2.pair, decoder.s2.stream), known, "{label}");
+            let mut cache: FrameCache<FrameTexture> = FrameCache::new(1);
+            decoder
+                .decode_paused(None, TimeCode(3), &mut cache)
+                .expect("3");
+            let seeks = decoder.seek_count();
+            let from = decoder.cursor();
+            decoder
+                .decode_paused(from, TimeCode(4), &mut cache)
+                .expect("4");
+            let continued = decoder.seek_count() == seeks;
+            assert_eq!(continued, known == (true, true), "{label}: c + 1");
+        }
     }
 
     /// Decode one still frame through the legacy path (RGBA8) for content
