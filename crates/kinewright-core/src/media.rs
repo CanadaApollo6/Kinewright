@@ -499,7 +499,8 @@ pub struct PlaybackStats {
     /// they published (a newer epoch, a `play`, shutdown, or a newer drag
     /// target once the wait reached its deadline).
     pub paused_abandoned: u64,
-    /// S2c-1: seeks made by the preview's reader decoders.
+    /// S2c-1: seeks made by the preview's reader decoders (a K-3
+    /// synchronous fallback render's seeks are not counted).
     pub reader_seeks: u64,
     pub sync_fallback_frames: u64,
     /// Decoders open now in this engine's renderers (preview, proofs,

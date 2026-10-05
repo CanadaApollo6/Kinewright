@@ -4904,14 +4904,50 @@ over the three runs:
   `continue`'s counts expect about 6 extra seeks per drag at GOP 60 (a drag walks ~375 frames) and 1–2 at GOP 250.
   P-seek's `drag_seeks` now reports it.
 - **Ruling:** Amendment R49 (design §8), accepted by the lead on 2026-10-05 with the `RETIRE_DEADLINE` bound.
-- **Witnesses** (mutations in `s2c-logs/s2c1/mut-*.log`, run by `s2c-logs/s2c1/mutate.sh`):
+- **Witnesses.** Each mutation was applied alone and the four witnesses rerun by `s2c-logs/s2c1/mutate.sh`, in a
+  throwaway worktree with its own `target/`. Two runs were made: at exactly caa6ef4 (`s2c-logs/s2c1/mut-*.log`)
+  and at the follow-up commit (`s2c-logs/s2c1/followup/mut-*.log`; its `crates/` tree is
+  da0c0858, since the commit was amended for this text only). Each log's first line records the commit and the
+  only modified file. The mutations:
 
-  | # | Witness | R49 removed | deadline removed | deadline wake removed | kept wait ignores the newest job |
-  |---|---|---|---|---|---|
-  | 1 | `preview::tests::a_drag_publishes_every_taken_paused_job` (29 posts at 30 Hz over two sources, each job's decodes held until the next post) | fails: `abandoned` | passes | passes | passes |
-  | 2 | `preview::tests::a_stuck_drag_job_is_superseded_at_the_deadline` (R43's seam, `Stuck`) | fails: `superseded at 5.06 ms` | fails: `superseded at the deadline` (never, 10 s) | fails: same | passes |
-  | 3 | `preview::tests::controls_still_supersede_a_paused_wait_at_once` (seek, pause, document, play, shutdown) | passes | passes | passes | fails: `superseded late: seek 200.2 ms, pause 200.8 ms, document 200.5 ms` |
-  | 4 | `sched::tests::a_drag_never_abandons_a_young_paused_wait` (every 6-event sequence, 8 events, drained) | fails: `a drag abandoned a young wait (Frame)` | fails: `kept past the deadline` | passes (the model has no wake) | fails: `Seek did not abandon the wait at once` |
+  - *R49 removed*: `view.newer` alone supersedes.
+  - *deadline removed*: `!view.drag`.
+  - *deadline wake removed*: the paused wait's timed wake, `else if false`.
+  - *kept wait ignores the newest job*: `!view.young`.
+  - *epoch unchecked*: the drag test's `job.stamp.epoch == stamp.epoch` (preview.rs:737 at caa6ef4, 763 after the follow-up) made `true`.
+
+  | # | Witness | R49 removed | deadline removed | deadline wake removed | kept wait ignores the newest job | epoch unchecked |
+  |---|---|---|---|---|---|---|
+  | 1 | `preview::tests::a_drag_publishes_every_taken_paused_job` (29 posts at 30 Hz over two sources, each job's decodes held until the next post) | fails: `abandoned` (both runs) | passes | passes | passes | passes |
+  | 2 | `preview::tests::a_stuck_drag_job_is_superseded_at_the_deadline` (R43's seam, `Stuck`) | fails: `superseded at 6.12 ms` / `6.05 ms` | fails: `superseded at the deadline` (never, 10 s) | fails: same | passes | passes |
+  | 3 | `preview::tests::controls_still_supersede_a_paused_wait_at_once` (seek, pause, document, play, shutdown) | passes | passes | passes | fails: caa6ef4 `superseded late: seek 200.5 ms, pause 200.5 ms, document 200.7 ms`; follow-up `seek None, pause None, document None` (not within 5 s) | fails: caa6ef4 `superseded late: seek 201.0 ms`; follow-up `seek None, pause None` |
+  | 4 | `sched::tests::a_drag_never_abandons_a_young_paused_wait` (every 6-event sequence, 8 events, drained) | fails: `a drag abandoned a young wait (Frame)` | fails: `kept past the deadline` | passes (the model has no wake) | fails: `Seek did not abandon the wait at once` | passes (the model is given `drag`) |
 
   Witness 3 guards L-6 against an over-broad R49, so removing R49 leaves it green. Its `play` and shutdown cases
   stay green under every mutation: R37's `played` and the shutdown flag supersede independently of R49's test.
+  Witness 3's `seek` case is the deterministic catcher of the epoch mutation: a seek is one post of a newer
+  epoch's paused job. `pause` and `document` post `None` and then the resting job, so whether they catch it
+  depends on whether the waiter wakes between the two posts (it did not at caa6ef4, and did at the follow-up for
+  `pause`). No new witness was needed.
+- **Robustness to render speed (follow-up).** At caa6ef4, witnesses 1 and 3 measured R49 against the real 200 ms
+  `RETIRE_DEADLINE`. Witness 1 holds each job's decodes until the next post (33 ms apart). A loaded CI or
+  llvmpipe render whose decode runs past 200 ms after its gate opened would be abandoned legitimately, so
+  witness 1 could flake. Witness 3 started its clock before the job was taken and allowed 200 ms, so a slow take
+  plus a slow wake could flake it too. The follow-up adds a per-lane test drag deadline (`Lane::drag_deadline`,
+  `cfg(test)`, read by `FrameWait::superseded` and the paused wait's timed wake). Production still uses
+  `RETIRE_DEADLINE`. Witnesses 1 and 3 set it to 30 s:
+  - In witness 1, "kept" holds while any render finishes within 30 s.
+  - Witness 3 now times from the control, and "at once" means within 5 s, against a 30 s deadline. A control
+    that wrongly waits out the deadline is still separated from one that supersedes at once by 25 s.
+
+  Witness 2 keeps the real 200 ms because its assertion is a lower bound (`after >= RETIRE_DEADLINE`, a 10 s
+  ceiling). Its render is held in its open by R43's `Stuck` seam, so render speed cannot shorten it, and load
+  can only lengthen it within the 10 s ceiling. Witness 4 is a pure model and does not depend on time.
+- **Counter scope (follow-up).** `PlaybackStats::reader_seeks` (P-seek's `drag_seeks`) counts the preview's
+  reader-decoder seeks only. A K-3 synchronous fallback render's seeks are not counted, and its doc says so.
+  `sync_fallback_frames` already reports when the fallback ran.
+- **Budget (S2c-1, follow-up).** caa6ef4 adds 280 non-blank, non-comment source lines against the brief's ~150:
+  about 54 production and about 226 test. The overrun is the witnesses: R49 is a one-predicate change in
+  `paused_superseded` plus the deadline wake. Showing that it keeps drags, still yields to every control, and
+  is bounded by the deadline took four witnesses, including witness 4's exhaustive sched model. The lead
+  accepted the overrun on 2026-10-05. The follow-up commit adds 24 such lines, all of them test seam or test.

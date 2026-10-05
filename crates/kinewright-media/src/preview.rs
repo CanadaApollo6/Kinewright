@@ -323,6 +323,10 @@ pub(crate) struct Lane {
     pub(crate) panic_at: Mutex<Option<i64>>,
     #[cfg(test)]
     pub(crate) panicked: Mutex<Vec<u64>>,
+    /// Amendment R49's witnesses: a longer drag deadline, so they do not
+    /// depend on how fast a render is.
+    #[cfg(test)]
+    pub(crate) drag_deadline: Mutex<Option<Duration>>,
     /// H-5: the `Permits` monitor, a leaf never taken with `state` (H-4).
     permits: Mutex<PermitBook>,
     permits_cv: Condvar,
@@ -363,6 +367,8 @@ impl Lane {
             epoch: Instant::now(),
             #[cfg(test)]
             skew: Mutex::default(),
+            #[cfg(test)]
+            drag_deadline: Mutex::default(),
             #[cfg(test)]
             gate: Mutex::default(),
             #[cfg(test)]
@@ -539,6 +545,20 @@ impl Lane {
         #[cfg(test)]
         let now = now + *self.skew.lock().expect("skew");
         now
+    }
+
+    /// Amendment R49: how long a paused wait outlives a drag's newer job
+    /// (`RETIRE_DEADLINE`; its witnesses may lengthen it).
+    #[cfg_attr(
+        not(test),
+        allow(clippy::unused_self, reason = "the witnesses' override is per lane")
+    )]
+    fn drag_deadline(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(deadline) = *self.drag_deadline.lock().expect("drag deadline") {
+            return deadline;
+        }
+        RETIRE_DEADLINE
     }
 
     /// Replace the transport slot (`None` clears it).
@@ -746,7 +766,7 @@ impl FrameWait {
             newer,
             played: lane.superseded_by_play(stamp),
             drag,
-            young: self.since.elapsed() < RETIRE_DEADLINE,
+            young: self.since.elapsed() < lane.drag_deadline(),
         })
     }
 }
@@ -1656,7 +1676,7 @@ impl Preview {
         if wait.playback.is_some() {
             state.wait_timeout(ready, HOLD_POLL)
         } else if state.version != wait.version {
-            let deadline = wait.since + RETIRE_DEADLINE;
+            let deadline = wait.since + self.lane.drag_deadline();
             state.wait_timeout(ready, deadline.saturating_duration_since(Instant::now()))
         } else {
             state.wait(ready)
@@ -4760,6 +4780,9 @@ pub(crate) mod tests {
     fn a_drag_publishes_every_taken_paused_job() {
         let (document, _workload) = cut_document();
         let lane = Arc::<Lane>::default();
+        // R49's keep, not the render's speed: no render here may outlive the
+        // deadline (a loaded CI render can take longer than 200 ms).
+        *lane.drag_deadline.lock().expect("drag deadline") = Some(LONG_DRAG_DEADLINE);
         let (gate, frames, thread) = gated_preview(&lane);
         let started = Instant::now();
         let request = |seq: u32| {
@@ -4822,20 +4845,27 @@ pub(crate) mod tests {
         join_within(thread);
     }
 
+    /// Amendment R49's witnesses' drag deadline: far beyond any render, so
+    /// "kept" and "superseded at once" do not depend on render speed.
+    const LONG_DRAG_DEADLINE: Duration = Duration::from_secs(30);
+
     /// Amendment R49 [S2c] witness 3 (L-6): a seek, a pause, a new document,
-    /// a `play` and shutdown each supersede a paused wait at once (well
-    /// before `RETIRE_DEADLINE`), and it publishes nothing.
+    /// a `play` and shutdown each supersede a paused wait at once (within
+    /// `AT_ONCE` of the control, the drag deadline being 30 s), and it
+    /// publishes nothing.
     #[test]
     fn controls_still_supersede_a_paused_wait_at_once() {
+        const AT_ONCE: Duration = Duration::from_secs(5);
         let (document, _workload) = cut_document();
         let mut slow = Vec::new();
         for control in ["seek", "pause", "document", "play", "shutdown"] {
             let lane = Arc::<Lane>::default();
+            *lane.drag_deadline.lock().expect("drag deadline") = Some(LONG_DRAG_DEADLINE);
             let (gate, frames, thread) = gated_preview(&lane);
-            let taken = Instant::now();
             let paused = |at| JobKind::Paused(TimeCode(at));
             lane.post(Some(job(&document, paused(0), stamp(1, 1))));
             wait_until(&lane, decoding);
+            let taken = Instant::now();
             match control {
                 "seek" => lane.post(Some(job(&document, paused(5), stamp(2, 2)))),
                 "pause" | "document" => {
@@ -4855,8 +4885,8 @@ pub(crate) mod tests {
                 }
                 _ => drop(lane.shut_down()),
             }
-            let after = abandoned(&lane, 1, taken, RETIRE_DEADLINE);
-            if after.is_none_or(|after| after >= RETIRE_DEADLINE) {
+            let after = abandoned(&lane, 1, taken, AT_ONCE);
+            if after.is_none_or(|after| after >= AT_ONCE) {
                 slow.push((control, after));
             }
             lane.shut_down();
