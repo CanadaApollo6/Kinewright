@@ -923,6 +923,17 @@ direct evidence on the gate's protocol; **PB**: pending an S0 baseline.
 | G2 | G1's criterion for `explainer_16x9`, `reel_9x16`, `feed_4x5`, `talk_recut` | P-play, LH | S3b | — | PB |
 | G4 | typical, `explainer_16x9` ≥ 24 fps; `blend_heavy_1080p`, `reel_9x16` ≥ 15 fps (provisional) | P-play, LL | S3b | — | PB |
 
+**Amendment R48 [S2b] G3 on LH is environment-blocked until S4's pinned run
+(Riel, 2026-10-05).** On an idle desktop the RTX 3090 stays mostly at P8
+through the G3 benchmark, and every binary reads 42–65 fps: S2b's `10a2d18`,
+R37's `712d108` and R47 (E12.18). The earlier ~71 fps passes were taken while
+the screensaver held the clocks up (E12.13.4). G3 therefore measures the
+driver's power management, not the compositor, on an unpinned card. It is
+recorded as **blocked (environment)**, not as a pass or a regression: no stage
+closes on it until S4 fixes and records the GPU state, and S4 rules on the
+floor then. G3's LH figures are still taken and reported in every timing run.
+The Omarchy bar and its widget pollers are baseline load, not contamination.
+
 **Rec:** L-1m/L-2m and L-4b; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
 S0 and the ratio at S4 (ME14's absolute 20 fps floor stays **owed**, D6); the

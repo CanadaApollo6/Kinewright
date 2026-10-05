@@ -4754,6 +4754,8 @@ Non-blank, non-comment `.rs` lines, net, counted as in E12.13.2 (only a `mod tes
 
 #### E12.17.5 Timing: pending, quiet window
 
+*Run on 2026-10-05 with rebuilt binaries: see E12.18.*
+
 Nothing was timed for R47. What is ready:
 
 - **The binary:** the release test binary at `9b09a30`, `/tmp/kinewright-r37/bins/bin-9b09a30`, sha256
@@ -4765,3 +4767,100 @@ Nothing was timed for R47. What is ready:
 - **Unchanged:** the S0 side of G18 (`media-s0-g18`) and the step-0 A/B plan (`plan-ab.txt`).
 - The lanes also print `engine_detained_fallback_frames` and `engine_shutdown_detached_readers`. The W workloads remove
   no source mid-run and detach no reader, so both should read 0, as should `engine_retire_overruns`.
+
+### E12.18 S2b timing: the step-0 A/B and the slim R47 gates (2026-10-05)
+
+Riel gave a quiet window. By agreement it ran a **slim plan**: step 0, then the lanes that answer "is S2b's playback
+fixed?" and "did anything regress?". The other lanes move to one combined run after S2c (E12.18.5). All logs, plans
+and scripts are in `s2b-logs/r47-timing-2026-10-05.tar.gz`.
+
+#### E12.18.1 Binaries, machine and conditions
+
+- **Rebuilt after a reboot** cleared `/tmp`, from the archived plans and scripts, each in its own target directory
+  (a target directory shared across worktrees had mixed `kinewright-core` between commits). rustc 1.98.0.
+
+  | Binary | Source | sha256 |
+  |---|---|---|
+  | `bin-d1fa8fd` (R47) | `pf1/impl` `d1fa8fd`; `crates/` identical to `9b09a30` | `0f7a7c0328f26b0ecede197bd1a40d7457c0fa4e30e852e68b8efdfe4b378a49` |
+  | `bin-10a2d18` (A) | `10a2d18`, the S2b code | `4d9e206cd41d27cbf9b48f7cbd760747919c0b8a19d2193d2cf4e350670b1d84` |
+  | `bin-712d108` (B) | `712d108`, R37 | `2adefd0b347b8bb3ef9d43f82b8b712b211a75deac3f84b2f24b0b08f3b4e10d` |
+  | `media-s0-g18` | `d19bdf9` + `pf1_export_lane.rs` at `2aa4e1b` | `c8ab80032da4c59149522d0c1dec19aa751d8be32bf24cca4a199de9cabd93e9` |
+
+- **Machine:** i5-13600K; RTX 3090 on NVIDIA 615.71.09; llvmpipe (**LLVM 23.1.1**, was 22.1.8 in E12.1); Linux
+  7.2.5-4-omarchy; FFmpeg n8.0-23-gd1f31a829d.
+- **When:** the launcher waited for 3 min of load < 2 with no process above 20% CPU, then ran step 0 from 12:16:13
+  to 12:32:21 EDT and the gates from 12:32:21 to 13:01:36 EDT, each lane alone.
+- **Contamination:** the sampler (E12.13.5) recorded every 5 s. Riel ruled the Omarchy bar (`quickshell`) and its
+  widget pollers baseline load (Amendment R48); from the gates on, the runner exempts their descendants and the test
+  binary's own children. Every flag raised was one of:
+  - the fixtures' `ffmpeg`, a child of the test, before the timed part;
+  - the bar's agent-usage poller (one core for ~15 s every 15 min) and its calendar poll (`gcalcli`, ~22%, seconds);
+  - one `opencode serve` start-up spawned by T3 Code (65% for ~3 s) in `G18 LH S0 run1`, which was the faster S0 run.
+- **GPU state:** in every LH lane the RTX sat mostly at **P8**. G3 lanes: 52–62% of samples at P8, mean graphics
+  clock 620–850 MHz; P-play lanes: 87–93% at P8, 310–390 MHz. This confirms E12.13.4's idle-clock hypothesis.
+
+#### E12.18.2 Step 0: the interleaved A/B (A = `10a2d18`, B = `712d108`)
+
+G3 narrowed with `R28_ONLY=typical_1080p,blend_heavy_1080p` (fps, three runs per lane):
+
+| Lane | `typical_1080p` | `blend_heavy_1080p` |
+|---|---|---|
+| A1 | 64.8, 49.1, 47.1 | 45.6, 47.7, 47.0 |
+| B1 | 46.1, 46.0, 45.1 | 46.4, 49.9, 48.3 |
+| A2 | 45.6, 43.9, 45.9 | 42.5, 48.2, 48.3 |
+| B2 | 45.0, 48.4, 47.7 | 47.4, 45.2, 44.8 |
+
+P-play LH `blend_heavy_1080p`, `PF1_RUNS=2` (of 1,800 due; no run late):
+
+| Lane | on time | dropped | held max (ms) |
+|---|---|---|---|
+| A1 | 1789, 1771 | 11, 29 | 105.1, 105.5 |
+| B1 | 1777, 1793 | 23, 7 | 85.1, 62.4 |
+| A2 | 1793, 1790 | 7, 10 | 105.1, 105.1 |
+| B2 | 1791, 1798 | 9, 1 | 85.1, 61.1 |
+
+- **Verdict: B is not worse than A beyond A's own spread, so there is no bisect** (E12.13.5, "Owed", item 2).
+- **G3's drop is the environment.** Identical code read ~71 fps under the screensaver (E12) and 42–65 fps here.
+- **R37 improves held frames on an idle card.** A breaks G14 (held > 100 ms) in all four runs; B never does. S2b's
+  earlier P-play LH passes were screensaver figures too.
+
+#### E12.18.3 R47 gates (`bin-d1fa8fd`)
+
+P-play, `PF1_RUNS=3` (of 1,800 due; `valid=true`, `passes=true`, `underrun_frames=0`,
+`engine_sync_fallback_frames=0`, `engine_retire_overruns=0` and `engine_detained_fallback_frames=0` in every run):
+
+| Lane, workload | on time | late | dropped | p50 / p95 present (ms) | p95/p50 | held max (ms) | clock stall max (ms) |
+|---|---|---|---|---|---|---|---|
+| LL `typical_1080p` | 1798, 1798, 1798 | 0, 0, 0 | 2, 2, 2 | 42.2 / 43.3 | 1.03 | 90.1, 85.1, 85.1 | 46.1, 45.9, 46.0 |
+| LH `typical_1080p` | 1797, 1799, 1798 | 1, 1, 0 | 2, 0, 2 | 33.7 / 42.9 | 1.27 | 61.7, 46.5, 85.1 | 47.2, 45.9, 47.1 |
+| LH `blend_heavy_1080p` | 1798, 1799, 1783 | 0, 0, 0 | 2, 1, 17 | 32.0 / 42.9 | 1.34 | 85.1, 54.4, 85.1 | 46.2, 47.1, 45.9 |
+
+- **LH controls** (`typical_1080p`): Slowdown fails G1 (364 on time), Freeze fails G14, ClockFreeze fails G16, Stall
+  fails `underrun_frames`. All four are caught.
+- **G18** (`@G18 verdict`): every export hashes `fe87e67c33845ccdf6e62d1e4d576a2d5fc86e54cb48cc1f5f7f03dd2d979b88`
+  (3,375,562 bytes), **IDENTICAL**. S0 wall 213.9 / 192.2 / 192.1 s, median 192.2 s; R47 36.9 / 36.6 / 36.8 s, median
+  36.8 s, **−80.9%, PASS**.
+- **G3 LH:** `typical_1080p` 44.0, 45.3, 47.8 fps; `blend_heavy_1080p` 49.7, 46.8, 45.7 (floor 60, exit 101);
+  `heavy_4k` 28.8–28.9. The same as both A/B binaries.
+
+#### E12.18.4 Verdicts
+
+| Gate | Verdict | Evidence |
+|---|---|---|
+| G1 (`typical_1080p`, LH) | **Pass**: worst run 3 of 1,800 (≤ 18), p95 42.9 ms (≤ 50) | E12.18.3 |
+| G6 (typical p95/p50 ≤ 3) | **Pass**: 1.03 LL, 1.27 LH | E12.18.3 |
+| G14 (held ≤ 100 ms, LH) | **Pass**: max 85.1 ms over typical and `blend_heavy`; the freeze control fails it | E12.18.3 |
+| G16 (clock stall ≤ 100 ms) | **Pass** on the measured lanes: max 47.2 ms; the clock-freeze control fails it | E12.18.3 |
+| G17 (`sync_fallback_frames`) | **Pass on the measured lanes** (0); the other W workloads are owed | E12.18.5 |
+| G18 (export ≤ S0 + 5%) | **Pass**, hashes identical | E12.18.3 |
+| G3 (LH, 60 fps) | **Blocked (environment)**, Amendment R48; no binary passes on an idle unpinned card | E12.18.2 |
+
+- **Margin to watch:** `blend_heavy_1080p` LH run 2 dropped 17 frames, one under G1's budget (`blend_heavy` is G2's
+  criterion, due at S3b; recorded here because it is the workload that regressed in E12.13.5).
+
+#### E12.18.5 Owed to the combined run after S2c
+
+- P-play LL and LH for `blend_heavy_1080p` (LL), `explainer_16x9`, `reel_9x16`, `feed_4x5` and `talk_recut`, which
+  completes G17 and G11 and gives G2 a first reading;
+- P-play LL controls; P-seek LL and LH (G8, L-6); P-rss LL (G15, provisional; the pinned verdict stays S4's);
+- I4 LL and LH.
