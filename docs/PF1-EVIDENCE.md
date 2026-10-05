@@ -5052,3 +5052,84 @@ build, with systemd-oomd active, and the rerun passed.
 - render.rs 6 and preview.rs 5;
 - pf1_s2c_witness.rs 43 (16 removed);
 - pf1_s2c_continuation.rs 100.
+
+### E13.3 S2c-3: S-3 bounded backward window
+
+**Implementation (95faf28).** Design §8 S-3's *Implementation [S2c-3]* paragraph describes it.
+- `Readers::backward` (sched.rs) takes a paused job's single-time sources. A source refills when t is below its
+  last playhead and t's frame is not in the ring. B = clamp(⌊(C − G − H) / n / f⌋, 1, 16) and
+  start = max(in-point, t − B + 1). [start, t) joins t's required times, so K-2 reserves the window.
+- `ReaderDemand.in_points` (render.rs) carries each source's in-point: the media clip's `source_range.start`, or t
+  for a freeze clip.
+- `Readers::hold` keeps each window across posts while its source stays planned (`post` forgets the others). A step
+  inside a held window, in either direction, is a hit and converts nothing. K-5 evicts the frames behind the travel
+  first.
+- `preview::backward_windows` runs only for a paused job (`wait.playback.is_none()`). The job's `paused_plan` then
+  sends the reader through `decode_paused`, so the window decodes with one seek to the key ≤ start and continues
+  under S-2.
+
+**Witnesses.**
+- `preview::tests::a_backward_drag_matches_fresh_seeks_and_refills_once_per_window` drives a real paused drag on a
+  generated 160×90 file (GOP 30), along [40, 39, 38, 35, 31, 30, 29, 28, 20, 14, 13, 12, 5, 6]. It checks two things.
+  - Every presented frame is byte-identical to a fresh-seek decode (C-5).
+  - The reader seeks exactly at [40, 39, 29, 28, 12]: the first paused frame, then one refill per window crossed.
+- `sched::tests::a_backward_step_refills_a_bounded_window_and_then_hits` covers:
+  - B from the share, the clamp at 1 and at 16, and the in-point floor;
+  - forward steps (no refill), hits that decode nothing, and K-2's set never exceeding C.
+- `sched::tests::a_held_window_is_evicted_behind_the_travel_after_a_reversal` covers K-5 after a reversal.
+- `preview::tests::only_a_paused_job_refills_a_backward_window`: a playback job holds no window.
+
+**Mutations.** Each mutation alone against 95faf28 (`s2c-logs/s2c3/mutate.py`, logs `mut-*.log`, summary
+`mutate-95faf28.out`). All 7 fail. The first run (`first-run/`, on the uncommitted tree) let `paused-only-removed`
+survive. The fourth witness was added for it before the commit.
+
+| Mutation | Failing tests | First failure line |
+|---|---|---|
+| hold ignored (a held window never hits) | drag, refill, reversal | `hit 37`; `[40, 39, 36]: the set does not fit beside the window` |
+| share ignored (B always 16) | refill, reversal | `K-3: a set over C was posted` |
+| in-point floor ignored | refill | `C 1000 G 0 floor 35: refill` |
+| forward steps refill | refill | `floor 0: forward` |
+| a hit drops the window | drag, refill, reversal | `left: None right: Some((31, 39))` |
+| travel ignored in eviction | reversal, `eviction_follows_the_travel_direction` | `[40, 39, 36] left [31, 32] right [39, 38]`; the existing `[101] → 100` |
+| paused-only check removed | `only_a_paused_job_refills_a_backward_window` | `paused false` |
+
+**Gates.** L-4a (a hit) is gated by the timing run's P-seek and L-4b (a refill) is recorded there (E13.4); GOPs
+over 250 are recorded, not gated (D4). Possible L-1 risk: a backward click-seek that misses the ring refills
+up to 16 frames before t. The P-seek lanes show whether that costs L-1.
+
+**R39 item 4: open GOP. Stopped, needs a ruling.** A fresh seek to an open-GOP leading frame yields no frame, and
+`SourceSpec::decode` then returns `no_frame`. This is a product bug that predates PF1. A diagnostic (never
+committed; `s2c-logs/s2c3/opengop-diag.txt`) decoded every frame of each C-4 fixture with a fresh one-frame
+window at 1 thread:
+- Default, Pyramid, EditList and Vfr: every frame is present.
+- OpenGop: frames 21, 22, 23, 47 and 71 are missing (the leading frames before keys 24, 48 and 72 that a seek lands on).
+- AviDtsGuess: frames 0, 1, 24, 25, 48, 49, 72 and 73 are missing.
+
+The likely fix, prototyped (`s2c-logs/s2c3/opengop-retry-prototype.diff`), retries once. When the window misses
+`start` and the first packet is a key past the stream start, it seeks to that key's dts − 1 and decodes again. That
+recovers every OpenGop frame and AviDtsGuess 24/25/48/49/72/73; AviDtsGuess 0 and 1 stay missing, since no earlier
+key exists. With the prototype, `pf1_s2c` failed 14 of 32 tests, all at `Truth::new`
+(`pf1_s2c_witness.rs:512`, `assert_eq!(decoder.seek_count(), 1, "{:?}: the linear run seeked again")`), for OpenGop
+(left 2) and AviDtsGuess (`s2c-logs/s2c3/opengop-proto-pf1_s2c.log`).
+
+The brief allows regenerating the oracle from a fixed seek path, but that is not enough here:
+- The C-4 oracle assumes a run's anchor is A(t), the shadow's seek result. A retry anchors the run one key earlier.
+- `Truth`'s one-seek assertion would have to change, and so would S-2's anchor rule for a retried run: the prototype
+  refuses continuation after a retry.
+- That is an edit to the oracle's assertions and to rule 2, and the brief reserves both for the lead.
+
+The behaviour stays pinned (continuation equals today's seek path) and the prototype was reverted. The proposed
+amendment: a retried seek anchors at the earlier key, A(t) becomes that key for leading frames, and the test author
+updates `Truth` and the model. The AviDtsGuess misses at 24/25 suggest the AVI case has a different cause
+(DTS-guessed timestamps) and need their own look.
+
+**Lines (non-blank, non-comment, added; 95faf28).** 252 in total: sched.rs 147 (47 production, 100 tests),
+preview.rs 100 (37 production, 63 tests; 10 removed), render.rs 5. With S2c-2's ~428, S-2 and S-3 together come to
+about 680, against ~560: 21% over, inside the 50% rule. Tests make up most of the excess: 163 of S2c-3's lines.
+
+**Gates (95faf28 before the fourth witness was amended in).**
+- `cargo test -p kinewright-media`: lib 1013 passed, 56 ignored (414 s); au3 3 passed / 2 ignored; au5 9;
+  generated_media 12 passed / 3 ignored; transcript_e2e 2.
+- clippy (1.99, `-D warnings`) clean; fmt clean; `cargo build -p kinewright-app` ok.
+
+The final tree is covered by S2c-4's workspace gate (E13.4).
