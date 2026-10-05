@@ -34,6 +34,12 @@ const READERS_PER_SOURCE: usize = 2;
 /// seek back), starts a new region.
 const REGION_GAP: i64 = 1;
 
+/// S-3 [S2c]: B's ceiling, the frames a backward window holds at most.
+const WINDOW_FRAMES: usize = 16;
+
+/// S-3 [S2c]: per source, a paused job's backward window [start, end].
+pub(crate) type Windows<K> = HashMap<K, (i64, i64)>;
+
 /// H-5: R = clamp(P, 1, 8).
 pub(crate) fn reader_limit(parallelism: usize) -> usize {
     parallelism.clamp(1, 8)
@@ -447,6 +453,10 @@ pub(crate) struct Readers<K, F> {
     /// K-5 (review B F4): per source, its last required times and the
     /// direction its demand travels, for eviction (bounded, U-1).
     travel: SourceMemory<K, (Vec<i64>, Travel)>,
+    /// S-3 [S2c]: the backward windows the current plan holds: their ring
+    /// frames stay across posts while their source is in the plan (one
+    /// entry per planned source at most).
+    windows: Windows<K>,
 }
 
 impl<K, F> Default for Readers<K, F> {
@@ -484,6 +494,7 @@ impl<K, F> Readers<K, F> {
             merged_rewinds: 0,
             starved_keys: HashSet::new(),
             travel: SourceMemory::default(),
+            windows: HashMap::new(),
         }
     }
 
@@ -594,10 +605,15 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             .map(|(key, _)| self.sizes.get(key).copied().unwrap_or(0))
             .sum();
         let mut frames = Vec::new();
-        let wanted = &self.wanted;
+        self.windows.retain(|key, _| self.wanted.contains_key(key));
+        let (wanted, windows) = (&self.wanted, &self.windows);
         self.rings.retain(|key, ring| {
             let keep = wanted.get(key);
-            let gone = ring.extract_if(.., |t, _| keep.is_none_or(|keep| !keep.contains(t)));
+            // S-3 [S2c]: a held window's frames stay with its source.
+            let window = windows.get(key).map(|(start, end)| *start..=*end);
+            let held = |t: &i64| window.as_ref().is_some_and(|window| window.contains(t));
+            let kept = |t: &i64| keep.is_some_and(|keep| keep.contains(t) || held(t));
+            let gone = ring.extract_if(.., |t, _| !kept(t));
             frames.extend(gone.map(|(_, frame)| frame));
             !ring.is_empty()
         });
@@ -638,6 +654,57 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         self.regions_merged += planned.merged;
         self.regions_folded += planned.folded;
         self.post(planned.regions, plan, now)
+    }
+
+    /// S-3 [S2c]: a paused job's backward windows. `steps` holds each
+    /// source with one required time t, and its floor (the clip's
+    /// in-point); `set` is the job's set (H + G), each source's f in
+    /// `sizes`. A step below the source's last playhead to a t not resident
+    /// refills: B = clamp(⌊share / f⌋, 1, 16) with share = (C − G − H) / n,
+    /// start = max(floor, t − B + 1), and [start, t) joins t's required
+    /// times (K-2 charges them; B·f ≤ share keeps the set within C). A
+    /// resident t inside its source's window keeps the window (a hit).
+    /// Returns the windows to hold and the refills; nothing changes until
+    /// [`Self::hold`].
+    pub(crate) fn backward(
+        &self,
+        steps: &[(K, i64, i64)],
+        sizes: &HashMap<K, usize>,
+        set: usize,
+    ) -> (Windows<K>, Vec<(K, Vec<i64>)>) {
+        let share = self.budget.saturating_sub(set) / sizes.len().max(1);
+        let mut windows = HashMap::new();
+        let mut refills = Vec::new();
+        for (key, t, floor) in steps {
+            let t = *t;
+            if (self.rings.get(key)).is_some_and(|ring| ring.contains_key(&t)) {
+                let window = self.windows.get(key);
+                if let Some(window) = window.filter(|(start, end)| (*start..=*end).contains(&t)) {
+                    windows.insert(key.clone(), *window);
+                }
+                continue;
+            }
+            let last = self.travel.peek(key);
+            let last = last.and_then(|(points, _)| points.iter().max().copied());
+            if last.is_none_or(|last| t >= last) {
+                continue;
+            }
+            let f = sizes.get(key).copied().unwrap_or(0);
+            let frames = share.checked_div(f).unwrap_or(1).clamp(1, WINDOW_FRAMES);
+            let back = i64::try_from(frames).unwrap_or(1) - 1;
+            let start = t.saturating_sub(back).max(*floor).max(0);
+            if start < t {
+                windows.insert(key.clone(), (start, t));
+                refills.push((key.clone(), (start..t).collect()));
+            }
+        }
+        (windows, refills)
+    }
+
+    /// S-3 [S2c]: the windows the next post holds (a playback job holds
+    /// none; a post forgets those of sources it does not plan).
+    pub(crate) fn hold(&mut self, windows: Windows<K>) {
+        self.windows = windows;
     }
 
     /// Give waiting regions new readers while slots are free; while one
@@ -2550,6 +2617,123 @@ mod tests {
             };
             let order: Vec<u32> = evicted.iter().map(|f| f.value).collect();
             assert_eq!(order, [frame(0, first)], "{previous:?} → 100");
+        }
+    }
+
+    /// S-3 [S2c]: one paused job requiring `t` of source 0 (in-point
+    /// `floor`, G = `g`), its windows held as the preview holds them, then
+    /// served; returns the times decoded, in order.
+    fn paused_step(readers: &mut Model, t: i64, floor: i64, g: usize) -> Vec<i64> {
+        let sizes = HashMap::from([(0u8, F)]);
+        let (windows, refills) = readers.backward(&[(0, t, floor)], &sizes, F + g);
+        let mut required = vec![t];
+        required.extend(refills.into_iter().flat_map(|(_, times)| times));
+        let regions = plan_regions(&[(0, required, Vec::new())], readers.limit());
+        readers.hold(windows);
+        let posted = readers.post(
+            regions.expect("a reader").regions,
+            (sizes, g),
+            Duration::ZERO,
+        );
+        let dropped: usize = posted.dropped.0.iter().map(Fr::bytes).sum();
+        readers.release(dropped);
+        let admitted = readers.admit(g);
+        assert!(
+            matches!(admitted, Admission::Ready { .. }),
+            "{t}: the set fits"
+        );
+        let mut decoded = BTreeMap::new();
+        drive(readers, &mut decoded);
+        readers.release(g);
+        let resolved = readers.resolve(&[(0, t)]).expect("t resolved");
+        assert_eq!(
+            resolved[0].as_ref().ok().map(|f| f.value),
+            Some(frame(0, t))
+        );
+        let mut times: Vec<i64> = decoded.into_values().flatten().collect();
+        times.sort_unstable();
+        times
+    }
+
+    /// S-3 [S2c]: a backward paused step to a frame not resident refills
+    /// [max(floor, t − B + 1), t], B = clamp(⌊share / f⌋, 1, 16) with share
+    /// = (C − G − H) / n, as required frames (K-2: the peak stays within C);
+    /// a step inside the window decodes nothing, a step below it refills
+    /// again, and a forward step never refills.
+    #[test]
+    fn a_backward_step_refills_a_bounded_window_and_then_hits() {
+        // (C, G, floor, the window refilled at 39 from 40)
+        let cases = [
+            (100 * F, 0, 0, Some(24)),  // B = 16, the ceiling
+            (10 * F, 0, 0, Some(31)),   // share = 9f: B = 9
+            (5 * F, F, 0, Some(37)),    // share = (5 − 1 − 1) f: B = 3
+            (100 * F, 0, 35, Some(35)), // the clip's in-point
+            (2 * F, F, 0, None),        // share 0: B = 1, no window
+        ];
+        for (c, g, floor, start) in cases {
+            let label = format!("C {c} G {g} floor {floor}");
+            let mut readers = Model::new(20).with_budget(c);
+            assert_eq!(paused_step(&mut readers, 40, floor, g), [40], "{label}");
+            assert_eq!(
+                paused_step(&mut readers, 41, floor, g),
+                [41],
+                "{label}: forward"
+            );
+            let start = start.unwrap_or(39);
+            let window: Vec<i64> = (start..=39).collect();
+            assert_eq!(
+                paused_step(&mut readers, 39, floor, g),
+                window,
+                "{label}: refill"
+            );
+            for t in (start..39).rev() {
+                assert!(
+                    paused_step(&mut readers, t, floor, g).is_empty(),
+                    "{label}: hit {t}"
+                );
+            }
+            if start > floor {
+                let decoded = paused_step(&mut readers, start - 1, floor, g);
+                assert_eq!(decoded.last(), Some(&(start - 1)), "{label}: refill again");
+                assert_eq!(decoded.len(), window.len(), "{label}: the same B");
+            }
+            assert!(
+                readers.live().1 <= c,
+                "{label}: peak {:?} over C",
+                readers.live()
+            );
+        }
+    }
+
+    /// S-3 [S2c] with K-5: a held window's frames are evicted by travel:
+    /// dragging back (39 → 36) evicts those above the playhead first, and
+    /// after a reversal (35 → 36) those below it.
+    #[test]
+    fn a_held_window_is_evicted_behind_the_travel_after_a_reversal() {
+        for (path, first) in [
+            (&[40, 39, 36][..], [39, 38]),
+            (&[40, 39, 35, 36][..], [31, 32]),
+        ] {
+            let mut readers = Model::new(20).with_budget(10 * F);
+            for t in path {
+                paused_step(&mut readers, *t, 0, 0);
+            }
+            // The window is [31, 39] (B = 9), 9f live. A job requiring 36
+            // and source 1's 0 with G = 2f: 9f + f + 2f > C = 10f.
+            let sizes = HashMap::from([(0u8, F), (1, F)]);
+            let steps = [(0u8, 36, 0), (1, 0, 0)];
+            let (windows, refills) = readers.backward(&steps, &sizes, 4 * F);
+            assert!(refills.is_empty(), "{path:?}: 36 is a hit");
+            assert_eq!(windows.get(&0), Some(&(31, 39)), "{path:?}");
+            let demand = [(0u8, vec![36], Vec::new()), (1, vec![0], Vec::new())];
+            let regions = plan_regions(&demand, readers.limit()).expect("readers");
+            readers.hold(windows);
+            readers.post(regions.regions, (sizes, 2 * F), Duration::ZERO);
+            let Admission::Wait { evicted, .. } = readers.admit(2 * F) else {
+                panic!("{path:?}: the set does not fit beside the window");
+            };
+            let order: Vec<u32> = evicted.iter().map(|f| f.value).collect();
+            assert_eq!(order, first.map(|at| frame(0, at)), "{path:?}");
         }
     }
 

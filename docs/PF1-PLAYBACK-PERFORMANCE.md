@@ -747,6 +747,25 @@ to t and converts only [start, t], a demand region (K-5). A hit is one render
 GOP), plus B conversions (L-4b, recorded). GOPs over 250 are recorded, not
 gated (D4).
 
+*Implementation [S2c-3].*
+- **Scope.** A paused job's sources each with one required time t go to
+  `Readers::backward`, under the post's lock.
+- **Refill.** t refills when it is below the source's last playhead (K-5's
+  travel memory) and its frame is not in the ring. B is
+  ⌊(C − G − H) / n / f⌋ clamped to 1…16, with H and G the job's set. The
+  window is [start, t], start = max(the clip's in-point, t − B + 1), and
+  [start, t) joins t's required times. K-2 therefore reserves the whole
+  window, and B·f ≤ share keeps the set within C. The reader decodes the
+  window ascending: one seek to the key ≤ start, then S-2's continuation.
+- **Hold.** The post holds each source's window. Its ring frames survive
+  later posts while the source stays planned and the playhead stays inside
+  the window. A step inside the window, in either direction, is a hit and
+  decodes nothing. Held frames that the job does not require are lookahead
+  to K-5: a drain evicts the frames behind the travel first, so after a
+  reversal those below the playhead go first.
+- **Exclusions.** Playback jobs, forward steps and sources with several
+  required times hold no window.
+
 ## 9 Audio clock and A/V sync
 
 **V-1 [S1] The clock counts programme frames popped (R6).** `render_output`

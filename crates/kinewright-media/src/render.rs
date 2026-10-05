@@ -372,6 +372,9 @@ pub(crate) struct ReaderDemand {
     /// The rasters G counts (review B S2: only those not resident are
     /// reserved).
     generated_keys: Vec<TitleCacheKey>,
+    /// S-3 [S2c]: per required source, its clip's in-point (a backward
+    /// window's floor; a freeze clip's is its frame).
+    pub(crate) in_points: HashMap<VideoSourceKey, i64>,
 }
 
 impl ReaderDemand {
@@ -482,6 +485,10 @@ pub(crate) fn reader_demand(
             }
             let time = video.source.source_at.0;
             if frame == at.0 {
+                let clip = document.clip(video.source.clip);
+                let clip = clip.filter(|clip| clip.content.is_media());
+                let floor = clip.map_or(time, |clip| clip.source_range.start.0);
+                demand.in_points.insert(key.clone(), floor);
                 demand.required.push((key, time));
             } else if !ahead.contains(&(key.clone(), time)) {
                 ahead.push((key, time));

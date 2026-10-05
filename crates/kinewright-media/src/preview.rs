@@ -712,16 +712,13 @@ fn supplied(
     (frames, pins)
 }
 
+/// A source, its required times and its lookahead.
+type Times = (VideoSourceKey, Vec<i64>, Vec<i64>);
+type PerSource = Vec<Times>;
+
 /// H-5/K-3: per source its required and lookahead times, each source's
 /// frame bytes, and the required set's bytes (distinct frames plus G).
-#[allow(clippy::type_complexity)]
-fn demand_plan(
-    demand: &ReaderDemand,
-) -> (
-    Vec<(VideoSourceKey, Vec<i64>, Vec<i64>)>,
-    HashMap<VideoSourceKey, usize>,
-    usize,
-) {
+fn demand_plan(demand: &ReaderDemand) -> (PerSource, HashMap<VideoSourceKey, usize>, usize) {
     let per_source = (demand.sources.iter())
         .map(|(key, (_, lookahead))| {
             let required = demand.required.iter().filter(|(k, _)| k == key);
@@ -737,6 +734,39 @@ fn demand_plan(
         .map(|(key, _)| sizes.get(key).copied().unwrap_or(0))
         .fold(demand.generated, usize::saturating_add);
     (per_source, sizes, set)
+}
+
+/// S-3 [S2c]: a paused job's backward windows (`Readers::backward`) for
+/// each source with one required time: a refill's times join that
+/// source's required times, and their bytes the set. Returns the windows
+/// to hold (none for playback).
+fn backward_windows(
+    paused: bool,
+    readers: &Readers<VideoSourceKey, Pinned>,
+    demand: &ReaderDemand,
+    (per_source, sizes, set): (&mut [Times], &HashMap<VideoSourceKey, usize>, &mut usize),
+) -> crate::sched::Windows<VideoSourceKey> {
+    if !paused {
+        return HashMap::new();
+    }
+    let steps: Vec<(VideoSourceKey, i64, i64)> = (per_source.iter())
+        .filter_map(|(key, required, _)| {
+            let (&t, rest) = required.split_first()?;
+            let floor = demand.in_points.get(key).copied().unwrap_or(t);
+            rest.iter()
+                .all(|other| *other == t)
+                .then(|| (key.clone(), t, floor))
+        })
+        .collect();
+    let (windows, refills) = readers.backward(&steps, sizes, *set);
+    for (key, times) in refills {
+        let f = sizes.get(&key).copied().unwrap_or(0);
+        *set = set.saturating_add(f.saturating_mul(times.len()));
+        if let Some((_, required, _)) = per_source.iter_mut().find(|(k, ..)| *k == key) {
+            required.extend(times);
+        }
+    }
+    windows
 }
 
 /// A transport render's `FrameWait` terms (H-2): its lane version, and for
@@ -1412,7 +1442,7 @@ impl Preview {
         at: TimeCode,
         wait: &FrameWait,
     ) -> Result<Option<Scheduled>, Halt> {
-        let (per_source, sizes, set) = demand_plan(demand);
+        let (mut per_source, sizes, mut set) = demand_plan(demand);
         let lane = Arc::clone(&self.lane);
         let now = lane.now();
         let mut state = lane.lock();
@@ -1423,6 +1453,9 @@ impl Preview {
         if state.shutdown || wait.superseded(&lane, &state) {
             return Err(Halt::Superseded);
         }
+        let paused = wait.playback.is_none();
+        let job = (per_source.as_mut_slice(), &sizes, &mut set);
+        let windows = backward_windows(paused, &state.readers, demand, job);
         let planned = match self.plan(&state, &per_source, set) {
             Ok(planned) => planned,
             Err(reason) => {
@@ -1433,7 +1466,8 @@ impl Preview {
         };
         let plan = (sizes, demand.generated);
         // The set is admitted under the post's lock, before a reader starts.
-        state.paused_plan = wait.playback.is_none();
+        state.paused_plan = paused;
+        state.readers.hold(windows);
         let mut posted = Some(state.readers.post_planned(planned, plan, now));
         // Review B S2: only the rasters not resident are reserved.
         let mut generated = Some(demand.generated_uncharged(&self.charged));
@@ -2656,6 +2690,81 @@ pub(crate) mod tests {
             synchronous.file_count, 0,
             "the synchronous renderer decoded nothing"
         );
+    }
+
+    /// S-3 [S2c] (C-5): a backward drag's frames, refills and hits alike,
+    /// composite to a fresh seek's bytes. Only a step to a frame not
+    /// resident seeks (a refill of B = 16, from the clip's in-point at
+    /// most), and a step inside the window, either way, decodes nothing.
+    #[test]
+    fn a_backward_drag_matches_fresh_seeks_and_refills_once_per_window() {
+        // One track: testsrc2 0..30 (in-point 0), smptebars 30..60 (in 7).
+        let workload = crate::perf_fixtures::cuts((160, 90), 60, 1, 2, 30);
+        let document = Arc::new(workload.0.clone());
+        let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let mut seeked = Vec::new();
+        let path = [40, 39, 38, 35, 31, 30, 29, 28, 20, 14, 13, 12, 5, 6];
+        for (seq, at) in (1..).zip(path) {
+            let before = preview.lane.counters().stats.reader_seeks;
+            let job = job(&document, JobKind::Paused(TimeCode(at)), stamp(1, seq));
+            preview.run_paused(&job, 0);
+            assert!(preview.lane.take_failures().is_empty(), "frame {at}");
+            let shown = frames.try_recv().expect("published");
+            let expected = reference.render_live(
+                &document,
+                TimeCode(at),
+                resolution,
+                scale,
+                DecodeStrategy::Seek,
+            );
+            assert_eq!(
+                shown.texture.rgba,
+                expected.expect("reference").rgba,
+                "frame {at}"
+            );
+            if preview.lane.counters().stats.reader_seeks > before {
+                seeked.push(at);
+            }
+        }
+        // 40 opens; 39 refills smptebars [7, 16]; 29 opens testsrc2; 28
+        // refills [13, 28]; 12 refills [0, 12].
+        assert_eq!(seeked, [40, 39, 29, 28, 12]);
+    }
+
+    /// S-3 [S2c]: only a paused job holds a backward window: the same
+    /// backward step (25 → 20) refills for a paused job, and changes
+    /// nothing for playback.
+    #[test]
+    fn only_a_paused_job_refills_a_backward_window() {
+        let workload = crate::perf_fixtures::cuts((160, 90), 60, 1, 2, 30);
+        let document = &workload.0;
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let mut sizes = FrameSizes::default();
+        let mut demand = |at| {
+            reader_demand(document, TimeCode(at), resolution, scale, 0, &mut sizes)
+                .expect("the demand")
+        };
+        let (later, earlier) = (demand(25), demand(20));
+        let mut readers: Readers<VideoSourceKey, Pinned> = Readers::new(4);
+        let (per_source, plan_sizes, _) = demand_plan(&later);
+        let regions = plan_regions(&per_source, readers.limit()).expect("a reader");
+        let _posted = readers.post(regions.regions, (plan_sizes, 0), Duration::ZERO);
+        for paused in [false, true] {
+            let (mut per_source, sizes, mut set) = demand_plan(&earlier);
+            let before = (per_source.clone(), set);
+            let job = (per_source.as_mut_slice(), &sizes, &mut set);
+            let windows = backward_windows(paused, &readers, &earlier, job);
+            assert_eq!(windows.is_empty(), !paused, "paused {paused}");
+            assert_eq!((per_source, set) == before, !paused, "paused {paused}");
+        }
     }
 
     /// Review B S3's sources: an encoded 30-frame 160×90 H.264 source with
