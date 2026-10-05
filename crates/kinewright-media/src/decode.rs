@@ -844,6 +844,7 @@ fn reader_input(
     path: &Path,
     stop: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<ffmpeg::format::context::Input, MediaError> {
+    crate::quiet_ffmpeg_log();
     READER_STOP.set(Some(ReaderStop {
         stop: Arc::clone(stop),
         #[cfg(test)]
