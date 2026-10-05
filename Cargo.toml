@@ -54,8 +54,11 @@ unsafe_code = "forbid"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Rust 1.99 added this one; it rewrites `assert!(v.is_empty())` (and its negation)
+# as `assert_eq!(v, [] as [T; 0])`, which reads worse and changes 141 tests.
+assert_is_empty = "allow"
 
 # MSVC emits very large PDBs for this media/GUI graph. Keep useful line tables
 # for app development, omit dependency symbols, and disable the unbounded

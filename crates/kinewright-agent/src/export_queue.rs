@@ -690,6 +690,9 @@ impl ExportQueue {
             {
                 return Err(ExportQueueError::OutputInUse(output_path));
             }
+            // `fetch_update` is deprecated in favour of `try_update` from Rust 1.99, which
+            // the 1.92 MSRV does not have.
+            #[allow(deprecated)]
             let id = ExportJobId(
                 self.state
                     .next_id

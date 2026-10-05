@@ -2821,7 +2821,7 @@ fn curve_operations(
         operations.push(operation(point_count, minimum));
         active_count = minimum;
     }
-    let stored_x1 = curve.x_parameter(1).map_or(i64::MAX, &stored);
+    let stored_x1 = curve.x_parameter(1).map_or(i64::MAX, stored);
     let leading_order = if target[0][0] < stored_x1 {
         [0_usize, 1]
     } else {
