@@ -1120,6 +1120,220 @@ fn rotation_from_degrees(degrees: i32) -> Result<VideoRotation, MediaError> {
     }
 }
 
+/// PF1 S2c C-4: the first video packet after a seek, as S-2 rule 1 defines the
+/// anchor: (`pos`, DTS, key flag).
+#[cfg(test)]
+pub(crate) type Anchor = (isize, Option<i64>, bool);
+
+/// PF1 S2c C-4: a held frame: its grid position, `best_effort_timestamp` and a
+/// hash of its decoded planes (so retained pixels are compared, not counted).
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Retained {
+    pub(crate) grid: i64,
+    pub(crate) pts: Option<i64>,
+    pub(crate) hash: u64,
+}
+
+/// PF1 S2c C-4: the S-2 state the witnesses compare, plus the run's anchor.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecoderState {
+    pub(crate) pending: Option<Retained>,
+    pub(crate) lookahead: Option<Retained>,
+    pub(crate) continuation_at: Option<i64>,
+    pub(crate) eof_sent: bool,
+    pub(crate) fallback_index: i64,
+    /// The first video packet the real context read after the run's seek.
+    pub(crate) first_packet: Option<Anchor>,
+}
+
+/// PF1 S2c C-4: a test-injected timestamp fault, keyed by the frame's true
+/// `best_effort_timestamp` so a fresh decoder and a continuing one meet the
+/// same fault at the same frame.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tamper {
+    /// The frame with this timestamp has none (S-2 rule 3: falls back to the index).
+    Missing(i64),
+    /// The frame with this timestamp repeats its predecessor's timestamp.
+    Repeat(i64),
+}
+
+/// PF1 S2c C-4: one received frame: `packets` read in the run when it arrived,
+/// its grid position and the timestamp the decoder acted on (after any tamper).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameLog {
+    pub(crate) packets: u64,
+    pub(crate) grid: i64,
+    pub(crate) ts: Option<i64>,
+}
+
+/// PF1 S2c C-4: counters the witnesses read (test builds only). Whatever
+/// implements S-2 continuation must keep feeding them: `on_packet` for every
+/// video packet read, `on_frame` for every frame received (with the
+/// timestamp selection acted on, after `tampered`), and it must leave
+/// `first_packet` alone (it is the run's anchor).
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct DecoderProbe {
+    pub(crate) first_packet: Option<Anchor>,
+    awaiting_first: bool,
+    /// Frames received over the decoder's lifetime (a seek does not reset it).
+    pub(crate) received: u64,
+    /// Video packets read since the run's seek (the anchor packet is 1).
+    pub(crate) packets: u64,
+    /// The frames received since the run's seek, in arrival order.
+    pub(crate) frames: Vec<FrameLog>,
+    cancel_at_received: Option<u64>,
+    /// Model S-2's "cancellation is checked between produced frames": after
+    /// a received frame raises the stop flag, the run ends with `Cancelled`
+    /// before any further frame is accepted. Off, the decoder is today's:
+    /// it checks between packets, so frames already decoded and waiting
+    /// (frame threads, the end-of-stream flush) are still drained. A test
+    /// seam standing in for the check S2c-2 puts in `receive_frames`. Private:
+    /// only `arm_between_frames` sets it, and that needs the positive
+    /// control's `ControlToken`.
+    check_between_frames: bool,
+    /// How many times the seam has been set or cleared over the decoder's
+    /// lifetime (monotonic; there is no way to reset it), so arming and
+    /// clearing again inside one call still shows.
+    seam_arms: u64,
+    pub(crate) tampers: Vec<Tamper>,
+    last_ts: Option<i64>,
+    /// Colour conversions run over the decoder's lifetime.
+    pub(crate) conversions: u64,
+    /// The timestamp of the frame being converted.
+    converting_pts: Option<i64>,
+    /// The latest conversion's RGBA64 bytes (the input to the working frame).
+    pub(crate) last_conversion: Option<Converted>,
+}
+
+/// PF1 S2c C-4: what the shared conversion path handed to the working-frame
+/// stage: the source frame's own timestamp and the tightly packed RGBA64LE.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct Converted {
+    pub(crate) pts: Option<i64>,
+    pub(crate) rgba: Arc<Vec<u8>>,
+}
+
+/// PF1 S2c C-4: a deliberate fault in the shared output path (the mutation
+/// that a continuation-versus-Seek comparison cannot see, since both share
+/// the path). Per thread, so parallel tests do not meet each other's fault.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFault {
+    /// The colour conversion (graph or scaler) returns wrong RGBA64.
+    Conversion,
+    /// The working-frame stage receives wrong RGBA64 (the conversion was right).
+    WorkingFrame,
+    /// The working frame comes out with one sample replaced by NaN.
+    Nan,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OUTPUT_FAULT: std::cell::Cell<Option<OutputFault>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+impl DecoderProbe {
+    /// Set the between-frames cancel seam. Only the positive control holds a
+    /// `ControlToken` (its constructor is private to `pf1_s2c_witness::reference`),
+    /// so any other path calling this does not compile.
+    pub(crate) fn arm_between_frames(
+        &mut self,
+        on: bool,
+        _control: &crate::pf1_s2c_witness::ControlToken,
+    ) {
+        self.check_between_frames = on;
+        self.seam_arms += 1;
+    }
+
+    /// Times the seam was set or cleared over the decoder's lifetime.
+    pub(crate) fn seam_arms(&self) -> u64 {
+        self.seam_arms
+    }
+
+    pub(crate) fn on_seek(&mut self) {
+        self.first_packet = None;
+        (self.awaiting_first, self.packets, self.last_ts) = (true, 0, None);
+        self.frames.clear();
+    }
+
+    pub(crate) fn on_packet(&mut self, packet: &ffmpeg::Packet) {
+        self.packets += 1;
+        if std::mem::take(&mut self.awaiting_first) {
+            self.first_packet = Some((packet.position(), packet.dts(), packet.is_key()));
+        }
+    }
+
+    /// The timestamp the decoder acts on for a frame whose true one is `ts`.
+    pub(crate) fn tampered(&mut self, ts: Option<i64>) -> Option<i64> {
+        let out = match ts {
+            Some(true_ts) => self.tampers.iter().find_map(|t| match *t {
+                Tamper::Missing(at) if at == true_ts => Some(None),
+                Tamper::Repeat(at) if at == true_ts => Some(self.last_ts),
+                _ => None,
+            }),
+            None => None,
+        };
+        let out = out.unwrap_or(ts);
+        self.last_ts = out.or(self.last_ts);
+        out
+    }
+
+    /// Record a conversion's RGBA64 (`rgba` is the graph or scaler output),
+    /// applying the thread's `OUTPUT_FAULT`, if any, on its side of the tap.
+    pub(crate) fn tap_conversion(
+        &mut self,
+        pts: Option<i64>,
+        rgba: &mut ffmpeg::frame::Video,
+        (width, height): (u32, u32),
+    ) {
+        let fault = OUTPUT_FAULT.with(std::cell::Cell::get);
+        let flip = |rgba: &mut ffmpeg::frame::Video| rgba.data_mut(0)[1] ^= 0x10;
+        if fault == Some(OutputFault::Conversion) {
+            flip(rgba);
+        }
+        let (row, stride) = (usize::try_from(width).unwrap() * 8, rgba.stride(0));
+        let bytes = (0..usize::try_from(height).unwrap())
+            .flat_map(|y| rgba.data(0)[y * stride..y * stride + row].iter().copied())
+            .collect();
+        self.conversions += 1;
+        self.last_conversion = Some(Converted {
+            pts,
+            rgba: Arc::new(bytes),
+        });
+        if fault == Some(OutputFault::WorkingFrame) {
+            flip(rgba);
+        }
+    }
+
+    /// Count a received frame; a cancel armed for it raises the stop flag.
+    pub(crate) fn on_frame(
+        &mut self,
+        grid: i64,
+        ts: Option<i64>,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.received += 1;
+        self.frames.push(FrameLog {
+            packets: self.packets,
+            grid,
+            ts,
+        });
+        if self.cancel_at_received.is_some_and(|n| self.received >= n)
+            && let Some(stop) = stop
+        {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 struct PendingVideoFrame {
     first_grid_frame: i64,
     decoded: Option<ffmpeg::frame::Video>,
@@ -1275,6 +1489,11 @@ pub(crate) trait DecoderFrame: CachedFrame {
         flip_horizontal: bool,
         managed_source: Option<&ManagedSource>,
     ) -> Result<Self, MediaError>;
+
+    /// PF1 S2c C-4: replace one sample with NaN (the test-only shared-path
+    /// fault `OutputFault::Nan`); frames without float samples ignore it.
+    #[cfg(test)]
+    fn poison_sample(&mut self) {}
 }
 
 impl DecoderFrame for FrameTexture {
@@ -1342,6 +1561,11 @@ impl DecoderFrame for WorkingFrame {
             source.assumption,
         )
     }
+
+    #[cfg(test)]
+    fn poison_sample(&mut self) {
+        Arc::make_mut(&mut self.pixels)[2] = half::f16::NAN; // pixel 0, blue
+    }
 }
 
 /// H-5: a synchronous decoder's frame threads, min(P, 16).
@@ -1377,6 +1601,8 @@ pub(crate) struct VideoDecoder {
     /// set; Amendment R43 (RS-1): and its IO (seek, packet read) at the next
     /// read of the file, through `input`'s interrupt callback.
     stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    probe: DecoderProbe,
 }
 
 impl VideoDecoder {
@@ -1577,6 +1803,8 @@ impl VideoDecoder {
             eof_sent: false,
             seek_count: 0,
             stop: stop.cloned(),
+            #[cfg(test)]
+            probe: DecoderProbe::default(),
         })
     }
 
@@ -1606,6 +1834,8 @@ impl VideoDecoder {
         self.continuation_at = None;
         self.eof_sent = false;
         self.seek_count = self.seek_count.saturating_add(1);
+        #[cfg(test)]
+        self.probe.on_seek();
 
         self.decode_from_cursor(start, end, cache)
     }
@@ -1640,6 +1870,75 @@ impl VideoDecoder {
     /// The seeks this decoder made (S2c-1: P-seek's `drag_seeks`).
     pub(crate) fn seek_count(&self) -> u64 {
         self.seek_count
+    }
+
+    /// PF1 S2c C-4: the witnesses' stop signal on a decoder opened without
+    /// one (checked at packet and frame boundaries; R43's IO interrupt reads
+    /// only the flag given to `open`).
+    #[cfg(test)]
+    pub(crate) fn set_stop(&mut self, stop: Arc<std::sync::atomic::AtomicBool>) {
+        self.stop = Some(stop);
+    }
+
+    /// PF1 S2c C-4: the fields §8 S-2 names, for the witnesses to compare.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> DecoderState {
+        let frame = |f: &PendingVideoFrame| Retained {
+            grid: f.first_grid_frame,
+            pts: f.decoded.as_ref().and_then(|d| d.timestamp()),
+            hash: f.decoded.as_ref().map_or(0, plane_hash),
+        };
+        DecoderState {
+            pending: self.pending.as_ref().map(frame),
+            lookahead: self.lookahead.as_ref().map(frame),
+            continuation_at: self.continuation_at.map(|t| t.0),
+            eof_sent: self.eof_sent,
+            fallback_index: self.fallback_index,
+            first_packet: self.probe.first_packet,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe(&self) -> &DecoderProbe {
+        &self.probe
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_mut(&mut self) -> &mut DecoderProbe {
+        &mut self.probe
+    }
+
+    /// Raise the stop flag once `frames` more frames have been received.
+    #[cfg(test)]
+    pub(crate) fn arm_cancel_after(&mut self, frames: Option<u64>) {
+        self.probe.cancel_at_received = frames.map(|n| self.probe.received + n);
+    }
+
+    /// Flip one bit of the held lookahead frame's luma (a corrupted retained frame).
+    #[cfg(test)]
+    pub(crate) fn corrupt_lookahead(&mut self) {
+        if let Some(frame) = self.lookahead.as_mut().and_then(|f| f.decoded.as_mut()) {
+            frame.data_mut(0)[0] ^= 1;
+        }
+    }
+
+    /// The tightly packed decoded planes of the held frames, exactly the bytes
+    /// `ffmpeg -f framehash` hashes (8-bit planar), for the independent oracle.
+    #[cfg(test)]
+    pub(crate) fn retained_planes(&self) -> [Option<Vec<u8>>; 2] {
+        [&self.pending, &self.lookahead]
+            .map(|f| f.as_ref().and_then(|f| f.decoded.as_ref()).map(plane_bytes))
+    }
+
+    /// The anchor of a raw `avformat_seek_file` target on the real context
+    /// (the test-only seam for S-2's tick boundaries). Use on a scratch
+    /// decoder: it moves the demuxer.
+    #[cfg(test)]
+    pub(crate) fn probe_anchor_at(&mut self, timestamp: i64) -> Option<Anchor> {
+        self.input.seek(timestamp, ..timestamp).ok()?;
+        let index = self.stream_index;
+        let (_, packet) = self.input.packets().find(|(s, _)| s.index() == index)?;
+        Some((packet.position(), packet.dts(), packet.is_key()))
     }
 
     /// Amendment R43 (RS-1): a failed or stopped window leaves no cursor, so
@@ -1689,6 +1988,11 @@ impl VideoDecoder {
                 self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
                 return Ok(());
             }
+            // PF1 S2c C-4: and before each read, so a stop raised while
+            // decoded frames drained reads no further packet.
+            if self.stopped() {
+                return Err(MediaError::Cancelled);
+            }
             // Amendment R43 (RS-1): one read per turn, not `packets()`,
             // whose iterator retries a failed read forever: an interrupted
             // read fails with `AVERROR_EXIT` until the flag clears, so the
@@ -1715,6 +2019,8 @@ impl VideoDecoder {
             if packet.stream() != self.stream_index {
                 continue;
             }
+            #[cfg(test)]
+            self.probe.on_packet(&packet);
             self.decoder
                 .send_packet(&packet)
                 .map_err(|error| media_error(&self.path, "video decode failed", error))?;
@@ -1744,7 +2050,12 @@ impl VideoDecoder {
             if self.decoder.receive_frame(&mut decoded).is_err() {
                 break;
             }
-            let first_grid_frame = decoded.timestamp().map_or_else(
+            // PF1 S2c C-4: test builds may inject a timestamp fault (`Tamper`).
+            #[cfg(test)]
+            let timestamp = self.probe.tampered(decoded.timestamp());
+            #[cfg(not(test))]
+            let timestamp = decoded.timestamp();
+            let first_grid_frame = timestamp.map_or_else(
                 || {
                     let index = self.fallback_index;
                     self.fallback_index = self.fallback_index.saturating_add(1);
@@ -1758,6 +2069,17 @@ impl VideoDecoder {
                     )
                 },
             );
+            #[cfg(test)]
+            self.probe
+                .on_frame(first_grid_frame, timestamp, self.stop.as_ref());
+            #[cfg(test)]
+            if self.probe.check_between_frames
+                && (self.stop.as_ref())
+                    .is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire))
+            {
+                self.continuation_at = None;
+                return Err(MediaError::Cancelled);
+            }
             let next = PendingVideoFrame {
                 first_grid_frame,
                 decoded: Some(decoded),
@@ -1806,6 +2128,11 @@ impl VideoDecoder {
                 .as_ref()
                 .ok_or_else(|| MediaError::Backend("pending video frame has no pixels".to_owned()))?
                 .clone();
+            // The clone drops the timestamp; the tap records the frame's own.
+            #[cfg(test)]
+            {
+                self.probe.converting_pts = pending.decoded.as_ref().and_then(|d| d.timestamp());
+            }
             let texture = self.convert::<T>(&decoded)?;
             for index in first..=last {
                 cache.insert(TimeCode(index), texture.clone());
@@ -1854,15 +2181,57 @@ impl VideoDecoder {
                 })?;
             }
         }
-        T::from_rgba_frame(
+        #[cfg(test)]
+        if matches!(self.converter, VideoConverter::Managed(_)) {
+            self.probe.tap_conversion(
+                self.probe.converting_pts,
+                &mut rgba,
+                (self.scaled_width, self.scaled_height),
+            );
+        }
+        let frame = T::from_rgba_frame(
             &rgba,
             self.scaled_width,
             self.scaled_height,
             self.rotation,
             self.flip_horizontal,
             self.managed_source.as_ref(),
-        )
+        )?;
+        #[cfg(test)]
+        let frame = {
+            let mut frame = frame;
+            if OUTPUT_FAULT.with(std::cell::Cell::get) == Some(OutputFault::Nan) {
+                frame.poison_sample();
+            }
+            frame
+        };
+        Ok(frame)
     }
+}
+
+/// PF1 S2c C-4: a decoded frame's visible plane bytes, tightly packed
+/// (8-bit planar formats, as the witness fixtures are).
+#[cfg(test)]
+fn plane_bytes(frame: &ffmpeg::frame::Video) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for plane in 0..frame.planes() {
+        let (width, height) = (frame.plane_width(plane), frame.plane_height(plane));
+        let stride = frame.stride(plane);
+        let data = frame.data(plane);
+        for row in 0..height as usize {
+            bytes.extend_from_slice(&data[row * stride..row * stride + width as usize]);
+        }
+    }
+    bytes
+}
+
+#[cfg(test)]
+fn plane_hash(frame: &ffmpeg::frame::Video) -> u64 {
+    plane_bytes(frame)
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+        })
 }
 
 fn read_plane(

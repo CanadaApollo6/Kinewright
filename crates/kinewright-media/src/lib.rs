@@ -132,6 +132,12 @@ mod pf1_export_lane;
 /// V-4 consumer metrics, `process_memory()` and the Q-3 controls.
 #[cfg(test)]
 mod pf1_harness;
+/// PF1 S2c C-4: the S-2 fixtures, the seek-path oracle and the continuation
+/// witnesses (the integration point is `pf1_s2c_witness::TargetPath`).
+#[cfg(test)]
+mod pf1_s2c_fixtures;
+#[cfg(test)]
+mod pf1_s2c_witness;
 mod still_orientation;
 
 use ffmpeg_next as ffmpeg;
