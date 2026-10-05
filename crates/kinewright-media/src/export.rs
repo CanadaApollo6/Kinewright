@@ -377,6 +377,7 @@ fn export_to_temporary(
         .map(|target| normalize_master(&mut audio_mix, target, settings))
         .transpose()?;
 
+    crate::quiet_ffmpeg_log();
     let mut muxer = ffmpeg::format::output(out).map_err(backend)?;
     let global_header = muxer
         .format()

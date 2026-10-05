@@ -796,6 +796,7 @@ pub(crate) fn stream_timestamp_to_global(timestamp: i64, time_base: ffmpeg::Rati
 }
 
 pub(crate) fn media_input(path: &Path) -> Result<ffmpeg::format::context::Input, MediaError> {
+    crate::quiet_ffmpeg_log();
     ffmpeg::format::input(path).map_err(|error| {
         MediaError::Backend(format!(
             "could not open media {}: {error}; the file may be truncated or its format may be unsupported",
