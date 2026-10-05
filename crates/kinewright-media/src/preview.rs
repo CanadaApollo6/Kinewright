@@ -39,8 +39,8 @@ use crate::{
         document_source_keys, reader_demand,
     },
     sched::{
-        Admission, Next, PermitBook, Planned, Poll, Posted, Readers, WaitStep, WaitView, Weighed,
-        plan_regions, wait_step,
+        Admission, Next, PausedView, PermitBook, Planned, Poll, Posted, Readers, WaitStep,
+        WaitView, Weighed, paused_superseded, plan_regions, wait_step,
     },
     stats::{ACK_QUEUE, Ack, Counters},
 };
@@ -725,6 +725,30 @@ struct FrameWait {
     /// A paused job's stamp: a `play` issued after it supersedes the wait
     /// (Amendment R37).
     paused: Option<FrameStamp>,
+    /// When the job was taken (Amendment R49's deadline).
+    since: Instant,
+}
+
+impl FrameWait {
+    /// H-2: a newer post supersedes the wait. Amendment R49: a paused wait
+    /// is also superseded by a `play` issued after it (R37), but not by a
+    /// newer paused job of its epoch (a drag) while younger than
+    /// `RETIRE_DEADLINE`.
+    fn superseded(&self, lane: &Lane, state: &LaneState) -> bool {
+        let newer = state.version != self.version;
+        let Some(stamp) = self.paused else {
+            return newer;
+        };
+        let drag = (state.transport.as_ref()).is_some_and(|job| {
+            matches!(job.kind, JobKind::Paused(_)) && job.stamp.epoch == stamp.epoch
+        });
+        paused_superseded(PausedView {
+            newer,
+            played: lane.superseded_by_play(stamp),
+            drag,
+            young: self.since.elapsed() < RETIRE_DEADLINE,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -819,6 +843,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                         panic!("injected: reader {id} panics decoding {at} (Amendment R43)");
                     }
                 }
+                let seeks = decoder.as_ref().map_or(0, VideoDecoder::seek_count);
                 let result = match &mut decoder {
                     Some(decoder) => spec.decode(decoder, at),
                     None => spec.open(threads, stop).and_then(|opened| {
@@ -827,6 +852,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                         spec.decode(decoder.insert(opened), at)
                     }),
                 };
+                // S2c-1: P-seek's `drag_seeks`.
+                let seeks = decoder.as_ref().map_or(0, |d| d.seek_count() - seeks);
+                if seeks > 0 {
+                    lane.counters().stats.reader_seeks += seeks;
+                }
                 // Stopped: the reader retires, or K-2 stopped its lookahead.
                 // Amendment R43 (RS-1): any failure once the flag is set is
                 // the stop's (an interrupted open, seek or read).
@@ -1334,12 +1364,7 @@ impl Preview {
             if !retired.iter().any(|id| live(&state, id)) {
                 return Ok(());
             }
-            let superseded = wait.is_some_and(|wait| {
-                let played = wait
-                    .paused
-                    .is_some_and(|stamp| lane.superseded_by_play(stamp));
-                state.version != wait.version || played
-            });
+            let superseded = wait.is_some_and(|wait| wait.superseded(&lane, &state));
             if state.shutdown || superseded {
                 return Err(Halt::Superseded);
             }
@@ -1372,7 +1397,7 @@ impl Preview {
             wait.paused
                 .is_some_and(|stamp| lane.superseded_by_play(stamp))
         };
-        if state.shutdown || state.version != wait.version || played() {
+        if state.shutdown || wait.superseded(&lane, &state) {
             return Err(Halt::Superseded);
         }
         let planned = match self.plan(&state, &per_source, set) {
@@ -1410,7 +1435,7 @@ impl Preview {
             let agent = |job: &AgentJob| !job.cancel.load(Ordering::Acquire);
             let view = WaitView {
                 shutdown: state.shutdown,
-                superseded: state.version != wait.version || played(),
+                superseded: wait.superseded(&lane, &state),
                 resolved: resolved.is_some(),
                 playback: wait.playback.is_some(),
                 agent_waiting: state.agent.iter().any(agent),
@@ -1624,10 +1649,15 @@ impl Preview {
         None
     }
 
+    /// Amendment R49: a paused wait a drag's newer job leaves running
+    /// wakes at its deadline.
     fn wait_ready<'a>(&self, state: Sched<'a>, wait: &FrameWait) -> Sched<'a> {
         let ready = &self.lane.ready;
         if wait.playback.is_some() {
             state.wait_timeout(ready, HOLD_POLL)
+        } else if state.version != wait.version {
+            let deadline = wait.since + RETIRE_DEADLINE;
+            state.wait_timeout(ready, deadline.saturating_duration_since(Instant::now()))
         } else {
             state.wait(ready)
         }
@@ -1715,6 +1745,7 @@ impl Preview {
             version,
             playback: None,
             paused: Some(job.stamp),
+            since: Instant::now(),
         };
         match self.render_monitor(&job.scene, at, &wait) {
             Ok(Some(texture)) => self.publish(PreviewFrame {
@@ -1722,7 +1753,8 @@ impl Preview {
                 stamp: job.stamp,
                 texture,
             }),
-            Ok(None) | Err(Halt::Superseded | Halt::Held { .. }) => {}
+            Err(Halt::Superseded) => self.lane.counters().stats.paused_abandoned += 1,
+            Ok(None) | Err(Halt::Held { .. }) => {}
             Err(Halt::Failed(error)) => self.fail(job.stamp, error),
         }
     }
@@ -1783,6 +1815,7 @@ impl Preview {
             version,
             playback: Some(started + wait),
             paused: None,
+            since: started,
         };
         let rendered = self.render_monitor(&job.scene, at, &terms);
         let took = started.elapsed().as_secs_f64() * 1_000.0;
@@ -2911,6 +2944,7 @@ pub(crate) mod tests {
                 version: lane.lock().version,
                 playback: Some(Instant::now() + Duration::from_secs(60)),
                 paused: None,
+                since: Instant::now(),
             };
             let shown = preview.render_monitor(&job.scene, TimeCode(at), &wait);
             let Ok(Some(shown)) = shown else {
@@ -3370,6 +3404,7 @@ pub(crate) mod tests {
             version: preview.lane.lock().version,
             playback: Some(Instant::now() + Duration::from_secs(60)),
             paused: None,
+            since: Instant::now(),
         };
         let rendered = preview.render_monitor(&scene, TimeCode(at), &wait);
         let Ok(Some(frame)) = rendered else {
@@ -3711,6 +3746,7 @@ pub(crate) mod tests {
             version,
             playback,
             paused,
+            since: Instant::now(),
         };
         preview.render_monitor(&scene, TimeCode(at), &wait)
     }
@@ -3765,6 +3801,7 @@ pub(crate) mod tests {
             version,
             playback,
             paused,
+            since: Instant::now(),
         };
         let Ok(Some(frame)) = preview.render_monitor(&scene, TimeCode(at), &wait) else {
             panic!("frame {at} of generation {generation} did not render");
@@ -4086,6 +4123,7 @@ pub(crate) mod tests {
             version: lane.lock().version,
             playback: None,
             paused: None,
+            since: Instant::now(),
         };
         let halted = preview.render_monitor(&at_zero.scene, TimeCode(0), &wait(&lane));
         assert!(matches!(halted, Err(Halt::Superseded)), "superseded");
@@ -4699,5 +4737,134 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    /// Amendment R49: wait (polling, bounded by `limit`) until `lane`
+    /// counts `n` abandoned paused jobs; when, from `from`.
+    fn abandoned(lane: &Lane, n: u64, from: Instant, limit: Duration) -> Option<Duration> {
+        while lane.counters().stats.paused_abandoned < n {
+            if from.elapsed() > limit {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        Some(from.elapsed())
+    }
+
+    /// Amendment R49 [S2c] witness 1: a scripted 30 Hz drag over the cut
+    /// document's two sources, on real decoders. Each job's decodes are held
+    /// until the drag's next `request_frame` posts a newer paused job of its
+    /// epoch; every taken job still finishes and publishes, in order, none
+    /// is abandoned, and the final target is shown.
+    #[test]
+    fn a_drag_publishes_every_taken_paused_job() {
+        let (document, _workload) = cut_document();
+        let lane = Arc::<Lane>::default();
+        let (gate, frames, thread) = gated_preview(&lane);
+        let started = Instant::now();
+        let request = |seq: u32| {
+            let at = JobKind::Paused(TimeCode(i64::from(seq) - 1));
+            lane.post(Some(job(&document, at, stamp(1, u64::from(seq)))));
+        };
+        // Open the gate until a frame publishes.
+        let next_frame = || loop {
+            assert!(started.elapsed() < Duration::from_secs(60), "hung");
+            let _ = gate.try_send(());
+            if let Ok(frame) = frames.recv_timeout(Duration::from_millis(1)) {
+                break frame;
+            }
+        };
+        request(1);
+        for seq in 2..=30 {
+            wait_until(&lane, decoding); // job seq − 1 waits on a reader
+            let tick = started + Duration::from_secs(1) * (seq - 1) / 30;
+            thread::sleep(tick.saturating_duration_since(Instant::now()));
+            request(seq);
+            let shown = next_frame();
+            assert_eq!(shown.stamp, stamp(1, u64::from(seq - 1)), "abandoned");
+        }
+        let last = next_frame();
+        assert_eq!((last.at, last.stamp), (TimeCode(29), stamp(1, 30)));
+        assert!(lane.take_failures().is_empty());
+        assert_eq!(lane.counters().stats.paused_abandoned, 0);
+        lane.shut_down();
+        drop(gate);
+        join_within(thread);
+    }
+
+    /// Amendment R49 [S2c] witness 2: the drag's job at 0 waits on a reader
+    /// stuck in its open's IO (R43's seam). The drag's next job (10, same
+    /// epoch) supersedes it only once it has waited `RETIRE_DEADLINE`; it
+    /// is never shown, and once the IO returns the newest target renders.
+    #[test]
+    fn a_stuck_drag_job_is_superseded_at_the_deadline() {
+        use crate::decode::interrupt_seam::{Mode, arm, disarm, release, wait_entered};
+        let (crate::perf_fixtures::Workload(document, _media), path, lane) = retirement_fixture(2);
+        let document = Arc::new(document);
+        arm(&path, Mode::Stuck);
+        let (frames, thread) = threaded_preview(&lane);
+        let taken = Instant::now();
+        let paused = |at| JobKind::Paused(TimeCode(at));
+        lane.post(Some(job(&document, paused(0), stamp(1, 1))));
+        let entered = wait_entered(&path, Duration::from_secs(60));
+        assert!(entered, "held in its open");
+        lane.post(Some(job(&document, paused(10), stamp(1, 2))));
+        let after = abandoned(&lane, 1, taken, Duration::from_secs(10));
+        let after = after.expect("superseded at the deadline");
+        assert!(after >= RETIRE_DEADLINE, "superseded at {after:?}");
+        release(&path);
+        let frame = frames.recv_timeout(Duration::from_secs(60));
+        let frame = frame.expect("the newest target");
+        assert_eq!((frame.at, frame.stamp), (TimeCode(10), stamp(1, 2)));
+        assert!(frames.try_recv().is_err(), "the abandoned job published");
+        disarm(&path);
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R49 [S2c] witness 3 (L-6): a seek, a pause, a new document,
+    /// a `play` and shutdown each supersede a paused wait at once (well
+    /// before `RETIRE_DEADLINE`), and it publishes nothing.
+    #[test]
+    fn controls_still_supersede_a_paused_wait_at_once() {
+        let (document, _workload) = cut_document();
+        let mut slow = Vec::new();
+        for control in ["seek", "pause", "document", "play", "shutdown"] {
+            let lane = Arc::<Lane>::default();
+            let (gate, frames, thread) = gated_preview(&lane);
+            let taken = Instant::now();
+            let paused = |at| JobKind::Paused(TimeCode(at));
+            lane.post(Some(job(&document, paused(0), stamp(1, 1))));
+            wait_until(&lane, decoding);
+            match control {
+                "seek" => lane.post(Some(job(&document, paused(5), stamp(2, 2)))),
+                "pause" | "document" => {
+                    lane.post(None);
+                    let mut resting = job(&document, paused(0), stamp(2, 2));
+                    resting.scene.generation += u64::from(control == "document");
+                    lane.post(Some(resting));
+                }
+                "play" => {
+                    lane.issue_play(2);
+                    let from = TimeCode(0);
+                    lane.post(Some(job(
+                        &document,
+                        JobKind::Playback { from },
+                        stamp(2, 2),
+                    )));
+                }
+                _ => drop(lane.shut_down()),
+            }
+            let after = abandoned(&lane, 1, taken, RETIRE_DEADLINE);
+            if after.is_none_or(|after| after >= RETIRE_DEADLINE) {
+                slow.push((control, after));
+            }
+            lane.shut_down();
+            drop(gate);
+            join_within(thread);
+            let stale = frames.try_iter().any(|frame| frame.stamp == stamp(1, 1));
+            assert!(!stale, "{control}: the superseded job published");
+        }
+        assert!(slow.is_empty(), "superseded late: {slow:?}");
     }
 }

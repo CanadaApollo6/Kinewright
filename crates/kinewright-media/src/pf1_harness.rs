@@ -800,6 +800,9 @@ fn drag_and_release(
     mut step: impl FnMut() -> i64,
 ) -> (String, bool) {
     let (start, mut calls, mut arrivals) = (Instant::now(), Vec::new(), Vec::new());
+    // S2c-1 (Amendment R49): the drag's abandoned paused jobs and reader
+    // seeks, before the release.
+    let before = session.engine.stats();
     let collect = |until: Instant, arrivals: &mut Vec<(f64, i64, FrameStamp)>| {
         while let Ok(PreviewFrame { at, stamp, .. }) = session.frames.recv_deadline(until) {
             arrivals.push((ms(start), at.0, stamp));
@@ -812,6 +815,9 @@ fn drag_and_release(
         calls.push((ms(start), target, session.engine.stamp()));
     }
     collect(start + Duration::from_secs(5), &mut arrivals);
+    let after = session.engine.stats();
+    let abandoned = after.paused_abandoned - before.paused_abandoned;
+    let seeks = after.reader_seeks - before.reader_seeks;
     // Review B: an answer carries the call's stamp or a newer one of its
     // epoch, so an older in-flight image never answers a newer call.
     let answered = |arrivals: &[(f64, i64, FrameStamp)],
@@ -871,7 +877,8 @@ fn drag_and_release(
          drag_distinct_fps={:.1} \
          release_pending_drag_calls={pending} release_shown={} release_ms={:.1} \
          stale_frames_after_release={after_release} frames_over_release={overwrote} \
-         valid_frames_over_release={valid_over}",
+         valid_frames_over_release={valid_over} drag_paused_abandoned={abandoned} \
+         drag_seeks={seeks}",
         percentile(&mut drag, 0.95),
         percentile(&mut answered, 0.95),
         distinct.len() as f64 / 5.0,

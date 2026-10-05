@@ -317,7 +317,7 @@ required request is never lost:
 | Reader | Retiring | nothing | closes its decoder outside all locks, returns permits, exits |
 | Preview | Parked | `ready`: untimed if paused, timed to the next due time if playing | new `version`; agent push; `shutdown`; due time |
 | Preview | Rendering / Staging / SyncRender | nothing (outside the lock) | done |
-| Preview | FrameWait(job) | `ready`: untimed for paused jobs, timed to the deadline for playback | each required (source, time) has a result or matching failure; superseded; agent push (paused only, R-4); `shutdown` |
+| Preview | FrameWait(job) | `ready`: untimed for paused jobs (R49: timed to `RETIRE_DEADLINE` once a drag's newer job waits), timed to the deadline for playback | each required (source, time) has a result or matching failure; superseded (R49 for paused jobs); agent push (paused only, R-4); `shutdown` |
 | Preview | Holding(frame) | `ready`, timed to `at` | due; superseded; `shutdown` |
 | Preview | ReservationWait | `ready` | a live-owned reservation released (K-2); superseded; `shutdown` |
 
@@ -658,6 +658,28 @@ sampled every 5 ms (harness) or at each `App::logic` (app).
 
 **S-1 [S2a] Coalescing.** The paused slot keeps the newest stamp. At most one
 paused render is in flight, and the final target is always rendered (L-6).
+
+**Amendment R49 [S2c] (lead ruling 2026-10-05, deadline-bounded) A drag
+finishes the paused render in flight.** The S2c-1 probe (E13) refuted reader
+churn: on a 30 Hz drag 62–90 % of taken paused jobs were abandoned in H-2's
+FrameWait by the next `request_frame` and 40–68 % of decodes were stale at
+delivery, so few frames ever published. A paused FrameWait is therefore
+superseded by a `play` (R37), by a newer epoch (`seek`, `pause`,
+`set_document`), by any other post (`None`, playback) and by shutdown, at
+once, as before (L-6). It is not superseded by a newer paused job of its own
+epoch (a drag's `request_frame`) **only while it has waited less than
+`RETIRE_DEADLINE`** since it was taken (the existing constant, no new
+tunable); past that the newest `request_frame` supersedes it, as before, so a
+reader stuck in IO cannot hold a drag until the next epoch change. A kept wait
+wakes at that deadline. It finishes, publishes, and the preview then takes the
+newest job (S-1's slot). A drag call's latency is at most min(two paused
+renders, `RETIRE_DEADLINE` + one render). S-1, L-6, P, C, K-2, H-5's FIFO order
+and R37's region rule are unchanged, and no plan is posted for the newer job
+while the older one finishes. S-2 is the cost fix. P-seek prints
+`drag_paused_abandoned` and `drag_seeks` (`PlaybackStats::paused_abandoned`
+and `reader_seeks` over the drag). The brief's item-2 bounds (decoder kept
+across plan changes, no permit resize while dragging) and its reopen witness
+are withdrawn: the probe saw no reopens or resizes to remove.
 
 **S-2 [S2c] Forward continuation, only inside a demonstrated domain (R12,
 R18).** For a paused target t with reader cursor c, the reader decodes forward

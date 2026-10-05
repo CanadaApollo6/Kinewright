@@ -495,6 +495,12 @@ pub struct PlaybackStats {
     /// Amendment R47: readers a preview's shutdown left running (alive at
     /// its deadline, stuck in IO), detached rather than joined.
     pub shutdown_detached_readers: u64,
+    /// Amendment R49 (S2c-1): paused jobs taken and then superseded before
+    /// they published (a newer epoch, a `play`, shutdown, or a newer drag
+    /// target once the wait reached its deadline).
+    pub paused_abandoned: u64,
+    /// S2c-1: seeks made by the preview's reader decoders.
+    pub reader_seeks: u64,
     pub sync_fallback_frames: u64,
     /// Decoders open now in this engine's renderers (preview, proofs,
     /// export).

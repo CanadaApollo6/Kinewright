@@ -4864,3 +4864,54 @@ P-play, `PF1_RUNS=3` (of 1,800 due; `valid=true`, `passes=true`, `underrun_frame
   completes G17 and G11 and gives G2 a first reading;
 - P-play LL controls; P-seek LL and LH (G8, L-6); P-rss LL (G15, provisional; the pinned verdict stays S4's);
 - I4 LL and LH.
+
+## E13 S2c results
+
+### E13.1 S2c-1: the drag probe and Amendment R49
+
+The 30 Hz drag regressed at S2b (E12.10 D2). The brief's hypothesis was reader churn. A counting probe (not timing:
+it needs no quiet machine) instrumented the P-seek drag on LL, drag only, three runs per workload, at load 13–17,
+so its fps are indicative only. Its scratch patch (never committed), logs and runner are in
+`s2c-logs/probe/` (`s2c1-probe.patch`, `probe-{base,finish,continue,both}.log.gz`, `run-probe.sh`). Variants:
+`base` (ad8f896), `finish` (a paused wait is not abandoned for a newer paused job of its epoch), `continue` (a
+naive forward continuation when c < t ≤ c + 12, without S-2's anchor and key-packet rules) and `both`. Ranges are
+over the three runs:
+
+| Variant | Workload | posts | jobs abandoned in wait / taken | published | decodes (req) | stale at delivery | seeks (fwd) | frames decoded / converted | opens / closes | retired / spawned | shrink + grow | reassigned | lookahead discarded | distinct fps | unanswered |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| base | seek_gop60 | 43–136 | 33–93 / 43–136 | 10–43 | 25–116 | 15–73 | 21–94 (21–94) | 811–2882 / 25–116 (≈23.0, 32.4, 24.8 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 1.6–8.6 | 0–4 |
+| base | talk_recut | 150 | 109–121 / 150 | 28–40 | 108–118 | 76–84 | 88–99 (88–99) | 5546–5749 / 107–117 (≈47.8, 49.1, 52.9 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 5.6–8.0 | 1–37 |
+| base | explainer_16x9 | 149–150 | 126–135 / 149–150 | 14–23 | 152–174 | 78–85 | 127–134 (125–132) | 6772–7377 / 151–173 (≈48.9, 39.1, 45.0 per frame) | 2 / 2 | 2 / 2 | 0–0 | 0–1 | 0 | 2.8–4.6 | 3–28 |
+| finish | seek_gop60 | 129–132 | 0–1 / 129–133 | 128–131 | 129–132 | 0 | 100–106 (100–106) | 3094–3116 / 128–131 (≈23.6, 24.3, 24.0 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 25.6–26.2 | 0–2 |
+| finish | talk_recut | 105–111 | 0 / 105–111 | 104–110 | 105–111 | 0 | 82–92 (82–92) | 4883–5341 / 104–110 (≈44.4, 49.5, 50.6 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 20.8–22.0 | 1–2 |
+| finish | explainer_16x9 | 72–79 | 0 / 72–79 | 71–78 | 101–116 | 0 | 95–109 (93–107) | 5658–6128 / 100–116 (≈60.5, 48.8, 55.2 per frame) | 2 / 2 | 2 / 2 | 0–0 | 0–1 | 0 | 14.2–15.6 | 1–2 |
+| continue | seek_gop60 | 148–150 | 0 / 148–150 | 148–150 | 148–150 | 0 | 0 (0) | 360–375 / 148–150 (≈2.5, 2.5, 2.4 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 29.6–30.0 | 0 |
+| continue | talk_recut | 149–150 | 3–6 / 149–150 | 144–146 | 149–150 | 3–5 | 6 (6) | 634–776 / 149 (≈4.6, 4.3, 5.2 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 28.8–29.2 | 0 |
+| continue | explainer_16x9 | 150 | 0–2 / 150 | 148–150 | 220–224 | 0–2 | 2–3 (0–1) | 575–599 / 220–224 (≈2.7, 2.7, 2.6 per frame) | 2 / 2 | 2 / 2 | 0–0 | 0–1 | 0 | 29.6–30.0 | 0 |
+| both | seek_gop60 | 150 | 0 / 150 | 150 | 150 | 0 | 0 (0) | 360–375 / 150 (≈2.5, 2.5, 2.4 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 30.0 | 0 |
+| both | talk_recut | 147–150 | 0 / 147–150 | 147–150 | 147–150 | 0 | 6 (6) | 634–776 / 147–150 (≈4.6, 4.2, 5.3 per frame) | 0 / 0 | 0 / 0 | 0–0 | 0 | 0 | 29.4–30.0 | 0–1 |
+| both | explainer_16x9 | 149–150 | 0 / 149–150 | 149–150 | 218–224 | 0 | 2–3 (0–1) | 576–599 / 218–224 (≈2.7, 2.7, 2.6 per frame) | 2 / 2 | 2 / 2 | 0–0 | 0–1 | 0 | 29.8–30.0 | 0 |
+
+- **Reader churn is refuted.** No decoder reopens, permit resizes, reassignments or discarded lookahead on
+  `seek_gop60` and `talk_recut`; `explainer_16x9`'s two opens and retirements are its cutaway entering and leaving.
+  S2a did not keep a warm decoder either: it sought on every paused render (`DecodeStrategy::Seek`, 3b221bd).
+- **Cause 1, H-2 preemption:** 62–90% of taken paused jobs were abandoned in FrameWait by the next
+  `request_frame`, and 40–68% of decodes were stale at delivery. `finish` restores S2a's rates (25.6–26.2,
+  20.8–22.0 and 14.2–15.6 distinct fps; S2a 23.6, 18.8 and 14.6).
+- **Cause 2, seek cost:** every non-+1 decode seeks and walks its GOP, ≈ 23–55 frames decoded per frame converted.
+  `continue` reaches ~30 fps with 0–6 seeks per drag. S-2 is that fix, with its anchor and key-packet rules.
+- **Prediction for the timing run:** S-2 abandons continuation at each key packet read before t, so against
+  `continue`'s counts expect about 6 extra seeks per drag at GOP 60 (a drag walks ~375 frames) and 1–2 at GOP 250.
+  P-seek's `drag_seeks` now reports it.
+- **Ruling:** Amendment R49 (design §8), accepted by the lead on 2026-10-05 with the `RETIRE_DEADLINE` bound.
+- **Witnesses** (mutations in `s2c-logs/s2c1/mut-*.log`, run by `s2c-logs/s2c1/mutate.sh`):
+
+  | # | Witness | R49 removed | deadline removed | deadline wake removed | kept wait ignores the newest job |
+  |---|---|---|---|---|---|
+  | 1 | `preview::tests::a_drag_publishes_every_taken_paused_job` (29 posts at 30 Hz over two sources, each job's decodes held until the next post) | fails: `abandoned` | passes | passes | passes |
+  | 2 | `preview::tests::a_stuck_drag_job_is_superseded_at_the_deadline` (R43's seam, `Stuck`) | fails: `superseded at 5.06 ms` | fails: `superseded at the deadline` (never, 10 s) | fails: same | passes |
+  | 3 | `preview::tests::controls_still_supersede_a_paused_wait_at_once` (seek, pause, document, play, shutdown) | passes | passes | passes | fails: `superseded late: seek 200.2 ms, pause 200.8 ms, document 200.5 ms` |
+  | 4 | `sched::tests::a_drag_never_abandons_a_young_paused_wait` (every 6-event sequence, 8 events, drained) | fails: `a drag abandoned a young wait (Frame)` | fails: `kept past the deadline` | passes (the model has no wake) | fails: `Seek did not abandon the wait at once` |
+
+  Witness 3 guards L-6 against an over-broad R49, so removing R49 leaves it green. Its `play` and shutdown cases
+  stay green under every mutation: R37's `played` and the shutdown flag supersede independently of R49's test.

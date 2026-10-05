@@ -1637,7 +1637,7 @@ impl VideoDecoder {
         (self.rotation).display_dimensions(self.scaled_width, self.scaled_height)
     }
 
-    #[cfg(test)]
+    /// The seeks this decoder made (S2c-1: P-seek's `drag_seeks`).
     pub(crate) fn seek_count(&self) -> u64 {
         self.seek_count
     }

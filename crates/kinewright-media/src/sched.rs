@@ -1501,6 +1501,29 @@ pub(crate) struct WaitView {
     pub(crate) agent_due: bool,
 }
 
+/// Amendment R49: what a paused `FrameWait` sees of the lane (a
+/// predicate's inputs, not a state).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PausedView {
+    /// A post replaced the job's lane version.
+    pub(crate) newer: bool,
+    /// A `play` was issued after the job (Amendment R37).
+    pub(crate) played: bool,
+    /// The newest post is a paused job of the wait's epoch (a drag's
+    /// `request_frame`).
+    pub(crate) drag: bool,
+    /// The wait is younger than `RETIRE_DEADLINE`.
+    pub(crate) young: bool,
+}
+
+/// Amendment R49: a paused wait is superseded by a `play`, or by a newer
+/// post, except a newer paused job of its epoch while the wait is younger
+/// than the deadline: it finishes and publishes, then the newest renders.
+pub(crate) const fn paused_superseded(view: PausedView) -> bool {
+    view.played || view.newer && !(view.drag && view.young)
+}
+
 pub(crate) const fn wait_step(view: WaitView) -> WaitStep {
     if view.shutdown {
         WaitStep::Shutdown
@@ -3320,7 +3343,8 @@ mod tests {
             } else if view.resolved {
                 WaitStep::Ready
             } else if !view.playback {
-                // Paused: untimed; only an agent push suspends it (R-4).
+                // Paused: untimed (R49: but for a drag's deadline); only
+                // an agent push suspends it (R-4).
                 if view.agent_waiting {
                     WaitStep::Suspend
                 } else {
@@ -3335,5 +3359,127 @@ mod tests {
             };
             assert_eq!(step, expected, "{view:?}");
         }
+    }
+
+    // Amendment R49's model (witness 4): events, state and the preview.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    enum DragEvent {
+        Frame,
+        Seek,
+        Pause,
+        Document,
+        Play,
+        Shutdown,
+        Tick,
+        Finish,
+    }
+    const DRAG_EVENTS: [DragEvent; 8] = [
+        DragEvent::Frame,
+        DragEvent::Seek,
+        DragEvent::Pause,
+        DragEvent::Document,
+        DragEvent::Play,
+        DragEvent::Shutdown,
+        DragEvent::Tick,
+        DragEvent::Finish,
+    ];
+    /// (paused, epoch, version) jobs; the wait's age in ticks.
+    #[derive(Clone, Default)]
+    struct DragModel {
+        epoch: u64,
+        version: u64,
+        played: u64,
+        shutdown: bool,
+        slot: Option<(bool, u64, u64)>,
+        wait: Option<(u64, u64, u8)>,
+        shown: Option<u64>,
+        newest: Option<u64>,
+    }
+    fn drag_step(m: &mut DragModel, ev: DragEvent, cells: &mut BTreeSet<&'static str>) {
+        let post = |m: &mut DragModel, paused: bool| {
+            m.version += 1;
+            m.slot = Some((paused, m.epoch, m.version));
+            m.newest = paused.then_some(m.version);
+        };
+        match ev {
+            DragEvent::Frame => post(m, true),
+            DragEvent::Seek | DragEvent::Pause | DragEvent::Document => {
+                if ev != DragEvent::Seek {
+                    (m.version, m.slot) = (m.version + 1, None);
+                }
+                m.epoch += 1;
+                post(m, true);
+            }
+            DragEvent::Play => {
+                m.epoch += 1;
+                m.played = m.epoch;
+                post(m, false);
+            }
+            DragEvent::Shutdown => m.shutdown = true,
+            DragEvent::Tick => m.wait.iter_mut().for_each(|wait| wait.2 += 1),
+            DragEvent::Finish => m.shown = m.wait.take().map(|wait| wait.1).or(m.shown),
+        }
+        if let Some((epoch, version, age)) = m.wait {
+            let view = PausedView {
+                newer: m.version != version,
+                played: m.played > epoch,
+                drag: m.slot.is_some_and(|job| job.0 && job.1 == epoch),
+                young: age < 2,
+            };
+            if m.shutdown || paused_superseded(view) {
+                let lawful = m.shutdown || m.epoch != epoch || age >= 2;
+                assert!(lawful, "a drag abandoned a young wait ({ev:?})");
+                cells.insert(if age >= 2 && m.epoch == epoch && !m.shutdown {
+                    "deadline"
+                } else {
+                    "at once"
+                });
+                m.wait = None;
+            } else {
+                let control = !matches!(ev, DragEvent::Frame | DragEvent::Tick | DragEvent::Finish);
+                assert!(!control, "{ev:?} did not abandon the wait at once");
+                assert!(!view.newer || age < 2, "kept past the deadline");
+                if view.newer {
+                    cells.insert("kept");
+                }
+            }
+        }
+        // Idle, the preview takes a paused job a `play` did not precede.
+        if let (None, Some((true, epoch, version))) = (m.wait, m.slot)
+            && !m.shutdown
+            && m.played <= epoch
+        {
+            (m.wait, m.slot) = (Some((epoch, version, 0)), None);
+        }
+    }
+    fn drag_explore(m: &DragModel, depth: usize, cells: &mut BTreeSet<&'static str>) {
+        if depth == 0 {
+            // Drained: the newest paused target is the one shown.
+            let mut m = m.clone();
+            for _ in 0..3 {
+                drag_step(&mut m, DragEvent::Finish, cells);
+            }
+            if !m.shutdown && m.slot.is_none_or(|job| job.0) {
+                assert_eq!(m.shown, m.newest.or(m.shown), "S-1/L-6");
+            }
+            return;
+        }
+        for ev in DRAG_EVENTS {
+            let mut next = m.clone();
+            drag_step(&mut next, ev, cells);
+            drag_explore(&next, depth - 1, cells);
+        }
+    }
+    /// Amendment R49 [S2c] (H-8's `FrameWait`, witness 4): every sequence of
+    /// six events over the transport slot and one paused wait, decided by
+    /// `paused_superseded`, then drained. A newer same-epoch paused job (a
+    /// drag) never abandons a wait younger than the deadline (two ticks
+    /// here); at the deadline it does; a seek, pause, new document, `play`
+    /// or shutdown abandons it at once (L-6); the newest target renders.
+    #[test]
+    fn a_drag_never_abandons_a_young_paused_wait() {
+        let mut cells = BTreeSet::new();
+        drag_explore(&DragModel::default(), 6, &mut cells);
+        assert_eq!(cells.len(), 3, "the model is vacuous: {cells:?}");
     }
 }
