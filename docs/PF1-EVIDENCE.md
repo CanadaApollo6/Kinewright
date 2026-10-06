@@ -5571,6 +5571,11 @@ plans, logs and binaries are in `target/review/pf/s2c-timing/r2`, `r3` and `r4`.
 - `gate-removed`: the pair no longer checks `unfragmented_mov`;
 - `mvex-ignored`: the walker no longer looks for `mvex`.
 
+These mutants, and the R52 ones above, first ran on uncommitted working trees whose diff matched the later commit.
+After review, both fragmented-MP4 mutants were rerun on the committed tree at `118895a` (which includes `3d1d96d`), and
+both are killed again (`frag-mut-{mvex-ignored,gate-removed}-118895a.log`; the unmutated run passes,
+`frag-clean-118895a.log`).
+
 The test now covers three files:
 - `frag_keyframe+empty_moov` gives (pair, stream) = (false, true);
 - `frag_keyframe` gives (false, true);
@@ -5702,7 +5707,7 @@ ratio, cand/ref, for random p95 · +1 p95 · backward combined p95.
 | L-1 random p95, GOP 60 | ≤ 40 | 63.2 / 71.2 | 61.4 / 74.3 | **Shared miss, environment-limited at load 1.9–22.5.** The pair ratios are 0.92 and 1.03, inside the pair spread (0.89–1.08) |
 | L-2 random p95, `talk_recut` | ≤ 110 | 86.2 / 103.6 | 93.6 / 90.4 | **Pass** (pair ratios 1.11 and 1.02) |
 | L-3 +1 p95, GOP 60 | ≤ 20 | 19.1 / 25.7 | 16.6 / 26.6 | **Pass on LL. LH is a shared miss** (pair ratio 0.97) |
-| L-4a backward hit p95, GOP 60 | ≤ 20 | no hits | 11.4 / 17.4 (COUNT lanes, r2) | **Pass on LL and LH** |
+| L-4a backward hit p95, GOP 60 | ≤ 20 | no hits | 11.4 / 17.4 (COUNT lanes, r2: a plain lane cannot tell a hit from a refill) | **Pass on LL and LH** |
 | L-4b refill p95 | recorded | 58.9 / 63.1 (every step seeks) | 161.1 / 159.7 | Recorded; E13.5.7 |
 | L-5 drag distinct fps, GOP 60 / 250 | ≥ 10 / 7 | 12.7, 8.0 / 8.0, 7.0 | 30.0, 29.8 / 30.0, 29.8 | **Pass**, ×2.5–7.9 the reference |
 | L-6 release shown | every run | 52/52 | 51/51 | **Pass** |
@@ -5914,8 +5919,8 @@ drops its session at return, crashed three times, all after `test result: ok`:
 - P-seek LH `talk_recut` ref3 exited 139.
 
 In r4, all 36 COUNT2 lanes exited 0, the 18 reference lanes included. That makes 0 crashes in 54 candidate
-P-seek lanes, against 3 in 54 reference lanes. This is the proof R51/R52's ruling asked for: repeated P-seek lanes ending
-without a 139.
+P-seek lanes, against 3 in 54 reference lanes. That is consistent with the teardown fix (repeated P-seek lanes ending
+without a 139), not a proof: the reference's crashes were 3 in 54.
 
 #### E13.5.10 Verdicts
 
@@ -5934,10 +5939,11 @@ without a 139.
 | I4 (paired ≤ 1.05) | **Pass**, 1.03 (LL) and 1.04 (LH) | E13.5.9 |
 | G18 (≤ S0 + 5%, bytes identical) | **Pass**, 0.193, identical hash | E13.5.9 |
 | G3 (LH, 60 fps) | Reported (R48), pair ratios 1.02–1.22 | E13.5.9 |
-| Teardown | **Proven by repetition**: 0 crashes in 54 candidate P-seek lanes | E13.5.9 |
+| Teardown | **Consistent with the fix**: 0 crashes in 54 candidate P-seek lanes, against 3 in 54 reference lanes | E13.5.9 |
 
-**S2c closes on G8 at `d116e92`**, with L-1 and LH's L-3 as shared misses. Nothing else regresses against the
-reference on the evidence above. Still open:
+**S2c closes on G8 at `d116e92`**, with L-1 and LH's L-3 as shared misses. No other regression is attributed to S2c on
+the evidence above. Two costs stay in view: the refill p95 (L-4b, E13.5.7) and the order-flipped LH `typical_1080p`
+drops (E13.5.8). Still open:
 - S2c-5 waits on the lead's answers (E13.5.3);
 - L-4b's refill cost is recorded with a proposal (E13.5.7).
 
