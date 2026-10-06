@@ -780,9 +780,10 @@ gated (D4).
   from t − 1. A newer post cancels the rest between frames; the frames
   already converted stay held. A step to a window frame not yet converted
   keeps the window (no refill) and goes to the reader that kept its decoded
-  frame, which converts it without decoding anything. If no reader keeps
-  it (the reader closed or decoded elsewhere), the step is today's: a
-  refill or a seek.
+  frame, which converts it without decoding anything. A step to the frame
+  whose conversion is already in flight keeps the window too and waits for
+  that conversion. If no reader keeps it (the reader closed or decoded
+  elsewhere), the step is today's: a refill or a seek.
 - **Hold.** The post holds each source's window. Its ring frames survive
   later posts while the source stays planned and the playhead stays inside
   the window. A step inside the window, in either direction, is a hit and
@@ -1078,6 +1079,7 @@ cost).
   full window is recorded.
 - Witnesses, each with a mutation: t is published before any window frame is converted; a newer job cancels the
   remaining window conversions; a step into the not-yet-converted part of the window decodes nothing new.
+  A fourth covers a step to the frame whose conversion is in flight (it waits; no refill).
 
 **Rec:** L-1m/L-2m and L-4b; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
