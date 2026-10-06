@@ -5973,3 +5973,130 @@ drops (E13.5.8). Still open:
   `only_a_paused_job_refills_a_backward_window` and `continuation_needs_the_witnessed_pair_and_the_seek_stream`
   are strengthened.
 - **Lines:** see E13.5.1. This section is documentation only.
+
+### E13.6 S2c-5, Amendment R53 and the closing re-time (2026-10-06): stopped on a design conflict
+
+The lead's order (r53-s2c5-rulings.md): S2c-5, then R53, gates, the workspace test, the closing re-time, this
+section. Steps 1–4 are done. **The closing re-time stopped after a paired check of the R53 gates:** both L-4
+gates miss at GOP 60 (E13.6.4). This section is partial and goes to the lead with the conflict.
+
+#### E13.6.1 S2c-5, open GOP (b)
+
+| Commit | What | Lines |
+|---|---|---|
+| `354b30e` | S-2 note: the earlier-key retry on the witnessed pair | docs |
+| `93c6b8c` | Oracle: Truth expects the retry's second seek (`retries`, AviDtsGuess excluded) | test |
+| `04596d6` | Oracle: the model's retried seek has no anchor | test |
+| `ebac92a` | Control: `ReferenceContinuation` skips the rule-2 latch after a retry (ruling item 1) | test |
+| `69ad48c` | Oracle: a retried target's first packet is the retried anchor (ruling item 1) | test |
+| `6c9e81f` | Oracle: `unreachable == 0` on the retried pair (ruling item 1; AviDtsGuess keeps its assertion) | test |
+| `0c7c659` | The OpenGop pin regenerated: digest `14694f55cd0d355b` → `ce0029f0ab06abf5`, output `dfb48baf4f89ec08` → `854e56e5b3109248` | test |
+| `5f6c2d2` | Witness: an OpenGop playback region start (starts 21, 22, 23, 47, 71) returns its leading frames, matching a linear decode, with two seeks | test |
+| `118895a` | The retry: on the pair only, in every Seek render of `decode_window` | media |
+
+Mutations (logs `s2c-logs/s2c7/s2c5-*.log`):
+- retry off: **killed** (the region-start witness: no frame at 21; the CLI check: 5 unreachable);
+- the latch skip off: **killed** (`continuation_reproduces_seek_on_every_fixture`);
+- the pair gate off: **killed** (11 tests);
+- seek to `dts` instead of `dts − 1`: **survives**. **Partial:** the one-tick margin is not witnessed by the
+  fixtures.
+
+#### E13.6.2 Amendment R53
+
+| Commit | What |
+|---|---|
+| `ffa94e7` | Design text: S-3's "t first" bullet and the Amendment R53 paragraph |
+| `7f4bd3e`, `d37587e` | The three ruled witnesses (red before the implementation: `r53-witness-red.log`); `d37587e` keeps the workload's media alive |
+| `f54ce3f` | A fourth witness: a step to the frame whose conversion is in flight waits for it (red: 2 extra seeks, `r53-inflight-red.log`) |
+| `a7420fb` | The implementation (decoder: `decode_refill`, `convert_retained`, kept raw frames; scheduler: `Plan.window`, t first then descending, `Slot.retained`/`converting`, `Next::Decode.from`) |
+| `eb7a4c1` | Design text for the in-flight case |
+
+The fourth witness came from the media suite under load. `a_backward_drag_matches_fresh_seeks_and_refills_once_per_window`
+seeked at 14 and 5 instead of 12: a step was posted while its window frame's conversion was in flight, so no reader
+kept it any more and the step refilled. `backward` now counts that conversion as kept, which is what R53's
+"waits for that conversion; it is not re-decoded" says.
+
+Mutations (`s2c-logs/s2c7/r53-mut/`), every one killed:
+
+| Mutant | Killed by |
+|---|---|
+| plan ascending (no t first) | the three ruled witnesses |
+| no retaining (convert the window eagerly) | the three witnesses and two S-3 tests |
+| a window plan survives a newer post | the step witness (and the drag test hung; stopped) |
+| `backward` ignores kept frames | the drag test and the step witness |
+| `decode` ignores kept frames | all five R53/S-3 preview tests |
+| `backward` ignores the in-flight conversion | the fourth witness |
+
+**Memory, outside K-1:** the reader keeps up to B − 1 = 15 decoded frames at the source's decoded size (about
+3 MB each for 1080p 4:2:0) until it converts them, decodes anything else or closes. They are copies:
+ffmpeg-next's `Clone` deep-copies, and the workspace forbids `unsafe`, so a reference-counted `av_frame_ref` is not
+available.
+
+#### E13.6.3 Review follow-ups (Sonnet, f967bae..cc0e8f3)
+
+1. E13.5 wording: done in `230fbee`. The reviewer placed L-4a's hit p95 in the plain P-seek lanes. It comes from
+   the COUNT lanes: a plain lane cannot tell a hit from a refill. E13.5 says so.
+2. **`fall_back` posts do not update the travel memory: recorded as harmless, not changed.** R52 defines `last`
+   as the last *posted required* time. A fall-back post's step is compared with an older `last`. The effect is
+   only whether that step refills:
+   - frames still match fresh seeks either way (C-5);
+   - B·f ≤ share holds either way (K-2).
+
+   Changing it would change R52's text.
+3. The `mvex-ignored` and gate-removed fragmented-MP4 mutants were rerun on the committed tree `118895a`: both
+   killed, and the clean tree passes (`frag-mut-*-118895a.log`, `frag-clean-118895a.log`). The R52 and
+   fragmented-MP4 mutations first ran on trees whose diff matched the commit.
+4. Not applicable (item 2 is unchanged).
+
+#### E13.6.4 The R53 gates: a paired check (r5a)
+
+Before the full closing plan (`s2c-timing/r5/plan-r5.txt`, 116 lanes, about four hours), COUNT P-seek
+`seek_gop60` ran as three pairs on LL and on LH:
+- reference `count2-ref-ad8f896`;
+- candidate `count3-cand-eb7a4c1`, which is `eb7a4c1` + `count/apply-count3.py`. That is counting v2 plus R53's
+  time to the full window.
+
+Conditions:
+- 12 lanes, 13:22–13:44 EDT, all exit 0;
+- 1-minute load 8.0–19.0 (annotation only, R50);
+- nothing of mine ran during the lanes.
+
+Medians over nine runs per side; pair ratios cand/ref, median of three:
+
+| Lane | Ref step mean / p95 | Cand backward mean (ratio) | Cand hit mean / **p95** (n) | Cand refill = time to t, mean (**ratio to ref step mean**) | Per refill: decoded / converted | Windows fully converted |
+|---|---|---|---|---|---|---|
+| LL | 51.4 / 73.5 | 40.4 (0.78) | 18.9 / **26.7** (132) | 82.3 (**1.59**: 1.68, 1.57, 1.59) | 46 / 3.1 | 0 of 68 |
+| LH | 47.6 / 65.2 | 35.9 (0.77) | 16.9 / **23.2** (132) | 72.6 (**1.52**: 1.52, 1.45, 1.63) | 46 / 3.2 | 0 of 68 |
+
+Against r4 (`d116e92`, eager window conversion), R53 at GOP 60:
+- **time to t on a refill fell** from 139.8 / 144.0 ms to 82.3 / 72.6;
+- **the backward mean fell** from 1.26 / 1.20× the reference to 0.78 / 0.77×;
+- **hits got slower:** from 10.4 / 13.0 ms to 18.9 / 16.9, and the hit p95 rose from 13.8 / 18.3 to 26.7 / 23.2.
+
+The verdicts:
+- **L-4b fails:** 1.59 / 1.52 against ≤ 1.25.
+- **L-4a fails:** a hit p95 of 26.7 / 23.2 against ≤ 20.
+
+**Why both gates miss (the conflict):**
+- **L-4a.** P-seek posts each backward step as soon as the previous one is shown. Each post cancels the window's
+  remaining conversions, which R53 requires and a witness checks. So no window is ever fully converted (0 of 68).
+  A step into the window is served by converting its kept frame on demand: no decode and no seek, so it counts as
+  a hit, but it costs one conversion and a reader hand-off. Before R53 the refill had paid those conversions and
+  a hit was a ring lookup.
+- **L-4b.** Time to t is bounded below by the window's decoding. A refill decodes 46 frames against the
+  reference's 30, because a quarter of the windows start before t's key and walk the earlier GOP. It also copies
+  15 decoded frames. At about 1.2–1.5 ms per decoded frame (E13.5.7), the 16 extra decodes alone are 20–24 ms on
+  a ~50 ms step: about 1.4–1.5× before any copy. **Partial:** the copy cost is inferred, not measured.
+
+The full closing re-time was not run: its L-4 gates would fail for the reasons above.
+- **Done:** the workspace test.
+- **Not run:** P-play, I4 and G18. Their code paths are unchanged by R53 except the paused refill.
+
+#### E13.6.5 Tests and gates at `eb7a4c1`
+
+- Workspace (`cargo test --workspace`, fast tier, at `a7420fb`; `eb7a4c1` is docs only): 36 binaries, all ok,
+  3,507 passed and 91 ignored. Log: `workspace-a7420fb.log.gz`. Media lib: 1022 passed and 56 ignored
+  (`r53-media-tests2.log.gz`).
+- rustc 1.99.0: `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt -- --check` OK;
+  `python3 scripts/slow_tests.py lint` OK.
+- No new test is ignored or slow, so `ci/ignored-tests.txt` and `ci/slow-tests.txt` are unchanged.
