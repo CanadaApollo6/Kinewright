@@ -1328,6 +1328,15 @@ mod reference {
                 .arm_between_frames(self.rules.cancel != CancelAt::Drain, &self.token);
             let mut cache = FrameCache::new(1);
             let result = d.decode_window(t, t, &mut cache);
+            // S2c-5 (lead rulings of 2026-10-06): a retried seek's first
+            // packet is the earlier key's, not A(t), so rule 2's latch is
+            // skipped there; the run has no anchor and the next frame seeks.
+            if retries(&self.fx.facts, t.0) {
+                (self.run, self.continued) = (None, 0);
+                let observation = observe(&d, &mut cache, t, result, before);
+                self.decoder = Some(d);
+                return observation;
+            }
             let shadow = match anchor(&self.fx.facts, t.0) {
                 Some(a) if std::mem::take(&mut self.mismatch_once) => Some((a.0 + 1, a.1, a.2)),
                 _ => self.shadow(t.0, true),
