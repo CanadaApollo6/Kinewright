@@ -5513,3 +5513,457 @@ G8 fixes in E13.4.9 (they touch the same paused path). Do (c) separately. Until 
 - **Logs:** S2c-2's mutation logs are now gzipped (`s2c-logs/s2c2/mut-*.log.gz`, named `mut-*.log` in E13.2).
 - **Lines:** S2c-4 is documentation only: design §8 gains Amendment R50 (as given by Riel and the lead), and this
   section is added.
+
+### E13.5 The S2c fix round: R51, R52, the tap gate, teardown and the R50 re-time (2026-10-06)
+
+The lead's rulings after E13.4 (Amendments R51 and R52, the test-only tap gate, the P-seek teardown, open GOP (b)
+as S2c-5, and the evidence wording fixes) were taken in the ruled order. The paired re-time ran on `d116e92`
+against `ad8f896`. Two diagnostic runs followed: the playback counters (r3) and the backward-step means (r4). Kit,
+plans, logs and binaries are in `target/review/pf/s2c-timing/r2`, `r3` and `r4`. Load is recorded, not gated.
+
+#### E13.5.1 What changed
+
+| Commit | Change | Lines (+/−) |
+|---|---|---|
+| `f967bae` | R51 oracle, alone and first: C-4's `Model::expected` uses the anchor test only; the key-packet rules go | +29/−94 (test) |
+| `700b729` | R51: rule 2 is the anchor test alone. `key_read` and the key branch of `on_packet` are removed | +9/−15 |
+| `de7a00f` | R52: a backward paused target refills only when `last − B < t < last` (`Readers::backward`); two new witnesses | +120/−9 |
+| `3d1d96d` | S-2 rule 4: the `mov` pair excludes fragmented MP4 (`unfragmented_mov`: `moov` read, no `mvex`) | +81/−3 |
+| `8a5c7bf` | The C-4 tap copies only while a witness holds `Tap` (`CONVERSION_TAP`); the output oracle fails without it | +57/−8 |
+| `9f50a23` | `seek_run` ends with `teardown(session)`, as P-play and P-rss do | +6/−2 (test) |
+| `8db4303` | Design: S-2 rule 2 and rule 4, S-3's refill and exclusions, Amendments R51 and R52 | +37/−12 (docs) |
+| `905b231` | E13.4 wording: the n = 2 claim, the load range stated once per run, L-4a's 42.5 ms run | +7/−4 (docs) |
+| `d116e92` | Witness: a conversion without the tap clears the last record | +21 (test) |
+
+- About 56 production lines are added (`decode.rs` about 49, most of them `unfragmented_mov`; `sched.rs` 7). The
+  rest is tests and the harness.
+- **Agent renders (R52).** An agent thumbnail goes through `run_agent`, a synchronous Seek. It never posts to the
+  readers, so it neither refills nor moves the travel memory. The new preview witness
+  `a_backward_jump_seeks_alone_and_an_agent_render_moves_no_travel` shows this.
+  - With paths [59, 40, 39, 38], the reader seeks at 59, 40 and 39: the jump to 40 seeks alone, and 39 is a step
+    and refills.
+  - With [40, agent thumbnail at 35, 39, 38], the reader seeks at 40 and 39 only.
+  - The bytes match the reference renderer (C-5), and the ring is unchanged by the agent render.
+
+#### E13.5.2 Mutations
+
+**R51** (`s2c-logs/s2c7/r51-mutate.txt`, at `700b729`). The witnesses are
+`continuation_reproduces_seek_on_every_fixture` and `continuation_holds_the_scripted_cases`.
+
+| Mutant | Result |
+|---|---|
+| `key-abandons`: reverts `700b729`, so any key packet read abandons | Killed (2 of 2 fail) |
+| `shadow-unchecked`: continues without `shadow_anchor(t) == run` | Killed (2 of 2) |
+| `first-unchecked`: drops `s2.first == s2.run` | Survives. **Equivalent:** `paused` sets the `disabled` latch whenever the seek's real first packet differs from the shadow's, so `!disabled && run.is_some()` already implies it |
+
+**R52** (`r52-mutate.txt`, at `de7a00f`, the `sched` and `preview` witnesses). This includes the lead's two
+`backward_windows` mutations.
+
+| Mutant | Killed by |
+|---|---|
+| `bound-removed`: any `t < last` refills | `only_a_step_within_b_of_the_last_time_refills`, `a_backward_jump_seeks_alone_…` |
+| `bound-off-by-one`: `t <= last − B` becomes `t < last − B` | `only_a_step_within_b_of_the_last_time_refills` |
+| `extend-removed`: `required.extend(times)` dropped | `only_a_paused_job_refills_a_backward_window`, `a_backward_jump_seeks_alone_…`, `a_backward_drag_matches_fresh_seeks_and_refills_once_per_window` |
+| `set-removed`: the `*set` accounting dropped | `only_a_paused_job_refills_a_backward_window` (now asserts `set == before + f·|window|`) |
+
+**Fragmented MP4** (`frag-mut-*.log`). Two mutants are both killed by
+`continuation_needs_the_witnessed_pair_and_the_seek_stream`:
+- `gate-removed`: the pair no longer checks `unfragmented_mov`;
+- `mvex-ignored`: the walker no longer looks for `mvex`.
+
+The test now covers three files:
+- `frag_keyframe+empty_moov` gives (pair, stream) = (false, true);
+- `frag_keyframe` gives (false, true);
+- `+faststart` gives (true, true).
+
+**C-4 rerun** (`mutate.py`; `mutate-9f50a23.out`, `mutate-tap-rerun.out`). The run covers the 15 decode-side
+mutants: the 12 earlier ones (R51 swaps `keys-unchecked` for `key-abandons`) and three for the tap gate. Each
+reruns the ContinuationPath witnesses, the open-time pair test and the output-oracle tests.
+- At `9f50a23`, 14 of 15 were killed. `tap-stale-kept` survived (a conversion without the tap kept the previous
+  record), because no witness used a decoder across tap states.
+- `d116e92` adds `a_conversion_without_the_tap_clears_the_last_record`. Rerun at `d116e92`, `tap-stale-kept` and
+  `tap-never-copies` exit 101. **All 15 are killed.**
+- `the_output_oracle_fails_without_the_conversion_tap` shows the oracle **fails** ("a returned frame without its
+  conversion") rather than skipping.
+
+#### E13.5.3 S2c-5, open GOP (b): stopped before any commit
+
+The ruling allowed four pieces, each in its own commit before the implementation:
+- an anchor-rule note in S-2;
+- `Truth`'s one-seek assertion;
+- the model;
+- the regenerated oracle.
+
+A prototype (`s2c-logs/s2c7/s2c5-prototype.diff`, never committed) shows (b) needs more than that, so I stopped
+as the ruling says. The prototype works like this:
+- `decode_window` seeks again, to just before the landed key's DTS, when the first decoded frame presents after
+  `start` and the first packet is a key past the stream start.
+- The retried run has no anchor.
+- `decode_paused` skips rule 2 after a retry.
+
+What the prototype shows:
+- OpenGop's CLI check matches 89 of 89 frames, with 0 unreachable.
+- The AVI timestamp-guess mismatches against the CLI fall from 7 to 1 (`s2c5-avi-cli-{base,proto}.log`).
+- The pins change for OpenGop and AviDtsGuess.
+
+What (b) needs beyond the ruling:
+1. **The positive control.** `ReferenceContinuation` (C-4's reference implementation) must also skip the rule-2
+   latch after a retried seek. Without that, 13 witnesses fail at the pin check (`s2c5-proto.log`).
+2. **An oracle assertion.** `the_oracle_covers_the_special_targets` asserts "Rule 1's premise: the real seek's
+   first packet is A(t)". That is false for a retried target by construction. It would need an exception, and that
+   means editing an oracle assertion.
+3. **A second oracle assertion.** `the_seek_path_matches_the_cli_reference` asserts `unreachable > 0` exactly on
+   OpenGop. It would become `unreachable == 0` everywhere. That is a strengthening, but it is still an assertion
+   edit.
+4. **AviDtsGuess retries too** (at 24, 25, 48, 49, 72 and 73). The retry lives in the shared `decode_window`, so
+   (c), which the ruling keeps out of S2c, comes into scope. There are two ways forward:
+   - `Truth`'s exact seek count needs a retry predictor for AVI. The prototype's model predicate is "A(t) is a key
+     that is not the first key, and its first frame presents after t". It holds for OpenGop, but AVI's
+     DTS-guessed stamps have not been shown to follow it.
+   - Or the retry is limited to the S-2 pair (`mov`/H.264), which leaves the AVI misses as they are.
+5. **Product scope.** `decode_window` serves every Seek render: preview, agent thumbnails and playback region
+   starts. So (b) changes returned frames outside S-2 (a `no_frame` error becomes a frame). These are new frames,
+   not changed bytes, but the design text should say so.
+
+Questions for the lead:
+- (i) May the C-4 positive control and the two assertions above be edited, with the reviewer checking them
+  against the S-2 note?
+- (ii) Should the retry cover every file, with AVI in scope, or the S-2 pair only?
+
+(a) holds until then.
+
+#### E13.5.4 Binaries, plans and conditions
+
+Each binary was built as `cargo test --release -p kinewright-media --lib --no-run` with rustc 1.99.0, in its own
+worktree and target directory under `kr-s2c/`, before any timing started.
+
+| Binary | Source | sha256 |
+|---|---|---|
+| `cand-d116e92` | `pf1/impl` `d116e92` (tap off unless a witness holds it) | `bb7c6630f3ef0393af9eff21870197177d2f9b0f7b7dbfd960d79b4c374bdc84` |
+| `ref-ad8f896` | reused from E13.4 | `6d52c2f9401d30930b41a3806ff4761e03b118a8a2a8b927655565ce95824a71` |
+| `s0-d19bdf9-lane2aa4e1b` | reused (G18's S0) | `5731d7ae0ad49926def6417e075bccc57ba8caaf57838bc95c0ff717c609ee75` |
+| `count-cand-d116e92` | `d116e92` + the counting patch (E13.4.1) | `aa804966552cc09b6f0e834de75e371d153970ff71e97afb2aed1e4fb60767ea` |
+| `count-ref-ad8f896` | reused | `0025af649a57b721726289f6779854770f44471a9b454f71519da5f06af9b898` |
+| `count2-cand-d116e92` | `d116e92` + counting v2 (r4: `count/apply-count2.py`) | `7104781a63a28975ece23b28c155f377a2bd181a346f1cc38afa8b25ecf08ba4` |
+| `count2-ref-ad8f896` | `ad8f896` + counting v2 | `9ba7ac32e9cae885b911d74478b935618d05402dfafc2050b3e571e6aa20451c` |
+
+Counting v2 adds, per P-seek run:
+- the means of backward hits, refills and the whole backward phase;
+- the random and forward means;
+- the frames decoded and converted inside refills only.
+
+The plans:
+- **r2, the re-time** (`r2/plan-r2.txt`, 118 lanes, 04:38 to 08:49 EDT). Every lane is paired and interleaved,
+  reference first:
+  - COUNT P-seek and P-seek, LL and LH, three workloads, three pairs each;
+  - P-play `typical_1080p` and `feed_4x5`, LL and LH, three pairs;
+  - I4, LL and LH, three pairs;
+  - G3 LH, two pairs (reported only);
+  - G18 LH, S0 against the candidate, three pairs.
+- **r3, the playback diagnosis** (18 lanes, 09:10 to 09:33). LH `typical_1080p` ran as three COUNT pairs, then
+  three plain pairs **in reverse order** (candidate first). LL `feed_4x5` ran as three COUNT pairs.
+- **r4, the L-4 means** (36 lanes, 09:41 to 11:25). COUNT2 P-seek, LL and LH, three workloads, three pairs.
+
+Conditions:
+- **Load record (annotation only):** the 1-minute load at lane start was 1.9–22.5 in r2 (median 8.2),
+  2.1–16.4 in r3 and 6.5–38.6 in r4.
+- Foreign processes in the samples: other projects' `rustc`, `clippy-driver` and `campfire` nextest runs, `cc1`,
+  `git` and `python`. r2 wrote 4,226 contamination annotations.
+- On r2's LH lanes the RTX sat at P8 in 86% of samples (P0 9%).
+- None of my cargo commands ran during any timing lane. The r4 binaries were built between r3 and r4.
+
+#### E13.5.5 G8: P-seek, paired (r2)
+
+Each cell is the median over a side's runs (n = 8–9: three pairs × three seeded runs), with the range in brackets.
+Values are ms, except the drag's distinct stamped frames per second (L-5). The last column is the median per-pair
+ratio, cand/ref, for random p95 · +1 p95 · backward combined p95.
+
+| Lane, workload | Side | random p95 | forward p95 | +1 p95 | backward p95 (combined) | drag distinct fps | drag seeks | release (L-6) | pair ratio |
+|---|---|---|---|---|---|---|---|---|---|
+| LL `seek_gop60` | ref | 63.2 [55.7–70.8] | 64.7 | 19.1 [14.7–22.0] | 63.7 | 12.7 [7.6–17.0] | — | 8/8 | |
+| LL `seek_gop60` | cand | 61.4 [57.8–66.7] | 33.7 | 16.6 [16.0–21.2] | 157.6 | 30.0 [30.0–30.0] | 6 | 8/8 | 0.92 · 0.79 · 2.43 |
+| LL `talk_recut` | ref | 86.2 [80.6–102.7] | 81.4 | 16.1 | 84.3 | 8.0 [6.8–9.2] | — | 9/9 | |
+| LL `talk_recut` | cand | 93.6 [83.5–115.7] | 57.8 | 17.2 | 160.6 | 29.8 [29.6–30.0] | 7 | 9/9 | 1.11 · 1.05 · 1.86 |
+| LL `explainer_16x9` | ref | 149.1 | 134.2 | 23.3 | 145.4 | 3.9 [2.2–5.6] | — | 8/8 | |
+| LL `explainer_16x9` | cand | 150.9 | 36.7 | 26.7 | 199.5 | 30.0 [29.8–30.0] | 8 | 8/8 | 1.00 · 1.09 · 1.34 |
+| LH `seek_gop60` | ref | 71.2 [67.1–78.6] | 72.1 | 25.7 [23.6–27.0] | 73.2 | 8.0 [5.2–13.2] | — | 9/9 | |
+| LH `seek_gop60` | cand | 74.3 [63.3–99.8] | 46.1 | 26.6 [22.9–34.7] | 201.0 | 30.0 [29.8–30.0] | 6 | 9/9 | 1.03 · 0.97 · 2.67 |
+| LH `talk_recut` | ref | 103.6 [85.2–121.7] | 93.7 | 23.4 | 92.4 | 7.0 [4.8–9.0] | — | 9/9 | |
+| LH `talk_recut` | cand | 90.4 [84.5–115.7] | 63.2 | 23.4 | 151.6 | 29.8 [29.6–30.0] | 7 | 9/9 | 1.02 · 1.00 · 1.64 |
+| LH `explainer_16x9` | ref | 145.6 | 139.3 | 32.6 | 152.1 | 3.8 [2.2–4.6] | — | 9/9 | |
+| LH `explainer_16x9` | cand | 157.2 | 47.0 | 36.0 | 213.2 | 29.8 [29.4–30.0] | 8 | 8/8 | 1.05 · 1.11 · 1.39 |
+
+- `drag_paused_abandoned` is 0 in every candidate run.
+- The COUNT lanes agree with the table above. LL `seek_gop60`: random p95 60.4 against 58.5, +1 p95 17.4 against
+  17.4. LH: +1 p95 20.4 against 23.0.
+
+| G8 item | Gate | Reference (LL / LH) | Candidate (LL / LH) | Verdict (R50 item 2) |
+|---|---|---|---|---|
+| L-1 random p95, GOP 60 | ≤ 40 | 63.2 / 71.2 | 61.4 / 74.3 | **Shared miss, environment-limited at load 1.9–22.5.** The pair ratios are 0.92 and 1.03, inside the pair spread (0.89–1.08) |
+| L-2 random p95, `talk_recut` | ≤ 110 | 86.2 / 103.6 | 93.6 / 90.4 | **Pass** (pair ratios 1.11 and 1.02) |
+| L-3 +1 p95, GOP 60 | ≤ 20 | 19.1 / 25.7 | 16.6 / 26.6 | **Pass on LL. LH is a shared miss** (pair ratio 0.97) |
+| L-4a backward hit p95, GOP 60 | ≤ 20 | no hits | 11.4 / 17.4 (COUNT lanes, r2) | **Pass on LL and LH** |
+| L-4b refill p95 | recorded | 58.9 / 63.1 (every step seeks) | 161.1 / 159.7 | Recorded; E13.5.7 |
+| L-5 drag distinct fps, GOP 60 / 250 | ≥ 10 / 7 | 12.7, 8.0 / 8.0, 7.0 | 30.0, 29.8 / 30.0, 29.8 | **Pass**, ×2.5–7.9 the reference |
+| L-6 release shown | every run | 52/52 | 51/51 | **Pass** |
+
+**G8 passes at `d116e92`.** R51 and R52 removed the regressions in L-1, L-2 and L-3 (E13.4: ×5–12 and ×3–5).
+Random and +1 steps are now within the pair spread of the reference. The drag holds at 30 fps. L-4a passes on
+both lanes.
+
+#### E13.5.6 Load-independent counters (COUNT lanes, r2)
+
+These are medians over 7–9 runs per side, the same seeds as E13.5.5. The counters are identical on LL and LH for
+the same binary and workload.
+
+| Workload | Phase | Ref: seeks | Ref: decoded / converted | Cand: seeks | Cand: decoded / converted |
+|---|---|---|---|---|---|
+| `seek_gop60` | random | 200 | 6015 / 200 | 200 [198–200] | 6015 / 215 |
+| `seek_gop60` | forward | 191 | 5761 / 203 | 28 [26–31] | 1359 / 203 |
+| `seek_gop60` | backward | 200 | 6004 / 200 | 86 [86–91] | 3200 / 1088 |
+| `seek_gop60` | drag | 108 | 3222 / 142 | 6 [6–7] | 373 / 151 |
+| `talk_recut` | random | 200 | 14040 / 200 | 200 [199–200] | 14040 / 200 |
+| `talk_recut` | forward | 190 | 12256 / 201 | 35 [28–36] | 2909 / 201 |
+| `talk_recut` | backward | 200 | 13192 / 200 | 100 [94–100] | 7145 / 984 |
+| `talk_recut` | drag | 94 | 5954 / 118 | 7 [7–11] | 690 / 150 |
+| `explainer_16x9` | random | 307 | 19777 / 307 | 304 [300–306] | 19576 / 366 |
+| `explainer_16x9` | forward | 281 | 19331 / 298 | 28 [26–32] | 2499 / 298 |
+| `explainer_16x9` | backward | 301 | 19784 / 301 | 131 [127–137] | 9009 / 1607 |
+| `explainer_16x9` | drag | 133 | 7159 / 161 | 8 [8–10] | 595 / 224 |
+
+- **Random seeks are back to one seek each.** The candidate converts 1.0–1.2 frames per target, against 7–8.5 at
+  `abcd7cb`. The few extra conversions are R52 steps that fall within B of the last time.
+- **Forward steps** need 82–90% fewer seeks and 76–87% fewer decoded frames. That is R51: a key packet in the
+  read-ahead no longer ends a run.
+- **Drag:** 6–8 seeks per 150 calls, against 94–133.
+- **Backward:** 132 hits and 68 refills at GOP 60 (111/89 on `talk_recut`, 113/87 on `explainer_16x9`). The phase
+  needs about half the reference's seeks and decoded frames, but 4.9–5.4× its conversions (E13.5.7).
+
+#### E13.5.7 L-4: backward steps, hits against refills (r4)
+
+Per side, nine runs (three pairs × three seeded runs) of the P-seek backward phase: 200 steps of −1…−12 from a
+random start. A step that decoded nothing is a hit. Cells are medians, in ms. The pair ratio is cand/ref per
+pair, median over the three pairs. The reference refills every step (one seek), so its step is its "refill".
+
+| Lane, workload | Ref step: mean / p95 | Cand backward: mean / p95 | Pair ratio: mean / p95 | Cand hits: mean / p95 (n) | Cand refills: mean / p95 (n) | Per refill: decoded / converted (ref per step) |
+|---|---|---|---|---|---|---|
+| LL `seek_gop60` | 44.1 / 62.4 | 55.6 / 166.0 | **1.26** / 2.73 | 10.4 / 13.8 (132) | 139.8 / 173.0 (68) | 46.0 / 16.0 (30.0 / 1.0) |
+| LL `talk_recut` | 57.7 / 91.0 | 57.1 / 155.8 | **1.02** / 1.83 | 9.9 / 12.3 (111) | 113.3 / 182.7 (89) | 80.3 / 11.0 (66.0 / 1.0) |
+| LL `explainer_16x9` | 89.0 / 159.7 | 90.7 / 254.0 | **1.00** / 1.46 | 15.9 / 26.7 (113) | 186.3 / 312.6 (87) | 96.9 / 18.5 (98.5 / 1.5) |
+| LH `seek_gop60` | 48.7 / 65.6 | 56.9 / 170.0 | **1.20** / 2.61 | 13.0 / 18.3 (132) | 144.0 / 183.0 (68) | 46.0 / 16.0 (30.0 / 1.0) |
+| LH `talk_recut` | 69.1 / 111.8 | 67.5 / 185.3 | **0.88** / 1.64 | 12.6 / 16.8 (111) | 132.6 / 214.0 (89) | 80.3 / 11.0 (66.0 / 1.0) |
+| LH `explainer_16x9` | 84.4 / 151.8 | 74.0 / 198.7 | **0.89** / 1.29 | 15.1 / 24.6 (113) | 149.2 / 217.7 (87) | 97.3 / 18.5 (98.4 / 1.5) |
+
+- r4's load reached 38.6. Two pairs carry one-sided spikes: LL `explainer_16x9` pair 1 (ratio 2.38) and LH
+  `talk_recut` pair 1 (0.29). The medians set them aside.
+- r4 repeats L-4a: hit p95 at GOP 60 is 13.8 (LL) and 18.3 (LH), a pass. `explainer_16x9` hits reach a p95 of
+  24.6–26.7 ms (two sources per frame). It is not an L-4a workload.
+
+**What the backward cost is.**
+- **The mean is about even except at GOP 60.** The backward phase's mean is 0.88–1.02× the reference's on
+  `talk_recut` and `explainer_16x9`, and 1.20–1.26× at GOP 60.
+- **The p95 is 1.3–2.7×**, because the p95 is the refill.
+- A refill costs 1.8–3.2× a reference step: 113–186 ms against 44–89.
+- **Where a refill's time goes, at GOP 60:**
+  - Against a reference step, it decodes 16 more frames: 46 against 30, because a quarter of the windows
+    start before the key and walk the earlier GOP.
+  - It converts 15 more frames: 16 against 1.
+  - The reference's step is 44 ms for 30 decoded frames and one conversion, so decoding costs at most about
+    1.2–1.5 ms a frame (an upper bound: that 44 ms also includes the seek and the one conversion). The 16 extra
+    decodes are therefore at most about 20–24 ms of the 96 ms difference. **The conversions are the remaining
+    ~70–75 ms, about 5 ms each.**
+  - `talk_recut` gives the same rate: 55 ms for 14 more decodes and 10 more conversions, about 4 ms per
+    conversion.
+  - **Partial:** this split is inferred from the counters and the means. Conversion time was not measured per
+    frame.
+- **Under −1 stepping** (arrow keys, the case S-3 is for), one refill buys 15 hits. Modelled from these means, a
+  GOP 60 step costs (139.8 + 15 × 10.4) / 16 ≈ 18 ms on average, against the reference's 44 ms. The price is one
+  stall of about 170 ms (p95) every 16 steps. **Partial:** this is modelled, not measured; P-seek's mix is
+  −1…−12.
+
+**Proposal (no change made).** Keep B, and stop converting the window before t is published:
+1. **Preferred: publish t first.** A refill is held up by its 15 eager conversions, about 75 ms. Two ways to move
+   them off the critical path:
+   - the reader converts t first and publishes it, then converts [start, t) while the user looks at t. This
+     needs a short-lived run of decoded (YUV) frames: about 3 MB a frame at 1080p 4:2:0, against 16.6 MB for
+     the RGBA64 working frame;
+   - or [start, t) is posted as the paused job's lookahead rather than its required times. This is simpler, but
+     the window costs a second seek and a GOP walk in the background.
+
+   Either way, a refill's latency should fall to about a reference seek plus the extra decodes: roughly
+   44 + 20 ≈ 65 ms at GOP 60, against 140 today. The hits are unchanged.
+2. **Fallback: shrink B to 8.** That halves the conversions, for a refill of roughly 44 + 10 + 35 ≈ 90 ms. Hits
+   halve too: under −1 stepping the mean rises to about (90 + 7 × 10.4) / 8 ≈ 20 ms, and a stall comes every 8
+   steps instead of every 16. B = 8 also no longer meets R52's "B = the window's actual size ≤ 16" rationale for
+   large frames.
+
+Both change S-3's text ("[start, t) joins t's required times", B's formula), so they are the lead's call.
+
+#### E13.5.8 P-play, and the playback diagnosis
+
+**r2** (`PF1_RUNS=1`, R C × 3, in run order). Every run had:
+- `valid=true` and `underrun_frames=0`;
+- `engine_sync_fallback_frames=0`, `engine_retire_overruns=0` and `engine_stale_errors=0`.
+
+| Lane, workload | Side | dropped | present p95 | held max | lookahead starved | regions folded | peak RSS | load at start |
+|---|---|---|---|---|---|---|---|---|
+| LL `typical_1080p` | ref | 2, 2, 2 | 43.3, 43.2, 43.3 | 85.1, 85.7, 85.1 | 2403, 2370, 2420 | 66, 66, 66 | 981.7, 998.3, 924.5 | 5.8, 7.9, 5.6 |
+| LL `typical_1080p` | cand | 2, 2, 2 | 43.3, 43.2, 43.3 | 85.0, 85.1, 85.1 | 2340, 2318, 2382 | 66, 66, 66 | 931.9, 968.6, 953.7 | 4.7, 6.8, 3.6 |
+| LL `feed_4x5` | ref | 58, 105, 179 | 43.3, 63.6, 64.1 | 85.3, 84.6, 116.4 | 296, 264, 239 | 0 | 1247.5, 1362.8, 1436.4 | 3.4, 7.8, 9.6 |
+| LL `feed_4x5` | cand | 136, 87, 164 | 64.0, 46.8, 64.1 | 111.5, 107.6, 122.3 | 278, 272, 238 | 0 | 1402.1, 1253.6, 1347.4 | 7.9, 9.6, 9.0 |
+| LH `typical_1080p` | ref | 30, 19, 111 | 43.0, 42.9, 63.5 | 85.1, 85.1, 112.0 | 2389, 2468, 2386 | 66, 64, 63 | 1010.4, 1013.6, 1044.1 | 8.4, 7.6, 9.4 |
+| LH `typical_1080p` | cand | 126, 163, 336 | 63.9, 64.1, 64.6 | 85.1, 113.3, 85.1 | 2332, 2296, 2048 | 59, 59, 57 | 1032.8, 994.4, 1018.1 | 4.7, 8.0, 22.3 |
+| LH `feed_4x5` | ref | 591, 646, 521 | 84.6, 85.0, 66.9 | 98.4, 96.5, 89.1 | 209, 193, 199 | 0 | 1458.7, 1185.1, 1168.3 | 16.0, 13.4, 12.4 |
+| LH `feed_4x5` | cand | 633, 562, 647 | 85.0, 84.9, 84.9 | 94.0, 112.3, 85.2 | 190, 217, 206 | 0 | 1282.6, 1239.1, 1177.9 | 16.7, 12.6, 13.0 |
+
+- **LL `typical_1080p` is settled.** It dropped 2, 2 and 2 frames on both binaries, held 85 ms, and passed 3 of 3
+  on both. The n = 2 notap reading in E13.4.7 (8 and 45 dropped) does not reproduce.
+- **r2 also showed two possible regressions:**
+  - LH `typical_1080p` dropped more frames in all three pairs (126, 163 and 336 against 30, 19 and 111), with
+    present p95 at 64 against 43;
+  - LL `feed_4x5` held max exceeded G14's 100 ms in 3 of 3 pairs, against 1 of 3 for the reference.
+
+**What S2c changes on the playback path (by reading `ad8f896..d116e92`).** S-2 keeps `decode_window_sequential`
+for playback: `SourceSpec::decode(…, paused)` takes `paused = state.paused_plan`, which a playback post sets false.
+`backward_windows` returns nothing for playback. `FrameWait::superseded` and `wait_ready` are unchanged for a
+playback wait (R49 applies to paused waits only). What remains on the playback path:
+- per packet: `Continuation::on_packet` (a counter and, on packet 1, one tuple);
+- per frame: `Continuation::on_frame` (a comparison), and one more `stopped()` atomic load before each read;
+- in test binaries only, `DecoderProbe` bookkeeping and the gated tap (a counter and one thread-local read per
+  conversion);
+- per required source per frame: `reader_demand` looks up the clip's in-point;
+- per post: `windows.retain` on an empty map;
+- per reader decode that seeked: one `reader_seeks` counter update;
+- per decoder open: `unfragmented_mov`, a few header reads.
+
+None of these changes how many frames playback decodes, converts or seeks.
+
+**The counters agree (r3).** The counting binaries print the frames decoded, frames converted and decoder seeks
+for the whole 60 s play (`count_play_*`):
+
+| Lane, workload | Pair | Side (order) | dropped | held max | decoded | converted | seeks | lookahead starved | folded |
+|---|---|---|---|---|---|---|---|---|---|
+| LH `typical_1080p` | 1 | ref, cand | 6, 4 | 138.2, 85.5 | 9803, 9805 | 5168, 5168 | 175, 174 | 2490, 2457 | 66, 66 |
+| LH `typical_1080p` | 2 | ref, cand | 11, 10 | 85.1, 85.1 | 9811, 9902 | 5168, 5168 | 175, 179 | 2475, 2528 | 66, 66 |
+| LH `typical_1080p` | 3 | ref, cand | 147, 69 | 85.1, 85.1 | 9827, 9779 | 5168, 5168 | 175, 173 | 2262, 2428 | 49, 66 |
+| LL `feed_4x5` | 1 | ref, cand | 277, 220 | 105.7, 109.5 | 6671, 6623 | 2717, 2720 | 141, 139 | 236, 216 | 0, 0 |
+| LL `feed_4x5` | 2 | ref, cand | 180, 286 | 103.5, 1407.9 | 6862, 6991 | 2722, 2717 | 145, 150 | 255, 251 | 0, 0 |
+| LL `feed_4x5` | 3 | ref, cand | 234, 266 | 161.3, 996.1 | 6699, 6662 | 2720, 2719 | 139, 141 | 218, 236 | 0, 0 |
+
+The plain binaries ran in reverse order (candidate first) on LH `typical_1080p`:
+
+| Pair | dropped (cand, ref) | present p95 | held max | load at start |
+|---|---|---|---|---|
+| 1 | 91, **310** | 50.9, 64.4 | 85.3, 85.1 | 16.4, 12.3 |
+| 2 | 62, 55 | 43.2, 42.7 | 117.1, **1305.1** | 8.9, 11.7 |
+| 3 | 164, 173 | 63.9, 64.1 | 317.5, 85.2 | 9.5, 8.6 |
+
+**Diagnosis: no playback regression is attributable to S2c.**
+- Playback does the same work on both binaries. Decoded frames differ by at most 1.9%, conversions by at most 5,
+  and seeks by at most 5, in both directions.
+- Sync fallbacks, retire overruns and stale errors are 0 everywhere.
+- With the candidate run first (r3), the reference drops more in 2 of 3 pairs. In r3's COUNT pairs (reference
+  first), the candidate drops fewer in 3 of 3. Over the nine LH `typical_1080p` pairs in r2 and r3, the candidate
+  drops more in 4 and fewer in 5.
+- Dropped frames follow lanes, not binaries: lookahead starved and regions folded fall in whichever run drops
+  more, on either binary. With `underrun_frames=0`, the drops are on the render and present side.
+- G14's 100 ms is missed on both binaries. Under r3's load (12–16, `campfire` nextest on most cores), both
+  binaries also held a frame for about a second: the reference 1305.1 ms on LH, the candidate 1407.9 and 996.1 ms
+  on LL `feed_4x5`.
+- **Partial:** I have not found what holds a frame for a second. The counters show it is not decode, conversion
+  or seek work. LL `feed_4x5` held max is a shared miss, *environment-limited at load 12–16* in r3; in r2 the
+  reference also missed once (116.4).
+
+No bisect was needed: decode, conversion and seek counts match per run.
+
+#### E13.5.9 I4, G3, G18 and the teardown (r2)
+
+**I4** (`r28_end_to_end_tracked`, `typical_1080p`, mean ms, median of three runs per lane):
+
+| Lane | ref1 / cand1 | ref2 / cand2 | ref3 / cand3 | Pair ratios, mean | Median ratio: mean / p95 |
+|---|---|---|---|---|---|
+| LL | 98.44 / 89.66 | 71.36 / 73.34 | 71.88 / 74.35 | 0.91, 1.03, 1.03 | **1.03** / 1.04 |
+| LH | 83.36 / 86.29 | 88.38 / 97.56 | 85.25 / 88.46 | 1.04, 1.10, 1.04 | **1.04** / 1.04 |
+
+**I4 passes** on the tap-off binary (median per-pair ratio ≤ 1.05; the test's own baseline rule passes too, at
+−80 to −86%). LH pair 2 reads 1.10, and the other two 1.04. The verdict uses the median.
+
+**G3 LH** is reported only (R48), and every binary exits 101 against its 60 fps floor. These are median fps,
+ref1 / cand1 / ref2 / cand2:
+
+| Workload | ref1 | cand1 | ref2 | cand2 |
+|---|---|---|---|---|
+| `typical_1080p` | 45.6 | 58.9 | 62.0 | 45.9 |
+| `blend_heavy_1080p` | 46.8 | 65.8 | 60.4 | 43.9 |
+| `heavy_4k` | 28.8 | 41.4 | 28.9 | 28.7 |
+
+The pair ratios (fps) are 1.02, 1.07 and 1.22. The swings follow the run, not the binary.
+
+**G18 LH** (R38's 120-frame export, S0 against the candidate, S C × 3):
+- S0 took 222.6, 223.2 and 223.7 s; the candidate 43.0, 43.2 and 42.6 s.
+- The pair ratios are 0.193, 0.193 and 0.191: **median 0.193, pass** (≤ 1.05). R47 read 0.19 on a quiet machine.
+- Every export hashes `fe87e67c33845ccdf6e62d1e4d576a2d5fc86e54cb48cc1f5f7f03dd2d979b88` (3,375,562 bytes):
+  **identical** (C-5).
+- `g18_verdict.py` printed INCOMPLETE again, because of the lane-name format (E13.4.6). The verdict is computed by
+  `r2/analyze.py` from the same lines.
+
+**Teardown.** All 36 candidate P-seek lanes exited 0, COUNT lanes included. The reference, whose `seek_run` still
+drops its session at return, crashed three times, all after `test result: ok`:
+- COUNT LH `talk_recut` ref1 exited 134 ("double free or corruption");
+- COUNT LH `explainer_16x9` ref1 exited 134 (a `khronos-egl` unwrap on a preview thread);
+- P-seek LH `talk_recut` ref3 exited 139.
+
+In r4, all 36 COUNT2 lanes exited 0, the 18 reference lanes included. That makes 0 crashes in 54 candidate
+P-seek lanes, against 3 in 54 reference lanes. This is the proof R51/R52's ruling asked for: repeated P-seek lanes ending
+without a 139.
+
+#### E13.5.10 Verdicts
+
+| Gate | Verdict | Evidence |
+|---|---|---|
+| G8 L-1 (random p95 ≤ 40, GOP 60) | Shared miss, *environment-limited at load 1.9–22.5*; pair ratios 0.92 and 1.03 | E13.5.5 |
+| G8 L-2 (random p95 ≤ 110, `talk_recut`) | **Pass**, 93.6 and 90.4 | E13.5.5 |
+| G8 L-3 (+1 p95 ≤ 20, GOP 60) | **Pass on LL** (16.6). LH is a shared miss (26.6 against 25.7) | E13.5.5 |
+| G8 L-4a (backward hit p95 ≤ 20, GOP 60) | **Pass**, 11.4 (LL) and 17.4 (LH) | E13.5.5, E13.5.7 |
+| G8 L-4b (refill) | Recorded: refill mean 113–186 ms and p95 173–313 ms (r4), against the reference's 44–89 ms per step. The backward mean is 0.88–1.26× | E13.5.7 |
+| G8 L-5 (drag ≥ 10 / 7 fps) | **Pass**, 29.8–30.0 fps (reference 3.8–12.7) | E13.5.5 |
+| G8 L-6 (release shown) | **Pass**, 51/51 | E13.5.5 |
+| P-play, LL `typical_1080p` (the n = 2 question) | **Settled: no regression**, 2/2/2 dropped on both binaries | E13.5.8 |
+| P-play, LH `typical_1080p` and LL `feed_4x5` | **Not S2c's:** identical decode, conversion and seek work; the difference reverses with run order. G1 and G14 misses are shared, *environment-limited* | E13.5.8 |
+| G17 / G11 | **Pass**: 0 sync fallbacks and 0 underruns in every run | E13.5.8 |
+| I4 (paired ≤ 1.05) | **Pass**, 1.03 (LL) and 1.04 (LH) | E13.5.9 |
+| G18 (≤ S0 + 5%, bytes identical) | **Pass**, 0.193, identical hash | E13.5.9 |
+| G3 (LH, 60 fps) | Reported (R48), pair ratios 1.02–1.22 | E13.5.9 |
+| Teardown | **Proven by repetition**: 0 crashes in 54 candidate P-seek lanes | E13.5.9 |
+
+**S2c closes on G8 at `d116e92`**, with L-1 and LH's L-3 as shared misses. Nothing else regresses against the
+reference on the evidence above. Still open:
+- S2c-5 waits on the lead's answers (E13.5.3);
+- L-4b's refill cost is recorded with a proposal (E13.5.7).
+
+#### E13.5.11 Tests, gates and lines
+
+- **Workspace** (`cargo test --workspace`, fast tier, at `d116e92`): 36 test binaries, all ok, 3,502 passed and
+  91 ignored. That includes:
+  - media lib 1017 passed, 56 ignored (378 s);
+  - app 790 passed, 4 ignored;
+  - core 310 passed, 1 ignored;
+  - agent 628 passed, 1 ignored; `mcp_server` 76 passed, 10 ignored.
+
+  Log: `s2c-logs/s2c7/workspace-test.log.gz`.
+- **Gates at `d116e92`** (`s2c-logs/s2c7/gate-*.log`):
+  - rustc 1.99.0;
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean;
+  - `cargo fmt -- --check` OK;
+  - `cargo build -p kinewright-app` OK;
+  - `python3 scripts/slow_tests.py lint`: "slow-test manifest and markers agree: 47 tests …; 44 allowlist entries
+    well-formed".
+- **New tests**, none ignored and none slow, so `ci/ignored-tests.txt` and `ci/slow-tests.txt` are unchanged:
+  - `sched::tests::only_a_step_within_b_of_the_last_time_refills`;
+  - `preview::tests::a_backward_jump_seeks_alone_and_an_agent_render_moves_no_travel`;
+  - `pf1_s2c_witness::tests::the_output_oracle_fails_without_the_conversion_tap`;
+  - `pf1_s2c_witness::tests::a_conversion_without_the_tap_clears_the_last_record`.
+
+  `only_a_paused_job_refills_a_backward_window` and `continuation_needs_the_witnessed_pair_and_the_seek_stream`
+  are strengthened.
+- **Lines:** see E13.5.1. This section is documentation only.
