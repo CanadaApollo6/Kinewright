@@ -728,7 +728,13 @@ impl<'a> Model<'a> {
     /// A cold seek to `t`: the run's anchor is A(t), if the shadow can say.
     /// A seek at which the shadow disagrees with the real context disables
     /// continuation for the decoder for good.
+    /// S2c-5: a retried seek (`retries`) leaves a run with no anchor, and
+    /// rule 2 is not judged on it (no latch; a waiting `MismatchOnce` waits on).
     fn seeked(&mut self, t: i64) {
+        if retries(&self.corpus.fx.facts, t) {
+            self.run = None;
+            return;
+        }
         self.disabled |= std::mem::take(&mut self.mismatch_next);
         self.run = if self.faulty || self.disabled {
             None
