@@ -5974,11 +5974,15 @@ drops (E13.5.8). Still open:
   are strengthened.
 - **Lines:** see E13.5.1. This section is documentation only.
 
-### E13.6 S2c-5, Amendment R53 and the closing re-time (2026-10-06): stopped on a design conflict
+### E13.6 S2c-5, Amendments R53–R55 and the closing re-time (2026-10-06): stopped at R55's measurement
 
 The lead's order (r53-s2c5-rulings.md): S2c-5, then R53, gates, the workspace test, the closing re-time, this
 section. Steps 1–4 are done. **The closing re-time stopped after a paired check of the R53 gates:** both L-4
 gates miss at GOP 60 (E13.6.4). This section is partial and goes to the lead with the conflict.
+
+Amendment R54 (E13.6.6) then fixed the refill: L-4b passes, L-4a still misses. Amendment R55 asked for a
+measurement first and a stop if a hit's wait is not mostly conversion. It is not (E13.6.7), so R55 stopped
+there: no conversion change was made. **This section is partial.**
 
 #### E13.6.1 S2c-5, open GOP (b)
 
@@ -6100,3 +6104,73 @@ The full closing re-time was not run: its L-4 gates would fail for the reasons a
 - rustc 1.99.0: `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo fmt -- --check` OK;
   `python3 scripts/slow_tests.py lint` OK.
 - No new test is ignored or slow, so `ci/ignored-tests.txt` and `ci/slow-tests.txt` are unchanged.
+
+#### E13.6.6 Amendment R54: the paired check (r54a)
+
+Commits: `feae206` (design), `51e90d8` (three witnesses, red), `b366669` (implementation). Mutations, each red:
+the refill seeking from the window start (`decode_window(start, t)`) fails the fresh-seek witness; reserving f for
+a kept window frame fails the K-1 witness (red before the implementation: live 368,640 bytes, 16 f, against
+1,296,000 kept + f); dropping the in-window continuation fails the conversion witness. Media suite at `b366669`: 1025 passed, 56 ignored; clippy 1.99 and fmt
+clean.
+
+Implementation notes the ruling did not spell out:
+- d is an upper bound computed when f is measured: the decoder's pixel format at its default buffer geometry
+  (stride a multiple of 64 bytes for every plane, so the width is padded to 64 chroma samples; the height padded
+  to 32 after H.264's two extra rows). A first version without the chroma pad undercounted (a 320-wide H.264
+  frame has a 384-byte luma stride) and the K-1 witness caught it.
+- A frame cancelled by a post outside the window has its reservation returned at that post, as R54 says; its
+  decoded frame stays in the reader's decoder until that reader's next decode or close. So **one window's kept
+  frames are uncharged for that interval.** Charging them until the drop could deadlock: admission would wait
+  for bytes that only that reader's next (admitted) decode frees.
+- The keeping cost (r54a, GOP 60, 1080p): 40.8 MB of decoded frames kept per refill (about 13 frames), with no
+  copies: every kept frame was a moved decoder reference (`count_keep_copied` 0).
+- S2c-5's surviving mutant (seeking to `dts` rather than `dts − 1`) is equivalent on the mov/H.264 pair. Both
+  seeks land on the latest key whose pts ≤ the target. An open-GOP key K with leading frames has pts(K) > dts(K),
+  so both exclude K and land on the key before it unless that earlier key presents exactly at dts(K). In the
+  fixture the earlier keys present at 0, 12288 and 24576 against dts 9728, 23040 and 35328 (time base 1/15360;
+  `s2c5-dts-probe.log`). A counterexample needs a GOP no longer than the reorder delay; no fixture was made.
+
+The paired check: r5a kit, `seek_gop60`, three pairs on LL and on LH, 14:41–15:05 EDT, all exit 0. Reference
+`count2-ref-ad8f896`, candidate `count4-cand-b366669` (counting v4). Log `r5/timing-r54a.log.gz`, table
+`r5/l5-r54a.txt`.
+
+| Lane | Ref step mean | Cand backward mean (ratio) | Cand hit mean / **p95** (n) | **L-4b** (pairs) | Pre-converted hits | Windows filled | Decoded per refill |
+|---|---|---|---|---|---|---|---|
+| LL | 46.0 | 30.2 (0.66) | 17.1 / **23.3** (125) | **1.14** (1.19, 1.14, 1.08) | 18 of 125 | 11 of 75 | 32.9 (ref 30.0) |
+| LH | 47.3 | 33.5 (0.68) | 19.7 / **26.4** (125) | **1.15** (1.11, 1.15, 1.15) | 21 of 125 | 11 of 75 | 32.9 (ref 30.0) |
+
+L-4b passes; **L-4a misses**. The lead's Amendment R55 followed.
+
+#### E13.6.7 Amendment R55, step 1: the measurement (stopped)
+
+Commits: `2d39659` (design), `585e97b` (test-build counters, `pf1_clock`; no behaviour change). One pair per lane,
+`seek_gop60`, reference `count2-ref-ad8f896`, candidate `cand-585e97b` (`c1e2c086…`), 15:18–15:24 EDT, all exit 0.
+Log `r5/timing-r55m.log.gz`. Medians of the candidate's three runs per lane:
+
+| Lane | Hit mean / p95 | **Wait for frames** mean / p95 | **Render** mean | Rest (dispatch, demand) | Pre-converted | Windows filled |
+|---|---|---|---|---|---|---|
+| LL | 19.8 / 26.8 | 7.5 / 14.1 | 9.5 | about 2.8 | 6, 13, 19 of ~124 | 5–6 of ~76 |
+| LH | 17.5 / 22.7 | 5.0 / 9.3 | 9.8 | about 2.7 | 23, 25, 28 of ~124 | 10–16 of ~76 |
+
+Conversion, per frame (ms), split into the filter graph (YUV to RGBA64, swscale) and the working-frame step:
+
+| Lane | t: total / graph / working | Window frame: total / graph / working | Graph's calling-thread CPU ÷ wall (t, window) | Process CPU per refill |
+|---|---|---|---|---|
+| LL | 5.69 / 1.60 / 3.98 | 6.44 / 1.18 / 5.20 | 0.63, 0.90 | 463 ms |
+| LH | 4.86 / 1.28 / 3.56 | 4.40 / 0.80 / 3.60 | 0.81, 1.31 | 415 ms |
+
+Findings:
+- **A hit's time is not mostly conversion.** Its wait for its frame is 7.5 / 5.0 ms (about a third of the hit),
+  and the render after it is 9.5 / 9.8 ms. Under R55's own rule that stops the slice here.
+- Before R53 a whole hit averaged 10.4 / 13.0 ms (E13.5), render included. The render is now about 9.5 ms on both
+  lanes. **Partial:** the render may be slower now because the window conversions run beside it (CPU contention).
+  That is inferred, not measured.
+- The converter's graph is effectively single-threaded. The scale filter's `threads` option defaults to 1, and the
+  calling thread's CPU is about the graph's wall time on window frames. But the graph is only about 20% of a
+  conversion (0.8–1.6 ms); the working-frame step (our RGBA64 to working-frame code) is the other 80%.
+- So threading swscale (R55 option a) could save at most about 1 ms a conversion. A CLI probe shows the option
+  works in safe code: 1080p to 1280×720 rgba64le, 120 frames, scale `threads` 1 / 2 / 4 = 0.66 / 0.34 / 0.31 s.
+- If the wait for conversion went to zero, a hit would be about render + rest: roughly 12.5 ms mean. **Partial:**
+  that is an estimate; its p95 was not measured.
+- The process CPU per refill counts everything in the backward phase (the hits' renders and lavapipe's CPU
+  rendering on LL), not only the refill.
