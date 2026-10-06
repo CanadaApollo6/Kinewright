@@ -936,6 +936,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 bytes,
                 from,
                 size,
+                discard,
             } => {
                 // A stop meant for an earlier lookahead decode (K-2) lapses.
                 stop.store(false, Ordering::Release);
@@ -951,11 +952,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 let traced =
                     crate::pf1_clock::decode_start((id, decoder.as_ref()), at, from, paused);
                 let result = match &mut decoder {
-                    Some(decoder) => spec.decode(decoder, at, paused, from),
+                    Some(decoder) => spec.decode(decoder, at, paused, (from, discard)),
                     None => spec.open(threads, stop).and_then(|opened| {
                         #[cfg(test)]
                         lane.decoder_open(id, true);
-                        spec.decode(decoder.insert(opened), at, paused, from)
+                        spec.decode(decoder.insert(opened), at, paused, (from, None))
                     }),
                 };
                 #[cfg(test)]

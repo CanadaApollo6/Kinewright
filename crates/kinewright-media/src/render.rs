@@ -349,14 +349,18 @@ impl SourceSpec {
     /// Amendment R53 [S2c]: `from` is a paused refill's window start (`at`
     /// is its t): only `at` is converted and the window's frames are kept;
     /// a kept frame at `at` is converted without decoding; any other decode
-    /// drops the kept frames.
+    /// drops the kept frames. Amendment R57 [S2c]: first, the kept frames
+    /// above `discard` are dropped.
     pub(crate) fn decode(
         &self,
         decoder: &mut VideoDecoder,
         at: i64,
         paused: bool,
-        from: Option<i64>,
+        (from, discard): (Option<i64>, Option<i64>),
     ) -> Result<WorkingFrame, MediaError> {
+        if let Some(bound) = discard {
+            decoder.discard_kept_above(bound);
+        }
         let mut window = FrameCache::new(1);
         if let Some(start) = from.filter(|_| paused) {
             decoder.decode_refill(TimeCode(start), TimeCode(at), &mut window)?;
