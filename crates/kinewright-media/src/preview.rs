@@ -3399,10 +3399,12 @@ pub(crate) mod tests {
     }
 
     /// Amendment R54 (C-5): a step inside the window keeps it converting.
-    /// The reader is held before 17 (19, 18 done); a step to 14 is posted.
-    /// 14 is converted first, then the rest of the window, descending, so
-    /// every frame of [4, 19] ends up held, with no decoded frame and no
-    /// seek after the refill.
+    /// Amendment R57: only below the new t, nearest first. The reader is
+    /// held before 17 (19, 18 done; 17 in flight); a step to 14 (a jump of
+    /// 5) is posted. 17 finishes and stays held; 14 is converted, then 13
+    /// down to 4; 15 and 16, above the new t, are never converted: the
+    /// reader drops them at its next decode, and their K-1 charges stay
+    /// until it has. No decoded frame and no seek after the refill.
     #[test]
     fn a_step_inside_the_window_keeps_it_converting() {
         let (_workload, document, lane, frames, thread) = r53_preview();
@@ -3420,11 +3422,22 @@ pub(crate) mod tests {
             .key
             .clone();
         let seeks = lane.counters().stats.reader_seeks;
+        let (version, (before, _)) = {
+            let state = lane.lock();
+            (state.readers.version(), state.readers.live())
+        };
         lane.post(Some(job(
             &document,
             JobKind::Paused(TimeCode(14)),
             stamp(1, 3),
         )));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while lane.lock().readers.version() == version {
+            assert!(Instant::now() < deadline, "the step was never posted");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (after, _) = lane.lock().readers.live();
+        assert_eq!(after, before, "K-1: 15 and 16 stay charged while kept");
         drop(release);
         let shown = shown_at(&frames, 14);
         assert_eq!(
@@ -3432,7 +3445,8 @@ pub(crate) mod tests {
             reference(&document, 14).0[..],
             "C-5 at 14"
         );
-        let window: Vec<i64> = (4..=19).collect();
+        let mut window: Vec<i64> = (4..=14).collect();
+        window.extend([17, 18, 19]);
         wait_until(&lane, |state| {
             let ring = state.readers.ring_times(&source);
             window.iter().all(|t| ring.contains(t)) && !decoding(state)
@@ -3440,12 +3454,17 @@ pub(crate) mod tests {
         assert_eq!(lane.counters().stats.reader_seeks, seeks, "no seek");
         let decodes = lane.decodes.lock().expect("decodes").clone();
         let order: Vec<i64> = decodes.iter().map(|d| d.at).collect();
-        let mut expected = vec![19, 18, 17, 14, 16, 15];
+        let mut expected = vec![19, 18, 17, 14];
         expected.extend((4..=13).rev());
         assert_eq!(order, expected, "{decodes:?}");
         for d in &decodes[1..] {
             assert_eq!((d.converted, d.received, d.seeks), (1, 0, 0), "{d:?}");
         }
+        let ring = lane.lock().readers.ring_times(&source);
+        assert!(!ring.contains(&15) && !ring.contains(&16), "{ring:?}");
+        // After 17 the decoder kept 4..=16 (13 frames); after 14, 4..=13.
+        let kept = |at: i64| decodes.iter().find(|d| d.at == at).map_or(0, |d| d.kept);
+        assert_eq!(kept(14) * 13, kept(17) * 10, "15 and 16 dropped");
         lane.shut_down();
         join_within(thread);
     }
