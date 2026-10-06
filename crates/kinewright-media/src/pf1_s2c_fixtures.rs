@@ -1,7 +1,7 @@
 //! PF1 S2c C-4: the S-2 witness fixtures (design §8 S-2) and what is known
 //! about each from outside the decoder under test: a demux-only shadow
-//! context (the anchor `A(t)` of today's seek, its key packets, the packet
-//! order, the tick-exact anchor boundaries) and the pinned FFmpeg CLI's own
+//! context (the anchor `A(t)` of today's seek, its key packets, the
+//! tick-exact anchor boundaries) and the pinned FFmpeg CLI's own
 //! linear decode (`ffprobe -show_frames`, `ffmpeg -f framehash`). Generated
 //! with the CLI into the temp directory (deleted on drop), the way
 //! `perf_fixtures` does; nothing is bundled. Every number is read from the
@@ -74,8 +74,6 @@ pub(super) struct Facts {
     pub(super) anchors: Vec<Option<Anchor>>,
     /// (`pos`, grid frame) of each key packet (PTS, else DTS), by grid frame.
     pub(super) keys: Vec<(isize, i64)>,
-    /// The video packets in demux order: (`pos`, key flag).
-    pub(super) packets: Vec<(isize, bool)>,
     /// Grid frame of the last packet (the end of stream).
     pub(super) last: i64,
     /// The stream's start offset in grid frames (the edit list's, if any).
@@ -261,7 +259,7 @@ impl Fixture {
             .expect("video");
         let (index, time_base) = (stream.index(), stream.time_base());
         let start = normalized_start(stream.start_time());
-        let (mut keys, mut packets, mut last) = (Vec::new(), Vec::new(), 0);
+        let (mut keys, mut last) = (Vec::new(), 0);
         for (s, packet) in input.packets() {
             if s.index() != index {
                 continue;
@@ -272,7 +270,6 @@ impl Fixture {
                 fps,
             );
             last = last.max(at);
-            packets.push((packet.position(), packet.is_key()));
             if packet.is_key() {
                 keys.push((packet.position(), at));
             }
@@ -290,7 +287,6 @@ impl Fixture {
             kind,
             anchors,
             keys,
-            packets,
             last,
             offset_frames: grid(start, time_base, fps),
             time_base: (

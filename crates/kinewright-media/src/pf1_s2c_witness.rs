@@ -346,9 +346,9 @@ pub(super) enum Event {
     /// after that.
     MismatchOnce,
     /// From now on the shadow's A(t) for a later target differs from the run's
-    /// anchor although no key packet was read (on the fixtures every anchor
-    /// change comes with a key packet, so only this injection isolates the
-    /// A(t) = A(t0) clause of rule 2).
+    /// anchor where the file's does not (on the fixtures every anchor change
+    /// comes with a key packet, so this injection moves A(t) inside a GOP:
+    /// rule 2's A(t) = A(t0) test, Amendment R51's whole rule 2).
     AnchorDrifts,
     /// From now on the decoder meets this timestamp fault (`Tamper`); the
     /// path must read timestamps as `decode.rs` does, through the probe.
@@ -487,9 +487,9 @@ pub(super) struct Target {
 }
 
 /// The linear decode from each anchor, at one thread count: the frames as
-/// they arrive (packets read when each did) and the packets read in all.
+/// they arrive (packets read when each did).
 pub(super) struct Truth {
-    runs: BTreeMap<isize, (Vec<FrameLog>, u64)>,
+    runs: BTreeMap<isize, Vec<FrameLog>>,
 }
 
 impl Truth {
@@ -515,30 +515,13 @@ impl Truth {
                 "{:?}: the linear run seeked again",
                 fx.kind
             );
-            runs.insert(
-                a.0,
-                (decoder.probe().frames.clone(), decoder.probe().packets),
-            );
+            runs.insert(a.0, decoder.probe().frames.clone());
         }
         Self { runs }
     }
 
-    /// The packets read in a run from `anchor` when a frame past `t` arrived
-    /// (the window for `t` is complete), else all of them (end of stream).
-    /// The run's first frame is always held, whatever its position.
-    fn completion(&self, anchor: &Anchor, t: i64) -> Option<u64> {
-        let (frames, total) = self.runs.get(&anchor.0)?;
-        Some(
-            (frames.iter().enumerate())
-                .find(|(i, f)| *i >= 1 && f.grid > t)
-                .map_or(*total, |(_, f)| f.packets),
-        )
-    }
-
     fn pts_of(&self, grid: i64) -> Option<i64> {
-        (self.runs.values().flat_map(|r| &r.0))
-            .find(|f| f.grid == grid)?
-            .ts
+        (self.runs.values().flatten()).find(|f| f.grid == grid)?.ts
     }
 }
 
@@ -681,22 +664,11 @@ impl Corpus {
     }
 }
 
-/// Did a run from `anchor` that has read `packets` video packets read a key
-/// packet since the anchor (the anchor packet itself is packet 1)?
-fn keys_read(facts: &Facts, anchor: &Anchor, packets: u64) -> bool {
-    let Some(first) = facts.packets.iter().position(|p| p.0 == anchor.0) else {
-        return true; // an anchor that is not a packet is unknown
-    };
-    let end = (first + usize::try_from(packets).unwrap()).min(facts.packets.len());
-    facts.packets[(first + 1).min(end)..end].iter().any(|p| p.1)
-}
-
 /// What S-2 says about the reader's run, tracked over a script: the anchor
 /// of the run's last seek (`None`: unknown or no run) and whether the shadow
 /// is compromised.
 pub(super) struct Model<'a> {
     corpus: &'a Corpus,
-    threads: usize,
     run: Option<Anchor>,
     faulty: bool,
     /// A `MismatchOnce` is waiting for the next seek.
@@ -707,10 +679,9 @@ pub(super) struct Model<'a> {
 }
 
 impl<'a> Model<'a> {
-    fn new(corpus: &'a Corpus, threads: usize) -> Self {
+    fn new(corpus: &'a Corpus) -> Self {
         Self {
             corpus,
-            threads,
             run: None,
             faulty: false,
             mismatch_next: false,
@@ -738,9 +709,10 @@ impl<'a> Model<'a> {
 
     /// Where S-2 says the reader at `c` producing `t` seeks or continues.
     /// Continue needs: the `mov` pair; a known run anchor; `c < t <= c + 12`;
-    /// A(t) equal to the run's; no key packet read since the anchor by the
-    /// time the frame past `t` arrives (exact: the packets of a linear decode
-    /// at this thread count against the file's key flags). Anything else Seek.
+    /// A(t) equal to the run's (Amendment R51: rule 2 is this anchor test
+    /// alone; a key packet read, read-ahead included, no longer ends a run,
+    /// since with the same anchor and an unbroken feed a fresh seek to `t`
+    /// feeds the same packets from the same flushed state). Anything else Seek.
     fn expected(&mut self, c: i64, t: i64) -> Route {
         let facts = &self.corpus.fx.facts;
         let continues = !self.faulty
@@ -749,11 +721,7 @@ impl<'a> Model<'a> {
             && c < t
             && t <= c + 12
             && self.run.is_some()
-            && anchor(facts, t) == self.run
-            && self.run.as_ref().is_some_and(|a| {
-                let done = self.corpus.truth[&self.threads].completion(a, t);
-                done.is_some_and(|p| !keys_read(facts, a, p))
-            });
+            && anchor(facts, t) == self.run;
         if continues {
             return Route::Continue;
         }
@@ -828,7 +796,7 @@ pub(super) fn witness_hops<P: TargetPath>(
     for (g, (want, want2)) in corpus.targets.iter().zip(&corpus.oracle[&threads]) {
         let place = format!("{:?} x{threads} {g:?}", corpus.fx.kind);
         produced(path, None, g.c)?;
-        let mut model = Model::new(corpus, threads);
+        let mut model = Model::new(corpus);
         model.seeked(g.c);
         let expect = model.expected(g.c, g.t);
         let got = produced(path, Some(Cursor(g.c)), g.t)?;
@@ -894,7 +862,7 @@ pub(super) fn run_script<P: TargetPath>(
     check_route: bool,
 ) -> Result<(), String> {
     let mut reference = SeekPath::new(&cx.a.fx, cx.threads);
-    let mut model = Model::new(cx.a, cx.threads);
+    let mut model = Model::new(cx.a);
     for (n, step) in steps.iter().enumerate() {
         match step {
             Step::Prime(c) => {
@@ -1029,9 +997,9 @@ pub(super) fn scripts(cx: &Ctx, cancel_after: usize) -> Vec<(&'static str, Vec<S
     // One bad seek (the shadow disagrees with the real context, once) disables
     // continuation for the decoder for good: later seeks match again, and
     // still every target seeks, until the decoder is replaced; then the
-    // reader continues again. Frames are early in a GOP (`base` + 1 ..) so that
-    // at any thread count no key packet has been read ahead yet, and the
-    // recovery hops are asserted to continue, not just to agree.
+    // reader continues again. Frames are early in a GOP (`base` + 1 ..), so
+    // the recovery hops share their anchor and are asserted to continue, not
+    // just to agree.
     let mismatch_once = |replace: Event, base: i64| {
         vec![
             Prime(1),
@@ -1188,14 +1156,10 @@ mod reference {
         /// A mismatch at a seek disables continuation for the decoder for good.
         pub(super) latch: bool,
         pub(super) same_anchor: bool,
-        pub(super) keys: bool,
         pub(super) timestamps: bool,
         pub(super) window: bool,
         pub(super) stream: bool,
         pub(super) events: bool,
-        /// Count the packets read as a one-thread decoder would have (ignore
-        /// the extra ones frame threads read ahead).
-        pub(super) thread_blind: bool,
         pub(super) cancel: CancelAt,
         pub(super) corrupt: Corrupt,
     }
@@ -1207,12 +1171,10 @@ mod reference {
             real_matches: true,
             latch: true,
             same_anchor: true,
-            keys: true,
             timestamps: true,
             window: true,
             stream: true,
             events: true,
-            thread_blind: false,
             cancel: CancelAt::Exact,
             corrupt: Corrupt::Never,
         };
@@ -1227,9 +1189,10 @@ mod reference {
     }
 
     /// A reader that keeps its decoder, continues under S-2's rules and
-    /// otherwise seeks. The continuation is today's `decode_window_sequential`
-    /// judged after the fact against the packets it read; the shadow is the
-    /// fixture's `anchors`. Test-only: S2c-2's is the real one.
+    /// otherwise seeks. The continuation is today's `decode_window_sequential`,
+    /// judged after the fact against the timestamps it met (rule 3); rule 2
+    /// (Amendment R51: the anchor test alone) is judged before it. The shadow
+    /// is the fixture's `anchors`. Test-only: S2c-2's is the real one.
     pub(super) struct ReferenceContinuation {
         token: ControlToken,
         fx: Rc<Fixture>,
@@ -1306,16 +1269,9 @@ mod reference {
                     prev = Some(ts);
                 }
             }
-            // Keys are counted from the run's real first packet (not the shadow's).
-            let lag = if self.rules.thread_blind {
-                u64::try_from(self.threads - 1).unwrap()
-            } else {
-                0
-            };
-            let key_read = d.state().first_packet.as_ref().is_none_or(|a| {
-                keys_read(&self.fx.facts, a, d.probe().packets.saturating_sub(lag))
-            });
-            !(self.rules.keys && key_read)
+            // Amendment R51: no key-packet clause; rule 2 is `may_continue`'s
+            // anchor test (A(t) = A(t0), the real first packet A(t0)).
+            true
         }
 
         fn seek(&mut self, t: TimeCode, before: Option<Before>) -> Observation {
@@ -2481,13 +2437,12 @@ mod tests {
     /// each rule at the file or script aimed at it.
     #[test]
     fn a_continuation_that_drops_one_rule_fails() {
-        let mutants: [(&str, RuleMutation); 14] = [
+        let mutants: [(&str, RuleMutation); 13] = [
             ("pair", |r| r.pair = false),
             ("shadow unknown", |r| r.shadow_known = false),
             ("real anchor unchecked", |r| r.real_matches = false),
             ("mismatch not latched", |r| r.latch = false),
             ("A(t) unchecked", |r| r.same_anchor = false),
-            ("key packets", |r| r.keys = false),
             ("timestamps", |r| r.timestamps = false),
             ("window", |r| r.window = false),
             ("stream", |r| r.stream = false),
@@ -2556,22 +2511,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// Frame threads read packets ahead: a key packet already fed through the
-    /// decoder's buffering is one the continuation has read. A reference that
-    /// counts packets as one thread would passes at one thread and fails at four.
-    #[test]
-    fn a_continuation_blind_to_frame_threads_passes_one_thread_and_fails_four() {
-        let suite = Suite::new(&[1, 4]);
-        let mut rules = Rules::ALL;
-        rules.thread_blind = true;
-        run_all(&suite, rules, 2, &[1]).unwrap();
-        let e = run_all(&suite, rules, 2, &[4]).unwrap_err();
-        eprintln!(
-            "pf1-c4 mutation thread-blind key count (x1 passes): {}",
-            e.chars().take(140).collect::<String>()
-        );
     }
 
     /// Damage to the retained lookahead frame that only a later hop consumes
