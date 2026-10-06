@@ -2389,6 +2389,27 @@ mod tests {
         assert!(e.contains("a returned frame without its conversion"), "{e}");
     }
 
+    /// The tap gate on one decoder: a conversion made with the tap off
+    /// records nothing and clears the record before it, so no observation
+    /// can pair a returned frame with an earlier frame's conversion.
+    #[test]
+    fn a_conversion_without_the_tap_clears_the_last_record() {
+        let fx = Fixture::new(Kind::Default);
+        let (mut decoder, mut cache) = (fx.open(1), FrameCache::<WorkingFrame>::new(1));
+        let tap = Tap::on();
+        decoder
+            .decode_window(TimeCode(5), TimeCode(5), &mut cache)
+            .unwrap();
+        assert!(decoder.probe().last_conversion.is_some(), "the tap copies");
+        drop(tap);
+        let conversions = decoder.probe().conversions;
+        decoder
+            .decode_window(TimeCode(30), TimeCode(30), &mut cache)
+            .unwrap();
+        assert!(decoder.probe().conversions > conversions, "it converted");
+        assert!(decoder.probe().last_conversion.is_none(), "a stale record");
+    }
+
     /// The non-fixture cases already hold for the fresh Seek (cancel: the
     /// stop flag is raised after n received frames), so they are live for
     /// the implementation too; all but the exact stop with frames waiting.
