@@ -2907,8 +2907,9 @@ pub(crate) mod tests {
     /// Amendment R53's set-up: a threaded preview on one track (testsrc2
     /// 0..30 at in-point 0, so source time is timeline time), paused at 20
     /// (it opens: no window). The next paused step to 19 refills [4, 19)
-    /// (B = 16).
+    /// (B = 16). The workload owns the media files.
     fn r53_preview() -> (
+        crate::perf_fixtures::Workload,
         Arc<Document>,
         Arc<Lane>,
         Receiver<PreviewFrame>,
@@ -2926,7 +2927,7 @@ pub(crate) mod tests {
         shown_at(&frames, 20);
         wait_until(&lane, |state| !decoding(state));
         lane.decodes.lock().expect("decodes").clear();
-        (document, lane, frames, thread)
+        (workload, document, lane, frames, thread)
     }
 
     /// The first published frame at `at` (60 s is a hang).
@@ -2960,7 +2961,7 @@ pub(crate) mod tests {
     /// job, descending from t − 1, one frame per decode, decoding nothing.
     #[test]
     fn a_refill_publishes_t_before_converting_its_window() {
-        let (document, lane, frames, thread) = r53_preview();
+        let (_workload, document, lane, frames, thread) = r53_preview();
         let (release, held) = bounded::<()>(0);
         *lane.hold_at.lock().expect("hold") = Some((18, held));
         lane.post(Some(job(
@@ -3012,7 +3013,7 @@ pub(crate) mod tests {
     /// old plan, decoded nothing.
     #[test]
     fn a_newer_job_cancels_the_rest_of_the_window() {
-        let (document, lane, frames, thread) = r53_preview();
+        let (_workload, document, lane, frames, thread) = r53_preview();
         let (release, held) = bounded::<()>(0);
         *lane.hold_at.lock().expect("hold") = Some((17, held));
         lane.post(Some(job(
@@ -3061,7 +3062,7 @@ pub(crate) mod tests {
     /// fresh seek's bytes.
     #[test]
     fn a_step_into_the_unconverted_window_decodes_nothing_new() {
-        let (document, lane, frames, thread) = r53_preview();
+        let (_workload, document, lane, frames, thread) = r53_preview();
         let (release, held) = bounded::<()>(0);
         *lane.hold_at.lock().expect("hold") = Some((17, held));
         lane.post(Some(job(
