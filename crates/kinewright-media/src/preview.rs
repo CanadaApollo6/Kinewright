@@ -283,6 +283,41 @@ impl LaneState {
     }
 }
 
+/// Amendment R53's witnesses: one reader decode of `at` under plan
+/// `version`: the colour conversions, decoded frames and seeks it took.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DecodeRecord {
+    pub(crate) at: i64,
+    pub(crate) version: u64,
+    pub(crate) converted: u64,
+    pub(crate) received: u64,
+    pub(crate) seeks: u64,
+}
+
+#[cfg(test)]
+impl DecodeRecord {
+    /// The decoder's conversions and decoded frames so far.
+    fn work(decoder: Option<&VideoDecoder>) -> (u64, u64) {
+        decoder.map_or((0, 0), |d| (d.probe().converted, d.probe().received))
+    }
+
+    fn new(
+        (at, version, seeks): (i64, u64, u64),
+        before: (u64, u64),
+        decoder: Option<&VideoDecoder>,
+    ) -> Self {
+        let after = Self::work(decoder);
+        Self {
+            at,
+            version,
+            converted: after.0 - before.0,
+            received: after.1 - before.1,
+            seeks,
+        }
+    }
+}
+
 /// The worker/preview hand-off: one leaf lock and the `ready` condvar.
 pub(crate) struct Lane {
     state: Mutex<LaneState>,
@@ -325,6 +360,9 @@ pub(crate) struct Lane {
     pub(crate) panic_at: Mutex<Option<i64>>,
     #[cfg(test)]
     pub(crate) panicked: Mutex<Vec<u64>>,
+    /// Amendment R53's witnesses: every reader decode, in order.
+    #[cfg(test)]
+    pub(crate) decodes: Mutex<Vec<DecodeRecord>>,
     /// Amendment R49's witnesses: a longer drag deadline, so they do not
     /// depend on how fast a render is.
     #[cfg(test)]
@@ -389,6 +427,8 @@ impl Lane {
             panic_at: Mutex::default(),
             #[cfg(test)]
             panicked: Mutex::default(),
+            #[cfg(test)]
+            decodes: Mutex::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
             permits_cv: Condvar::new(),
             counters: Mutex::default(),
@@ -879,24 +919,10 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 drop(state);
                 let hold = Hold::adopt(lane, bytes);
                 #[cfg(test)]
-                {
-                    let gate = lane.gate.lock().expect("gate").clone();
-                    if let Some(gate) = gate {
-                        lane.notify(); // a test waiting for `Decoding`
-                        let _ = gate.recv();
-                    }
-                    let hold_at = lane.hold_at.lock().expect("hold").clone();
-                    if let Some((_, release)) = hold_at.filter(|(time, _)| *time == at) {
-                        lane.notify(); // a test waiting for `Decoding`
-                        let _ = release.recv();
-                    }
-                    let panics = (lane.panic_at.lock().expect("panic")).take_if(|time| *time == at);
-                    if panics.is_some() {
-                        lane.panicked.lock().expect("panicked").push(id);
-                        panic!("injected: reader {id} panics decoding {at} (Amendment R43)");
-                    }
-                }
+                lane.before_decode(id, at);
                 let seeks = decoder.as_ref().map_or(0, VideoDecoder::seek_count);
+                #[cfg(test)]
+                let before = DecodeRecord::work(decoder.as_ref());
                 let result = match &mut decoder {
                     Some(decoder) => spec.decode(decoder, at, paused),
                     None => spec.open(threads, stop).and_then(|opened| {
@@ -910,6 +936,12 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 if seeks > 0 {
                     lane.counters().stats.reader_seeks += seeks;
                 }
+                #[cfg(test)]
+                (lane.decodes.lock().expect("decodes")).push(DecodeRecord::new(
+                    (at, version, seeks),
+                    before,
+                    decoder.as_ref(),
+                ));
                 // Stopped: the reader retires, or K-2 stopped its lookahead.
                 // Amendment R43 (RS-1): any failure once the flag is set is
                 // the stop's (an interrupted open, seek or read).
@@ -940,6 +972,29 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 deliver(lane, id, (at, version), result);
                 state = lane.lock();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+impl Lane {
+    /// Test support, before reader `id` decodes `at`: the gate, `hold_at`
+    /// and `panic_at`.
+    fn before_decode(&self, id: u64, at: i64) {
+        let gate = self.gate.lock().expect("gate").clone();
+        if let Some(gate) = gate {
+            self.notify(); // a test waiting for `Decoding`
+            let _ = gate.recv();
+        }
+        let hold_at = self.hold_at.lock().expect("hold").clone();
+        if let Some((_, release)) = hold_at.filter(|(time, _)| *time == at) {
+            self.notify(); // a test waiting for `Decoding`
+            let _ = release.recv();
+        }
+        let panics = (self.panic_at.lock().expect("panic")).take_if(|time| *time == at);
+        if panics.is_some() {
+            self.panicked.lock().expect("panicked").push(id);
+            panic!("injected: reader {id} panics decoding {at} (Amendment R43)");
         }
     }
 }
@@ -2847,6 +2902,207 @@ pub(crate) mod tests {
             }
             assert_eq!(seeked, expected, "{path:?}");
         }
+    }
+
+    /// Amendment R53's set-up: a threaded preview on one track (testsrc2
+    /// 0..30 at in-point 0, so source time is timeline time), paused at 20
+    /// (it opens: no window). The next paused step to 19 refills [4, 19)
+    /// (B = 16).
+    fn r53_preview() -> (
+        Arc<Document>,
+        Arc<Lane>,
+        Receiver<PreviewFrame>,
+        thread::JoinHandle<()>,
+    ) {
+        let workload = crate::perf_fixtures::cuts((160, 90), 60, 1, 2, 30);
+        let document = Arc::new(workload.0.clone());
+        let lane = Arc::new(Lane::default());
+        let (frames, thread) = threaded_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(20)),
+            stamp(1, 1),
+        )));
+        shown_at(&frames, 20);
+        wait_until(&lane, |state| !decoding(state));
+        lane.decodes.lock().expect("decodes").clear();
+        (document, lane, frames, thread)
+    }
+
+    /// The first published frame at `at` (60 s is a hang).
+    fn shown_at(frames: &Receiver<PreviewFrame>, at: i64) -> PreviewFrame {
+        loop {
+            let shown = frames.recv_timeout(Duration::from_secs(60));
+            let shown = shown.unwrap_or_else(|_| panic!("frame {at} was never published"));
+            if shown.at == TimeCode(at) {
+                return shown;
+            }
+        }
+    }
+
+    fn decoding_at(state: &LaneState, at: i64) -> bool {
+        (state.readers.slots.iter()).any(|slot| {
+            matches!(slot.state, crate::sched::ReaderState::Decoding { at: t, .. } if t == at)
+        })
+    }
+
+    /// The one source's ring times.
+    fn ring(lane: &Lane) -> Vec<i64> {
+        let state = lane.lock();
+        let key = &state.readers.slots.first().expect("a reader").key;
+        state.readers.ring_times(key)
+    }
+
+    /// Amendment R53 [S2c] (C-5): a refill publishes t before it converts
+    /// any frame of its window: while the reader is held before t − 1, t
+    /// is shown, the ring holds t alone of the window and the refill's
+    /// decode converted one frame. Then the window converts in the same
+    /// job, descending from t − 1, one frame per decode, decoding nothing.
+    #[test]
+    fn a_refill_publishes_t_before_converting_its_window() {
+        let (document, lane, frames, thread) = r53_preview();
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((18, held));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        let shown = shown_at(&frames, 19);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, 19).0[..],
+            "C-5 at 19"
+        );
+        wait_until(&lane, |state| decoding_at(state, 18));
+        let window: Vec<i64> = (4..19).collect();
+        let resident = ring(&lane);
+        assert!(resident.contains(&19), "{resident:?}");
+        assert!(!resident.iter().any(|t| window.contains(t)), "{resident:?}");
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let [refill] = decodes[..] else {
+            panic!("one decode before 19 is shown: {decodes:?}");
+        };
+        assert_eq!((refill.at, refill.converted), (19, 1), "{refill:?}");
+        assert!(
+            refill.received >= 16,
+            "the refill decoded its window: {refill:?}"
+        );
+        drop(release);
+        wait_until(&lane, |state| {
+            let key = &state.readers.slots.first().expect("a reader").key;
+            let ring = state.readers.ring_times(key);
+            window.iter().all(|t| ring.contains(t)) && !decoding(state)
+        });
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let order: Vec<i64> = decodes.iter().map(|d| d.at).collect();
+        let descending: Vec<i64> = (4..=19).rev().collect();
+        assert_eq!(order, descending, "{decodes:?}");
+        for d in &decodes[1..] {
+            assert_eq!((d.converted, d.received, d.seeks), (1, 0, 0), "{d:?}");
+        }
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R53 [S2c]: a newer job cancels the window's remaining
+    /// conversions between frames. The reader is held before 17 (19, 18
+    /// done); a forward jump to 25 is posted; once it shows, no frame below
+    /// 17 of the old window was converted, and 17 itself, converted for the
+    /// old plan, decoded nothing.
+    #[test]
+    fn a_newer_job_cancels_the_rest_of_the_window() {
+        let (document, lane, frames, thread) = r53_preview();
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((17, held));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        wait_until(&lane, |state| decoding_at(state, 17));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(25)),
+            stamp(1, 3),
+        )));
+        drop(release);
+        let shown = shown_at(&frames, 25);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, 25).0[..],
+            "C-5 at 25"
+        );
+        wait_until(&lane, |state| !decoding(state));
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let cancelled: Vec<_> = (decodes.iter())
+            .filter(|d| (4..17).contains(&d.at))
+            .collect();
+        assert!(
+            cancelled.is_empty(),
+            "converted after the newer post: {decodes:?}"
+        );
+        let order: Vec<i64> = decodes.iter().map(|d| d.at).collect();
+        assert_eq!(order[..3], [19, 18, 17], "{decodes:?}");
+        assert!(order[3..].iter().all(|t| *t >= 25), "{decodes:?}");
+        for d in &decodes[1..3] {
+            assert_eq!((d.converted, d.received, d.seeks), (1, 0, 0), "{d:?}");
+        }
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R53 [S2c] (C-5): a step into the part of the window not yet
+    /// converted waits for its conversion and decodes nothing new. The
+    /// reader is held before 17 (19, 18 done); a step to 14 is posted. It
+    /// keeps the window (no refill): 14 is converted from the refill's
+    /// decoded frame, with no decoded frame and no seek, and shows the
+    /// fresh seek's bytes.
+    #[test]
+    fn a_step_into_the_unconverted_window_decodes_nothing_new() {
+        let (document, lane, frames, thread) = r53_preview();
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((17, held));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        wait_until(&lane, |state| decoding_at(state, 17));
+        let seeks = lane.counters().stats.reader_seeks;
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(14)),
+            stamp(1, 3),
+        )));
+        drop(release);
+        let shown = shown_at(&frames, 14);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, 14).0[..],
+            "C-5 at 14"
+        );
+        wait_until(&lane, |state| !decoding(state));
+        assert_eq!(lane.counters().stats.reader_seeks, seeks, "no seek");
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let step = (decodes.iter()).filter(|d| d.at == 14).collect::<Vec<_>>();
+        let [step] = step[..] else {
+            panic!("14 decoded once: {decodes:?}");
+        };
+        assert_eq!(
+            (step.converted, step.received, step.seeks),
+            (1, 0, 0),
+            "{step:?}"
+        );
+        let after = decodes.iter().skip_while(|d| d.at != 17);
+        assert!(
+            after.clone().all(|d| d.received == 0 && d.seeks == 0),
+            "{decodes:?}"
+        );
+        lane.shut_down();
+        join_within(thread);
     }
 
     /// Review B S3's sources: an encoded 30-frame 160×90 H.264 source with

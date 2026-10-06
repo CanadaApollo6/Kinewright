@@ -1383,6 +1383,9 @@ pub(crate) struct DecoderProbe {
     last_ts: Option<i64>,
     /// Colour conversions run over the decoder's lifetime.
     pub(crate) conversions: u64,
+    /// Amendment R53's witnesses: frames converted over the decoder's
+    /// lifetime, by either converter (`conversions` counts the managed one).
+    pub(crate) converted: u64,
     /// The timestamp of the frame being converted.
     converting_pts: Option<i64>,
     /// The latest conversion's RGBA64 bytes (the input to the working frame).
@@ -2533,6 +2536,10 @@ impl VideoDecoder {
         decoded: &ffmpeg::frame::Video,
     ) -> Result<T, MediaError> {
         let mut rgba = ffmpeg::frame::Video::empty();
+        #[cfg(test)]
+        {
+            self.probe.converted += 1;
+        }
         match &mut self.converter {
             VideoConverter::Legacy(scaler) => scaler
                 .run(decoded, &mut rgba)
