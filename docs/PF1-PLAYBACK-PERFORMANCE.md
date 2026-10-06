@@ -1112,8 +1112,31 @@ p95 23.2–26.7 ms (no window was ever fully converted).
   the window all of its frames end up converted. The R53 "newer job cancels" witness targets a time outside the
   window.
 
+**Amendment R55 [S2c] Window conversions outrun the stepper (lead ruling, 2026-10-06).** E13.6 (r54a): L-4b passed
+(1.14 / 1.15×) but the hit p95 was 23.3 / 26.4 ms, with 18 / 21 of 125 hits pre-converted and 11 of 75 windows
+filled. P-seek posts each step as soon as the previous one shows, and one window conversion costs about a step,
+so a hit almost always waits for one conversion. Before R53 a hit was a ring lookup (E13.5: p95 13.8 / 18.3), so
+the regression is this design's, not the environment's. The gates and P-seek's pacing do not change.
+- **Measure first** (no behaviour change, its own commit): the per-frame conversion time for t and for window
+  frames, LL and LH; whether the converter is threaded today; and a hit's time from post to frame ready, split
+  into waiting for a conversion and the render. If a hit's wait is not mostly conversion, stop and report.
+- **Then cut the per-hit wait,** in this order: (a) threaded conversion (FFmpeg 8 swscale or slice threading) in
+  safe code for window frames, and for t if it speeds t too, bounded at min(4, available parallelism − 2)
+  threads, with CPU time per refill recorded against r54a; (b) if (a) is unavailable or not enough, a second
+  conversion lane beside the job thread, at most 2 conversions in flight per source; (c) never convert past what
+  K-2 has reserved. B, I12 and the R54 charges do not change.
+- **Invariants, each with a witness (and a mutation where new):** t is published before any window conversion
+  starts; a newer job outside the window stops every lane's remaining conversions (in-flight ones may finish and
+  stay held); a step inside the window converts its own frame first unless a lane already has it, and no frame
+  is converted twice; converted bytes stay inside K-1 with any number of lanes in flight (I12); frames equal
+  fresh seeks (the C-4 oracle).
+- **Gate:** the paired L-4 check (3 pairs, LL and LH, `seek_gop60`): hit p95 ≤ 20 ms and L-4b ≤ 1.25×, with the
+  pre-converted hit share, windows filled, CPU per refill and the backward mean reported.
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
-that waited for a conversion, windows fully converted, and frames decoded per refill; `dropped_agent`, `stale_errors`, `slot_starved`,
+that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
+conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and
+CPU time per refill; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
 S0 and the ratio at S4 (ME14's absolute 20 fps floor stays **owed**, D6); the
 PERFORMANCE heavy-4K, agent and desktop lanes.
