@@ -1388,6 +1388,8 @@ pub(crate) struct DecoderProbe {
     pub(crate) converted: u64,
     /// The timestamp of the frame being converted.
     converting_pts: Option<i64>,
+    /// Amendment R55 (Rec): the conversion running is a kept window frame's.
+    window_conversion: bool,
     /// The latest conversion's RGBA64 bytes (the input to the working frame).
     pub(crate) last_conversion: Option<Converted>,
 }
@@ -2253,6 +2255,15 @@ impl VideoDecoder {
         if result.is_err() {
             self.retained.clear();
         }
+        #[cfg(test)]
+        if result.is_ok() {
+            use crate::pf1_clock::{KEPT_BYTES, REFILLS, WINDOWS_FULL, add};
+            add(REFILLS, 1);
+            add(KEPT_BYTES, self.kept_bytes() as u64);
+            if self.retained.is_empty() {
+                add(WINDOWS_FULL, 1);
+            }
+        }
         result
     }
 
@@ -2303,10 +2314,19 @@ impl VideoDecoder {
         #[cfg(test)]
         {
             self.probe.converting_pts = kept.pts;
+            self.probe.window_conversion = true;
         }
         let frame = self.convert::<T>(&kept.decoded);
+        #[cfg(test)]
+        {
+            self.probe.window_conversion = false;
+        }
         if kept.first != kept.last {
             self.retained.push(kept); // its other grid frames
+        }
+        #[cfg(test)]
+        if self.retained.is_empty() {
+            crate::pf1_clock::add(crate::pf1_clock::WINDOWS_FULL, 1);
         }
         Some(frame)
     }
@@ -2549,6 +2569,8 @@ impl VideoDecoder {
             if self.decoder.receive_frame(&mut decoded).is_err() {
                 break;
             }
+            #[cfg(test)]
+            crate::pf1_clock::add(crate::pf1_clock::DECODED, 1);
             // PF1 S2c C-4: test builds may inject a timestamp fault (`Tamper`).
             #[cfg(test)]
             let timestamp = self.probe.tampered(decoded.timestamp());
@@ -2694,6 +2716,8 @@ impl VideoDecoder {
         {
             self.probe.converted += 1;
         }
+        #[cfg(test)]
+        let clock = (std::time::Instant::now(), crate::pf1_clock::thread_cpu_ns());
         match &mut self.converter {
             VideoConverter::Legacy(scaler) => scaler
                 .run(decoded, &mut rgba)
@@ -2730,6 +2754,12 @@ impl VideoDecoder {
             }
         }
         #[cfg(test)]
+        let clock = (
+            clock.0,
+            std::time::Instant::now(),
+            crate::pf1_clock::thread_cpu_ns().saturating_sub(clock.1),
+        );
+        #[cfg(test)]
         if matches!(self.converter, VideoConverter::Managed(_)) {
             self.probe.tap_conversion(
                 self.probe.converting_pts,
@@ -2745,6 +2775,13 @@ impl VideoDecoder {
             self.flip_horizontal,
             self.managed_source.as_ref(),
         )?;
+        #[cfg(test)]
+        crate::pf1_clock::converted(
+            self.probe.window_conversion,
+            clock.1 - clock.0,
+            clock.1.elapsed(),
+            clock.2,
+        );
         #[cfg(test)]
         let frame = {
             let mut frame = frame;

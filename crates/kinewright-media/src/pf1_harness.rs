@@ -40,6 +40,7 @@ use crate::{
     engine::Faults,
     gpu_test_support::fixture_gpu_or_skip,
     perf_fixtures::{self, MIB, Workload},
+    pf1_clock,
     test_support::TempDirectory,
 };
 
@@ -758,14 +759,20 @@ fn seek_run(document: &Document, seed: u64) -> String {
             plus_one.push(latency);
         }
     }
+    let (clock, cpu) = (pf1_clock::snapshot(), pf1_clock::process_cpu_ms());
+    let mut taps = Vec::new();
     for _ in 0..200 {
         if at < 12 {
             at = 12 + next(n - 12);
             op(at);
         }
         at -= 1 + next(12);
-        backward.push(op(at));
+        let before = pf1_clock::snapshot();
+        let latency = op(at);
+        taps.push((latency, before, pf1_clock::snapshot()));
+        backward.push(latency);
     }
+    let back = backward_counts(&taps, clock, pf1_clock::process_cpu_ms() - cpu);
     let target = next(n - 800);
     op(target);
     let (drag, release_shown) = drag_and_release(&session, target, || 1 + next(4));
@@ -777,18 +784,99 @@ fn seek_run(document: &Document, seed: u64) -> String {
         + usize::from(!release_shown);
     let line = format!(
         "random_p95_ms={:.1} random_max_ms={:.1} forward_p95_ms={:.1} plus1_p95_ms={:.1} \
-         plus1_n={} backward_combined_p95_ms={:.1} {drag} timeouts={timeouts}",
+         plus1_n={} backward_combined_p95_ms={:.1} {drag} timeouts={timeouts} \
+         random_mean_ms={:.1} forward_mean_ms={:.1} {back}",
         percentile(&mut random, 0.95),
         percentile(&mut random, 1.0),
         percentile(&mut forward, 0.95),
         percentile(&mut plus_one, 0.95),
         plus_one.len(),
         percentile(&mut backward, 0.95),
+        mean(&random),
+        mean(&forward),
     );
     // Lead ruling after R51/R52: the session ends as P-play's and P-rss's
     // do, the engine's worker joined before the process moves on (an exit
     // 139 was the race of dropping it mid-teardown).
     format!("{line} {}", teardown(session))
+}
+
+fn mean(values: &[f64]) -> f64 {
+    values.iter().sum::<f64>() / values.len().max(1) as f64
+}
+
+/// Amendment R55 (Rec): P-seek's backward phase from `pf1_clock`. A step
+/// that decoded no frame is a hit (L-4a), any other a refill (L-4b). Per
+/// phase: conversions of t and of window frames (graph and working-frame
+/// ms per frame, and the graph's calling-thread CPU over its wall time),
+/// a hit's wait for its frame against its render, hits served
+/// pre-converted, refills, windows filled, bytes kept and process CPU.
+fn backward_counts(
+    taps: &[(f64, [u64; pf1_clock::LEN], [u64; pf1_clock::LEN])],
+    from: [u64; pf1_clock::LEN],
+    cpu_ms: u64,
+) -> String {
+    use pf1_clock::{
+        CONVERT_T, CONVERT_W, DECODED, JOBS, KEPT_BYTES, PRECONVERTED, REFILLS, WINDOWS_FULL,
+    };
+    let to = taps.last().map_or(from, |(_, _, after)| *after);
+    let d = |i: usize| to[i] - from[i];
+    let (mut hits, mut refills, mut waits) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut render, mut pre, mut decoded, mut converted) = (0u64, 0u64, 0u64, 0u64);
+    for (latency, before, after) in taps {
+        let delta = |i: usize| after[i] - before[i];
+        let converts = delta(CONVERT_T) + delta(CONVERT_W);
+        if delta(DECODED) == 0 {
+            hits.push(*latency);
+            waits.push(delta(JOBS + 1) as f64 / 1e6);
+            render += delta(JOBS + 2);
+            pre += u64::from(delta(PRECONVERTED) > 0);
+        } else {
+            refills.push(*latency);
+            decoded += delta(DECODED);
+            converted += converts;
+        }
+    }
+    let per = |ns: u64, n: u64| ns as f64 / 1e6 / n.max(1) as f64;
+    let conv = |base: usize| {
+        let n = d(base);
+        let wall = d(base + 1);
+        format!(
+            "n={n} ms={:.2} graph_ms={:.2} work_ms={:.2} graph_cpu_ratio={:.2}",
+            per(wall + d(base + 2), n),
+            per(wall, n),
+            per(d(base + 2), n),
+            d(base + 3) as f64 / wall.max(1) as f64,
+        )
+    };
+    let (hit_n, refill_n) = (hits.len() as u64, refills.len() as u64);
+    let hit_wait_mean = mean(&waits);
+    format!(
+        "count_back_hits={hit_n} count_back_refills={refill_n} count_back_hit_mean_ms={:.1} \
+         count_back_hit_p95_ms={:.1} count_back_refill_mean_ms={:.1} count_back_refill_p95_ms={:.1} \
+         count_back_mean_ms={:.1} count_refill_decoded={decoded} count_refill_converted={converted} \
+         count_back_hits_preconverted={pre} count_refills_started={} count_windows_full={} \
+         count_keep_mb_per_refill={:.1} hit_wait_mean_ms={hit_wait_mean:.1} hit_wait_p95_ms={:.1} \
+         hit_render_mean_ms={:.1} conv_t_{} conv_w_{} cpu_back_ms={cpu_ms} cpu_ms_per_refill={:.1}",
+        mean(&hits),
+        percentile(&mut hits, 0.95),
+        mean(&refills),
+        percentile(&mut refills, 0.95),
+        mean(
+            &taps
+                .iter()
+                .map(|(latency, ..)| *latency)
+                .collect::<Vec<_>>()
+        ),
+        d(REFILLS),
+        d(WINDOWS_FULL),
+        d(KEPT_BYTES) as f64 / 1e6 / d(REFILLS).max(1) as f64,
+        percentile(&mut waits, 0.95),
+        per(render, hit_n),
+        conv(CONVERT_T),
+        conv(CONVERT_W),
+        cpu_ms as f64 / refill_n.max(1) as f64,
+    )
 }
 
 /// The drag from `target` (already shown): 150 `request_frame` calls at

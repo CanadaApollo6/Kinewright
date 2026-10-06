@@ -125,6 +125,8 @@ mod mo2_perf_fixtures;
 /// PF1 W-0/W-1: the shared performance workloads (MO2 R28's and PF1's).
 #[cfg(test)]
 mod perf_fixtures;
+#[cfg(test)]
+mod pf1_clock;
 /// PF1 G18: the export lane.
 #[cfg(test)]
 mod pf1_export_lane;
