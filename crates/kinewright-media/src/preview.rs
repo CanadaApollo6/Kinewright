@@ -2763,7 +2763,89 @@ pub(crate) mod tests {
             let job = (per_source.as_mut_slice(), &sizes, &mut set);
             let windows = backward_windows(paused, &readers, &earlier, job);
             assert_eq!(windows.is_empty(), !paused, "paused {paused}");
-            assert_eq!((per_source, set) == before, !paused, "paused {paused}");
+            if !paused {
+                assert!((per_source, set) == before, "playback changes nothing");
+                continue;
+            }
+            // The refill's times join the source's required times, after
+            // t, and their bytes the set (K-2 charges them).
+            assert_eq!(windows.len(), 1, "one window");
+            let (key, &(start, t)) = windows.iter().next().expect("one window");
+            let times: Vec<i64> = (start..t).collect();
+            assert!(!times.is_empty(), "a refill");
+            let f = sizes[key];
+            assert_eq!(set, before.1 + f * times.len(), "the set");
+            let required = per_source.iter().find(|(k, ..)| k == key);
+            let required = &required.expect("the source").1;
+            assert_eq!(required[..], [&[t][..], &times[..]].concat()[..]);
+        }
+    }
+
+    /// Amendment R52 [S2c] (C-5): a backward jump beyond B seeks without a
+    /// refill, and the next step refills; an agent render between paused
+    /// steps (synchronous `Seek`, R-4) neither refills nor moves the
+    /// travel, so the step after it still refills.
+    #[test]
+    fn a_backward_jump_seeks_alone_and_an_agent_render_moves_no_travel() {
+        // One track: testsrc2 0..30 (in-point 0), smptebars 30..60 (in 7).
+        let workload = crate::perf_fixtures::cuts((160, 90), 60, 1, 2, 30);
+        let document = Arc::new(workload.0.clone());
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+        // A step: `Some(at)` a paused job, `None` an agent thumbnail at 35.
+        // 59 (source 36) opens; 40 (17) is 19 below, beyond B = 16: it
+        // seeks alone; 39 refills [7, 16]; 38 hits. With the agent: 40
+        // opens, the thumbnail (12) leaves the travel at 17, 39 refills.
+        let cases: [(&[Option<i64>], &[i64]); 2] = [
+            (&[Some(59), Some(40), Some(39), Some(38)], &[59, 40, 39]),
+            (&[Some(40), None, Some(39), Some(38)], &[40, 39]),
+        ];
+        for (path, expected) in cases {
+            let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+            let mut seeked = Vec::new();
+            for (seq, step) in (1..).zip(path) {
+                let Some(at) = *step else {
+                    let rings = preview.lane.lock().readers.ring_bytes();
+                    let (reply, response) = bounded(1);
+                    let work = AgentWork::Thumbnail {
+                        document: Arc::clone(&document),
+                        lut: Arc::default(),
+                        at: TimeCode(35),
+                        max_width: 64,
+                        reply,
+                    };
+                    let cancel = Arc::default();
+                    preview.run_agent(AgentJob { work, cancel }, false);
+                    let thumbnail = response.recv_timeout(Duration::from_secs(60));
+                    assert!(thumbnail.expect("the thumbnail ran").is_ok());
+                    assert_eq!(preview.lane.lock().readers.ring_bytes(), rings);
+                    continue;
+                };
+                let before = preview.lane.counters().stats.reader_seeks;
+                let job = job(&document, JobKind::Paused(TimeCode(at)), stamp(1, seq));
+                preview.run_paused(&job, 0);
+                assert!(preview.lane.take_failures().is_empty(), "frame {at}");
+                let shown = frames.try_recv().expect("published");
+                let expected = reference.render_live(
+                    &document,
+                    TimeCode(at),
+                    resolution,
+                    scale,
+                    DecodeStrategy::Seek,
+                );
+                assert_eq!(
+                    shown.texture.rgba,
+                    expected.expect("reference").rgba,
+                    "frame {at}"
+                );
+                if preview.lane.counters().stats.reader_seeks > before {
+                    seeked.push(at);
+                }
+            }
+            assert_eq!(seeked, expected, "{path:?}");
         }
     }
 

@@ -659,8 +659,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// S-3 [S2c]: a paused job's backward windows. `steps` holds each
     /// source with one required time t, and its floor (the clip's
     /// in-point); `set` is the job's set (H + G), each source's f in
-    /// `sizes`. A step below the source's last playhead to a t not resident
-    /// refills: B = clamp(⌊share / f⌋, 1, 16) with share = (C − G − H) / n,
+    /// `sizes`. A step below the source's last required time `last` to a t
+    /// not resident refills only within B of it (Amendment R52:
+    /// last − B < t < last; a longer jump back seeks as before S-3):
+    /// B = clamp(⌊share / f⌋, 1, 16) with share = (C − G − H) / n,
     /// start = max(floor, t − B + 1), and [start, t) joins t's required
     /// times (K-2 charges them; B·f ≤ share keeps the set within C). A
     /// resident t inside its source's window keeps the window (a hit).
@@ -684,14 +686,18 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 }
                 continue;
             }
-            let last = self.travel.peek(key);
-            let last = last.and_then(|(points, _)| points.iter().max().copied());
-            if last.is_none_or(|last| t >= last) {
-                continue;
-            }
             let f = sizes.get(key).copied().unwrap_or(0);
             let frames = share.checked_div(f).unwrap_or(1).clamp(1, WINDOW_FRAMES);
-            let back = i64::try_from(frames).unwrap_or(1) - 1;
+            let b = i64::try_from(frames).unwrap_or(1);
+            // Amendment R52: only a step refills, last − B < t < last, with
+            // `last` the source's last posted required time (source space)
+            // and B this window's own size; a longer jump back seeks.
+            let last = self.travel.peek(key);
+            let last = last.and_then(|(points, _)| points.iter().max().copied());
+            if last.is_none_or(|last| t >= last || t <= last.saturating_sub(b)) {
+                continue;
+            }
+            let back = b - 1;
             let start = t.saturating_sub(back).max(*floor).max(0);
             if start < t {
                 windows.insert(key.clone(), (start, t));
@@ -2702,6 +2708,29 @@ mod tests {
                 "{label}: peak {:?} over C",
                 readers.live()
             );
+        }
+    }
+
+    /// Amendment R52 [S2c]: only a step refills. With B = 9 (C = 10f) a
+    /// target at or below last − B, `last` the source's last required
+    /// time, seeks alone (a jump); last − B + 1 refills; and a step back
+    /// from a jump's target refills as any step does.
+    #[test]
+    fn only_a_step_within_b_of_the_last_time_refills() {
+        // (path, the times its last step decodes)
+        let cases: [(&[i64], Vec<i64>); 4] = [
+            (&[40, 31], vec![31]),                // last − B: a jump
+            (&[40, 32], (24..=32).collect()),     // last − B + 1: a step
+            (&[40, 20], vec![20]),                // far below
+            (&[40, 31, 30], (22..=30).collect()), // a step from the jump
+        ];
+        for (path, expected) in cases {
+            let mut readers = Model::new(20).with_budget(10 * F);
+            let mut decoded = Vec::new();
+            for t in path {
+                decoded = paused_step(&mut readers, *t, 0, 0);
+            }
+            assert_eq!(decoded, expected, "{path:?}");
         }
     }
 
