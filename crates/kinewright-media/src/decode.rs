@@ -1802,9 +1802,12 @@ pub(crate) struct VideoDecoder {
     s2: Continuation,
     /// Amendment R53 [S2c]: a refill's window [start, t) being decoded: its
     /// frames are kept unconverted (`retained`) rather than converted.
+    /// Amendment R54: only frames t's own decode produces are kept.
     retaining: Option<(i64, i64)>,
     /// Amendment R53 [S2c]: the refill window's decoded frames, not yet
     /// converted: (first grid frame, last grid frame, timestamp, frame).
+    /// Amendment R54: each the decoder's own reference-counted output (no
+    /// copy), unless the frame also shows at t.
     retained: Vec<KeptFrame>,
     #[cfg(test)]
     probe: DecoderProbe,
@@ -2057,6 +2060,8 @@ impl VideoDecoder {
             .filter(|(_, dts, key)| *key && dts.is_some_and(|dts| dts > self.stream_start));
         if let (true, true, Some((_, Some(dts), _))) = (self.s2.pair, past, key) {
             let earlier = stream_timestamp_to_global(dts.saturating_sub(1), self.stream_time_base);
+            // Amendment R54: a refill keeps what the retried run decodes.
+            self.retained.clear();
             self.seek_to(earlier, start)?;
             self.s2.retried = true;
             self.decode_from_cursor(start, end, cache)?;
@@ -2229,10 +2234,12 @@ impl VideoDecoder {
     }
 
     /// Amendment R53 [S2c]: a paused backward refill of the window
-    /// [start, t]. Every frame is decoded on the routes `decode_paused`
-    /// takes frame by frame (a seek at start, then S-2's continuation), but
-    /// only t is converted (into `cache`): the frames of [start, t) are
-    /// kept for `convert_retained`. A failure keeps none.
+    /// [start, t]: only t is converted (into `cache`), and the decoded
+    /// frames of [start, t) are kept for `convert_retained`. Amendment R54:
+    /// the refill seeks and decodes exactly as a fresh paused seek to t
+    /// (the same anchor, S2c-5's retry on its pair); the window keeps only
+    /// the frames that decode produces in [start, t) (`kept_from`), never
+    /// seeking earlier to fill it. A failure keeps none.
     pub(crate) fn decode_refill<T: DecoderFrame>(
         &mut self,
         start: TimeCode,
@@ -2241,20 +2248,48 @@ impl VideoDecoder {
     ) -> Result<(), MediaError> {
         self.retained.clear();
         self.retaining = Some((start.0, t.0));
-        let mut window = FrameCache::<T>::new(1);
-        let mut result = Ok(());
-        for at in start.0..t.0 {
-            result = self.decode_paused(self.cursor(), TimeCode(at), &mut window);
-            if result.is_err() {
-                break;
-            }
-        }
+        let result = self.decode_paused(None, t, cache);
         self.retaining = None;
-        result = result.and_then(|()| self.decode_paused(self.cursor(), t, cache));
         if result.is_err() {
             self.retained.clear();
         }
         result
+    }
+
+    /// Amendment R54 [S2c]: the first window time the last refill kept
+    /// (`None`: it kept nothing).
+    pub(crate) fn kept_from(&self) -> Option<i64> {
+        self.retained.iter().map(|kept| kept.first).min()
+    }
+
+    /// Amendment R54 (K-1): d, an upper bound on one decoded frame's
+    /// bytes as the decoder keeps it: its pixel format's planes at the
+    /// decoder's default buffer geometry (every plane's stride a multiple
+    /// of 64 bytes, so the width is padded to 64 chroma samples; the height
+    /// padded to 32 past H.264's two extra rows), or 8 bytes a pixel if the
+    /// format is not known yet.
+    pub(crate) fn decoded_frame_bytes(&self) -> usize {
+        let padded = |n: u32, to: u32| n.div_ceil(to).saturating_mul(to);
+        let (width, height) = (self.decoder.width(), self.decoder.height());
+        if width == 0 || height == 0 {
+            return 0;
+        }
+        let format = self.decoder.format();
+        let shift = format
+            .descriptor()
+            .map_or(0, ffmpeg::format::pixel::Descriptor::log2_chroma_w);
+        let width = padded(width, 64 << shift);
+        let height = padded(height.saturating_add(2), 32);
+        let planes = if format == ffmpeg::format::Pixel::None {
+            0
+        } else {
+            let frame = ffmpeg::frame::Video::new(format, width, height);
+            (0..frame.planes()).map(|i| frame.data(i).len()).sum()
+        };
+        match planes {
+            0 => usize::try_from(u64::from(width) * u64::from(height) * 8).unwrap_or(usize::MAX),
+            bytes => bytes,
+        }
     }
 
     /// Amendment R53 [S2c]: the kept refill frame at `at`, converted, if
@@ -2593,26 +2628,44 @@ impl VideoDecoder {
         end: TimeCode,
         cache: &mut FrameCache<T>,
     ) -> Result<(), MediaError> {
-        let Some(pending) = self.pending.as_ref() else {
+        let Some(pending) = self.pending.as_mut() else {
             return Ok(());
         };
-        let first = pending.first_grid_frame.max(start.0);
-        let last = next_grid_frame.saturating_sub(1).min(end.0);
-        // Amendment R53 [S2c]: inside a refill's window the frame is kept,
-        // not converted (`convert_retained` converts it later).
-        let window = self.retaining.map(|(from, to)| from..to);
-        if first <= last && window.is_some_and(|w| w.contains(&first) && w.contains(&last)) {
-            let decoded = pending.decoded.as_ref().ok_or_else(|| {
-                MediaError::Backend("pending video frame has no pixels".to_owned())
-            })?;
-            self.retained.push(KeptFrame {
-                first,
-                last,
-                pts: decoded.timestamp(),
-                decoded: decoded.clone(),
-            });
-            return Ok(());
+        let raw_last = next_grid_frame.saturating_sub(1);
+        // Amendment R53 [S2c]: the part of the frame inside a refill's
+        // window is kept, not converted (`convert_retained` converts it
+        // later). Amendment R54: t's own decode runs from t's anchor, so
+        // the window is what lands in [from, to); a frame shown only below
+        // t is kept as the decoder's reference (moved, not copied: the
+        // pending frame is replaced next), one also shown at t is copied.
+        if let Some((from, to)) = self.retaining {
+            let first = pending.first_grid_frame.max(from);
+            let last = raw_last.min(to.saturating_sub(1));
+            if first <= last {
+                let pts = pending.decoded.as_ref().and_then(|d| d.timestamp());
+                let below = raw_last < to;
+                let decoded = if below {
+                    pending.decoded.take()
+                } else {
+                    pending.decoded.clone()
+                };
+                let decoded = decoded.ok_or_else(|| {
+                    MediaError::Backend("pending video frame has no pixels".to_owned())
+                })?;
+                self.retained.push(KeptFrame {
+                    first,
+                    last,
+                    pts,
+                    decoded,
+                });
+                if below {
+                    return Ok(());
+                }
+            }
         }
+        let pending = self.pending.as_ref().expect("the pending frame");
+        let first = pending.first_grid_frame.max(start.0);
+        let last = raw_last.min(end.0);
         if first <= last {
             let decoded = pending
                 .decoded

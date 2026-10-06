@@ -779,6 +779,14 @@ fn demand_plan(demand: &ReaderDemand) -> (PerSource, HashMap<VideoSourceKey, usi
     (per_source, sizes, set)
 }
 
+/// Amendment R54 (K-1): per source, an unconverted window frame's
+/// reservation max(f, d) (d: a decoded frame as a refill keeps it).
+fn kept_sizes(demand: &ReaderDemand) -> HashMap<VideoSourceKey, usize> {
+    (demand.sources.iter())
+        .map(|(key, (spec, _))| (key.clone(), spec.frame_bytes.max(spec.decoded_bytes)))
+        .collect()
+}
+
 /// S-3 [S2c]: a paused job's backward windows (`Readers::backward`) for
 /// each source with one required time: a refill's times join that
 /// source's required times, and their bytes the set. Returns the windows
@@ -801,10 +809,15 @@ fn backward_windows(
                 .then(|| (key.clone(), t, floor))
         })
         .collect();
-    let (windows, refills) = readers.backward(&steps, sizes, *set);
+    // Amendment R54 (K-1): a window frame is charged max(f, d), for B too.
+    let kept = kept_sizes(demand);
+    let kept: HashMap<_, _> = (sizes.iter())
+        .map(|(key, f)| (key.clone(), kept.get(key).copied().unwrap_or(*f)))
+        .collect();
+    let (windows, refills) = readers.backward(&steps, &kept, *set);
     for (key, times) in refills {
-        let f = sizes.get(&key).copied().unwrap_or(0);
-        *set = set.saturating_add(f.saturating_mul(times.len()));
+        let bytes = kept.get(&key).copied().unwrap_or(0);
+        *set = set.saturating_add(bytes.saturating_mul(times.len()));
         if let Some((_, required, _)) = per_source.iter_mut().find(|(k, ..)| *k == key) {
             required.extend(times);
         }
@@ -920,6 +933,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 version,
                 bytes,
                 from,
+                size,
             } => {
                 // A stop meant for an earlier lookahead decode (K-2) lapses.
                 stop.store(false, Ordering::Release);
@@ -965,23 +979,38 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                     state = lane.lock();
                     continue;
                 }
-                // K-1 (review B F1): f is exact; a frame of any other size
-                // is a failure `deliver` cleans up, never an undercharge.
-                let result = result.and_then(|frame| match frame.byte_len() {
-                    len if len == bytes => Ok(frame),
-                    len => Err(MediaError::Backend(format!(
-                        "decode-reader: a frame of {len} bytes, {bytes} reserved (K-1)"
-                    ))),
-                });
-                let result = result.map(|frame| {
-                    let hold = Arc::new(hold);
-                    Pinned { frame, hold }
-                });
+                // Amendment R54 [S2c]: a refill's window is clipped to what
+                // t's own decode kept.
+                if from.is_some() && result.is_ok() {
+                    let kept_from = decoder.as_ref().and_then(VideoDecoder::kept_from);
+                    lane.lock().readers.refilled(id, kept_from);
+                }
+                let result = pinned(result, size, hold);
                 deliver(lane, id, (at, version), result);
                 state = lane.lock();
             }
         }
     }
+}
+
+/// K-1 (review B F1): f (`size`) is exact; a frame of any other size is a
+/// failure `deliver` cleans up, never an undercharge. Amendment R54: a
+/// converted window frame's hold keeps f of its max(f, d).
+fn pinned(
+    result: Result<WorkingFrame, MediaError>,
+    size: usize,
+    mut hold: Hold,
+) -> Result<Pinned, MediaError> {
+    let reserved = hold.bytes;
+    let frame = result.and_then(|frame| match frame.byte_len() {
+        len if len == size && reserved >= size => Ok(frame),
+        len => Err(MediaError::Backend(format!(
+            "decode-reader: a frame of {len} bytes, {size} expected, {reserved} reserved (K-1)"
+        ))),
+    })?;
+    hold.shrink_to(size);
+    let hold = Arc::new(hold);
+    Ok(Pinned { frame, hold })
 }
 
 #[cfg(test)]
@@ -1530,7 +1559,7 @@ impl Preview {
         let plan = (sizes, demand.generated);
         // The set is admitted under the post's lock, before a reader starts.
         state.paused_plan = paused;
-        state.readers.hold(windows);
+        state.readers.hold(windows, kept_sizes(demand));
         let mut posted = Some(state.readers.post_planned(planned, plan, now));
         // Review B S2: only the rasters not resident are reserved.
         let mut generated = Some(demand.generated_uncharged(&self.charged));
@@ -3198,8 +3227,9 @@ pub(crate) mod tests {
         let stream = input.streams().best(ffmpeg_next::media::Type::Video);
         let (index, base) = stream.map(|s| (s.index(), s.time_base())).expect("video");
         let grid = |pts: i64| {
-            let seconds = pts as f64 * f64::from(base.numerator()) / f64::from(base.denominator());
-            (seconds * 30.0).round() as i64
+            let (num, den) = (i128::from(base.numerator()), i128::from(base.denominator()));
+            let twice = i128::from(pts) * num * 30 * 2;
+            i64::try_from((twice + den) / (2 * den)).expect("a grid frame")
         };
         (input.packets())
             .filter(|(s, packet)| s.index() == index && packet.is_key())
@@ -5146,7 +5176,7 @@ pub(crate) mod tests {
             test_preview_on(Arc::clone(&lane), Arc::new(SharedClock::new()));
         // Seed a size one row short: the reservation undercharges.
         preview.sizes = (sizes.iter())
-            .map(|(key, (width, height))| (key.clone(), (*width, height - 1)))
+            .map(|(key, ((width, height), d))| (key.clone(), ((*width, height - 1), *d)))
             .collect();
         let failed = render_paused(&mut preview, &document, 0);
         let Err(Halt::Failed(MediaError::Backend(message))) = failed else {

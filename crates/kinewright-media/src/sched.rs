@@ -244,6 +244,10 @@ pub(crate) enum Next {
         /// Amendment R53 [S2c]: `at` is a refill's t and this its window's
         /// start: decode [from, at], convert `at` only, keep the rest.
         from: Option<i64>,
+        /// Amendment R54 (K-1): f, the converted frame's exact size; `bytes`
+        /// may be more (an unconverted window frame's max(f, d)), the excess
+        /// released once the frame is converted.
+        size: usize,
     },
     /// H-5: queue for `want` permits, then open at the grant.
     Open {
@@ -469,6 +473,9 @@ pub(crate) struct Readers<K, F> {
     /// frames stay across posts while their source is in the plan (one
     /// entry per planned source at most).
     windows: Windows<K>,
+    /// Amendment R54 (K-1): per held window's source, an unconverted window
+    /// frame's reservation, max(f, d) (d: its decoded frame, kept).
+    kept_sizes: HashMap<K, usize>,
 }
 
 impl<K, F> Default for Readers<K, F> {
@@ -507,6 +514,7 @@ impl<K, F> Readers<K, F> {
             starved_keys: HashSet::new(),
             travel: SourceMemory::default(),
             windows: HashMap::new(),
+            kept_sizes: HashMap::new(),
         }
     }
 
@@ -606,6 +614,12 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             *last = points;
         }
         let errors = self.failures.drain().map(|(_, (_, error))| error).collect();
+        let mut continued = self.continued(&regions);
+        for (key, kept) in &continued {
+            self.required
+                .extend(kept.iter().map(|at| (key.clone(), *at)));
+            self.wanted.entry(key.clone()).or_default().extend(kept);
+        }
         // Reservations of frames no longer required return at once.
         let required = &self.required;
         let gone = self
@@ -613,11 +627,9 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             .extract_if(|frame, _| !required.contains(frame));
         let released: usize = gone.map(|(_, bytes)| bytes).sum();
         self.release(released);
-        self.required_bytes = (self.required.iter())
-            .map(|(key, _)| self.sizes.get(key).copied().unwrap_or(0))
-            .sum();
-        let mut frames = Vec::new();
         self.windows.retain(|key, _| self.wanted.contains_key(key));
+        self.required_bytes = self.required_set_bytes();
+        let mut frames = Vec::new();
         let (wanted, windows) = (&self.wanted, &self.windows);
         self.rings.retain(|key, ring| {
             let keep = wanted.get(key);
@@ -638,7 +650,15 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         }
         self.pending.clear();
         let regions_len = regions.len();
-        for (key, region) in regions {
+        for (key, mut region) in regions {
+            // Amendment R54 [S2c]: a continued window's kept frames join the
+            // source's first region with required times.
+            let kept = (!region.required.is_empty())
+                .then(|| continued.remove(&key))
+                .flatten();
+            if let Some(kept) = &kept {
+                region.required.extend(kept);
+            }
             // Amendment R53 [S2c]: the reader that keeps the region's first
             // frame decoded first, then the nearest.
             let first = region.first();
@@ -649,8 +669,9 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                     let near = slot.cursor.map_or(u64::MAX, |c| c.abs_diff(first));
                     (!slot.retained.contains(&first), near)
                 });
+            let window = self.windows.get(&key).copied();
             match free {
-                Some(slot) => slot.plan = plan(version, region, self.windows.get(&key).copied()),
+                Some(slot) => slot.plan = plan(version, region, window, kept.as_deref()),
                 None => self.pending.push((key, region)),
             }
         }
@@ -659,6 +680,111 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             dropped: (frames, errors),
             ..self.assign(now)
         }
+    }
+
+    /// Amendment R54 [S2c]: per held window whose source the job requires
+    /// only inside it ([start, t]), the window times a reader keeps decoded
+    /// and the ring lacks, descending: they stay required (with their
+    /// reservations), so the window keeps converting after the step. A job
+    /// requiring a time of the source outside its window cancels them.
+    fn continued(&self, regions: &[(K, Region)]) -> HashMap<K, Vec<i64>> {
+        let mut continued = HashMap::new();
+        for (key, (start, t)) in &self.windows {
+            let own: Vec<i64> = (regions.iter())
+                .filter(|(k, _)| k == key)
+                .flat_map(|(_, region)| region.required.iter().copied())
+                .collect();
+            if own.is_empty() || !own.iter().all(|at| (start..=t).contains(&at)) {
+                continue;
+            }
+            let ring = self.rings.get(key);
+            let mut kept: Vec<i64> = (self.slots.iter())
+                .filter(|slot| &slot.key == key)
+                .flat_map(|slot| slot.retained.iter().copied())
+                .filter(|at| (start..t).contains(&at) && !own.contains(at))
+                .filter(|at| !ring.is_some_and(|ring| ring.contains_key(at)))
+                .collect();
+            kept.sort_unstable_by(|a, b| b.cmp(a));
+            kept.dedup();
+            if !kept.is_empty() {
+                continued.insert(key.clone(), kept);
+            }
+        }
+        continued
+    }
+
+    /// Amendment R54 (K-1): a required frame's reservation: max(f, d) for a
+    /// held window's frame below its t (its decoded frame may be kept), f
+    /// otherwise.
+    fn frame_bytes(&self, key: &K, at: i64) -> usize {
+        let f = self.sizes.get(key).copied().unwrap_or(0);
+        let window = (self.windows.get(key)).is_some_and(|(start, t)| (start..t).contains(&&at));
+        if window {
+            f.max(self.kept_sizes.get(key).copied().unwrap_or(0))
+        } else {
+            f
+        }
+    }
+
+    /// K-2: H, the required frames' reservations.
+    fn required_set_bytes(&self) -> usize {
+        (self.required.iter())
+            .map(|(key, at)| self.frame_bytes(key, *at))
+            .fold(0, usize::saturating_add)
+    }
+
+    /// Amendment R54 (K-1): `key`'s decoded frames at `times` are gone (the
+    /// decoder dropped them): their reservations shrink to f.
+    fn unkept(&mut self, key: &K, times: BTreeSet<i64>) {
+        let f = self.sizes.get(key).copied().unwrap_or(0);
+        let mut excess = 0usize;
+        for at in times {
+            if let Some(bytes) = self.reserved.get_mut(&(key.clone(), at)) {
+                excess = excess.saturating_add(bytes.saturating_sub(f));
+                *bytes = (*bytes).min(f);
+            }
+        }
+        self.release(excess);
+    }
+
+    /// Amendment R54 [S2c]: reader `id`'s refill (its decode in flight) kept
+    /// the window's decoded frames from `kept_from` (`None`: none). The
+    /// window is clipped to them: times below leave its plan, the job's
+    /// required set and the held window, and their reservations return.
+    pub(crate) fn refilled(&mut self, id: u64, kept_from: Option<i64>) {
+        let Some(slot) = self.slot(id) else {
+            return;
+        };
+        let ReaderState::Decoding { at: t, .. } = slot.state else {
+            return;
+        };
+        let key = slot.key.clone();
+        let from = kept_from.unwrap_or(t).min(t);
+        slot.retained.retain(|at| *at >= from);
+        let gone: Vec<i64> = (slot.plan.required.iter())
+            .copied()
+            .filter(|at| *at < from)
+            .collect();
+        slot.plan.required.retain(|at| *at >= from);
+        if let Some((start, end)) = &mut slot.plan.window {
+            *start = (*start).max(from);
+            debug_assert_eq!(*end, t, "the refill's window");
+        }
+        if let Some((start, end)) = self.windows.get_mut(&key)
+            && *end == t
+        {
+            *start = (*start).max(from);
+        }
+        let mut released = 0usize;
+        for at in gone {
+            let frame = (key.clone(), at);
+            self.required.remove(&frame);
+            if let Some(bytes) = self.reserved.remove(&frame) {
+                released = released.saturating_add(bytes);
+            }
+        }
+        self.release(released);
+        self.required_bytes = self.required_set_bytes();
     }
 
     /// R38 / R41: [`Self::post`] a planned job, counting its merges and
@@ -743,8 +869,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
 
     /// S-3 [S2c]: the windows the next post holds (a playback job holds
     /// none; a post forgets those of sources it does not plan).
-    pub(crate) fn hold(&mut self, windows: Windows<K>) {
+    /// Amendment R54 (K-1): `kept` holds each window source's max(f, d).
+    pub(crate) fn hold(&mut self, windows: Windows<K>, kept: HashMap<K, usize>) {
         self.windows = windows;
+        self.kept_sizes = kept;
     }
 
     /// Give waiting regions new readers while slots are free; while one
@@ -768,7 +896,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             self.slots.push(Slot {
                 id,
                 key: key.clone(),
-                plan: plan(self.version, region, window),
+                plan: plan(self.version, region, window, None),
                 state: ReaderState::Idle { since: now },
                 cursor: None,
                 last: None,
@@ -824,7 +952,8 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     pub(crate) fn closed(&mut self, id: u64) {
         if let Some(slot) = self.slot(id) {
             (slot.threads, slot.cursor) = (0, None);
-            slot.retained.clear();
+            let (key, gone) = (slot.key.clone(), std::mem::take(&mut slot.retained));
+            self.unkept(&key, gone);
         }
     }
 
@@ -1021,10 +1150,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         else {
             return Next::Retire;
         };
+        let f = self.sizes.get(&key).copied().unwrap_or(0);
         let bytes = if required {
-            self.reserved.remove(&(key, at)).unwrap_or(0)
+            self.reserved.remove(&(key.clone(), at)).unwrap_or(0)
         } else {
-            let f = self.sizes.get(&key).copied().unwrap_or(0);
             let reserved = self.reserve(f, self.budget);
             debug_assert!(reserved, "admissible lookahead fits");
             f
@@ -1038,19 +1167,22 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         // a kept time converts; anything else decodes and drops the kept.
         let from = (slot.plan.window).and_then(|(start, t)| (t == at).then_some(start));
         slot.converting = false;
+        let mut gone = BTreeSet::new();
         if let Some(start) = from {
             slot.retained = (start..at).collect();
         } else if slot.retained.remove(&at) {
             slot.converting = true;
         } else {
-            slot.retained.clear();
+            gone = std::mem::take(&mut slot.retained);
         }
+        self.unkept(&key, gone);
         self.merged_rewinds += u64::from(rewind);
         Next::Decode {
             at,
             version,
             bytes,
             from,
+            size: f,
         }
     }
 
@@ -1106,15 +1238,17 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             }
             Err(error) => {
                 slot.cursor = None;
-                slot.retained.clear();
+                let gone = std::mem::take(&mut slot.retained);
                 let current = version == slot.plan.version;
+                let lookahead = slot.plan.lookahead.contains(&at);
+                if !(current && required) && lookahead {
+                    slot.lookahead_failed = Some(slot.plan.version);
+                }
+                self.unkept(&key, gone);
                 if current && required {
                     let old = self.failures.insert((key, at), (version, error));
                     (None, old.map(|(_, error)| error))
                 } else {
-                    if slot.plan.lookahead.contains(&at) {
-                        slot.lookahead_failed = Some(slot.plan.version);
-                    }
                     (None, Some(error))
                 }
             }
@@ -1134,10 +1268,12 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 }
             }
             (slot.flight, slot.cursor) = (0, None);
-            (slot.retained, slot.converting) = (BTreeSet::new(), false);
+            slot.converting = false;
             if slot.state != ReaderState::Retiring {
                 slot.state = ReaderState::Idle { since: now };
             }
+            let (key, gone) = (slot.key.clone(), std::mem::take(&mut slot.retained));
+            self.unkept(&key, gone);
         }
     }
 
@@ -1166,14 +1302,13 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     pub(crate) fn admit(&mut self, generated: usize) -> Admission<F> {
         let set = self.required_bytes.saturating_add(generated);
         debug_assert!(set <= self.budget, "K-3: a set over C was posted");
-        let size = |key: &K| self.sizes.get(key).copied().unwrap_or(0);
         let missing: Vec<(K, i64)> = (self.required.iter())
             .filter(|(key, at)| self.missing(key, *at))
             .cloned()
             .collect();
         let missing: Vec<((K, i64), usize)> = (missing.into_iter())
             .map(|frame| {
-                let bytes = size(&frame.0);
+                let bytes = self.frame_bytes(&frame.0, frame.1);
                 (frame, bytes)
             })
             .collect();
@@ -1592,10 +1727,32 @@ impl PermitBook {
     }
 }
 
-fn plan(version: u64, mut region: Region, window: Option<(i64, i64)>) -> Plan {
+fn plan(
+    version: u64,
+    mut region: Region,
+    window: Option<(i64, i64)>,
+    kept: Option<&[i64]>,
+) -> Plan {
     // Amendment R43: a reader walks its plan in order.
     region.required.sort_unstable();
     region.lookahead.sort_unstable();
+    // Amendment R54 [S2c]: a step inside a held window converts its own
+    // times first, then the window's kept frames, descending (`kept`).
+    if let Some(kept) = kept {
+        let mut required: Vec<i64> = (region.required.iter())
+            .rev()
+            .filter(|at| !kept.contains(at))
+            .copied()
+            .collect();
+        required.extend(kept);
+        return Plan {
+            version,
+            required,
+            lookahead: region.lookahead,
+            merged: region.merged,
+            window: None,
+        };
+    }
     // Amendment R53 [S2c]: a refill's region (its window, t included) walks
     // t first, then down the window.
     let window = window.filter(|(start, t)| {
@@ -2713,7 +2870,7 @@ mod tests {
         let mut required = vec![t];
         required.extend(refills.into_iter().flat_map(|(_, times)| times));
         let regions = plan_regions(&[(0, required, Vec::new())], readers.limit());
-        readers.hold(windows);
+        readers.hold(windows, HashMap::new());
         let posted = readers.post(
             regions.expect("a reader").regions,
             (sizes, g),
@@ -2834,7 +2991,7 @@ mod tests {
             assert_eq!(windows.get(&0), Some(&(31, 39)), "{path:?}");
             let demand = [(0u8, vec![36], Vec::new()), (1, vec![0], Vec::new())];
             let regions = plan_regions(&demand, readers.limit()).expect("readers");
-            readers.hold(windows);
+            readers.hold(windows, HashMap::new());
             readers.post(regions.regions, (sizes, 2 * F), Duration::ZERO);
             let Admission::Wait { evicted, .. } = readers.admit(2 * F) else {
                 panic!("{path:?}: the set does not fit beside the window");

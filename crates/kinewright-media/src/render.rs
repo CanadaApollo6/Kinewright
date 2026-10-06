@@ -282,6 +282,8 @@ pub(crate) struct SourceSpec {
     max_width: Option<u32>,
     /// Working bytes of one frame (S1d's f).
     pub(crate) frame_bytes: usize,
+    /// Amendment R54 (K-1): d, a decoded frame's bytes as a refill keeps it.
+    pub(crate) decoded_bytes: usize,
 }
 
 impl SourceSpec {
@@ -321,7 +323,7 @@ impl SourceSpec {
         &self,
         key: &VideoSourceKey,
         sizes: &mut FrameSizes,
-    ) -> Result<(u32, u32), MediaError> {
+    ) -> Result<((u32, u32), usize), MediaError> {
         if let Some(size) = sizes.get(key) {
             return Ok(*size);
         }
@@ -335,7 +337,8 @@ impl SourceSpec {
             description,
             (1, None),
         );
-        let size = opened?.frame_size();
+        let opened = opened?;
+        let size = (opened.frame_size(), opened.decoded_frame_bytes());
         sizes.insert(key.clone(), size);
         Ok(size)
     }
@@ -404,7 +407,8 @@ impl ReaderDemand {
 /// K-1 (review B F1): each source's frame size, measured once from the
 /// decoder a reader opens. Amendment R41 (U-1): kept while the source is in
 /// the document and not cleared, for at most `SOURCE_MEMORY` sources.
-pub(crate) type FrameSizes = crate::sched::SourceMemory<VideoSourceKey, (u32, u32)>;
+/// Amendment R54: with d, a decoded frame's bytes.
+pub(crate) type FrameSizes = crate::sched::SourceMemory<VideoSourceKey, ((u32, u32), usize)>;
 
 /// Amendment R41: the reader keys of every source in `document` at `scale`.
 pub(crate) fn document_source_keys(
@@ -479,13 +483,17 @@ pub(crate) fn reader_demand(
                     description: asset.color_description.clone(),
                     max_width,
                     frame_bytes: 0,
+                    decoded_bytes: 0,
                 };
                 // R38 D1: only a required source's failure is the job's.
                 // A lookahead-only source that cannot be measured is left
                 // out of this job's plan; it is measured again when a later
                 // job requires it, and fails that job then.
                 match spec.measure(&key, sizes) {
-                    Ok(size) => spec.frame_bytes = working_bytes(size),
+                    Ok((size, decoded)) => {
+                        spec.frame_bytes = working_bytes(size);
+                        spec.decoded_bytes = decoded;
+                    }
                     Err(_) if frame != at.0 => {
                         unmeasured.push(key);
                         continue;
