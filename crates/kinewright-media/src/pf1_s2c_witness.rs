@@ -1593,8 +1593,8 @@ mod tests {
         pin(
             Kind::OpenGop,
             "2ba78079067b3fcceab67b6a0d860bd48a92d8d19c2bdf3f1d51e9aa02d8a9a9",
-            "14694f55cd0d355b",
-            "dfb48baf4f89ec08",
+            "ce0029f0ab06abf5",
+            "854e56e5b3109248",
         ),
         pin(
             Kind::Vfr,
