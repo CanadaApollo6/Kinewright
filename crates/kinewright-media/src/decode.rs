@@ -1148,8 +1148,6 @@ struct Continuation {
     first: Option<Anchor>,
     /// Video packets read since the seek.
     packets: u64,
-    /// Rule 2: a key packet was read after the first.
-    key_read: bool,
     /// Rule 3: a frame since the seek had no timestamp, or not a larger one.
     stamps_broken: bool,
     last_stamp: Option<i64>,
@@ -1169,19 +1167,17 @@ impl Continuation {
     /// A seek: the run starts again.
     fn seeked(&mut self) {
         (self.run, self.first, self.packets, self.last_stamp) = (None, None, 0, None);
-        (self.key_read, self.stamps_broken) = (false, false);
+        self.stamps_broken = false;
     }
 
-    /// A video packet read; true if it ends a running continuation (rule 2).
-    fn on_packet(&mut self, packet: &ffmpeg::Packet) -> bool {
+    /// A video packet read: the first is the run's real anchor (rule 2).
+    /// Amendment R51: a later key packet, read-ahead included, ends nothing;
+    /// rule 2 is the anchor test alone (`may_continue`).
+    fn on_packet(&mut self, packet: &ffmpeg::Packet) {
         self.packets += 1;
         if self.packets == 1 {
             self.first = Some((packet.position(), packet.dts(), packet.is_key()));
-        } else if packet.is_key() {
-            self.key_read = true;
-            return self.abandon();
         }
-        false
     }
 
     /// A frame received with `stamp`; true if it ends a running
@@ -2154,7 +2150,6 @@ impl VideoDecoder {
             && self.continuation_at == Some(TimeCode(c.saturating_add(1)))
             && c < t
             && t <= c.saturating_add(12)
-            && !s2.key_read
             && !s2.stamps_broken
             && s2.run.is_some()
             && s2.first == s2.run;
@@ -2298,10 +2293,8 @@ impl VideoDecoder {
             }
             #[cfg(test)]
             self.probe.on_packet(&packet);
-            // S-2 rule 2: a key packet read ends a running continuation.
-            if self.s2.on_packet(&packet) {
-                return Ok(());
-            }
+            // S-2 rule 2: the run's real first packet (its anchor).
+            self.s2.on_packet(&packet);
             self.decoder
                 .send_packet(&packet)
                 .map_err(|error| media_error(&self.path, "video decode failed", error))?;

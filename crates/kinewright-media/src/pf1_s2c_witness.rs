@@ -2879,7 +2879,8 @@ mod tests {
         }
     }
 
-    /// Continuing across an anchor change or a key packet is caught by the
+    /// Continuing across an anchor change (Amendment R51: a key packet read
+    /// with the anchor unchanged is no boundary) is caught by the
     /// route check on every file, and by the bytes-and-state comparison
     /// alone on every file too: the run's anchor is part of the state, so a
     /// continuation that carries the old run's first packet across a
