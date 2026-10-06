@@ -1846,7 +1846,8 @@ mod tests {
     /// The oracle is not the decoder agreeing with itself: for every frame,
     /// the fresh Seek's selected frame and its retained frames equal what the
     /// pinned `FFmpeg` CLI's own linear decode produces (`ffprobe -show_frames`
-    /// timestamps, `ffmpeg -f framehash` SHA-256 of the raw planes).
+    /// timestamps, `ffmpeg -f framehash` SHA-256 of the raw planes). On the
+    /// S-2 pair no frame is unreachable (S2c-5's retry).
     #[test]
     fn the_seek_path_matches_the_cli_reference() {
         for kind in KINDS {
@@ -1860,7 +1861,14 @@ mod tests {
                 reference.len()
             );
             assert!(checked >= 60, "{kind:?} checked {checked}");
-            assert_eq!(unreachable > 0, kind == Kind::OpenGop, "{kind:?}");
+            // S2c-5 (lead rulings of 2026-10-06): on the retried pair (every
+            // kind but AVI) the retry reaches every frame, open-GOP leading
+            // frames included; AVI keeps the assertion it had.
+            if kind == Kind::AviDtsGuess {
+                assert_eq!(unreachable > 0, kind == Kind::OpenGop, "{kind:?}");
+            } else {
+                assert_eq!(unreachable, 0, "{kind:?}");
+            }
         }
     }
 
