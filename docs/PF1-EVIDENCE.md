@@ -5133,3 +5133,380 @@ about 680, against ~560: 21% over, inside the 50% rule. Tests make up most of th
 - clippy (1.99, `-D warnings`) clean; fmt clean; `cargo build -p kinewright-app` ok.
 
 The final tree is covered by S2c-4's workspace gate (E13.4).
+
+### E13.4 S2c-4: the combined timing run under Amendment R50 (2026-10-05/06)
+
+S2c-4 ran the combined plan that R50 asks for: G8's P-seek lanes plus the lanes E12.18.5 still owed. Every lane is
+paired against the last closed stage's binary (`ad8f896`), and G18 against S0, interleaved A B A B on the machine
+as it was. A supplement then added a third binary, the candidate without its test-only conversion tap (E13.4.7). Kit,
+plans, logs and binaries are in `target/review/pf/s2c-timing/` (logs gzipped). Load is recorded, not gated.
+
+#### E13.4.1 Binaries, plans and conditions
+
+Each binary is `cargo test --release -p kinewright-media --lib --no-run`, rustc 1.99.0, built in its own worktree
+and target directory under `kr-s2c/` (deleted afterwards) before any timing started.
+
+| Binary | Source | sha256 |
+|---|---|---|
+| `cand-abcd7cb` | `pf1/impl` `abcd7cb` (`crates/` clean) | `2f8375085318c73129dd9a7b637c249ef5250caf09ad1c410b4080f4f29d60a5` |
+| `ref-ad8f896` | `ad8f896`, S2b's close | `6d52c2f9401d30930b41a3806ff4761e03b118a8a2a8b927655565ce95824a71` |
+| `s0-d19bdf9-lane2aa4e1b` | `d19bdf9` + `pf1_export_lane.rs` at `2aa4e1b` + its `lib.rs` line | `5731d7ae0ad49926def6417e075bccc57ba8caaf57838bc95c0ff717c609ee75` |
+| `count-ref-ad8f896` | `ad8f896` + the counting patch | `0025af649a57b721726289f6779854770f44471a9b454f71519da5f06af9b898` |
+| `count-cand-abcd7cb` | `abcd7cb` + the counting patch | `0c3708204d5bd9fe386d05d8331c7eb83018898ab5a48601507b82e890e70b45` |
+| `cand-notap-abcd7cb` | `abcd7cb` with C-4's `tap_conversion` call disabled (`if false && …`) | `9b77ba6c75aeb934b92fec072357930b631c0a89ee242ff989445f26102635e5` |
+
+- **Counting patch** (`count/pf1_count.rs`, `count/apply-count.py`; `cfg(test)`, never committed): process-wide
+  atomics for frames decoded (each successful `receive_frame`), frames converted (each `convert`) and seeks (each
+  `seek_count` increment). P-seek prints them per phase (`count_{random,forward,backward,drag}_*`). A backward step
+  that decoded nothing is a hit, so the backward phase splits into hits and refills, with each one's p95.
+- **Plans:** `plan.txt` (131 lanes, 18:23:05 to 00:18:12 EDT) and `plan-notap.txt` (the supplement, from 00:21).
+  The runner is `lanes3.sh`, R47's `lanes2.sh` adapted to R50: no quiet-wait, and contamination lines are annotations. Each lane runs alone, under the 5 s
+  sampler (load, top five processes, GPU state).
+- **Machine:** as E12.18.1. rustc 1.99.0, NVIDIA 615.71.09, llvmpipe LLVM 23.1.1.
+- **Load record (annotation only, R50 item 4):** the 1-minute load at lane start ran from 3.4 to 36.9. Foreign
+  processes in the top-five samples: other projects' `rustc` and nextest runs, `python`, `npm`, `chrome-headless`,
+  `campfire`, `spotify` and `pipewire`. On LH lanes the RTX sat at P8 in 87% of samples (P0 8%).
+- **One self-inflicted overlap:** a poll loop of mine (a `read` from `/dev/zero`, about one core) ran from 00:24:19
+  to 00:33:49 during the supplement's `seek_gop60` `cand1` and `notap1` lanes. Its triple was run again at the end
+  of the supplement (triple 3), and triple 1 is left out of E13.4.7's `seek_gop60` rows.
+
+#### E13.4.2 G8: P-seek, paired (main run)
+
+Six runs per side per cell: two R C R C pairs × three seeded runs each. Each cell is the median, with the range in
+brackets. All ms, except the drag's distinct stamped frames per second (L-5).
+
+| Lane, workload | Side | random p95 | forward p95 | +1 p95 | backward p95 (combined) | drag distinct fps | drag p95 | drag seeks | release (L-6) |
+|---|---|---|---|---|---|---|---|---|---|
+| LL `seek_gop60` | ref | 63.3 [57.6–87.1] | 63.2 | 19.0 [16.9–29.5] | 64.3 | 14.1 [10.6–14.6] | 354.9 | — | 6/6, 19.4 |
+| LL `seek_gop60` | cand | 768.8 [701.9–876.6] | 69.3 | 68.7 [55.6–79.9] | 704.7 | 26.0 [24.6–26.8] | 105.8 | 38 [33–40] | 6/6, 19.1 |
+| LL `talk_recut` | ref | 101.2 [87.5–177.5] | 90.6 | 18.5 | 90.5 | 7.5 [5.0–8.2] | ∞ (unanswered) | — | 6/6, 59.2 |
+| LL `talk_recut` | cand | 652.0 [580.0–1011.6] | 86.2 | 94.3 | 595.6 | 27.1 [26.0–27.8] | 119.3 | 16.5 [12–23] | 6/6, 36.7 |
+| LL `explainer_16x9` | ref | 153.7 | 140.1 | 25.1 | 149.9 | 2.8 [2.0–4.0] | 2877.1 | — | 6/6, 53.8 |
+| LL `explainer_16x9` | cand | 491.5 | 105.7 | 120.0 | 558.2 | 27.1 [21.2–28.2] | 151.4 | 23 [18–25] | 6/6, 25.6 |
+| LH `seek_gop60` | ref | 62.7 [61.1–68.5] | 65.4 | 23.2 [22.6–23.5] | 65.8 | 13.2 [11.4–14.6] | 332.8 | — | 6/6, 25.9 |
+| LH `seek_gop60` | cand | 805.8 [707.3–837.8] | 71.2 | 70.2 [59.8–74.0] | 701.3 | 25.1 [24.8–25.6] | 114.4 | 37 [32–38] | 6/6, 30.4 |
+| LH `talk_recut` | ref | 96.0 [84.0–107.5] | 94.0 | 23.2 | 89.8 | 6.7 [4.2–7.8] | ∞ (unanswered) | — | 6/6, 51.2 |
+| LH `talk_recut` | cand | 676.2 [542.4–945.8] | 89.5 | 94.3 | 572.4 | 26.7 [25.8–27.8] | 131.4 | 16 [13–22] | 6/6, 43.1 |
+| LH `explainer_16x9` | ref | 145.2 | 138.5 | 32.2 | 151.4 | 2.9 [2.0–4.0] | ∞ (unanswered) | — | 6/6, 79.5 |
+| LH `explainer_16x9` | cand | 505.9 | 111.2 | 122.8 | 523.5 | 25.7 [25.2–27.4] | 156.7 | 21.5 [19–24] | 6/6, 48.6 |
+
+- `drag_paused_abandoned` is 0 in 35 of the 36 candidate P-seek runs (1 in one LL `explainer_16x9` run), and at
+  most 4 in the COUNT lanes. The reference harness predates `drag_seeks` and `drag_paused_abandoned`.
+- `+1 p95` rests on 8–17 samples per run (`plus1_n`, median 11), so it is close to each run's maximum.
+- L-4a and L-4b come from the COUNT lanes (E13.4.3): backward hits p95 15.2 [11.3–42.5] at GOP 60, 14.2 [11.6–26.8]
+  on `talk_recut` and 21.1 [19.7–22.8] on `explainer_16x9`. Refills p95 904 [803–2101], 1048 [890–1245] and 1016
+  [724–1246]. The reference has no hits: every backward step seeks, at a p95 of 80, 100 and 154.
+
+| G8 item | Gate | Reference (LL / LH) | Candidate (LL / LH) | Verdict (R50 item 2) |
+|---|---|---|---|---|
+| L-1 random p95, GOP 60 | ≤ 40 | 63.3 / 62.7 | 768.8 / 805.8 | **Fail, against the candidate:** both miss, and the candidate is ×12 the reference, far beyond the pair spread |
+| L-2 random p95, `talk_recut` | ≤ 110 | 101.2 / 96.0 (pass) | 652.0 / 676.2 | **Fail, against the candidate:** the reference passes in the same run |
+| L-3 +1 p95, GOP 60 | ≤ 20 | 19.0 / 23.2 | 68.7 / 70.2 | **Fail, against the candidate:** the reference passes on LL |
+| L-4a backward hit p95, GOP 60 | ≤ 20 | no hits | 15.2 (LL only) | **Pass on LL**; LH is not split (partial) |
+| L-4b refill p95 | recorded | 79.6 (every step) | 904 (LL) | Recorded |
+| L-5 drag distinct fps, GOP 60 / 250 | ≥ 10 / 7 | 14.1, 7.5 / 13.2, 6.7 | 26.0, 27.1 / 25.1, 26.7 | **Pass**, about ×2 and ×4 the reference |
+| L-6 release shown | every run | 36/36 | 36/36 | **Pass** |
+
+**G8 does not close at `abcd7cb`.** S2c fixes the drag (L-5, about 25–27 fps against 3–14) and holds L-6, but it
+regresses random seeks ×5–12 and +1 steps ×3–5. The counters (E13.4.3) show why. The tap is not the cause (E13.4.7).
+
+#### E13.4.3 Load-independent counters (COUNT lanes, LL, R50 item 3)
+
+Six runs per side (R C R C, three seeded runs each), the same seeds as E13.4.2. Each phase is 200 operations,
+except the drag (150 calls). Cells are medians [range]; "per conv." is frames decoded per frame converted.
+
+| Workload | Phase | Ref: seeks | Ref: decoded / converted (per conv.) | Cand: seeks | Cand: decoded / converted (per conv.) |
+|---|---|---|---|---|---|
+| `seek_gop60` | random | 200 | 6015 / 200 (30.1) | 753 [692–828] | 31200 / 1699 (18.4) |
+| `seek_gop60` | forward (+1…+12) | 191 [187–195] | 5761 / 203 (28.4) | 115 [107–119] | 4855 / 233 (20.8) |
+| `seek_gop60` | backward (−1…−12) | 200 | 6004 / 200 (30.0) | 428 [416–439] | 18746 / 1088 (17.2) |
+| `seek_gop60` | drag | 106 [99–110] | 3191 / 140 (22.7) | 40 [31–42] | 1760 / 130 (13.5) |
+| `talk_recut` | random | 200 | 14040 / 200 (70.2) | 334 [324–414] | 31206 / 1469 (21.2) |
+| `talk_recut` | forward | 190 [184–193] | 12256 / 201 (61.0) | 61 [53–62] | 6048 / 201 (30.1) |
+| `talk_recut` | backward | 200 | 13192 / 200 (66.0) | 225 [188–226] | 24005 / 1096 (21.9) |
+| `talk_recut` | drag | 90 [84–102] | 5656 / 109 (51.9) | 18 [12–24] | 1886 / 134 (14.1) |
+| `explainer_16x9` | random | 307 [301–309] | 19777 / 307 (64.4) | 477 [450–532] | 37962 / 2272 (16.7) |
+| `explainer_16x9` | forward | 281 [277–287] | 19331 / 298 (64.9) | 72 [71–75] | 6340 / 352 (18.0) |
+| `explainer_16x9` | backward | 301 [301–303] | 19784 / 301 (65.7) | 304 [290–308] | 25712 / 1607 (16.0) |
+| `explainer_16x9` | drag | 132 [119–135] | 6864 / 160 (42.9) | 24 [21–26] | 1904 / 196 (9.7) |
+
+Backward split (candidate): 132 [130–133] hits and 68 [67–70] refills at GOP 60; 125 [122–127] and 75 [73–78] on
+`talk_recut`; 113 [111–118] and 87 [82–89] on `explainer_16x9`. The reference refills all 200.
+
+What the counters show:
+- **The drag is fixed by mechanism.** Seeks per drag fall from 90–132 to 18–40, and frames decoded per frame
+  converted from 23–52 to 10–14. This is S-2 continuing forward, with R49 keeping the render in flight.
+- **Forward steps cost less in total**: about 40–75% fewer seeks and 15–67% fewer frames decoded. The forward p95 is
+  equal or lower (E13.4.2).
+- **Random seeks are the regression.** The candidate converts 7–8.5 frames per random seek, against 1. About half
+  of all random targets fall below the last playhead and outside the ring. S-3 treats each of these as a backward
+  step and refills a window of up to B = 16 frames before t. Each refill then decodes its window frame by frame
+  through `decode_paused(cursor, at)`. That is S-2 continuation with a one-frame cache (`SourceSpec::decode`), and it
+  re-seeks wherever rule 2 trips. Rule 2 abandons at any key packet read, and with 16 frame threads the decoder reads
+  up to 16 packets ahead. So the window's frames near the next key seek again: about 6 seeks and about 270 frames
+  decoded per refill at GOP 60. E13.3 named the L-1 risk ("a backward click-seek that misses the ring refills up to
+  16 frames"); the counters confirm it.
+- **The +1 regression is rule 2 under frame-thread read-ahead.** At `ad8f896`, a +1 step after a rendered frame
+  reused the decoder through the old `continuation_at == start` path and never sought. At `abcd7cb`, a +1 step whose
+  read-ahead reaches the next key (about `threads` positions before each key, 16 of 60 at GOP 60) abandons and
+  seeks. With about 11 +1 samples per run, one such seek sets the p95. **Partial:** this is inferred from the
+  forward phase's seek count and the p95's size (a seek plus a GOP walk), not counted per +1 step.
+
+#### E13.4.4 P-play, paired (main run)
+
+`PF1_RUNS=1` per lane, R C R C R C, so three runs per side, in run order. Each row lists on time, dropped,
+present p95 (ms), held max (ms), clock stall max (ms), peak RSS (MiB) and `passes`. Every one of the 72 runs had
+`valid=true`, `underrun_frames=0`, `engine_sync_fallback_frames=0`, `engine_retire_overruns=0`,
+`engine_detained_fallback_frames=0` and `engine_stale_errors=0`.
+
+| Lane, workload | Side | on time | dropped | p95 | held max | clock stall max | peak RSS | passes |
+|---|---|---|---|---|---|---|---|---|
+| LL `typical_1080p` | ref | 1798, 1798, 1798 | 2, 2, 2 | 43.3, 43.2, 43.2 | 85.0, 85.1, 85.1 | 46.3, 47.5, 48.4 | 982.2, 992.9, 939.0 | 3/3 |
+| LL `typical_1080p` | cand | 1747, 1793, 1796 | 52, 7, 4 | 43.4, 43.2, 43.2 | 100.1, 90.6, 150.1 | 51.7, 49.6, 47.9 | 1070.0, 1039.0, 1054.5 | 1/3 |
+| LL `blend_heavy_1080p` | ref | 1782, 1779, 1774 | 18, 21, 25 | 43.1, 43.0, 43.1 | 95.6, 85.3, 95.2 | 49.3, 51.6, 47.8 | 786.7, 774.9, 774.0 | 1/3 |
+| LL `blend_heavy_1080p` | cand | 1798, 1793, 1731 | 2, 7, 69 | 43.0, 43.1, 43.3 | 85.0, 145.5, 105.1 | 49.4, 49.8, 49.8 | 869.6, 856.8, 848.8 | 1/3 |
+| LL `explainer_16x9` | ref | 1798, 1798, 1798 | 2, 2, 2 | 43.3, 43.3, 43.3 | 85.0, 90.1, 85.1 | 47.2, 46.3, 46.1 | 1386.5, 1157.0, 1185.4 | 3/3 |
+| LL `explainer_16x9` | cand | 1794, 1798, 1798 | 6, 2, 2 | 43.2, 43.2, 43.3 | 116.5, 95.1, 85.1 | 53.1, 46.5, 46.7 | 1304.1, 1402.0, 1540.7 | 2/3 |
+| LL `reel_9x16` | ref | 1768, 1798, 1332 | 31, 2, 461 | 43.3, 43.2, 74.5 | 144.0, 85.1, 514.8 | 51.1, 46.8, 62.2 | 1238.1, 1395.0, 971.4 | 1/3 |
+| LL `reel_9x16` | cand | 1798, 1444, 1750 | 2, 355, 49 | 43.2, 64.8, 43.4 | 85.1, 902.1, 98.2 | 55.3, 78.4, 49.1 | 1413.5, 1224.3, 1238.7 | 1/3 |
+| LL `feed_4x5` | ref | 1678, 1769, 1542 | 120, 30, 258 | 63.8, 43.2, 64.4 | 127.6, 124.7, 154.3 | 47.9, 46.9, 58.9 | 1186.0, 1475.6, 1242.0 | 0/3 |
+| LL `feed_4x5` | cand | 1654, 1640, 1690 | 146, 159, 110 | 63.9, 64.0, 63.6 | 168.2, 90.1, 85.2 | 54.4, 49.4, 46.8 | 1494.2, 1698.7, 1551.9 | 0/3 |
+| LL `talk_recut` | ref | 7173, 7111, 7166 | 27, 87, 33 | 43.3, 43.2, 43.3 | 701.1, 1257.9, 941.2 | 51.8, 49.7, 51.7 | 782.9, 776.8, 768.0 | 0/3 |
+| LL `talk_recut` | cand | 7198, 7150, 7050 | 2, 49, 150 | 43.3, 43.3, 43.3 | 85.5, 1016.3, 1695.8 | 47.3, 60.0, 46.8 | 832.2, 853.9, 850.9 | 1/3 |
+| LH `typical_1080p` | ref | 1798, 1773, 1675 | 2, 27, 125 | 42.7, 43.0, 63.7 | 85.1, 85.1, 85.1 | 46.5, 48.9, 50.5 | 1023.8, 1002.8, 1042.9 | 1/3 |
+| LH `typical_1080p` | cand | 1789, 1720, 1518 | 11, 80, 282 | 42.8, 43.5, 64.4 | 85.1, 85.1, 142.5 | 47.6, 51.5, 49.9 | 1130.5, 1112.0, 1124.3 | 1/3 |
+| LH `blend_heavy_1080p` | ref | 1362, 1450, 1717 | 438, 350, 82 | 64.7, 64.6, 43.2 | 84.9, 85.1, 635.0 | 48.6, 56.5, 68.3 | 829.6, 837.4, 825.2 | 0/3 |
+| LH `blend_heavy_1080p` | cand | 1629, 1792, 1779 | 171, 8, 21 | 64.1, 43.1, 43.0 | 85.1, 109.7, 110.9 | 48.5, 52.1, 63.9 | 895.8, 896.7, 874.4 | 0/3 |
+| LH `explainer_16x9` | ref | 1615, 1792, 1753 | 185, 8, 47 | 64.1, 43.2, 43.3 | 130.0, 85.0, 85.1 | 68.8, 51.4, 50.6 | 977.2, 1262.0, 1367.6 | 1/3 |
+| LH `explainer_16x9` | cand | 1756, 1779, 1758 | 44, 21, 42 | 43.3, 43.3, 43.3 | 185.1, 135.7, 85.1 | 52.2, 55.8, 49.0 | 1024.6, 1135.3, 1096.4 | 0/3 |
+| LH `reel_9x16` | ref | 1651, 1643, 1643 | 149, 157, 157 | 64.0, 64.0, 64.1 | 85.1, 118.4, 85.5 | 50.4, 48.8, 50.3 | 1339.7, 1258.8, 1417.9 | 0/3 |
+| LH `reel_9x16` | cand | 1638, 1645, 1645 | 162, 155, 155 | 64.0, 64.0, 64.0 | 90.1, 85.1, 85.1 | 51.7, 49.8, 53.4 | 1374.2, 1360.4, 1357.6 | 0/3 |
+| LH `feed_4x5` | ref | 1204, 1240, 1258 | 596, 558, 542 | 84.9, 84.8, 84.7 | 416.9, 99.4, 88.9 | 48.9, 47.7, 51.2 | 1426.6, 1300.4, 1342.7 | 0/3 |
+| LH `feed_4x5` | cand | 1228, 1229, 1201 | 572, 569, 599 | 84.7, 85.0, 84.8 | 115.8, 113.0, 93.9 | 47.9, 49.0, 48.1 | 1452.2, 1680.8, 1539.0 | 0/3 |
+| LH `talk_recut` | ref | 7178, 7181, 7065 | 21, 19, 134 | 43.4, 43.4, 43.4 | 416.7, 464.0, 1415.0 | 51.7, 48.0, 74.1 | 838.2, 851.9, 845.1 | 0/3 |
+| LH `talk_recut` | cand | 7163, 7150, 6956 | 37, 50, 244 | 43.4, 43.4, 43.4 | 1001.2, 1402.6, 1959.3 | 49.4, 60.0, 58.5 | 913.1, 912.8, 894.2 | 0/3 |
+
+- **G17 and G11 are complete:** `sync_fallback_frames` and underruns are 0 on all six workloads, LL and LH,
+  both binaries.
+- **G6** (p95/p50 ≤ 3): the worst run is 2.01 (LH `feed_4x5`, 42.1 / 84.7 ms). Pass.
+- **G16** (clock stall ≤ 100 ms): the worst run is 78.4 ms. Pass.
+- **G1 and G14 on LH `typical_1080p`:** the reference passes G1 in 1 of 3 runs (dropped 2, 27, 125) and the
+  candidate in 1 of 3 (11, 80, 282). That is a shared miss, *environment-limited at load 5–10*. G14: the reference
+  holds 85.1 ms in all three, and the candidate holds 85.1, 85.1 and **142.5**. By R50 item 2 that one miss counts
+  against the candidate binary as built. E13.4.7 attributes it to the test-only tap, which a product build does not
+  contain.
+- **G2's first reading** (`blend_heavy_1080p`, LH): dropped 438, 350, 82 (reference) and 171, 8, 21 (candidate).
+- **Peak RSS** is 3–25% higher in the candidate on every workload. E13.4.7 attributes this to the tap too.
+- `talk_recut` held max is 417–1959 ms on both binaries, LL and LH: its GOP 250 cuts. It is not a G14 workload.
+
+#### E13.4.5 Controls (candidate only, `typical_1080p`)
+
+Every Q-3 control fails its metric on both lanes:
+
+| Control | LL | LH | Metric failed |
+|---|---|---|---|
+| Slowdown | 374 on time, 1353 dropped | 285 on time, 1432 dropped | G1 |
+| Freeze | held max 1406.5 ms | held max 1171.1 ms | G14 |
+| ClockFreeze | clock stall max 1050.0 ms | clock stall max 1050.0 ms | G16 |
+| Stall | 48,128 underrun frames | 48,128 underrun frames | `underrun_frames` (G11) |
+
+#### E13.4.6 P-rss (G15), I4, G3 and G18 (main run)
+
+**P-rss LL** (R C R C, one child process per workload; settled idle, MiB / threads):
+
+| Workload | S0 (E9.5) + 4 | ref1 | cand1 | ref2 | cand2 | Candidate ≤ S0 + 4 |
+|---|---|---|---|---|---|---|
+| `typical_1080p` | 588.8 | 440.2/49 | 480.7/49 | 467.1/49 | 482.4/49 | yes |
+| `blend_heavy_1080p` | 681.2 | 470.9/49 | 491.4/49 | 453.8/49 | 465.7/49 | yes |
+| `explainer_16x9` | 550.4 | 437.4/49 | 469.3/49 | 440.7/49 | 467.1/49 | yes |
+| `reel_9x16` | 496.5 | 383.2/49 | 399.5/49 | 391.7/49 | 397.5/49 | yes |
+| `feed_4x5` | 406.7 | 384.3/49 | 397.3/49 | 393.1/49 | 394.8/49 | yes |
+| `talk_recut` | 385.8 | 359.0/49 | 373.6/49 | 373.9/49 | 375.8/49 | yes |
+| `title_only` | 240.0 | 228.1/49 | 234.0/49 | 234.3/49 | 226.9/49 | yes |
+
+- **G15 passes provisionally** (unpinned; the pinned verdict stays S4's). The tightest margins are `talk_recut`
+  (382.3 MiB at most over all candidate runs, the supplement included, against 385.8) and `title_only` (234.0
+  against 240.0).
+- Settled-idle thread count is 49 everywhere, as at S2b.
+- The candidate settles −7 to +41 MiB from the reference in the same pair (median +14). The supplement puts this
+  on the tap (E13.4.7).
+
+**I4** (`r28_end_to_end_tracked`, mean ms over three runs per lane; ME13's 5% rule is against `BASELINES`):
+
+| Lane | ref1 | cand1 | ref2 | cand2 | Delta vs baseline (candidate) | Paired median ratio (cand / ref), mean / p95 |
+|---|---|---|---|---|---|---|
+| LL | 74.7–75.4 | 123.8–130.4 | 86.8–92.1 | 142.5–165.0 | −74.6%, −68.5% | **1.77** / 1.86 |
+| LH | 96.5–112.0 | 153.0–179.4 | 104.0–116.8 | 159.6–186.6 | −66.6%, −65.1% | **1.55** / 1.70 |
+
+The test's own 5% rule passes (every run is far below its baseline). R50 item 1 instead judges I4 on the paired
+ratio, and the candidate binary fails that by 55–77%. E13.4.7 shows the tap causes it: without it the ratio is 1.02.
+
+**G3 LH** (reported, not gated, R48; every binary exits 101 against its 60 fps floor). Median fps over each lane's
+three runs, ref1 / cand1 / ref2 / cand2: `typical_1080p` 41.3 / 36.2 / 40.2 / 33.8; `blend_heavy_1080p` 43.7 / 32.8
+/ 38.5 / 29.4; `heavy_4k` 27.5 / 25.4 / 25.5 / 26.1. The paired median ratio is 0.76 on `blend_heavy_1080p`
+and 0.86 on `typical_1080p`. The tap explains most of it (E13.4.7).
+
+**G18 LH** (R38's 120-frame export; S0 against the candidate, S C S C): every export hashes
+`fe87e67c33845ccdf6e62d1e4d576a2d5fc86e54cb48cc1f5f7f03dd2d979b88` (3,375,562 bytes), **identical** (C-5). S0
+255.0 / 262.1 s, candidate 79.4 / 78.8 s: **paired median ratio 0.31, pass** (≤ 1.05). R47 read 0.19 on a quiet
+machine (E12.18.3). Both S0 and the candidate are slower under this load. The candidate's extra cost is the tap
+(E13.4.7). `g18_verdict.py` printed INCOMPLETE because it expects lane names with a separate `S0` word. The verdict
+above is computed by hand from the same lines.
+
+#### E13.4.7 The supplement: the candidate without its test-only conversion tap
+
+**Why.** Every timing binary is a `cargo test --release --lib` binary, so `cfg(test)` code is compiled in. C-4's
+`DecoderProbe::tap_conversion` (`decode.rs`) copies every RGBA64 conversion into `last_conversion` with a
+`flat_map`/`collect`. At 1080p that is a 16.6 MB allocation and copy per converted frame, and the retained copy
+stays resident. `ad8f896` has no tap. A product build has none either. `cand-notap-abcd7cb` is `abcd7cb` with
+only the tap call disabled. `plan-notap.txt` interleaves ref / cand / notap (00:21:15 to 02:45:23 EDT, load at lane
+start 6.3–40.5).
+
+P-seek LL (two triples per workload, three seeded runs each; `seek_gop60` uses triples 2 and 3, E13.4.1):
+
+| Workload | Side | random p95 | forward p95 | +1 p95 | backward p95 | drag distinct fps | drag seeks |
+|---|---|---|---|---|---|---|---|
+| `seek_gop60` | ref | 66.4 [61.7–69.7] | 67.8 | 21.8 | 67.7 | 9.9 [7.2–12.6] | — |
+| `seek_gop60` | cand | 780.8 [696.6–2783.1] | 66.2 | 70.1 | 702.0 | 26.1 [25.6–26.8] | 38.5 |
+| `seek_gop60` | notap | 734.5 [698.3–830.0] | 64.3 | 65.6 | 692.9 | 26.7 [25.0–26.8] | 39.5 |
+| `talk_recut` | ref | 101.8 [88.5–123.3] | 95.0 | 20.8 | 97.8 | 5.2 [4.2–8.6] | — |
+| `talk_recut` | cand | 688.8 [562.0–1055.5] | 96.1 | 99.4 | 622.7 | 26.4 [25.2–27.6] | 15.5 |
+| `talk_recut` | notap | 792.2 [591.2–1202.8] | 89.5 | 87.5 | 539.0 | 26.7 [24.6–28.0] | 16.0 |
+
+P-play (`PF1_RUNS=1`; LL two triples per workload, LH `typical_1080p` two and `talk_recut` one; columns as E13.4.4):
+
+| Lane, workload | Side | on time | dropped | p95 | held max | clock stall max | peak RSS | passes |
+|---|---|---|---|---|---|---|---|---|
+| LL `typical_1080p` | ref | 1798, 1798 | 2, 2 | 43.2, 43.2 | 85.1, 105.1 | 47.9, 48.0 | 1039.6, 940.5 | 1/2 |
+| LL `typical_1080p` | cand | 1780, 1798 | 19, 2 | 43.2, 43.1 | 170.1, 85.1 | 53.9, 49.7 | 1059.6, 1041.3 | 1/2 |
+| LL `typical_1080p` | notap | 1792, 1755 | 8, 45 | 43.2, 43.2 | 90.1, 115.1 | 56.7, 52.3 | 966.6, 928.2 | 1/2 |
+| LL `feed_4x5` | ref | 1709, 1561 | 89, 238 | 48.7, 64.2 | 92.4, 786.2 | 48.2, 50.1 | 1280.2, 1286.4 | 0/2 |
+| LL `feed_4x5` | cand | 1594, 1419 | 206, 380 | 64.2, 64.7 | 100.5, 141.6 | 47.3, 49.8 | 1525.2, 1581.1 | 0/2 |
+| LL `feed_4x5` | notap | 1612, 1511 | 186, 288 | 64.1, 64.5 | 97.1, 142.6 | 49.9, 48.8 | 1337.9, 1359.1 | 0/2 |
+| LH `typical_1080p` | ref | 1539, 1606 | 261, 194 | 64.4, 64.1 | 85.2, 113.1 | 56.1, 53.2 | 1041.5, 1010.7 | 0/2 |
+| LH `typical_1080p` | cand | 960, 1547 | 840, 253 | 85.3, 64.3 | 171.2, 113.0 | 77.4, 55.9 | 1082.3, 1129.3 | 0/2 |
+| LH `typical_1080p` | notap | 1551, 1692 | 249, 108 | 64.4, 63.6 | 85.2, 85.3 | 55.0, 57.3 | 1020.3, 998.2 | 0/2 |
+| LH `talk_recut` | ref | 7112 | 87 | 43.4 | 1272.0 | 56.6 | 752.7 | 0/1 |
+| LH `talk_recut` | cand | 7077 | 123 | 43.4 | 2896.8 | 55.3 | 815.4 | 0/1 |
+| LH `talk_recut` | notap | 7157 | 43 | 43.4 | 884.7 | 57.5 | 844.6 | 0/1 |
+
+Other lanes (one triple each, except I4 with two):
+
+| Lane | ref | cand | notap | notap / ref |
+|---|---|---|---|---|
+| P-rss LL settled idle, `typical_1080p` / `explainer_16x9` / `talk_recut` (MiB) | 457.7 / 451.9 / 371.2 | 476.6 / 468.3 / 382.3 | 456.5 / 459.7 / 376.5 | −1.2 / +7.8 / +5.3 MiB |
+| P-rss LL playing peak, `typical_1080p` / `feed_4x5` (MiB) | 990.2 / 1040.6 | 1033.2 / 1188.1 | 981.3 / 1013.4 | 0.99 / 0.97 |
+| I4 LL mean (median of three runs), triple 1 / 2 (ms) | 80.3 / 74.4 | 144.6 / 123.6 | 81.3 / 76.8 | **1.01 / 1.03, median 1.02** |
+| I4 LL p95, triple 1 / 2 (ms) | 231.6 / 202.9 | 445.0 / 360.1 | 229.5 / 210.9 | 0.99 / 1.04 |
+| G3 LH fps, `typical` / `blend_heavy` / `heavy_4k` (median of three) | 45.9 / 46.1 / 29.3 | 40.2 / 37.7 / 27.4 | 43.2 / 43.1 / 28.3 | 0.94 / 0.93 / 0.97 |
+| G18 LH wall, against S0's 267.4 s (s) | — | 79.6 | 53.0 | S0 ratio: cand 0.30, notap **0.20** |
+
+Every G18 export in the supplement hashes `fe87e67c…d2d979b88` too. P-rss across all seven workloads, notap minus ref
+is −2.8 to +7.8 MiB, and cand minus ref +1.9 to +18.9.
+
+**What the supplement shows:**
+- **The P-seek regressions are S2c's, not the tap's.** notap matches cand within the spread on every P-seek metric:
+  random p95 ×11 / ×7.8 the reference, +1 p95 ×3 / ×4. The drag gain is S2c's too.
+- **The I4, G3, G18, peak-RSS and P-play held/dropped differences are the tap's.** Without it, I4's paired ratio is
+  1.02 (≤ 1.05, **pass**). G18 is 0.20 of S0, as R47 found on a quiet machine. Settled idle is within 8 MiB of the
+  reference, playing peak at or below it, and G3 is within 3–7% on one pair. On LH `typical_1080p`, notap holds 85.2 and
+  85.3 ms where cand held 171.2 and 113.0 (G14), and it drops the fewest frames of the three binaries.
+- **Consequence for the timing kit:** a timing binary must not carry the tap. The proposed fix is to gate the copy
+  behind a switch only C-4's witnesses turn on (for example an `AtomicBool` the probe sets), so a release test
+  binary pays nothing. This changes only test code. It is left for the lead, because the tap belongs to C-4's
+  witness harness.
+
+#### E13.4.8 The three exit-139 lanes: the known exit-time teardown race
+
+Three P-seek lanes in the main run exited with SIGSEGV: LL `talk_recut` cand2 (19:40:31), LH `seek_gop60` cand1
+(20:02:32) and LH `explainer_16x9` **ref1** (20:28:20). Each had already printed all three runs and `test result:
+ok`, so its data is complete and is used above. The cores' `coredumpctl info` output is kept in
+`s2c-logs/s2c4/sigsegv-{221921,678585,1183491}-*.txt.gz`. All three cores show the same picture as E12.8's P-rss
+crash:
+- The main thread is in libc `exit()`, running the NVIDIA libraries' exit handlers (`libGLX_nvidia`,
+  `libnvidia-glcore`, `libnvidia-glvkspirv`).
+- A preview thread is still dropping its `FrameRenderer`'s wgpu device (`libnvidia-glcore`, `vkDestroyDevice`).
+- The engine's worker thread is in `Thread::join`, joining that preview.
+
+**Cause:** P-seek's `seek_run` (`pf1_harness.rs`) lets its `Session` drop at the end of the function. P-play
+(line 562) and P-rss (line 984) instead call `teardown(session)`, which waits up to 30 s for
+`FfmpegMediaEngine::finished` before dropping the GPU context. So libtest can reach `exit()` while the engine's
+threads are still destroying their Vulkan device. The reference crashed as well, and every crash came after the
+test passed, so this is the harness and the driver's exit ordering. It is not S2c. **No rerun was needed.**
+Proposed harness fix (not made, as `seek_run` is shared timing code and the stage is closed for timing): end
+`seek_run` with `teardown(session)` as P-play does. The product-side gap E12.8 named, `FfmpegMediaEngine` having
+no `Drop` that joins its worker, is unchanged.
+
+#### E13.4.9 Verdicts and what S2c needs
+
+| Gate | Verdict | Evidence |
+|---|---|---|
+| G8 L-1 (random p95 ≤ 40, GOP 60) | **Fail, against S2c** (×11–12 the reference; the reference also misses, at 63) | E13.4.2, E13.4.7 |
+| G8 L-2 (random p95 ≤ 110, `talk_recut`) | **Fail, against S2c** (the reference passes at 96–102) | E13.4.2 |
+| G8 L-3 (+1 p95 ≤ 20, GOP 60) | **Fail, against S2c** (the reference passes on LL at 19.0) | E13.4.2 |
+| G8 L-4a (backward hit p95 ≤ 20) | **Pass on LL** at GOP 60 (15.2) and `talk_recut` (14.2); LH not split (**partial**) | E13.4.3 |
+| G8 L-4b (refill) | Recorded: p95 0.9–1.0 s | E13.4.3 |
+| G8 L-5 (drag ≥ 10 / 7 fps) | **Pass**: 25–27 fps (reference 3–14) | E13.4.2 |
+| G8 L-6 (release shown) | **Pass**, 36/36 | E13.4.2 |
+| G1 (LH `typical_1080p`) | Shared miss, *environment-limited at load 5–40*; notap drops the fewest | E13.4.4, E13.4.7 |
+| G6 (p95/p50 ≤ 3) | **Pass**, worst 2.01 | E13.4.4 |
+| G14 (held ≤ 100 ms, LH typical) | **Pass without the tap** (85.1–85.3). The cand binary misses once per run set (142.5, 171.2), and the reference once in the supplement (113.1) | E13.4.4, E13.4.7 |
+| G16 (clock stall ≤ 100 ms) | **Pass**, worst 78.4 | E13.4.4 |
+| G17 / G11 | **Pass** on all six workloads, LL and LH; the E12.18.5 debt is cleared | E13.4.4 |
+| G15 (settled idle ≤ S0 + 4, provisional) | **Pass** on all seven workloads | E13.4.6 |
+| I4 (paired 5% rule) | **Pass without the tap** (1.02); the cand binary 1.55–1.77 | E13.4.6, E13.4.7 |
+| G18 (≤ S0 + 5%, bytes identical) | **Pass**: 0.31 (cand), 0.20 (notap); every hash identical | E13.4.6, E13.4.7 |
+| G3 (LH, 60 fps) | Reported, blocked by R48; notap within 3–7% of the reference | E13.4.6, E13.4.7 |
+| Q-3 controls | Each fails its metric on LL and LH | E13.4.5 |
+
+**S2c does not close at `abcd7cb`: G8's L-1, L-2 and L-3 fail, and the cause is S2c's.** The drag is fixed
+(L-5) and nothing else regressed once the tap is excluded. The fixes below are design changes, so they go back to
+the lead and are not made here:
+1. **L-1/L-2: refill only on steps.** S-3 refills when t is below the last playhead and not in the ring. A random
+   click-seek backward meets that test, so it pays a window of up to 16 frames. Proposal: refill only when t is
+   within 12 frames below the last *paused target* (the L-4 step domain), and otherwise seek as `ad8f896` did.
+2. **The window costs about 6 seeks per refill.** Each window frame is a separate `decode_paused(cursor, at)` with
+   a one-frame cache, and rule 2 re-seeks near the next key under 16-thread read-ahead. Options: decode the window
+   in one pass (`decode_window(start, t)`, one seek, converting each frame as it presents); or narrow rule 2 to key
+   packets that present at or before the target; or decode paused jobs with one frame thread.
+3. **L-3: +1 steps.** The same read-ahead makes a +1 step about `threads` frames before a key abandon and seek,
+   where `ad8f896` reused the decoder. Narrowing rule 2 as in item 2 would fix both. Whether a one-thread paused
+   decoder costs L-5 is to be measured.
+4. **Timing kit:** gate the C-4 tap behind a witness-only switch (E13.4.7), and give `seek_run` a `teardown`
+   (E13.4.8).
+
+#### E13.4.10 Open GOP (R39 item 4): options for the lead
+
+E13.3 records the stop and its diagnostic. The options are:
+- **(a) Keep it pinned** (today). Continuation equals today's seek path, including its missing open-GOP leading
+  frames (`no_frame`). This is a product bug that predates PF1, and it stays open.
+- **(b) Adopt the earlier-key retry** (`s2c-logs/s2c3/opengop-retry-prototype.diff`). A window that misses `start`
+  after landing on a key past the stream start seeks again to that key's dts − 1. A retried run anchors at the
+  earlier key, and A(t) becomes that key for leading frames. This needs an amendment to S-2's anchor rule, and the
+  C-4 author has to update `Truth`'s one-seek assertion and the model, then regenerate the oracle. It recovers
+  every OpenGop miss and AviDtsGuess 24/25/48/49/72/73.
+- **(c) Investigate AviDtsGuess on its own.** Its misses at 0/1 cannot be recovered (no earlier key), and its
+  misses at 24/25 point to DTS-guessed timestamps rather than open GOP.
+
+**Recommendation:** (b) for OpenGop, done by the C-4 test author together with the S-2 anchor amendment, after the
+G8 fixes in E13.4.9 (they touch the same paused path). Do (c) separately. Until then, (a) holds.
+
+#### E13.4.11 Tests, gates and lines
+
+- **Workspace** (`cargo test --workspace`, fast tier, at `abcd7cb`'s `crates/` tree; S2c-4 changes only docs).
+  36 test binaries, all ok, including:
+  - media lib 1014 passed, 56 ignored (417 s);
+  - app 790 passed, 4 ignored;
+  - core 310 passed, 1 ignored;
+  - agent 628 passed, 1 ignored; `mcp_server` 76 passed, 10 ignored.
+
+  Log: `s2c-logs/s2c4/workspace-test.log.gz`.
+- **Gates** (`s2c-logs/s2c4/gates.log`):
+  - rustc 1.99.0;
+  - `cargo clippy --workspace --all-targets -- -D warnings` clean;
+  - `cargo fmt -- --check` OK;
+  - `python3 scripts/slow_tests.py lint`: "slow-test manifest and markers agree: 47 tests …; 44 allowlist entries
+    well-formed".
+- **Logs:** S2c-2's mutation logs are now gzipped (`s2c-logs/s2c2/mut-*.log.gz`, named `mut-*.log` in E13.2).
+- **Lines:** S2c-4 is documentation only: design §8 gains Amendment R50 (as given by Riel and the lead), and this
+  section is added.

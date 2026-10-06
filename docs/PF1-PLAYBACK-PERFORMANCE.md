@@ -995,6 +995,26 @@ closes on it until S4 fixes and records the GPU state, and S4 rules on the
 floor then. G3's LH figures are still taken and reported in every timing run.
 The Omarchy bar and its widget pollers are baseline load, not contamination.
 
+**Amendment R50 [S2c] Timing runs on the machine as it is (Riel, 2026-10-05).** No timing waits for a quiet window
+("you should not be banking on that"). Every timing run from S2c on follows these rules.
+1. **Paired.** Every timed lane interleaves the candidate with a reference binary in the same run (A B A B, at least
+   two pairs), so both see the same load. The reference is the last closed stage's binary (`ad8f896` for S2c), or S0
+   for G18. Relative claims are judged on the per-pair ratio, median across pairs: G18 ≤ S0 + 5%, I4's 5% rule, and
+   any "this stage improves X".
+2. **Absolute gates** (G1, G6, G8, G14, G16) are still measured and reported against their thresholds.
+   - A miss counts against the candidate when the reference passes in the same run, or when the candidate is worse
+     than the reference by more than the spread between pairs.
+   - A miss both binaries share is recorded as *environment-limited at load L*, with the load record. The stage
+     closes on the paired comparison.
+   - Any later run whose load record is low supplies the absolute verdict. Runs are not scheduled to wait for one.
+3. **Mechanism claims gate on counters that do not depend on load:** frames decoded per frame converted, seeks,
+   `drag_paused_abandoned`, `sync_fallback_frames` (G17), underruns (G11) and RSS (G15). These are the primary
+   evidence for S2c.
+4. **The load record stays but no longer gates.** It keeps `uptime`, the top five processes, the GPU state and the 5 s
+   sampler. Contamination lines are annotations, and the runner's quiet-wait is removed. The run must not overlap
+   the worker's own cargo builds: build everything first, then time.
+5. G3 stays environment-blocked under R48.
+
 **Rec:** L-1m/L-2m and L-4b; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
 S0 and the ratio at S4 (ME14's absolute 20 fps floor stays **owed**, D6); the
