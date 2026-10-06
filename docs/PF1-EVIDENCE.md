@@ -5974,7 +5974,7 @@ drops (E13.5.8). Still open:
   are strengthened.
 - **Lines:** see E13.5.1. This section is documentation only.
 
-### E13.6 S2c-5, Amendments R53–R56 and the closing re-time (2026-10-06): stopped at R56's trace
+### E13.6 S2c-5, Amendments R53–R57 and the closing re-time (2026-10-06): stopped at R57's L-4a (LH)
 
 The lead's order (r53-s2c5-rulings.md): S2c-5, then R53, gates, the workspace test, the closing re-time, this
 section. Steps 1–4 are done. **The closing re-time stopped after a paired check of the R53 gates:** both L-4
@@ -5983,7 +5983,10 @@ gates miss at GOP 60 (E13.6.4). This section is partial and goes to the lead wit
 Amendment R54 (E13.6.6) then fixed the refill: L-4b passes, L-4a still misses. Amendment R55 asked for a
 measurement first and a stop if a hit's wait is not mostly conversion. It is not (E13.6.7), so R55 stopped
 there: no conversion change was made. Amendment R56 asked for a trace first and a stop if the conversions run
-back to back and still fall behind. They do (E13.6.8), so R56 stopped there too. **This section is partial.**
+back to back and still fall behind. They do (E13.6.8), so R56 stopped there too. Amendment R57 added a
+row-wise fill and converts the window only below the newest t (E13.6.9). L-4b passes on both lanes and L-4a
+passes on LL, but L-4a misses on LH, whose hit is now mostly its ~13 ms render. R57 stopped there. **This
+section is partial.**
 
 #### E13.6.1 S2c-5, open GOP (b)
 
@@ -6223,3 +6226,117 @@ measured):**
   16.0 and 16.7. So for L-4a this stepper needs nearly every hit pre-converted. That means converting the whole
   skipped range (about 6 frames, 30–40 ms) within one ~20 ms cycle: two to three lanes beyond the reader, over
   R56's one-extra-thread cap.
+
+#### E13.6.9 Amendment R57: the row-wise fill and the re-prioritized window (stopped: L-4a misses on LH)
+
+Commits:
+
+| Commit | What |
+|---|---|
+| `c2bbc6d` | R57 (revised) design text |
+| `4eb29ad` | fill witness, red against a stub; the fused loop moved unchanged to `fill_fused` |
+| `959d9e3` | `fill_rows`: the fast path for unrotated, unflipped frames |
+| `23c815b` | re-prioritization witness, red |
+| `96ea61d` | the window converts only below the newest t |
+
+**Item 1, the fast path.** The witness compares `fill_rows` and `fill_managed_plane` with the fused loop. It covers
+five separable descriptions (the fixtures' BT.709 limited and full, RGB 10-bit, BT.1886 12-bit and identity
+16-bit), sizes 1×1, 5×3, 7×5, 33×7 and 64×4, and padded strides of 0, 3, 8 and 24 pixels. Through
+`fill_managed_plane` it also checks every rotation and flip. All are bit-identical. A row-stride off-by-one
+mutation fails three tests. The X-2 parity tests and every pin are unchanged.
+
+**Item 2, re-prioritization.** After a post at t′ inside a held window, `continued()` keeps only the kept frames
+below t′, nearest first. Every reader's kept frames above t′ leave its retained set. Their reservations move to
+the reader, and its next decode's hold carries them, with `discard = t′`. The decoder drops its kept frames above
+t′ before that decode. The hold releases their bytes with the excess once the frame is converted, or on a stop
+or failure. `closed`, `exited` and `fail_start` release them if the decoder goes first. The conversion in flight
+finishes and stays held. No new uncharged interval was added.
+
+R54's in-window witness changes, as R57 states: after 19 → 14 with 17 in flight, the order was 14, 16, 15, 13…4
+and is now 14, 13…4. **For the lead:** this edits an R54 oracle (the order, and 15 and 16 no longer held). The
+edit follows R57 item 2. Its C-5, no-seek and conversion-only checks stay, and it gains three checks:
+- K-1 live is unchanged across the post;
+- the decoder's kept bytes show 15 and 16 dropped (10/13 of the bytes it kept after 17);
+- 15 and 16 are not in the ring.
+
+Three mutations fail it: frames above t′ kept in the pass, their bytes released at the post, and the decoder not
+dropping them. Media: lib 1026 passed, 56 ignored; the integration tests are green.
+
+**The paired L-4 check (r57),** 16:27–16:51 EDT. `seek_gop60`, 3 pairs per lane: reference
+`count2-ref-ad8f896` against candidate `cand-96ea61d` (`90490da8…`). Pair 1's candidate was traced. One extra
+run per lane used the R56 binary `cand-794caf3` ("before"). All exits were 0. The load was heavy and is recorded,
+not gating (R50): another project's rustc, ffmpeg and test builds averaged 1.5–9 cores beside the test (LL cand1:
+about 9). Files are in `s2c-timing/r57/`: `timing-r57.log`, `samples-r57.log`, `l57.py` and `l57-r57.txt`. Medians
+of each run's three passes:
+
+| Lane | L-4a hit p95 per pair → median | Hit mean | L-4b (≤ 1.25) | Back mean ÷ ref |
+|---|---|---|---|---|
+| LL | 23.9 (cand1, ~9 cores of other load), 17.2, 17.6 → **17.6 PASS** | 17.9, 12.6, 12.7 | 1.07 PASS | 0.59 |
+| LH | 22.4, 23.5, 21.1 → **22.4 MISS** | 18.2, 18.5, 17.1 | 1.06 PASS | 0.65 |
+
+A supplementary paired run (r57w) put before (`cand-794caf3`) against the candidate, 3 pairs per lane, untraced
+(`timing-r57w.log`, `l57-r57w.txt`):
+- the candidate's L-4a: LL 16.8, 17.3, 17.0; LH 23.9, 23.8, 32.1 (that run had about 10 cores of other load);
+- a third traced pair (r57t2) gave LL 16.6 and LH 21.3.
+
+Counters (the r57 candidate's untraced pairs and r57w; "before" is R56's binary under the same harness):
+
+| Lane | Wait / render (mean) | Pre-converted of 125 | Windows filled of ~75 | Process CPU per refill |
+|---|---|---|---|---|
+| LL now | 2.2 / 7.6–8.0 | 44–50 | 52–54 | 442–454 ms |
+| LL before | 5.0–6.6 / 7.3–8.2 | 13–19 | 7–9 | 437–455 ms |
+| LH now | 1.6–3.0 / 13.0–13.3 | 51–70 | 57–68 | 422–430 ms |
+| LH before | 4.3–5.6 / 13.0–13.3 | 27–35 | 17–23 | 426–446 ms |
+
+The working-frame step per conversion (ms; r57w, 3 pairs, before → now; median ratio):
+
+| Lane | t | Window frame |
+|---|---|---|
+| LL | 3.39, 3.32, 3.69 → 1.87, 1.90, 1.92 (×0.55) | 4.47, 3.63, 4.43 → 2.12, 2.11, 2.18 (×0.49) |
+| LH | 3.37, 3.86, 3.59 → 1.94, 1.87, 2.61 (×0.58) | 3.74, 4.60, 4.60 → 2.48, 3.31, 3.30 (×0.72) |
+
+Whole conversions (graph and working frame) went from 4.4–5.3 to 2.9–3.2 ms on LL, and from 4.5–5.4 to 3.2–4.2
+ms on LH (×0.56–0.77). The before binary differs from the candidate in both items, but the working-frame step
+does not depend on the scheduling.
+
+Traces: `trace-r57-{LL,LH}.txt` (r57's pair 1) and `trace2-r57-{LL,LH}.txt` (r57t2), both gzipped, analysed by
+`../r56/trace.py`. From r57t2 (372 hits per lane):
+- **Pre-converted hits:** 40% (LL) and 51% (LH), up from 15–16% under R56. The others wait behind the conversion
+  in flight (1.3 / 1.4 ms) and then their own (2.6 / 2.8 ms).
+- **Conversions started above the newest t:** 1 and 0, down from 632 and 611.
+- **Conversions of frames later shown:** 390 of 2,213 (LL) and 397 of 2,476 (LH), 16–18%. The stepper still skips
+  frames, and the pass converts them on the way down.
+- **A hit's time:** wait 2.2 / 1.8 ms and render 7.8 / 13.2 ms. The rest is about 2.5 ms of dispatch.
+
+Findings:
+- **LH misses L-4a because of its render, not conversion.** The LH render is 13.0–13.3 ms in every run, the R56
+  binary included. Under R55 it was 9.8 (E13.6.7), so the change comes from the environment, not R57. In 117 of the
+  136 GPU samples taken during the LH runs, the GPU was at P8 (210 MHz), its idle clocks. With the whole wait removed, the r57t2 LH trace
+  still gives hit p95 18.1 ms.
+- **LL passes L-4a** in every pair not run under about 9 cores of other load (16.6–17.6 ms).
+- **L-4b passes on both lanes** (1.06–1.07). The backward mean is 0.59 / 0.65 of the reference.
+
+Under R57 item 4 ("if L-4a misses: stop and report the counters"), this round stops here. The workspace test,
+the closing plan (R50, I4, G18) and E13.6's close were not run.
+
+The estimates for the lead and Riel are **partial: estimates, not measured.** `r57/est57.py` replays each traced
+window and its posts with n lanes per source. Each lane converts the kept frames below the newest t, nearest
+first, using the run's own conversion durations. A hit's latency is then its measured step-to-seen, minus its
+measured wait, plus the simulated wait and the render slowdown. The render slowdown is the render's regression
+on the conversions overlapping it, times the extra overlap the lanes add. With one lane the replay matches the
+measurement (LL p95 17.6 against 16.8 measured; LH 23.4 against 22.0). From r57t2 (`est57-t2.txt`):
+
+| Lanes per source | LL hit mean / p95 | LL render slowdown | LH hit mean / p95 | Conversions per refill | Conversion CPU per refill |
+|---|---|---|---|---|---|
+| 1 (now) | 12.9 / 17.6 | — | 17.9 / 23.4 | 10.1 / 11.1 | 31 / 34 ms |
+| 2 (+1) | 11.5 / 15.3 | +0.44 ms (+6%) | 16.0 / 19.5 | 12.8 / 13.0 | 40 / 40 ms |
+| 3 (+2) | 10.7 / 13.1 | +0.18 ms (+2%) | 15.6 / 18.1 | 13.1 / 13.1 | 41 / 41 ms |
+
+- With the extra lanes' conversions 25% slower under contention, the LH p95 is 22.3 with +1 and 18.4 with +2.
+  LL's render slowdown is then +7–8%.
+- **Lavapipe's slope:** each overlapping conversion adds about 1.2 ms to an LL render (7.8 ms mean), against 0.4
+  ms on LH. More lanes add little render overlap, because they finish the window sooner.
+- **The extra CPU per refill** is about +9 ms (+1 lane) or +10 ms (+2), against about 440 ms of process CPU per
+  refill. The window is only ~13 frames, so the lanes convert little more than one does.
+- **LH would pass L-4a only with two extra lanes**, or with one if conversions do not slow, and then by about
+  0.5–2 ms. Its ~13 ms render is the floor either way. One heavily loaded LH run reached 32.1 ms.
