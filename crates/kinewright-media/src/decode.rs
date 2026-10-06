@@ -2906,13 +2906,18 @@ fn fill_managed_plane(
         usize::try_from(out_width).unwrap_or_default(),
         usize::try_from(out_height).unwrap_or_default(),
     );
-    let pixels = fill_fused(
-        (plane, stride),
-        (w, h),
-        (out_w, out_h),
-        (rotation, flip_horizontal),
-        (rgb, alpha),
-    );
+    // Amendment R57 [S2c]: an unrotated, unflipped frame fills row-wise.
+    let pixels = if rotation == VideoRotation::None && !flip_horizontal {
+        fill_rows((plane, stride), (w, h), (rgb, alpha))
+    } else {
+        fill_fused(
+            (plane, stride),
+            (w, h),
+            (out_w, out_h),
+            (rotation, flip_horizontal),
+            (rgb, alpha),
+        )
+    };
     Ok(WorkingFrame {
         width: out_width,
         height: out_height,
@@ -2950,14 +2955,38 @@ fn fill_fused(
 }
 
 /// Amendment R57 [S2c]: the fused loop's output for an unrotated, unflipped
-/// plane, row by row.
-#[cfg_attr(not(test), allow(dead_code))] // R57 witness stub: wired with its implementation
+/// plane, row by row: the output allocated once, each row sliced once, each
+/// pixel's codes read from its 8 bytes. `plane` holds `h` rows of `w` pixels
+/// at `stride` (checked by the caller); the tables have 65,536 entries
+/// whenever there is a pixel.
 fn fill_rows(
-    (_plane, _stride): (&[u8], usize),
-    (_w, _h): (usize, usize),
-    (_rgb, _alpha): (&[half::f16], &[half::f16]),
+    (plane, stride): (&[u8], usize),
+    (w, h): (usize, usize),
+    (rgb, alpha): (&[half::f16], &[half::f16]),
 ) -> Vec<half::f16> {
-    Vec::new() // R57 witness stub: red first
+    type Table<'a> = &'a [half::f16; 65_536];
+    let mut pixels = vec![half::f16::ZERO; w.saturating_mul(h).saturating_mul(4)];
+    let (Ok(rgb), Ok(alpha)) = (Table::try_from(rgb), Table::try_from(alpha)) else {
+        return pixels; // no pixel: a failed table is only taken for an empty frame
+    };
+    if w == 0 {
+        return pixels;
+    }
+    let row_bytes = w * 8;
+    for (y, out) in pixels.chunks_exact_mut(w * 4).enumerate() {
+        let start = y * stride;
+        let row = &plane[start..start + row_bytes];
+        for (px, out) in row
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(out.as_chunks_mut::<4>().0)
+        {
+            let code = |i: usize| usize::from(u16::from_le_bytes([px[i], px[i + 1]]));
+            *out = [rgb[code(0)], rgb[code(2)], rgb[code(4)], alpha[code(6)]];
+        }
+    }
+    pixels
 }
 
 fn rotate_bytes(
