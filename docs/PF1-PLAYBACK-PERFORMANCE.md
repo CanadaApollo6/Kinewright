@@ -1152,6 +1152,32 @@ and P-seek's pacing do not change; the working-frame step and swscale threading 
 - **The R54 gap is accepted as bounded** (one window per reader, at most B − 1 decoded frames, D13).
 - **Gate:** the paired L-4 check as for R55.
 
+**Amendment R57 [S2c] A row-wise table fill, and the window converts only below the newest t (lead ruling,
+2026-10-06, revised).** R56's trace (E13.6.8): the reader converts back to back, but P-seek's backward steps
+jump 1–12 frames, so 80% of window conversions are of frames never shown, a third of them above the newest t.
+The hit pays one conversion in flight and its own, and the working-frame step is most of a conversion. That step
+is already table-driven (X-1/X-3: `Conversion::Separable`, `fill_managed_plane`); its cost is the fused loop
+itself, a per-pixel rotation `match`, bounds-checked byte reads and `extend`. The gates and P-seek's pacing and
+jump sizes do not change; no conversion lanes and no swscale threading this round.
+- **A fast path in `fill_managed_plane`** for an unrotated, unflipped frame: row-wise, the output preallocated,
+  each row sliced once, no per-pixel `match`; safe code, bit-identical to the fused loop, which rotated and
+  flipped frames still take. X-1's checks and errors run first, unchanged. Witness: equality with the fused loop
+  on every separable description the fixtures use, an odd width, a stride wider than the row and a pixel count
+  that is not a multiple of 8, with rotated and flipped frames still equal to the fused loop; mutation: an
+  off-by-one in the row stride. The X-2 parity tests and every pin stay unchanged. The working-frame ms is
+  recorded before and after, LL and LH, under the harness.
+- **The window converts only below the newest t.** After a post at t′ inside a held window, the pass converts the
+  kept frames below t′, nearest first, and never one above t′; the conversion in flight may finish and stay held.
+  The kept frames above t′ leave the plan and the reader drops them before its next decode; their K-1 charges are
+  held until it has (no new uncharged interval). This supersedes R54's "the descending conversions continue"
+  for frames above t′, so R54's in-window witness now expects the window at and below t′ converted and nothing
+  above it after the post. Witness: after a jump of k frames, no frame above the new t is converted after the
+  post except the one in flight; mutation: frames above t′ stay in the pass. The other R53/R54 invariants and
+  witnesses stay.
+- **Gate:** the paired L-4 check, run as a measurement. If L-4a misses: the usual counters, and estimates of the
+  hit p95 with one and two extra conversion lanes per source, lavapipe's render slowdown under that contention on
+  LL, and the extra CPU per refill, for the lead and Riel.
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
 conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and
