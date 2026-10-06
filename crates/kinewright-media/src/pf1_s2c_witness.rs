@@ -535,6 +535,25 @@ pub(super) struct Corpus {
     /// The independent check of every returned frame (`None` only where a
     /// test shows what the comparison with the Seek path alone cannot see).
     out: Option<OutputOracle>,
+    /// The conversion tap, on for the corpus's life (its oracle included).
+    _tap: Tap,
+}
+
+/// PF1 S2c C-4 (lead ruling after R51/R52): holds the decoder's conversion
+/// tap on for this thread (`decode::CONVERSION_TAP`) while it lives.
+pub(super) struct Tap;
+
+impl Tap {
+    pub(super) fn on() -> Self {
+        crate::decode::CONVERSION_TAP.with(|tap| tap.set(tap.get() + 1));
+        Self
+    }
+}
+
+impl Drop for Tap {
+    fn drop(&mut self) {
+        crate::decode::CONVERSION_TAP.with(|tap| tap.set(tap.get() - 1));
+    }
 }
 
 fn splitmix(state: &mut u64) -> i64 {
@@ -630,6 +649,7 @@ fn targets(fx: &Fixture) -> Vec<Target> {
 
 impl Corpus {
     pub(super) fn new(kind: Kind, threads: &[usize]) -> Self {
+        let tap = Tap::on();
         let fx = Rc::new(Fixture::new(kind));
         let targets = targets(&fx);
         let oracle = threads
@@ -653,6 +673,7 @@ impl Corpus {
             oracle,
             truth,
             out,
+            _tap: tap,
         }
     }
 
@@ -2351,6 +2372,21 @@ mod tests {
             "pf1-c4 mutation output reference hashes altered: {}",
             e.chars().take(150).collect::<String>()
         );
+    }
+
+    /// Lead ruling (tap gate): the conversion copy runs only under a C-4
+    /// witness's `Tap`; with the tap off the output oracle fails on the
+    /// first returned frame, it does not skip it.
+    #[test]
+    fn the_output_oracle_fails_without_the_conversion_tap() {
+        let corpus = Corpus::new(Kind::Default, &[1]);
+        let seek = |c: &Corpus| witness(&mut SeekPath::new(&c.fx, 1), c, 1, false);
+        seek(&corpus).unwrap();
+        let held = crate::decode::CONVERSION_TAP.with(|tap| tap.replace(0));
+        let e = seek(&corpus);
+        crate::decode::CONVERSION_TAP.with(|tap| tap.set(held));
+        let e = e.unwrap_err();
+        assert!(e.contains("a returned frame without its conversion"), "{e}");
     }
 
     /// The non-fixture cases already hold for the fresh Seek (cancel: the

@@ -1410,6 +1410,13 @@ pub(crate) enum OutputFault {
 thread_local! {
     pub(crate) static OUTPUT_FAULT: std::cell::Cell<Option<OutputFault>> =
         const { std::cell::Cell::new(None) };
+    /// PF1 S2c C-4 (lead ruling after R51/R52): the conversion tap copies
+    /// its RGBA64 only while a C-4 witness holds the tap on this thread
+    /// (`pf1_s2c_witness::Tap`; a count, so holders nest). Counting and
+    /// `OUTPUT_FAULT` always apply; other test binaries' runs (the timing
+    /// harness) no longer pay a frame-sized copy per conversion.
+    pub(crate) static CONVERSION_TAP: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1461,6 +1468,9 @@ impl DecoderProbe {
 
     /// Record a conversion's RGBA64 (`rgba` is the graph or scaler output),
     /// applying the thread's `OUTPUT_FAULT`, if any, on its side of the tap.
+    /// The copy is made only under `CONVERSION_TAP`; without it no
+    /// conversion is recorded, so the output oracle fails on a returned
+    /// frame rather than reading a stale one.
     pub(crate) fn tap_conversion(
         &mut self,
         pts: Option<i64>,
@@ -1472,15 +1482,18 @@ impl DecoderProbe {
         if fault == Some(OutputFault::Conversion) {
             flip(rgba);
         }
-        let (row, stride) = (usize::try_from(width).unwrap() * 8, rgba.stride(0));
-        let bytes = (0..usize::try_from(height).unwrap())
-            .flat_map(|y| rgba.data(0)[y * stride..y * stride + row].iter().copied())
-            .collect();
         self.conversions += 1;
-        self.last_conversion = Some(Converted {
-            pts,
-            rgba: Arc::new(bytes),
-        });
+        self.last_conversion = None;
+        if CONVERSION_TAP.with(std::cell::Cell::get) > 0 {
+            let (row, stride) = (usize::try_from(width).unwrap() * 8, rgba.stride(0));
+            let bytes = (0..usize::try_from(height).unwrap())
+                .flat_map(|y| rgba.data(0)[y * stride..y * stride + row].iter().copied())
+                .collect();
+            self.last_conversion = Some(Converted {
+                pts,
+                rgba: Arc::new(bytes),
+            });
+        }
         if fault == Some(OutputFault::WorkingFrame) {
             flip(rgba);
         }
