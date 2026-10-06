@@ -6003,7 +6003,7 @@ Mutations (logs `s2c-logs/s2c7/s2c5-*.log`):
 - the latch skip off: **killed** (`continuation_reproduces_seek_on_every_fixture`);
 - the pair gate off: **killed** (11 tests);
 - seek to `dts` instead of `dts − 1`: **survives**. **Partial:** the one-tick margin is not witnessed by the
-  fixtures.
+  fixtures. E13.6.6 argues the mutant is equivalent on the fixtures' mov/H.264 pair (for the Sonnet review).
 
 #### E13.6.2 Amendment R53
 
@@ -6121,7 +6121,9 @@ Implementation notes the ruling did not spell out:
 - A frame cancelled by a post outside the window has its reservation returned at that post, as R54 says; its
   decoded frame stays in the reader's decoder until that reader's next decode or close. So **one window's kept
   frames are uncharged for that interval.** Charging them until the drop could deadlock: admission would wait
-  for bytes that only that reader's next (admitted) decode frees.
+  for bytes that only that reader's next (admitted) decode frees. Amendment R56 accepts the gap as bounded: one
+  window per reader, at most B − 1 = 15 decoded frames, until that reader decodes again or closes. It is deferred
+  to S4's G15 RSS check (design §15, D13).
 - The keeping cost (r54a, GOP 60, 1080p): 40.8 MB of decoded frames kept per refill (about 13 frames), with no
   copies: every kept frame was a moved decoder reference (`count_keep_copied` 0).
 - S2c-5's surviving mutant (seeking to `dts` rather than `dts − 1`) is equivalent on the mov/H.264 pair. Both

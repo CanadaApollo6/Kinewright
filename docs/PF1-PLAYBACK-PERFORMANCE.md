@@ -1133,10 +1133,29 @@ the regression is this design's, not the environment's. The gates and P-seek's p
 - **Gate:** the paired L-4 check (3 pairs, LL and LH, `seek_gop60`): hit p95 ≤ 20 ms and L-4b ≤ 1.25×, with the
   pre-converted hit share, windows filled, CPU per refill and the backward mean reported.
 
+**Amendment R56 [S2c] The window converts continuously after t (lead ruling, 2026-10-06).** R55's measurement
+(E13.6.7) stopped it: a hit's wait is about a third of the hit and a conversion is 80% the working-frame step, so
+(a) and (b) miss the cost. But a window conversion costs 4.4–6.4 ms against a step every 17–20 ms, and only 6–28
+of ~124 hits were pre-converted, so something keeps the conversions from running ahead between steps. The gates
+and P-seek's pacing do not change; the working-frame step and swscale threading are not touched (D12).
+- **Trace first** (test builds, its own commit): each window frame's conversion queued, started and finished,
+  against the step posts and the hit renders; one pair per lane. E13.6 names the cause with numbers. If the
+  conversions really do run back to back and still fall behind, stop and report.
+- **Then the scheduling:** from t's publish until the window is done or cancelled (R54), window conversions
+  proceed without waiting on hits. A post inside the window only re-prioritizes: it never restarts, cancels or
+  re-plans the pass. A hit on a converted frame never waits on a conversion. If the trace shows it, conversions
+  run off the thread that serves hits: at most one extra thread per source, no new dependency.
+- **Invariants (R53/R54) hold**, each behaviour change with a witness and a mutation, red first: t first, an
+  out-of-window cancel, no frame converted twice, I12 and K-2's charges, frames equal fresh seeks. The new
+  witness: a stepper posting faster than a hit but slower than one conversion per step has every in-window step
+  after the first k served pre-converted.
+- **The R54 gap is accepted as bounded** (one window per reader, at most B − 1 decoded frames, D13).
+- **Gate:** the paired L-4 check as for R55.
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
 conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and
-CPU time per refill; `dropped_agent`, `stale_errors`, `slot_starved`,
+CPU time per refill; R56's trace (test builds) of window conversions against steps and hits; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
 S0 and the ratio at S4 (ME14's absolute 20 fps floor stays **owed**, D6); the
 PERFORMANCE heavy-4K, agent and desktop lanes.
@@ -1211,3 +1230,5 @@ Opus. *CI on push*, Windows included.
 | D9 | Device output-latency compensation; an output-drain acknowledgment, so the terminal stop waits for the last sample to sound (V-2's drained predicate is the ring's) | AU-owned clock semantics | AU backlog | recorded `device_latency_ms` > 1 frame, or an audibly clipped programme end |
 | D10 | Native SVG raster gates; cached external-render fixture | AW2 owns code and external clips (A1) | AW2 | AW2 design |
 | D11 | Bounded streaming, row banding and a lazy `decoded_layers` for required sets > C (preview or full resolution) | R15: kept out of the scheduler core; K-3 falls back to today's path | export-performance slice (D3 owner) | G17 fails, or a full-resolution set exceeds C in the session |
+| D12 | The working-frame step (RGBA64 to the working frame, after swscale) | Amendment R56: 3.6–5.2 ms a frame, about 80% of a conversion (E13.6.7); t, window frames and playback all pay it. Our own Rust code, not swscale | S3/S4 | S3/S4 planning |
+| D13 | Charging a cancelled window's decoded frames until the reader drops them | Amendment R56: after a post outside a held window, that window's kept decoded frames stay in its reader until the reader's next decode or close, uncharged. Bounded: one window per reader, at most B − 1 = 15 decoded frames. Charging them could deadlock admission | S4 | S4's G15 RSS check |
