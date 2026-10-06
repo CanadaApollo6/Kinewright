@@ -509,9 +509,11 @@ impl Truth {
             decoder
                 .decode_window_sequential(TimeCode(f + 1), end, &mut cache)
                 .unwrap();
+            // S2c-5: a run from an open-GOP leading frame seeks once more,
+            // before its key (`retries`); otherwise one seek.
             assert_eq!(
                 decoder.seek_count(),
-                1,
+                1 + u64::from(retries(&fx.facts, f)),
                 "{:?}: the linear run seeked again",
                 fx.kind
             );
@@ -562,6 +564,19 @@ fn splitmix(state: &mut u64) -> i64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     i64::try_from((z ^ (z >> 31)) >> 1).unwrap()
+}
+
+/// S2c-5 (R39 item 4 (b), lead rulings of 2026-10-06): whether a seek to `t`
+/// is retried before its key. On the S-2 pair only, when A(t) is a key that
+/// is not the stream's first and presents after `t` (an open-GOP leading
+/// frame: its references are in the GOP before), production seeks once more
+/// to the key before. Other demuxers (AVI) keep one seek.
+fn retries(facts: &Facts, t: i64) -> bool {
+    let Some(a) = anchor(facts, t).filter(|_| facts.kind != Kind::AviDtsGuess) else {
+        return false;
+    };
+    let i = facts.keys.iter().position(|(pos, _)| *pos == a.0);
+    i.is_some_and(|i| i > 0 && facts.keys[i].1 > t)
 }
 
 /// The anchor of target `t` (shadow, from the file), if known.
