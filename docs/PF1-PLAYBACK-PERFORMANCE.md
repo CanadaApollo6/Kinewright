@@ -1178,6 +1178,19 @@ jump sizes do not change; no conversion lanes and no swscale threading this roun
   hit p95 with one and two extra conversion lanes per source, lavapipe's render slowdown under that contention on
   LL, and the extra CPU per refill, for the lead and Riel.
 
+**Amendment R58 [S2c] L-4a on LH is environment-limited by GPU idle clocks; S4's pinned run re-checks it
+(Riel, 2026-10-06).** The R57 check (E13.6.9) found the following.
+- L-4a passes on LL at 17.6 ms and misses on LH at 22.4 ms.
+- An LH hit's wait is 1.6–3.0 ms; its render is 13.0–13.3 ms.
+- The R56 binary renders in the same 13 ms in the same session. Under R55 the LH render was 9.8 ms, and on LL it
+  is 7.6–8.0 ms.
+- In 117 of 136 GPU samples taken during the LH runs, the GPU was at P8 (210 MHz).
+
+The render code is the same in every one of these binaries, so the miss is not S2c's. Its cause is the one behind
+G3 (R48) and the LH L-3 miss that both binaries share. **This is not a waiver:** L-4a on LH is recorded as
+*environment-limited (GPU idle clocks), re-checked at S4's pinned run*, not as a pass. It joins G3 on S4's
+checklist (§13, S4's row). No conversion lanes are added. S2c closes on the paired comparison and on L-4a on LL.
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
 conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and
@@ -1216,7 +1229,7 @@ open with ⌊P / R⌋ threads; before S2b-3, each ring holds the S1d window.
 | S2c | S-2 shadow-anchored continuation, S-3 backward window, witnesses | C-4 + earlier; G8 | ~560 |
 | S3a | G-2…G-7 display correctness: encode, fence, rebind rule, bounded wait, Terminal handoff, flag readback, lifetimes, self-check, premultiply, app registration | I1b, I5, I6, I16 + earlier; G7a, G7b | ~950 |
 | S3b | Staging ring, U-2 residency | I17 + earlier; G2, G4 | ~450 |
-| S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes | all | ~80 |
+| S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes; the GPU state pinned and recorded | all; on LH at the pinned run: G3 (R48) and L-4a (R58) | ~80 |
 
 The total is about 5,560 lines (rev 3: 5,830): R15/R16 remove ≈ 450 from S2b;
 the paint marker, Terminal handoff and shadow-seek anchor add ≈ 180.
