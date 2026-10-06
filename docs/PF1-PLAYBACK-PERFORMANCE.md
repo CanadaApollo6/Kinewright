@@ -773,6 +773,16 @@ gated (D4).
   [start, t) joins t's required times. K-2 therefore reserves the whole
   window, and B·f ≤ share keeps the set within C. The reader decodes the
   window ascending: one seek to the key ≤ start, then S-2's continuation.
+- **t first (Amendment R53).** The refill's reader decodes [start, t] on
+  those same routes frame by frame, but converts only t; it keeps the
+  decoded (unconverted) frames of [start, t) and publishes t. The window's
+  conversions then follow in the same job, one plan step each, descending
+  from t − 1. A newer post cancels the rest between frames; the frames
+  already converted stay held. A step to a window frame not yet converted
+  keeps the window (no refill) and goes to the reader that kept its decoded
+  frame, which converts it without decoding anything. If no reader keeps
+  it (the reader closed or decoded elsewhere), the step is today's: a
+  refill or a seek.
 - **Hold.** The post holds each source's window. Its ring frames survive
   later posts while the source stays planned and the playhead stays inside
   the window. A step inside the window, in either direction, is a hit and
@@ -1052,6 +1062,22 @@ source space, not the timeline playhead); B is the window's actual size (≤ 16,
 jump seeks as `ad8f896` did, so a click-seek back no longer pays a window (L-1/L-2). Hits inside a held window stay
 unconditional. Agent paused jobs neither refill nor update the travel memory: they render synchronously outside the
 readers. Implementation `de7a00f`; evidence E13.5.
+
+**Amendment R53 [S2c] A refill shows t first (lead ruling, 2026-10-06).** A backward refill converts and publishes t
+before converting the rest of its window (E13.5.7: about 16 conversions of about 5 ms each made the refill's extra
+cost).
+- The window stays **required** and reserved under K-2, so the budget accounting is unchanged. B stays
+  clamp(share, 1, 16).
+- The window's conversions continue after t is published, in the same job, in descending order from t − 1. They
+  are cancellable between frames; frames already converted stay held.
+- A step that arrives for a window frame not yet converted waits for that conversion; it is not re-decoded.
+- The reader keeps the window's decoded frames (at most B − 1, at the source's decoded size) until it converts
+  them, decodes anything else, or closes. They are decoder memory outside K-1, like the decoder's own reference
+  frames.
+- L-4b is gated as *time to t on a refill*: no worse than 1.25 × the reference's step mean, paired. The time to the
+  full window is recorded.
+- Witnesses, each with a mutation: t is published before any window frame is converted; a newer job cancels the
+  remaining window conversions; a step into the not-yet-converted part of the window decodes nothing new.
 
 **Rec:** L-1m/L-2m and L-4b; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
