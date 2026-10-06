@@ -579,6 +579,20 @@ fn retries(facts: &Facts, t: i64) -> bool {
     i.is_some_and(|i| i > 0 && facts.keys[i].1 > t)
 }
 
+/// S2c-5: where a retried seek to `t` lands, the key packet before A(t), as
+/// the shadow gives it (the anchor of the frames that key starts).
+fn retried_anchor(facts: &Facts, t: i64) -> Option<Anchor> {
+    let a = anchor(facts, t)?;
+    let i = facts.keys.iter().position(|(pos, _)| *pos == a.0)?;
+    let before = facts.keys.get(i.checked_sub(1)?)?.0;
+    facts
+        .anchors
+        .iter()
+        .flatten()
+        .find(|x| x.0 == before)
+        .copied()
+}
+
 /// The anchor of target `t` (shadow, from the file), if known.
 fn anchor(facts: &Facts, t: i64) -> Option<Anchor> {
     usize::try_from(t)
@@ -1676,7 +1690,8 @@ mod tests {
     /// The witnesses are only as strong as the oracle's coverage: every §8
     /// special present, real anchor boundaries, EOF hit, chained hops, no
     /// errors, varied frames (a constant oracle would pass anything), and
-    /// the real seek's first packet equal to the shadow's at every target.
+    /// the real seek's first packet equal to the shadow's at every target (the
+    /// retried anchor at an S2c-5 retried target).
     #[test]
     fn the_oracle_covers_the_special_targets() {
         for c in corpora(&[1]) {
@@ -1737,11 +1752,20 @@ mod tests {
                 "{kind:?}: {} distinct frames",
                 distinct.len()
             );
-            // Rule 1's premise, observed: the real seek's first packet is A(t).
+            // Rule 1's premise, observed: the real seek's first packet is A(t);
+            // for a retried target (S2c-5, lead rulings of 2026-10-06) it is
+            // the retried anchor, the key's before A(t), instead.
+            let first = |t: i64| {
+                if retries(facts, t) {
+                    retried_anchor(facts, t)
+                } else {
+                    anchor(facts, t)
+                }
+            };
             for (g, (o, o2)) in c.targets.iter().zip(oracle) {
-                assert_eq!(o.state.first_packet, anchor(facts, g.t), "{kind:?} {g:?}");
+                assert_eq!(o.state.first_packet, first(g.t), "{kind:?} {g:?}");
                 if let (Some(t2), Some(o2)) = (g.t2, o2) {
-                    assert_eq!(o2.state.first_packet, anchor(facts, t2), "{kind:?} {g:?}");
+                    assert_eq!(o2.state.first_packet, first(t2), "{kind:?} {g:?}");
                 }
             }
             eprintln!(
