@@ -12,8 +12,17 @@
 //!   resident at the post (a hit served pre-converted);
 //! - S-3 refills: started, the decoded bytes they keep, and windows that end
 //!   fully converted (a refill that keeps nothing counts as full).
+//!
+//! Amendment R56 (trace): while a harness has it on, a timeline of events
+//! (ns since the first, a kind, a source time, the reader's id or −1): the
+//! harness's steps, the preview's posts, frames ready and renders done, and
+//! the readers' refills, window frames kept, conversions, other decodes and
+//! waits.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 pub(crate) const DECODED: usize = 0;
 pub(crate) const CONVERT_T: usize = 1; // count, graph ns, work ns, graph cpu ns
@@ -80,4 +89,106 @@ pub(crate) fn process_cpu_ms() -> u64 {
         .filter_map(|field| field.parse().ok())
         .collect();
     fields.iter().sum::<u64>() * 10
+}
+
+/// Amendment R56: the trace's event kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Event {
+    /// The harness issues a step to `at` (before `seek`).
+    Step,
+    /// The harness saw the step's frame (`at`).
+    Seen,
+    /// The preview posts a paused job requiring `at`.
+    Post,
+    /// The job's frames are ready (render starts).
+    Ready,
+    /// The job's render is done.
+    Rendered,
+    /// A reader starts a refill to t = `at`, and ends it.
+    RefillStart,
+    RefillEnd,
+    /// A refill kept the decoded frame at `at` (the window's queue).
+    Kept,
+    /// A reader starts converting the kept frame at `at`, and ends.
+    ConvertStart,
+    ConvertEnd,
+    /// A reader starts any other decode of `at`, and ends it.
+    DecodeStart,
+    DecodeEnd,
+    /// A reader goes idle (`Next::Wait`).
+    Wait,
+}
+
+static TRACING: AtomicBool = AtomicBool::new(false);
+static TRACE: Mutex<Vec<(u64, Event, i64, i64)>> = Mutex::new(Vec::new());
+static BASE: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Amendment R56: record `event` at `at` if a harness traces.
+pub(crate) fn trace(event: Event, at: i64) {
+    traced(event, at, -1);
+}
+
+/// Amendment R56: record reader `id`'s `event` at `at` if a harness traces.
+fn traced(event: Event, at: i64, id: i64) {
+    if !TRACING.load(Ordering::Relaxed) {
+        return;
+    }
+    let base = BASE.get_or_init(std::time::Instant::now);
+    let ns = nanos(base.elapsed());
+    TRACE.lock().expect("trace").push((ns, event, at, id));
+}
+
+/// Amendment R56: start a trace (an empty one).
+pub(crate) fn trace_on() {
+    TRACE.lock().expect("trace").clear();
+    TRACING.store(true, Ordering::Relaxed);
+}
+
+/// Amendment R56: stop tracing and take the events.
+pub(crate) fn trace_off() -> Vec<(u64, Event, i64, i64)> {
+    TRACING.store(false, Ordering::Relaxed);
+    std::mem::take(&mut *TRACE.lock().expect("trace"))
+}
+
+/// Amendment R56: a reader starts decoding `at`: a refill (`from`, paused),
+/// a kept frame's conversion or another decode. Returns its end event.
+pub(crate) fn decode_start(
+    (id, decoder): (u64, Option<&crate::decode::VideoDecoder>),
+    at: i64,
+    from: Option<i64>,
+    paused: bool,
+) -> Event {
+    if !TRACING.load(Ordering::Relaxed) {
+        return Event::DecodeEnd;
+    }
+    let kept = decoder.is_some_and(|decoder| decoder.kept_times().contains(&at));
+    let (start, end) = match (from.filter(|_| paused), kept) {
+        (Some(_), _) => (Event::RefillStart, Event::RefillEnd),
+        (None, true) => (Event::ConvertStart, Event::ConvertEnd),
+        (None, false) => (Event::DecodeStart, Event::DecodeEnd),
+    };
+    traced(start, at, i64::try_from(id).unwrap_or(-1));
+    end
+}
+
+/// Amendment R56: the decode of `at` ended (`end`); a refill's kept
+/// frames follow it, ascending.
+pub(crate) fn decode_end(
+    (id, decoder): (u64, Option<&crate::decode::VideoDecoder>),
+    at: i64,
+    end: Event,
+) {
+    let id = i64::try_from(id).unwrap_or(-1);
+    traced(end, at, id);
+    if end == Event::RefillEnd && TRACING.load(Ordering::Relaxed) {
+        let kept = decoder.map(crate::decode::VideoDecoder::kept_times);
+        for at in kept.unwrap_or_default() {
+            traced(Event::Kept, at, id);
+        }
+    }
+}
+
+/// Amendment R56: reader `id` goes idle (its next decode ends the wait).
+pub(crate) fn waits(id: u64) {
+    traced(Event::Wait, -1, i64::try_from(id).unwrap_or(-1));
 }

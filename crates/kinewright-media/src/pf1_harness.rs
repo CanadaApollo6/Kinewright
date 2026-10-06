@@ -761,6 +761,7 @@ fn seek_run(document: &Document, seed: u64) -> String {
     }
     let (clock, cpu) = (pf1_clock::snapshot(), pf1_clock::process_cpu_ms());
     let mut taps = Vec::new();
+    pf1_clock::trace_on();
     for _ in 0..200 {
         if at < 12 {
             at = 12 + next(n - 12);
@@ -768,10 +769,13 @@ fn seek_run(document: &Document, seed: u64) -> String {
         }
         at -= 1 + next(12);
         let before = pf1_clock::snapshot();
+        pf1_clock::trace(pf1_clock::Event::Step, at);
         let latency = op(at);
+        pf1_clock::trace(pf1_clock::Event::Seen, at);
         taps.push((latency, before, pf1_clock::snapshot()));
         backward.push(latency);
     }
+    write_trace(seed, &pf1_clock::trace_off());
     let back = backward_counts(&taps, clock, pf1_clock::process_cpu_ms() - cpu);
     let target = next(n - 800);
     op(target);
@@ -799,6 +803,26 @@ fn seek_run(document: &Document, seed: u64) -> String {
     // do, the engine's worker joined before the process moves on (an exit
     // 139 was the race of dropping it mid-teardown).
     format!("{line} {}", teardown(session))
+}
+
+/// Amendment R56 (trace): with `PF1_TRACE` set, the backward phase's events
+/// are appended to that file, one per line (ns, kind, time, reader) after a
+/// `# seed` header.
+fn write_trace(seed: u64, events: &[(u64, pf1_clock::Event, i64, i64)]) {
+    use std::{fmt::Write as _, io::Write as _};
+    let Some(path) = std::env::var_os("PF1_TRACE") else {
+        return;
+    };
+    let mut text = format!("# seed={seed:#x} lane={}\n", lane().1);
+    for (ns, event, at, id) in events {
+        let _ = writeln!(text, "{ns} {event:?} {at} {id}");
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
+    file.and_then(|mut file| file.write_all(text.as_bytes()))
+        .expect("the trace file");
 }
 
 fn mean(values: &[f64]) -> f64 {

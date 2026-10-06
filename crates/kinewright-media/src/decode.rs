@@ -2345,6 +2345,17 @@ impl VideoDecoder {
             .sum()
     }
 
+    /// Amendment R56 (trace) test support: the grid frames the decoder
+    /// keeps decoded, ascending.
+    #[cfg(test)]
+    pub(crate) fn kept_times(&self) -> Vec<i64> {
+        let mut times: Vec<i64> = (self.retained.iter())
+            .flat_map(|kept| kept.first..=kept.last)
+            .collect();
+        times.sort_unstable();
+        times
+    }
+
     /// Amendment R53 [S2c]: the decoder decodes something else; its kept
     /// refill frames go.
     pub(crate) fn drop_retained(&mut self) {
