@@ -5291,7 +5291,8 @@ present p95 (ms), held max (ms), clock stall max (ms), peak RSS (MiB) and `passe
 - **G6** (p95/p50 ≤ 3): the worst run is 2.01 (LH `feed_4x5`, 42.1 / 84.7 ms). Pass.
 - **G16** (clock stall ≤ 100 ms): the worst run is 78.4 ms. Pass.
 - **G1 and G14 on LH `typical_1080p`:** the reference passes G1 in 1 of 3 runs (dropped 2, 27, 125) and the
-  candidate in 1 of 3 (11, 80, 282). That is a shared miss, *environment-limited at load 5–10*. G14: the reference
+  candidate in 1 of 3 (11, 80, 282). That is a shared miss, *environment-limited at load 5.0–9.9* (the 1-minute
+  load at these six lanes' starts; the supplement's LH `typical_1080p` lanes started at 10.6–40.5). G14: the reference
   holds 85.1 ms in all three, and the candidate holds 85.1, 85.1 and **142.5**. By R50 item 2 that one miss counts
   against the candidate binary as built. E13.4.7 attributes it to the test-only tap, which a product build does not
   contain.
@@ -5444,11 +5445,11 @@ no `Drop` that joins its worker, is unchanged.
 | G8 L-1 (random p95 ≤ 40, GOP 60) | **Fail, against S2c** (×11–12 the reference; the reference also misses, at 63) | E13.4.2, E13.4.7 |
 | G8 L-2 (random p95 ≤ 110, `talk_recut`) | **Fail, against S2c** (the reference passes at 96–102) | E13.4.2 |
 | G8 L-3 (+1 p95 ≤ 20, GOP 60) | **Fail, against S2c** (the reference passes on LL at 19.0) | E13.4.2 |
-| G8 L-4a (backward hit p95 ≤ 20) | **Pass on LL** at GOP 60 (15.2) and `talk_recut` (14.2); LH not split (**partial**) | E13.4.3 |
+| G8 L-4a (backward hit p95 ≤ 20) | **Pass on LL** by the median at GOP 60 (15.2; one of six runs at 42.5) and `talk_recut` (14.2; range to 26.8); LH not split (**partial**) | E13.4.3 |
 | G8 L-4b (refill) | Recorded: p95 0.9–1.0 s | E13.4.3 |
 | G8 L-5 (drag ≥ 10 / 7 fps) | **Pass**: 25–27 fps (reference 3–14) | E13.4.2 |
 | G8 L-6 (release shown) | **Pass**, 36/36 | E13.4.2 |
-| G1 (LH `typical_1080p`) | Shared miss, *environment-limited at load 5–40*; notap drops the fewest | E13.4.4, E13.4.7 |
+| G1 (LH `typical_1080p`) | Shared miss, *environment-limited*: load at lane start 5.0–9.9 (main run), 10.6–40.5 (supplement); notap drops the fewest | E13.4.4, E13.4.7 |
 | G6 (p95/p50 ≤ 3) | **Pass**, worst 2.01 | E13.4.4 |
 | G14 (held ≤ 100 ms, LH typical) | **Pass without the tap** (85.1–85.3). The cand binary misses once per run set (142.5, 171.2), and the reference once in the supplement (113.1) | E13.4.4, E13.4.7 |
 | G16 (clock stall ≤ 100 ms) | **Pass**, worst 78.4 | E13.4.4 |
@@ -5460,7 +5461,9 @@ no `Drop` that joins its worker, is unchanged.
 | Q-3 controls | Each fails its metric on LL and LH | E13.4.5 |
 
 **S2c does not close at `abcd7cb`: G8's L-1, L-2 and L-3 fail, and the cause is S2c's.** The drag is fixed
-(L-5) and nothing else regressed once the tap is excluded. The fixes below are design changes, so they go back to
+(L-5), and nothing else regressed once the tap is excluded, on the supplement's evidence. That rests on n = 2 notap
+runs per cell, and LL `typical_1080p` notap dropped 8 and 45 frames against the reference's 2 and 2, so the claim is
+provisional until a 3-pair re-time (E13.5 settles it). The fixes below are design changes, so they go back to
 the lead and are not made here:
 1. **L-1/L-2: refill only on steps.** S-3 refills when t is below the last playhead and not in the ring. A random
    click-seek backward meets that test, so it pays a window of up to 16 frames. Proposal: refill only when t is
