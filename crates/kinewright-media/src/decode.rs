@@ -1129,7 +1129,8 @@ pub(crate) type Anchor = (isize, Option<i64>, bool);
 #[derive(Default)]
 #[allow(clippy::struct_excessive_bools, reason = "one flag per S-2 rule")]
 struct Continuation {
-    /// Rule 4: the demuxer/codec pair is witnessed (`mov`/H.264).
+    /// Rule 4: the demuxer/codec pair is witnessed (`mov`/H.264, not
+    /// fragmented: `unfragmented_mov`).
     pair: bool,
     /// Rule 1: today's seek selects the decoder's video stream
     /// (`av_find_default_stream_index` can pick no other).
@@ -1242,6 +1243,59 @@ fn selects_stream(input: &ffmpeg::format::context::Input, index: usize) -> bool 
             attached || stream.parameters().medium() != ffmpeg::media::Type::Video
         }
     })
+}
+
+/// PF1 S2c S-2 rule 4 (lead ruling after R51/R52): the `mov` pair excludes
+/// fragmented MP4, whose `moof` path C-4 never witnessed. A fragmented file
+/// declares its fragments with an `mvex` box in `moov` (ISO/IEC 14496-12
+/// §8.8.1), so the top-level boxes are walked to `moov` and its children
+/// read. True only for a `moov` read without `mvex`; anything unreadable,
+/// odd or past 64 top-level boxes counts as fragmented (no continuation).
+fn unfragmented_mov(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    /// The box at `at` below `end`: (its size, its type, its header size).
+    fn header(file: &mut std::fs::File, at: u64, end: u64) -> Option<(u64, [u8; 4], u64)> {
+        let mut head = [0u8; 16];
+        file.seek(SeekFrom::Start(at)).ok()?;
+        file.read_exact(&mut head[..8]).ok()?;
+        let kind: [u8; 4] = head[4..8].try_into().ok()?;
+        let (size, header) = match u32::from_be_bytes(head[..4].try_into().ok()?) {
+            0 => (end - at, 8),
+            1 => {
+                file.read_exact(&mut head[8..]).ok()?;
+                (u64::from_be_bytes(head[8..].try_into().ok()?), 16)
+            }
+            size => (u64::from(size), 8),
+        };
+        (size >= header && size <= end - at).then_some((size, kind, header))
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(end) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let mut at = 0;
+    for _ in 0..64 {
+        let Some((size, kind, head)) = header(&mut file, at, end) else {
+            return false;
+        };
+        if &kind == b"moov" {
+            let (mut child, moov_end) = (at + head, at + size);
+            while child < moov_end {
+                let Some((size, kind, _)) = header(&mut file, child, moov_end) else {
+                    return false;
+                };
+                if &kind == b"mvex" {
+                    return false;
+                }
+                child += size;
+            }
+            return true;
+        }
+        at += size;
+    }
+    false
 }
 
 /// PF1 S2c C-4: a held frame: its grid position, `best_effort_timestamp` and a
@@ -1846,7 +1900,8 @@ impl VideoDecoder {
         // PF1 S2c S-2 rules 1 and 4, fixed by the file.
         let s2 = Continuation {
             pair: input.format().name().split(',').any(|name| name == "mov")
-                && decoder.id() == ffmpeg::codec::Id::H264,
+                && decoder.id() == ffmpeg::codec::Id::H264
+                && unfragmented_mov(path),
             stream: selects_stream(&input, stream_index),
             ..Continuation::default()
         };
@@ -3467,7 +3522,7 @@ mod tests {
     }
 
     /// PF1 S2c S-2 rules 1 and 4, as the decoder reads them at open: the
-    /// witnessed pair (`mov`/H.264) and the stream today's seek selects
+    /// witnessed pair (`mov`/H.264, not fragmented) and the stream today's seek selects
     /// (an audio stream or a cover picture beside the video cannot win; a
     /// second video stream might). Outside either, every paused frame
     /// seeks, c + 1 included; inside both, c + 1 continues.
@@ -3498,6 +3553,29 @@ mod tests {
                 (true, false),
             ),
             ("s2-mpeg4", "", "-c:v mpeg4 -g 12", "mp4", (false, true)),
+            // Fragmented MP4 is outside the witnessed pair (`mvex` in
+            // `moov`, with or without an empty `moov`); `moov` first is not.
+            (
+                "s2-fragmented",
+                "",
+                "-c:v libx264 -g 12 -movflags frag_keyframe+empty_moov",
+                "mp4",
+                (false, true),
+            ),
+            (
+                "s2-fragmented-moov",
+                "",
+                "-c:v libx264 -g 12 -movflags frag_keyframe",
+                "mp4",
+                (false, true),
+            ),
+            (
+                "s2-faststart",
+                "",
+                "-c:v libx264 -g 12 -movflags +faststart",
+                "mp4",
+                (true, true),
+            ),
             (
                 "s2-matroska",
                 "",
