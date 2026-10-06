@@ -912,7 +912,12 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 #[cfg(test)]
                 lane.notify(); // a test waiting for a reopen
             }
-            Next::Decode { at, version, bytes } => {
+            Next::Decode {
+                at,
+                version,
+                bytes,
+                from,
+            } => {
                 // A stop meant for an earlier lookahead decode (K-2) lapses.
                 stop.store(false, Ordering::Release);
                 let paused = state.paused_plan;
@@ -924,11 +929,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 #[cfg(test)]
                 let before = DecodeRecord::work(decoder.as_ref());
                 let result = match &mut decoder {
-                    Some(decoder) => spec.decode(decoder, at, paused),
+                    Some(decoder) => spec.decode(decoder, at, paused, from),
                     None => spec.open(threads, stop).and_then(|opened| {
                         #[cfg(test)]
                         lane.decoder_open(id, true);
-                        spec.decode(decoder.insert(opened), at, paused)
+                        spec.decode(decoder.insert(opened), at, paused, from)
                     }),
                 };
                 // S2c-1: P-seek's `drag_seeks`.

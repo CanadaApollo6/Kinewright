@@ -343,16 +343,27 @@ impl SourceSpec {
     /// The frame at `at`, exactly as the renderer's Seek or Sequential
     /// window would cache it (continuing from the decoder's cursor). PF1
     /// S2c S-2: a `paused` job's frame continues only inside S-2's domain.
+    /// Amendment R53 [S2c]: `from` is a paused refill's window start (`at`
+    /// is its t): only `at` is converted and the window's frames are kept;
+    /// a kept frame at `at` is converted without decoding; any other decode
+    /// drops the kept frames.
     pub(crate) fn decode(
         &self,
         decoder: &mut VideoDecoder,
         at: i64,
         paused: bool,
+        from: Option<i64>,
     ) -> Result<WorkingFrame, MediaError> {
         let mut window = FrameCache::new(1);
-        if paused {
+        if let Some(start) = from.filter(|_| paused) {
+            decoder.decode_refill(TimeCode(start), TimeCode(at), &mut window)?;
+        } else if let Some(frame) = decoder.convert_retained(at) {
+            return frame;
+        } else if paused {
+            decoder.drop_retained();
             decoder.decode_paused(decoder.cursor(), TimeCode(at), &mut window)?;
         } else {
+            decoder.drop_retained();
             decoder.decode_window_sequential(TimeCode(at), TimeCode(at), &mut window)?;
         }
         let frame = window.frame_at_or_before(TimeCode(at));

@@ -1800,8 +1800,24 @@ pub(crate) struct VideoDecoder {
     interruptible: bool,
     /// PF1 S2c S-2: the run since the last seek, for forward continuation.
     s2: Continuation,
+    /// Amendment R53 [S2c]: a refill's window [start, t) being decoded: its
+    /// frames are kept unconverted (`retained`) rather than converted.
+    retaining: Option<(i64, i64)>,
+    /// Amendment R53 [S2c]: the refill window's decoded frames, not yet
+    /// converted: (first grid frame, last grid frame, timestamp, frame).
+    retained: Vec<KeptFrame>,
     #[cfg(test)]
     probe: DecoderProbe,
+}
+
+/// Amendment R53 [S2c]: a refill window's decoded frame, kept unconverted
+/// for the grid frames `first..=last`.
+struct KeptFrame {
+    first: i64,
+    last: i64,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pts: Option<i64>,
+    decoded: ffmpeg::frame::Video,
 }
 
 impl VideoDecoder {
@@ -2012,6 +2028,8 @@ impl VideoDecoder {
             stop: stop.cloned(),
             interruptible: stop.is_some(),
             s2,
+            retaining: None,
+            retained: Vec::new(),
             #[cfg(test)]
             probe: DecoderProbe::default(),
         })
@@ -2208,6 +2226,60 @@ impl VideoDecoder {
         let result = self.paused(from, t, cache);
         self.s2.frame_checks = false;
         result
+    }
+
+    /// Amendment R53 [S2c]: a paused backward refill of the window
+    /// [start, t]. Every frame is decoded on the routes `decode_paused`
+    /// takes frame by frame (a seek at start, then S-2's continuation), but
+    /// only t is converted (into `cache`): the frames of [start, t) are
+    /// kept for `convert_retained`. A failure keeps none.
+    pub(crate) fn decode_refill<T: DecoderFrame>(
+        &mut self,
+        start: TimeCode,
+        t: TimeCode,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        self.retained.clear();
+        self.retaining = Some((start.0, t.0));
+        let mut window = FrameCache::<T>::new(1);
+        let mut result = Ok(());
+        for at in start.0..t.0 {
+            result = self.decode_paused(self.cursor(), TimeCode(at), &mut window);
+            if result.is_err() {
+                break;
+            }
+        }
+        self.retaining = None;
+        result = result.and_then(|()| self.decode_paused(self.cursor(), t, cache));
+        if result.is_err() {
+            self.retained.clear();
+        }
+        result
+    }
+
+    /// Amendment R53 [S2c]: the kept refill frame at `at`, converted, if
+    /// the decoder keeps one (no decode, no seek; the cursor stays).
+    pub(crate) fn convert_retained<T: DecoderFrame>(
+        &mut self,
+        at: i64,
+    ) -> Option<Result<T, MediaError>> {
+        let index = (self.retained.iter()).position(|r| (r.first..=r.last).contains(&at))?;
+        let kept = self.retained.swap_remove(index);
+        #[cfg(test)]
+        {
+            self.probe.converting_pts = kept.pts;
+        }
+        let frame = self.convert::<T>(&kept.decoded);
+        if kept.first != kept.last {
+            self.retained.push(kept); // its other grid frames
+        }
+        Some(frame)
+    }
+
+    /// Amendment R53 [S2c]: the decoder decodes something else; its kept
+    /// refill frames go.
+    pub(crate) fn drop_retained(&mut self) {
+        self.retained.clear();
     }
 
     fn paused<T: DecoderFrame>(
@@ -2512,6 +2584,21 @@ impl VideoDecoder {
         };
         let first = pending.first_grid_frame.max(start.0);
         let last = next_grid_frame.saturating_sub(1).min(end.0);
+        // Amendment R53 [S2c]: inside a refill's window the frame is kept,
+        // not converted (`convert_retained` converts it later).
+        let window = self.retaining.map(|(from, to)| from..to);
+        if first <= last && window.is_some_and(|w| w.contains(&first) && w.contains(&last)) {
+            let decoded = pending.decoded.as_ref().ok_or_else(|| {
+                MediaError::Backend("pending video frame has no pixels".to_owned())
+            })?;
+            self.retained.push(KeptFrame {
+                first,
+                last,
+                pts: decoded.timestamp(),
+                decoded: decoded.clone(),
+            });
+            return Ok(());
+        }
         if first <= last {
             let decoded = pending
                 .decoded

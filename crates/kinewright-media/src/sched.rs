@@ -178,6 +178,9 @@ pub(crate) struct Plan {
     pub(crate) lookahead: Vec<i64>,
     /// Amendment R41: a fallback region (see [`Region::merged`]).
     pub(crate) merged: bool,
+    /// Amendment R53 [S2c]: a refill's window (start, t): `required` is t
+    /// first, then descending to start.
+    pub(crate) window: Option<(i64, i64)>,
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +206,12 @@ pub(crate) struct Slot<K> {
     cancelled: bool,
     /// K-1: the bytes reserved for its decode in flight (a handoff).
     flight: usize,
+    /// Amendment R53 [S2c]: the window times whose decoded frames its
+    /// decoder keeps (a refill's [start, t) less those converted since).
+    retained: BTreeSet<i64>,
+    /// Amendment R53 [S2c]: its decode in flight converts a kept frame (the
+    /// decoder's cursor does not move).
+    converting: bool,
 }
 
 /// One region of demand on a source, served by one reader.
@@ -232,6 +241,9 @@ pub(crate) enum Next {
         at: i64,
         version: u64,
         bytes: usize,
+        /// Amendment R53 [S2c]: `at` is a refill's t and this its window's
+        /// start: decode [from, at], convert `at` only, keep the rest.
+        from: Option<i64>,
     },
     /// H-5: queue for `want` permits, then open at the grant.
     Open {
@@ -627,12 +639,18 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         self.pending.clear();
         let regions_len = regions.len();
         for (key, region) in regions {
+            // Amendment R53 [S2c]: the reader that keeps the region's first
+            // frame decoded first, then the nearest.
+            let first = region.first();
             let free = (self.slots.iter_mut())
                 .filter(|slot| slot.key == key && slot.state != ReaderState::Retiring)
                 .filter(|slot| slot.plan.required.is_empty() && slot.plan.lookahead.is_empty())
-                .min_by_key(|slot| slot.cursor.map_or(u64::MAX, |c| c.abs_diff(region.first())));
+                .min_by_key(|slot| {
+                    let near = slot.cursor.map_or(u64::MAX, |c| c.abs_diff(first));
+                    (!slot.retained.contains(&first), near)
+                });
             match free {
-                Some(slot) => slot.plan = plan(version, region),
+                Some(slot) => slot.plan = plan(version, region, self.windows.get(&key).copied()),
                 None => self.pending.push((key, region)),
             }
         }
@@ -686,6 +704,22 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 }
                 continue;
             }
+            // Amendment R53 [S2c]: a step into the held window to a frame a
+            // reader keeps decoded (not yet converted), or is converting,
+            // keeps the window: that reader converts it, with no refill.
+            let held = self
+                .windows
+                .get(key)
+                .filter(|(start, end)| (start..=end).contains(&&t));
+            let kept = (self.slots.iter()).any(|slot| {
+                let converting = slot.converting
+                    && matches!(slot.state, ReaderState::Decoding { at, .. } if at == t);
+                slot.key == *key && (converting || slot.retained.contains(&t))
+            });
+            if let Some(window) = held.filter(|_| kept) {
+                windows.insert(key.clone(), *window);
+                continue;
+            }
             let f = sizes.get(key).copied().unwrap_or(0);
             let frames = share.checked_div(f).unwrap_or(1).clamp(1, WINDOW_FRAMES);
             let b = i64::try_from(frames).unwrap_or(1);
@@ -730,10 +764,11 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             let (key, region) = self.pending.remove(index);
             let id = self.next_id;
             self.next_id += 1;
+            let window = self.windows.get(&key).copied();
             self.slots.push(Slot {
                 id,
                 key: key.clone(),
-                plan: plan(self.version, region),
+                plan: plan(self.version, region, window),
                 state: ReaderState::Idle { since: now },
                 cursor: None,
                 last: None,
@@ -742,6 +777,8 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 threads: 0,
                 cancelled: false,
                 flight: 0,
+                retained: BTreeSet::new(),
+                converting: false,
             });
             spawn.push((id, key));
         }
@@ -787,6 +824,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     pub(crate) fn closed(&mut self, id: u64) {
         if let Some(slot) = self.slot(id) {
             (slot.threads, slot.cursor) = (0, None);
+            slot.retained.clear();
         }
     }
 
@@ -996,8 +1034,24 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let rewind = slot.plan.merged && slot.last.is_some_and(|last| at <= last);
         (slot.state, slot.flight) = (ReaderState::Decoding { at, version }, bytes);
         (slot.last, slot.floor) = (Some(at), Some(at));
+        // Amendment R53 [S2c]: a refill's t decodes its window and keeps it;
+        // a kept time converts; anything else decodes and drops the kept.
+        let from = (slot.plan.window).and_then(|(start, t)| (t == at).then_some(start));
+        slot.converting = false;
+        if let Some(start) = from {
+            slot.retained = (start..at).collect();
+        } else if slot.retained.remove(&at) {
+            slot.converting = true;
+        } else {
+            slot.retained.clear();
+        }
         self.merged_rewinds += u64::from(rewind);
-        Next::Decode { at, version, bytes }
+        Next::Decode {
+            at,
+            version,
+            bytes,
+            from,
+        }
     }
 
     /// H-3: a reader's result for `at`, decoded under plan `version`. A frame
@@ -1027,10 +1081,18 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         }
         slot.state = ReaderState::Idle { since: now };
         let key = slot.key.clone();
+        let converted = std::mem::take(&mut slot.converting);
         match result {
             Ok(frame) => {
-                slot.cursor = Some(at + 1);
-                let wanted = (self.wanted.get(&key)).is_some_and(|wanted| wanted.contains(&at));
+                if !converted {
+                    slot.cursor = Some(at + 1);
+                }
+                // Amendment R53 [S2c]: a converted window frame stays held
+                // after a newer post, as the ring's window frames do.
+                let held =
+                    (self.windows.get(&key)).is_some_and(|(start, t)| (start..=t).contains(&&at));
+                let wanted =
+                    held || (self.wanted.get(&key)).is_some_and(|wanted| wanted.contains(&at));
                 // K-2: while draining, only required frames are kept.
                 if wanted && (required || !self.draining) {
                     if let Some(bytes) = self.reserved.remove(&(key.clone(), at)) {
@@ -1044,6 +1106,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             }
             Err(error) => {
                 slot.cursor = None;
+                slot.retained.clear();
                 let current = version == slot.plan.version;
                 if current && required {
                     let old = self.failures.insert((key, at), (version, error));
@@ -1071,6 +1134,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 }
             }
             (slot.flight, slot.cursor) = (0, None);
+            (slot.retained, slot.converting) = (BTreeSet::new(), false);
             if slot.state != ReaderState::Retiring {
                 slot.state = ReaderState::Idle { since: now };
             }
@@ -1528,15 +1592,27 @@ impl PermitBook {
     }
 }
 
-fn plan(version: u64, mut region: Region) -> Plan {
+fn plan(version: u64, mut region: Region, window: Option<(i64, i64)>) -> Plan {
     // Amendment R43: a reader walks its plan in order.
     region.required.sort_unstable();
     region.lookahead.sort_unstable();
+    // Amendment R53 [S2c]: a refill's region (its window, t included) walks
+    // t first, then down the window.
+    let window = window.filter(|(start, t)| {
+        !region.merged
+            && region.required.len() > 1
+            && region.required.contains(t)
+            && region.required.iter().all(|at| (start..=t).contains(&at))
+    });
+    if window.is_some() {
+        region.required.reverse();
+    }
     Plan {
         version,
         required: region.required,
         lookahead: region.lookahead,
         merged: region.merged,
+        window,
     }
 }
 
@@ -1994,7 +2070,9 @@ mod tests {
             let position = slot.and_then(|slot| slot.last);
             let before = (self.readers.draining, self.readers.live);
             match self.readers.next(id, self.now, self.shutdown) {
-                Next::Decode { at, version, bytes } => {
+                Next::Decode {
+                    at, version, bytes, ..
+                } => {
                     // Amendment R43: after its first decode in a plan
                     // version a reader only moves past its position: at
                     // most one rewind per job, that first decode.
@@ -2828,7 +2906,10 @@ mod tests {
         book.enqueue(a, 2);
         assert_eq!(book.poll(a), Poll::Granted(2));
         readers.granted(a, Some(2), Duration::ZERO);
-        let Next::Decode { at, version, bytes } = readers.next(a, Duration::ZERO, false) else {
+        let Next::Decode {
+            at, version, bytes, ..
+        } = readers.next(a, Duration::ZERO, false)
+        else {
             panic!("A decodes its required frame");
         };
         let fr = Fr {
@@ -2886,7 +2967,9 @@ mod tests {
             for (id, key) in ids {
                 match readers.next(id, Duration::ZERO, false) {
                     Next::Open { want } => readers.granted(id, Some(want), Duration::ZERO),
-                    Next::Decode { at, version, bytes } => {
+                    Next::Decode {
+                        at, version, bytes, ..
+                    } => {
                         decoded.entry(id).or_default().push(at);
                         let value = frame(key, at);
                         let fr = Fr {
@@ -3184,7 +3267,9 @@ mod tests {
         let mut times = Vec::new();
         for _ in 0..BUDGET {
             match step_reader(readers, id) {
-                Next::Decode { at, version, bytes } => {
+                Next::Decode {
+                    at, version, bytes, ..
+                } => {
                     times.push(at);
                     deliver_ok(readers, id, key, (at, version, bytes));
                 }
@@ -3217,6 +3302,7 @@ mod tests {
             at: 14,
             version,
             bytes,
+            ..
         } = step_reader(&mut readers, far)
         else {
             panic!("the far reader decodes 14");
@@ -3270,7 +3356,10 @@ mod tests {
         let id = readers.slots[0].id;
         let mut decoded = Vec::new();
         while decoded.len() < 3 {
-            if let Next::Decode { at, version, bytes } = step_reader(&mut readers, id) {
+            if let Next::Decode {
+                at, version, bytes, ..
+            } = step_reader(&mut readers, id)
+            {
                 decoded.push(at);
                 deliver_ok(&mut readers, id, 0, (at, version, bytes));
             }
@@ -3308,7 +3397,9 @@ mod tests {
                     decoded.push(15);
                     break;
                 }
-                Next::Decode { at, version, bytes } => {
+                Next::Decode {
+                    at, version, bytes, ..
+                } => {
                     decoded.push(at);
                     deliver_ok(&mut readers, id, 0, (at, version, bytes));
                 }
