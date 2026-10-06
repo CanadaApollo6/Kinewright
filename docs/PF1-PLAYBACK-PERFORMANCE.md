@@ -697,14 +697,15 @@ today's seek.
    the shadow fails, the correction is unknown and the reader seeks normally.
 2. *Matching anchor:* at the run's seek to t0 the real context's first packet
    of that video stream must equal A(t0) (`pos`, DTS, key), else continuation
-   is disabled for the decoder. A(t) must equal A(t0), and no key packet may
-   have been read since it (one appearing before t is produced abandons
-   continuation for a seek).
+   is disabled for the decoder. A(t) must equal A(t0), and the decoder must
+   have been fed continuously from A(t0) (Amendment R51 withdrew the clause
+   that no key packet may have been read since it).
 3. *Valid decoded timestamps:* every frame produced since the anchor has a
    `best_effort_timestamp`, strictly increasing; selection uses them, never
    `fallback_index`; c < t ≤ c + 12 frames.
 4. *Witnessed pair:* the demuxer/codec pair is on the list (`mov`/H.264 to
-   start), extended only by adding witnesses.
+   start, fragmented MP4 excluded: the lead's ruling with R51/R52), extended
+   only by adding witnesses.
 
 Here a seek to t would feed the same packets from the same flushed state; the
 witnesses must show `pending`, `lookahead`, `continuation_at` and `eof_sent`
@@ -723,10 +724,10 @@ cut; cancellation mid-run.
 `VideoDecoder::decode_paused(cursor, t)`; a playback plan keeps
 `decode_window_sequential` (rule 2 would seek at every GOP and change
 open-GOP leading frames there). The decoder tracks, since its last seek, the
-first video packet, whether a later key packet was read, and whether every
-frame's timestamp was present and increasing; a running continuation that
-reads a key packet or meets a bad timestamp before t is complete is abandoned
-for `decode_window(t, t)`. After each paused seek the shadow's A(t0) is read
+first video packet and whether every frame's timestamp was present and
+increasing; a running continuation that meets a bad timestamp before t is
+complete is abandoned for `decode_window(t, t)` (a key packet read no longer
+abandons it: Amendment R51). After each paused seek the shadow's A(t0) is read
 and compared with the real first packet (a mismatch latches continuation off
 until a reset: an error, or a new decoder). The shadow is opened on first
 use, with the reader's interrupt; a second demuxer context (its own copy of
@@ -750,8 +751,10 @@ gated (D4).
 *Implementation [S2c-3].*
 - **Scope.** A paused job's sources each with one required time t go to
   `Readers::backward`, under the post's lock.
-- **Refill.** t refills when it is below the source's last playhead (K-5's
-  travel memory) and its frame is not in the ring. B is
+- **Refill.** t refills when its frame is not in the ring and it is a step
+  back: last − B < t < last, with `last` the source's last posted required
+  time (K-5's travel memory, source space) and B the window's own size
+  (Amendment R52; a longer jump back seeks alone, as before S-3). B is
   ⌊(C − G − H) / n / f⌋ clamped to 1…16, with H and G the job's set. The
   window is [start, t], start = max(the clip's in-point, t − B + 1), and
   [start, t) joins t's required times. K-2 therefore reserves the whole
@@ -763,8 +766,11 @@ gated (D4).
   decodes nothing. Held frames that the job does not require are lookahead
   to K-5: a drain evicts the frames behind the travel first, so after a
   reversal those below the playhead go first.
-- **Exclusions.** Playback jobs, forward steps and sources with several
-  required times hold no window.
+- **Exclusions.** Playback jobs, forward steps, jumps back of B or more
+  (R52) and sources with several required times hold no window. Agent
+  renders (render-for-agent) never reach the readers (`run_agent` renders
+  synchronously with `Seek`), so they neither refill nor move the travel
+  memory.
 
 ## 9 Audio clock and A/V sync
 
@@ -1014,6 +1020,25 @@ The Omarchy bar and its widget pollers are baseline load, not contamination.
    sampler. Contamination lines are annotations, and the runner's quiet-wait is removed. The run must not overlap
    the worker's own cargo builds: build everything first, then time.
 5. G3 stays environment-blocked under R48.
+
+**Amendment R51 [S2c] Rule 2 is the anchor test alone (lead ruling, 2026-10-06).** The S2c timing (E13.4) showed that
+abandoning continuation on *any* key packet read, read-ahead included, makes a refill cost about 6 seeks and 270
+decodes and makes +1 steps near a key seek again (the L-1/L-2/L-3 regressions). Rule 2 becomes: A(t) must equal
+A(t0), and the decoder has been fed continuously from A(t0). The key-packet clause is withdrawn.
+- *Why it is safe:* with the same anchor and an unbroken feed, a fresh seek to t feeds the same packets from the same
+  flushed state. A key that presents at or before t gives a different corrected A(t), and the shadow check rejects
+  it. This covers B-frame reordering, open GOP and edit lists, because the shadow uses the same `seek` call.
+- *The condition:* `pair && stream && !disabled && continuation_at == c + 1 && c < t ≤ c + 12 && !stamps_broken &&
+  run.is_some() && first == run && shadow_anchor(t) == run`; `key_read` and the key branch of `on_packet` are gone.
+- *Order:* the C-4 oracle (`Model::expected`, the positive control's rules) changed first, in its own commit
+  (`f967bae`), then the implementation (`700b729`). Evidence: E13.5.
+
+**Amendment R52 [S2c] S-3 refills only on steps (lead ruling, 2026-10-06).** A backward paused target t refills
+only when last − B < t < last. `last` is the source's last posted required time (the existing travel memory, in
+source space, not the timeline playhead); B is the window's actual size (≤ 16, `WINDOW_FRAMES`). A larger backward
+jump seeks as `ad8f896` did, so a click-seek back no longer pays a window (L-1/L-2). Hits inside a held window stay
+unconditional. Agent paused jobs neither refill nor update the travel memory: they render synchronously outside the
+readers. Implementation `de7a00f`; evidence E13.5.
 
 **Rec:** L-1m/L-2m and L-4b; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
