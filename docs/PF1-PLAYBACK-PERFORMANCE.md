@@ -707,6 +707,19 @@ today's seek.
    start, fragmented MP4 excluded: the lead's ruling with R51/R52), extended
    only by adding witnesses.
 
+*Open GOP: the earlier-key retry (S2c-5, R39 item 4 (b), lead rulings of
+2026-10-06).* On a witnessed pair (rule 4's list, the same one), a
+`decode_window` whose seek landed on a key packet past the stream start, and
+whose first decoded frame presents after `start`, seeks once more, to just
+before that key's DTS. It then decodes from the earlier key, which holds the
+open-GOP leading frames' references. This applies to every Seek render
+(preview, agent thumbnails, playback region starts), where these frames were
+`no_frame` errors before, and that change is the intended fix. A retried run
+has no anchor (no A(t0)): rule 2 cannot hold, so the next paused frame seeks,
+and the rule-2 latch is not set by a retried seek. Its first packet is the
+earlier key's, not A(t). Other demuxers keep today's single seek, so
+AviDtsGuess's misses stay on the backlog ((c)).
+
 Here a seek to t would feed the same packets from the same flushed state; the
 witnesses must show `pending`, `lookahead`, `continuation_at` and `eof_sent`
 equal the seek path's. Cancellation is checked between produced frames; the
