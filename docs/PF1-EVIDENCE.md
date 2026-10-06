@@ -5974,7 +5974,7 @@ drops (E13.5.8). Still open:
   are strengthened.
 - **Lines:** see E13.5.1. This section is documentation only.
 
-### E13.6 S2c-5, Amendments R53–R55 and the closing re-time (2026-10-06): stopped at R55's measurement
+### E13.6 S2c-5, Amendments R53–R56 and the closing re-time (2026-10-06): stopped at R56's trace
 
 The lead's order (r53-s2c5-rulings.md): S2c-5, then R53, gates, the workspace test, the closing re-time, this
 section. Steps 1–4 are done. **The closing re-time stopped after a paired check of the R53 gates:** both L-4
@@ -5982,7 +5982,8 @@ gates miss at GOP 60 (E13.6.4). This section is partial and goes to the lead wit
 
 Amendment R54 (E13.6.6) then fixed the refill: L-4b passes, L-4a still misses. Amendment R55 asked for a
 measurement first and a stop if a hit's wait is not mostly conversion. It is not (E13.6.7), so R55 stopped
-there: no conversion change was made. **This section is partial.**
+there: no conversion change was made. Amendment R56 asked for a trace first and a stop if the conversions run
+back to back and still fall behind. They do (E13.6.8), so R56 stopped there too. **This section is partial.**
 
 #### E13.6.1 S2c-5, open GOP (b)
 
@@ -6176,3 +6177,49 @@ Findings:
   that is an estimate; its p95 was not measured.
 - The process CPU per refill counts everything in the backward phase (the hits' renders and lavapipe's CPU
   rendering on LL), not only the refill.
+
+#### E13.6.8 Amendment R56, step 1: the trace (stopped)
+
+Commits: `794caf3` (test-build trace in `pf1_clock`; no behaviour change), `8257911` (R56 design text, D12, D13).
+One pair per lane, `seek_gop60`, reference `count2-ref-ad8f896`, candidate `cand-794caf3` (`3d0e7d0c…`) with
+`PF1_TRACE`, 15:38–15:45 EDT. All exit 0, except the LH reference: it exited 139 after `test result: ok` (a
+teardown crash). Files: `r56/timing-r56t.log.gz`, the traces `r56/trace-r56t-{LL,LH}.txt.gz`, and the analysis
+scripts `r56/trace.py`, `extra.py` and `est.py`.
+
+The candidate's own counters match r55m: hit p95 20.1 / 28.6 / 23.9 (LL) and 24.6 / 28.3 / 30.9 (LH), with 11–22
+of ~124 hits pre-converted.
+
+What the reader was doing when each in-window hit was posted (all three runs, 372 hits per lane; times in ms):
+
+| Lane | Converting a frame above the new t | Converting t itself | t already converted | Wait (mean / p95): above / own / pre-converted |
+|---|---|---|---|---|
+| LL | 286 (77%): 2.1 to finish it, then 4.7 for t | 29 (8%) | 57 (15%) | 6.8 / 10.2, 2.6 / 5.0, 0.8 / 6.9 |
+| LH | 289 (78%): 3.3 to finish it, then 6.5 for t | 25 (7%) | 58 (16%) | 9.9 / 16.3, 4.0 / 9.3, 1.2 / 9.7 |
+
+Findings:
+- **The conversions run back to back.** On the same reader, the median gap between one window conversion and the
+  next is 0.02 ms. The reader went idle 39 (LL) and 25 (LH) times, and never while it still kept an unconverted
+  frame. No hit, render, demand, hand-off or job-thread stall holds them up: they run on the reader thread, not
+  the preview's. About 3.0–3.2 conversions finish between one post and the next.
+- **They still fall behind, because the stepper skips frames.** P-seek's backward steps are 1–12 frames (mean
+  6.8 here), and a window lives 1.6 hits (228 refills, 372 hits). In the ~20 ms between posts the reader
+  converts t − 1, t − 2 and t − 3. The next step usually lands below them, so the frame in flight is one the
+  stepper skipped.
+- **Most window conversions are for frames never shown.** Of 1,891 (LL) and 1,786 (LH), only 388 and 390 are of
+  frames a later step showed. 632 and 611 started above the newest posted t: the descending pass resumes from the
+  top of what is left, so after a step it converts the skipped frames first.
+- The free time between a hit's render and the next post is 2.7 ms (the harness's own turn). The rest of a cycle
+  is the hit's wait and render, during which the conversions run.
+
+Under R56 item 1 ("if the trace shows conversions really do run back-to-back and still fall behind, stop and
+report"), this round stops here; no scheduling change was made. For the lead, **partial (estimates, not
+measured):**
+- Re-prioritizing (after a step, convert below the new t first; never above it) removes the 632 / 611
+  conversions that start above t, and their CPU. It does not change how many frames fit between posts (about 3),
+  so a step longer than about 3 frames still lands on an unconverted frame. With steps uniform on 1–12, that is
+  about three hits in four.
+- A second lane converting t at once, instead of after the frame in flight, removes the "finish it" part. Taking
+  that part out of each traced hit leaves hit p95 at 20.9 (LL) and 25.3 (LH) ms. Taking the whole wait out leaves
+  16.0 and 16.7. So for L-4a this stepper needs nearly every hit pre-converted. That means converting the whole
+  skipped range (about 6 frames, 30–40 ms) within one ~20 ms cycle: two to three lanes beyond the reader, over
+  R56's one-extra-thread cap.
