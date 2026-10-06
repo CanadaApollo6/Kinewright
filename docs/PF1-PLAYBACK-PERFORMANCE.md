@@ -755,11 +755,12 @@ raised while decoded frames drain reads no further packet.
 
 **S-3 [S2c] Bounded backward window.** On a backward paused step to a
 non-resident target t: B = clamp(share in frames, 1, 16), start = max(source
-start, clip in-point, t − B + 1). The reader seeks to the key ≤ start, decodes
-to t and converts only [start, t], a demand region (K-5). A hit is one render
-(L-4a); a refill is a seek, plus decode from that key (possibly in an earlier
-GOP), plus B conversions (L-4b, recorded). GOPs over 250 are recorded, not
-gated (D4).
+start, clip in-point, t − B + 1). The reader seeks and decodes exactly as a
+fresh paused seek to t (Amendment R54): the window is the decoded frames that
+land in [start, t − 1] on that decode, a demand region (K-5); it never seeks to
+an earlier key to fill the window, so near a GOP start the window is smaller.
+A hit is one render (L-4a); a refill is t's own seek and decode, plus t's
+conversion (L-4b: time to t). GOPs over 250 are recorded, not gated (D4).
 
 *Implementation [S2c-3].*
 - **Scope.** A paused job's sources each with one required time t go to
@@ -771,14 +772,22 @@ gated (D4).
   ⌊(C − G − H) / n / f⌋ clamped to 1…16, with H and G the job's set. The
   window is [start, t], start = max(the clip's in-point, t − B + 1), and
   [start, t) joins t's required times. K-2 therefore reserves the whole
-  window, and B·f ≤ share keeps the set within C. The reader decodes the
-  window ascending: one seek to the key ≤ start, then S-2's continuation.
-- **t first (Amendment R53).** The refill's reader decodes [start, t] on
-  those same routes frame by frame, but converts only t; it keeps the
-  decoded (unconverted) frames of [start, t) and publishes t. The window's
-  conversions then follow in the same job, one plan step each, descending
-  from t − 1. A newer post cancels the rest between frames; the frames
-  already converted stay held. A step to a window frame not yet converted
+  window, and B·f ≤ share keeps the set within C. Amendment R54: the
+  reader seeks and decodes as a fresh paused seek to t (the same anchor and
+  S2c-5 retry), keeping the decoded frames that land in [start, t − 1]; the
+  window is then clipped to the frames kept (the times below them stop
+  being required and their reservations return). A later step below the
+  anchor is an ordinary refill in the earlier GOP. A window frame's
+  reservation is max(f, d), d its decoded size (and B uses max(f, d) for
+  f), so the kept frames are inside K-1.
+- **t first (Amendment R53).** The refill's reader converts only t; it
+  keeps the decoded (unconverted) frames of the window and publishes t. The
+  window's conversions then follow in the same job, one plan step each,
+  descending from t − 1. A newer post that requires a time of that source
+  outside the window cancels the rest between frames (Amendment R54); the
+  frames already converted stay held. A step inside the window keeps it
+  converting: the step's own frame first, then the remaining kept frames,
+  descending. A step to a window frame not yet converted
   keeps the window (no refill) and goes to the reader that kept its decoded
   frame, which converts it without decoding anything. A step to the frame
   whose conversion is already in flight keeps the window too and waits for
@@ -1073,15 +1082,38 @@ cost).
   are cancellable between frames; frames already converted stay held.
 - A step that arrives for a window frame not yet converted waits for that conversion; it is not re-decoded.
 - The reader keeps the window's decoded frames (at most B − 1, at the source's decoded size) until it converts
-  them, decodes anything else, or closes. They are decoder memory outside K-1, like the decoder's own reference
-  frames.
+  them, decodes anything else, or closes. Amendment R54 charges them inside K-1 (below).
 - L-4b is gated as *time to t on a refill*: no worse than 1.25 × the reference's step mean, paired. The time to the
   full window is recorded.
 - Witnesses, each with a mutation: t is published before any window frame is converted; a newer job cancels the
   remaining window conversions; a step into the not-yet-converted part of the window decodes nothing new.
   A fourth covers a step to the frame whose conversion is in flight (it waits; no refill).
 
-**Rec:** L-1m/L-2m and L-4b; `dropped_agent`, `stale_errors`, `slot_starved`,
+**Amendment R54 [S2c] A refill decodes what a fresh seek decodes; steps inside the window keep it converting (lead
+ruling, 2026-10-06).** E13.6.4: under R53 L-4b was 1.52–1.59× (a refill decoded 46 frames against 30) and the hit
+p95 23.2–26.7 ms (no window was ever fully converted).
+- **The window is clipped to t's own decode.** A refill seeks and decodes exactly as a fresh paused seek to t (the
+  same anchor, and the same S2c-5 retry on its pair). The window is the decoded frames that land in
+  [max(t − B + 1, clip in-point, source start), t − 1]. A refill never seeks to a key before t's anchor to fill the
+  window, so its decode count equals the reference step's; near a GOP start the window is smaller. A step past the
+  anchor is an ordinary refill in the earlier GOP.
+- **Kept frames are references where safe code allows.** Each frame is received into a fresh `frame::Video` (a
+  reference to the decoder's buffer); a kept frame is moved out of the pending slot, not copied, except a frame
+  that also covers t. The cost of keeping is measured and recorded in E13.6.
+- **Kept decoded frames count inside K-1.** Each unconverted window frame's K-2 reservation is max(f, d), d the
+  source's decoded frame size; it shrinks to f on conversion and returns on drop or cancel. I12 (live ≤ C) covers
+  the kept frames.
+- **Cancellation applies only to jobs outside the window.** A newer job cancels the window's remaining
+  conversions only when, for that source, it requires a time outside [window start, t]. A step inside the window
+  has its own frame converted first, if it is not already, and then the descending conversions continue.
+- **L-4a and L-4b stay as defined** (hit p95 ≤ 20 ms; time to t ≤ 1.25 × the reference's step mean, paired).
+- Witnesses, each red first and each with a mutation: a refill's decode equals a fresh seek's and its window stops
+  at t's anchor; I12 holds with a window kept (the mutation leaves the kept bytes uncharged); after a step inside
+  the window all of its frames end up converted. The R53 "newer job cancels" witness targets a time outside the
+  window.
+
+**Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
+that waited for a conversion, windows fully converted, and frames decoded per refill; `dropped_agent`, `stale_errors`, `slot_starved`,
 `sync_decoders`, `device_latency_ms`, and RSS per workload; WARP VM baselines at
 S0 and the ratio at S4 (ME14's absolute 20 fps floor stays **owed**, D6); the
 PERFORMANCE heavy-4K, agent and desktop lanes.
