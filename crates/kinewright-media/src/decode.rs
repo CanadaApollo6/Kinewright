@@ -1151,6 +1151,12 @@ struct Continuation {
     packets: u64,
     /// Rule 3: a frame since the seek had no timestamp, or not a larger one.
     stamps_broken: bool,
+    /// S2c-5: the grid frame of the first frame decoded since the seek.
+    first_frame: Option<i64>,
+    /// S2c-5 (R39 item 4 (b)): the run's seek landed on an open-GOP key past
+    /// its start and was retried before that key, so the run has no anchor
+    /// (rule 2 cannot hold) and its first packet is no shadow's A(t).
+    retried: bool,
     last_stamp: Option<i64>,
     /// A continuation is running: a rule it breaks ends it (`abandoned`).
     continuing: bool,
@@ -1168,7 +1174,7 @@ impl Continuation {
     /// A seek: the run starts again.
     fn seeked(&mut self) {
         (self.run, self.first, self.packets, self.last_stamp) = (None, None, 0, None);
-        self.stamps_broken = false;
+        (self.stamps_broken, self.first_frame, self.retried) = (false, None, false);
     }
 
     /// A video packet read: the first is the run's real anchor (rule 2).
@@ -2017,6 +2023,29 @@ impl VideoDecoder {
         let timestamp = frame_to_global_timestamp(start, self.fps).saturating_add(
             stream_timestamp_to_global(self.stream_start, self.stream_time_base),
         );
+        self.seek_to(timestamp, start)?;
+        self.decode_from_cursor(start, end, cache)?;
+        // PF1 S2c-5 (R39 item 4 (b), lead rulings of 2026-10-06): on the S-2
+        // pair, a seek that landed on a key past the stream start whose first
+        // frame presents after `start` (an open-GOP key: its leading frames
+        // reference the GOP before) holds no frame for `start`. One seek to
+        // just before that key's DTS decodes them from the earlier key; the
+        // run then has no anchor (`retried`). Other demuxers keep one seek.
+        let past = self.s2.first_frame.is_some_and(|grid| grid > start.0);
+        let key = (self.s2.first)
+            .filter(|(_, dts, key)| *key && dts.is_some_and(|dts| dts > self.stream_start));
+        if let (true, true, Some((_, Some(dts), _))) = (self.s2.pair, past, key) {
+            let earlier = stream_timestamp_to_global(dts.saturating_sub(1), self.stream_time_base);
+            self.seek_to(earlier, start)?;
+            self.s2.retried = true;
+            self.decode_from_cursor(start, end, cache)?;
+        }
+        Ok(())
+    }
+
+    /// Seek to the global `timestamp` for a window from `start`, and reset
+    /// the decode state (a failed seek resets the decoder).
+    fn seek_to(&mut self, timestamp: i64, start: TimeCode) -> Result<(), MediaError> {
         if let Err(error) = self.input.seek(timestamp, ..timestamp) {
             // Amendment R43 (RS-1): the reader's interrupt ended the seek.
             #[cfg(test)]
@@ -2038,8 +2067,7 @@ impl VideoDecoder {
         self.s2.seeked();
         #[cfg(test)]
         self.probe.on_seek();
-
-        self.decode_from_cursor(start, end, cache)
+        Ok(())
     }
 
     /// Continue directly from the prior window when it ended immediately
@@ -2195,6 +2223,11 @@ impl VideoDecoder {
             self.continuation_at = None;
         }
         self.decode_window(t, t, cache)?;
+        if self.s2.retried {
+            // S2c-5: a retried run has no anchor (rule 2 is not judged on
+            // it, so no latch); the next paused frame seeks.
+            return Ok(());
+        }
         // Rule 2: the run's anchor, and the real seek's first packet must be it.
         let shadow = self.shadow_anchor(t, true);
         if shadow.is_some() && self.s2.first.is_some() && self.s2.first != shadow {
@@ -2411,6 +2444,7 @@ impl VideoDecoder {
                     )
                 },
             );
+            self.s2.first_frame.get_or_insert(first_grid_frame);
             #[cfg(test)]
             self.probe
                 .on_frame(first_grid_frame, timestamp, self.stop.as_ref());
