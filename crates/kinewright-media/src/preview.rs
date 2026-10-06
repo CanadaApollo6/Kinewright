@@ -293,6 +293,8 @@ pub(crate) struct DecodeRecord {
     pub(crate) converted: u64,
     pub(crate) received: u64,
     pub(crate) seeks: u64,
+    /// Amendment R54: the decoded bytes its decoder keeps after it.
+    pub(crate) kept: usize,
 }
 
 #[cfg(test)]
@@ -314,6 +316,7 @@ impl DecodeRecord {
             converted: after.0 - before.0,
             received: after.1 - before.1,
             seeks,
+            kept: decoder.map_or(0, VideoDecoder::kept_bytes),
         }
     }
 }
@@ -3158,6 +3161,227 @@ pub(crate) mod tests {
             (decodes.iter()).all(|d| d.at == 19 || (d.received, d.seeks) == (0, 0)),
             "{decodes:?}"
         );
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R54's one-source set-up: a threaded preview on `workload`
+    /// (one clip from in-point 0, so source time is timeline time), paused
+    /// at `open` (it opens: no window), its decode records cleared.
+    fn r54_preview(
+        workload: &crate::perf_fixtures::Workload,
+        open: i64,
+    ) -> (
+        Arc<Document>,
+        Arc<Lane>,
+        Receiver<PreviewFrame>,
+        thread::JoinHandle<()>,
+    ) {
+        let document = Arc::new(workload.0.clone());
+        let lane = Arc::new(Lane::default());
+        let (frames, thread) = threaded_preview(&lane);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(open)),
+            stamp(1, 1),
+        )));
+        shown_at(&frames, open);
+        wait_until(&lane, |state| !decoding(state));
+        lane.decodes.lock().expect("decodes").clear();
+        (document, lane, frames, thread)
+    }
+
+    /// The grid frame of the last key packet presenting at or before `t`
+    /// (30 fps, as the R54 workloads are).
+    fn key_at_or_before(path: &std::path::Path, t: i64) -> i64 {
+        let mut input = ffmpeg_next::format::input(&path).expect("the source opens");
+        let stream = input.streams().best(ffmpeg_next::media::Type::Video);
+        let (index, base) = stream.map(|s| (s.index(), s.time_base())).expect("video");
+        let grid = |pts: i64| {
+            let seconds = pts as f64 * f64::from(base.numerator()) / f64::from(base.denominator());
+            (seconds * 30.0).round() as i64
+        };
+        (input.packets())
+            .filter(|(s, packet)| s.index() == index && packet.is_key())
+            .filter_map(|(_, packet)| packet.pts().map(grid))
+            .filter(|key| *key <= t)
+            .max()
+            .expect("a key at or before t")
+    }
+
+    /// Amendment R54 (C-5): a refill decodes what a fresh paused seek to t
+    /// decodes. On a GOP-10 source the step 25 → 19 (B = 16, start 4)
+    /// decodes from 19's key, not from the key at or before 4: as many
+    /// frames as a fresh decoder's paused seek to 19, with one seek. Its
+    /// window is clipped to [key, 19]: once its conversions are done the
+    /// ring holds key…19 and nothing below the key, converted without
+    /// decoding; a window frame shows the fresh seek's bytes.
+    #[test]
+    fn a_refill_decodes_what_a_fresh_seek_decodes() {
+        let workload = crate::perf_fixtures::one_source((160, 90), (160, 90), 60, 10);
+        let (media, asset) = &workload.1[0];
+        let key = key_at_or_before(media.path(), 19);
+        assert!(key > 4, "the window must start below 19's key ({key})");
+        let fresh = {
+            let description = &asset.color_description;
+            let assumption = crate::render::d65_assumption(description);
+            let max_width = Some(crate::engine::monitor_max_width((160, 90)));
+            let opened = VideoDecoder::open_scaled_managed(
+                media.path(),
+                asset.fps,
+                max_width,
+                description,
+                assumption,
+            );
+            let mut decoder = opened.expect("opens");
+            let mut cache = crate::cache::FrameCache::<WorkingFrame>::new(1);
+            (decoder.decode_paused(None, TimeCode(19), &mut cache)).expect("decodes");
+            decoder.probe().received
+        };
+        let (document, lane, frames, thread) = r54_preview(&workload, 25);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        let shown = shown_at(&frames, 19);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, 19).0[..],
+            "C-5 at 19"
+        );
+        let source = (lane.lock().readers.slots.first())
+            .expect("a reader")
+            .key
+            .clone();
+        let window: Vec<i64> = (key..=19).collect();
+        wait_until(&lane, |state| {
+            let ring = state.readers.ring_times(&source);
+            window.iter().all(|t| ring.contains(t)) && !decoding(state)
+        });
+        let resident = ring(&lane);
+        assert!(resident.iter().all(|t| *t >= key), "{resident:?}");
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let refill = decodes.first().expect("the refill");
+        assert_eq!(
+            (refill.at, refill.received, refill.seeks),
+            (19, fresh, 1),
+            "{decodes:?}"
+        );
+        assert!(
+            decodes[1..].iter().all(|d| (d.received, d.seeks) == (0, 0)),
+            "{decodes:?}"
+        );
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(key + 1)),
+            stamp(1, 3),
+        )));
+        let shown = shown_at(&frames, key + 1);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, key + 1).0[..],
+            "C-5 at {}",
+            key + 1
+        );
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R54 (K-1, I12): a kept window is charged. A 320×180 source
+    /// shown at a 72-pixel proxy has d > f. While the reader is held before
+    /// the refill's first window conversion (20 → 19 keeps 4…18 decoded),
+    /// live counts t's frame and at least every byte the decoder keeps, and
+    /// it never passed C.
+    #[test]
+    fn a_kept_window_is_charged_inside_k1() {
+        let workload = crate::perf_fixtures::one_source((320, 180), (90, 1600), 60, 60);
+        let (document, lane, frames, thread) = r54_preview(&workload, 20);
+        let f = {
+            let (media, asset) = &workload.1[0];
+            let max_width = Some(crate::engine::monitor_max_width(document.resolution));
+            let decoder = VideoDecoder::open_scaled(media.path(), asset.fps, max_width);
+            let (w, h) = decoder.expect("opens").frame_size();
+            usize::try_from(u64::from(w) * u64::from(h) * 8).expect("f")
+        };
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((18, held));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        wait_until(&lane, |state| decoding_at(state, 18));
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let [refill] = decodes[..] else {
+            panic!("one decode before the window converts: {decodes:?}");
+        };
+        assert!(
+            refill.kept > 15 * f,
+            "the fixture keeps more than f a frame: {} against {f}",
+            refill.kept
+        );
+        let (live, peak) = lane.lock().readers.live();
+        assert!(
+            live >= refill.kept + f,
+            "K-1: {live} live for t's frame ({f}) and {} kept",
+            refill.kept
+        );
+        assert!(peak <= FRAME_CACHE_BYTE_BUDGET, "I12: {peak} over C");
+        drop(release);
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R54 (C-5): a step inside the window keeps it converting.
+    /// The reader is held before 17 (19, 18 done); a step to 14 is posted.
+    /// 14 is converted first, then the rest of the window, descending, so
+    /// every frame of [4, 19] ends up held, with no decoded frame and no
+    /// seek after the refill.
+    #[test]
+    fn a_step_inside_the_window_keeps_it_converting() {
+        let (_workload, document, lane, frames, thread) = r53_preview();
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((17, held));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        wait_until(&lane, |state| decoding_at(state, 17));
+        let source = (lane.lock().readers.slots.first())
+            .expect("a reader")
+            .key
+            .clone();
+        let seeks = lane.counters().stats.reader_seeks;
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(14)),
+            stamp(1, 3),
+        )));
+        drop(release);
+        let shown = shown_at(&frames, 14);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, 14).0[..],
+            "C-5 at 14"
+        );
+        let window: Vec<i64> = (4..=19).collect();
+        wait_until(&lane, |state| {
+            let ring = state.readers.ring_times(&source);
+            window.iter().all(|t| ring.contains(t)) && !decoding(state)
+        });
+        assert_eq!(lane.counters().stats.reader_seeks, seeks, "no seek");
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let order: Vec<i64> = decodes.iter().map(|d| d.at).collect();
+        let mut expected = vec![19, 18, 17, 14, 16, 15];
+        expected.extend((4..=13).rev());
+        assert_eq!(order, expected, "{decodes:?}");
+        for d in &decodes[1..] {
+            assert_eq!((d.converted, d.received, d.seeks), (1, 0, 0), "{d:?}");
+        }
         lane.shut_down();
         join_within(thread);
     }

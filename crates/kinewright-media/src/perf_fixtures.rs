@@ -412,6 +412,28 @@ pub(crate) fn talk_recut() -> Workload {
     Workload(document(HD, &media, vec![spans, lower_third]), media)
 }
 
+/// Amendment R54's witnesses: one GOP-`gop` `testsrc2` source of `size`,
+/// one clip of all of it from in-point 0, on a `document`-sized timeline.
+pub(crate) fn one_source(
+    size: (u32, u32),
+    document_size: (u32, u32),
+    frames: i64,
+    gop: u32,
+) -> Workload {
+    let media = vec![encode(
+        "pf1-r54",
+        "testsrc2",
+        size,
+        frames,
+        gop,
+        false,
+        &[],
+        1,
+    )];
+    let spans = vec![media_clip(1, &media[0].1, 0, frames, 0)];
+    Workload(document(document_size, &media, vec![spans]), media)
+}
+
 /// P-seek's single-source GOP-60 document (L-1): noisy 1080p, 60 s.
 pub(crate) fn seek_gop60() -> Workload {
     let media = vec![video("testsrc2", HD, 1_800, 60, true, 1)];

@@ -2276,6 +2276,20 @@ impl VideoDecoder {
         Some(frame)
     }
 
+    /// Amendment R54 (K-1) test support: the bytes of the decoded frames
+    /// the decoder keeps (every plane's rows).
+    #[cfg(test)]
+    pub(crate) fn kept_bytes(&self) -> usize {
+        (self.retained.iter())
+            .map(|kept| {
+                let frame = &kept.decoded;
+                (0..frame.planes())
+                    .map(|i| frame.data(i).len())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
     /// Amendment R53 [S2c]: the decoder decodes something else; its kept
     /// refill frames go.
     pub(crate) fn drop_retained(&mut self) {
