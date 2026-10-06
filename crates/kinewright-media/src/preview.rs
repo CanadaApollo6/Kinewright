@@ -3106,6 +3106,57 @@ pub(crate) mod tests {
         join_within(thread);
     }
 
+    /// Amendment R53 [S2c] (C-5): a step to the window frame whose
+    /// conversion is in flight waits for that conversion; it is not
+    /// re-decoded. The reader is held before 17 (19, 18 done, 17 handed to
+    /// it); a step to 17 is posted. It keeps the window (no refill): 17 is
+    /// converted once, with no decoded frame and no seek, and shows the
+    /// fresh seek's bytes.
+    #[test]
+    fn a_step_to_the_frame_in_conversion_waits_for_it() {
+        let (_workload, document, lane, frames, thread) = r53_preview();
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((17, held));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        wait_until(&lane, |state| decoding_at(state, 17));
+        let seeks = lane.counters().stats.reader_seeks;
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(17)),
+            stamp(1, 3),
+        )));
+        drop(release);
+        let shown = shown_at(&frames, 17);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, 17).0[..],
+            "C-5 at 17"
+        );
+        wait_until(&lane, |state| !decoding(state));
+        assert_eq!(lane.counters().stats.reader_seeks, seeks, "no seek");
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let step = (decodes.iter()).filter(|d| d.at == 17).collect::<Vec<_>>();
+        let [step] = step[..] else {
+            panic!("17 decoded once: {decodes:?}");
+        };
+        assert_eq!(
+            (step.converted, step.received, step.seeks),
+            (1, 0, 0),
+            "{step:?}"
+        );
+        assert!(
+            (decodes.iter()).all(|d| d.at == 19 || (d.received, d.seeks) == (0, 0)),
+            "{decodes:?}"
+        );
+        lane.shut_down();
+        join_within(thread);
+    }
+
     /// Review B S3's sources: an encoded 30-frame 160×90 H.264 source with
     /// `filter`'s pixels, tagged by `vf` and in `pixel_format`.
     fn c5_source(
