@@ -1872,6 +1872,56 @@ mod tests {
         }
     }
 
+    /// S2c-5 (lead rulings of 2026-10-06): a playback region start (the
+    /// renderer's `Sequential` window on a fresh decoder, `decode_window` over
+    /// several frames) at an open-GOP leading frame returns every frame of
+    /// its window, leading frames included, equal to a linear decode from the
+    /// stream's start; it seeks twice (the retry). Before S2c-5 the window
+    /// held no frame at its start.
+    #[test]
+    fn an_open_gop_region_start_returns_its_leading_frames() {
+        let fx = Fixture::new(Kind::OpenGop);
+        let last = fx.facts.last;
+        let linear = {
+            let mut decoder = fx.open(1);
+            let mut cache = FrameCache::<WorkingFrame>::new(usize::try_from(last + 1).unwrap());
+            decoder
+                .decode_window(TimeCode(0), TimeCode(last), &mut cache)
+                .unwrap();
+            assert_eq!(decoder.seek_count(), 1);
+            (0..=last)
+                .map(|x| {
+                    cache
+                        .frame_at_or_before(TimeCode(x))
+                        .map(|f| fnv_bits(&f.pixels))
+                })
+                .collect::<Vec<_>>()
+        };
+        let starts: Vec<i64> = (1..=last).filter(|&t| retries(&fx.facts, t)).collect();
+        assert!(starts.len() >= 2, "OpenGop leading frames {starts:?}");
+        for &t in &starts {
+            let end = (t + 12).min(last);
+            let mut decoder = fx.open(1);
+            let mut cache = FrameCache::<WorkingFrame>::new(13);
+            let result = decoder.decode_window_sequential(TimeCode(t), TimeCode(end), &mut cache);
+            assert!(result.is_ok(), "region start {t}: {result:?}");
+            for x in t..=end {
+                let got = (cache.contains(TimeCode(x)))
+                    .then(|| cache.frame_at_or_before(TimeCode(x)))
+                    .flatten()
+                    .map(|f| fnv_bits(&f.pixels));
+                assert!(got.is_some(), "region start {t}: no frame at {x}");
+                assert_eq!(
+                    got,
+                    linear[usize::try_from(x).unwrap()],
+                    "region start {t}: frame {x}"
+                );
+            }
+            assert_eq!(decoder.seek_count(), 2, "region start {t}: the retry");
+        }
+        eprintln!("pf1-c4 s2c5 region starts at open-GOP leading frames {starts:?}: every frame");
+    }
+
     /// The CLI comparison fails for a wrong reference: another file's frames,
     /// one flipped frame hash, one shifted timestamp.
     #[test]
