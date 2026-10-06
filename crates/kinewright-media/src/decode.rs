@@ -2906,7 +2906,31 @@ fn fill_managed_plane(
         usize::try_from(out_width).unwrap_or_default(),
         usize::try_from(out_height).unwrap_or_default(),
     );
-    let mut pixels = Vec::with_capacity(bytes / 2);
+    let pixels = fill_fused(
+        (plane, stride),
+        (w, h),
+        (out_w, out_h),
+        (rotation, flip_horizontal),
+        (rgb, alpha),
+    );
+    Ok(WorkingFrame {
+        width: out_width,
+        height: out_height,
+        pixels: Arc::new(pixels),
+    })
+}
+
+/// PF1 X-3's fused loop: each output pixel's source pixel through the
+/// rotation and flip, then the tables. `plane` holds `h` rows of `w`
+/// pixels at `stride` (checked by the caller).
+fn fill_fused(
+    (plane, stride): (&[u8], usize),
+    (w, h): (usize, usize),
+    (out_w, out_h): (usize, usize),
+    (rotation, flip_horizontal): (VideoRotation, bool),
+    (rgb, alpha): (&[half::f16], &[half::f16]),
+) -> Vec<half::f16> {
+    let mut pixels = Vec::with_capacity(out_w.saturating_mul(out_h).saturating_mul(4));
     for oy in 0..out_h {
         for ox in 0..out_w {
             let (x, y) = match rotation {
@@ -2922,11 +2946,18 @@ fn fill_managed_plane(
             pixels.extend([rgb[code(0)], rgb[code(2)], rgb[code(4)], alpha[code(6)]]);
         }
     }
-    Ok(WorkingFrame {
-        width: out_width,
-        height: out_height,
-        pixels: Arc::new(pixels),
-    })
+    pixels
+}
+
+/// Amendment R57 [S2c]: the fused loop's output for an unrotated, unflipped
+/// plane, row by row.
+#[cfg_attr(not(test), allow(dead_code))] // R57 witness stub: wired with its implementation
+fn fill_rows(
+    (_plane, _stride): (&[u8], usize),
+    (_w, _h): (usize, usize),
+    (_rgb, _alpha): (&[half::f16], &[half::f16]),
+) -> Vec<half::f16> {
+    Vec::new() // R57 witness stub: red first
 }
 
 fn rotate_bytes(
@@ -4254,6 +4285,85 @@ mod tests {
                     decode_bits(&frame, (5, 4), rotation, flip, &reference)
                 );
                 assert!(fused.is_err());
+            }
+        }
+    }
+
+    /// Amendment R57 [S2c]: the row-wise fill equals the fused loop for an
+    /// unrotated, unflipped plane: every separable description the fixtures
+    /// use, odd widths, pixel counts that are not a multiple of 8 and strides
+    /// wider than a row (by whole and part pixels); every orientation still
+    /// fills as the fused loop does.
+    #[test]
+    fn the_row_wise_fill_matches_the_fused_loop() {
+        use {ColorBitDepth as D, ColorMatrix as M, ColorRange as R, ColorTransfer as T};
+        let descriptions = [
+            (M::Bt709, R::Limited, D::Eight, T::Bt709), // perf fixtures (BT.709, tv)
+            (M::Bt709, R::Full, D::Eight, T::Bt709),
+            (M::Rgb, R::Limited, D::Ten, T::Bt709), // the X-3 fixture
+            (M::Bt709, R::Limited, D::Integer(12), T::Bt1886),
+            (M::Identity, R::Full, D::Sixteen, T::Srgb),
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for (matrix, range, depth, transfer) in descriptions {
+            let description = described(
+                ColorPrimaries::Bt709,
+                ColorWhitePoint::D65,
+                matrix,
+                range,
+                depth,
+                transfer,
+            );
+            let source = ManagedSource::with_conversion(&description, None).expect("accepted");
+            let Conversion::Separable(table) = &source.conversion else {
+                panic!("{description:?} is separable");
+            };
+            let tables = (table.entries().expect("a table"), alpha_table());
+            for (w, h) in [(1, 1), (5, 3), (7, 5), (33, 7), (64, 4)] {
+                for pad in [0, 3, 8, 24] {
+                    let stride = w * 8 + pad;
+                    let plane: Vec<u8> = (0..stride * h)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            state.to_le_bytes()[3]
+                        })
+                        .collect();
+                    let fused = fill_fused(
+                        (&plane, stride),
+                        (w, h),
+                        (w, h),
+                        (VideoRotation::None, false),
+                        tables,
+                    );
+                    let rows = fill_rows((&plane, stride), (w, h), tables);
+                    assert_eq!(rows, fused, "{description:?} {w}x{h} stride {stride}");
+                    let size = (u32::try_from(w).expect("w"), u32::try_from(h).expect("h"));
+                    for rotation in [
+                        VideoRotation::None,
+                        VideoRotation::Clockwise90,
+                        VideoRotation::HalfTurn,
+                        VideoRotation::Clockwise270,
+                    ] {
+                        for flip in [false, true] {
+                            let out = rotation.display_dimensions(size.0, size.1);
+                            let out = (out.0 as usize, out.1 as usize);
+                            let filled = fill_managed_plane(
+                                (&plane, stride),
+                                size,
+                                rotation,
+                                flip,
+                                table,
+                                &source,
+                            );
+                            let filled = filled.expect("fills");
+                            let fused =
+                                fill_fused((&plane, stride), (w, h), out, (rotation, flip), tables);
+                            assert_eq!(*filled.pixels, fused, "{rotation:?} flip={flip}");
+                        }
+                    }
+                }
             }
         }
     }
