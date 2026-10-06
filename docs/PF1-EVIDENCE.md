@@ -6253,8 +6253,8 @@ or failure. `closed`, `exited` and `fail_start` release them if the decoder goes
 finishes and stays held. No new uncharged interval was added.
 
 R54's in-window witness changes, as R57 states: after 19 → 14 with 17 in flight, the order was 14, 16, 15, 13…4
-and is now 14, 13…4. **For the lead:** this edits an R54 oracle (the order, and 15 and 16 no longer held). The
-edit follows R57 item 2. Its C-5, no-seek and conversion-only checks stay, and it gains three checks:
+and is now 14, 13…4. This edits an R54 oracle (the order, and 15 and 16 no longer held). The edit follows R57
+item 2, and the lead confirmed it. Its C-5, no-seek and conversion-only checks stay, and it gains three checks:
 - K-1 live is unchanged across the post;
 - the decoder's kept bytes show 15 and 16 dropped (10/13 of the bytes it kept after 17);
 - 15 and 16 are not in the ring.
@@ -6266,7 +6266,7 @@ dropping them. Media: lib 1026 passed, 56 ignored; the integration tests are gre
 `count2-ref-ad8f896` against candidate `cand-96ea61d` (`90490da8…`). Pair 1's candidate was traced. One extra
 run per lane used the R56 binary `cand-794caf3` ("before"). All exits were 0. The load was heavy and is recorded,
 not gating (R50): another project's rustc, ffmpeg and test builds averaged 1.5–9 cores beside the test (LL cand1:
-about 9). Files are in `s2c-timing/r57/`: `timing-r57.log`, `samples-r57.log`, `l57.py` and `l57-r57.txt`. Medians
+about 9). Files are in `s2c-timing/r57/`: `timing-r57.log.gz`, `samples-r57.log.gz`, `l57.py` and `l57-r57.txt`. Medians
 of each run's three passes:
 
 | Lane | L-4a hit p95 per pair → median | Hit mean | L-4b (≤ 1.25) | Back mean ÷ ref |
@@ -6275,7 +6275,7 @@ of each run's three passes:
 | LH | 22.4, 23.5, 21.1 → **22.4 MISS** | 18.2, 18.5, 17.1 | 1.06 PASS | 0.65 |
 
 A supplementary paired run (r57w) put before (`cand-794caf3`) against the candidate, 3 pairs per lane, untraced
-(`timing-r57w.log`, `l57-r57w.txt`):
+(`timing-r57w.log.gz`, `samples-r57w.log.gz`, `l57-r57w.txt`):
 - the candidate's L-4a: LL 16.8, 17.3, 17.0; LH 23.9, 23.8, 32.1 (that run had about 10 cores of other load);
 - a third traced pair (r57t2) gave LL 16.6 and LH 21.3.
 
@@ -6299,7 +6299,8 @@ Whole conversions (graph and working frame) went from 4.4–5.3 to 2.9–3.2 ms 
 ms on LH (×0.56–0.77). The before binary differs from the candidate in both items, but the working-frame step
 does not depend on the scheduling.
 
-Traces: `trace-r57-{LL,LH}.txt` (r57's pair 1) and `trace2-r57-{LL,LH}.txt` (r57t2), both gzipped, analysed by
+Traces: `trace-r57-{LL,LH}.txt.gz` (r57's pair 1) and `trace2-r57-{LL,LH}.txt.gz` (r57t2: `timing-r57t2.log.gz`,
+`samples-r57t2.log.gz`, `l57-r57t2.txt`), analysed after gunzip by
 `../r56/trace.py`. From r57t2 (372 hits per lane):
 - **Pre-converted hits:** 40% (LL) and 51% (LH), up from 15–16% under R56. The others wait behind the conversion
   in flight (1.3 / 1.4 ms) and then their own (2.6 / 2.8 ms).
