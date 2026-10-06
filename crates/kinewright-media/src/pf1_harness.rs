@@ -775,7 +775,7 @@ fn seek_run(document: &Document, seed: u64) -> String {
         .filter(|l| l.is_infinite())
         .count()
         + usize::from(!release_shown);
-    format!(
+    let line = format!(
         "random_p95_ms={:.1} random_max_ms={:.1} forward_p95_ms={:.1} plus1_p95_ms={:.1} \
          plus1_n={} backward_combined_p95_ms={:.1} {drag} timeouts={timeouts}",
         percentile(&mut random, 0.95),
@@ -784,7 +784,11 @@ fn seek_run(document: &Document, seed: u64) -> String {
         percentile(&mut plus_one, 0.95),
         plus_one.len(),
         percentile(&mut backward, 0.95),
-    )
+    );
+    // Lead ruling after R51/R52: the session ends as P-play's and P-rss's
+    // do, the engine's worker joined before the process moves on (an exit
+    // 139 was the race of dropping it mid-teardown).
+    format!("{line} {}", teardown(session))
 }
 
 /// The drag from `target` (already shown): 150 `request_frame` calls at
