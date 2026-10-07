@@ -1107,12 +1107,16 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         bounds: &HashMap<K, i64>,
         room: usize,
     ) -> HashMap<K, (i64, i64)> {
-        let mut set = self.required_set_bytes().saturating_add(self.generated);
+        // Amendment R66 [S2c] (F13): each frame at the charge admission
+        // reserves it at, max(f, d) for a time a reader still keeps.
+        let mut set = (self.required.iter())
+            .map(|(key, at)| self.kept_charge(key, *at))
+            .fold(self.generated, usize::saturating_add);
         let depth = continued.values().map(Vec::len).max().unwrap_or(0);
         let mut fit = depth;
         for level in 0..depth {
             let bytes = (continued.iter())
-                .filter_map(|(key, kept)| kept.get(level).map(|at| self.frame_bytes(key, *at)))
+                .filter_map(|(key, kept)| kept.get(level).map(|at| self.kept_charge(key, *at)))
                 .fold(0, usize::saturating_add);
             let Some(next) = set.checked_add(bytes).filter(|next| *next <= room) else {
                 fit = level;

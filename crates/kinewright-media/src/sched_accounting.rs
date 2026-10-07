@@ -2315,3 +2315,62 @@ fn a_refill_clips_the_times_its_pending_discard_drops() {
         world.snapshot()
     );
 }
+
+/// The run seed 29956 drew (`Discards`): C = 20f, P = 4, d = 2f on source
+/// 0, f on source 1.
+const RUN_29956: Run = Run {
+    budget: 20 * F,
+    pool: 4,
+    decoded: [2 * F, F],
+    gop: [12, 48],
+    floor: [0, 0],
+    posts: 2,
+    retires: 0,
+    returns: 1,
+    runs: 0,
+    discards: 1,
+    profile: Profile::Discards,
+};
+
+/// Amendment R66 [S2c] (F13, K-3): seed 29956's scenario. Reader 0's
+/// refill of source 0's 26 keeps 24 and 25 (from 26's key frame, 24).
+/// Source 1's window [6, 21] is refilled and kept. A paused step to 24 of
+/// source 0 and to 18 of source 1 continues source 1's window, fitted
+/// beside the set. At f the set is 2f + 2f + f (source 0's window
+/// [22, 24]) + 12f (7–18) + G = 3f, C exactly; but admission reserves 24,
+/// which reader 0 still keeps, at max(f, d) = 2f. Before the fix the fit
+/// counted 24 at f, so the job was never admitted (I5); the fit now
+/// counts it at 2f and cuts the continuation by one.
+#[test]
+fn a_continued_window_fits_beside_a_kept_time_at_its_kept_charge() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_29956,
+        vec![
+            Post(vec![(0, vec![27], vec![])], true, 3 * F),
+            Do(Op::Run),
+            Post(vec![(0, vec![26], vec![])], true, 3 * F),
+            Do(Op::Step(0)),
+            Post(vec![(1, vec![22], vec![])], true, 3 * F),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Do(Op::Step(1)),
+            Do(Op::Grant(1)),
+            Do(Op::Step(1)),
+            Do(Op::Finish(1, Outcome::Ok)),
+            Post(vec![(1, vec![21], vec![])], true, 3 * F),
+            Do(Op::Step(1)),
+            Do(Op::Finish(1, Outcome::Ok)),
+            Post(
+                vec![(0, vec![24], vec![]), (1, vec![18], vec![])],
+                true,
+                3 * F,
+            ),
+        ],
+    );
+    let required = &world.readers.required;
+    assert!(
+        !required.contains(&(1, 7)) && required.contains(&(1, 8)),
+        "the continuation is cut to 8–18:\n{}",
+        world.snapshot()
+    );
+}
