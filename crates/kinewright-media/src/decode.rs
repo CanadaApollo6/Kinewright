@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
@@ -1811,6 +1811,9 @@ pub(crate) struct VideoDecoder {
     /// frames are kept unconverted (`retained`) rather than converted.
     /// Amendment R54: only frames t's own decode produces are kept.
     retaining: Option<(i64, i64)>,
+    /// Amendment R63 [S2c] (F2): the window times the refill keeps (the
+    /// scheduler's: the window less the times the ring already holds).
+    retain: BTreeSet<i64>,
     /// Amendment R53 [S2c]: the refill window's decoded frames, not yet
     /// converted: (first grid frame, last grid frame, timestamp, frame).
     /// Amendment R54: each the decoder's own reference-counted output (no
@@ -2037,6 +2040,7 @@ impl VideoDecoder {
             interruptible: stop.is_some(),
             s2,
             retaining: None,
+            retain: BTreeSet::new(),
             retained: KeptFrames::default(),
             #[cfg(test)]
             probe: DecoderProbe::default(),
@@ -2244,17 +2248,20 @@ impl VideoDecoder {
     /// the refill seeks and decodes exactly as a fresh paused seek to t
     /// (the same anchor, S2c-5's retry on its pair); the window keeps only
     /// the frames that decode produces in [start, t) (`kept_from`), never
-    /// seeking earlier to fill it. A failure keeps none.
+    /// seeking earlier to fill it. A failure keeps none. Amendment R63
+    /// [S2c] (F2): it keeps only the times in `retain`; the decode is the
+    /// same, the other window frames drop as it passes them.
     pub(crate) fn decode_refill<T: DecoderFrame>(
         &mut self,
-        start: TimeCode,
-        t: TimeCode,
+        (start, t): (TimeCode, TimeCode),
+        retain: BTreeSet<i64>,
         cache: &mut FrameCache<T>,
     ) -> Result<(), MediaError> {
         self.retained.clear();
-        self.retaining = Some((start.0, t.0));
+        (self.retaining, self.retain) = (Some((start.0, t.0)), retain);
         let result = self.decode_paused(None, t, cache);
         self.retaining = None;
+        self.retain.clear();
         if result.is_err() {
             self.retained.clear();
         }
@@ -2702,10 +2709,18 @@ impl VideoDecoder {
         // the window is what lands in [from, to); a frame shown only below
         // t is kept as the decoder's reference (moved, not copied: the
         // pending frame is replaced next), one also shown at t is copied.
+        // Amendment R63 [S2c] (F2): only the times in `retain` (the window
+        // less the ring's); a frame owing none is not kept.
         if let Some((from, to)) = self.retaining {
             let first = pending.first_grid_frame.max(from);
             let last = raw_last.min(to.saturating_sub(1));
             if first <= last {
+                self.retained.cover(first);
+            }
+            let times: BTreeSet<i64> = (first..=last)
+                .filter(|at| self.retain.contains(at))
+                .collect();
+            if !times.is_empty() {
                 let pts = pending.decoded.as_ref().and_then(|d| d.timestamp());
                 let below = raw_last < to;
                 let decoded = if below {
@@ -2716,11 +2731,10 @@ impl VideoDecoder {
                 let decoded = decoded.ok_or_else(|| {
                     MediaError::Backend("pending video frame has no pixels".to_owned())
                 })?;
-                self.retained
-                    .push((first..=last).collect(), KeptFrame { pts, decoded });
-                if below {
-                    return Ok(());
-                }
+                self.retained.push(times, KeptFrame { pts, decoded });
+            }
+            if first <= last && raw_last < to {
+                return Ok(());
             }
         }
         let pending = self.pending.as_ref().expect("the pending frame");

@@ -205,22 +205,38 @@ pub(crate) struct Kept<V> {
 #[derive(Clone)]
 pub(crate) struct KeptFrames<V> {
     frames: Vec<Kept<V>>,
+    /// Amendment R63 [S2c] (F2): the first window time the last refill's
+    /// decode produced, kept or not (the ring already held it).
+    from: Option<i64>,
 }
 
 impl<V> Default for KeptFrames<V> {
     fn default() -> Self {
-        Self { frames: Vec::new() }
+        Self {
+            frames: Vec::new(),
+            from: None,
+        }
     }
 }
 
 impl<V> KeptFrames<V> {
-    /// Keep `value` for `times`.
+    /// Amendment R63 [S2c] (F2): a refill's decode produced window times
+    /// from `first` (whether or not it keeps them).
+    pub(crate) fn cover(&mut self, first: i64) {
+        self.from = Some(self.from.map_or(first, |from| from.min(first)));
+    }
+
+    /// Keep `value` for `times` (none: nothing is kept).
     pub(crate) fn push(&mut self, times: BTreeSet<i64>, value: V) {
-        self.frames.push(Kept { times, value });
+        if let Some(first) = times.first() {
+            self.cover(*first);
+            self.frames.push(Kept { times, value });
+        }
     }
 
     pub(crate) fn clear(&mut self) {
         self.frames.clear();
+        self.from = None;
     }
 
     #[cfg(test)]
@@ -228,11 +244,11 @@ impl<V> KeptFrames<V> {
         self.frames.is_empty()
     }
 
-    /// Amendment R54: the first time kept (`None`: nothing is kept).
-    pub(crate) fn kept_from(&self) -> Option<i64> {
-        (self.frames.iter())
-            .filter_map(|kept| kept.times.first().copied())
-            .min()
+    /// Amendment R54: the first window time the last refill's decode
+    /// produced (`None`: none). Amendment R63 (F2): kept, or left to the
+    /// ring that holds it.
+    pub(crate) const fn kept_from(&self) -> Option<i64> {
+        self.from
     }
 
     /// The kept frames.
@@ -289,7 +305,7 @@ impl<V> KeptFrames<V> {
     /// to f), so nothing stays kept.
     pub(crate) fn settle(&mut self, ok: bool) {
         if !ok {
-            self.frames.clear();
+            self.clear();
         }
     }
 }
@@ -1469,6 +1485,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             debug_assert!(reserved, "admissible lookahead fits");
             f
         };
+        // Amendment R63 [S2c] (F2): a refill keeps none of the window times
+        // the ring holds.
+        let window = (self.slots.iter().find(|slot| slot.id == id))
+            .and_then(|slot| slot.plan.window)
+            .filter(|(_, t)| *t == at);
+        let resident: BTreeSet<i64> = (window.zip(self.rings.get(&key)))
+            .map(|((start, _), ring)| ring.range(start..at).map(|(t, _)| *t).collect())
+            .unwrap_or_default();
         let slot = self.slot(id).expect("the reader's slot");
         let (discard, discarding) = (slot.discard.take(), std::mem::take(&mut slot.discarding));
         let bytes = charged.saturating_add(discarding);
@@ -1482,7 +1506,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         slot.converting = false;
         let mut gone = BTreeSet::new();
         if let Some(start) = from {
-            slot.retained = (start..at).collect();
+            slot.retained = (start..at).filter(|t| !resident.contains(t)).collect();
         } else if slot.retained.remove(&at) {
             slot.converting = true;
         } else {
@@ -1589,6 +1613,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             let (key, gone) = (slot.key.clone(), std::mem::take(&mut slot.retained));
             self.unkept(&key, gone);
         }
+    }
+
+    /// Amendment R63 [S2c] (F2): the window times reader `id`'s refill
+    /// keeps (its dispatch's: the window less the ring's times).
+    pub(crate) fn retaining(&self, id: u64) -> BTreeSet<i64> {
+        (self.slots.iter().find(|slot| slot.id == id))
+            .map(|slot| slot.retained.clone())
+            .unwrap_or_default()
     }
 
     /// K-2: whether a required frame has no frame, failure, reservation or
@@ -3565,6 +3597,58 @@ mod tests {
             3 * 2 * F,
             "B's three shed 2f each"
         );
+    }
+
+    /// Amendment R63 [S2c] (F2): a refill keeps none of the window times
+    /// the ring already holds. Source 0's ring holds 10 (converted earlier,
+    /// charged f) when a step back from 20 to 19 refills [4, 19] (C = 100f,
+    /// d = 3f). Its reader keeps 4–18 but 10, which stays the ring's and is
+    /// reserved by nobody; the times kept are reserved at max(f, d), and
+    /// K-1 is exact: live is the ring, the reservations and the flight.
+    #[test]
+    fn a_refill_keeps_none_of_the_rings_times() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        assert_eq!(paused_step(&mut readers, 20, 0, 0), [20]);
+        let ten = Fr {
+            value: frame(0, 10),
+            bytes: F,
+            pinned: false,
+        };
+        assert!(readers.reserve(F, usize::MAX));
+        readers.rings.entry(0).or_default().insert(10, ten);
+        let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::from([(0, 3 * F)]));
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let a = readers.slots[0].id;
+        loop {
+            if let Next::Decode { at, from, .. } = step_reader(&mut readers, a) {
+                assert_eq!((at, from), (19, Some(4)), "the refill");
+                break;
+            }
+        }
+        let kept: BTreeSet<i64> = (4..19).filter(|at| *at != 10).collect();
+        assert_eq!(
+            readers.slots[0].retained, kept,
+            "the window less the ring's 10"
+        );
+        assert_eq!(readers.retaining(a), kept, "what its decoder keeps");
+        assert!(readers.rings[&0].contains_key(&10), "10 stays the ring's");
+        assert_eq!(readers.reserved.get(&(0, 10)), None, "nobody reserves 10");
+        let charged = |at: &i64| readers.reserved.get(&(0, *at)).copied();
+        assert!(
+            kept.iter().all(|at| charged(at) == Some(3 * F)),
+            "max(f, d)"
+        );
+        let ring: usize = readers
+            .rings
+            .values()
+            .flat_map(|ring| ring.values())
+            .map(Fr::bytes)
+            .sum();
+        let reserved: usize = readers.reserved.values().sum();
+        let flight: usize = (readers.slots.iter())
+            .map(|slot| slot.flight + slot.discarding)
+            .sum();
+        assert_eq!(readers.live().0, ring + reserved + flight, "K-1 exact");
     }
 
     /// Amendment R61 [S2c] (review A2a, K-3): C = 20f. Source 0's reader

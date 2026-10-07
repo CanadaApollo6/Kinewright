@@ -911,6 +911,7 @@ impl World {
         let now = self.now;
         let next = self.readers.next(id, now, false);
         let slot = (self.readers.slots.iter()).find(|slot| slot.id == id);
+        let retain = self.readers.retaining(id);
         let agent = (self.agents.iter_mut()).find(|agent| agent.id == id);
         let agent = agent.expect("the agent");
         agent.doing = match next {
@@ -938,7 +939,11 @@ impl World {
                 discard,
             } => {
                 agent.stop = false;
-                agent.retain = from.map_or_else(BTreeSet::new, |start| (start..at).collect());
+                agent.retain = if from.is_some() {
+                    retain
+                } else {
+                    BTreeSet::new()
+                };
                 // `SourceSpec::decode`'s steps before any IO: the discard,
                 // then a refill or any decode but a kept time's conversion
                 // drops the kept frames (no allocation comes first).
@@ -1069,8 +1074,8 @@ impl World {
         if let Some(start) = from {
             // `decode_refill`: t's own decode from its key frame keeps the
             // window's frames it produces, grouped per decoded frame (VFR:
-            // one frame shows at 2k and 2k + 1), each the times `retain`
-            // holds (the whole window).
+            // one frame shows at 2k and 2k + 1). Amendment R63 (F2): each
+            // keeps only the times `retain` holds (the window less the ring's).
             decoder.clear();
             if !matches!(outcome, Outcome::Ok) {
                 return Err(MediaError::Backend("model: the refill fails".to_owned()));
@@ -1081,6 +1086,9 @@ impl World {
             for time in first..at {
                 let frame = if key == 0 { time / 2 } else { time };
                 frames.entry(frame).or_default().insert(time);
+            }
+            if first < at {
+                decoder.cover(first);
             }
             for (_, times) in frames {
                 let times = times.into_iter().filter(|t| retain.contains(t)).collect();

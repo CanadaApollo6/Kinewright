@@ -952,6 +952,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 // A stop meant for an earlier lookahead decode (K-2) lapses.
                 stop.store(false, Ordering::Release);
                 let paused = state.paused_plan;
+                // Amendment R63 [S2c] (F2): a refill keeps only these times.
+                let refill = from.map(|start| (start, state.readers.retaining(id)));
                 drop(state);
                 let hold = Hold::adopt(lane, bytes);
                 #[cfg(test)]
@@ -971,11 +973,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 let traced =
                     crate::pf1_clock::decode_start((id, decoder.as_ref()), at, from, paused);
                 let result = match &mut decoder {
-                    Some(decoder) => spec.decode(decoder, at, paused, (from, discard)),
+                    Some(decoder) => spec.decode(decoder, at, paused, (refill, discard)),
                     None => spec.open(threads, stop).and_then(|opened| {
                         #[cfg(test)]
                         lane.decoder_open(id, true);
-                        spec.decode(decoder.insert(opened), at, paused, (from, None))
+                        spec.decode(decoder.insert(opened), at, paused, (refill, None))
                     }),
                 };
                 #[cfg(test)]

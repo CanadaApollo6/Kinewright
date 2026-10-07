@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     path::Path,
     sync::{
         Arc, LazyLock,
@@ -346,8 +346,9 @@ impl SourceSpec {
     /// The frame at `at`, exactly as the renderer's Seek or Sequential
     /// window would cache it (continuing from the decoder's cursor). PF1
     /// S2c S-2: a `paused` job's frame continues only inside S-2's domain.
-    /// Amendment R53 [S2c]: `from` is a paused refill's window start (`at`
-    /// is its t): only `at` is converted and the window's frames are kept;
+    /// Amendment R53 [S2c]: `refill` is a paused refill's window start (`at`
+    /// is its t) and (Amendment R63, F2) the window times it keeps: only
+    /// `at` is converted and those window frames are kept;
     /// a kept frame at `at` is converted without decoding; any other decode
     /// drops the kept frames. Amendment R57 [S2c]: first, the kept frames
     /// outside `discard` ([low, bound], Amendment R61) are dropped.
@@ -356,14 +357,15 @@ impl SourceSpec {
         decoder: &mut VideoDecoder,
         at: i64,
         paused: bool,
-        (from, discard): (Option<i64>, Option<(i64, i64)>),
+        (refill, discard): (Option<Refill>, Option<(i64, i64)>),
     ) -> Result<WorkingFrame, MediaError> {
         if let Some(keep) = discard {
             decoder.discard_kept_outside(keep);
         }
         let mut window = FrameCache::new(1);
-        if let Some(start) = from.filter(|_| paused) {
-            decoder.decode_refill(TimeCode(start), TimeCode(at), &mut window)?;
+        if let Some((start, retain)) = refill.filter(|_| paused) {
+            let window_times = (TimeCode(start), TimeCode(at));
+            decoder.decode_refill(window_times, retain, &mut window)?;
         } else if let Some(frame) = decoder.convert_retained(at) {
             return frame;
         } else if paused {
@@ -377,6 +379,10 @@ impl SourceSpec {
         frame.ok_or_else(|| no_frame(self.asset, TimeCode(at)))
     }
 }
+
+/// Amendment R53 / R63 [S2c]: a paused refill's window start and the
+/// window times it keeps (F2: the window less the ring's times).
+pub(crate) type Refill = (i64, BTreeSet<i64>);
 
 /// PF1 S2b-1: a transport job's demand on the readers.
 #[derive(Default)]
