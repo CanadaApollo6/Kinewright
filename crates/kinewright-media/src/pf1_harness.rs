@@ -703,6 +703,7 @@ fn pf1_play_baseline() {
                 "PF1 play lane={lane} adapter={adapter} output={output} workload={key} run={run} {line}"
             );
             assert_idle_discard(&line);
+            assert_valid(&line);
         }
     }
     if device || !wanted("controls") {
@@ -765,14 +766,17 @@ fn seek_run(document: &Document, seed: u64) -> String {
         latency.unwrap_or(f64::INFINITY)
     };
     let mut random: Vec<f64> = (0..200).map(|_| op(next(n))).collect();
+    // Amendment R61 (review B2): the setup and reposition seeks' latencies,
+    // reported only through their timeouts.
+    let mut setup = Vec::new();
     // Steps start from where the transport actually is.
     let mut at = next(n - 13);
-    op(at);
+    setup.push(op(at));
     let (mut forward, mut plus_one, mut backward) = (Vec::new(), Vec::new(), Vec::new());
     for _ in 0..200 {
         if at + 12 >= n {
             at = next(n - 13);
-            op(at);
+            setup.push(op(at));
         }
         let step = 1 + next(12);
         at += step;
@@ -789,7 +793,7 @@ fn seek_run(document: &Document, seed: u64) -> String {
     for _ in 0..200 {
         if at < 12 {
             at = 12 + next(n - 12);
-            op(at);
+            setup.push(op(at));
         }
         at -= 1 + next(12);
         let before = pf1_clock::snapshot();
@@ -805,14 +809,9 @@ fn seek_run(document: &Document, seed: u64) -> String {
     }
     let back = backward_counts(&taps, clock, pf1_clock::process_cpu_ms() - cpu);
     let target = next(n - 800);
-    op(target);
+    setup.push(op(target));
     let (drag, release_shown) = drag_and_release(&session, target, || 1 + next(4));
-    let timeouts = [&random, &forward, &backward]
-        .iter()
-        .flat_map(|v| v.iter())
-        .filter(|l| l.is_infinite())
-        .count()
-        + usize::from(!release_shown);
+    let timeouts = seek_timeouts([&random, &forward, &backward, &setup], release_shown);
     let line = format!(
         "random_p95_ms={:.1} random_max_ms={:.1} forward_p95_ms={:.1} plus1_p95_ms={:.1} \
          plus1_n={} backward_combined_p95_ms={:.1} {drag} timeouts={timeouts} \
@@ -833,6 +832,22 @@ fn seek_run(document: &Document, seed: u64) -> String {
 }
 
 /// Amendment R59: no reader idled holding discard charges in the run.
+/// Amendment R61 (review B2): P-seek's timeouts: every phase's steps
+/// (random, forward, backward, and the setup and reposition seeks), and a
+/// drag release never shown.
+fn seek_timeouts(phases: [&[f64]; 4], release_shown: bool) -> usize {
+    let steps = phases.iter().flat_map(|phase| phase.iter());
+    steps.filter(|latency| latency.is_infinite()).count() + usize::from(!release_shown)
+}
+
+/// Amendment R61 (review B2): an invalid P-play run (Q-2) fails the lane.
+fn assert_valid(line: &str) {
+    assert!(
+        line.starts_with("valid=true "),
+        "R61: an invalid P-play run: {line}"
+    );
+}
+
 fn assert_idle_discard(line: &str) {
     assert!(
         line.contains(" count_idle_discard=0 "),
@@ -1409,4 +1424,26 @@ fn the_backward_phase_traces_only_on_request() {
     start_trace(true);
     assert!(pf1_clock::tracing(), "PF1_TRACE set, not traced");
     pf1_clock::trace_off();
+}
+
+/// Amendment R61 (review B2): a setup or reposition seek that timed out
+/// counts as a P-seek timeout, as any step's does and an unshown release.
+#[test]
+fn every_p_seek_timeout_counts() {
+    let (ok, lost) = ([1.0, 2.0], [1.0, f64::INFINITY]);
+    assert_eq!(seek_timeouts([&ok, &ok, &ok, &ok], true), 0);
+    for phase in 0..4 {
+        let mut phases: [&[f64]; 4] = [&ok, &ok, &ok, &ok];
+        phases[phase] = &lost;
+        assert_eq!(seek_timeouts(phases, true), 1, "phase {phase}");
+    }
+    assert_eq!(seek_timeouts([&ok, &ok, &ok, &ok], false), 1, "release");
+}
+
+/// Amendment R61 (review B2): P-play's `valid=false` fails the lane.
+#[test]
+fn an_invalid_p_play_run_fails_the_lane() {
+    assert_valid("valid=true elapsed_s=60.00");
+    let invalid = std::panic::catch_unwind(|| assert_valid("valid=false elapsed_s=61.90"));
+    assert!(invalid.is_err(), "valid=false passed");
 }
