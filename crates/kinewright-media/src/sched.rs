@@ -1108,6 +1108,12 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             let Some((low, bound)) = keep.get(&slot.key).copied() else {
                 continue;
             };
+            // Amendment R63 [S2c] (F3): a retiring reader's kept frames stay
+            // with their reservations until it closes; moving them onto it
+            // after detention decided would detain the plan's own frames.
+            if slot.state == ReaderState::Retiring {
+                continue;
+            }
             let gone: Vec<i64> = (slot.retained.iter())
                 .copied()
                 .filter(|at| !(low..=bound).contains(at))

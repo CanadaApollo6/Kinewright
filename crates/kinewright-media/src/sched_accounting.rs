@@ -1659,6 +1659,8 @@ fn the_readers_accounting_holds_for_seeded_sequences() {
 enum Fixed {
     Post(Vec<Times>, bool, usize),
     Op(Op),
+    /// A retirement (`Clear`, `Forget`) and the readers it detaches.
+    Stall(Op, Vec<u64>),
 }
 
 /// A fixed operation sequence (a seed's scenario written out), each step
@@ -1680,6 +1682,15 @@ fn fixed(run: Run, steps: Vec<Fixed>) -> World {
                     world.snapshot()
                 );
                 world.apply(op, &mut rng);
+            }
+            Fixed::Stall(op, ids) => {
+                assert!(
+                    matches!(op, Op::Clear | Op::Forget(_)),
+                    "step {index}: {op:?}"
+                );
+                world.script = Some(ids);
+                world.apply(op, &mut rng);
+                world.script = Some(Vec::new());
             }
         }
         world.check();
@@ -1837,6 +1848,63 @@ fn a_carried_reservation_below_its_charge_is_made_again_at_it() {
         world.readers.reserved.get(&(0, 0)),
         Some(&(2 * F)),
         "0 at max(f, d):\n{}",
+        world.snapshot()
+    );
+}
+
+/// The run seed 674 drew (`Holders`): C = 40f, P = 8, d = 3f on source 0.
+const RUN_674: Run = Run {
+    budget: 40 * F,
+    pool: 8,
+    decoded: [3 * F, F / 2],
+    gop: [4, 3],
+    floor: [0, 0],
+    posts: 4,
+    retires: 0,
+    returns: 1,
+    runs: 1,
+    discards: 1,
+    profile: Profile::Holders,
+};
+
+/// Amendment R63 [S2c] (F3, K-3): seed 674's scenario, reduced. Reader 0
+/// refills source 0's window and keeps 37 decoded while it decodes 36 for
+/// playback; a cache clear then retires it, stalled (detached), still
+/// keeping 37. Paused steps to 39, 38 and 36 hold windows over 37. Before
+/// the fix `discard_outside` gave the retiring reader a discard of 37
+/// after K-3's detention had decided, so H + G passed C less the detached
+/// readers' charges (I3); a retiring reader's kept frames stay its own.
+#[test]
+fn a_retiring_reader_is_given_no_discard_after_detention() {
+    use Fixed::{Op as Do, Post, Stall};
+    let world = fixed(
+        RUN_674,
+        vec![
+            Post(
+                vec![(0, vec![43], vec![]), (1, vec![11], vec![])],
+                true,
+                3 * F,
+            ),
+            Do(Op::Step(0)),
+            Do(Op::Grant(0)),
+            Post(vec![(0, vec![39], vec![]), (1, vec![10], vec![])], true, F),
+            Do(Op::Step(0)),
+            Do(Op::Step(1)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(vec![(0, vec![36], vec![37, 38, 39])], false, 6 * F),
+            Do(Op::Step(0)),
+            Stall(Op::Clear, vec![0, 1]),
+            Post(vec![(0, vec![39], vec![])], true, F),
+            Post(vec![(0, vec![38], vec![])], true, 3 * F),
+            Post(vec![(0, vec![36], vec![])], true, F),
+        ],
+    );
+    let slot = (world.readers.slots.iter()).find(|slot| slot.id == 0);
+    assert!(
+        slot.is_some_and(|slot| slot.state == ReaderState::Retiring && slot.discard.is_none()),
+        "reader 0 retires with no discard:\n{}",
         world.snapshot()
     );
 }
