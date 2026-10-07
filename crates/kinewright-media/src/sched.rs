@@ -1237,14 +1237,20 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let Some(slot) = self.slot(id) else {
             return;
         };
-        if slot.state != (ReaderState::Decoding { at: t, version }) {
+        // Amendment R66 [S2c] (K-1): a reader retired while it refilled
+        // keeps what its decoder kept too (its one decode was this refill).
+        let retiring = slot.state == ReaderState::Retiring;
+        if !retiring && slot.state != (ReaderState::Decoding { at: t, version }) {
             return;
         }
         let key = slot.key.clone();
         let from = kept_from.unwrap_or(t).min(t);
         let kept = slot.retained.split_off(&from);
         let clipped = std::mem::replace(&mut slot.retained, kept);
-        let current = slot.plan.version == version;
+        // Amendment R66 [S2c] (F8, B): so are the times its pending
+        // discard drops (its decoder kept none below `from`).
+        slot.dropping.retain(|at| *at >= from);
+        let current = !retiring && slot.plan.version == version;
         if !current {
             // Amendment R64 [S2c] (K-1): the times it does not keep shrink
             // to their charge (no reader keeps them decoded).
@@ -1811,6 +1817,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         // (review A S1), so nothing may repopulate them.
         slot.flight = 0;
         if slot.state == ReaderState::Retiring {
+            // Amendment R66 [S2c] (K-1): on a failure its decoder keeps
+            // nothing (the read loop's settle), so neither does its slot.
+            if result.is_err() {
+                slot.converting = false;
+                (slot.dropping, slot.dispatched) = (BTreeSet::new(), BTreeSet::new());
+                let (key, gone) = (slot.key.clone(), std::mem::take(&mut slot.retained));
+                self.unkept(&key, gone);
+            }
             return (result.as_ref().ok().cloned(), result.err());
         }
         slot.state = ReaderState::Idle { since: now };

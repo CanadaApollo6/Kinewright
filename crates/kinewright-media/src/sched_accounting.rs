@@ -1797,6 +1797,7 @@ fn the_readers_accounting_holds_for_300k_seeded_sequences() {
 
 /// A fixed case's step: a post of a given job (its demand per source,
 /// whether it is paused, its G), or an operation (enabled now).
+#[derive(Debug)]
 enum Fixed {
     Post(Vec<Times>, bool, usize),
     Op(Op),
@@ -1810,7 +1811,11 @@ fn fixed(run: Run, steps: Vec<Fixed>) -> World {
     let mut world = World::new(run);
     world.script = Some(Vec::new());
     let mut rng = Rng(1);
+    let verbose = std::env::var_os("PF1_MODEL_TRACE").is_some();
     for (index, step) in steps.into_iter().enumerate() {
+        if verbose {
+            eprintln!("{index}: {step:?}");
+        }
         match step {
             Fixed::Post(per_source, paused, generated) => {
                 world.post_job(per_source, paused, generated);
@@ -1835,6 +1840,9 @@ fn fixed(run: Run, steps: Vec<Fixed>) -> World {
             }
         }
         world.check();
+        if verbose {
+            eprintln!("{}", world.snapshot());
+        }
     }
     world.settle();
     world
@@ -2231,4 +2239,79 @@ fn a_time_a_dispatched_discard_drops_is_counted_when_decoded_again() {
         world.snapshot()
     );
     assert_eq!(world.readers.kept_handoffs, 1, "37 decoded again, counted");
+}
+
+/// Amendment R66 [S2c] (K-1, F8): found by F14's exact count. Reader 0
+/// refills 38's window [35, 38]; a cache clear retires it while the
+/// refill is in flight, and its decoder keeps only 36 and 37 (from 38's
+/// key frame). Before the fix its slot still kept 35 too (a retiring
+/// reader's refill was not clipped), so playback's post handed 35 off
+/// from it, and reader 1's decode of 35 was counted as decoded again
+/// (I6, exact); admission also reserved 35 at max(f, d) (F13's rule).
+#[test]
+fn a_retired_readers_refill_keeps_only_what_its_decoder_kept() {
+    use Fixed::{Op as Do, Post, Stall};
+    let world = fixed(
+        RUN_16102,
+        vec![
+            Post(vec![(0, vec![39], vec![])], true, 6 * F),
+            Do(Op::Run),
+            Post(vec![(0, vec![38], vec![])], true, 6 * F),
+            Do(Op::Step(0)),
+            Stall(Op::Clear, vec![]),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(vec![(0, vec![35], vec![36, 37])], false, 6 * F),
+            Do(Op::Step(1)),
+            Do(Op::Grant(1)),
+            Do(Op::Step(1)),
+        ],
+    );
+    let slot = (world.readers.slots.iter()).find(|slot| slot.id == 0);
+    assert!(
+        slot.is_none_or(|slot| slot.retained.iter().all(|at| *at >= 36)),
+        "reader 0 keeps 36 and 37 at most:\n{}",
+        world.snapshot()
+    );
+    assert_eq!(world.readers.kept_handoffs, 0, "35 was never kept");
+}
+
+/// Seed 16102's run with C = 60f: a backward window wide enough to keep
+/// times below its refill's key frame.
+const RUN_16102_WIDE: Run = Run {
+    budget: 60 * F,
+    ..RUN_16102
+};
+
+/// Amendment R66 [S2c] (F8, B): found by F14's exact count (seed 3517).
+/// Reader 0 refills 38's window [23, 38] from below 36, 38's key frame:
+/// its decoder will keep only 36 and 37. While it decodes, a paused step
+/// to 37 beside G = 55f cuts the continuation to 37, so a pending discard
+/// drops 23–36. Before the fix the refill's result clipped only the times
+/// its slot kept, not those its discard drops, so playback's next post
+/// handed 26 off from it, and reader 1's decode of 26 was counted as
+/// decoded again (I6, exact).
+#[test]
+fn a_refill_clips_the_times_its_pending_discard_drops() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_16102_WIDE,
+        vec![
+            Post(vec![(0, vec![39], vec![])], true, 6 * F),
+            Do(Op::Run),
+            Post(vec![(0, vec![38], vec![])], true, 6 * F),
+            Do(Op::Step(0)),
+            Post(vec![(0, vec![37], vec![])], true, 55 * F),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(vec![(0, vec![26, 37], vec![])], false, 6 * F),
+            Do(Op::Step(1)),
+            Do(Op::Grant(1)),
+            Do(Op::Step(1)),
+        ],
+    );
+    assert_eq!(
+        world.readers.kept_handoffs,
+        0,
+        "26 was never kept:\n{}",
+        world.snapshot()
+    );
 }
