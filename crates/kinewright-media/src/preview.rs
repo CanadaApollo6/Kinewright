@@ -799,16 +799,26 @@ fn kept_sizes(demand: &ReaderDemand) -> HashMap<VideoSourceKey, usize> {
 /// S-3 [S2c]: a paused job's backward windows (`Readers::backward_job`) for
 /// each source with one required time: a refill's times join that
 /// source's required times. Amendment R62 [S2c]: the set becomes the
-/// scheduler's charge of the job over those windows (`sched::job_bytes`),
+/// scheduler's charge of the job over those windows (`sched::job_bytes`;
+/// Amendment R63, F7: a frame a reader keeps at max(f, d), playback too),
 /// so K-3 fits what admission charges. Returns the windows to hold (none
-/// for playback: the set stays every frame at f).
+/// for playback: its frames at f, one a reader keeps at max(f, d)).
 fn backward_windows(
     paused: bool,
     readers: &Readers<VideoSourceKey, Pinned>,
     demand: &ReaderDemand,
     (per_source, sizes, set): (&mut [Times], &HashMap<VideoSourceKey, usize>, &mut usize),
 ) -> crate::sched::Windows<VideoSourceKey> {
+    // Amendment R54 (K-1): a window frame is charged max(f, d), for B too.
+    let kept = kept_sizes(demand);
+    let kept: HashMap<_, _> = (sizes.iter())
+        .map(|(key, f)| (key.clone(), kept.get(key).copied().unwrap_or(*f)))
+        .collect();
     if !paused {
+        // Amendment R63 [S2c] (K-3, F7): a required frame a reader keeps
+        // decoded is charged max(f, d) by the post; K-3 counts it so.
+        let held = (&HashMap::new(), &kept);
+        *set = readers.job_set(per_source, held, sizes, demand.generated);
         return HashMap::new();
     }
     let steps: Vec<(VideoSourceKey, i64, i64)> = (per_source.iter())
@@ -819,11 +829,6 @@ fn backward_windows(
                 .all(|other| *other == t)
                 .then(|| (key.clone(), t, floor))
         })
-        .collect();
-    // Amendment R54 (K-1): a window frame is charged max(f, d), for B too.
-    let kept = kept_sizes(demand);
-    let kept: HashMap<_, _> = (sizes.iter())
-        .map(|(key, f)| (key.clone(), kept.get(key).copied().unwrap_or(*f)))
         .collect();
     let job = (*set, demand.generated);
     let windows;

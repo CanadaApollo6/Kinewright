@@ -60,16 +60,28 @@ pub(crate) fn charge<K: Eq + Hash>(
 }
 
 /// Amendment R62 [S2c] (K-3): a job's set H + G: its distinct `required`
-/// frames by [`charge`] (f from `sizes`) beside `generated`.
+/// frames by [`charge`] (f from `sizes`) beside `generated`. Amendment R63
+/// [S2c] (F7): a frame a reader keeps decoded (`keeps`) at the charge its
+/// reservation holds while kept, max(f, d) (`held`'s second map).
 pub(crate) fn job_bytes<'a, K: Eq + Hash + 'a>(
     required: impl IntoIterator<Item = (&'a K, i64)>,
     held: (&Windows<K>, &HashMap<K, usize>),
     sizes: &HashMap<K, usize>,
     generated: usize,
+    keeps: impl Fn(&K, i64) -> bool,
 ) -> usize {
     let distinct: HashSet<(&K, i64)> = required.into_iter().collect();
+    let held_charge = |(key, at): (&K, i64)| {
+        let charge = charge(held, sizes.get(key).copied().unwrap_or(0), key, at);
+        let kept = held.1.get(key).copied().unwrap_or(0);
+        if keeps(key, at) {
+            charge.max(kept)
+        } else {
+            charge
+        }
+    };
     (distinct.into_iter())
-        .map(|(key, at)| charge(held, sizes.get(key).copied().unwrap_or(0), key, at))
+        .map(held_charge)
         .fold(generated, usize::saturating_add)
 }
 
@@ -1165,10 +1177,27 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 required.extend(times);
             }
         }
+        let set = self.job_set(per_source, (&windows, kept), sizes, generated);
+        (windows, set)
+    }
+
+    /// Amendment R63 [S2c] (K-3, F7): the set H + G of the job
+    /// `per_source` requires, each frame at the charge it will hold
+    /// ([`job_bytes`]): max(f, d) while a reader keeps it decoded, its
+    /// [`charge`] under the windows `held` otherwise. K-3 decides on it.
+    pub(crate) fn job_set(
+        &self,
+        per_source: &[(K, Vec<i64>, Vec<i64>)],
+        held: (&Windows<K>, &HashMap<K, usize>),
+        sizes: &HashMap<K, usize>,
+        generated: usize,
+    ) -> usize {
         let required =
             (per_source.iter()).flat_map(|(key, times, _)| times.iter().map(move |at| (key, *at)));
-        let set = job_bytes(required, (&windows, kept), sizes, generated);
-        (windows, set)
+        let keeps = |key: &K, at: i64| {
+            (self.slots.iter()).any(|slot| slot.key == *key && slot.retained.contains(&at))
+        };
+        job_bytes(required, held, sizes, generated, keeps)
     }
 
     /// S-3 [S2c]: the windows the next post holds (a playback job holds

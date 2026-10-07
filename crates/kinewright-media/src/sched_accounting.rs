@@ -725,9 +725,9 @@ impl World {
                 let kept: HashMap<u8, usize> = (sizes.keys())
                     .map(|key| (*key, self.kept_size(*key)))
                     .collect();
-                let required = (per_source.iter())
-                    .flat_map(|(key, times, _)| times.iter().map(move |at| (key, *at)));
-                let set = super::job_bytes(required, (&HashMap::new(), &kept), &sizes, 0);
+                let set = self
+                    .readers
+                    .job_set(per_source, (&HashMap::new(), &kept), &sizes, 0);
                 self.run.budget.saturating_sub(set)
             }
         } else if rng.chance(if near { 70 } else { 30 }) {
@@ -830,6 +830,8 @@ impl World {
             let job = (set, generated);
             (self.readers).backward_job(&steps, (&sizes, &kept), &mut per_source, job)
         } else {
+            let held = (&HashMap::new(), &kept);
+            let set = (self.readers).job_set(&per_source, held, &sizes, generated);
             (HashMap::new(), set)
         };
         // `plan`.
@@ -1638,4 +1640,93 @@ fn the_readers_accounting_holds_for_seeded_sequences() {
     if first.is_none() {
         reach.assert_reached();
     }
+}
+
+/// A fixed case's step: a post of a given job (its demand per source,
+/// whether it is paused, its G), or an operation (enabled now).
+enum Fixed {
+    Post(Vec<Times>, bool, usize),
+    Op(Op),
+}
+
+/// A fixed operation sequence (a seed's scenario written out), each step
+/// checked as a seed's are; settled at the end. Returns the world.
+fn fixed(run: Run, steps: Vec<Fixed>) -> World {
+    let mut world = World::new(run);
+    world.script = Some(Vec::new());
+    let mut rng = Rng(1);
+    for (index, step) in steps.into_iter().enumerate() {
+        match step {
+            Fixed::Post(per_source, paused, generated) => {
+                world.post_job(per_source, paused, generated);
+            }
+            Fixed::Op(op) => {
+                let enabled = op == Op::Run || world.ops().iter().any(|(other, _)| *other == op);
+                assert!(
+                    enabled,
+                    "step {index}: {op:?} is not enabled:\n{}",
+                    world.snapshot()
+                );
+                world.apply(op, &mut rng);
+            }
+        }
+        world.check();
+    }
+    world.settle();
+    world
+}
+
+/// The run seed 2008 drew (under R62's generator): C = 20f, P = 2, d = 2f.
+const RUN_2008: Run = Run {
+    budget: 20 * F,
+    pool: 2,
+    decoded: [2 * F, 2 * F],
+    gop: [12, 6],
+    floor: [6, 0],
+    posts: 2,
+    retires: 0,
+    returns: 4,
+    runs: 0,
+    discards: 4,
+    profile: Profile::Uniform,
+};
+
+/// Amendment R63 [S2c] (F7, K-3): seed 2008's scenario. A paused step back
+/// from 24 to 21 refills source 0's window, and reader 0 converts 21–19,
+/// keeping 18 (and below) decoded at max(f, d) = 2f. Playback then
+/// requires 6 and 18 of source 0 and 18 of source 1 beside G = 17f. At f
+/// the set is 3f + 17f = C, but admission charges 18 the 2f its kept frame
+/// holds: 21f > C. Before the fix K-3 posted it, and the job was never
+/// admitted (I5); K-3 now counts 18 at 2f and takes its fallback.
+#[test]
+fn a_kept_required_frame_counts_at_its_held_charge_in_k3() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_2008,
+        vec![
+            Post(vec![(0, vec![24], vec![])], true, 0),
+            Do(Op::Run),
+            Post(vec![(0, vec![21], vec![])], true, 0),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(
+                vec![
+                    (0, vec![6, 18], vec![7, 8, 9, 19, 20]),
+                    (1, vec![18], vec![19, 20, 21]),
+                ],
+                false,
+                17 * F,
+            ),
+            Do(Op::Run),
+        ],
+    );
+    assert_eq!(
+        world.reach.fallbacks[1], 1,
+        "K-3's fallback: {:?}",
+        world.reach
+    );
 }
