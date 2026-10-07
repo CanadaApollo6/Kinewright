@@ -5974,19 +5974,24 @@ drops (E13.5.8). Still open:
   are strengthened.
 - **Lines:** see E13.5.1. This section is documentation only.
 
-### E13.6 S2c-5, Amendments R53–R57 and the closing re-time (2026-10-06): stopped at R57's L-4a (LH)
+### E13.6 S2c-5, Amendments R53–R59 and the closing re-time (2026-10-06/07)
 
 The lead's order (r53-s2c5-rulings.md): S2c-5, then R53, gates, the workspace test, the closing re-time, this
-section. Steps 1–4 are done. **The closing re-time stopped after a paired check of the R53 gates:** both L-4
-gates miss at GOP 60 (E13.6.4). This section is partial and goes to the lead with the conflict.
+section. Steps 1–4 were done first. The closing re-time then stopped after a paired check of the R53 gates:
+both L-4 gates missed at GOP 60 (E13.6.4), and the section went to the lead with the conflict.
 
-Amendment R54 (E13.6.6) then fixed the refill: L-4b passes, L-4a still misses. Amendment R55 asked for a
+Amendment R54 (E13.6.6) fixed the refill: L-4b passed, L-4a still missed. Amendment R55 asked for a
 measurement first and a stop if a hit's wait is not mostly conversion. It is not (E13.6.7), so R55 stopped
 there: no conversion change was made. Amendment R56 asked for a trace first and a stop if the conversions run
 back to back and still fall behind. They do (E13.6.8), so R56 stopped there too. Amendment R57 added a
-row-wise fill and converts the window only below the newest t (E13.6.9). L-4b passes on both lanes and L-4a
-passes on LL, but L-4a misses on LH, whose hit is now mostly its ~13 ms render. R57 stopped there. **This
-section is partial.**
+row-wise fill and converts the window only below the newest t (E13.6.9). L-4b passed on both lanes and L-4a on
+LL, but L-4a missed on LH, whose hit is now mostly its ~13 ms render.
+
+Amendment R58 (Riel) records L-4a on LH as *environment-limited (GPU idle clocks), re-checked at S4's pinned
+run*: not a pass, and on S4's checklist beside G3. The closing plan at `5fa62b4` (r58) then found P-seek steps
+timing out on the candidate only. Amendment R59 found the cause (a reader idling while holding discard charges)
+and fixed it, and the closing re-time ran at `c90d062` (E13.6.10). What stays open is listed at the end of
+E13.6.10.
 
 #### E13.6.1 S2c-5, open GOP (b)
 
@@ -6006,8 +6011,9 @@ Mutations (logs `s2c-logs/s2c7/s2c5-*.log`):
 - retry off: **killed** (the region-start witness: no frame at 21; the CLI check: 5 unreachable);
 - the latch skip off: **killed** (`continuation_reproduces_seek_on_every_fixture`);
 - the pair gate off: **killed** (11 tests);
-- seek to `dts` instead of `dts − 1`: **survives**. **Partial:** the one-tick margin is not witnessed by the
-  fixtures. E13.6.6 argues the mutant is equivalent on the fixtures' mov/H.264 pair (for the Sonnet review).
+- seek to `dts` instead of `dts − 1`: **survives, as an equivalent mutant** on the fixtures' mov/H.264 pair
+  (E13.6.6 gives the argument). The one-tick margin is therefore not witnessed by any fixture; a counterexample
+  needs a GOP no longer than the reorder delay.
 
 #### E13.6.2 Amendment R53
 
@@ -6094,11 +6100,12 @@ The verdicts:
 - **L-4b.** Time to t is bounded below by the window's decoding. A refill decodes 46 frames against the
   reference's 30, because a quarter of the windows start before t's key and walk the earlier GOP. It also copies
   15 decoded frames. At about 1.2–1.5 ms per decoded frame (E13.5.7), the 16 extra decodes alone are 20–24 ms on
-  a ~50 ms step: about 1.4–1.5× before any copy. **Partial:** the copy cost is inferred, not measured.
+  a ~50 ms step: about 1.4–1.5× before any copy. The copy cost was never measured, and R54 removed it: kept
+  frames are moved decoder references, not copies (E13.6.6, `count_keep_copied` 0).
 
-The full closing re-time was not run: its L-4 gates would fail for the reasons above.
-- **Done:** the workspace test.
-- **Not run:** P-play, I4 and G18. Their code paths are unchanged by R53 except the paused refill.
+At R53 the full closing re-time was not run, because its L-4 gates would fail for the reasons above. Only the
+workspace test was done. P-play, I4 and G18 ran in the closing plan after R58, at `5fa62b4`, and again after R59,
+at `c90d062` (E13.6.10).
 
 #### E13.6.5 Tests and gates at `eb7a4c1`
 
@@ -6341,3 +6348,230 @@ measurement (LL p95 17.6 against 16.8 measured; LH 23.4 against 22.0). From r57t
   refill. The window is only ~13 frames, so the lanes convert little more than one does.
 - **LH would pass L-4a only with two extra lanes**, or with one if conversions do not slow, and then by about
   0.5–2 ms. Its ~13 ms render is the floor either way. One heavily loaded LH run reached 32.1 ms.
+
+#### E13.6.10 The closing plan (r58), Amendment R59 and the closing re-time (r59)
+
+**The closing plan at `5fa62b4` (r58).** 114 lanes (`s2c-timing/r58/plan-r58.txt`), 17:40–22:25 EDT on 2026-10-06.
+The candidate was `cand-5fa62b4` (`b1cf2d9c…`); the references were `ref-ad8f896` and, on COUNT lanes,
+`count2-ref-ad8f896`; G18 ran against `s0-d19bdf9-lane2aa4e1b`. The load at lane start was 4.1–34.2 (median 12.6),
+with `campfire` at up to 1361% CPU (annotation, R50). It found three things:
+- **P-seek `explainer_16x9` backward steps timed out at 10 s, on the candidate only:** 117 timeouts in 15 of its
+  36 runs (LL 11 of 18, LH 4 of 18), and none in the reference's 36. Every lane still exited 0, because the
+  harness printed `timeouts=` without failing on it. That is how this hid until the closing plan.
+- **P-play LH `feed_4x5` was worse on the candidate in all three pairs:** held max 728 / 547 / 8,250 ms against
+  135 / 171 / 174, and dropped 516 / 762 / 1,126 against 439 / 646 / 597. These lanes carried no counters.
+- **LH `talk_recut` random p95:** pair ratio median 1.25 (0.83, 1.45, 1.25).
+
+I4 (0.87 / 0.80) and G18 (identical hash, 0.174) passed. The R58 L-4a result on LH is unchanged.
+
+**The cause (R59 item 1).** The instrumented build `diag-counters` (`5fa62b4` + the counters, `b8d2fba6…`) repeated
+LL `explainer_16x9` run 0 (`s2c-timing/r59/diag/`): 6 timeouts; 50 admission waits totalling 60,063 ms, the longest
+60,011 ms; and 25 counts of a reader idle while holding discard charges. The trace shows it:
+- the post at 235 is a refill below the held window [237, 250], and its admission waits;
+- reader 0 finishes converting 241, then idles holding the charges of the frames the post discarded;
+- it wakes every 5 s (the quiescence timeout), has no decode to start (its own required frame is unreserved), and
+  idles again; it cannot retire, because that frame is still owed;
+- nothing decodes until the wait ends 60 s later, six 10 s steps on.
+
+This is the deadlock E13.6.6 warned of. The design's Amendment R59 states the fix.
+
+**The fix.**
+
+| Commit | What |
+|---|---|
+| `8a1d833` | test: the R59 counters (admission waits: count, total, longest; a reader idle while holding discard charges); a P-seek step timeout, or `count_idle_discard` > 0, fails the lane |
+| `7281b9a` | test: the two-source liveness witness, red |
+| `c90d062` | media: the discard-only job (`Next::Discard`), and the design text R59 |
+
+- **The discard-only job.** In `Readers::next`, a reader with no decode to start but with discarded frames pending
+  is handed `Next::Discard { bound, bytes }`. Outside `Sched` its decoder drops the kept frames above `bound`, and
+  then their charges are released, which wakes admission. A post wakes every reader, so the job runs at the post.
+- **The witness** `a_reader_holding_discards_drops_them_so_the_other_source_is_admitted` (sched):
+  - budget 20 frames; source 0's reader keeps a window, so 36, 37 and 38 are retained;
+  - a step to 35 beside source 1's frame at 0 does not fit beside their charges: `Wait`;
+  - after one step of every reader, admission must be `Ready` while source 0's reader still exists, and both
+    frames resolve.
+
+  It fails before the fix (`s2c-logs/s2c7/r59-witness-red.log`) and passes after. With the discard-only job
+  removed (the mutation) it fails again (`r59-mutant.log`). `preview::` and `sched::`: 88 passed
+  (`r59-fix-tests.log`). The media library at `c90d062`: 1027 passed, 56 ignored (`r59-media-lib.log`).
+- **The asserts (the coordinator's addition to R59).** `pf1_seek_baseline` now fails on any P-seek step timeout,
+  with "R59: N P-seek step(s) timed out (workload, run N)". Both harnesses fail if `count_idle_discard` is not 0.
+  Both asserts went in with the counters (`8a1d833`), so timeouts and idle discard charges fail loudly. The
+  pre-fix reproduction above now exits 101.
+
+**P-play LH `feed_4x5` (R59 item 3; r59a).** Nine counted lanes, 23:05–23:19 EDT, all exit 0, rotated: pair 1 ref,
+pre, cand; pair 2 pre, cand, ref; pair 3 cand, ref, pre. The binaries were ref `count5-ref-ad8f896` (`bd5f14b5…`);
+pre `diag-counters` (the r58 candidate's code); and cand `cand-c90d062` (`55acda05…`). Logs:
+`s2c-timing/r59/timing-r59a.log.gz`, `samples-r59a.log.gz`.
+
+| Lane | Load | Held max (ms) | Dropped | On time | Admission waits (total ms) | Idle with discards | Decoded | Converted | Lookahead starved |
+|---|---|---|---|---|---|---|---|---|---|
+| ref1 | 10.9 | 170.6 | 661 | 1139 | 0 | — | 6614 | 2705 | 203 |
+| pre1 | 14.7 | 183.8 | 645 | 1155 | 0 | 0 | 6880 | 2705 | 200 |
+| cand1 | 15.9 | 306.4 | 761 | 1039 | 0 | 0 | 6849 | 2697 | 202 |
+| pre2 | 17.2 | **1658.2** | 931 | 867 | 0 | 0 | 6915 | 2624 | 130 |
+| cand2 | 24.8 | 1092.8 | 739 | 1060 | 1 (4.8) | 0 | 7402 | 2656 | 175 |
+| ref2 | 29.4 | 507.8 | 589 | 1211 | 0 | — | 7511 | 2704 | 198 |
+| cand3 | 17.6 | 242.9 | 612 | 1187 | 1 (2.4) | 0 | 6630 | 2705 | 199 |
+| ref3 | 14.7 | 875.6 | 946 | 843 | 0 | — | 6650 | 2598 | 162 |
+| pre3 | 26.9 | 85.1 | 691 | 1109 | 0 | 0 | 7120 | 2704 | 194 |
+
+- **This is not the admission stall.** The pre-fix build had no admission wait in any run, yet held a frame for
+  1,658 ms in pre2. The fixed candidate waited at most once, for 4.8 ms. The reference spikes too (ref3: 875.6 ms,
+  946 dropped).
+- **The counters match across the three binaries:** decoded 6.6–7.5k, converted 2.6–2.7k, ledger peak 99.0 MiB,
+  and no retire overrun or sync fallback. The large holds come with fewer lookahead-starved counts and higher clock
+  stalls (pre2: 130 and 100.9 ms; ref3: 162 and 89.8 ms), on the reference as well.
+- **The lead's ruling:** the LH `feed_4x5` spikes are a property of the workload and the machine, shared with the
+  reference, and are not attributed to S2c. They join the "~1 s holds go to S4" finding (E13.5.8). **G14 on
+  `feed_4x5` is not a pass.**
+- **r58's 8,250 ms run stays unexplained:** its lanes had no counters, so it can be neither confirmed nor excluded
+  as the stall.
+
+**The closing re-time at `c90d062` (r59b).** I stopped the first start of `plan-r59.txt` (114 lanes) about two
+minutes in, for the stop above. It was restarted at 23:23:54 EDT, with the lead's stop guards checked every 30 s
+(`r59/guard.py`). The run would stop if a candidate P-play or P-seek lane showed any of:
+- `count_idle_discard` > 0;
+- an admission wait of 1 s or more;
+- a P-seek timeout;
+- a held max over 2 s;
+- a nonzero exit.
+
+The run ended at 04:28:26 EDT on 2026-10-07. All 48 candidate P-play and P-seek lanes passed the guard. The pairs
+were:
+- P-seek and P-play: `ref-ad8f896` (`6d52c2f9…`) against `cand-c90d062`;
+- COUNT P-seek: `count5-ref-ad8f896` against the same candidate;
+- G18: `s0-d19bdf9-lane2aa4e1b` (`5731d7ae…`) against the candidate.
+
+Three reference lanes exited 139 after `test result: ok`, the reference binary's known teardown crash (COUNT LH
+`seek_gop60` ref2, COUNT LH `explainer_16x9` ref3, and LH `talk_recut` ref2). Every other lane exited 0. The load
+at lane start was 4.7–46.1 (median 14.8); `chrome-headless`, `node`, `rustc` and `campfire` were the main foreign CPU
+(annotation, R50). Logs: `timing-r59b.log.gz`, `samples-r59b.log.gz`, `analyze-r59b.txt` (`r2/analyze.py`) and `l5-r59b.txt`
+(`r5/l5.py`). `l5.py` now starts a new lane at any `# BEGIN`. Before this fix, a plain lane's lines that followed a
+COUNT lane were counted into it; no earlier plan mixed the two kinds.
+
+The candidate's R59 counters, per run (36 lanes of 3 P-seek runs, 12 P-play runs):
+
+| Workload | Admission waits per run | Their total per run (ms) | Longest (ms) | Idle with discards | Timeouts |
+|---|---|---|---|---|---|
+| `seek_gop60` (LL, LH) | 3–17 | 0.9–75.8 | 35.3 | 0 | 0 |
+| `talk_recut` | 1–10 | 0.0–20.5 | 17.7 | 0 | 0 |
+| `explainer_16x9` | 49–63 | 55.9–250.5 | 21.3 | 0 | 0 |
+| P-play (both workloads) | 0–1 | 0.0–2.2 | 2.2 | 0 | — |
+
+Admission still waits in `explainer_16x9`, about 55 times a run, but the longest wait was 21.3 ms. Before the fix,
+50 waits took 60 s.
+
+**P-seek (R50, 3 pairs of 3 runs; per-pair ratio cand/ref, median and the three pairs):**
+
+| Lane, workload | Random p95 | Forward p95 | +1 p95 | Backward p95 | Drag distinct fps | Timeouts (cand) |
+|---|---|---|---|---|---|---|
+| LL `seek_gop60` | 0.96 (0.93, 0.96, 1.73) | 0.50 | 0.85 | 0.96 | ×3.00 | 0 |
+| LL `talk_recut` | 0.96 (0.96, 1.04, 0.86) | 0.73 | 0.95 | 0.93 | ×3.92 | 0 |
+| LL `explainer_16x9` | 1.00 (1.05, 0.94, 1.00) | 0.27 | 0.92 | 0.88 | ×12.25 | **0** |
+| LH `seek_gop60` | 0.59 (0.59, 0.48, 1.02) | 0.58 | 1.03 | 1.08 | ×3.75 | 0 |
+| LH `talk_recut` | 0.82 (0.61, 0.82, 2.97) | 0.78 | 1.62 (1.62, 1.08, 2.52) | 2.45 (2.45, 1.18, 2.66) | ×4.15 | 0 |
+| LH `explainer_16x9` | 0.94 (0.78, 0.94, 1.12) | 0.27 | 1.07 | 0.80 | ×37.00 | **0** |
+
+- **`explainer_16x9` timed out 0 times** in all 36 candidate runs (P-seek and COUNT, LL and LH), against 117 at
+  `5fa62b4`.
+- **LH `talk_recut` random p95, as the R50 pair median with the reference spread:** 0.82 (0.61, 0.82, 2.97). The
+  candidate's median was 306.6 ms (range 101.9–517.4) against the reference's 160.0 (110.2–300.2). In the COUNT
+  lanes it was 0.77 (0.77, 0.43, 1.59), with the reference at 261.6 (116.0–628.1).
+- **LH `talk_recut` pair 3.** All three of cand3's runs were slow: random p95 474.6 / 465.8 / 517.4 ms, backward
+  378.1 / 407.7 / 388.0. That pair alone carries the 2.97, 2.52 and 2.66.
+  - Its counters match the fast runs: decoded 23.8–25.3k (other candidate runs 23.5–25.3k), converted 1.05–1.13k
+    (1.08–1.32k), process CPU in the backward phase 55.6–56.7 s (53.4–56.5 s), and the longest admission wait 17.7
+    ms.
+  - The same work took longer on the wall clock. The foreign CPU logged during that lane was about three times any
+    other `talk_recut` lane's (95,051 %·samples against 29,687–34,130).
+  - In the COUNT lanes, with counters on both sides, the same workload's backward p95 ratio is 0.50 and its L-4b
+    is 0.67.
+
+**L-4b (COUNT lanes; time to t on a refill divided by the reference's step mean; ≤ 1.25) passes on every
+workload:**
+
+| Workload | LL | LH |
+|---|---|---|
+| `seek_gop60` | 0.82 | 1.02 |
+| `talk_recut` | 1.11 | 0.67 |
+| `explainer_16x9` | 0.71 | 1.01 |
+
+The backward mean is 0.40–0.63 of the reference's.
+
+**L-4a (hit p95 ≤ 20 ms, `seek_gop60`).**
+- **In r59b, under this run's load, the candidate's hit p95 was LL 41.6 ms (19.3–106.0) and LH 29.7 (26.8–63.7).**
+  - The hit's render was 8.9–35.8 ms on LL (r58: 7.5–8.1 in eight of nine runs, 12.7 in the ninth) and 14.1–25.0 on LH (r58: 12.9–13.5).
+  - Its wait was 2.7–12.8 / 4.2–9.5 ms (r58: 2.0–4.4 / 1.5–3.1).
+- **A paired check against the pre-fix code** (r59c, 04:30–04:49 EDT, load 7.6–16.1): `cand-5fa62b4` (R57's code,
+  the build that passed L-4a on LL in r57 and r58) against `cand-c90d062`, 3 rotated pairs per lane. Logs:
+  `timing-r59c.log.gz`, `samples-r59c.log.gz`.
+
+  | Lane | Pre-fix hit p95 per pair | Candidate | Ratio per pair → median | Wait / render mean (pre; cand) | Pre-converted; windows full (pre; cand) |
+  |---|---|---|---|---|---|
+  | LL | 25.8, 23.7, 23.6 | 29.3, 26.3, 26.3 | 1.14, 1.11, 1.11 → **1.11** | 4.5 / 10.4; 5.2 / 10.9 | 37; 46 · 34; 45 |
+  | LH | 27.7, 26.9, 23.9 | 28.3, 27.1, 24.7 | 1.02, 1.01, 1.03 → **1.02** | 3.6 / 14.1; 3.9 / 14.0 | 48; 52 · 47; 50 |
+
+  CPU per refill is equal on both binaries (LL 445–482 ms; LH 417–451 ms).
+- **The R59 job never ran in `seek_gop60`.** A traced candidate run (LL, all three seeds,
+  `r59/diag/trace-gop60-LL.txt.gz`) has 0 `Discard` events in 600 steps, against 10 admission waits. On this workload
+  the candidate executes the pre-fix code path, plus the test-build counters.
+- **Findings:**
+  - **In this session the pre-fix build misses L-4a on LL as well** (23.7 ms; 17.3 in r58). The LL render (lavapipe,
+    CPU) is 10–11 ms here against 7.5–8.1 in r58.
+  - **The candidate's LL hit p95 is 1.11× the pre-fix build's in all three pairs** (about +2.6 ms; wait +0.7 ms and
+    render +0.5 ms on the means). The candidate lanes ran at the higher load in all three LL pairs (11.0, 11.4 and
+    11.2 against 8.0, 10.7 and 9.9). That is an annotation, not counter evidence, and the trace rules out the R59
+    job. **The 1.11 is unexplained.**
+  - **L-4a on LL is therefore not re-confirmed at `c90d062`.** Its pass stands at R57's code (r57: 17.6 ms; r58: 17.3
+    ms). This is for the lead. L-4a on LH stays as R58 records it.
+
+**P-play (3 pairs; held max ms and dropped, cand against ref):**
+
+| Lane, workload | Held max | Dropped | Present p95 |
+|---|---|---|---|
+| LL `typical_1080p` | 85.1 / 131.4 / 107.5 vs 175.1 / 190.0 / 95.2 | 2 / 18 / 17 vs 8 / 43 / 4 | 43.2–43.3 vs 43.1–43.3 |
+| LL `feed_4x5` | 85.6 / 85.1 / 120.4 vs 85.2 / 564.8 / 123.0 | 89 / 71 / 120 vs 149 / 316 / 143 | 43.6–63.7 vs 63.9–65.2 |
+| LH `typical_1080p` | 532.6 / 85.1 / 85.3 vs 85.1 / 121.8 / 339.7 | 373 / 65 / 26 vs 5 / 157 / 357 | 42.9–68.0 vs 42.8–67.6 |
+| LH `feed_4x5` | 115.5 / **1247.9** / 169.1 vs **1156.6** / 116.0 / 251.8 | 385 / 507 / 614 vs 501 / 360 / 592 | 64.6–85.0 vs 64.6–84.9 |
+
+- Every run was `valid=true`, with 0 underrun frames, 0 sync fallback frames, 0 stale errors and 0 retire
+  overruns.
+- The candidate's runs had at most one admission wait (≤ 2.2 ms) and 0 idle-with-discards.
+- **G14 (held ≤ 100 ms) is missed on both binaries**, as in E13.5.8: in 7 of 12 candidate runs and 9 of
+  12 reference runs. LH `feed_4x5` again holds a frame
+  for over a second, once on each binary. It is not a pass, and it goes to S4 with the "~1 s holds" finding.
+
+**I4 and G18, rerun.** R59 item 4 let them stand only if the fix's diff touched neither the playback nor the export
+path. It touches `Readers::next` and the reader loop in `preview.rs`, which playback runs on every decode. The new
+branch is reached only when a held window discards, but the diff does touch that path, so both were rerun.
+
+**I4** (`typical_1080p`, mean ms per run; pair ratio cand/ref, median):
+
+| Lane | ref1 / cand1 | ref2 / cand2 | ref3 / cand3 | Pair ratios, mean | Median ratio: mean / p95 |
+|---|---|---|---|---|---|
+| LL | 88.26 / 68.50 | 96.21 / 73.46 | 89.35 / 71.74 | 0.78, 0.76, 0.80 | **0.78** / 0.79 |
+| LH | 98.36 / 85.63 | 100.81 / 73.34 | 110.52 / 198.76 | 0.87, 0.73, 1.80 | **0.87** / 0.88 |
+
+**I4 passes** on both lanes (median ratio ≤ 1.05). The test's own baseline rule also passes on every run (−59.9%
+to −86.2%). LH cand3 (198.76 ms) is the outlier, and the median uses its pair.
+
+**G18** (export): S0 `fe87e67c…`, 3,375,562 bytes, in all three runs; the candidate's output is byte-identical in
+all three. Wall time cand/S0 is 0.157, 0.178 and 0.156, median **0.157** (r58: 0.174). **G18 passes.**
+
+**Where E13.6 closes:**
+- **Resolved:**
+  - the `explainer_16x9` stall: 0 timeouts in 36 candidate runs, 0 idle-with-discards in every run, and both now
+    fail the lane;
+  - the E13.6.1 dts mutant: recorded as equivalent;
+  - the E13.6.4 copy cost: R54 removed it;
+  - L-4b on every workload and both lanes;
+  - I4 and G18, rerun at `c90d062`.
+- **Recorded, not passed:**
+  - L-4a on LH: *environment-limited (GPU idle clocks), re-checked at S4's pinned run* (R58), beside G3;
+  - G14 on LH `feed_4x5`: shared with the reference, with the "~1 s holds" finding, for S4;
+  - r58's 8,250 ms LH `feed_4x5` hold: unexplained (no counters).
+- **Open, for the lead:** L-4a on LL is not re-confirmed at `c90d062`. Both binaries miss it in this session, and
+  the candidate is 1.11× the pre-fix code in the paired check, which the trace does not explain.
+- The E13.6.7 and E13.6.8 estimates stay estimates.
