@@ -75,6 +75,7 @@ kinewright_media pf1_harness::pf1_play_baseline crates/kinewright-media/src/pf1_
 kinewright_media pf1_harness::pf1_rss_baseline crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-rss lane: manual release memory measurement; run with --release --ignored
 kinewright_media pf1_harness::pf1_rss_child crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-rss child: the subprocess pf1_rss_baseline spawns
 kinewright_media pf1_harness::pf1_seek_baseline crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-seek lane: manual release seek-latency measurement; run with --release --ignored
+kinewright_media sched::accounting::the_readers_accounting_holds_for_seeded_sequences crates/kinewright-media/src/sched_accounting.rs any inherited-gap  # INHERITED GAP: the seeded accounting model is red until the PF1 R63/R64 fixes land; the last fix (F11) removes this line
 
 # kinewright_project
 kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # INHERITED GAP: known journal-lock defect (S5 obligation: journal writers must hold the lock); unskip once fixed

@@ -241,6 +241,12 @@ impl<V> KeptFrames<V> {
         self.frames.iter().map(|kept| &kept.value)
     }
 
+    /// Every kept frame with the times it owes.
+    #[cfg(test)]
+    pub(crate) fn frames(&self) -> impl Iterator<Item = &Kept<V>> {
+        self.frames.iter()
+    }
+
     /// The times kept, ascending.
     #[cfg(test)]
     pub(crate) fn times(&self) -> Vec<i64> {
@@ -2180,6 +2186,10 @@ pub(crate) const fn wait_step(view: WaitView) -> WaitStep {
         WaitStep::Wait
     }
 }
+
+#[cfg(test)]
+#[path = "sched_accounting.rs"]
+mod accounting;
 
 #[cfg(test)]
 mod tests {
