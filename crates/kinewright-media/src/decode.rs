@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::Path, sync::Arc};
+use std::{path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
@@ -11,6 +11,7 @@ use crate::{
     cache::FrameCache,
     conversion::{Conversion, TransferTable, alpha_table, select_conversion},
     frame::{CachedFrame, WorkingFrame, managed_pixel_error},
+    sched::KeptFrames,
     sha256::source_fingerprint,
 };
 
@@ -1814,16 +1815,14 @@ pub(crate) struct VideoDecoder {
     /// converted: (first grid frame, last grid frame, timestamp, frame).
     /// Amendment R54: each the decoder's own reference-counted output (no
     /// copy), unless the frame also shows at t.
-    retained: Vec<KeptFrame>,
+    retained: KeptFrames<KeptFrame>,
     #[cfg(test)]
     probe: DecoderProbe,
 }
 
 /// Amendment R53 [S2c]: a refill window's decoded frame, kept unconverted
-/// for the grid frames `times`. Amendment R61: a time leaves once
-/// converted (or discarded); the frame goes with its last time.
+/// (`KeptFrames` holds the grid times it owes).
 struct KeptFrame {
-    times: BTreeSet<i64>,
     #[cfg_attr(not(test), allow(dead_code))]
     pts: Option<i64>,
     decoded: ffmpeg::frame::Video,
@@ -2038,7 +2037,7 @@ impl VideoDecoder {
             interruptible: stop.is_some(),
             s2,
             retaining: None,
-            retained: Vec::new(),
+            retained: KeptFrames::default(),
             #[cfg(test)]
             probe: DecoderProbe::default(),
         })
@@ -2274,9 +2273,7 @@ impl VideoDecoder {
     /// Amendment R54 [S2c]: the first window time the last refill kept
     /// (`None`: it kept nothing).
     pub(crate) fn kept_from(&self) -> Option<i64> {
-        (self.retained.iter())
-            .filter_map(|kept| kept.times.first().copied())
-            .min()
+        self.retained.kept_from()
     }
 
     /// Amendment R54 (K-1): d, an upper bound on one decoded frame's
@@ -2319,27 +2316,23 @@ impl VideoDecoder {
         &mut self,
         at: i64,
     ) -> Option<Result<T, MediaError>> {
-        let index = (self.retained.iter()).position(|r| r.times.contains(&at))?;
-        let mut kept = self.retained.swap_remove(index);
-        kept.times.remove(&at);
+        let kept = self.retained.take(at)?;
         #[cfg(test)]
         {
-            self.probe.converting_pts = kept.pts;
+            self.probe.converting_pts = kept.value.pts;
             self.probe.window_conversion = true;
         }
         let frame = if kept.times.is_empty() {
-            self.convert::<T>(&kept.decoded)
+            self.convert::<T>(&kept.value.decoded)
         } else {
-            let copy = kept.decoded.clone();
+            let copy = kept.value.decoded.clone();
             self.convert::<T>(&copy)
         };
         #[cfg(test)]
         {
             self.probe.window_conversion = false;
         }
-        if !kept.times.is_empty() {
-            self.retained.push(kept); // its grid frames not yet converted
-        }
+        self.retained.put_back(kept); // its grid frames not yet converted
         #[cfg(test)]
         let frame = match self.probe.fail_conversion.take_if(|time| *time == at) {
             Some(_) => Err(MediaError::Backend(format!(
@@ -2358,7 +2351,7 @@ impl VideoDecoder {
     /// the decoder keeps (every plane's rows).
     #[cfg(test)]
     pub(crate) fn kept_bytes(&self) -> usize {
-        (self.retained.iter())
+        (self.retained.values())
             .map(|kept| {
                 let frame = &kept.decoded;
                 (0..frame.planes())
@@ -2378,27 +2371,26 @@ impl VideoDecoder {
     /// keeps decoded, ascending.
     #[cfg(test)]
     pub(crate) fn kept_times(&self) -> Vec<i64> {
-        let mut times: Vec<i64> = (self.retained.iter())
-            .flat_map(|kept| kept.times.iter().copied())
-            .collect();
-        times.sort_unstable();
-        times
+        self.retained.times()
     }
 
     /// Amendment R57 [S2c]: the kept refill frames above `bound` go (a
     /// newer post's t′ is below them: they are never converted). Amendment
     /// R61: so do those below `low` (a continuation cut to fit K-3).
-    pub(crate) fn discard_kept_outside(&mut self, (low, bound): (i64, i64)) {
-        self.retained.retain_mut(|kept| {
-            kept.times.retain(|at| (low..=bound).contains(at));
-            !kept.times.is_empty()
-        });
+    pub(crate) fn discard_kept_outside(&mut self, keep: (i64, i64)) {
+        self.retained.discard_outside(keep);
     }
 
     /// Amendment R53 [S2c]: the decoder decodes something else; its kept
     /// refill frames go.
     pub(crate) fn drop_retained(&mut self) {
         self.retained.clear();
+    }
+
+    /// Amendment R62 [S2c]: a reader's result came back (`ok`: it did not
+    /// fail); a failure leaves nothing kept ([`KeptFrames::settle`]).
+    pub(crate) fn settle_kept(&mut self, ok: bool) {
+        self.retained.settle(ok);
     }
 
     fn paused<T: DecoderFrame>(
@@ -2724,11 +2716,8 @@ impl VideoDecoder {
                 let decoded = decoded.ok_or_else(|| {
                     MediaError::Backend("pending video frame has no pixels".to_owned())
                 })?;
-                self.retained.push(KeptFrame {
-                    times: (first..=last).collect(),
-                    pts,
-                    decoded,
-                });
+                self.retained
+                    .push((first..=last).collect(), KeptFrame { pts, decoded });
                 if below {
                     return Ok(());
                 }

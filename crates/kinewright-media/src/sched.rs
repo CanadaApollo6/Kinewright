@@ -188,6 +188,106 @@ impl<K: Clone + Eq + Hash, V> FromIterator<(K, V)> for SourceMemory<K, V> {
     }
 }
 
+/// Amendment R53 [S2c]: one decoded frame a reader's decoder keeps
+/// unconverted after a refill, for the grid `times` it still owes (a VFR
+/// frame may show at several). Amendment R61: a time leaves once converted
+/// (or discarded); the frame goes with its last time.
+#[derive(Clone)]
+pub(crate) struct Kept<V> {
+    pub(crate) times: BTreeSet<i64>,
+    pub(crate) value: V,
+}
+
+/// Amendment R53 / R54 / R61 [S2c]: a reader's decoder's kept refill frames
+/// (`Slot::retained`'s pixels). Amendment R62 [S2c]: one bookkeeping, the
+/// decoder's (`V` its decoded frame) and the seeded accounting model's, so
+/// the model runs what the decoder runs.
+#[derive(Clone)]
+pub(crate) struct KeptFrames<V> {
+    frames: Vec<Kept<V>>,
+}
+
+impl<V> Default for KeptFrames<V> {
+    fn default() -> Self {
+        Self { frames: Vec::new() }
+    }
+}
+
+impl<V> KeptFrames<V> {
+    /// Keep `value` for `times`.
+    pub(crate) fn push(&mut self, times: BTreeSet<i64>, value: V) {
+        self.frames.push(Kept { times, value });
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.frames.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.frames.is_empty()
+    }
+
+    /// Amendment R54: the first time kept (`None`: nothing is kept).
+    pub(crate) fn kept_from(&self) -> Option<i64> {
+        (self.frames.iter())
+            .filter_map(|kept| kept.times.first().copied())
+            .min()
+    }
+
+    /// The kept frames.
+    #[cfg(test)]
+    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+        self.frames.iter().map(|kept| &kept.value)
+    }
+
+    /// The times kept, ascending.
+    #[cfg(test)]
+    pub(crate) fn times(&self) -> Vec<i64> {
+        let mut times: Vec<i64> = (self.frames.iter())
+            .flat_map(|kept| kept.times.iter().copied())
+            .collect();
+        times.sort_unstable();
+        times
+    }
+
+    /// Amendment R61: the frame kept for `at`, taken out with `at` gone from
+    /// its times. If times remain ([`Kept::times`]), the caller converts a
+    /// copy and puts it back ([`Self::put_back`]); otherwise the frame
+    /// itself, which releases it.
+    pub(crate) fn take(&mut self, at: i64) -> Option<Kept<V>> {
+        let index = (self.frames.iter()).position(|kept| kept.times.contains(&at))?;
+        let mut kept = self.frames.swap_remove(index);
+        kept.times.remove(&at);
+        Some(kept)
+    }
+
+    /// A taken frame stays kept for the times it still owes.
+    pub(crate) fn put_back(&mut self, kept: Kept<V>) {
+        if !kept.times.is_empty() {
+            self.frames.push(kept);
+        }
+    }
+
+    /// Amendment R57 / R61: keep only the times in [low, bound].
+    pub(crate) fn discard_outside(&mut self, (low, bound): (i64, i64)) {
+        self.frames.retain_mut(|kept| {
+            kept.times.retain(|at| (low..=bound).contains(at));
+            !kept.times.is_empty()
+        });
+    }
+
+    /// Amendment R62 [S2c] (K-1, the one rule for a failure): a reader's
+    /// result came back; if it failed, the scheduler takes every kept time
+    /// of the reader as gone (`deliver` and `stopped` shrink their charges
+    /// to f), so nothing stays kept.
+    pub(crate) fn settle(&mut self, ok: bool) {
+        if !ok {
+            self.frames.clear();
+        }
+    }
+}
+
 /// H-2's reader states (S2b-2: Idle, `PermitWait`, Decoding, Retiring).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ReaderState {

@@ -1016,8 +1016,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 // Amendment R62 [S2c] (K-1): on any failure the scheduler
                 // takes the reader's kept window as gone (every kept time's
                 // charge shrinks to f), so its decoder keeps nothing either.
-                if let Some(decoder) = decoder.as_mut().filter(|_| result.is_err()) {
-                    decoder.drop_retained();
+                if let Some(decoder) = decoder.as_mut() {
+                    decoder.settle_kept(result.is_ok());
                 }
                 deliver(lane, id, (at, version), result);
                 state = lane.lock();
