@@ -790,10 +790,12 @@ fn kept_sizes(demand: &ReaderDemand) -> HashMap<VideoSourceKey, usize> {
         .collect()
 }
 
-/// S-3 [S2c]: a paused job's backward windows (`Readers::backward`) for
+/// S-3 [S2c]: a paused job's backward windows (`Readers::backward_job`) for
 /// each source with one required time: a refill's times join that
-/// source's required times, and their bytes the set. Returns the windows
-/// to hold (none for playback).
+/// source's required times. Amendment R62 [S2c]: the set becomes the
+/// scheduler's charge of the job over those windows (`sched::job_bytes`),
+/// so K-3 fits what admission charges. Returns the windows to hold (none
+/// for playback: the set stays every frame at f).
 fn backward_windows(
     paused: bool,
     readers: &Readers<VideoSourceKey, Pinned>,
@@ -817,14 +819,9 @@ fn backward_windows(
     let kept: HashMap<_, _> = (sizes.iter())
         .map(|(key, f)| (key.clone(), kept.get(key).copied().unwrap_or(*f)))
         .collect();
-    let (windows, refills) = readers.backward(&steps, &kept, *set);
-    for (key, times) in refills {
-        let bytes = kept.get(&key).copied().unwrap_or(0);
-        *set = set.saturating_add(bytes.saturating_mul(times.len()));
-        if let Some((_, required, _)) = per_source.iter_mut().find(|(k, ..)| *k == key) {
-            required.extend(times);
-        }
-    }
+    let job = (*set, demand.generated);
+    let windows;
+    (windows, *set) = readers.backward_job(&steps, (sizes, &kept), per_source, job);
     windows
 }
 

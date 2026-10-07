@@ -40,6 +40,39 @@ const WINDOW_FRAMES: usize = 16;
 /// S-3 [S2c]: per source, a paused job's backward window [start, end].
 pub(crate) type Windows<K> = HashMap<K, (i64, i64)>;
 
+/// Amendment R54 (K-1), R62 [S2c] (the one charging rule): a required
+/// frame of `key` at `at`, f its source's frame bytes: max(f, d) inside its
+/// source's held window below its t (`kept`: max(f, d), d its decoded frame
+/// a reader may keep), f otherwise. K-3's fit (the preview's `plan`), the
+/// continued window's fit, admission and the reservations all charge it.
+pub(crate) fn charge<K: Eq + Hash>(
+    (windows, kept): (&Windows<K>, &HashMap<K, usize>),
+    f: usize,
+    key: &K,
+    at: i64,
+) -> usize {
+    let window = (windows.get(key)).is_some_and(|(start, t)| (start..t).contains(&&at));
+    if window {
+        f.max(kept.get(key).copied().unwrap_or(0))
+    } else {
+        f
+    }
+}
+
+/// Amendment R62 [S2c] (K-3): a job's set H + G: its distinct `required`
+/// frames by [`charge`] (f from `sizes`) beside `generated`.
+pub(crate) fn job_bytes<'a, K: Eq + Hash + 'a>(
+    required: impl IntoIterator<Item = (&'a K, i64)>,
+    held: (&Windows<K>, &HashMap<K, usize>),
+    sizes: &HashMap<K, usize>,
+    generated: usize,
+) -> usize {
+    let distinct: HashSet<(&K, i64)> = required.into_iter().collect();
+    (distinct.into_iter())
+        .map(|(key, at)| charge(held, sizes.get(key).copied().unwrap_or(0), key, at))
+        .fold(generated, usize::saturating_add)
+}
+
 /// H-5: R = clamp(P, 1, 8).
 pub(crate) fn reader_limit(parallelism: usize) -> usize {
     parallelism.clamp(1, 8)
@@ -815,12 +848,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// otherwise.
     fn frame_bytes(&self, key: &K, at: i64) -> usize {
         let f = self.sizes.get(key).copied().unwrap_or(0);
-        let window = (self.windows.get(key)).is_some_and(|(start, t)| (start..t).contains(&&at));
-        if window {
-            f.max(self.kept_sizes.get(key).copied().unwrap_or(0))
-        } else {
-            f
-        }
+        charge((&self.windows, &self.kept_sizes), f, key, at)
     }
 
     /// K-2: H, the required frames' reservations.
@@ -976,6 +1004,31 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             }
         }
         (windows, refills)
+    }
+
+    /// S-3 [S2c]: a paused job's backward windows ([`Self::backward`], `kept`
+    /// each step source's max(f, d), `set` the job's set at f for B): each
+    /// refill's times join its source's required times in `per_source`.
+    /// Amendment R62 [S2c]: returns the windows to hold and the job's set
+    /// H + G by [`charge`] over those windows ([`job_bytes`]), what the post
+    /// will charge: K-3 decides on it.
+    pub(crate) fn backward_job(
+        &self,
+        steps: &[(K, i64, i64)],
+        (sizes, kept): (&HashMap<K, usize>, &HashMap<K, usize>),
+        per_source: &mut [(K, Vec<i64>, Vec<i64>)],
+        (set, generated): (usize, usize),
+    ) -> (Windows<K>, usize) {
+        let (windows, refills) = self.backward(steps, kept, set);
+        for (key, times) in refills {
+            if let Some((_, required, _)) = per_source.iter_mut().find(|(k, ..)| *k == key) {
+                required.extend(times);
+            }
+        }
+        let required =
+            (per_source.iter()).flat_map(|(key, times, _)| times.iter().map(move |at| (key, *at)));
+        let set = job_bytes(required, (&windows, kept), sizes, generated);
+        (windows, set)
     }
 
     /// S-3 [S2c]: the windows the next post holds (a playback job holds
@@ -3446,6 +3499,79 @@ mod tests {
             .map(Fr::bytes)
             .sum();
         assert_eq!(readers.live().0, ring, "only the ring charged");
+    }
+
+    /// Amendment R62 [S2c]: one paused job of `steps` as the preview plans
+    /// it (`backward_windows`, then `plan`'s K-3 fit, then the post and
+    /// admission): each window source's max(f, d) in `kept` (f otherwise),
+    /// G = `g`. `None`: K-3's fallback (the empty plan `fall_back` posts);
+    /// otherwise the job's set and its admission.
+    fn post_job(
+        readers: &mut Model,
+        steps: &[(u8, i64, i64)],
+        kept: &HashMap<u8, usize>,
+        g: usize,
+    ) -> Option<(usize, Admission<Fr>)> {
+        let sizes: HashMap<u8, usize> = steps.iter().map(|(key, ..)| (*key, F)).collect();
+        let kept: HashMap<u8, usize> = (sizes.iter())
+            .map(|(key, f)| (*key, kept.get(key).copied().unwrap_or(*f)))
+            .collect();
+        let mut per_source: Vec<(u8, Vec<i64>, Vec<i64>)> = (steps.iter())
+            .map(|(key, t, _)| (*key, vec![*t], Vec::new()))
+            .collect();
+        // `demand_plan`'s set: the distinct required frames at f, and G.
+        let set = steps.len() * F + g;
+        let held = (&sizes, &kept);
+        let (windows, set) = readers.backward_job(steps, held, &mut per_source, (set, g));
+        if !readers.fits(set) {
+            let posted = readers.post(Vec::new(), (HashMap::new(), 0), Duration::ZERO);
+            readers.release(posted.dropped.0.iter().map(Fr::bytes).sum());
+            return None;
+        }
+        let regions = plan_regions(&per_source, readers.limit()).expect("readers");
+        readers.hold(windows, kept);
+        let posted = readers.post(regions.regions, (sizes, g), Duration::ZERO);
+        readers.release(posted.dropped.0.iter().map(Fr::bytes).sum());
+        Some((set, readers.admit(g)))
+    }
+
+    /// Amendment R62 [S2c] (one charging rule, C < d + G): C = 12f, d = 3f.
+    /// A step back from 20 to 19 refills [17, 19] (B = ⌊11f / 3f⌋ = 3),
+    /// charged f + 2 × 3f. A hit inside that window is charged max(f, d)
+    /// by the scheduler, so K-3 decides with the same: a hit at 18 beside
+    /// G = 4f is admitted with H + G equal to the set K-3 fitted, and beside
+    /// G = 10f (3f + 10f > C) it falls back. Charging the hit f (11f) would
+    /// post a set the admission's K-3 assert rejects.
+    #[test]
+    fn a_hit_in_a_held_window_is_charged_by_k3_as_admission_charges_it() {
+        let kept = HashMap::from([(0u8, 3 * F)]);
+        let window = || {
+            let mut readers = Model::new(20).with_budget(12 * F);
+            let first = post_job(&mut readers, &[(0, 20, 0)], &kept, 0);
+            assert!(matches!(first, Some((_, Admission::Ready { .. }))), "20");
+            drive(&mut readers, &mut BTreeMap::new());
+            let refill = post_job(&mut readers, &[(0, 19, 0)], &kept, 0);
+            let Some((set, Admission::Ready { .. })) = refill else {
+                panic!("the refill fits");
+            };
+            assert_eq!(set, F + 2 * 3 * F, "t at f, 17 and 18 at max(f, d)");
+            drive(&mut readers, &mut BTreeMap::new());
+            assert_eq!(readers.ring_times(&0), [17, 18, 19], "the window");
+            readers
+        };
+        let mut readers = window();
+        let hit = post_job(&mut readers, &[(0, 18, 0)], &kept, 4 * F);
+        let Some((set, admitted)) = hit else {
+            panic!("18 beside G = 4f fits");
+        };
+        assert_eq!(set, 3 * F + 4 * F, "the hit at max(f, d)");
+        assert_eq!(readers.required_bytes + 4 * F, set, "one rule");
+        assert!(matches!(admitted, Admission::Ready { .. }), "admitted");
+        let mut readers = window();
+        let over = post_job(&mut readers, &[(0, 18, 0)], &kept, 10 * F);
+        assert!(over.is_none(), "3f + 10f over C: K-3 falls back");
+        assert!(readers.required.is_empty(), "the empty plan");
+        assert!(readers.reserved.is_empty(), "nothing reserved");
     }
 
     /// H-6: a reader retired while its decode ran (the preview went) stays
