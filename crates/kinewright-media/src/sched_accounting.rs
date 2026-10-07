@@ -225,6 +225,9 @@ enum Outcome {
     Fail,
     /// A decode interrupted by its stop flag.
     Cancel,
+    /// Amendment R66 (F15): the reader panics while it decodes (R43's
+    /// exit: its hold and its decoder drop, then `fail_start`).
+    Panic,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -270,6 +273,8 @@ struct Reach {
     redecoded: u64,
     waits: u64,
     settles: u64,
+    /// Amendment R66 (F15): readers that panicked.
+    panics: u64,
 }
 
 impl Reach {
@@ -294,6 +299,7 @@ impl Reach {
         self.redecoded += r.redecoded;
         self.waits += r.waits;
         self.settles += r.settles;
+        self.panics += r.panics;
     }
 
     /// The runs reached every operation the ruling names.
@@ -312,6 +318,7 @@ impl Reach {
         );
         assert!(self.fallbacks.iter().all(|n| *n > 0), "{self:?}");
         assert!(self.two_holders > 0, "{self:?}");
+        assert!(self.panics > 0, "{self:?}");
     }
 }
 
@@ -421,6 +428,7 @@ impl World {
                     if agent.stop {
                         ops.push((Op::Finish(id, Outcome::Cancel), if stopped { 6 } else { 2 }));
                     }
+                    ops.push((Op::Finish(id, Outcome::Panic), 1));
                 }
             }
         }
@@ -1202,7 +1210,7 @@ impl World {
             self.reach.vfr_conversions += u64::from(shared);
             match outcome {
                 Outcome::Ok => Ok(()),
-                Outcome::Fail | Outcome::Cancel => {
+                Outcome::Fail | Outcome::Cancel | Outcome::Panic => {
                     self.reach.failed_conversions += 1;
                     Err(MediaError::Backend(
                         "model: the conversion fails".to_owned(),
@@ -1215,6 +1223,7 @@ impl World {
                 Outcome::Ok => Ok(()),
                 Outcome::Fail => Err(MediaError::Backend("model: the decode fails".to_owned())),
                 Outcome::Cancel => Err(MediaError::Cancelled),
+                Outcome::Panic => unreachable!("a panic unwinds (`panicked`)"),
             }
         }
     }
@@ -1222,6 +1231,10 @@ impl World {
     /// A reader's decode came back (`read`'s `Decode` arm and
     /// `SourceSpec::decode`).
     fn finish(&mut self, id: u64, outcome: Outcome) {
+        if outcome == Outcome::Panic {
+            self.panicked(id);
+            return;
+        }
         let now = self.now;
         let agent = self.agent(id);
         let Doing::Decode {
@@ -1294,6 +1307,20 @@ impl World {
         }
         let (back, _) = self.readers.deliver(id, at, version, result, now);
         self.readers.release(back.map_or(0, |back| back.bytes));
+    }
+
+    /// Amendment R66 (F15): reader `id` panicked while it decoded. The
+    /// unwind drops its hold (the decode's bytes return) and its decoder
+    /// (its kept frames), then its exit guard calls `fail_start` (R43).
+    fn panicked(&mut self, id: u64) {
+        let Doing::Decode { bytes, .. } = self.agent(id).doing else {
+            unreachable!("decoding");
+        };
+        self.agents.retain(|agent| agent.id != id);
+        self.readers.release(bytes);
+        let error = MediaError::Backend("model: the reader panicked".to_owned());
+        self.readers.fail_start(id, &error);
+        self.reach.panics += 1;
     }
 
     /// `PF1_MODEL_EMIT`: the operation just applied as a fixed case's
@@ -2373,4 +2400,30 @@ fn a_continued_window_fits_beside_a_kept_time_at_its_kept_charge() {
         "the continuation is cut to 8–18:\n{}",
         world.snapshot()
     );
+}
+
+/// Amendment R66 [S2c] (F15, K-1): Astra's scenario on seed 16102's run.
+/// Reader 0 refills 38's window, keeping 36 and 37 decoded at d = 3f.
+/// Playback then requires 36 and 37; their region goes to reader 0, and
+/// both are reserved at 3f while it keeps them. Reader 0 panics while it
+/// converts 36: its decoder drops 37 too. Before the fix the panic's exit
+/// (`fail_start`) left 37 reserved at 3f with no reader keeping it, above
+/// its charge f (I1, exact).
+#[test]
+fn a_panicking_readers_kept_frames_return_to_their_charge() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_16102,
+        vec![
+            Post(vec![(0, vec![39], vec![])], true, 6 * F),
+            Do(Op::Run),
+            Post(vec![(0, vec![38], vec![])], true, 6 * F),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(vec![(0, vec![36, 37], vec![38, 39])], false, 6 * F),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Panic)),
+        ],
+    );
+    assert_eq!(world.reach.panics, 1, "reader 0 panicked");
 }

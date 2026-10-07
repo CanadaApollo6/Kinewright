@@ -2018,12 +2018,16 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         if let Some(index) = self.slots.iter().position(|slot| slot.id == id) {
             let slot = self.slots.remove(index);
             self.release(slot.discarding);
-            for at in slot.plan.required {
-                let frame = (slot.key.clone(), at);
+            for at in &slot.plan.required {
+                let frame = (slot.key.clone(), *at);
                 if self.required.contains(&frame) {
                     self.failures.insert(frame, (self.version, error.clone()));
                 }
             }
+            // Amendment R66 [S2c] (F15, K-1): a panicking reader's decoder
+            // went with it, as `exited`'s does (F9): its kept frames'
+            // reservations shrink to their charge once no reader keeps them.
+            self.unkept(&slot.key, slot.retained);
         }
     }
 
