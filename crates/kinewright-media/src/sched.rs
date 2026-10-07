@@ -790,20 +790,27 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         self.release(excess);
     }
 
-    /// Amendment R54 [S2c]: reader `id`'s refill (its decode in flight) kept
-    /// the window's decoded frames from `kept_from` (`None`: none). The
-    /// window is clipped to them: times below leave its plan, the job's
-    /// required set and the held window, and their reservations return.
-    pub(crate) fn refilled(&mut self, id: u64, kept_from: Option<i64>) {
+    /// Amendment R54 [S2c]: reader `id`'s refill of `t` (its decode in
+    /// flight, under plan `version`) kept the window's decoded frames from
+    /// `kept_from` (`None`: none). The window is clipped to them: times
+    /// below leave its plan, the job's required set and the held window,
+    /// and their reservations return. Amendment R61 [S2c]: only while that
+    /// plan is current. A refill a newer post superseded clips only the
+    /// reader's kept times (what its decoder holds); the newer plan's
+    /// required set, window and reservations stay as posted.
+    pub(crate) fn refilled(&mut self, id: u64, (t, version): (i64, u64), kept_from: Option<i64>) {
         let Some(slot) = self.slot(id) else {
             return;
         };
-        let ReaderState::Decoding { at: t, .. } = slot.state else {
+        if slot.state != (ReaderState::Decoding { at: t, version }) {
             return;
-        };
+        }
         let key = slot.key.clone();
         let from = kept_from.unwrap_or(t).min(t);
         slot.retained.retain(|at| *at >= from);
+        if slot.plan.version != version {
+            return;
+        }
         let gone: Vec<i64> = (slot.plan.required.iter())
             .copied()
             .filter(|at| *at < from)
@@ -3146,6 +3153,77 @@ mod tests {
             readers.resolve(&[(0, 35), (1, 0)]).is_some(),
             "both resolved"
         );
+    }
+
+    /// Amendment R61 [S2c] (reviews A1/B1, the stale refill): source 0's
+    /// reader refills [4, 19] (B = 16, GOP 10: t's own decode keeps only
+    /// 10–18). While that decode runs, a newer post requires `target`: a
+    /// seek below the window (3, 2) or a step inside it (8, with the
+    /// window's kept frames below it continued). The refill then completes
+    /// with `kept_from` = 10. The target stays required and reserved, the
+    /// held window as posted, and the reader delivers the target; nothing
+    /// stays charged once the job is done but the ring's frames.
+    #[test]
+    fn a_superseded_refill_leaves_the_newer_plan_whole() {
+        for target in [3, 2, 8] {
+            let mut readers = Model::new(20).with_budget(100 * F);
+            paused_step(&mut readers, 20, 0, 0);
+            let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::new());
+            assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+            let id = readers.slots[0].id;
+            let refill = loop {
+                if let Next::Decode {
+                    at,
+                    version,
+                    bytes,
+                    from,
+                    ..
+                } = step_reader(&mut readers, id)
+                {
+                    assert_eq!(from, Some(4), "the refill's window");
+                    break (at, version, bytes);
+                }
+            };
+            assert_eq!(refill.0, 19, "the refill's t");
+            let ready = post_paused(&mut readers, &[(0, target, 0)], HashMap::new());
+            assert!(
+                matches!(ready, Admission::Ready { .. }),
+                "{target}: admitted"
+            );
+            let window = readers.windows.get(&0).copied();
+            readers.refilled(id, (refill.0, refill.1), Some(10));
+            assert!(
+                readers.required.contains(&(0, target)),
+                "{target}: still required"
+            );
+            assert!(
+                readers.reserved.contains_key(&(0, target)),
+                "{target}: still reserved"
+            );
+            assert!(
+                readers.slots[0].plan.required.contains(&target),
+                "{target}: still in the reader's plan"
+            );
+            assert_eq!(readers.windows.get(&0).copied(), window, "{target}");
+            assert!(
+                readers.slots[0].retained.iter().all(|at| *at >= 10),
+                "{target}: only what the decoder keeps"
+            );
+            deliver_ok(&mut readers, id, 0, refill);
+            let decoded = walk(&mut readers, id, 0);
+            assert!(decoded.contains(&target), "{target}: decoded {decoded:?}");
+            let resolved = readers.resolve(&[(0, target)]).expect("resolved");
+            assert_eq!(
+                resolved[0].as_ref().ok().map(|f| f.value),
+                Some(frame(0, target)),
+                "{target}: delivered"
+            );
+            assert!(readers.reserved.is_empty(), "{target}: no reservation left");
+            let ring: usize = (readers.rings.values().flat_map(BTreeMap::values))
+                .map(Fr::bytes)
+                .sum();
+            assert_eq!(readers.live().0, ring, "{target}: only the ring charged");
+        }
     }
 
     /// H-6: a reader retired while its decode ran (the preview went) stays

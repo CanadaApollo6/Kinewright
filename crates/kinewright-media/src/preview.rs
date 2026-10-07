@@ -996,7 +996,7 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 // t's own decode kept.
                 if from.is_some() && result.is_ok() {
                     let kept_from = decoder.as_ref().and_then(VideoDecoder::kept_from);
-                    lane.lock().readers.refilled(id, kept_from);
+                    lane.lock().readers.refilled(id, (at, version), kept_from);
                 }
                 let result = pinned(result, size, hold);
                 deliver(lane, id, (at, version), result);
