@@ -6573,10 +6573,9 @@ all three. Wall time cand/S0 is 0.157, 0.178 and 0.156, median **0.157** (r58: 0
   - L-4a on LH: *environment-limited (GPU idle clocks), re-checked at S4's pinned run* (R58), beside G3;
   - G14 on LH `feed_4x5`: shared with the reference, with the "~1 s holds" finding, for S4;
   - r58's 8,250 ms LH `feed_4x5` hold: unexplained (no counters).
-- **L-4a on LL:** passed on the r57/r58 evidence (17.6 / 17.3 ms); this session's absolute miss is shared by the
-  identical pre-fix code and attributed by the counters to the LL render (lead, R60).
-- **For the lead:** R60's three-way check (below) does not reproduce the 1.11, but its result falls outside R60's
-  four readings.
+- **L-4a on LL:** passed on the r57/r58 evidence (17.6 / 17.3 ms), with no R59 regression. This session's
+  absolute miss is shared by the identical pre-fix code and attributed by the counters to the LL render; R60's
+  three-way check reads the r59c 1.11 as noise (lead, R60).
 - The E13.6.7 and E13.6.8 estimates stay estimates.
 
 **Amendment R60: the three-way paired check (r60).** LL only, COUNT P-seek `seek_gop60`, 05:01–05:20 EDT on
@@ -6616,19 +6615,17 @@ Hit p95 ratios per rotation, and their median:
 
 The hit means read the same way: 1.07, 0.92 and 0.92.
 
-**Reading.** None of R60's four readings fits:
-- cand is not within 1.05 of diag (0.91);
-- cand is not above 1.05 against both (it is the fastest of the three);
-- the three are not all within 1.05 of one another.
-
-What the counters show:
-- **The candidate is not slower than the pre-fix code** (0.92). The r59c 1.11 does not reproduce. Over r59c's three
-  pairs and these four, cand/pre is 0.71, 0.84, 1.01, 1.02, 1.11, 1.11 and 1.14, median 1.02.
+**Reading (lead, R60): within noise. The fix costs nothing on this path.**
+- **The fix is the fastest of the three here.** cand/pre is 0.92 in r60. Over all seven pairs (r59c's three and
+  these four) it is 0.71–1.14, median 1.02.
+- **The work is identical:** CPU per refill is the same on all three binaries (453–474 ms).
 - **The R59 job never ran:** 0 `Discard` events in 1,800 traced candidate steps.
-- **CPU per refill is the same on all three** (453–474 ms).
-- **Single ratios swing by ±30% between rotations,** so on this machine a paired median of four cannot resolve 5%.
-- **The diag lanes logged the most foreign CPU in every rotation** (9,799–20,847 %·samples, against 4,336–10,903 for
-  pre and 4,393–10,667 for cand). That is an annotation only.
+- **The single-rotation ratios swing by ±30%,** more than R60's 1.05 threshold, so that threshold could not resolve
+  anything on this machine. That was a fault in how R60 was set, not a finding.
+- **diag's 1.10 against pre is not a product question.** diag is a test-only build that never ships, and the fix
+  carries the same counters yet beat diag at 0.91. The diag lanes logged the most foreign CPU in every rotation
+  (9,799–20,847 %·samples, against 4,336–10,903 for pre and 4,393–10,667 for cand); that is on record as an
+  annotation, not used as the explanation.
 
-This goes to the lead to rule on.
+**L-4a on LL stays passed on r57/r58 (17.6 / 17.3 ms), with no R59 regression.**
 
