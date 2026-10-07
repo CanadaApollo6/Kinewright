@@ -1187,8 +1187,13 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         }
         let key = slot.key.clone();
         let from = kept_from.unwrap_or(t).min(t);
-        slot.retained.retain(|at| *at >= from);
-        if slot.plan.version != version {
+        let kept = slot.retained.split_off(&from);
+        let clipped = std::mem::replace(&mut slot.retained, kept);
+        let current = slot.plan.version == version;
+        if !current {
+            // Amendment R64 [S2c] (K-1): the times it does not keep shrink
+            // to their charge (no reader keeps them decoded).
+            self.unkept(&key, clipped);
             return;
         }
         let gone: Vec<i64> = (slot.plan.required.iter())
@@ -3844,6 +3849,39 @@ mod tests {
         let charged = |at: i64| readers.reserved.get(&(0, at)).copied();
         assert!((4..19).all(|at| charged(at) == Some(F)), "every one f");
         assert_eq!(live - readers.live().0, 15 * 2 * F, "K-1 exact");
+    }
+
+    /// Amendment R64 [S2c] (K-1): a refill a newer post superseded keeps
+    /// only from where its decode produced the window (its key frame).
+    /// Reader A's refill of [4, 19] is in flight, keeping 4–18 at 3f.
+    /// Playback then requires 4–19 (no window held: a dropped time's
+    /// charge is f); the region goes to A, its keeper. The refill comes
+    /// back stale, having kept from 8: 4–7 are not kept, so their
+    /// reservations shrink to f; 8–18 stay 3f (before the fix 4–7 stayed
+    /// 3f, kept by nobody).
+    #[test]
+    fn a_superseded_refill_returns_what_it_does_not_keep() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        let a = refilled_4_to_19(&mut readers);
+        let ReaderState::Decoding { version, .. } = readers.slot(a).expect("A").state else {
+            panic!("A refills");
+        };
+        let all: Vec<i64> = (4..=19).collect();
+        post_playback(&mut readers, &[(&all, &[])], 3 * F);
+        assert_eq!(readers.slot(a).expect("A").plan.required.len(), 16, "A's");
+        let charged = |readers: &Model, at: i64| readers.reserved.get(&(0, at)).copied();
+        assert!(
+            (4..19).all(|at| charged(&readers, at) == Some(3 * F)),
+            "kept"
+        );
+        let live = readers.live().0;
+        readers.refilled(a, (19, version), Some(8));
+        assert_eq!(readers.slot(a).expect("A").retained, (8..19).collect());
+        for at in 4..19 {
+            let expected = if at < 8 { F } else { 3 * F };
+            assert_eq!(charged(&readers, at), Some(expected), "{at}");
+        }
+        assert_eq!(live - readers.live().0, 4 * 2 * F, "K-1 exact");
     }
 
     /// Amendment R63 [S2c] (F2): a refill keeps none of the window times
