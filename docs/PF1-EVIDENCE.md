@@ -5974,7 +5974,7 @@ drops (E13.5.8). Still open:
   are strengthened.
 - **Lines:** see E13.5.1. This section is documentation only.
 
-### E13.6 S2c-5, Amendments R53–R59 and the closing re-time (2026-10-06/07)
+### E13.6 S2c-5, Amendments R53–R64 and the closing re-time (2026-10-06/07)
 
 The lead's order (r53-s2c5-rulings.md): S2c-5, then R53, gates, the workspace test, the closing re-time, this
 section. Steps 1–4 were done first. The closing re-time then stopped after a paired check of the R53 gates:
@@ -5991,7 +5991,9 @@ Amendment R58 (Riel) records L-4a on LH as *environment-limited (GPU idle clocks
 run*: not a pass, and on S4's checklist beside G3. The closing plan at `5fa62b4` (r58) then found P-seek steps
 timing out on the candidate only. Amendment R59 found the cause (a reader idling while holding discard charges)
 and fixed it, and the closing re-time ran at `c90d062` (E13.6.10). What stays open is listed at the end of
-E13.6.10.
+E13.6.10. Both Astra stage-close reviews then said do not close; Amendment R61 fixed their findings (E13.6.11).
+R62–R64 replaced its re-time gate with work-counter equivalence and added a seeded model of the scheduler's
+accounting (E13.6.12).
 
 #### E13.6.1 S2c-5, open GOP (b)
 
@@ -6648,3 +6650,302 @@ resolve a 5% difference on this machine.**
 
 **L-4a on LL stays passed on r57/r58 (17.6 / 17.3 ms), with no R59 regression.**
 
+
+#### E13.6.11 Amendment R61: the stage-close fixes (2026-10-07)
+
+Both Astra stage-close reviews (`review-s2c-a.md` on the code `cc0e8f3..8792841`, `review-s2c-b.md` on the stage and
+its evidence) said do not close. The lead's ruling (`r61-rulings.md`) is Amendment R61 in the design. Logs:
+`s2c-logs/s2c7/r61/`; notes: `s2c-logs/s2c7/notes-fix-round.md` (R61 section).
+
+**The code fixes.** Each has a witness, red first, a mutation and its own commit. Per-commit gates: build, clippy
+(Rust 1.99, `-D warnings`), rustfmt on the touched files, and the affected tests.
+
+| Item | Commit | Fix | Witness | Red / mutation (killed) | Affected tests |
+|---|---|---|---|---|---|
+| 1 (A1, B1) | `d57087d` | `Readers::refilled` takes the refill's plan version; it clips the newer plan only if that version is current, and otherwise only the reader's own kept set | `sched::a_superseded_refill_leaves_the_newer_plan_whole` (targets 3 and 2 below the window, 8 inside it) | red without the version check: "3: still required", and "8: still required" (`item1-red.log`) | `sched::` 26 passed, `preview::` 63 passed |
+| 2 (A2a) | `60b657b` | `fit_continued`: continued window times join the required set only while H + G ≤ C, nearest t first; the cut times' kept frames are discarded through a kept range [low, bound] (`discard_kept_outside`) | `sched::a_continued_window_is_shortened_to_fit_k3` (A's numbers: C = 20f, window [4, 19] kept 4–18, another source's f, G = 6f; unshortened 22f) | 2a no cut: fails at "nearest t first" (the pre-fix path, which reaches admit's K-3 debug assert); 2b cut without discarding: fails at "the cut kept frames go" (`item2-mutations.log`) | `sched::` + `preview::` 90 passed |
+| 3 (A2b) | `64cea5a` | `detained` counts a detached reader's `discarding` beside its `flight` | `sched::a_detached_reader_detains_a_plan_by_its_discards` (8f of discards; a 13f plan is detained, 12f is not) | discarding left out (the pre-fix sum): "not beside the 8f it holds" (`item3-mutation.log`) | the detain/detach/fallback filter, 12 passed, 3 ignored (pre-existing) |
+| 4 (A3) | `63564ae` | `KeptFrame.times`: a converted time leaves the set; a frame still owed for another time converts a copy, and its last time converts the frame itself | `preview::a_vfr_window_keeps_nothing_once_converted` (new fixture `one_vfr_source`: one decoded frame shows at two grid times) | pre-fix: window conversions fail; 4a times kept after conversion: "nothing kept once converted" (207,360 bytes, 12 times); 4b no copy: the same failures as pre-fix (`item4-mutations.log`) | `preview::` `decode::` `pf1_s2c` `render::` 146 passed |
+| 5 (A5) | `2ccd995` | the P-seek backward phase traces only when `PF1_TRACE` is set | `pf1_harness::the_backward_phase_traces_only_on_request` | always trace (the pre-fix harness): "traced without PF1_TRACE" (`item5.log`) | `pf1_harness` 8 passed, 4 ignored |
+| 6 (B2) | `4577ac7` | every setup and reposition seek counts toward P-seek's `timeouts`; P-play's `valid=false` fails the lane | `pf1_harness::every_p_seek_timeout_counts`, `pf1_harness::an_invalid_p_play_run_fails_the_lane` | 6a the setup phase not counted: "phase 3"; 6b any `valid=` accepted: "valid=false passed" (`item6.log`) | `pf1_harness` 10 passed, 4 ignored |
+
+- **Item 1, the audit of the other completions.** `deliver`, `stopped`, `closed`, `exited` and `fail_start` act
+  only on the reader's own decoder state, or record for the current version and a time the current job still
+  requires. The discard completion releases exactly the bytes moved to the reader at the post. The window cancel is
+  synchronous within the newest post. No other stale-completion clip was found. One consequence of the ruling:
+  after a superseded refill, a continued window time below the decoder's `kept_from` stays required in the newer
+  plan and is decoded normally, with a seek. That keeps liveness, at the cost of extra decodes in that race only.
+- **Item 4, a finding.** Writing the witness exposed a pre-existing defect (since R53/R54). The managed converter's
+  `source.add` moves the frame's buffers into the filter graph. A kept frame covering two window times was
+  converted for its first time and kept for the second, which then failed with "managed source frame submission
+  failed …: Cannot allocate memory". On the VFR fixture every second-converted time (10, 8, 6, 4, 2, 0) failed so.
+  In practice A3's "uncharged decoded pixels" was an emptied frame struct. The visible defect was failed window
+  conversions on VFR sources. The fix converts a copy while another time is still owed. The copy is a deep copy of
+  one decoded frame, transient during that conversion, inside that time's max(f, d) hold.
+- **Item 4 and the export path.** `retained` is filled only by `decode_refill` (preview refills). Export never
+  keeps a frame, so `convert_retained` and `discard_kept_outside` are not reached there. The `render.rs` change only
+  widens the preview's discard argument. Under the ruling, neither G18 nor I4 was rerun.
+- **Item 5, which closing runs traced.** From `794caf3` (R56) to `63564ae`, `seek_run` switched the in-process
+  trace on for every backward phase, with or without `PF1_TRACE`. It wrote a file only when `PF1_TRACE` was set.
+  So every candidate P-seek run from R56 on traced its 200 backward steps in process: `cand-5fa62b4`,
+  `diag-counters` and `cand-c90d062`, in r57, r58, r59b, r59c and r60. That puts a trace lock per event on the
+  reader paths. The random, forward and drag phases were not traced. The reference binaries (`ref-ad8f896`,
+  `count5-ref-ad8f896`, `s0-d19bdf9-lane2aa4e1b`) have no trace code. So on the candidate-against-reference
+  comparisons the trace could only have handicapped the candidate's backward (L-4) numbers. r59c and r60 compared
+  traced builds with traced builds.
+- **Item 6, partial.** The call site's `setup.push(op(..))` lines are not witnessed: removing one would not fail a
+  test. The guard's hardening (`r61/guard.py`) is the lead's.
+
+**The docs (items 7–11, `43b2625`).**
+- **7:** the design's S-3 and R53 text and E13.6.2 now say "published" means delivered to the preview ring, and
+  that the witness shows conversion order against delivery, not against render.
+- **8:** E13.6.1, E13.6.6 and E13.6.10 now say the `dts − 1` mutant is equivalent on the recorded fixtures only.
+- **9:** the fixed `l5.py` was re-run over every recorded run whose plan mixed COUNT and plain lanes. Inputs were
+  split-normalized only; outputs are in `s2c-timing/r61/l5/` (old = the pre-fix `l5.py`, kept as `l5-old.py`).
+  - **r58** (`plan-r58.txt`: 36 COUNT and 78 other lanes) changes in one row only. LH COUNT `explainer_16x9`'s
+    candidate had pooled n = 117 lines (the bleed) and now has 9. L-4b goes from 0.88 (0.88, 0.97, 0.85) to
+    **0.97** (0.88, 0.97, 1.18), PASS both ways. Its pair ratios: backward mean 0.55 → 0.59, backward p95
+    0.72 → 0.85, random mean 0.95 → 1.11, forward mean 0.35 → 0.40. None of these r58 `l5` numbers was cited in
+    the docs.
+  - **r59b:** the recorded `l5-r59b.txt` was made with the fixed `l5.py` and equals the re-run. The pre-fix
+    parser would have shown LH `explainer_16x9` L-4b 1.01 with the third pair at 0.71 instead of 0.85.
+  - The root `timing.log` has no COUNT lanes, so it does not change. The r5, r54a, r55m, r56, r59a, r59c and r60
+    plans are COUNT-only, and the r57 plans have no COUNT lanes. The full `r5/plan-r5.txt` was mixed but never
+    ran (only its COUNT subset r5a did). `r2/analyze.py` already started a lane at every `# BEGIN`.
+  - **No gate result changes.** E13.6.10's "no earlier plan mixed the two kinds" is corrected in place.
+- **10:** E13.6.10's R60 reading now says "no regression detected; the check cannot resolve a 5% difference on
+  this machine", and that 2,400 candidate steps were traced (4 lanes × 3 runs × 200), not 1,800. LL L-4a stays
+  passed under the ruling. E13.6.10 also corrects "the r59c lanes were untraced" (item 5 above).
+- **11:** D12 now gives the post-R57 working-frame cost (E13.6.9). D13 and S4's row in §13 add an active
+  scenario: RSS sampled during window cancellation, not only at settled idle. S-3's hold text now says that,
+  after R57, reversing above the newest t to a frame never converted may need a re-decode.
+
+**Residuals (outside the ruling; not fixed, not witnessed).**
+- `unkept` shrinks the (source, time) reservations of any time a reader retained. If two readers of one source
+  ever retain the same time (a refill by reader B over times that reader A still keeps unconverted), A's later
+  `unkept` would shrink B's reservation to f while B still keeps its decoded frame.
+- The scheduler charges an own required time inside a held window at max(f, d), but the preview's K-3 decision
+  charges it f. With d > f and C < d + G, t alone could still exceed C in scheduler terms and reach admit's K-3
+  debug assert.
+- Item 1's consequence above (extra decodes after a superseded refill).
+
+**The gate.**
+- **The workspace fast tier** at `43b2625` (`cargo test --workspace`, nice 19, `-j 4`, `RUST_TEST_THREADS=4`):
+  exit 0, 36 test binaries, **3,519 passed, 0 failed, 91 ignored** (the media library: 1034 passed, 56 ignored)
+  (`workspace-fast.log`).
+- **The slow-test lint:** "slow-test manifest and markers agree: 47 tests, features
+  kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 44 allowlist entries
+  well-formed" (`slow-lint.log`).
+- **The proportionate re-time (r61),** 06:34–07:28 EDT, `s2c-timing/r61/plan-r61.txt`. It ran 24 COUNT P-seek
+  lanes: `seek_gop60` and `explainer_16x9`, LL and LH, 3 pairs each, reference then candidate. The binaries were
+  `count5-ref-ad8f896` (`bd5f14b5…`) and `cand-43b2625` (`0225653b…`). Every lane exited 0; three LH reference
+  lanes printed the reference's known EGL teardown panic after their results. The R61 guard ran every 30 s:
+  `guard --final`: 12 candidate lanes checked, **0 trips**. Load at lane start was 8.0–18.5 (median 11.8,
+  annotation). Logs: `timing-r61.log.gz`, `samples-r61.log.gz`, `l5-r61.txt`, `table-r61.txt`, `analyze-r61.txt`.
+
+  | Lane, workload | **L-4b** (pairs) | Backward mean ratio | Cand hit p95 per pair (ms) | Hit wait / render mean (ms) | Admission waits per run; longest | Timeouts; idle with discards |
+  |---|---|---|---|---|---|---|
+  | LL `seek_gop60` | **1.10** (1.10, 0.98, 1.11) | 0.61 | 23.3, 21.8, 20.8 | 3.7–4.4 / 9.0–9.8 | 4–8; 6.3 | 0; 0 |
+  | LL `explainer_16x9` | **0.91** (0.91, 0.89, 0.95) | 0.55 | 21.8, 26.9, 32.4 | 2.2–4.2 / 11.0–14.9 | 51–61; 13.0 | 0; 0 |
+  | LH `seek_gop60` | **1.06** (0.96, 1.06, 1.07) | 0.63 | 24.5, 25.9, 24.5 | 2.6–3.6 / 13.3–13.6 | 7–21; 4.5 | 0; 0 |
+  | LH `explainer_16x9` | **0.98** (0.98, 0.88, 0.99) | 0.60 | 34.5, 30.9, 32.5 | 1.3–2.5 / 17.3–18.1 | 53–61; 9.8 | 0; 0 |
+
+  L-4b passes on every lane (≤ 1.25). The candidate never timed out and never idled holding discards (36 runs).
+- **The paired L-4a non-regression check (r61b; the lead's R61 item 12),** 07:30–07:43 EDT, LL COUNT P-seek
+  `seek_gop60`. It compared `cand-c90d062-notrace` (`605e02b2…`: `c90d062` plus `2ccd995`'s test-only trace gate)
+  with `cand-43b2625` over 4 rotations, order alternated, with no `PF1_TRACE` on either. All 8 lanes exited 0, and
+  the guard reported 0 trips. Logs: `timing-r61b.log.gz`, `samples-r61b.log.gz`, `table-r61b.txt`.
+
+  | Lane | Load | Hit p95 per run (median) | Hit mean | Wait / render mean | CPU per refill (ms) | Foreign CPU (%·samples) |
+  |---|---|---|---|---|---|---|
+  | pre1 | 10.0 | 18.7, 25.4, 23.3 (23.3) | 16.4 | 4.1 / 9.6 | 448.8 | 3,672 |
+  | cand1 | 7.4 | 24.1, 18.7, 40.8 (24.1) | 17.4 | 3.7 / 9.6 | 464.1 | 4,048 |
+  | cand2 | 12.6 | 53.6, 38.1, 22.8 (38.1) | 23.1 | 5.7 / 14.7 | 472.3 | 6,050 |
+  | pre2 | 16.2 | 20.3, 20.5, 32.6 (20.5) | 14.7 | 3.4 / 8.9 | 458.0 | 4,157 |
+  | pre3 | 17.0 | 26.2, 27.6, 24.7 (26.2) | 19.4 | 5.4 / 11.1 | 461.2 | 6,381 |
+  | cand3 | 14.2 | 30.4, 23.4, 21.6 (23.4) | 17.0 | 4.7 / 9.9 | 455.6 | 5,403 |
+  | cand4 | 14.3 | 23.3, 27.6, 27.0 (27.0) | 18.8 | 4.9 / 11.4 | 463.4 | 5,019 |
+  | pre4 | 14.9 | 23.4, 21.2, 25.9 (23.4) | 15.7 | 3.9 / 9.3 | 465.1 | 3,879 |
+
+  Cand / pre per rotation:
+  - hit p95: 1.03, 1.86, 0.89, 1.15, median **1.09**; the candidate was faster in 1 of 4;
+  - hit mean: median 1.13;
+  - wait: 1.08;
+  - render: 1.11;
+  - CPU per refill: 1.03, 1.03, 0.99, 1.00, median 1.01.
+
+  How many continued windows `fit_continued` shortened is **not measured**: there is no counter, and none was
+  added (the lead's instruction). **The lead's no-regression condition is not met** (median ≤ 1.05 or faster in
+  most rotations, equal CPU, 0 windows shortened), so the run stopped here for the lead.
+
+#### E13.6.12 Amendments R62–R64: one charge rule and the accounting model (2026-10-07)
+
+The lead stopped R61's re-time on item 12 and ruled R62 (`r62-rulings.md`): timing non-regression is reported, not
+gating; work-counter equivalence is the gate. R62 fixed four residuals and asked for a seeded state-machine test of
+the scheduler's accounting (item 9). That model found seven new cases (F1–F7, R63) and then F8 (R64). The model is
+now the gate for scheduler accounting. Logs: `s2c-logs/s2c7/r62/`; notes: `notes-fix-round.md` (R62, R63, R64).
+
+**R62 items 1–8.** Each has a red-first witness, a mutation and its own commit (`r62/item*-*.log`).
+
+| Item | Commit | Fix | Witness |
+|---|---|---|---|
+| 1 | `29dc0b1` | `unkept` shrinks a time only when no reader still keeps it | `sched::a_time_two_readers_keep_shrinks_only_when_the_last_drops_it` (re-set outside a held window at F5) |
+| 2 | `a87b783` | one charge rule: `sched::charge` (max(f, d) inside a held window below its t, f otherwise); K-3 fits a paused job by `job_bytes` | `sched::a_hit_in_a_held_window_is_charged_by_k3_as_admission_charges_it` |
+| 4, 8 | `94478d8` | the harness call sites (`setup.push`, the trace request, the P-play check) are witnessed | `pf1_harness::every_p_seek_op_timeout_fails_the_lane`, `the_backward_phase_traces_only_on_request`, `a_p_play_run_is_checked_where_the_lane_runs_it` (10 mutations) |
+| 5 | `c52403d` | a continued window fits in the room detached readers leave (`Readers::room`, one function for the fit and detention) | `sched::a_continued_window_fits_beside_a_detached_reader` |
+| 6 | `ff701bd` | a dispatched discard stays charged to its reader (`flight`) | `sched::a_dispatched_discard_stays_charged_to_its_reader` |
+| 7 | `1482372` | a failed result first drops the decoder's kept frames | `preview::a_failed_window_conversion_leaves_nothing_kept` (re-set to the charge rule at F5, R64 item 2) |
+
+- **Item 3 (D14, not fixed).** After a refill superseded mid-decode, the newer plan's continued times below the
+  decoder's `kept_from` stay required though no reader keeps them: the reader decodes them again with one seek, at
+  most B − 1 = 15 times plus the GOP pre-roll, once per superseded refill. Added to §13 as D14 (S3 backlog).
+- **Item 4/8, partial.** `BackwardPhase::new`'s `traced: trace_requested()` is checked against `PF1_TRACE` only in
+  the environment the tests run in (unset): a constant `true` is caught, `false` is not.
+- **Items 3, 4 and 8 are outside a scheduler model**; their own witnesses cover 4 and 8.
+
+**The model (R62 item 9, R63 item 4, R64): `sched::accounting`** (`crates/kinewright-media/src/sched_accounting.rs`).
+Plain Rust, no dependency, no thread or clock. Each sequence is one seed's random walk of 64 operations over what
+the preview and its readers do: the post (paused steps in and out of a held window, playback, a second playhead),
+K-3's plan and fallbacks, admission, cache clears and source removal, R47's detach of a reader stalled past its
+retirement, and every reader's `Next` acted on outside the lock, with the decoder's kept frames in the decoder's own
+bookkeeping (`KeptFrames`, shared with `VideoDecoder` since the R63 refactor `4101e96`). Source 0 is VFR (one
+decoded frame shows at two grid times, d > f), source 1 CFR. After every operation it checks:
+- **I1** (K-1): live is exactly what the owners hold (ring, reservations, discards, decodes and discards in flight,
+  the admitted G), live ≤ C, and (R64, exact) each reservation is its charge by the one charge rule, above it only
+  while a reader keeps the time decoded (at most max(charge, d));
+- **I2** (K-1): a kept time the plan requires is charged (reserved at max(f, d) while its slot keeps it, or riding
+  its discard or decode); a kept time no plan requires is D13's gap, bounded below B per reader and counted;
+- **I3** (K-3): an admitted job's H + G fits C less the detached readers' charges;
+- **I4** (R59): no reader idles holding discard charges or a flight;
+- **I5** (progress): every required frame is resolved, in flight, planned or waiting; every 8 operations and at the
+  end a clone runs to rest with the detached readers stalled, the newest job resolves, and once they return nothing
+  stays charged but the rings and G;
+- **I6** (R64): no time is decoded while another live reader keeps it, but on B's counted path; and after each post
+  a live keeper of times the plan wants has some of them in its plan unless each went to another keeper.
+
+Seven weighted profiles (Uniform ×2, Holders, Discards, Detained, Stops, Kept) bias the generator (R63 item 4).
+`PF1_MODEL_SEQUENCES`, `PF1_MODEL_SEED`, `PF1_MODEL_TRACE`, `PF1_MODEL_SURVEY` and `PF1_MODEL_EMIT` (a seed written
+out as a fixed case's steps) drive exploration. Fixed cases (`fixed`) replay explicit operation sequences, each
+step checked as a seed's are, so a later generator change cannot move them.
+
+**What the model found, and the fixes (R63, R64).** Each has a red-first witness, a mutation and its own commit;
+per-commit gates as in R61. The F numbers are the order found.
+
+| Fix | Commit | Seed found | The case | Fix | Witness |
+|---|---|---|---|---|---|
+| F2 | `947fb3c` | 480 | a refill kept window times the ring already held: never converted, never charged, until the reader's next decode | at dispatch a refill keeps only its window less the ring's times (`Readers::retaining`, `decode_refill(.., retain, ..)`); the decode is unchanged (R54); `KeptFrames::cover` keeps R54's `kept_from` | `sched::a_refill_keeps_none_of_the_rings_times`; the model's F2 exemption is gone |
+| F7 | `c43987f` | 2008 | a playback post required a time a reader keeps (reserved max(f, d)); K-3 counted it at f, admission could never fit the set (I5) | option A: `job_bytes`/`Readers::job_set` count a kept frame at max(charge, d), paused and playback; t + G > C is K-3's existing synchronous fallback (§5 K-3 [S2b-3], R15; I12) | the model's fixed case `a_kept_required_frame_counts_at_its_held_charge_in_k3` (seed 2008's scenario, reduced) |
+| F8 | `26a560c` | 16102 | a playback region with no kept time took the only free reader, and a new reader decoded a time the first still kept (charge consumed, I2) | R64 keeper affinity (`Readers::keepers`), B as fallback (`Readers::hand_off`, counted `kept_handoffs`) | `sched::a_region_goes_to_the_reader_that_keeps_its_times`, `sched::a_kept_time_its_keeper_cannot_take_is_discarded_and_counted`, the model's fixed case `a_region_goes_to_the_reader_that_keeps_its_times` |
+| F1 | `50b3080` | 225 | a reservation carried from a playback plan at f stayed below its charge once a paused post held a window over it; the refill kept d against f | `post_within` returns a reservation below its charge; admission reserves it again at the charge | the model's fixed case `a_carried_reservation_below_its_charge_is_made_again_at_it` (seed 11, reduced to 2 steps) |
+| F3 | `0310165` | 835 | `discard_outside` moved a retiring reader's kept frames' reservations onto it after detention decided (I3) | it skips a retiring reader (the guards in `continued` and `backward`, never caught alone, were dropped) | the model's fixed case `a_retiring_reader_is_given_no_discard_after_detention` (seed 674, reduced to 15 steps) |
+| F4 | `9697cf3` | 2686 | a refill's t, reserved (carried), dispatched while admission still waited; its window times were unreserved, so it kept them uncharged | `work_for` holds a refill's t until every window time is reserved or resolved | `sched::a_refill_waits_until_its_window_is_reserved` (red first at this commit); the model's fixed case `a_refill_never_keeps_its_window_uncharged` (seed 3123 of 30k, reduced to 8 steps; lands with F11, which it also needs) |
+| F5 | `12db818` | 2961 | `unkept` shrank a held window's reservations to f, below the charge rule; a reopened reader's refill kept d against f | `unkept` shrinks to `frame_bytes` | `sched::a_dropped_time_inside_the_held_window_keeps_its_charge`; item 1's witness re-set outside a held window; item 7's re-set to the charge rule |
+| F6 | `c80bbcc` | 1273 | the read loop's stopped path did not settle the decoder: it kept raw frames the scheduler had let go | the stopped path drops the kept frames first (item 7's rule), mirrored in the model | `preview::a_stopped_window_conversion_leaves_nothing_kept` |
+| F9 | `645c41d` | 14917 | `exited` dropped a retiring slot's kept times with their reservations still max(f, d) | exit releases them through `unkept` (R64 item 5) | `sched::an_exiting_reader_returns_its_kept_frames_charges` |
+| F10 | `ef82c29` | 167 | a superseded refill clipped its kept times below `kept_from` without shrinking their reservations | the clipped times go through `unkept` | `sched::a_superseded_refill_returns_what_it_does_not_keep` |
+| F11 | `a00d1e4` | 5 | a post that no longer held a window left reservations made inside it at max(f, d), kept by nobody; admission waited on them | `post_within` lowers a reservation above its charge (max(charge, d) while a reader keeps the time) | `sched::a_post_returns_a_reservation_above_its_charge` |
+| F12 | `8d3dc4e` | 106741 (the 300k slow tier) | a busy reader's pending discard dropped a kept time (an earlier post's); a later post gave that time to another reader, which decoded it while the first decoder still kept it, uncounted (I6) | B's path covers it: a reader tracks the times its pending discard drops (`dropping`, cleared when it serves the discard, closes, fails or stops), and `hand_off` hands off any another region wants, counted when decoded again. Only counting changes: no reader's work or reservation does | the model's fixed case `a_time_a_busy_readers_discard_drops_is_counted_when_decoded_again` (seed 106741, reduced to 9 steps) |
+
+**The slow tier (`a973773`).** `sched::accounting::the_readers_accounting_holds_for_300k_seeded_sequences` runs the
+same model over 300,000 seeds (four threads), under `slow-tests`, registered in `ci/slow-tests.txt` with its marker
+(`slow_tests.py lint`: agree, 48 tests). Its first run failed at seed 106741 (I6), which became F12; after F12 it
+is green in 85 s locally (`r64-slow-300k.log`, `r64-slow-300k-2.log`).
+
+**The fast tier and the lint (R62 gate).** `cargo test --workspace` at `a973773` (nice 19, `-j 4`,
+`RUST_TEST_THREADS=4`, `TMPDIR` on disk): exit 0, 36 test binaries, **3,542 passed, 0 failed, 92 ignored** (the
+media library: 1,057 passed, 57 ignored) (`r64-workspace-fast.log.gz`). Two earlier attempts were cut off by the
+machine (a SIGKILL of the media binary, then a T3 restart) and are kept as `-1-sigkill` and `-2-cutoff`. `slow_tests.py lint`: agree, 48 tests
+(`r64-lint-final.log`).
+
+**The gate (R62, R63 item 5): stopped on R62's 5% band, then PASSED under Amendment R65 (below).** Counter equivalence, LL COUNT P-seek,
+`cand-43b2625` (`0225653b…`, pre) against `cand-a973773` (`ea911ffd…`), tracing off, 2 rotations per workload,
+alternated. Rotation 2 first failed on the machine, not the code: `/tmp` (tmpfs) returned "Disk quota exceeded" while
+the fixtures were generated, and three lanes exited 101/137 before any result. It was re-run as r64b with `TMPDIR`
+on disk. Logs: `s2c-timing/r64/` (`timing-r64-gate.log` = r64's rotation 1 + r64b; `table-r64.txt`). Every lane of
+the gate exited 0; `guard --final`: 4 candidate lanes, 0 trips. Load at lane start 19–25 (others' builds; annotation).
+
+| Workload | Decodes (refill + run) | CPU per refill | Hits pre-converted | Windows filled | Admission waits | Timeouts; idle with discards (cand) | Hit p95 (info) |
+|---|---|---|---|---|---|---|---|
+| `seek_gop60` | 1.000, 1.000 → **1.000** | 1.039, 1.019 → **1.029** | 0.968, 0.972 → **0.970** | 1.047, 1.073 → **1.060** ✗ | 1.000, 1.333 → **1.167** ✗ | 0; 0 | 1.21, 1.04 |
+| `explainer_16x9` | 0.999, 0.995 → **0.997** | 1.020, 0.966 → **0.993** | 1.022, 0.960 → **0.991** | 0.959, 1.044 → **1.001** | 0.963, 1.000 → **0.982** | 0; 0 | 2.13, 0.89 |
+
+(cand / pre per rotation, each the median of the lane's 3 runs → the median over rotations.)
+
+- Decodes on `seek_gop60` are identical run for run (12,793 / 12,712 / 12,653 on both binaries, and the same refill
+  and hit counts): the workload is deterministic and so is the work. `kept_handoff_redecode` is 0 in every
+  candidate run.
+- Windows filled and admission waits vary run to run within each binary (windows 39–46, waits 2–7 on `pre`), as
+  conversion races the steps. With 3–5 waits a run, one more wait is a 20–33% change.
+- **Diagnostic only, beyond the gate (r64c):** two more `seek_gop60` rotations (`plan-r64c.txt`, guard 0 trips, load
+  31–38). Over the four rotations: decodes 1.000, CPU per refill 1.003, pre-converted 1.003, windows filled
+  **1.012**, admission waits **1.167** (1.00, 1.33, 0.67, 1.67; pre's runs 2–7, mean 3.75; cand's 3–5, mean 4.08).
+  Consistent with timing noise at these counts, but not shown to be; F4 (a refill's t waits for its window's
+  reservations) could add admission waits. `table-r64-diag.txt`.
+- **Amendment R65 (the lead, `r65-rulings.md`): equivalence for small counters; the gate is PASSED.** A ratio
+  band cannot work on a counter of 2–7 a run (one wait moves a rotation by 25–33%). From now on (R62's gate and
+  the S3/S4 counter gates): a counter whose pre median is ≥ 20 a run keeps the band (median cand/pre within 5%); one
+  under 20 passes when the pooled per-run means differ by at most max(1, 25% of pre's mean) and cand's per-run
+  range overlaps pre's; a counter that must be 0 stays 0. `seek_gop60` admission waits, pooled over the four
+  rotations (the last two diagnostic): cand 49 waits in 12 runs (**4.08** a run, range 3–5), pre 45 in 12
+  (**3.75**, range 2–7): a difference of 0.33, ranges overlapping, so it passes. Windows filled stays on the band
+  and passes at 1.012 over the four rotations. F4's possible waits do not show where waits are many:
+  `explainer_16x9`'s, about 54 a run, are at 0.98. Decodes match run for run, and timeouts, idle with discards and
+  `kept_handoff_redecode` are 0.
+
+**The revert table (R63 item 4, R64 item 7), on the final code (`a973773`).** Each mutation reverts one fix or
+item in the final tree (`mut.py`, archived in `s2c7/r63-tooling.tar.gz`). "3k" is the fast tier's `sched::accounting` filter (the
+seeded 3,000 and the fixed cases): what fails. "30k" is the survey of 30,000 seeds (`PF1_MODEL_SURVEY`): failing
+seeds (the lowest failing seed). Log: `r62/r64-revert-final.txt` and `r64-revert-final-*.log`.
+
+| Reverted | 3k (fast tier) | 30k: seeds failing (lowest) | Targeted witness |
+|---|---|---|---|
+| A1 (R61) | seeded + fixed F12 case | 775 (9) | `sched::a_superseded_refill_leaves_the_newer_plan_whole` |
+| A2a (R61) | seeded + fixed F4/F11 case | 877 (8) | `sched::a_continued_window_is_shortened_to_fit_k3` |
+| A2b (R61) | seeded | 18 (347) | `sched::a_detached_reader_detains_a_plan_by_its_discards` |
+| A3 (R61) | seeded + 3 fixed cases | 8,754 (2) | `preview::a_vfr_window_keeps_nothing_once_converted` |
+| item 1 | **not caught** | 0 | `sched::a_time_two_readers_keep_shrinks_only_when_the_last_drops_it` (R64 item 3, below) |
+| item 2 | seeded | 576 (173) | `sched::a_hit_in_a_held_window_is_charged_by_k3_as_admission_charges_it` |
+| item 5 | seeded | 14 (895) | `sched::a_continued_window_fits_beside_a_detached_reader` |
+| item 6 | seeded | 19 (486) | `sched::a_dispatched_discard_stays_charged_to_its_reader` |
+| item 7 | seeded | 333 (107) | `preview::a_failed_window_conversion_leaves_nothing_kept` |
+| F1 | seeded + fixed | 114 (11) | fixed case (seed 11) |
+| F2 | seeded | 66 (187) | `sched::a_refill_keeps_none_of_the_rings_times` |
+| F3 | seeded + fixed | 12 (674) | fixed case (seed 674) |
+| F4 | fixed case only | 5 (3123) | `sched::a_refill_waits_until_its_window_is_reserved`; fixed case (seed 3123) |
+| F5 | seeded + fixed | 2,071 (5) | `sched::a_dropped_time_inside_the_held_window_keeps_its_charge` |
+| F6 (model side) | seeded | 37 (270) | — |
+| F6 (read loop) | not caught (outside the model) | 0 | `preview::a_stopped_window_conversion_leaves_nothing_kept` |
+| F7 | fixed case only | 0 | fixed case (seed 2008) |
+| F8 (A) | seeded + fixed | 128 (11) | `sched::a_region_goes_to_the_reader_that_keeps_its_times`; fixed case (seed 16102) |
+| F8 (B, `hand_off` removed) | fixed F12 case | 0 | `sched::a_kept_time_its_keeper_cannot_take_is_discarded_and_counted` |
+| F9 | **not caught at 3k** | 2 (14917) | `sched::an_exiting_reader_returns_its_kept_frames_charges` |
+| F10 | seeded + fixed F12 case | 81 (167) | `sched::a_superseded_refill_returns_what_it_does_not_keep` |
+| F11 | seeded + fixed | 9,253 (5) | `sched::a_post_returns_a_reservation_above_its_charge` |
+| F12 | fixed case only | 0 | fixed case (seed 106741) |
+| none | green (3.3 s here) | 0 | — |
+
+- The witnesses of F1–F12 and of items 1 and 7 were shown red under these mutations on the final code
+  (`r64-witness-summary.txt`, `r64-F12-witness-F12.log`). Those of A1–A3 and items 2, 5 and 6 are the R61/R62
+  witnesses, red at their own commits; they were not re-run under these mutations.
+- **The R63 bar** (A1, A2a, A2b, A3, items 1, 2, 5, 6, 7, F1, F3, F4, F5, F6, F7, each caught by the fast tier)
+  is met but for item 1, which R64 item 3 accepts: the generator cannot reach two readers keeping one time while
+  one of them drops it (a refill keeps only what the ring lacks, F2, and a region goes to its keeper, F8), so
+  `unkept`'s "no other reader still keeps it" test is never decisive. Its deterministic witness stays.
+- **F4 and F7 (R64 item 4).** A profile weight was tried first: Holders ×3 at 3k caught neither (0 and 0,
+  `r64-weight-holders3-*.log`), so both took the fixed-case route. F7: seed 2008's scenario. F4: no seed in 30k
+  fails on F4 alone at F4's commit (all 16 also need F11), and 20,000 fuzzed variants of seed 3123 found none; so
+  F4's red-first witness is the unit test, and the seed-3123 case (reduced to 8 steps) lands with F11.
+- F9, F12 and F8's B path are caught at 3k only by fixed cases or not at all: their witnesses are deterministic.
+- 3k model time on the final code: 3.3–5.6 s under load 20–40 (target ≈ 3 s).
+
+**Rulings and open items (R65).**
+- **Accepted (R65):** F10 and F11 (the one charge rule) and F12 (counting only, on R64's B path; the replay shows
+  the same scheduling) as same-rule fixes; the model's fast-tier time, 3.3–5.6 s under load (2.63 s on a quiet
+  run) against ≈ 3 s.
+- **Deferred (R65): D15.** `sched::tests::the_reader_model_holds_for_every_short_sequence` (about 120 s in the
+  fast tier, from S2b `72246d3`) goes to the S3 backlog: to the slow tier, or shrunk.
+- **F8's reading:** a keeper mid-decode stays eligible for affinity; a retiring or detached keeper's kept times
+  stay with it (F3, D13), so B's discard never reaches them.
+- **Open, not blockers (R65): F11's gate.** `preview::` twice hit the known Vulkan-loader SIGSEGV (in
+  `vkCreateInstance`), and one run of `a_backward_drag_matches_fresh_seeks_and_refills_once_per_window` failed
+  with its details lost; 3 solo and 6 full reruns passed. Not reproduced.

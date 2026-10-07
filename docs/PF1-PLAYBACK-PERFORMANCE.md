@@ -1245,6 +1245,39 @@ not close (E13.6.11). No R53–R60 semantics change except as stated here.
   counts toward P-seek's `timeouts`, and P-play's `valid=false` fails the lane.
 - Each code fix has a witness, red first, and a mutation (E13.6.11).
 
+
+**Amendments R62–R64 [S2c] One charge rule and the accounting model (lead rulings, 2026-10-07).** No R53–R61
+semantics change except as stated here (E13.6.12).
+- **One charge rule (R62 item 2, R63).** A required frame's reservation is its charge: max(f, d) inside a held
+  window below its t, f otherwise; above it only while a reader keeps the time decoded (max(charge, d)). K-3, the
+  post, admission and every release use it: K-3 counts a frame a reader keeps at max(f, d) (F7); a post raises a
+  reservation below its charge (F1) and lowers one above it (R64); a dropped kept time shrinks to its charge, not to
+  f (F5), when no other reader still keeps it (R62 item 1), on exit too (F9) and when a superseded refill clips it
+  (R64). If t alone plus G cannot fit C, K-3's synchronous fallback (R15, §5 K-3 [S2b-3]) takes the frame.
+- **A refill keeps only what the ring lacks (F2).** At dispatch a refill is told the window times to keep: its
+  window less the times the ring holds. Its decode is unchanged (R54).
+- **A refill's t waits for its window (F4).** A reader does not dispatch a refill until every window time is
+  reserved or resolved, so the frames it keeps are charged.
+- **A retiring reader's kept frames stay with it (F3).** `discard_outside` does not move reservations onto a
+  retiring reader after detention decided.
+- **A stopped result is a failure (F6).** The read loop's stopped path drops the decoder's kept frames, as
+  `stopped` takes them as gone (R62 item 7's rule).
+- **Keeper affinity (R64, F8).** At a post a region holding a time a live (neither retiring nor detached) reader
+  keeps decoded goes to that reader first; a reader two regions want takes the one with more of its kept times
+  required, and the other goes to a free reader or waits. Fallback B: a time its live keeper cannot take leaves
+  through a discard, its charge riding it (R57/R59), and is decoded again by the reader it went to, counted
+  (`kept_handoff_redecode`). The same holds for a time a busy keeper's pending discard dropped at an earlier
+  post: its decoder keeps it until it serves the discard, and a redecode elsewhere is counted (F12). A retiring or
+  detached keeper's kept times stay with it (F3; D13).
+- **The model is the gate for scheduler accounting (R62 item 9, R63).** `sched::accounting` checks I1–I6 after every
+  operation of 3,000 seeded sequences in the fast tier and 300,000 in the slow tier.
+
+**Amendment R65 [S2c] Equivalence for small counters (lead ruling, 2026-10-07).** R62's counter gate, and the
+S3/S4 counter gates after it: a counter whose pre median is ≥ 20 a run passes when its median cand/pre ratio is
+within 5%. One under 20 a run passes when the pooled per-run means differ by at most max(1, 25% of pre's mean) and
+cand's per-run range overlaps pre's. A counter that must be 0 stays 0. Under it the R62 gate passed (E13.6.12). F10,
+F11 and F12 are accepted as same-rule fixes; D15 is deferred to S3.
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
 conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and
@@ -1325,3 +1358,5 @@ Opus. *CI on push*, Windows included.
 | D11 | Bounded streaming, row banding and a lazy `decoded_layers` for required sets > C (preview or full resolution) | R15: kept out of the scheduler core; K-3 falls back to today's path | export-performance slice (D3 owner) | G17 fails, or a full-resolution set exceeds C in the session |
 | D12 | The working-frame step (RGBA64 to the working frame, after swscale) | Amendment R56: 3.6–5.2 ms a frame, about 80% of a conversion (E13.6.7). After R57's row-wise fill (E13.6.9, r57w): t 1.87–2.61 ms and a window frame 2.11–3.31 ms (×0.49–0.72), against whole conversions of 2.9–3.2 ms on LL and 3.2–4.2 ms on LH, so it is still most of a conversion. t, window frames and playback all pay it. Our own Rust code, not swscale | S3/S4 | S3/S4 planning |
 | D13 | Charging a cancelled window's decoded frames until the reader drops them | Amendment R56: after a post outside a held window, that window's kept decoded frames stay in its reader until the reader's next decode or close, uncharged. Bounded: one window per reader, at most B − 1 = 15 decoded frames. Charging them could deadlock admission | S4 | S4's G15 RSS check, plus an active scenario (R61 item 11): RSS sampled *during* cancellation, not only at settled idle. A P-seek-style backward stepper on a 1080p GOP-60 source refills a window, then posts outside it (a jump far back, then forward) before the window converts, repeatedly, with RSS sampled every 100 ms. The peak RSS above the idle baseline is recorded against the bound (one window per reader, B − 1 decoded frames at d each) |
+| D14 | Extra decodes after a superseded refill | Amendment R62 item 3: after a refill superseded mid-decode (R61's version check), the newer plan's continued times below the decoder's `kept_from` stay required though no reader keeps them, so the reader decodes them again, with one seek. Bounded: at most B − 1 = 15 required times plus the GOP pre-roll, once per superseded refill; their reservations hold their charge until each converts | S3 | the S3 backlog: a refill completion that hands the newer plan what the decoder kept |
+| D15 | The exhaustive reader-model test's fast-tier time | Amendment R65: `sched::tests::the_reader_model_holds_for_every_short_sequence` (S2b, `72246d3`) takes about 120 s in the fast tier. It predates S2c and stays as it is until S3 | S3 | the S3 backlog: move it to the slow tier, or shrink it |
