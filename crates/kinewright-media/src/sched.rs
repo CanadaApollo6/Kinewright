@@ -1153,16 +1153,18 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// let them go): a time another reader of the source still keeps decoded
     /// keeps its max(f, d) until that reader drops it too.
     fn unkept(&mut self, key: &K, times: BTreeSet<i64>) {
-        let f = self.sizes.get(key).copied().unwrap_or(0);
         let mut excess = 0usize;
         let slots = &self.slots;
         let kept =
             |at: i64| (slots.iter()).any(|slot| slot.key == *key && slot.retained.contains(&at));
         let times: Vec<i64> = times.into_iter().filter(|at| !kept(*at)).collect();
         for at in times {
+            // Amendment R63 [S2c] (F5): to the one charge rule's, not f (a
+            // held window's frame below its t stays max(f, d)).
+            let charge = self.frame_bytes(key, at);
             if let Some(bytes) = self.reserved.get_mut(&(key.clone(), at)) {
-                excess = excess.saturating_add(bytes.saturating_sub(f));
-                *bytes = (*bytes).min(f);
+                excess = excess.saturating_add(bytes.saturating_sub(charge));
+                *bytes = (*bytes).min(charge);
             }
         }
         self.release(excess);
@@ -2055,12 +2057,16 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         self.wanted.contains_key(key)
     }
 
-    /// Amendment R62's witness: the required frames' reservations, and
-    /// the times readers keep decoded.
+    /// Amendment R62's witness: the required frames' reservations, each
+    /// with its charge by the one charge rule (Amendment R64: the held
+    /// window's, not a kept frame's), and the times readers keep decoded.
     #[cfg(test)]
-    pub(crate) fn reservations(&self) -> (Vec<usize>, usize) {
+    pub(crate) fn reservations(&self) -> (Vec<(usize, usize)>, usize) {
         let kept = self.slots.iter().map(|slot| slot.retained.len()).sum();
-        (self.reserved.values().copied().collect(), kept)
+        let reserved = (self.reserved.iter())
+            .map(|((key, at), bytes)| (*bytes, self.frame_bytes(key, *at)))
+            .collect();
+        (reserved, kept)
     }
 
     /// U-1's witness: the sources whose travel is remembered.
@@ -3715,27 +3721,38 @@ mod tests {
         }
     }
 
-    /// Amendment R62 [S2c] (the `unkept` residual): two readers of source 0
-    /// keep the same window times decoded. Reader A refilled [4, 19] (its
-    /// decode of 19 in flight keeps 4–18 at max(f, d) = 3f); reader B (a
-    /// copy of A's slot, set up directly) keeps 10–12. A's decoder drops its
-    /// frames (it closes): only the times no other reader keeps shrink to f;
-    /// 10–12 keep B's 3f until B drops them too. K-1 stays exact: live
-    /// falls by exactly what the reservations shed.
-    #[test]
-    fn a_time_two_readers_keep_shrinks_only_when_the_last_drops_it() {
-        let mut readers = Model::new(20).with_budget(100 * F);
-        paused_step(&mut readers, 20, 0, 0);
-        let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::from([(0, 3 * F)]));
+    /// Source 0's reader A refilled [4, 19] (C = 100f, d = 3f): its decode
+    /// of 19 in flight keeps 4–18, reserved at max(f, d) = 3f. Returns A's
+    /// id.
+    fn refilled_4_to_19(readers: &mut Model) -> u64 {
+        paused_step(readers, 20, 0, 0);
+        let ready = post_paused(readers, &[(0, 19, 0)], HashMap::from([(0, 3 * F)]));
         assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
         let a = readers.slots[0].id;
         loop {
-            if let Next::Decode { at, from, .. } = step_reader(&mut readers, a) {
+            if let Next::Decode { at, from, .. } = step_reader(readers, a) {
                 assert_eq!((at, from), (19, Some(4)), "the refill");
                 break;
             }
         }
         assert_eq!(readers.slots[0].retained, (4..19).collect());
+        let charged = |at: i64| readers.reserved.get(&(0, at)).copied();
+        assert!((4..19).all(|at| charged(at) == Some(3 * F)), "max(f, d)");
+        a
+    }
+
+    /// Amendment R62 [S2c] (the `unkept` residual, item 1): two readers of
+    /// source 0 keep the same times decoded. Reader A refilled [4, 19] and
+    /// keeps 4–18 at max(f, d) = 3f; reader B (a copy of A's slot, set up
+    /// directly) keeps 10–12. Amendment R64 item 3: outside a held window
+    /// (a playback post holds none), where a dropped time's charge is f.
+    /// A's decoder drops its frames (it closes): only the times no other
+    /// reader keeps shrink to f; 10–12 keep B's 3f until B drops them too.
+    /// K-1 stays exact: live falls by exactly what the reservations shed.
+    #[test]
+    fn a_time_two_readers_keep_shrinks_only_when_the_last_drops_it() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        let a = refilled_4_to_19(&mut readers);
         let mut b = readers.slots[0].clone();
         (b.id, b.state) = (
             readers.next_id,
@@ -3746,12 +3763,11 @@ mod tests {
         readers.next_id += 1;
         b.retained = BTreeSet::from([10, 11, 12]);
         readers.slots.push(b.clone());
+        // No window held: a kept time's charge is f.
+        readers.hold(HashMap::new(), HashMap::from([(0, 3 * F)]));
+        assert!((4..19).all(|at| readers.frame_bytes(&0, at) == F), "f");
         let charged = |readers: &Model, at: i64| readers.reserved.get(&(0, at)).copied();
         let reserved = |readers: &Model| readers.reserved.values().sum::<usize>();
-        assert!(
-            (4..19).all(|at| charged(&readers, at) == Some(3 * F)),
-            "max(f, d)"
-        );
         let (live, held) = (readers.live().0, reserved(&readers));
         readers.closed(a);
         for at in 4..19 {
@@ -3783,6 +3799,27 @@ mod tests {
             3 * 2 * F,
             "B's three shed 2f each"
         );
+    }
+
+    /// Amendment R63 [S2c] (F5, the one charge rule): inside the held
+    /// window below its t a dropped time's charge is max(f, d), not f.
+    /// Reader A refilled [4, 19] and keeps 4–18 at 3f; its decoder drops
+    /// them (it closes) while the window is held: every reservation stays
+    /// 3f, nothing is released, and the set H stays what K-3 decided.
+    #[test]
+    fn a_dropped_time_inside_the_held_window_keeps_its_charge() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        let a = refilled_4_to_19(&mut readers);
+        let (live, required) = (readers.live().0, readers.required_bytes);
+        readers.closed(a);
+        assert!(readers.slots[0].retained.is_empty(), "A keeps nothing");
+        let charged = |at: i64| readers.reserved.get(&(0, at)).copied();
+        assert!(
+            (4..19).all(|at| charged(at) == Some(3 * F)),
+            "the window's charge, max(f, d)"
+        );
+        assert_eq!(readers.live().0, live, "nothing released");
+        assert_eq!(readers.required_bytes, required, "H as decided");
     }
 
     /// Amendment R63 [S2c] (F2): a refill keeps none of the window times

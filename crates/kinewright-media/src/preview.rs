@@ -3539,9 +3539,11 @@ pub(crate) mod tests {
     /// `a_kept_window_is_charged_inside_k1`), its conversion of 6 failing after the
     /// converter ran (6 has left its frame's times, as a failed conversion
     /// leaves them). On a failure the scheduler takes the reader's whole
-    /// kept window as gone (every kept time's charge shrinks to f), so the
-    /// decoder keeps nothing either: held before 5, nothing is kept by the
-    /// scheduler and every reservation is f; 5 is then decoded again (not
+    /// kept window as gone, so the decoder keeps nothing either: held
+    /// before 5, nothing is kept by the scheduler and every reservation is
+    /// its charge (Amendment R64 item 2, the one charge rule: max(f, d)
+    /// while a raw frame is kept, f once dropped; inside the held window
+    /// below its t the charge is max(f, d)); 5 is then decoded again (not
     /// converted from a kept frame), and nothing is kept after it.
     #[test]
     fn a_failed_window_conversion_leaves_nothing_kept() {
@@ -3580,8 +3582,12 @@ pub(crate) mod tests {
         let (reserved, kept) = state.readers.reservations();
         assert_eq!(kept, 0, "the scheduler keeps nothing");
         assert!(
-            reserved.iter().all(|bytes| *bytes == f),
-            "every reservation f ({f}): {reserved:?}"
+            !reserved.is_empty() && reserved.iter().all(|(bytes, charge)| bytes == charge),
+            "every reservation its charge: {reserved:?}"
+        );
+        assert!(
+            reserved.iter().all(|(_, charge)| *charge > f),
+            "in the held window below t: max(f, d) > f ({f}): {reserved:?}"
         );
         drop(state);
         drop(release);
