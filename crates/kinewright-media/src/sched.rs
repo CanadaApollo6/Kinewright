@@ -1522,7 +1522,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// detained if its required regions need more slots than R leaves
     /// beside them (or more readers of a source than H-1 does), if they
     /// hold the whole pool (no reader could open), or if the set does not
-    /// fit in C beside their bytes. Everything else a plan waits for is
+    /// fit in C beside their bytes (Amendment R61: in flight and discarded). Everything else a plan waits for is
     /// held by readers that exit at their next check.
     pub(crate) fn detained(&self, detached: &[u64], planned: &Planned<K>, set: usize) -> bool {
         let stuck: Vec<&Slot<K>> = (self.slots.iter())
@@ -1543,7 +1543,11 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let slots = !required.is_empty() && required.len() + stuck.len() > self.limit;
         let threads: usize = stuck.iter().map(|slot| slot.threads).sum();
         let permits = !required.is_empty() && threads >= self.pool;
-        let flight = (stuck.iter()).fold(set, |bytes, slot| bytes.saturating_add(slot.flight));
+        // Amendment R61 [S2c]: and its discarded kept frames' charges.
+        let held = |bytes: usize, slot: &&Slot<K>| {
+            (bytes.saturating_add(slot.flight)).saturating_add(slot.discarding)
+        };
+        let flight = stuck.iter().fold(set, held);
         slots || per_source || permits || flight > self.budget
     }
 
@@ -4109,6 +4113,50 @@ mod tests {
         let mut readers = readers;
         readers.exited(detached[0]);
         assert!(!readers.detained(&detached, &two, 2 * F), "it exited");
+    }
+
+    /// Amendment R61 [S2c] (review A2b): C = 20f. Source 0's reader keeps
+    /// a refill's frames (4–18 of [4, 19]); a step to 10 discards 11–18,
+    /// their 8f charged to it until its decoder drops them. Source 0 then
+    /// leaves the document, and the reader, retired, stays alive (detached)
+    /// with nothing in flight. A plan of 13 of source 1's frames fits C
+    /// alone but not beside the 8f: it is detained (K-3's fallback), not
+    /// posted to wait on that reader; 12 frames fit beside it.
+    #[test]
+    fn a_detached_reader_detains_a_plan_by_its_discards() {
+        let mut readers = Model::new(20).with_budget(20 * F);
+        paused_step(&mut readers, 20, 0, 0);
+        let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::new());
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let id = readers.slots[0].id;
+        let refill = loop {
+            if let Next::Decode {
+                at, version, bytes, ..
+            } = step_reader(&mut readers, id)
+            {
+                break (at, version, bytes);
+            }
+        };
+        readers.refilled(id, (refill.0, refill.1), Some(4));
+        deliver_ok(&mut readers, id, 0, refill);
+        post_paused(&mut readers, &[(0, 10, 0)], HashMap::new());
+        let slot = &readers.slots[0];
+        assert_eq!((slot.discarding, slot.flight), (8 * F, 0), "8f discarded");
+        let (detached, posted) = readers.forget(|key| *key != 0);
+        readers.release(posted.dropped.0.iter().map(Fr::bytes).sum());
+        assert_eq!(detached, [id], "the reader is retired, still alive");
+        let plan = |n: i64| {
+            plan_regions(&[(1u8, (0..n).collect(), Vec::new())], readers.limit()).expect("R")
+        };
+        assert!(readers.fits(13 * F), "13f fits C alone");
+        assert!(
+            readers.detained(&detached, &plan(13), 13 * F),
+            "not beside the 8f it holds"
+        );
+        assert!(
+            !readers.detained(&detached, &plan(12), 12 * F),
+            "12f fits beside it"
+        );
     }
 
     /// H-5 at P = 20: one source decodes on 16 threads, two on 10 + 10
