@@ -36,7 +36,10 @@
 //!   rings and G once the detached readers return.
 //! - I6 (Amendment R64, F8): no time is decoded while another live, idle
 //!   or ready reader keeps it decoded, but on B's counted path (that
-//!   reader's discard drops it, its charge riding the discard).
+//!   reader's discard drops it, its charge riding the discard). Amendment
+//!   R66 (F14, exact): each decode adds to `kept_handoffs` exactly the
+//!   times it decodes that another reader's decoder keeps (or its refill
+//!   in flight will keep).
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -194,6 +197,10 @@ struct Agent {
     stalled: bool,
     /// Amendment R63 (F2): the window times its refill in flight keeps.
     retain: BTreeSet<i64>,
+    /// Amendment R66 (F14): the kept times the discard-only job it served
+    /// dropped, until it is back (its next step): the scheduler learns of
+    /// it then.
+    served: BTreeSet<i64>,
     /// D13's accepted gap: kept times its decoder holds that no plan
     /// requires (a post left their window, or a superseded refill kept
     /// them), uncharged until the decoder drops them or (Amendment R66,
@@ -333,6 +340,10 @@ struct World {
     stalled_now: Vec<u64>,
     /// The operation being applied, until it is transcribed.
     applying: Option<Op>,
+    /// Amendment R66 (F14): the model's record of the last post's
+    /// handoffs ([`Self::handed_off`]), and that post's version.
+    handoff: HashSet<(u8, i64)>,
+    handoff_version: u64,
 }
 
 fn source(key: u8) -> usize {
@@ -356,6 +367,8 @@ impl World {
             posted_job: None,
             stalled_now: Vec::new(),
             applying: None,
+            handoff: HashSet::new(),
+            handoff_version: 0,
         }
     }
 
@@ -601,7 +614,12 @@ impl World {
                     unreachable!("discarding");
                 };
                 if let Some(decoder) = agent.decoder.as_mut() {
+                    let before = decoder.times();
                     decoder.discard_outside(keep);
+                    let after = decoder.times();
+                    agent.served = (before.into_iter())
+                        .filter(|t| !after.contains(t))
+                        .collect();
                 }
                 agent.doing = Doing::Ask { waiting: false };
                 self.readers.release(bytes);
@@ -642,6 +660,7 @@ impl World {
 
     /// What a post or an assignment hands back, acted on after unlock.
     fn posted(&mut self, posted: Posted<u8, Fr>) {
+        self.handed_off();
         let dropped: usize = posted.dropped.0.iter().map(Fr::bytes).sum();
         self.readers.release(dropped);
         for (id, key) in posted.spawn {
@@ -654,6 +673,7 @@ impl World {
                 cancelled: false,
                 stalled: false,
                 retain: BTreeSet::new(),
+                served: BTreeSet::new(),
                 unowed: BTreeSet::new(),
             });
         }
@@ -920,6 +940,8 @@ impl World {
         let retain = self.readers.retaining(id);
         let agent = (self.agents.iter_mut()).find(|agent| agent.id == id);
         let agent = agent.expect("the agent");
+        agent.served.clear(); // it is back
+        let mut converts = false;
         agent.doing = match next {
             Next::Retire => Doing::Exit,
             Next::Wait { .. } => {
@@ -957,8 +979,7 @@ impl World {
                     if let Some(keep) = discard {
                         decoder.discard_outside(keep);
                     }
-                    let converts =
-                        from.is_none() && decoder.frames().any(|k| k.times.contains(&at));
+                    converts = from.is_none() && decoder.frames().any(|k| k.times.contains(&at));
                     if !converts {
                         decoder.clear();
                     }
@@ -973,7 +994,7 @@ impl World {
             }
         };
         if let Next::Decode { at, from, .. } = next {
-            self.check_redecode(id, (at, from.is_some()), counted);
+            self.check_redecode(id, (at, from, converts), counted);
         }
         if matches!(next, Next::Wait { .. }) {
             self.reach.waits += 1;
@@ -1035,14 +1056,22 @@ impl World {
     /// I6 (Amendment R64, F8): reader `id`'s decode of `at` (a refill's:
     /// and of the window times it keeps) decodes no time another live
     /// reader (neither retiring nor detached) keeps decoded, but on B's
-    /// path: that reader's slot no longer keeps it, its discard drops it,
-    /// and the scheduler counted the decode (`kept_handoffs` past
-    /// `counted`).
-    fn check_redecode(&mut self, id: u64, (at, refill): (i64, bool), counted: u64) {
+    /// path: that reader's slot no longer keeps it, its discard drops it.
+    /// Amendment R66 (F14, exact): the scheduler counts (`kept_handoffs`
+    /// past `counted`) exactly the times this decode decodes (a refill's
+    /// window from its start, t alone otherwise, none for a conversion)
+    /// that the model's own record of the last post's handoffs holds
+    /// ([`Self::handed_off`]), each once.
+    fn check_redecode(
+        &mut self,
+        id: u64,
+        (at, from, converts): (i64, Option<i64>, bool),
+        counted: u64,
+    ) {
         let agent = self.agents.iter().find(|agent| agent.id == id);
         let agent = agent.expect("the agent");
         let key = agent.key;
-        let mut times = if refill {
+        let mut times = if from.is_some() {
             agent.retain.clone()
         } else {
             BTreeSet::new()
@@ -1066,14 +1095,69 @@ impl World {
                     && (slot.discard.is_some_and(outside)
                         || matches!(other.doing, Doing::Discard(keep, _) if outside(keep)));
                 assert!(
-                    handed && self.readers.kept_handoffs > counted,
+                    handed,
                     "I6: reader {id} decodes {t} of source {key} while reader {} keeps it decoded \
-                     (handed {handed}, counted {})",
-                    other.id,
-                    self.readers.kept_handoffs - counted
+                     (not handed off)",
+                    other.id
                 );
                 self.reach.handoffs += 1;
             }
+        }
+        let decoded: Vec<i64> = match from {
+            _ if converts => Vec::new(),
+            Some(start) => (start..=at).collect(),
+            None => vec![at],
+        };
+        let again: Vec<i64> = (decoded.into_iter())
+            .filter(|t| self.handoff.remove(&(key, *t)))
+            .collect();
+        let delta = self.readers.kept_handoffs - counted;
+        assert_eq!(
+            delta,
+            again.len() as u64,
+            "I6 (exact): reader {id}'s decode of {at} (source {key}) decodes {again:?} again, \
+             handed off at the last post; counted {delta}"
+        );
+    }
+
+    /// Amendment R66 (F14): the model's record of a post's handoffs (B):
+    /// each time a reader keeps decoded (its decoder's frames but the one
+    /// its conversion in flight takes, the times its refill in flight will
+    /// keep, and those a discard it served dropped before it is back) that
+    /// its new plan does not want and the plan wants elsewhere. Remade
+    /// after each post (`version`), from the decoders, not from the
+    /// scheduler's slots.
+    fn handed_off(&mut self) {
+        if self.readers.version == self.handoff_version {
+            return;
+        }
+        self.handoff_version = self.readers.version;
+        self.handoff.clear();
+        for agent in &self.agents {
+            let slot = (self.readers.slots.iter()).find(|slot| slot.id == agent.id);
+            let Some(slot) = slot else {
+                continue;
+            };
+            let mut kept: BTreeSet<i64> = (agent.decoder.as_ref())
+                .map(KeptFrames::times)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            match agent.doing {
+                Doing::Decode { at, from: None, .. } => {
+                    kept.remove(&at);
+                }
+                Doing::Decode { from: Some(_), .. } => kept.extend(agent.retain.iter().copied()),
+                _ => {}
+            }
+            kept.extend(agent.served.iter().copied());
+            let wanted = self.readers.wanted.get(&agent.key);
+            let planned =
+                |t: &i64| slot.plan.required.contains(t) || slot.plan.lookahead.contains(t);
+            let elsewhere =
+                |t: &i64| !planned(t) && wanted.is_some_and(|wanted| wanted.contains(t));
+            let handed = kept.into_iter().filter(elsewhere).map(|t| (agent.key, t));
+            self.handoff.extend(handed);
         }
     }
 
@@ -2106,4 +2190,45 @@ fn a_kept_time_required_again_is_admitted_at_its_kept_charge() {
     );
     assert_eq!(world.reach.conversions, 1, "reader 0 converted 37 (once)");
     assert_eq!(world.readers.kept_handoffs, 0, "nothing was decoded again");
+}
+
+/// Amendment R66 [S2c] (F14, B): Astra's scenario on seed 16102's run.
+/// Reader 0 refills 38's window, keeping 36 and 37 decoded. A paused step
+/// to 38 again under G = 17f cuts its continuation (K-3): 36 and 37 go
+/// out through a discard-only job, which reader 0 is given and has not
+/// served. Playback then requires 25 and 37: 25's region goes to reader
+/// 0, 37's to reader 1, which decodes it while reader 0's decoder still
+/// keeps it. Before the fix the dispatch forgot the times its discard
+/// drops, so the post did not hand 37 off and that decode was not
+/// counted (I6, exact).
+#[test]
+fn a_time_a_dispatched_discard_drops_is_counted_when_decoded_again() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_16102,
+        vec![
+            Post(vec![(0, vec![39], vec![])], true, 6 * F),
+            Do(Op::Run),
+            Post(vec![(0, vec![38], vec![])], true, 6 * F),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(vec![(0, vec![38], vec![])], true, 17 * F),
+            Do(Op::Step(0)),
+            Post(
+                vec![(0, vec![25, 37], vec![26, 27, 28, 38, 39])],
+                false,
+                6 * F,
+            ),
+            Do(Op::Step(1)),
+            Do(Op::Grant(1)),
+            Do(Op::Step(1)),
+        ],
+    );
+    assert_eq!(
+        world.reach.handoffs,
+        1,
+        "reader 1 decoded 37 while reader 0's decoder kept it:\n{}",
+        world.snapshot()
+    );
+    assert_eq!(world.readers.kept_handoffs, 1, "37 decoded again, counted");
 }

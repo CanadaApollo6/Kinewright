@@ -390,6 +390,10 @@ pub(crate) struct Slot<K> {
     /// its decoder keeps until it serves the discard; one the plan gives
     /// another reader is handed off.
     dropping: BTreeSet<i64>,
+    /// Amendment R66 [S2c] (F14): those of a dispatched discard-only job,
+    /// which its decoder keeps until it serves the job (the reader is
+    /// back, its next step).
+    dispatched: BTreeSet<i64>,
 }
 
 /// One region of demand on a source, served by one reader.
@@ -1013,10 +1017,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                         .is_some_and(|wanted| wanted.contains(at))
             };
             // A time its pending discard drops is handed off too (its
-            // decoder still keeps it), unless its own plan wants it back.
+            // decoder still keeps it), unless its own plan wants it back;
+            // so is one a dispatched discard drops until it is served
+            // (Amendment R66, F14).
             let planned =
                 |at: &&i64| slot.plan.required.contains(at) || slot.plan.lookahead.contains(at);
-            let dropping = slot.dropping.iter().filter(|at| !planned(at));
+            let dropping = (slot.dropping.iter())
+                .chain(&slot.dispatched)
+                .filter(|at| !planned(at));
             let dropped: Vec<i64> = dropping.copied().filter(elsewhere).collect();
             self.handoff
                 .extend(dropped.iter().map(|at| (slot.key.clone(), *at)));
@@ -1436,6 +1444,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 discard: None,
                 discarding: 0,
                 dropping: BTreeSet::new(),
+                dispatched: BTreeSet::new(),
             });
             spawn.push((id, key));
         }
@@ -1481,7 +1490,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     pub(crate) fn closed(&mut self, id: u64) {
         if let Some(slot) = self.slot(id) {
             (slot.threads, slot.cursor, slot.discard) = (0, None, None);
-            slot.dropping.clear();
+            (slot.dropping, slot.dispatched) = (BTreeSet::new(), BTreeSet::new());
             let dropped = std::mem::take(&mut slot.discarding);
             let (key, gone) = (slot.key.clone(), std::mem::take(&mut slot.retained));
             self.release(dropped);
@@ -1514,8 +1523,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         // Amendment R62 [S2c]: a reader asking is back: a discard-only job
         // it was given has released its charges (a decode's bytes left its
         // flight when its result came back).
+        // Amendment R66 [S2c] (F14): its decoder has served that job.
         if !matches!(slot.state, ReaderState::Decoding { .. }) {
             slot.flight = 0;
+            slot.dispatched.clear();
         }
         if shutdown || slot.state == ReaderState::Retiring {
             slot.state = ReaderState::Retiring;
@@ -1539,8 +1550,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         // Amendment R59 [S2c]: no reader idles holding discard charges.
         // Amendment R62 [S2c]: until it is back (its next step) they are
         // its flight, as a decode's bytes are (detention sees them).
+        // Amendment R66 [S2c] (F14): the times it drops stay its decoder's
+        // until it serves the job.
         if let Some(keep) = slot.discard.take() {
-            slot.dropping.clear();
+            slot.dispatched = std::mem::take(&mut slot.dropping);
             let bytes = std::mem::take(&mut slot.discarding);
             slot.flight = bytes;
             return Next::Discard { keep, bytes };
@@ -1743,14 +1756,21 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         } else {
             gone = std::mem::take(&mut slot.retained);
         }
+        let converting = slot.converting;
         self.unkept(&key, gone);
         // Amendment R64 [S2c] (F8): a kept time handed to this reader is
         // decoded again (a refill's window, or this decode's time).
-        let again = match from {
-            Some(start) => (start..=at)
+        // Amendment R66 [S2c] (F14): a conversion decodes nothing.
+        let times = match from {
+            Some(start) => start..=at,
+            None => at..=at,
+        };
+        let again = if converting {
+            0
+        } else {
+            times
                 .filter(|t| self.handoff.remove(&(key.clone(), *t)))
-                .count(),
-            None => usize::from(self.handoff.remove(&(key.clone(), at))),
+                .count()
         };
         if again > 0 {
             self.kept_handoffs += again as u64;
@@ -1820,7 +1840,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             }
             Err(error) => {
                 slot.cursor = None;
-                slot.dropping.clear();
+                (slot.dropping, slot.dispatched) = (BTreeSet::new(), BTreeSet::new());
                 let gone = std::mem::take(&mut slot.retained);
                 let current = version == slot.plan.version;
                 let lookahead = slot.plan.lookahead.contains(&at);
@@ -1852,6 +1872,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             }
             (slot.flight, slot.cursor) = (0, None);
             (slot.converting, slot.dropping) = (false, BTreeSet::new());
+            slot.dispatched.clear();
             if slot.state != ReaderState::Retiring {
                 slot.state = ReaderState::Idle { since: now };
             }
