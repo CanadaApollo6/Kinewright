@@ -1392,6 +1392,10 @@ pub(crate) struct DecoderProbe {
     window_conversion: bool,
     /// The latest conversion's RGBA64 bytes (the input to the working frame).
     pub(crate) last_conversion: Option<Converted>,
+    /// Amendment R62's witness: the kept frame's conversion of this time
+    /// fails (after the converter ran, as a failed conversion leaves the
+    /// kept frames).
+    fail_conversion: Option<i64>,
 }
 
 /// PF1 S2c C-4: what the shared conversion path handed to the working-frame
@@ -2337,6 +2341,13 @@ impl VideoDecoder {
             self.retained.push(kept); // its grid frames not yet converted
         }
         #[cfg(test)]
+        let frame = match self.probe.fail_conversion.take_if(|time| *time == at) {
+            Some(_) => Err(MediaError::Backend(format!(
+                "injected: the conversion of kept {at} fails (Amendment R62)"
+            ))),
+            None => frame,
+        };
+        #[cfg(test)]
         if self.retained.is_empty() {
             crate::pf1_clock::add(crate::pf1_clock::WINDOWS_FULL, 1);
         }
@@ -2355,6 +2366,12 @@ impl VideoDecoder {
                     .sum::<usize>()
             })
             .sum()
+    }
+
+    /// Amendment R62's witness: the kept frame's conversion of `at` fails.
+    #[cfg(test)]
+    pub(crate) fn fail_conversion_at(&mut self, at: i64) {
+        self.probe.fail_conversion = Some(at);
     }
 
     /// Amendment R56 (trace) test support: the grid frames the decoder

@@ -366,6 +366,10 @@ pub(crate) struct Lane {
     pub(crate) panic_at: Mutex<Option<i64>>,
     #[cfg(test)]
     pub(crate) panicked: Mutex<Vec<u64>>,
+    /// Amendment R62's witness: a reader's conversion of this kept time
+    /// fails.
+    #[cfg(test)]
+    pub(crate) fail_conversion: Mutex<Option<i64>>,
     /// Amendment R53's witnesses: every reader decode, in order.
     #[cfg(test)]
     pub(crate) decodes: Mutex<Vec<DecodeRecord>>,
@@ -433,6 +437,8 @@ impl Lane {
             panic_at: Mutex::default(),
             #[cfg(test)]
             panicked: Mutex::default(),
+            #[cfg(test)]
+            fail_conversion: Mutex::default(),
             #[cfg(test)]
             decodes: Mutex::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
@@ -954,6 +960,14 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 #[cfg(test)]
                 let before = DecodeRecord::work(decoder.as_ref());
                 #[cfg(test)]
+                if let Some(decoder) = decoder.as_mut()
+                    && (lane.fail_conversion.lock().expect("fail"))
+                        .take_if(|t| *t == at)
+                        .is_some()
+                {
+                    decoder.fail_conversion_at(at);
+                }
+                #[cfg(test)]
                 let traced =
                     crate::pf1_clock::decode_start((id, decoder.as_ref()), at, from, paused);
                 let result = match &mut decoder {
@@ -999,6 +1013,12 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                     lane.lock().readers.refilled(id, (at, version), kept_from);
                 }
                 let result = pinned(result, size, hold);
+                // Amendment R62 [S2c] (K-1): on any failure the scheduler
+                // takes the reader's kept window as gone (every kept time's
+                // charge shrinks to f), so its decoder keeps nothing either.
+                if let Some(decoder) = decoder.as_mut().filter(|_| result.is_err()) {
+                    decoder.drop_retained();
+                }
                 deliver(lane, id, (at, version), result);
                 state = lane.lock();
             }
@@ -3501,6 +3521,74 @@ pub(crate) mod tests {
             shown.texture.rgba[..],
             reference(&document, 15).0[..],
             "C-5 at 15"
+        );
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R62 [S2c] (re-review R61 P1-3, K-1): the VFR window of
+    /// `a_vfr_window_keeps_nothing_once_converted` (each frame showing at
+    /// two grid frames), at 320×180 shown at a 72-pixel proxy (d > f, as
+    /// `a_kept_window_is_charged_inside_k1`), its conversion of 6 failing after the
+    /// converter ran (6 has left its frame's times, as a failed conversion
+    /// leaves them). On a failure the scheduler takes the reader's whole
+    /// kept window as gone (every kept time's charge shrinks to f), so the
+    /// decoder keeps nothing either: held before 5, nothing is kept by the
+    /// scheduler and every reservation is f; 5 is then decoded again (not
+    /// converted from a kept frame), and nothing is kept after it.
+    #[test]
+    fn a_failed_window_conversion_leaves_nothing_kept() {
+        let mut workload = crate::perf_fixtures::one_vfr_source((320, 180), 90);
+        workload.0.resolution = (90, 1600);
+        let (document, lane, frames, thread) = r54_preview(&workload, 20);
+        let f = {
+            let (media, asset) = &workload.1[0];
+            let max_width = Some(crate::engine::monitor_max_width(document.resolution));
+            let decoder = VideoDecoder::open_scaled(media.path(), asset.fps, max_width);
+            let (w, h) = decoder.expect("opens").frame_size();
+            usize::try_from(u64::from(w) * u64::from(h) * 8).expect("f")
+        };
+        *lane.fail_conversion.lock().expect("fail") = Some(6);
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((5, held));
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        wait_until(&lane, |state| decoding_at(state, 5));
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let refill = decodes.first().expect("the refill");
+        assert_eq!(refill.at, 12, "the refill's t: {decodes:?}");
+        assert!(
+            refill.kept > refill.kept_times * f,
+            "d > f ({f}): {decodes:?}"
+        );
+        assert!(
+            decodes.iter().any(|d| d.at == 6),
+            "6 was converted: {decodes:?}"
+        );
+        let state = lane.lock();
+        let (reserved, kept) = state.readers.reservations();
+        assert_eq!(kept, 0, "the scheduler keeps nothing");
+        assert!(
+            reserved.iter().all(|bytes| *bytes == f),
+            "every reservation f ({f}): {reserved:?}"
+        );
+        drop(state);
+        drop(release);
+        wait_until(&lane, |state| !decoding(state));
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let five = decodes.iter().find(|d| d.at == 5).expect("5 decoded");
+        assert!(
+            five.received > 0,
+            "K-1: 5 decoded again, not kept: {five:?}"
+        );
+        assert_eq!(
+            (five.kept, five.kept_times),
+            (0, 0),
+            "nothing kept: {five:?}"
         );
         lane.shut_down();
         join_within(thread);

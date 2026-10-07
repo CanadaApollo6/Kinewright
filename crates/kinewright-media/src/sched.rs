@@ -1731,6 +1731,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         self.wanted.contains_key(key)
     }
 
+    /// Amendment R62's witness: the required frames' reservations, and
+    /// the times readers keep decoded.
+    #[cfg(test)]
+    pub(crate) fn reservations(&self) -> (Vec<usize>, usize) {
+        let kept = self.slots.iter().map(|slot| slot.retained.len()).sum();
+        (self.reserved.values().copied().collect(), kept)
+    }
+
     /// U-1's witness: the sources whose travel is remembered.
     #[cfg(test)]
     pub(crate) fn travel_keys(&self) -> Vec<K> {
