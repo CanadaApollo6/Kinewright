@@ -926,14 +926,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         // reader keeps the time decoded (max(charge, d) while kept).
         let over: Vec<((K, i64), usize)> = (self.reserved.iter())
             .filter_map(|((key, at), bytes)| {
-                let charge = self.frame_bytes(key, *at);
-                let kept =
-                    (self.slots.iter()).any(|slot| slot.key == *key && slot.retained.contains(at));
-                let most = if kept {
-                    charge.max(self.kept_sizes.get(key).copied().unwrap_or(0))
-                } else {
-                    charge
-                };
+                let most = self.kept_charge(key, *at);
                 (*bytes > most).then(|| ((key.clone(), *at), most))
             })
             .collect();
@@ -1178,6 +1171,20 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     fn frame_bytes(&self, key: &K, at: i64) -> usize {
         let f = self.sizes.get(key).copied().unwrap_or(0);
         charge((&self.windows, &self.kept_sizes), f, key, at)
+    }
+
+    /// Amendment R64 / R66 [S2c] (K-1, the one charge rule; F11, F13): a
+    /// frame's charge while a reader keeps it decoded, max(charge, d); its
+    /// charge otherwise. A reservation is never above it, and admission
+    /// reserves a missing frame at it.
+    fn kept_charge(&self, key: &K, at: i64) -> usize {
+        let charge = self.frame_bytes(key, at);
+        let kept = (self.slots.iter()).any(|slot| slot.key == *key && slot.retained.contains(&at));
+        if kept {
+            charge.max(self.kept_sizes.get(key).copied().unwrap_or(0))
+        } else {
+            charge
+        }
     }
 
     /// K-2: H, the required frames' reservations.
@@ -1890,9 +1897,13 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             .filter(|(key, at)| self.missing(key, *at))
             .cloned()
             .collect();
+        // Amendment R66 [S2c] (K-1, the one charge rule; F13): a time a
+        // reader still keeps decoded is reserved at max(charge, d), as K-3
+        // counted it (a playback that left it, then one requiring it again
+        // before its reader moved on).
         let missing: Vec<((K, i64), usize)> = (missing.into_iter())
             .map(|frame| {
-                let bytes = self.frame_bytes(&frame.0, frame.1);
+                let bytes = self.kept_charge(&frame.0, frame.1);
                 (frame, bytes)
             })
             .collect();

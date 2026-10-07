@@ -22,7 +22,9 @@
 //!   plan requires is charged: reserved at max(f, d) while that reader's
 //!   slot keeps it, or its charge rides that reader's discard or decode.
 //!   A kept time the plan no longer requires is D13's accepted gap
-//!   (bounded by B − 1 per reader; counted).
+//!   (bounded by B − 1 per reader; counted), as is one a retiring reader
+//!   keeps (F3). Amendment R66 (F13): for a live reader the gap ends when
+//!   a plan requires the time again, once admission reserves it.
 //! - I3 (K-3): an admitted job's set H + G fits in C less the detached
 //!   readers' charges (decodes and discards in flight, discards held).
 //! - I4 (R59): no reader goes idle holding discard charges or a flight.
@@ -192,9 +194,10 @@ struct Agent {
     stalled: bool,
     /// Amendment R63 (F2): the window times its refill in flight keeps.
     retain: BTreeSet<i64>,
-    /// D13's accepted gap: kept times its decoder held when no plan
-    /// required them (a post left their window, or a superseded refill
-    /// kept them), uncharged until the decoder drops them.
+    /// D13's accepted gap: kept times its decoder holds that no plan
+    /// requires (a post left their window, or a superseded refill kept
+    /// them), uncharged until the decoder drops them or (Amendment R66,
+    /// F13) a plan requires them again.
     unowed: BTreeSet<i64>,
 }
 
@@ -1168,7 +1171,8 @@ impl World {
         if from.is_some() && result.is_ok() {
             self.reach.refills += 1;
             // D13: a refill a newer post (or a retirement) superseded keeps
-            // its window's frames uncharged until the decoder drops them.
+            // its window's frames uncharged until the decoder drops them,
+            // while no plan requires them (Amendment R66, F13).
             let retiring = (self.readers.slots.iter())
                 .any(|slot| slot.id == id && slot.state == ReaderState::Retiring);
             if version != self.readers.version || retiring {
@@ -1255,6 +1259,10 @@ impl World {
             "  v{} live {} windows {:?} kept {:?} required {required:?} reserved {reserved:?} job {:?}",
             r.version, r.live, r.windows, r.kept_sizes, self.job
         );
+        let rings: BTreeMap<u8, Vec<i64>> = (r.rings.iter())
+            .map(|(key, ring)| (*key, ring.keys().copied().collect()))
+            .collect();
+        let _ = writeln!(out, "  rings {rings:?} handoff {}", r.kept_handoffs);
         for slot in &r.slots {
             let agent = self.agents.iter().find(|agent| agent.id == slot.id);
             let _ = writeln!(
@@ -1297,12 +1305,20 @@ impl World {
             for (at, raw) in kept {
                 let frame = (agent.key, at);
                 *holders.entry(frame).or_default() += 1;
-                if !readers.required.contains(&frame) {
+                // D13's gap is a kept time no plan requires, or one a
+                // retiring reader keeps (F3: its charges do not grow after
+                // detention decided; another reader decodes the time, B).
+                // For a live reader it ends when a plan requires the time
+                // again (Amendment R66, F13), once that plan's admission
+                // reserves it (K-2: until then the time is missing).
+                if !readers.required.contains(&frame) || slot.state == ReaderState::Retiring {
                     agent.unowed.insert(at);
-                }
-                if agent.unowed.contains(&at) {
                     continue;
                 }
+                if readers.missing(&agent.key, at) && agent.unowed.contains(&at) {
+                    continue;
+                }
+                agent.unowed.remove(&at);
                 let charged = slot.retained.contains(&at)
                     && readers
                         .reserved
@@ -2064,4 +2080,30 @@ fn a_time_a_busy_readers_discard_drops_is_counted_when_decoded_again() {
         world.snapshot()
     );
     assert_eq!(world.readers.kept_handoffs, 1, "21 decoded again, counted");
+}
+
+/// Amendment R66 [S2c] (F13, K-1): Astra's scenario on seed 16102's run.
+/// A paused step to 38 refills its window, and reader 0 keeps 36 and 37
+/// decoded at d = 3f. Playback at 25 releases 37's reservation (no plan
+/// requires it); playback then requires 37 again before reader 0 moves
+/// on. K-3 counts 37 at 3f and its region goes to reader 0, which keeps
+/// it; before the fix admission reserved it at f (I2, exact).
+#[test]
+fn a_kept_time_required_again_is_admitted_at_its_kept_charge() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_16102,
+        vec![
+            Post(vec![(0, vec![39], vec![])], true, 6 * F),
+            Do(Op::Run),
+            Post(vec![(0, vec![38], vec![])], true, 6 * F),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(vec![(0, vec![25], vec![26, 27, 28])], false, 6 * F),
+            Post(vec![(0, vec![37], vec![38, 39])], false, 6 * F),
+            Do(Op::Run),
+        ],
+    );
+    assert_eq!(world.reach.conversions, 1, "reader 0 converted 37 (once)");
+    assert_eq!(world.readers.kept_handoffs, 0, "nothing was decoded again");
 }
