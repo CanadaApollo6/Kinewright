@@ -386,6 +386,10 @@ pub(crate) struct Slot<K> {
     /// continued window shortened to fit K-3 (`i64::MIN`: no cut).
     discard: Option<(i64, i64)>,
     discarding: usize,
+    /// Amendment R64 [S2c] (F8, B): the kept times `discard` drops, which
+    /// its decoder keeps until it serves the discard; one the plan gives
+    /// another reader is handed off.
+    dropping: BTreeSet<i64>,
 }
 
 /// One region of demand on a source, served by one reader.
@@ -996,8 +1000,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// plan go out through a discard, their reservations riding it (R57,
     /// R59): the time is then missing, and admission reserves it for its
     /// new reader. A retiring or detached reader's stay with it (F3: its
-    /// charges do not grow after detention decided), D13's gap. Each such
-    /// time is counted when it is decoded again (`kept_handoffs`).
+    /// charges do not grow after detention decided), D13's gap. So is a
+    /// time a busy reader's pending discard drops (an earlier post's), its
+    /// decoder keeping it until it serves the discard. Each such time is
+    /// counted when it is decoded again (`kept_handoffs`).
     fn hand_off(&mut self, detached: &[u64]) {
         self.handoff.clear();
         let wanted = &self.wanted;
@@ -1013,6 +1019,14 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                         .get(&slot.key)
                         .is_some_and(|wanted| wanted.contains(at))
             };
+            // A time its pending discard drops is handed off too (its
+            // decoder still keeps it), unless its own plan wants it back.
+            let planned =
+                |at: &&i64| slot.plan.required.contains(at) || slot.plan.lookahead.contains(at);
+            let dropping = slot.dropping.iter().filter(|at| !planned(at));
+            let dropped: Vec<i64> = dropping.copied().filter(elsewhere).collect();
+            self.handoff
+                .extend(dropped.iter().map(|at| (slot.key.clone(), *at)));
             let handed: Vec<i64> = slot.retained.iter().copied().filter(elsewhere).collect();
             if handed.is_empty() {
                 continue;
@@ -1030,6 +1044,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 .collect();
             for at in gone {
                 slot.retained.remove(&at);
+                slot.dropping.insert(at);
                 if let Some(bytes) = self.reserved.remove(&(slot.key.clone(), at)) {
                     slot.discarding = slot.discarding.saturating_add(bytes);
                 }
@@ -1147,6 +1162,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             }
             for at in gone {
                 slot.retained.remove(&at);
+                slot.dropping.insert(at);
                 if let Some(bytes) = self.reserved.remove(&(slot.key.clone(), at)) {
                     slot.discarding = slot.discarding.saturating_add(bytes);
                 }
@@ -1412,6 +1428,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 converting: false,
                 discard: None,
                 discarding: 0,
+                dropping: BTreeSet::new(),
             });
             spawn.push((id, key));
         }
@@ -1457,6 +1474,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     pub(crate) fn closed(&mut self, id: u64) {
         if let Some(slot) = self.slot(id) {
             (slot.threads, slot.cursor, slot.discard) = (0, None, None);
+            slot.dropping.clear();
             let dropped = std::mem::take(&mut slot.discarding);
             let (key, gone) = (slot.key.clone(), std::mem::take(&mut slot.retained));
             self.release(dropped);
@@ -1515,6 +1533,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         // Amendment R62 [S2c]: until it is back (its next step) they are
         // its flight, as a decode's bytes are (detention sees them).
         if let Some(keep) = slot.discard.take() {
+            slot.dropping.clear();
             let bytes = std::mem::take(&mut slot.discarding);
             slot.flight = bytes;
             return Next::Discard { keep, bytes };
@@ -1699,6 +1718,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             .unwrap_or_default();
         let slot = self.slot(id).expect("the reader's slot");
         let (discard, discarding) = (slot.discard.take(), std::mem::take(&mut slot.discarding));
+        slot.dropping.clear();
         let bytes = charged.saturating_add(discarding);
         let version = slot.plan.version;
         let rewind = slot.plan.merged && slot.last.is_some_and(|last| at <= last);
@@ -1793,6 +1813,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             }
             Err(error) => {
                 slot.cursor = None;
+                slot.dropping.clear();
                 let gone = std::mem::take(&mut slot.retained);
                 let current = version == slot.plan.version;
                 let lookahead = slot.plan.lookahead.contains(&at);
@@ -1823,7 +1844,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 }
             }
             (slot.flight, slot.cursor) = (0, None);
-            slot.converting = false;
+            (slot.converting, slot.dropping) = (false, BTreeSet::new());
             if slot.state != ReaderState::Retiring {
                 slot.state = ReaderState::Idle { since: now };
             }

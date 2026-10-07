@@ -1973,3 +1973,56 @@ fn a_refill_never_keeps_its_window_uncharged() {
         world.snapshot()
     );
 }
+
+/// The run seed 106741 drew (`Discards`): C = 30f, P = 4, d = 2f on source 0.
+const RUN_106741: Run = Run {
+    budget: 30 * F,
+    pool: 4,
+    decoded: [2 * F, F / 2],
+    gop: [12, 48],
+    floor: [0, 4],
+    posts: 4,
+    retires: 0,
+    returns: 1,
+    runs: 1,
+    discards: 4,
+    profile: Profile::Discards,
+};
+
+/// Amendment R64 [S2c] (F8, B): seed 106741's scenario (the slow tier's).
+/// Reader 0 refills 22's window from 9; while it decodes, a paused step
+/// to 16 drops 17 to 21 through a discard it serves at its next step.
+/// Playback then requires 9 and 21: 9's region goes to reader 0 and 21's
+/// to reader 1. Reader 0's refill finishes, its decoder keeping 21 until
+/// the discard, and reader 1 decodes 21. Before the fix only a time the
+/// keeper still kept at the post was handed off, so that decode was not
+/// counted (I6).
+#[test]
+fn a_time_a_busy_readers_discard_drops_is_counted_when_decoded_again() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_106741,
+        vec![
+            Post(
+                vec![(0, vec![19, 31], vec![20, 21, 22, 32, 33])],
+                false,
+                6 * F,
+            ),
+            Do(Op::Run),
+            Post(vec![(1, vec![26], vec![])], true, F),
+            Post(vec![(0, vec![22], vec![])], true, 0),
+            Do(Op::Step(0)),
+            Post(vec![(0, vec![16], vec![])], true, 0),
+            Post(vec![(0, vec![9, 21], vec![10, 11, 12, 22, 23])], false, F),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Do(Op::Step(1)),
+        ],
+    );
+    assert_eq!(
+        world.reach.handoffs,
+        1,
+        "reader 1 decoded 21 while reader 0 kept it:\n{}",
+        world.snapshot()
+    );
+    assert_eq!(world.readers.kept_handoffs, 1, "21 decoded again, counted");
+}
