@@ -1801,3 +1801,42 @@ fn a_region_goes_to_the_reader_that_keeps_its_times() {
     assert_eq!(world.readers.kept_handoffs, 0, "nothing was decoded again");
     assert!(slot(1).is_some(), "25's region took a new reader");
 }
+
+/// The run seed 11 drew (`Discards`): C = 30f, P = 4, d = 2f on source 0.
+const RUN_11: Run = Run {
+    budget: 30 * F,
+    pool: 4,
+    decoded: [2 * F, F],
+    gop: [4, 48],
+    floor: [0, 0],
+    posts: 4,
+    retires: 0,
+    returns: 1,
+    runs: 2,
+    discards: 1,
+    profile: Profile::Discards,
+};
+
+/// Amendment R63 [S2c] (F1, K-1): seed 11's scenario, reduced. Playback
+/// requires 0 and 12 of source 0, each reserved at f. A paused step to 4
+/// then holds [0, 4]: 0 is in the held window below t, so its charge is
+/// max(f, d) = 2f. Before the fix the reservation carried from playback
+/// stayed at f (I1, exact); the post now returns it, and admission
+/// reserves 0 again at its charge.
+#[test]
+fn a_carried_reservation_below_its_charge_is_made_again_at_it() {
+    use Fixed::Post;
+    let world = fixed(
+        RUN_11,
+        vec![
+            Post(vec![(0, vec![0, 12], vec![1, 2, 3, 13, 14])], false, 0),
+            Post(vec![(0, vec![4], vec![])], true, 6 * F),
+        ],
+    );
+    assert_eq!(
+        world.readers.reserved.get(&(0, 0)),
+        Some(&(2 * F)),
+        "0 at max(f, d):\n{}",
+        world.snapshot()
+    );
+}

@@ -836,6 +836,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let released: usize = gone.map(|(_, bytes)| bytes).sum();
         self.release(released);
         self.windows.retain(|key, _| self.wanted.contains_key(key));
+        self.recharge();
         self.required_bytes = self.required_set_bytes();
         let mut frames = Vec::new();
         let (wanted, windows) = (&self.wanted, &self.windows);
@@ -901,6 +902,21 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             dropped: (frames, errors),
             ..self.assign(now)
         }
+    }
+
+    /// Amendment R63 [S2c] (K-1, the one charge rule; F1): at a post, a
+    /// reservation an earlier plan made below this plan's charge (a frame
+    /// now in a held window below its t) returns; admission reserves it
+    /// again at its charge.
+    fn recharge(&mut self) {
+        let short: Vec<(K, i64)> = (self.reserved.iter())
+            .filter(|((key, at), bytes)| **bytes < self.frame_bytes(key, *at))
+            .map(|(frame, _)| frame.clone())
+            .collect();
+        let raised: usize = (short.iter())
+            .filter_map(|frame| self.reserved.remove(frame))
+            .sum();
+        self.release(raised);
     }
 
     /// Amendment R64 [S2c] (F8, keeper affinity): per region, the reader it
