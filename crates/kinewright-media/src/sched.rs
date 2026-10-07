@@ -1974,11 +1974,15 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
 
     /// The reader `id` closed its decoder and exits.
     pub(crate) fn exited(&mut self, id: u64) {
+        let Some(index) = self.slots.iter().position(|slot| slot.id == id) else {
+            return;
+        };
+        let slot = self.slots.remove(index);
         // Amendment R57: a decoder closed with frames to drop.
-        let gone = (self.slots.iter().filter(|slot| slot.id == id)).map(|slot| slot.discarding);
-        let dropped = gone.sum();
-        self.release(dropped);
-        self.slots.retain(|slot| slot.id != id);
+        self.release(slot.discarding);
+        // Amendment R64 [S2c] (F9, K-1): so are its kept frames: their
+        // reservations shrink to their charge once no reader keeps them.
+        self.unkept(&slot.key, slot.retained);
     }
 
     /// The job's required frames in order, once each has a frame or a
@@ -3820,6 +3824,26 @@ mod tests {
         );
         assert_eq!(readers.live().0, live, "nothing released");
         assert_eq!(readers.required_bytes, required, "H as decided");
+    }
+
+    /// Amendment R64 [S2c] (F9, K-1): a retiring reader exits with kept
+    /// frames. Reader A refilled [4, 19] and keeps 4–18 at max(f, d) = 3f;
+    /// the window is no longer held (their charge is f), and A retires. Its
+    /// exit drops its decoder: every reservation shrinks to f, and live
+    /// falls by exactly what they shed (before the fix they stayed 3f).
+    #[test]
+    fn an_exiting_reader_returns_its_kept_frames_charges() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        let a = refilled_4_to_19(&mut readers);
+        readers.hold(HashMap::new(), HashMap::from([(0, 3 * F)]));
+        readers.slot(a).expect("A").state = ReaderState::Retiring;
+        let live = readers.live().0;
+        let next = step_reader(&mut readers, a);
+        assert_eq!(next, Next::Retire, "A exits");
+        assert!(readers.slot(a).is_none(), "gone");
+        let charged = |at: i64| readers.reserved.get(&(0, at)).copied();
+        assert!((4..19).all(|at| charged(at) == Some(F)), "every one f");
+        assert_eq!(live - readers.live().0, 15 * 2 * F, "K-1 exact");
     }
 
     /// Amendment R63 [S2c] (F2): a refill keeps none of the window times
