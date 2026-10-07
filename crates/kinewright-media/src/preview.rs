@@ -1709,7 +1709,11 @@ impl Preview {
         generated: &mut Option<usize>,
         granted: &mut Option<Hold>,
     ) -> (Sched<'a>, bool) {
-        match state.readers.admit(generated.unwrap_or(0)) {
+        let admission = state.readers.admit(generated.unwrap_or(0));
+        // Amendment R59: admission waits, timed.
+        #[cfg(test)]
+        crate::pf1_clock::admission(matches!(admission, Admission::Wait { .. }));
+        match admission {
             Admission::Ready { generated: bytes } => {
                 if generated.take().is_some() {
                     match granted {

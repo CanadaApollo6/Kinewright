@@ -13,6 +13,10 @@
 //! - S-3 refills: started, the decoded bytes they keep, and windows that end
 //!   fully converted (a refill that keeps nothing counts as full).
 //!
+//! Amendment R59: the preview's admission waits (K-2's `Admission::Wait`
+//! until the set is admitted: count, total and longest), and the invariant
+//! "a reader idle while holding discard charges" (0 in every harness run).
+//!
 //! Amendment R56 (trace): while a harness has it on, a timeline of events
 //! (ns since the first, a kind, a source time, the reader's id or −1): the
 //! harness's steps, the preview's posts, frames ready and renders done, and
@@ -32,7 +36,9 @@ pub(crate) const PRECONVERTED: usize = 12;
 pub(crate) const REFILLS: usize = 13;
 pub(crate) const KEPT_BYTES: usize = 14;
 pub(crate) const WINDOWS_FULL: usize = 15;
-pub(crate) const LEN: usize = 16;
+pub(crate) const ADMIT_WAITS: usize = 16; // count, total ns, longest ns
+pub(crate) const IDLE_DISCARD: usize = 19;
+pub(crate) const LEN: usize = 20;
 
 static COUNTS: [AtomicU64; LEN] = [const { AtomicU64::new(0) }; LEN];
 
@@ -60,6 +66,42 @@ pub(crate) fn converted(
     add(base + 1, nanos(graph));
     add(base + 2, nanos(work));
     add(base + 3, graph_cpu);
+}
+
+/// Amendment R59: the preview's admission is waiting (`true`) or has
+/// admitted (`false`); a wait is timed from its first `Admission::Wait`.
+pub(crate) fn admission(waiting: bool) {
+    static SINCE: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let mut since = SINCE.lock().expect("admission");
+    match (waiting, *since) {
+        (true, None) => {
+            *since = Some(std::time::Instant::now());
+            add(ADMIT_WAITS, 1);
+            trace(Event::AdmitWait, -1);
+        }
+        (false, Some(start)) => {
+            *since = None;
+            let waited = nanos(start.elapsed());
+            add(ADMIT_WAITS + 1, waited);
+            COUNTS[ADMIT_WAITS + 2].fetch_max(waited, Ordering::Relaxed);
+            trace(Event::Admitted, -1);
+        }
+        _ => {}
+    }
+}
+
+/// Amendment R59: a harness run starts: the longest admission wait is
+/// reset; returns the counters to take deltas from.
+pub(crate) fn start_run() -> [u64; LEN] {
+    COUNTS[ADMIT_WAITS + 2].store(0, Ordering::Relaxed);
+    snapshot()
+}
+
+/// Amendment R59: reader `id` went idle holding discard charges (never, by
+/// the invariant).
+pub(crate) fn idle_with_discards(id: u64) {
+    add(IDLE_DISCARD, 1);
+    traced(Event::IdleDiscard, -1, i64::try_from(id).unwrap_or(-1));
 }
 
 /// One paused job's wait for its frames and its render.
@@ -117,6 +159,11 @@ pub(crate) enum Event {
     DecodeEnd,
     /// A reader goes idle (`Next::Wait`).
     Wait,
+    /// Amendment R59: the preview's admission waits, and admits.
+    AdmitWait,
+    Admitted,
+    /// Amendment R59: a reader idles holding discard charges.
+    IdleDiscard,
 }
 
 static TRACING: AtomicBool = AtomicBool::new(false);

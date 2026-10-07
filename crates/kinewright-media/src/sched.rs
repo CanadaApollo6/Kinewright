@@ -1054,6 +1054,11 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             slot.state = ReaderState::Retiring;
             return Next::Retire;
         }
+        // Amendment R59: the invariant, counted in test builds.
+        #[cfg(test)]
+        if slot.discard.is_some() || slot.discarding > 0 {
+            crate::pf1_clock::idle_with_discards(id);
+        }
         slot.state = if blocked {
             ReaderState::BudgetWait { since }
         } else {

@@ -481,6 +481,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         (frames, post_end, missed)
     };
     let before = counters();
+    let counted = pf1_clock::start_run();
     let peak_reset = reset_peak();
     let slowdown = if control == Control::Slowdown { 50 } else { 0 };
     faults.render_delay_ms.store(slowdown, Ordering::Relaxed);
@@ -560,8 +561,28 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         m.passes(),
         engine_fields(&stats),
     );
-    let line = format!("{line} {}", teardown(session));
+    let line = format!("{line} {} {}", run_counts(counted), teardown(session));
     (m, underrun, line)
+}
+
+/// Amendment R59: one run's load-independent counters since `from`: frames
+/// decoded and converted, the preview's admission waits (count, total and
+/// longest) and the invariant "a reader idle while holding discard
+/// charges", which must stay 0.
+fn run_counts(from: [u64; pf1_clock::LEN]) -> String {
+    use pf1_clock::{ADMIT_WAITS, CONVERT_T, CONVERT_W, DECODED, IDLE_DISCARD};
+    let to = pf1_clock::snapshot();
+    let d = |i: usize| to[i] - from[i];
+    format!(
+        "count_run_decoded={} count_run_converted={} count_admit_waits={} \
+         count_admit_wait_ms={:.1} count_admit_wait_max_ms={:.1} count_idle_discard={}",
+        d(DECODED),
+        d(CONVERT_T) + d(CONVERT_W),
+        d(ADMIT_WAITS),
+        d(ADMIT_WAITS + 1) as f64 / 1e6,
+        to[ADMIT_WAITS + 2] as f64 / 1e6,
+        d(IDLE_DISCARD),
+    )
 }
 
 /// `Session::wait_frame`: the first `target` frame from `frames` that
@@ -681,6 +702,7 @@ fn pf1_play_baseline() {
             println!(
                 "PF1 play lane={lane} adapter={adapter} output={output} workload={key} run={run} {line}"
             );
+            assert_idle_discard(&line);
         }
     }
     if device || !wanted("controls") {
@@ -724,6 +746,7 @@ fn pf1_play_baseline() {
 fn seek_run(document: &Document, seed: u64) -> String {
     let session = Session::new(None, Arc::default(), lane().0);
     session.load(document);
+    let counted = pf1_clock::start_run();
     let n = document.duration.0;
     let mut state = seed;
     let mut next = |bound: i64| {
@@ -802,7 +825,15 @@ fn seek_run(document: &Document, seed: u64) -> String {
     // Lead ruling after R51/R52: the session ends as P-play's and P-rss's
     // do, the engine's worker joined before the process moves on (an exit
     // 139 was the race of dropping it mid-teardown).
-    format!("{line} {}", teardown(session))
+    format!("{line} {} {}", run_counts(counted), teardown(session))
+}
+
+/// Amendment R59: no reader idled holding discard charges in the run.
+fn assert_idle_discard(line: &str) {
+    assert!(
+        line.contains(" count_idle_discard=0 "),
+        "R59: a reader idled holding discard charges: {line}"
+    );
 }
 
 /// Amendment R56 (trace): with `PF1_TRACE` set, the backward phase's events
@@ -1019,6 +1050,15 @@ fn pf1_seek_baseline() {
         for run in 0..3 {
             let line = seek_run(&document, 0x5EED_0000 + run);
             println!("PF1 seek lane={lane} workload={key} run={run} {line}");
+            assert_idle_discard(&line);
+            // Amendment R59: a step that timed out fails the lane.
+            let timeouts = (line.split_whitespace())
+                .find_map(|field| field.strip_prefix("timeouts="))
+                .expect("the timeouts field");
+            assert_eq!(
+                timeouts, "0",
+                "R59: {timeouts} P-seek step(s) timed out ({key}, run {run})"
+            );
         }
     }
 }
