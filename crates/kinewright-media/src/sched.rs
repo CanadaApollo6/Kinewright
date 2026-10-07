@@ -3054,6 +3054,84 @@ mod tests {
         }
     }
 
+    /// Amendment R59 [S2c]: one paused post of `steps` (source, t, in-point)
+    /// with each window source's kept size `kept`, its windows held as the
+    /// preview holds them; returns the admission.
+    fn post_paused(
+        readers: &mut Model,
+        steps: &[(u8, i64, i64)],
+        kept: HashMap<u8, usize>,
+    ) -> Admission<Fr> {
+        let sizes: HashMap<u8, usize> = steps.iter().map(|(key, ..)| (*key, F)).collect();
+        let (windows, refills) = readers.backward(steps, &sizes, steps.len() * F);
+        let demand: Vec<(u8, Vec<i64>, Vec<i64>)> = (steps.iter())
+            .map(|(key, t, _)| {
+                let window = refills.iter().filter(|(k, _)| k == key);
+                let mut required = vec![*t];
+                required.extend(window.flat_map(|(_, times)| times.iter().copied()));
+                (*key, required, Vec::new())
+            })
+            .collect();
+        let regions = plan_regions(&demand, readers.limit()).expect("readers");
+        readers.hold(windows, kept);
+        let posted = readers.post(regions.regions, (sizes, 0), Duration::ZERO);
+        readers.release(posted.dropped.0.iter().map(Fr::bytes).sum());
+        readers.admit(0)
+    }
+
+    /// Amendment R59 [S2c] (the two-source liveness witness): source 0's
+    /// reader keeps a window's decoded frames (36–38 of [36, 39]); a step to
+    /// 35 beside source 1's 0 refills [27, 35], so 36–38 are discarded and
+    /// their charges stay with that reader until its decoder drops them. The
+    /// new set does not fit beside them (d = 2f), and the reader has no
+    /// decode it may start. It drops them at once (a discard-only job), so
+    /// source 1's frame is admitted without that reader retiring.
+    #[test]
+    fn a_reader_holding_discards_drops_them_so_the_other_source_is_admitted() {
+        let mut readers = Model::new(20).with_budget(20 * F);
+        paused_step(&mut readers, 40, 36, 0);
+        let ready = post_paused(&mut readers, &[(0, 39, 36)], HashMap::new());
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let id = (readers.slots.iter().find(|slot| slot.key == 0)).map(|slot| slot.id);
+        let id = id.expect("source 0's reader");
+        // The refill only: 39 converted, 36–38 kept (decoded).
+        let refill = loop {
+            if let Next::Decode {
+                at, version, bytes, ..
+            } = step_reader(&mut readers, id)
+            {
+                break (at, version, bytes);
+            }
+        };
+        assert_eq!(refill.0, 39, "the refill's t");
+        deliver_ok(&mut readers, id, 0, refill);
+        assert_eq!(readers.slots[0].retained, BTreeSet::from([36, 37, 38]));
+        let steps = [(0, 35, 0), (1, 0, 0)];
+        let waited = post_paused(&mut readers, &steps, HashMap::from([(0, 2 * F)]));
+        assert!(
+            matches!(waited, Admission::Wait { .. }),
+            "the set (f + 8 × 2f + f) does not fit beside the 3f discarded"
+        );
+        let ids: Vec<u64> = readers.slots.iter().map(|slot| slot.id).collect();
+        for id in &ids {
+            step_reader(&mut readers, *id);
+        }
+        assert!(
+            readers.slots.iter().any(|slot| slot.id == id),
+            "the reader holding the discards has not retired"
+        );
+        assert!(
+            matches!(readers.admit(0), Admission::Ready { .. }),
+            "R59: source 1's 0 is admitted without waiting for the reader to retire"
+        );
+        let mut decoded = BTreeMap::new();
+        drive(&mut readers, &mut decoded);
+        assert!(
+            readers.resolve(&[(0, 35), (1, 0)]).is_some(),
+            "both resolved"
+        );
+    }
+
     /// H-6: a reader retired while its decode ran (the preview went) stays
     /// retiring when the result arrives, though its required frame is gone.
     /// Review A S1: that late frame comes back (it is not kept in the
