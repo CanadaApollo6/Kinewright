@@ -1615,7 +1615,6 @@ fn sequence(seed: u64, reach: &mut Reach) {
 /// every operation of `SEQUENCES` seeded sequences, and the runs reach
 /// every operation the ruling names.
 #[test]
-#[ignore = "red until the R63/R64 fixes land; the last (F11) un-ignores it"]
 fn the_readers_accounting_holds_for_seeded_sequences() {
     let mut reach = Reach::default();
     let first = std::env::var("PF1_MODEL_SEED")
@@ -1908,6 +1907,69 @@ fn a_retiring_reader_is_given_no_discard_after_detention() {
     assert!(
         slot.is_some_and(|slot| slot.state == ReaderState::Retiring && slot.discard.is_none()),
         "reader 0 retires with no discard:\n{}",
+        world.snapshot()
+    );
+}
+
+/// The run seed 3123 drew (`Holders`): C = 40f, P = 4, d = 3f on source 0.
+const RUN_3123: Run = Run {
+    budget: 40 * F,
+    pool: 4,
+    decoded: [3 * F, F / 2],
+    gop: [8, 3],
+    floor: [0, 0],
+    posts: 2,
+    retires: 0,
+    returns: 4,
+    runs: 2,
+    discards: 1,
+    profile: Profile::Holders,
+};
+
+/// Amendment R63 [S2c] (F4, K-1; R64 item 4): seed 3123's scenario (F4's
+/// counterexample at 30k seeds), reduced. It needs F11 too (38's
+/// reservation returns to f at the last post), so it lands with F11. A paused step to 40 refills [28, 40] and reader 0
+/// decodes 40; a step to 39 supersedes the refill, and reader 0 is left
+/// holding the discard of 34–39. A step to 38 (G = 3f) holds [27, 38]:
+/// 38 (t) and 34–37 are reserved (carried), 27–33 are not, and admission
+/// waits on the discard. Before the fix reader 0 dispatched 38's refill
+/// since its t was reserved, keeping 27–33 decoded uncharged (I2); a
+/// refill's t now waits until every window time is reserved or resolved.
+#[test]
+fn a_refill_never_keeps_its_window_uncharged() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_3123,
+        vec![
+            Post(
+                vec![(0, vec![1], vec![]), (1, vec![36], vec![])],
+                true,
+                36 * F,
+            ),
+            Do(Op::Run),
+            Post(
+                vec![
+                    (0, vec![41], vec![42, 43, 44]),
+                    (1, vec![35], vec![36, 37, 38]),
+                ],
+                false,
+                6 * F,
+            ),
+            Post(vec![(0, vec![40], vec![])], true, 0),
+            Do(Op::Step(0)),
+            Post(
+                vec![(0, vec![39], vec![]), (1, vec![34], vec![])],
+                true,
+                6 * F,
+            ),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(vec![(0, vec![38], vec![])], true, 3 * F),
+        ],
+    );
+    let slot = (world.readers.slots.iter()).find(|slot| slot.id == 0);
+    assert!(
+        slot.is_some_and(|slot| slot.retained.is_empty()),
+        "reader 0 keeps nothing while admission waits:\n{}",
         world.snapshot()
     );
 }

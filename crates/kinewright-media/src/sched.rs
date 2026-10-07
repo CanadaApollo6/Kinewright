@@ -917,6 +917,30 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             .filter_map(|frame| self.reserved.remove(frame))
             .sum();
         self.release(raised);
+        // Amendment R64 [S2c] (K-1, the one charge rule): one above it
+        // (a window this plan no longer holds) returns the excess, unless a
+        // reader keeps the time decoded (max(charge, d) while kept).
+        let over: Vec<((K, i64), usize)> = (self.reserved.iter())
+            .filter_map(|((key, at), bytes)| {
+                let charge = self.frame_bytes(key, *at);
+                let kept =
+                    (self.slots.iter()).any(|slot| slot.key == *key && slot.retained.contains(at));
+                let most = if kept {
+                    charge.max(self.kept_sizes.get(key).copied().unwrap_or(0))
+                } else {
+                    charge
+                };
+                (*bytes > most).then(|| ((key.clone(), *at), most))
+            })
+            .collect();
+        let mut excess = 0usize;
+        for (frame, most) in over {
+            if let Some(bytes) = self.reserved.get_mut(&frame) {
+                excess = excess.saturating_add(*bytes - most);
+                *bytes = most;
+            }
+        }
+        self.release(excess);
     }
 
     /// Amendment R64 [S2c] (F8, keeper affinity): per region, the reader it
@@ -3882,6 +3906,28 @@ mod tests {
             assert_eq!(charged(&readers, at), Some(expected), "{at}");
         }
         assert_eq!(live - readers.live().0, 4 * 2 * F, "K-1 exact");
+    }
+
+    /// Amendment R64 [S2c] (K-1, the one charge rule at a post): a paused
+    /// step to 19 holds the window [4, 19] and reserves 4–18 at their
+    /// charge there, max(f, d) = 3f; no reader has decoded any. Playback
+    /// then requires 10 and holds no window: 10's charge is f, and nobody
+    /// keeps it decoded, so its reservation falls to f (F1 raises one
+    /// below its charge; this lowers one above it).
+    #[test]
+    fn a_post_returns_a_reservation_above_its_charge() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        paused_step(&mut readers, 20, 0, 0);
+        let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::from([(0, 3 * F)]));
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        assert_eq!(readers.reserved.get(&(0, 10)), Some(&(3 * F)), "max(f, d)");
+        assert!(readers.slots.iter().all(|slot| slot.retained.is_empty()));
+        let live = readers.live().0;
+        let reserved: usize = readers.reserved.values().sum();
+        post_playback(&mut readers, &[(&[10], &[11])], 3 * F);
+        assert_eq!(readers.reserved.get(&(0, 10)), Some(&F), "f, its charge");
+        let now: usize = readers.reserved.values().sum();
+        assert_eq!(live - readers.live().0, reserved - now, "K-1 exact");
     }
 
     /// Amendment R63 [S2c] (F2): a refill keeps none of the window times
