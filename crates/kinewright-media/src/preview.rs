@@ -887,6 +887,8 @@ fn spawn_reader(
 /// A reader's loop (H-2): every step is decided under the lock; decoding,
 /// opening and closing run outside it, and what `deliver` returns is
 /// dropped after unlock (H-4).
+// One reader's state machine: each arm is one step decided under the lock.
+#[allow(clippy::too_many_lines)]
 fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
     // Amendment R43: declared first, so it runs last (after `Sched` is
     // released and the decoder closed), on return and on unwind alike.
@@ -918,6 +920,9 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 lane.work.notify_all();
                 #[cfg(test)]
                 lane.notify(); // a test waiting for a grant
+            }
+            Next::Discard { bound, bytes } => {
+                state = discard((lane, state), &mut decoder, (id, bound, bytes));
             }
             Next::Close => {
                 drop(state);
@@ -999,6 +1004,26 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
             }
         }
     }
+}
+
+/// Amendment R59 [S2c]: reader `id`'s discard-only job, outside `Sched`:
+/// its decoder drops the kept frames above `bound`, then their charges
+/// (`bytes`) are released, waking admission. Returns `Sched` again.
+fn discard<'a>(
+    (lane, state): (&'a Arc<Lane>, Sched<'a>),
+    decoder: &mut Option<VideoDecoder>,
+    (id, bound, bytes): (u64, i64, usize),
+) -> Sched<'a> {
+    drop(state);
+    if let Some(decoder) = decoder {
+        decoder.discard_kept_above(bound);
+    }
+    #[cfg(test)]
+    crate::pf1_clock::discarded(id, bound);
+    #[cfg(not(test))]
+    let _ = id;
+    drop(Hold::adopt(lane, bytes));
+    lane.lock()
 }
 
 /// K-1 (review B F1): f (`size`) is exact; a frame of any other size is a

@@ -1191,6 +1191,22 @@ G3 (R48) and the LH L-3 miss that both binaries share. **This is not a waiver:**
 *environment-limited (GPU idle clocks), re-checked at S4's pinned run*, not as a pass. It joins G3 on S4's
 checklist (§13, S4's row). No conversion lanes are added. S2c closes on the paired comparison and on L-4a on LL.
 
+**Amendment R59 [S2c] No reader idles holding discard charges (lead ruling, 2026-10-06).** The closing plan at
+`5fa62b4` (E13.6.10) found `explainer_16x9` backward steps timing out at 10 s, on the candidate only. The cause:
+a refill below a held window discards that reader's kept frames above the new t′, and R57 keeps their K-1 charges
+with the reader until its decoder drops them, at its next decode. When the new set does not fit beside those
+charges, admission waits. The reader's own required frame is then unreserved, so it has no decode to start and
+never drops them: a deadlock until the next post. E13.6.6 warned of this.
+- **A discard-only job.** A reader holding discarded kept frames with no decode to start is told to drop them at
+  once (`Next::Discard`, decided under `Sched`). It drops them outside the lock, then releases their charges, which
+  wakes admission. A post wakes every reader, so the job runs at the post. K-1 stays exact, R57's text stays true,
+  and no charge waits on a reader's retirement.
+- **Invariant (test builds):** "a reader idle while holding discard charges" is counted and must be 0 in every
+  harness run; a P-seek step that times out also fails the lane.
+- **Witness:** two sources. Source 0's reader keeps a window's frames; a step refilling below them beside source
+  1's frame does not fit beside their charges, and source 1 must be admitted without that reader retiring.
+  Mutation: the discard-only job removed.
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
 conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and

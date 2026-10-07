@@ -97,6 +97,12 @@ pub(crate) fn start_run() -> [u64; LEN] {
     snapshot()
 }
 
+/// Amendment R59: reader `id` dropped its discarded kept frames above
+/// `bound` (a discard-only job).
+pub(crate) fn discarded(id: u64, bound: i64) {
+    traced(Event::Discard, bound, i64::try_from(id).unwrap_or(-1));
+}
+
 /// Amendment R59: reader `id` went idle holding discard charges (never, by
 /// the invariant).
 pub(crate) fn idle_with_discards(id: u64) {
@@ -162,7 +168,9 @@ pub(crate) enum Event {
     /// Amendment R59: the preview's admission waits, and admits.
     AdmitWait,
     Admitted,
-    /// Amendment R59: a reader idles holding discard charges.
+    /// Amendment R59: a reader drops its discarded kept frames (`at`: the
+    /// bound) with no decode; a reader idles holding discard charges.
+    Discard,
     IdleDiscard,
 }
 

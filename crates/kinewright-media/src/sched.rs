@@ -264,6 +264,13 @@ pub(crate) enum Next {
     /// H-5: close the decoder and release its permits (a `shrink`, or a
     /// short reader closing before it grows).
     Close,
+    /// Amendment R59 [S2c]: a discard-only job, for a reader holding
+    /// discarded kept frames with no decode to start: drop those above
+    /// `bound`, then release `bytes`, their K-1 charges.
+    Discard {
+        bound: i64,
+        bytes: usize,
+    },
     Wait {
         until: Duration,
     },
@@ -1037,6 +1044,11 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
                 return Next::Close;
             }
             return self.decode(id, at, required);
+        }
+        // Amendment R59 [S2c]: no reader idles holding discard charges.
+        if let Some(bound) = slot.discard.take() {
+            let bytes = std::mem::take(&mut slot.discarding);
+            return Next::Discard { bound, bytes };
         }
         // Inactive: H-5 rebalancing, then retirement.
         let grow = slot.threads > 0 && slot.threads < want && free > 0;
@@ -2341,6 +2353,10 @@ mod tests {
                     };
                     format!("step×{state}→close-{why}")
                 }
+                Next::Discard { bytes, .. } => {
+                    self.readers.release(bytes);
+                    format!("step×{state}→discard")
+                }
                 Next::Wait { until } => {
                     assert!(until > self.now, "a wait that never sleeps");
                     let blocked = self.state_of(id) == "budget-wait";
@@ -3269,6 +3285,7 @@ mod tests {
                         readers.release(back.map_or(0, |back| back.bytes));
                     }
                     Next::Close => readers.closed(id),
+                    Next::Discard { bytes, .. } => readers.release(bytes),
                     Next::Retire => readers.exited(id),
                     Next::Wait { .. } => continue,
                 }
@@ -3531,6 +3548,7 @@ mod tests {
         match next {
             Next::Open { want } => readers.granted(id, Some(want), Duration::ZERO),
             Next::Close => readers.closed(id),
+            Next::Discard { bytes, .. } => readers.release(bytes),
             Next::Retire => readers.exited(id),
             Next::Decode { .. } | Next::Wait { .. } => {}
         }
@@ -3562,7 +3580,7 @@ mod tests {
                     deliver_ok(readers, id, key, (at, version, bytes));
                 }
                 Next::Wait { .. } | Next::Retire => return times,
-                Next::Open { .. } | Next::Close => {}
+                Next::Open { .. } | Next::Close | Next::Discard { .. } => {}
             }
         }
         panic!("reader {id} did not settle within {BUDGET} steps");
