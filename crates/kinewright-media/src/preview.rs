@@ -921,8 +921,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 #[cfg(test)]
                 lane.notify(); // a test waiting for a grant
             }
-            Next::Discard { bound, bytes } => {
-                state = discard((lane, state), &mut decoder, (id, bound, bytes));
+            Next::Discard { keep, bytes } => {
+                state = discard((lane, state), &mut decoder, (id, keep, bytes));
             }
             Next::Close => {
                 drop(state);
@@ -1007,19 +1007,20 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
 }
 
 /// Amendment R59 [S2c]: reader `id`'s discard-only job, outside `Sched`:
-/// its decoder drops the kept frames above `bound`, then their charges
-/// (`bytes`) are released, waking admission. Returns `Sched` again.
+/// its decoder drops the kept frames outside `keep` ([low, bound], R61),
+/// then their charges (`bytes`) are released, waking admission. Returns
+/// `Sched` again.
 fn discard<'a>(
     (lane, state): (&'a Arc<Lane>, Sched<'a>),
     decoder: &mut Option<VideoDecoder>,
-    (id, bound, bytes): (u64, i64, usize),
+    (id, keep, bytes): (u64, (i64, i64), usize),
 ) -> Sched<'a> {
     drop(state);
     if let Some(decoder) = decoder {
-        decoder.discard_kept_above(bound);
+        decoder.discard_kept_outside(keep);
     }
     #[cfg(test)]
-    crate::pf1_clock::discarded(id, bound);
+    crate::pf1_clock::discarded(id, keep.1);
     #[cfg(not(test))]
     let _ = id;
     drop(Hold::adopt(lane, bytes));

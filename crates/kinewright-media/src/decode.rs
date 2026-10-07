@@ -2357,11 +2357,13 @@ impl VideoDecoder {
     }
 
     /// Amendment R57 [S2c]: the kept refill frames above `bound` go (a
-    /// newer post's t′ is below them: they are never converted).
-    pub(crate) fn discard_kept_above(&mut self, bound: i64) {
+    /// newer post's t′ is below them: they are never converted). Amendment
+    /// R61: so do those below `low` (a continuation cut to fit K-3).
+    pub(crate) fn discard_kept_outside(&mut self, (low, bound): (i64, i64)) {
         self.retained.retain_mut(|kept| {
+            kept.first = kept.first.max(low);
             kept.last = kept.last.min(bound);
-            kept.first <= bound
+            kept.first <= kept.last
         });
     }
 

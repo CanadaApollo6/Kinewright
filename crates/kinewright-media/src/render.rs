@@ -350,16 +350,16 @@ impl SourceSpec {
     /// is its t): only `at` is converted and the window's frames are kept;
     /// a kept frame at `at` is converted without decoding; any other decode
     /// drops the kept frames. Amendment R57 [S2c]: first, the kept frames
-    /// above `discard` are dropped.
+    /// outside `discard` ([low, bound], Amendment R61) are dropped.
     pub(crate) fn decode(
         &self,
         decoder: &mut VideoDecoder,
         at: i64,
         paused: bool,
-        (from, discard): (Option<i64>, Option<i64>),
+        (from, discard): (Option<i64>, Option<(i64, i64)>),
     ) -> Result<WorkingFrame, MediaError> {
-        if let Some(bound) = discard {
-            decoder.discard_kept_above(bound);
+        if let Some(keep) = discard {
+            decoder.discard_kept_outside(keep);
         }
         let mut window = FrameCache::new(1);
         if let Some(start) = from.filter(|_| paused) {

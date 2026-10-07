@@ -213,9 +213,11 @@ pub(crate) struct Slot<K> {
     /// decoder's cursor does not move).
     converting: bool,
     /// Amendment R57 [S2c]: kept frames above a newer post's t leave the
-    /// pass: its decoder drops those above `discard` before its next decode,
-    /// whose hold takes their reservations, `discarding` (K-1).
-    discard: Option<i64>,
+    /// pass: its decoder drops those outside `discard` (the kept times that
+    /// stay, [low, bound]) before its next decode, whose hold takes their
+    /// reservations, `discarding` (K-1). Amendment R61: `low` cuts a
+    /// continued window shortened to fit K-3 (`i64::MIN`: no cut).
+    discard: Option<(i64, i64)>,
     discarding: usize,
 }
 
@@ -253,9 +255,10 @@ pub(crate) enum Next {
         /// may be more (an unconverted window frame's max(f, d)), the excess
         /// released once the frame is converted.
         size: usize,
-        /// Amendment R57 [S2c]: first drop the kept frames above this time
-        /// (their reservations are in `bytes`, released with the excess).
-        discard: Option<i64>,
+        /// Amendment R57 [S2c]: first drop the kept frames outside these
+        /// times, [low, bound] (their reservations are in `bytes`, released
+        /// with the excess).
+        discard: Option<(i64, i64)>,
     },
     /// H-5: queue for `want` permits, then open at the grant.
     Open {
@@ -265,10 +268,10 @@ pub(crate) enum Next {
     /// short reader closing before it grows).
     Close,
     /// Amendment R59 [S2c]: a discard-only job, for a reader holding
-    /// discarded kept frames with no decode to start: drop those above
-    /// `bound`, then release `bytes`, their K-1 charges.
+    /// discarded kept frames with no decode to start: drop those outside
+    /// `keep`, [low, bound], then release `bytes`, their K-1 charges.
     Discard {
-        bound: i64,
+        keep: (i64, i64),
         bytes: usize,
     },
     Wait {
@@ -630,12 +633,13 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         }
         let errors = self.failures.drain().map(|(_, (_, error))| error).collect();
         let (mut continued, bounds) = self.continued(&regions);
+        let keep = self.fit_continued(&mut continued, &bounds);
         for (key, kept) in &continued {
             self.required
                 .extend(kept.iter().map(|at| (key.clone(), *at)));
             self.wanted.entry(key.clone()).or_default().extend(kept);
         }
-        self.discard_above(&bounds);
+        self.discard_outside(&keep);
         // Reservations of frames no longer required return at once.
         let required = &self.required;
         let gone = self
@@ -735,24 +739,74 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         (continued, bounds)
     }
 
+    /// Amendment R61 [S2c] (K-3): the continued windows join the required
+    /// set only as far as it fits in C beside G: each source's nearest its
+    /// t first, one step of every source at a time, down to none (t alone).
+    /// Returns per window source the kept times that stay, [low, bound]
+    /// (its bound t′): `low` is the lowest time it still requires if its
+    /// continuation was cut, `i64::MIN` otherwise. Call with the job's own
+    /// required set (before the continuation joins it).
+    fn fit_continued(
+        &self,
+        continued: &mut HashMap<K, Vec<i64>>,
+        bounds: &HashMap<K, i64>,
+    ) -> HashMap<K, (i64, i64)> {
+        let mut set = self.required_set_bytes().saturating_add(self.generated);
+        let depth = continued.values().map(Vec::len).max().unwrap_or(0);
+        let mut fit = depth;
+        for level in 0..depth {
+            let bytes = (continued.iter())
+                .filter_map(|(key, kept)| kept.get(level).map(|at| self.frame_bytes(key, *at)))
+                .fold(0, usize::saturating_add);
+            let Some(next) = set.checked_add(bytes).filter(|next| *next <= self.budget) else {
+                fit = level;
+                break;
+            };
+            set = next;
+        }
+        let mut keep = HashMap::new();
+        for (key, bound) in bounds {
+            let own = (self.required.iter())
+                .filter(|(k, _)| k == key)
+                .map(|(_, at)| *at)
+                .min();
+            let low = match continued.get_mut(key) {
+                Some(kept) if kept.len() > fit => {
+                    kept.truncate(fit);
+                    kept.last().copied().or(own).unwrap_or(*bound)
+                }
+                _ => i64::MIN,
+            };
+            keep.insert(key.clone(), (low, *bound));
+        }
+        continued.retain(|_, kept| !kept.is_empty());
+        keep
+    }
+
     /// Amendment R57 [S2c]: per source and its bound t′, every reader's kept
     /// frames above t′ leave the pass (never converted); their reservations
     /// move to the reader, released once its decoder has dropped them (K-1).
-    fn discard_above(&mut self, bounds: &HashMap<K, i64>) {
+    /// Amendment R61: so do those below `low`, a cut continuation's.
+    fn discard_outside(&mut self, keep: &HashMap<K, (i64, i64)>) {
         for slot in &mut self.slots {
-            let Some(bound) = bounds.get(&slot.key).copied() else {
+            let Some((low, bound)) = keep.get(&slot.key).copied() else {
                 continue;
             };
-            let above = slot.retained.split_off(&(bound + 1));
-            if above.is_empty() {
+            let gone: Vec<i64> = (slot.retained.iter())
+                .copied()
+                .filter(|at| !(low..=bound).contains(at))
+                .collect();
+            if gone.is_empty() {
                 continue;
             }
-            for at in above {
+            for at in gone {
+                slot.retained.remove(&at);
                 if let Some(bytes) = self.reserved.remove(&(slot.key.clone(), at)) {
                     slot.discarding = slot.discarding.saturating_add(bytes);
                 }
             }
-            slot.discard = Some(slot.discard.map_or(bound, |b| b.min(bound)));
+            let narrowed = |(l, b): (i64, i64)| (l.max(low), b.min(bound));
+            slot.discard = Some(slot.discard.map_or((low, bound), narrowed));
         }
     }
 
@@ -1053,9 +1107,9 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             return self.decode(id, at, required);
         }
         // Amendment R59 [S2c]: no reader idles holding discard charges.
-        if let Some(bound) = slot.discard.take() {
+        if let Some(keep) = slot.discard.take() {
             let bytes = std::mem::take(&mut slot.discarding);
-            return Next::Discard { bound, bytes };
+            return Next::Discard { keep, bytes };
         }
         // Inactive: H-5 rebalancing, then retirement.
         let grow = slot.threads > 0 && slot.threads < want && free > 0;
@@ -3224,6 +3278,93 @@ mod tests {
                 .sum();
             assert_eq!(readers.live().0, ring, "{target}: only the ring charged");
         }
+    }
+
+    /// Amendment R61 [S2c] (review A2a, K-3): C = 20f. Source 0's reader
+    /// refilled [4, 19] and keeps 4–18 decoded. A step to 18 beside source
+    /// 1's 0 and 6f of generated rasters continues the window (17 down to
+    /// 4): 1 + 14 + 1 + 6 = 22f. The continuation is shortened nearest t
+    /// first to what fits (17 down to 6): the set is admitted without K-3's
+    /// assert; the cut kept frames (4, 5) are discarded with their charges,
+    /// and nothing stays charged once the job is done but the ring's
+    /// frames.
+    #[test]
+    fn a_continued_window_is_shortened_to_fit_k3() {
+        let mut readers = Model::new(20).with_budget(20 * F);
+        paused_step(&mut readers, 20, 0, 0);
+        let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::new());
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let id = readers.slots[0].id;
+        let refill = loop {
+            if let Next::Decode {
+                at, version, bytes, ..
+            } = step_reader(&mut readers, id)
+            {
+                break (at, version, bytes);
+            }
+        };
+        assert_eq!(refill.0, 19, "the refill's t");
+        readers.refilled(id, (refill.0, refill.1), Some(4));
+        deliver_ok(&mut readers, id, 0, refill);
+        assert_eq!(readers.slots[0].retained, (4..19).collect());
+        let sizes = HashMap::from([(0u8, F), (1, F)]);
+        let (windows, refills) = readers.backward(&[(0, 18, 0), (1, 0, 0)], &sizes, 8 * F);
+        assert!(refills.is_empty(), "18 is kept: no refill");
+        assert_eq!(windows.get(&0), Some(&(4, 19)), "the window stays held");
+        let demand = [(0u8, vec![18], Vec::new()), (1, vec![0], Vec::new())];
+        let regions = plan_regions(&demand, readers.limit()).expect("readers");
+        readers.hold(windows, HashMap::new());
+        let posted = readers.post(regions.regions, (sizes, 6 * F), Duration::ZERO);
+        readers.release(posted.dropped.0.iter().map(Fr::bytes).sum());
+        let continued: BTreeSet<i64> = (readers.required.iter())
+            .filter(|(key, at)| *key == 0 && *at != 18)
+            .map(|(_, at)| *at)
+            .collect();
+        assert_eq!(continued, (6..18).collect(), "nearest t first");
+        assert!(readers.required.contains(&(1, 0)), "source 1's 0");
+        assert!(readers.required_bytes + 6 * F <= 20 * F, "H + G within C");
+        let slot = &readers.slots[0];
+        assert_eq!(slot.discard, Some((6, 18)), "the cut kept frames go");
+        assert_eq!(slot.discarding, 2 * F, "with their charges");
+        assert!(slot.retained.iter().all(|at| (6..=18).contains(at)));
+        // Beside the 2f discarded and the held window's 19, it drains
+        // (R59): the reader drops its discards with its next decode (its
+        // hold shrinks to f once converted), and the set is admitted.
+        if let Admission::Wait { evicted, .. } = readers.admit(6 * F) {
+            readers.release(evicted.iter().map(Fr::bytes).sum());
+            match step_reader(&mut readers, id) {
+                Next::Decode {
+                    at,
+                    version,
+                    bytes,
+                    size,
+                    discard,
+                    ..
+                } => {
+                    assert_eq!((at, discard), (18, Some((6, 18))), "t′, then the cut");
+                    readers.release(bytes - size);
+                    deliver_ok(&mut readers, id, 0, (at, version, size));
+                }
+                next => assert!(
+                    matches!(next, Next::Discard { keep: (6, 18), .. }),
+                    "{next:?}"
+                ),
+            }
+        }
+        assert!(
+            matches!(readers.admit(6 * F), Admission::Ready { .. }),
+            "admitted"
+        );
+        let mut decoded = BTreeMap::new();
+        drive(&mut readers, &mut decoded);
+        readers.release(6 * F);
+        let all: Vec<(u8, i64)> = (6..=18).map(|at| (0, at)).chain([(1, 0)]).collect();
+        assert!(readers.resolve(&all).is_some(), "all resolved");
+        assert!(readers.reserved.is_empty(), "no reservation left");
+        let ring: usize = (readers.rings.values().flat_map(BTreeMap::values))
+            .map(Fr::bytes)
+            .sum();
+        assert_eq!(readers.live().0, ring, "only the ring charged");
     }
 
     /// H-6: a reader retired while its decode ran (the preview went) stays
