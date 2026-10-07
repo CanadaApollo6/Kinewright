@@ -831,10 +831,17 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     }
 
     /// Amendment R54 (K-1): `key`'s decoded frames at `times` are gone (the
-    /// decoder dropped them): their reservations shrink to f.
+    /// decoder dropped them): their reservations shrink to f. Amendment R62
+    /// [S2c]: only once no reader keeps one (the caller's reader has already
+    /// let them go): a time another reader of the source still keeps decoded
+    /// keeps its max(f, d) until that reader drops it too.
     fn unkept(&mut self, key: &K, times: BTreeSet<i64>) {
         let f = self.sizes.get(key).copied().unwrap_or(0);
         let mut excess = 0usize;
+        let slots = &self.slots;
+        let kept =
+            |at: i64| (slots.iter()).any(|slot| slot.key == *key && slot.retained.contains(&at));
+        let times: Vec<i64> = times.into_iter().filter(|at| !kept(*at)).collect();
         for at in times {
             if let Some(bytes) = self.reserved.get_mut(&(key.clone(), at)) {
                 excess = excess.saturating_add(bytes.saturating_sub(f));
@@ -3282,6 +3289,76 @@ mod tests {
                 .sum();
             assert_eq!(readers.live().0, ring, "{target}: only the ring charged");
         }
+    }
+
+    /// Amendment R62 [S2c] (the `unkept` residual): two readers of source 0
+    /// keep the same window times decoded. Reader A refilled [4, 19] (its
+    /// decode of 19 in flight keeps 4–18 at max(f, d) = 3f); reader B (a
+    /// copy of A's slot, set up directly) keeps 10–12. A's decoder drops its
+    /// frames (it closes): only the times no other reader keeps shrink to f;
+    /// 10–12 keep B's 3f until B drops them too. K-1 stays exact: live
+    /// falls by exactly what the reservations shed.
+    #[test]
+    fn a_time_two_readers_keep_shrinks_only_when_the_last_drops_it() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        paused_step(&mut readers, 20, 0, 0);
+        let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::from([(0, 3 * F)]));
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let a = readers.slots[0].id;
+        loop {
+            if let Next::Decode { at, from, .. } = step_reader(&mut readers, a) {
+                assert_eq!((at, from), (19, Some(4)), "the refill");
+                break;
+            }
+        }
+        assert_eq!(readers.slots[0].retained, (4..19).collect());
+        let mut b = readers.slots[0].clone();
+        (b.id, b.state) = (
+            readers.next_id,
+            ReaderState::Idle {
+                since: Duration::ZERO,
+            },
+        );
+        readers.next_id += 1;
+        b.retained = BTreeSet::from([10, 11, 12]);
+        readers.slots.push(b.clone());
+        let charged = |readers: &Model, at: i64| readers.reserved.get(&(0, at)).copied();
+        let reserved = |readers: &Model| readers.reserved.values().sum::<usize>();
+        assert!(
+            (4..19).all(|at| charged(&readers, at) == Some(3 * F)),
+            "max(f, d)"
+        );
+        let (live, held) = (readers.live().0, reserved(&readers));
+        readers.closed(a);
+        for at in 4..19 {
+            let expected = if (10..=12).contains(&at) { 3 * F } else { F };
+            assert_eq!(
+                charged(&readers, at),
+                Some(expected),
+                "{at}: B still keeps it"
+            );
+        }
+        assert_eq!(
+            live - readers.live().0,
+            held - reserved(&readers),
+            "K-1 exact"
+        );
+        let (live, held) = (readers.live().0, reserved(&readers));
+        readers.closed(b.id);
+        assert!(
+            (4..19).all(|at| charged(&readers, at) == Some(F)),
+            "the last went"
+        );
+        assert_eq!(
+            live - readers.live().0,
+            held - reserved(&readers),
+            "K-1 exact"
+        );
+        assert_eq!(
+            held - reserved(&readers),
+            3 * 2 * F,
+            "B's three shed 2f each"
+        );
     }
 
     /// Amendment R61 [S2c] (review A2a, K-3): C = 20f. Source 0's reader
