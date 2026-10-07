@@ -6011,9 +6011,11 @@ Mutations (logs `s2c-logs/s2c7/s2c5-*.log`):
 - retry off: **killed** (the region-start witness: no frame at 21; the CLI check: 5 unreachable);
 - the latch skip off: **killed** (`continuation_reproduces_seek_on_every_fixture`);
 - the pair gate off: **killed** (11 tests);
-- seek to `dts` instead of `dts − 1`: **survives, as an equivalent mutant** on the fixtures' mov/H.264 pair
-  (E13.6.6 gives the argument). The one-tick margin is therefore not witnessed by any fixture; a counterexample
-  needs a GOP no longer than the reorder delay.
+- seek to `dts` instead of `dts − 1`: **survives**. It is equivalent **on the recorded fixtures only**: on their
+  mov/H.264 pair both seeks land on the same key (E13.6.6 gives the argument and the probed timestamps). This is
+  not an equivalence for mov/H.264 in general (Amendment R61, item 8): the argument depends on where the fixture's
+  earlier keys present, and a stream whose earlier key presents exactly at dts(K), or a GOP no longer than the
+  reorder delay, could tell the two apart. The one-tick margin is therefore not witnessed by any fixture.
 
 #### E13.6.2 Amendment R53
 
@@ -6024,6 +6026,16 @@ Mutations (logs `s2c-logs/s2c7/s2c5-*.log`):
 | `f54ce3f` | A fourth witness: a step to the frame whose conversion is in flight waits for it (red: 2 extra seeks, `r53-inflight-red.log`) |
 | `a7420fb` | The implementation (decoder: `decode_refill`, `convert_retained`, kept raw frames; scheduler: `Plan.window`, t first then descending, `Slot.retained`/`converting`, `Next::Decode.from`) |
 | `eb7a4c1` | Design text for the in-flight case |
+
+**What "t first" means, and what the witness shows (Amendment R61, item 7).** R53's guarantee is that t is
+converted and **delivered to the preview ring** before any window conversion starts; "published" in R53 means
+exactly that. It is not an ordering against the preview's render: under R56 the window's conversions deliberately
+run while the preview renders and shows t. The witness `a_refill_publishes_t_before_converting_its_window`
+(`preview.rs`) holds the reader before the first window conversion (t − 1) and checks that t is already in the
+ring and that the refill converted one frame. It also sees t shown, but only because the hold keeps the conversion
+from starting, so the shown check says nothing about production ordering. The witness and its mutation kills above
+show conversion order against delivery, not against render. No code changed
+for this item.
 
 The fourth witness came from the media suite under load. `a_backward_drag_matches_fresh_seeks_and_refills_once_per_window`
 seeked at 14 and 5 instead of 12: a step was posted while its window frame's conversion was in flight, so no reader
@@ -6137,7 +6149,8 @@ Implementation notes the ruling did not spell out:
   to S4's G15 RSS check (design §15, D13).
 - The keeping cost (r54a, GOP 60, 1080p): 40.8 MB of decoded frames kept per refill (about 13 frames), with no
   copies: every kept frame was a moved decoder reference (`count_keep_copied` 0).
-- S2c-5's surviving mutant (seeking to `dts` rather than `dts − 1`) is equivalent on the mov/H.264 pair. Both
+- S2c-5's surviving mutant (seeking to `dts` rather than `dts − 1`) is equivalent on the recorded fixtures'
+  mov/H.264 pair, not on mov/H.264 in general (R61 item 8). On that pair both
   seeks land on the latest key whose pts ≤ the target. An open-GOP key K with leading frames has pts(K) > dts(K),
   so both exclude K and land on the key before it unless that earlier key presents exactly at dts(K). In the
   fixture the earlier keys present at 0, 12288 and 24576 against dts 9728, 23040 and 35328 (time base 1/15360;
@@ -6449,7 +6462,9 @@ Three reference lanes exited 139 after `test result: ok`, the reference binary's
 at lane start was 4.7–46.1 (median 14.8); `chrome-headless`, `node`, `rustc` and `campfire` were the main foreign CPU
 (annotation, R50). Logs: `timing-r59b.log.gz`, `samples-r59b.log.gz`, `analyze-r59b.txt` (`r2/analyze.py`) and `l5-r59b.txt`
 (`r5/l5.py`). `l5.py` now starts a new lane at any `# BEGIN`. Before this fix, a plain lane's lines that followed a
-COUNT lane were counted into it; no earlier plan mixed the two kinds.
+COUNT lane were counted into it. *Correction (Amendment R61, item 9):* earlier plans did mix the two kinds. r58
+(`plan-r58.txt`, 36 COUNT and 78 other lanes) did, and so did the unrun full plan `r5/plan-r5.txt`; E13.6.11 gives
+the re-run and what changes.
 
 The candidate's R59 counters, per run (36 lanes of 3 P-seek runs, 12 P-play runs):
 
@@ -6565,7 +6580,8 @@ all three. Wall time cand/S0 is 0.157, 0.178 and 0.156, median **0.157** (r58: 0
 - **Resolved:**
   - the `explainer_16x9` stall: 0 timeouts in 36 candidate runs, 0 idle-with-discards in every run, and both now
     fail the lane;
-  - the E13.6.1 dts mutant: recorded as equivalent;
+  - the E13.6.1 dts mutant: recorded as equivalent on the recorded fixtures only (R61 item 8 corrects the
+    scope);
   - the E13.6.4 copy cost: R54 removed it;
   - L-4b on every workload and both lanes;
   - I4 and G18, rerun at `c90d062`.
@@ -6586,7 +6602,9 @@ cand, pre, diag; pre, cand, diag):
 - cand: `cand-c90d062` (`55acda05…`, the fix plus the counters).
 
 Every lane ran with the R56 trace on (`PF1_TRACE`), the same on all three binaries, to count `Discard` events per
-lane. The r59c lanes were untraced. Load at lane start was 6.1–16.4 (annotation, R50). Logs:
+lane. *Correction (R61, item 5):* the r59c lanes did not write a trace, but they were not untraced. Until `2ccd995`
+the harness switched the in-process trace on for every P-seek backward phase, with or without `PF1_TRACE`, on all
+three of these binaries (E13.6.11). Load at lane start was 6.1–16.4 (annotation, R50). Logs:
 `s2c-timing/r60/timing-r60.log.gz`, `samples-r60.log.gz`, `analyze-r60.txt` and `trace-*.txt.gz`. Per lane, the
 median of its three runs:
 
@@ -6615,11 +6633,12 @@ Hit p95 ratios per rotation, and their median:
 
 The hit means read the same way: 1.07, 0.92 and 0.92.
 
-**Reading (lead, R60): within noise. The fix costs nothing on this path.**
+**Reading (lead, R60, as corrected by R61 item 10): within noise. No regression was detected; the check cannot
+resolve a 5% difference on this machine.**
 - **The fix is the fastest of the three here.** cand/pre is 0.92 in r60. Over all seven pairs (r59c's three and
   these four) it is 0.71–1.14, median 1.02.
 - **The work is identical:** CPU per refill is the same on all three binaries (453–474 ms).
-- **The R59 job never ran:** 0 `Discard` events in 1,800 traced candidate steps.
+- **The R59 job never ran:** 0 `Discard` events in 2,400 traced candidate steps (4 lanes × 3 runs × 200 backward steps).
 - **The single-rotation ratios swing by ±30%,** more than R60's 1.05 threshold, so that threshold could not resolve
   anything on this machine. That was a fault in how R60 was set, not a finding.
 - **diag's 1.10 against pre is not a product question.** diag is a test-only build that never ships, and the fix

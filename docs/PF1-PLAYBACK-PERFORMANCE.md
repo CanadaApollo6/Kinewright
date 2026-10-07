@@ -781,13 +781,16 @@ conversion (L-4b: time to t). GOPs over 250 are recorded, not gated (D4).
   reservation is max(f, d), d its decoded size (and B uses max(f, d) for
   f), so the kept frames are inside K-1.
 - **t first (Amendment R53).** The refill's reader converts only t; it
-  keeps the decoded (unconverted) frames of the window and publishes t. The
-  window's conversions then follow in the same job, one plan step each,
-  descending from t − 1. A newer post that requires a time of that source
-  outside the window cancels the rest between frames (Amendment R54); the
-  frames already converted stay held. A step inside the window keeps it
-  converting: the step's own frame first, then the remaining kept frames,
-  descending. A step to a window frame not yet converted
+  keeps the decoded (unconverted) frames of the window and delivers t to the
+  preview ring ("published" in R53 means delivered to the ring, not rendered
+  or shown). The window's conversions then follow in the same job, one plan
+  step each, descending from t − 1; under R56 they deliberately run while
+  the preview renders and shows t. A newer post that requires a time of that
+  source outside the window cancels the rest between frames (Amendment
+  R54); the frames already converted stay held. A step inside the window
+  keeps it converting: the step's own frame first, then the remaining kept
+  frames below it, descending (frames above the newest t are dropped:
+  Amendment R57). A step to a window frame not yet converted
   keeps the window (no refill) and goes to the reader that kept its decoded
   frame, which converts it without decoding anything. A step to the frame
   whose conversion is already in flight keeps the window too and waits for
@@ -795,8 +798,12 @@ conversion (L-4b: time to t). GOPs over 250 are recorded, not gated (D4).
   elsewhere), the step is today's: a refill or a seek.
 - **Hold.** The post holds each source's window. Its ring frames survive
   later posts while the source stays planned and the playhead stays inside
-  the window. A step inside the window, in either direction, is a hit and
-  decodes nothing. Held frames that the job does not require are lookahead
+  the window. A step inside the window to a frame already in the ring, in
+  either direction, is a hit and decodes nothing. Since Amendment R57 the
+  window converts only below the newest t: kept frames above it are dropped
+  unconverted, so reversing above the newest t to a frame that was never
+  converted is not a hit and may need a re-decode (a refill or a seek).
+  Held frames that the job does not require are lookahead
   to K-5: a drain evicts the frames behind the travel first, so after a
   reversal those below the playhead go first.
 - **Exclusions.** Playback jobs, forward steps, jumps back of B or more
@@ -1075,7 +1082,9 @@ readers. Implementation `de7a00f`; evidence E13.5.
 
 **Amendment R53 [S2c] A refill shows t first (lead ruling, 2026-10-06).** A backward refill converts and publishes t
 before converting the rest of its window (E13.5.7: about 16 conversions of about 5 ms each made the refill's extra
-cost).
+cost). *Published* here and in R55/R56 means **delivered to the preview ring** (Amendment R61, item 7): t is
+converted and delivered to the ring before any window conversion starts. It does not mean rendered or shown; under
+R56 the window's conversions deliberately run while the preview renders and shows t.
 - The window stays **required** and reserved under K-2, so the budget accounting is unchanged. B stays
   clamp(share, 1, 16).
 - The window's conversions continue after t is published, in the same job, in descending order from t − 1. They
@@ -1085,7 +1094,9 @@ cost).
   them, decodes anything else, or closes. Amendment R54 charges them inside K-1 (below).
 - L-4b is gated as *time to t on a refill*: no worse than 1.25 × the reference's step mean, paired. The time to the
   full window is recorded.
-- Witnesses, each with a mutation: t is published before any window frame is converted; a newer job cancels the
+- Witnesses, each with a mutation: t is delivered to the ring before any window frame is converted (the witness,
+  `a_refill_publishes_t_before_converting_its_window`, checks conversion order against delivery, not against the
+  preview's render); a newer job cancels the
   remaining window conversions; a step into the not-yet-converted part of the window decodes nothing new.
   A fourth covers a step to the frame whose conversion is in flight (it waits; no refill).
 
@@ -1207,6 +1218,33 @@ never drops them: a deadlock until the next post. E13.6.6 warned of this.
   1's frame does not fit beside their charges, and source 1 must be admitted without that reader retiring.
   Mutation: the discard-only job removed.
 
+**Amendment R61 [S2c] The stage-close fixes (lead ruling, 2026-10-07).** Both Astra stage-close reviews said do
+not close (E13.6.11). No R53–R60 semantics change except as stated here.
+- **A refill completes only against its own plan.** A refill's completion (`Readers::refilled`) carries the plan
+  version it was started under. It always clips the reader's own kept set to what its decoder kept. It clips the
+  plan, the required set, the held window and the reservations only if that version is still current. A
+  completion superseded by a newer post leaves the newer plan whole. A continued window time below what the
+  decoder kept then stays required and is decoded normally (with a seek).
+- **A continued window fits K-3.** When a post continues a held window (R54/R57), the continued times join the
+  required set only while H + G ≤ C, nearest t first, in the scheduler's terms (max(f, d) for an unconverted
+  window time). The rest are cut, down to t alone. The kept frames of the cut times are discarded like R57's frames
+  above t′: their reservations move to the reader's discard charge until its decoder drops them (R59's
+  discard-only job if it has no decode). R57's discard bound becomes a kept range [low, bound]: the decoder keeps
+  only the times inside it. `low` is the lowest continued time kept when a continuation was cut, and unbounded
+  otherwise, so R57/R59 behave as before when nothing is cut. A required set that cannot be admitted, an assert or
+  an eviction of required frames is never the result.
+- **The detached-reader fallback (R47) counts discard charges.** A detached reader holds its conversion in flight
+  and its discard charges beside the set. Both count in the check that sends a plan to the synchronous renderer.
+- **A decoded frame that covers several window times** (a VFR source whose frame shows at two or more grid times)
+  keeps the set of times it still owes. Each conversion removes its time. While other times remain it converts a
+  copy (transient, inside that time's max(f, d) hold). The managed converter takes the frame's buffers, so
+  converting the kept frame itself would leave nothing for its next time. Its last time converts the frame itself,
+  which releases it. A discard drops the times outside the kept range, and the frame goes with its last time. A
+  decoded frame is never kept without a time that charges it.
+- **Test harness:** the P-seek backward phase traces only when `PF1_TRACE` is set. Every setup and reposition seek
+  counts toward P-seek's `timeouts`, and P-play's `valid=false` fails the lane.
+- Each code fix has a witness, red first, and a mutation (E13.6.11).
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
 conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and
@@ -1245,7 +1283,7 @@ open with ⌊P / R⌋ threads; before S2b-3, each ring holds the S1d window.
 | S2c | S-2 shadow-anchored continuation, S-3 backward window, witnesses | C-4 + earlier; G8 | ~560 |
 | S3a | G-2…G-7 display correctness: encode, fence, rebind rule, bounded wait, Terminal handoff, flag readback, lifetimes, self-check, premultiply, app registration | I1b, I5, I6, I16 + earlier; G7a, G7b | ~950 |
 | S3b | Staging ring, U-2 residency | I17 + earlier; G2, G4 | ~450 |
-| S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes; the GPU state pinned and recorded | all; on LH at the pinned run: G3 (R48) and L-4a (R58) | ~80 |
+| S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes; the GPU state pinned and recorded | all; on LH at the pinned run: G3 (R48) and L-4a (R58); D13's active RSS scenario (RSS during window cancellation, R61) | ~80 |
 
 The total is about 5,560 lines (rev 3: 5,830): R15/R16 remove ≈ 450 from S2b;
 the paint marker, Terminal handoff and shadow-seek anchor add ≈ 180.
@@ -1285,5 +1323,5 @@ Opus. *CI on push*, Windows included.
 | D9 | Device output-latency compensation; an output-drain acknowledgment, so the terminal stop waits for the last sample to sound (V-2's drained predicate is the ring's) | AU-owned clock semantics | AU backlog | recorded `device_latency_ms` > 1 frame, or an audibly clipped programme end |
 | D10 | Native SVG raster gates; cached external-render fixture | AW2 owns code and external clips (A1) | AW2 | AW2 design |
 | D11 | Bounded streaming, row banding and a lazy `decoded_layers` for required sets > C (preview or full resolution) | R15: kept out of the scheduler core; K-3 falls back to today's path | export-performance slice (D3 owner) | G17 fails, or a full-resolution set exceeds C in the session |
-| D12 | The working-frame step (RGBA64 to the working frame, after swscale) | Amendment R56: 3.6–5.2 ms a frame, about 80% of a conversion (E13.6.7); t, window frames and playback all pay it. Our own Rust code, not swscale | S3/S4 | S3/S4 planning |
-| D13 | Charging a cancelled window's decoded frames until the reader drops them | Amendment R56: after a post outside a held window, that window's kept decoded frames stay in its reader until the reader's next decode or close, uncharged. Bounded: one window per reader, at most B − 1 = 15 decoded frames. Charging them could deadlock admission | S4 | S4's G15 RSS check |
+| D12 | The working-frame step (RGBA64 to the working frame, after swscale) | Amendment R56: 3.6–5.2 ms a frame, about 80% of a conversion (E13.6.7). After R57's row-wise fill (E13.6.9, r57w): t 1.87–2.61 ms and a window frame 2.11–3.31 ms (×0.49–0.72), against whole conversions of 2.9–3.2 ms on LL and 3.2–4.2 ms on LH, so it is still most of a conversion. t, window frames and playback all pay it. Our own Rust code, not swscale | S3/S4 | S3/S4 planning |
+| D13 | Charging a cancelled window's decoded frames until the reader drops them | Amendment R56: after a post outside a held window, that window's kept decoded frames stay in its reader until the reader's next decode or close, uncharged. Bounded: one window per reader, at most B − 1 = 15 decoded frames. Charging them could deadlock admission | S4 | S4's G15 RSS check, plus an active scenario (R61 item 11): RSS sampled *during* cancellation, not only at settled idle. A P-seek-style backward stepper on a 1080p GOP-60 source refills a window, then posts outside it (a jump far back, then forward) before the window converts, repeatedly, with RSS sampled every 100 ms. The peak RSS above the idle baseline is recorded against the bound (one window per reader, B − 1 decoded frames at d each) |
