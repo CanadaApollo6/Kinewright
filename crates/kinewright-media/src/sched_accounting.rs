@@ -1656,6 +1656,45 @@ fn the_readers_accounting_holds_for_seeded_sequences() {
     }
 }
 
+/// Amendment R63 [S2c] (the slow tier): the same model over `SLOW` seeds
+/// (from 1, the fast tier's among them), four threads each taking every
+/// fourth seed.
+const SLOW: u64 = 300_000;
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn the_readers_accounting_holds_for_300k_seeded_sequences() {
+    let reaches: Vec<Reach> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (0..4u64)
+            .map(|lane| {
+                scope.spawn(move || {
+                    let mut reach = Reach::default();
+                    for seed in (1 + lane..=SLOW).step_by(4) {
+                        sequence(seed, &mut reach);
+                    }
+                    reach
+                })
+            })
+            .collect();
+        (threads.into_iter())
+            .map(|thread| {
+                thread
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    });
+    let mut reach = Reach::default();
+    for lane in &reaches {
+        reach.add(lane);
+    }
+    eprintln!("R63 slow tier: {reach:?}");
+    reach.assert_reached();
+}
+
 /// A fixed case's step: a post of a given job (its demand per source,
 /// whether it is paused, its G), or an operation (enabled now).
 enum Fixed {

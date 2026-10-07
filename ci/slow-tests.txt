@@ -89,6 +89,7 @@ kinewright_media loudness::tests::the_997_hz_calibration_tone_reads_its_pinned_v
 kinewright_media loudness::tests::the_relative_gate_case_and_the_one_window_floor_hold crates/kinewright-media/src/loudness.rs  # 15/17
 kinewright_media mo2_fixtures::review_probes::review1_all_geometric_frames_independent_oracle crates/kinewright-media/src/mo2_review_probes.rs  # 61/66
 kinewright_media mo2_perf_fixtures::r28_ledger_holds_the_ceilings_and_releases_every_charge crates/kinewright-media/src/mo2_perf_fixtures.rs  # 197/198
+kinewright_media sched::accounting::the_readers_accounting_holds_for_300k_seeded_sequences crates/kinewright-media/src/sched_accounting.rs  # 85/- (local, 4 threads; not yet measured on CI)
 
 # mcp_server
 mcp_server au3_queue_export_normalizes_and_verifies_audio crates/kinewright-agent/tests/mcp_server.rs  # 16/18
