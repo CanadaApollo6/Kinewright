@@ -1617,11 +1617,11 @@ impl Preview {
                 return Ok(self.fell_back(posted, demand, reason));
             }
         };
-        let plan = (sizes, demand.generated);
+        let (plan, detached) = ((sizes, demand.generated), &self.detached);
         // The set is admitted under the post's lock, before a reader starts.
         state.paused_plan = paused;
         state.readers.hold(windows, kept_sizes(demand));
-        let mut posted = Some(state.readers.post_planned(planned, plan, now));
+        let mut posted = Some(state.readers.post_planned(planned, plan, detached, now));
         // Review B S2: only the rasters not resident are reserved.
         let mut generated = Some(demand.generated_uncharged(&self.charged));
         let mut granted = None;

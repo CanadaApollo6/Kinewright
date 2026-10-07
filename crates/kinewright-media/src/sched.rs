@@ -638,7 +638,19 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     pub(crate) fn post(
         &mut self,
         regions: Vec<(K, Region)>,
+        plan: (HashMap<K, usize>, usize),
+        now: Duration,
+    ) -> Posted<K, F> {
+        self.post_within(regions, plan, &[], now)
+    }
+
+    /// [`Self::post`], its continued windows fitted in the room `detached`
+    /// readers leave ([`Self::room`], Amendment R62).
+    fn post_within(
+        &mut self,
+        regions: Vec<(K, Region)>,
         (sizes, generated): (HashMap<K, usize>, usize),
+        detached: &[u64],
         now: Duration,
     ) -> Posted<K, F> {
         self.version += 1;
@@ -666,7 +678,8 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         }
         let errors = self.failures.drain().map(|(_, (_, error))| error).collect();
         let (mut continued, bounds) = self.continued(&regions);
-        let keep = self.fit_continued(&mut continued, &bounds);
+        let room = self.room(detached);
+        let keep = self.fit_continued(&mut continued, &bounds, room);
         for (key, kept) in &continued {
             self.required
                 .extend(kept.iter().map(|at| (key.clone(), *at)));
@@ -775,6 +788,8 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// Amendment R61 [S2c] (K-3): the continued windows join the required
     /// set only as far as it fits in C beside G: each source's nearest its
     /// t first, one step of every source at a time, down to none (t alone).
+    /// Amendment R62 [S2c]: in `room`, C less the detached readers' charges
+    /// ([`Self::room`], as detention decides).
     /// Returns per window source the kept times that stay, [low, bound]
     /// (its bound t′): `low` is the lowest time it still requires if its
     /// continuation was cut, `i64::MIN` otherwise. Call with the job's own
@@ -783,6 +798,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         &self,
         continued: &mut HashMap<K, Vec<i64>>,
         bounds: &HashMap<K, i64>,
+        room: usize,
     ) -> HashMap<K, (i64, i64)> {
         let mut set = self.required_set_bytes().saturating_add(self.generated);
         let depth = continued.values().map(Vec::len).max().unwrap_or(0);
@@ -791,7 +807,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             let bytes = (continued.iter())
                 .filter_map(|(key, kept)| kept.get(level).map(|at| self.frame_bytes(key, *at)))
                 .fold(0, usize::saturating_add);
-            let Some(next) = set.checked_add(bytes).filter(|next| *next <= self.budget) else {
+            let Some(next) = set.checked_add(bytes).filter(|next| *next <= room) else {
                 fit = level;
                 break;
             };
@@ -927,16 +943,18 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     }
 
     /// R38 / R41: [`Self::post`] a planned job, counting its merges and
-    /// H-1 folds (the preview drains them at Ready).
+    /// H-1 folds (the preview drains them at Ready). Amendment R62 [S2c]:
+    /// beside the readers `detached` (those K-3's detention saw).
     pub(crate) fn post_planned(
         &mut self,
         planned: Planned<K>,
         plan: (HashMap<K, usize>, usize),
+        detached: &[u64],
         now: Duration,
     ) -> Posted<K, F> {
         self.regions_merged += planned.merged;
         self.regions_folded += planned.folded;
-        self.post(planned.regions, plan, now)
+        self.post_within(planned.regions, plan, detached, now)
     }
 
     /// S-3 [S2c]: a paused job's backward windows. `steps` holds each
@@ -1582,8 +1600,9 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// detained if its required regions need more slots than R leaves
     /// beside them (or more readers of a source than H-1 does), if they
     /// hold the whole pool (no reader could open), or if the set does not
-    /// fit in C beside their bytes (Amendment R61: in flight and discarded). Everything else a plan waits for is
-    /// held by readers that exit at their next check.
+    /// fit in C beside their bytes ([`Self::room`]; Amendment R61: in
+    /// flight and discarded). Everything else a plan waits for is held by
+    /// readers that exit at their next check.
     pub(crate) fn detained(&self, detached: &[u64], planned: &Planned<K>, set: usize) -> bool {
         let stuck: Vec<&Slot<K>> = (self.slots.iter())
             .filter(|slot| detached.contains(&slot.id))
@@ -1603,12 +1622,19 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let slots = !required.is_empty() && required.len() + stuck.len() > self.limit;
         let threads: usize = stuck.iter().map(|slot| slot.threads).sum();
         let permits = !required.is_empty() && threads >= self.pool;
-        // Amendment R61 [S2c]: and its discarded kept frames' charges.
-        let held = |bytes: usize, slot: &&Slot<K>| {
-            (bytes.saturating_add(slot.flight)).saturating_add(slot.discarding)
-        };
-        let flight = stuck.iter().fold(set, held);
-        slots || per_source || permits || flight > self.budget
+        slots || per_source || permits || set > self.room(detached)
+    }
+
+    /// Amendment R47 / R61 / R62 [S2c] (K-3): C less what the readers in
+    /// `detached` hold: their decodes in flight and their discarded kept
+    /// frames' charges. Detention and the continued windows' fit both
+    /// decide against it.
+    pub(crate) fn room(&self, detached: &[u64]) -> usize {
+        let stuck = (self.slots.iter()).filter(|slot| detached.contains(&slot.id));
+        let held = stuck
+            .map(|slot| slot.flight.saturating_add(slot.discarding))
+            .fold(0, usize::saturating_add);
+        self.budget.saturating_sub(held)
     }
 
     /// The reader `id` closed its decoder and exits.
@@ -3574,6 +3600,90 @@ mod tests {
         assert!(readers.reserved.is_empty(), "nothing reserved");
     }
 
+    /// Amendment R62 [S2c] (re-review R61 P1-1): C = 20f, d = f. Source 0's
+    /// reader refilled [11, 19] (in-point 11) and keeps 11–18 decoded; a
+    /// detached reader of source 1 holds 8f in flight. A step to 18 beside
+    /// G = 6f (7f: detention passes, 7f + 8f ≤ C) continues the window
+    /// with 17 down to 11. Fitted in C alone all seven join (14f + 8f > C:
+    /// the required set waits on the detached reader); fitted in the room
+    /// it leaves (12f) the continuation is cut to 17–13, so the set is
+    /// admitted without that reader exiting.
+    #[test]
+    fn a_continued_window_fits_beside_a_detached_reader() {
+        let mut readers = Model::new(20).with_budget(20 * F);
+        paused_step(&mut readers, 20, 11, 0);
+        let ready = post_paused(&mut readers, &[(0, 19, 11)], HashMap::new());
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let id = readers.slots[0].id;
+        let refill = loop {
+            if let Next::Decode {
+                at, version, bytes, ..
+            } = step_reader(&mut readers, id)
+            {
+                break (at, version, bytes);
+            }
+        };
+        assert_eq!(refill.0, 19, "the refill's t");
+        readers.refilled(id, (refill.0, refill.1), Some(11));
+        deliver_ok(&mut readers, id, 0, refill);
+        assert_eq!(readers.slots[0].retained, (11..19).collect());
+        // The detached reader: source 1's, retired mid-decode with 8f.
+        let mut stuck = readers.slots[0].clone();
+        (stuck.id, stuck.key, stuck.state) = (readers.next_id, 1, ReaderState::Retiring);
+        (stuck.retained, stuck.flight) = (BTreeSet::new(), 8 * F);
+        readers.next_id += 1;
+        readers.slots.push(stuck.clone());
+        assert!(readers.adopt(8 * F), "its decode's bytes");
+        let detached = [stuck.id];
+        assert_eq!(readers.room(&detached), 12 * F, "C less its 8f");
+        let sizes = HashMap::from([(0u8, F)]);
+        let kept = sizes.clone();
+        let mut per_source = vec![(0u8, vec![18], Vec::new())];
+        let job = (F + 6 * F, 6 * F);
+        let steps = [(0, 18, 11)];
+        let (windows, set) = readers.backward_job(&steps, (&sizes, &kept), &mut per_source, job);
+        assert_eq!(set, 7 * F, "18 is kept: no refill");
+        let planned = plan_regions(&per_source, readers.limit()).expect("readers");
+        assert!(!readers.detained(&detached, &planned, set), "7f + 8f fit");
+        readers.hold(windows, kept);
+        let posted = readers.post_planned(planned, (sizes, 6 * F), &detached, Duration::ZERO);
+        readers.release(posted.dropped.0.iter().map(Fr::bytes).sum());
+        let continued: BTreeSet<i64> = (readers.required.iter())
+            .filter(|(key, at)| *key == 0 && *at != 18)
+            .map(|(_, at)| *at)
+            .collect();
+        assert_eq!(continued, (13..18).collect(), "cut to the room");
+        assert_eq!(readers.required_bytes + 6 * F, 12 * F, "H + G in the room");
+        let mut admitted = false;
+        for _ in 0..4 {
+            match readers.admit(6 * F) {
+                Admission::Ready { .. } => {
+                    admitted = true;
+                    break;
+                }
+                Admission::Wait { evicted, .. } => {
+                    readers.release(evicted.iter().map(Fr::bytes).sum());
+                    if let Next::Decode {
+                        at,
+                        version,
+                        bytes,
+                        size,
+                        ..
+                    } = step_reader(&mut readers, id)
+                    {
+                        readers.release(bytes - size);
+                        deliver_ok(&mut readers, id, 0, (at, version, size));
+                    }
+                }
+            }
+        }
+        assert!(admitted, "admitted beside the detached reader");
+        assert!(
+            readers.slots.iter().any(|slot| slot.id == stuck.id),
+            "the detached reader has not exited"
+        );
+    }
+
     /// H-6: a reader retired while its decode ran (the preview went) stays
     /// retiring when the result arrives, though its required frame is gone.
     /// Review A S1: that late frame comes back (it is not kept in the
@@ -4044,7 +4154,7 @@ mod tests {
         let planned = plan_regions(&demand, readers.limit()).expect("two readers");
         assert_eq!(planned.merged, 1, "A's playheads merge");
         let sizes = HashMap::from([(0, F), (1, F)]);
-        let posted = readers.post_planned(planned, (sizes, 0), Duration::ZERO);
+        let posted = readers.post_planned(planned, (sizes, 0), &[], Duration::ZERO);
         readers.release(posted.dropped.0.iter().map(|fr| fr.bytes).sum());
         assert!(matches!(readers.admit(0), Admission::Ready { .. }));
         let merged = readers.slots.iter().find(|slot| slot.id == near);
@@ -4118,7 +4228,7 @@ mod tests {
         let demand = [(0u8, vec![0, 14], vec![15, 16]), (1, vec![7], vec![])];
         let planned = plan_regions(&demand, readers.limit()).expect("two readers");
         let sizes = HashMap::from([(0, F), (1, F)]);
-        readers.post_planned(planned, (sizes, 0), Duration::ZERO);
+        readers.post_planned(planned, (sizes, 0), &[], Duration::ZERO);
         assert!(matches!(readers.admit(0), Admission::Ready { .. }));
         let merged = readers.slots.iter().find(|slot| slot.plan.merged);
         let id = merged.expect("A's merged reader").id;
@@ -4256,7 +4366,7 @@ mod tests {
             sources.iter().map(|key| (*key, vec![0], vec![])).collect();
         let planned = plan_regions(&demand, readers.limit()).expect("one reader each");
         let sizes = sources.iter().map(|key| (*key, F)).collect();
-        let posted = readers.post_planned(planned, (sizes, 0), Duration::ZERO);
+        let posted = readers.post_planned(planned, (sizes, 0), &[], Duration::ZERO);
         assert!(matches!(readers.admit(0), Admission::Ready { .. }));
         for (id, _) in &posted.spawn {
             assert!(matches!(step_reader(&mut readers, *id), Next::Open { .. }));
