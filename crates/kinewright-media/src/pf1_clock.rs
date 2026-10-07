@@ -199,6 +199,11 @@ pub(crate) fn trace_on() {
     TRACING.store(true, Ordering::Relaxed);
 }
 
+/// Amendment R61: whether a harness traces now.
+pub(crate) fn tracing() -> bool {
+    TRACING.load(Ordering::Relaxed)
+}
+
 /// Amendment R56: stop tracing and take the events.
 pub(crate) fn trace_off() -> Vec<(u64, Event, i64, i64)> {
     TRACING.store(false, Ordering::Relaxed);

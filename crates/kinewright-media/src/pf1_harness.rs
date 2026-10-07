@@ -784,7 +784,8 @@ fn seek_run(document: &Document, seed: u64) -> String {
     }
     let (clock, cpu) = (pf1_clock::snapshot(), pf1_clock::process_cpu_ms());
     let mut taps = Vec::new();
-    pf1_clock::trace_on();
+    let traced = trace_requested();
+    start_trace(traced);
     for _ in 0..200 {
         if at < 12 {
             at = 12 + next(n - 12);
@@ -798,7 +799,10 @@ fn seek_run(document: &Document, seed: u64) -> String {
         taps.push((latency, before, pf1_clock::snapshot()));
         backward.push(latency);
     }
-    write_trace(seed, &pf1_clock::trace_off());
+    let events = pf1_clock::trace_off();
+    if traced {
+        write_trace(seed, &events);
+    }
     let back = backward_counts(&taps, clock, pf1_clock::process_cpu_ms() - cpu);
     let target = next(n - 800);
     op(target);
@@ -834,6 +838,19 @@ fn assert_idle_discard(line: &str) {
         line.contains(" count_idle_discard=0 "),
         "R59: a reader idled holding discard charges: {line}"
     );
+}
+
+/// Amendment R61 (review A5): whether `PF1_TRACE` asks for a trace.
+fn trace_requested() -> bool {
+    std::env::var_os("PF1_TRACE").is_some()
+}
+
+/// Amendment R61 (review A5): the backward phase traces only on request
+/// (each event takes the trace lock on the readers' paths).
+fn start_trace(requested: bool) {
+    if requested {
+        pf1_clock::trace_on();
+    }
 }
 
 /// Amendment R56 (trace): with `PF1_TRACE` set, the backward phase's events
@@ -1381,4 +1398,15 @@ fn pf1_engine_clock_follows_the_stepped_simulated_driver() {
     // 47 × 1,024 = 48,128 frames at 48 kHz: frame 30 at 30 fps.
     assert_eq!(engine.position(), TimeCode(30));
     engine.pause();
+}
+
+/// Amendment R61 (review A5): without `PF1_TRACE` the backward phase does
+/// not trace; with it, it does.
+#[test]
+fn the_backward_phase_traces_only_on_request() {
+    start_trace(false);
+    assert!(!pf1_clock::tracing(), "traced without PF1_TRACE");
+    start_trace(true);
+    assert!(pf1_clock::tracing(), "PF1_TRACE set, not traced");
+    pf1_clock::trace_off();
 }
