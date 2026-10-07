@@ -1,4 +1,4 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
@@ -1816,10 +1816,10 @@ pub(crate) struct VideoDecoder {
 }
 
 /// Amendment R53 [S2c]: a refill window's decoded frame, kept unconverted
-/// for the grid frames `first..=last`.
+/// for the grid frames `times`. Amendment R61: a time leaves once
+/// converted (or discarded); the frame goes with its last time.
 struct KeptFrame {
-    first: i64,
-    last: i64,
+    times: BTreeSet<i64>,
     #[cfg_attr(not(test), allow(dead_code))]
     pts: Option<i64>,
     decoded: ffmpeg::frame::Video,
@@ -2270,7 +2270,9 @@ impl VideoDecoder {
     /// Amendment R54 [S2c]: the first window time the last refill kept
     /// (`None`: it kept nothing).
     pub(crate) fn kept_from(&self) -> Option<i64> {
-        self.retained.iter().map(|kept| kept.first).min()
+        (self.retained.iter())
+            .filter_map(|kept| kept.times.first().copied())
+            .min()
     }
 
     /// Amendment R54 (K-1): d, an upper bound on one decoded frame's
@@ -2305,24 +2307,34 @@ impl VideoDecoder {
 
     /// Amendment R53 [S2c]: the kept refill frame at `at`, converted, if
     /// the decoder keeps one (no decode, no seek; the cursor stays).
+    /// Amendment R61: `at` leaves the frame's times. The managed converter
+    /// takes the frame it is given (its buffers move into the graph), so a
+    /// frame still kept for another time converts a copy, and its last time
+    /// converts the frame itself, which releases it.
     pub(crate) fn convert_retained<T: DecoderFrame>(
         &mut self,
         at: i64,
     ) -> Option<Result<T, MediaError>> {
-        let index = (self.retained.iter()).position(|r| (r.first..=r.last).contains(&at))?;
-        let kept = self.retained.swap_remove(index);
+        let index = (self.retained.iter()).position(|r| r.times.contains(&at))?;
+        let mut kept = self.retained.swap_remove(index);
+        kept.times.remove(&at);
         #[cfg(test)]
         {
             self.probe.converting_pts = kept.pts;
             self.probe.window_conversion = true;
         }
-        let frame = self.convert::<T>(&kept.decoded);
+        let frame = if kept.times.is_empty() {
+            self.convert::<T>(&kept.decoded)
+        } else {
+            let copy = kept.decoded.clone();
+            self.convert::<T>(&copy)
+        };
         #[cfg(test)]
         {
             self.probe.window_conversion = false;
         }
-        if kept.first != kept.last {
-            self.retained.push(kept); // its other grid frames
+        if !kept.times.is_empty() {
+            self.retained.push(kept); // its grid frames not yet converted
         }
         #[cfg(test)]
         if self.retained.is_empty() {
@@ -2350,7 +2362,7 @@ impl VideoDecoder {
     #[cfg(test)]
     pub(crate) fn kept_times(&self) -> Vec<i64> {
         let mut times: Vec<i64> = (self.retained.iter())
-            .flat_map(|kept| kept.first..=kept.last)
+            .flat_map(|kept| kept.times.iter().copied())
             .collect();
         times.sort_unstable();
         times
@@ -2361,9 +2373,8 @@ impl VideoDecoder {
     /// R61: so do those below `low` (a continuation cut to fit K-3).
     pub(crate) fn discard_kept_outside(&mut self, (low, bound): (i64, i64)) {
         self.retained.retain_mut(|kept| {
-            kept.first = kept.first.max(low);
-            kept.last = kept.last.min(bound);
-            kept.first <= kept.last
+            kept.times.retain(|at| (low..=bound).contains(at));
+            !kept.times.is_empty()
         });
     }
 
@@ -2697,8 +2708,7 @@ impl VideoDecoder {
                     MediaError::Backend("pending video frame has no pixels".to_owned())
                 })?;
                 self.retained.push(KeptFrame {
-                    first,
-                    last,
+                    times: (first..=last).collect(),
                     pts,
                     decoded,
                 });

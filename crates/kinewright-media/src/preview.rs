@@ -295,6 +295,8 @@ pub(crate) struct DecodeRecord {
     pub(crate) seeks: u64,
     /// Amendment R54: the decoded bytes its decoder keeps after it.
     pub(crate) kept: usize,
+    /// Amendment R61: the grid times its decoder keeps after it.
+    pub(crate) kept_times: usize,
 }
 
 #[cfg(test)]
@@ -317,6 +319,7 @@ impl DecodeRecord {
             received: after.1 - before.1,
             seeks,
             kept: decoder.map_or(0, VideoDecoder::kept_bytes),
+            kept_times: decoder.map_or(0, |d| d.kept_times().len()),
         }
     }
 }
@@ -3425,6 +3428,83 @@ pub(crate) mod tests {
         );
         assert!(peak <= FRAME_CACHE_BYTE_BUDGET, "I12: {peak} over C");
         drop(release);
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R61 [S2c] (review A3, K-1, C-5): a VFR source whose frames
+    /// each show at two grid frames. The step 20 → 19 (source 13 → 12)
+    /// refills [0, 12]: every window time converts (a frame's second time
+    /// from the frame itself, its first from a copy); one conversion leaves
+    /// the decoder's kept bytes unchanged (its frame still shows at another
+    /// window time); once every window time is converted the decoder keeps
+    /// nothing, and live is exactly the ring's converted frames. A step to
+    /// 15 (source 10, converted second) shows a fresh render's bytes.
+    #[test]
+    fn a_vfr_window_keeps_nothing_once_converted() {
+        let workload = crate::perf_fixtures::one_vfr_source((160, 90), 90);
+        let (document, lane, frames, thread) = r54_preview(&workload, 20);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        let required = |state: &LaneState| {
+            let slot = state.readers.slots.first().expect("a reader");
+            let key = slot.key.clone();
+            (slot.plan.required.iter())
+                .map(|t| (key.clone(), *t))
+                .collect::<Vec<_>>()
+        };
+        wait_until(&lane, |state| {
+            state.readers.resolve(&required(state)).is_some() && !decoding(state)
+        });
+        let state = lane.lock();
+        let window = required(&state);
+        let resolved = state.readers.resolve(&window).expect("resolved");
+        let failed: Vec<_> = (window.iter().zip(&resolved))
+            .filter_map(|((_, t), r)| r.as_ref().err().map(|e| (*t, e.to_string())))
+            .collect();
+        drop(state);
+        assert_eq!(window.len(), 13, "the window [0, 12]: {window:?}");
+        assert!(failed.is_empty(), "every window time converts: {failed:?}");
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let (refill, conversions) = decodes.split_first().expect("the refill");
+        assert_eq!((refill.at, conversions.len()), (12, 12), "{decodes:?}");
+        assert!(
+            conversions
+                .iter()
+                .all(|d| (d.converted, d.received, d.seeks) == (1, 0, 0)),
+            "{decodes:?}"
+        );
+        let kept: Vec<usize> = decodes.iter().map(|d| d.kept).collect();
+        assert!(
+            kept.windows(2)
+                .any(|pair| pair[0] == pair[1] && pair[0] > 0),
+            "a frame shows at two window times: {kept:?}"
+        );
+        let last = decodes.last().expect("a conversion");
+        assert_eq!(
+            (last.kept, last.kept_times),
+            (0, 0),
+            "nothing kept once converted: {decodes:?}"
+        );
+        let state = lane.lock();
+        let (live, ring) = (state.readers.live().0, state.readers.ring_bytes().1);
+        drop(state);
+        assert_eq!(live, ring, "K-1: live is the ring's converted frames");
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(15)),
+            stamp(1, 3),
+        )));
+        let shown = shown_at(&frames, 15);
+        assert_eq!(
+            shown.texture.rgba[..],
+            reference(&document, 15).0[..],
+            "C-5 at 15"
+        );
         lane.shut_down();
         join_within(thread);
     }

@@ -434,6 +434,50 @@ pub(crate) fn one_source(
     Workload(document(document_size, &media, vec![spans]), media)
 }
 
+/// Amendment R61's witness: one VFR GOP-60 `testsrc2` source of `size`
+/// whose frames land two of every three 30 fps ticks (as
+/// `pf1_s2c_fixtures`' VFR kind), so a frame shows at several grid
+/// frames; one clip of all of it from in-point 0.
+pub(crate) fn one_vfr_source(size: (u32, u32), frames: i64) -> Workload {
+    let vfr = [
+        "-vf",
+        "setpts=(floor(N/2)*3+mod(N\\,2)*2)/(30*TB)",
+        "-fps_mode",
+        "vfr",
+    ];
+    let media = vec![encode(
+        "pf1-r61-vfr",
+        "testsrc2",
+        size,
+        frames,
+        60,
+        false,
+        &vfr,
+        1,
+    )];
+    let asset = &media[0].1;
+    let clip = media_clip(1, asset, 0, asset.duration.0, 0);
+    // The source's grid is its own rate (not the timeline's 30 fps), so the
+    // document lasts what validation computes for its one clip.
+    let mut document = Document {
+        resolution: size,
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![clip],
+        }],
+        media_pool: vec![asset.clone()],
+        ..Document::default()
+    };
+    document.duration = match document.validate() {
+        Err(kinewright_core::OpError::IncorrectDocumentDuration { expected, .. }) => expected,
+        other => panic!("the VFR document: {other:?}"),
+    };
+    document.validate().expect("the VFR workload is valid");
+    Workload(document, media)
+}
+
 /// P-seek's single-source GOP-60 document (L-1): noisy 1080p, 60 s.
 pub(crate) fn seek_gop60() -> Workload {
     let media = vec![video("testsrc2", HD, 1_800, 60, true, 1)];
