@@ -297,18 +297,23 @@ pub(crate) struct DecodeRecord {
     pub(crate) kept: usize,
     /// Amendment R61: the grid times its decoder keeps after it.
     pub(crate) kept_times: usize,
+    /// Amendment R63 (F6): the decoded bytes its decoder kept before it.
+    pub(crate) held: usize,
 }
 
 #[cfg(test)]
 impl DecodeRecord {
-    /// The decoder's conversions and decoded frames so far.
-    fn work(decoder: Option<&VideoDecoder>) -> (u64, u64) {
-        decoder.map_or((0, 0), |d| (d.probe().converted, d.probe().received))
+    /// The decoder's conversions and decoded frames so far, and the
+    /// decoded bytes it keeps.
+    fn work(decoder: Option<&VideoDecoder>) -> (u64, u64, usize) {
+        decoder.map_or((0, 0, 0), |d| {
+            (d.probe().converted, d.probe().received, d.kept_bytes())
+        })
     }
 
     fn new(
         (at, version, seeks): (i64, u64, u64),
-        before: (u64, u64),
+        before: (u64, u64, usize),
         decoder: Option<&VideoDecoder>,
     ) -> Self {
         let after = Self::work(decoder);
@@ -320,6 +325,7 @@ impl DecodeRecord {
             seeks,
             kept: decoder.map_or(0, VideoDecoder::kept_bytes),
             kept_times: decoder.map_or(0, |d| d.kept_times().len()),
+            held: before.2,
         }
     }
 }
@@ -370,6 +376,10 @@ pub(crate) struct Lane {
     /// fails.
     #[cfg(test)]
     pub(crate) fail_conversion: Mutex<Option<i64>>,
+    /// Amendment R63's witness (F6): the reader's stop flag is set as it
+    /// starts its decode of this time (K-2 stopping it then).
+    #[cfg(test)]
+    pub(crate) stop_at: Mutex<Option<i64>>,
     /// Amendment R53's witnesses: every reader decode, in order.
     #[cfg(test)]
     pub(crate) decodes: Mutex<Vec<DecodeRecord>>,
@@ -439,6 +449,8 @@ impl Lane {
             panicked: Mutex::default(),
             #[cfg(test)]
             fail_conversion: Mutex::default(),
+            #[cfg(test)]
+            stop_at: Mutex::default(),
             #[cfg(test)]
             decodes: Mutex::default(),
             permits: Mutex::new(PermitBook::new(parallelism)),
@@ -975,6 +987,13 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                     decoder.fail_conversion_at(at);
                 }
                 #[cfg(test)]
+                if (lane.stop_at.lock().expect("stop"))
+                    .take_if(|t| *t == at)
+                    .is_some()
+                {
+                    stop.store(true, Ordering::Release);
+                }
+                #[cfg(test)]
                 let traced =
                     crate::pf1_clock::decode_start((id, decoder.as_ref()), at, from, paused);
                 let result = match &mut decoder {
@@ -1006,6 +1025,11 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 {
                     #[cfg(test)]
                     lane.cancelled.fetch_add(1, Ordering::AcqRel);
+                    // Amendment R63 [S2c] (K-1, F6): a stopped result is a
+                    // failure too: `stopped` takes the kept window as gone.
+                    if let Some(decoder) = decoder.as_mut() {
+                        decoder.settle_kept(false);
+                    }
                     lane.lock().readers.stopped(id, lane.now());
                     drop(hold);
                     #[cfg(test)]
@@ -3528,6 +3552,67 @@ pub(crate) mod tests {
             shown.texture.rgba[..],
             reference(&document, 15).0[..],
             "C-5 at 15"
+        );
+        lane.shut_down();
+        join_within(thread);
+    }
+
+    /// Amendment R63 [S2c] (F6, K-1): item 7's VFR window
+    /// (`a_failed_window_conversion_leaves_nothing_kept`), its conversion
+    /// of 6 failing while the reader's stop flag is set (K-2 stopping it
+    /// then): the read loop's stopped path. The scheduler takes the kept
+    /// window as gone (`stopped`) and the reader idles, so the decoder
+    /// keeps nothing either: nothing is kept by the scheduler, every
+    /// reservation is its charge, and the reader's next decode (for a step
+    /// on to 30) starts with its decoder keeping nothing (before the fix it
+    /// still kept the window's raw frames below 6, uncharged).
+    #[test]
+    fn a_stopped_window_conversion_leaves_nothing_kept() {
+        let mut workload = crate::perf_fixtures::one_vfr_source((320, 180), 90);
+        workload.0.resolution = (90, 1600);
+        let (document, lane, frames, thread) = r54_preview(&workload, 20);
+        *lane.fail_conversion.lock().expect("fail") = Some(6);
+        *lane.stop_at.lock().expect("stop") = Some(6);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(19)),
+            stamp(1, 2),
+        )));
+        shown_at(&frames, 19);
+        let stopped =
+            |state: &LaneState| lane.cancelled.load(Ordering::Acquire) > 0 && !decoding(state);
+        wait_until(&lane, stopped);
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        assert_eq!(
+            decodes.last().map(|d| d.at),
+            Some(6),
+            "the reader stopped converting 6: {decodes:?}"
+        );
+        let state = lane.lock();
+        let (reserved, kept) = state.readers.reservations();
+        assert_eq!(kept, 0, "the scheduler keeps nothing");
+        assert!(
+            reserved.iter().all(|(bytes, charge)| bytes == charge),
+            "every reservation its charge: {reserved:?}"
+        );
+        drop(state);
+        lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode(30)),
+            stamp(1, 3),
+        )));
+        shown_at(&frames, 30);
+        wait_until(&lane, |state| !decoding(state));
+        let decodes = lane.decodes.lock().expect("decodes").clone();
+        let six = decodes.iter().position(|d| d.at == 6).expect("6");
+        let next = decodes.get(six + 1).expect("the reader's next decode");
+        assert!(
+            next.version > decodes[six].version,
+            "a decode of the step on: {decodes:?}"
+        );
+        assert_eq!(
+            next.held, 0,
+            "K-1: the stopped path left its decoder keeping nothing: {decodes:?}"
         );
         lane.shut_down();
         join_within(thread);

@@ -1156,6 +1156,9 @@ impl World {
         let agent = (self.agents.iter_mut()).find(|agent| agent.id == id);
         let agent = agent.expect("the agent");
         let stopped = result.is_err() && agent.stop || matches!(result, Err(MediaError::Cancelled));
+        if stopped {
+            decoder.settle(false); // the read loop's stopped path (F6)
+        }
         agent.decoder = Some(decoder);
         if stopped {
             self.readers.stopped(id, now);
