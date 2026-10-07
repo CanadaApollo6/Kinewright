@@ -17,7 +17,10 @@
 //!   decodes and discards in flight, and the admitted G; live ≤ C. And
 //!   (Amendment R64, exact) each reservation is its charge by the one
 //!   charge rule, above it only while a reader keeps the time decoded (at
-//!   most max(charge, d)).
+//!   most max(charge, d)). Amendment R66 (item 4): the charge and "kept"
+//!   come from the model's own records (the windows it holds, f, d, and
+//!   which reader's decoder or refill in flight keeps which time), never
+//!   from the scheduler's helpers; its held windows equal the scheduler's.
 //! - I2 (K-1, exact): every time a reader's decoder keeps decoded that the
 //!   plan requires is charged: reserved at max(f, d) while that reader's
 //!   slot keeps it, or its charge rides that reader's discard or decode.
@@ -27,6 +30,8 @@
 //!   a plan requires the time again, once admission reserves it.
 //! - I3 (K-3): an admitted job's set H + G fits in C less the detached
 //!   readers' charges (decodes and discards in flight, discards held).
+//!   Amendment R66 (item 4): H is the model's, its charges over the
+//!   required set; the scheduler's cached H must equal it.
 //! - I4 (R59): no reader goes idle holding discard charges or a flight.
 //! - I5 (progress): every required frame of the newest plan is resolved,
 //!   in flight, or in a live reader's plan or a waiting region; and from
@@ -351,6 +356,12 @@ struct World {
     /// handoffs ([`Self::handed_off`]), and that post's version.
     handoff: HashSet<(u8, i64)>,
     handoff_version: u64,
+    /// Amendment R66 (item 4): the model's record of the windows the
+    /// readers hold (S-3): each source's (start, t), set by the post that
+    /// holds them, gone with a post that does not plan the source, and
+    /// clipped by a current refill to what its decoder kept. The model's
+    /// charges are computed from it, never by the scheduler's helpers.
+    held: HashMap<u8, (i64, i64)>,
 }
 
 fn source(key: u8) -> usize {
@@ -376,11 +387,36 @@ impl World {
             applying: None,
             handoff: HashSet::new(),
             handoff_version: 0,
+            held: HashMap::new(),
         }
     }
 
     fn kept_size(&self, key: u8) -> usize {
         F.max(self.run.decoded[source(key)])
+    }
+
+    /// Amendment R66 (item 4): a frame's charge by the one charge rule,
+    /// from the model's own records: max(f, d) below t in the window the
+    /// model holds for its source, f otherwise.
+    fn charge(&self, key: u8, at: i64) -> usize {
+        let window = (self.held.get(&key)).is_some_and(|(start, t)| (*start..*t).contains(&at));
+        if window {
+            F.max(self.kept_size(key))
+        } else {
+            F
+        }
+    }
+
+    /// Amendment R66 (item 4): whether a reader keeps `at` of `key`
+    /// decoded, by the model's records: its decoder's frames, or the
+    /// window times its refill in flight will keep.
+    fn keeps(&self, key: u8, at: i64) -> bool {
+        (self.agents.iter()).any(|agent| {
+            let refilling = matches!(agent.doing, Doing::Decode { from: Some(_), .. });
+            agent.key == key
+                && ((agent.decoder.as_ref()).is_some_and(|kept| kept.times().contains(&at))
+                    || refilling && agent.retain.contains(&at))
+        })
     }
 
     fn agent(&mut self, id: u64) -> &mut Agent {
@@ -642,6 +678,8 @@ impl World {
                 self.readers.exited(id);
             }
             Op::Clear => {
+                // Its empty post holds no window.
+                self.held.clear();
                 let (retired, posted) = self.readers.clear_cache(false, self.now);
                 self.retired(&retired, posted, rng);
             }
@@ -879,11 +917,21 @@ impl World {
             Ok(planned) => planned,
             Err(reason) => {
                 self.reach.fallbacks[reason] += 1;
+                self.held.clear(); // an empty plan holds no window
                 let posted = self.readers.post(Vec::new(), (HashMap::new(), 0), self.now);
                 self.posted(posted);
                 return;
             }
         };
+        // The windows this post holds, of the sources it plans.
+        let planned_keys: HashSet<u8> = (per_source.iter())
+            .filter(|(_, required, lookahead)| !required.is_empty() || !lookahead.is_empty())
+            .map(|(key, ..)| *key)
+            .collect();
+        self.held = (windows.iter())
+            .filter(|(key, _)| planned_keys.contains(key))
+            .map(|(key, window)| (*key, *window))
+            .collect();
         self.readers.hold(windows, kept);
         let (detached, now) = (self.detached.clone(), self.now);
         let keeping: Vec<(u64, u8, BTreeSet<i64>)> = (self.readers.slots.iter())
@@ -1276,6 +1324,11 @@ impl World {
                 self.reach.stale_refills += 1;
                 let times = agent.decoder.as_ref().map(KeptFrames::times);
                 agent.unowed.extend(times.unwrap_or_default());
+            } else if let Some((start, t)) = self.held.get_mut(&key)
+                && *t == at
+            {
+                // A current refill's window starts where its decoder kept.
+                *start = (*start).max(kept_from.unwrap_or(at).min(at));
             }
             self.readers.refilled(id, (at, version), kept_from);
         }
@@ -1495,26 +1548,30 @@ impl World {
         // I1 (K-1, the one charge rule, exact): a reservation is its
         // charge, and above it only while a reader keeps the time decoded
         // (at most max(charge, d)).
+        // Amendment R66 (item 4): both from the model's records (its held
+        // windows, f, d, and which reader keeps which time).
+        let windows: BTreeMap<u8, (i64, i64)> = (readers.windows.iter())
+            .map(|(key, window)| (*key, *window))
+            .collect();
+        let held: BTreeMap<u8, (i64, i64)> = self.held.iter().map(|(k, w)| (*k, *w)).collect();
+        assert_eq!(
+            windows, held,
+            "the windows held, the scheduler's and the model's"
+        );
         for ((key, at), bytes) in &readers.reserved {
-            let charge = readers.frame_bytes(key, *at);
+            let charge = self.charge(*key, *at);
             if *bytes == charge {
                 continue;
             }
-            let retained =
-                (readers.slots.iter()).any(|slot| slot.key == *key && slot.retained.contains(at));
-            let decoded = (self.agents.iter()).any(|agent| {
-                agent.key == *key
-                    && (agent.decoder.as_ref()).is_some_and(|kept| kept.times().contains(at))
-            });
-            let most = if retained || decoded {
+            let kept = self.keeps(*key, *at);
+            let most = if kept {
                 charge.max(self.kept_size(*key))
             } else {
                 charge
             };
             assert!(
                 (charge..=most).contains(bytes),
-                "I1: {at} of source {key} reserved {bytes}, its charge {charge} \
-                 (kept: retained {retained}, decoded {decoded})"
+                "I1: {at} of source {key} reserved {bytes}, its charge {charge} (kept {kept})"
             );
         }
         self.check_kept();
@@ -1522,7 +1579,15 @@ impl World {
         // I3.
         if let Some(job) = &self.job {
             let room = readers.budget.saturating_sub(self.detached_charges());
-            let set = readers.required_bytes + job.generated;
+            // Amendment R66 (item 4): H by the model's charges.
+            let h: usize = (readers.required.iter())
+                .map(|(key, at)| self.charge(*key, *at))
+                .sum();
+            assert_eq!(
+                readers.required_bytes, h,
+                "I3: the scheduler's H against the model's"
+            );
+            let set = h + job.generated;
             assert!(
                 set <= room,
                 "I3: H + G = {set} over C less the detached readers' charges ({room})"
