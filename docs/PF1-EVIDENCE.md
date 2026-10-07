@@ -6517,15 +6517,16 @@ The backward mean is 0.40–0.63 of the reference's.
 - **The R59 job never ran in `seek_gop60`.** A traced candidate run (LL, all three seeds,
   `r59/diag/trace-gop60-LL.txt.gz`) has 0 `Discard` events in 600 steps, against 10 admission waits. On this workload
   the candidate executes the pre-fix code path, plus the test-build counters.
-- **Findings:**
-  - **In this session the pre-fix build misses L-4a on LL as well** (23.7 ms; 17.3 in r58). The LL render (lavapipe,
-    CPU) is 10–11 ms here against 7.5–8.1 in r58.
-  - **The candidate's LL hit p95 is 1.11× the pre-fix build's in all three pairs** (about +2.6 ms; wait +0.7 ms and
-    render +0.5 ms on the means). The candidate lanes ran at the higher load in all three LL pairs (11.0, 11.4 and
-    11.2 against 8.0, 10.7 and 9.9). That is an annotation, not counter evidence, and the trace rules out the R59
-    job. **The 1.11 is unexplained.**
-  - **L-4a on LL is therefore not re-confirmed at `c90d062`.** Its pass stands at R57's code (r57: 17.6 ms; r58: 17.3
-    ms). This is for the lead. L-4a on LH stays as R58 records it.
+- **Findings (the lead's reading, R60):**
+  - **This session's absolute L-4a miss on LL is environmental.** The pre-fix build, R57's exact code, misses it
+    too (23.7 ms, against 17.3 in r58). The counters say why: the hit's lavapipe render rose from 7.5–8.1 ms to 10–11
+    ms on both binaries, while decode, conversion and CPU per refill are unchanged. Under R50 the miss is shared by
+    identical code and attributed by the counters. **L-4a on LL stays passed on the r57/r58 evidence (17.6 / 17.3
+    ms).** L-4a on LH stays as R58 records it.
+  - **The candidate's LL hit p95 was 1.11× the pre-fix build's in all three r59c pairs** (about +2.6 ms; wait +0.7
+    ms and render +0.5 ms on the means). The candidate lanes ran at the higher load in all three pairs (11.0, 11.4
+    and 11.2 against 8.0, 10.7 and 9.9), which is an annotation, not counter evidence, and the trace rules out the
+    R59 job. Amendment R60 isolated it (below).
 
 **P-play (3 pairs; held max ms and dropped, cand against ref):**
 
@@ -6572,6 +6573,62 @@ all three. Wall time cand/S0 is 0.157, 0.178 and 0.156, median **0.157** (r58: 0
   - L-4a on LH: *environment-limited (GPU idle clocks), re-checked at S4's pinned run* (R58), beside G3;
   - G14 on LH `feed_4x5`: shared with the reference, with the "~1 s holds" finding, for S4;
   - r58's 8,250 ms LH `feed_4x5` hold: unexplained (no counters).
-- **Open, for the lead:** L-4a on LL is not re-confirmed at `c90d062`. Both binaries miss it in this session, and
-  the candidate is 1.11× the pre-fix code in the paired check, which the trace does not explain.
+- **L-4a on LL:** passed on the r57/r58 evidence (17.6 / 17.3 ms); this session's absolute miss is shared by the
+  identical pre-fix code and attributed by the counters to the LL render (lead, R60).
+- **For the lead:** R60's three-way check (below) does not reproduce the 1.11, but its result falls outside R60's
+  four readings.
 - The E13.6.7 and E13.6.8 estimates stay estimates.
+
+**Amendment R60: the three-way paired check (r60).** LL only, COUNT P-seek `seek_gop60`, 05:01–05:20 EDT on
+2026-10-07, all 12 lanes exit 0. Three binaries, four Latin-square rotations (pre, diag, cand; diag, cand, pre;
+cand, pre, diag; pre, cand, diag):
+- pre: `cand-5fa62b4` (`b1cf2d9c…`, R57's code);
+- diag: `diag-counters` (`b8d2fba6…`, the same code plus the R59 test-build counters);
+- cand: `cand-c90d062` (`55acda05…`, the fix plus the counters).
+
+Every lane ran with the R56 trace on (`PF1_TRACE`), the same on all three binaries, to count `Discard` events per
+lane. The r59c lanes were untraced. Load at lane start was 6.1–16.4 (annotation, R50). Logs:
+`s2c-timing/r60/timing-r60.log.gz`, `samples-r60.log.gz`, `analyze-r60.txt` and `trace-*.txt.gz`. Per lane, the
+median of its three runs:
+
+| Lane | Load | Hit p95 (ms) | Hit mean | Wait / render mean | CPU per refill (ms) | `Discard` events | Admission waits (traced) |
+|---|---|---|---|---|---|---|---|
+| pre1 | 6.1 | 22.5 | 15.9 | 3.6 / 9.7 | 453 | — | 0 |
+| diag1 | 8.6 | 28.0 | 19.8 | 5.3 / 11.8 | 474 | — | 17 |
+| cand1 | 12.0 | 18.9 | 13.8 | 2.5 / 8.9 | 456 | 0 | 20 |
+| diag2 | 9.8 | 21.7 | 15.3 | 3.7 / 9.0 | 456 | — | 16 |
+| cand2 | 10.5 | 21.3 | 15.4 | 3.5 / 9.2 | 456 | 0 | 17 |
+| pre2 | 11.6 | 30.2 | 19.6 | 5.7 / 11.0 | 460 | — | 0 |
+| cand3 | 13.0 | 23.1 | 15.8 | 4.0 / 9.2 | 456 | 0 | 15 |
+| pre3 | 15.0 | 22.9 | 16.2 | 4.4 / 9.4 | 459 | — | 0 |
+| diag3 | 11.9 | 27.8 | 18.8 | 5.1 / 10.8 | 469 | — | 9 |
+| pre4 | 14.5 | 24.0 | 17.5 | 4.7 / 10.0 | 460 | — | 0 |
+| cand4 | 16.4 | 24.5 | 17.9 | 4.9 / 10.1 | 466 | 0 | 15 |
+| diag4 | 14.6 | 23.7 | 17.1 | 4.1 / 10.5 | 462 | — | 21 |
+
+`Discard` exists only in the candidate; pre and diag have no discard-only job. Idle-with-discards was 0 in every
+lane.
+
+Hit p95 ratios per rotation, and their median:
+- **diag / pre:** 1.24, 0.72, 1.21, 0.99 → **1.10**;
+- **cand / pre:** 0.84, 0.71, 1.01, 1.02 → **0.92**;
+- **cand / diag:** 0.68, 0.98, 0.83, 1.03 → **0.91**.
+
+The hit means read the same way: 1.07, 0.92 and 0.92.
+
+**Reading.** None of R60's four readings fits:
+- cand is not within 1.05 of diag (0.91);
+- cand is not above 1.05 against both (it is the fastest of the three);
+- the three are not all within 1.05 of one another.
+
+What the counters show:
+- **The candidate is not slower than the pre-fix code** (0.92). The r59c 1.11 does not reproduce. Over r59c's three
+  pairs and these four, cand/pre is 0.71, 0.84, 1.01, 1.02, 1.11, 1.11 and 1.14, median 1.02.
+- **The R59 job never ran:** 0 `Discard` events in 1,800 traced candidate steps.
+- **CPU per refill is the same on all three** (453–474 ms).
+- **Single ratios swing by ±30% between rotations,** so on this machine a paired median of four cannot resolve 5%.
+- **The diag lanes logged the most foreign CPU in every rotation** (9,799–20,847 %·samples, against 4,336–10,903 for
+  pre and 4,393–10,667 for cand). That is an annotation only.
+
+This goes to the lead to rule on.
+
