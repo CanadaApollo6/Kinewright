@@ -1165,6 +1165,12 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let Some(slot) = self.slot(id) else {
             return Next::Retire;
         };
+        // Amendment R62 [S2c]: a reader asking is back: a discard-only job
+        // it was given has released its charges (a decode's bytes left its
+        // flight when its result came back).
+        if !matches!(slot.state, ReaderState::Decoding { .. }) {
+            slot.flight = 0;
+        }
         if shutdown || slot.state == ReaderState::Retiring {
             slot.state = ReaderState::Retiring;
             return Next::Retire;
@@ -1185,8 +1191,11 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             return self.decode(id, at, required);
         }
         // Amendment R59 [S2c]: no reader idles holding discard charges.
+        // Amendment R62 [S2c]: until it is back (its next step) they are
+        // its flight, as a decode's bytes are (detention sees them).
         if let Some(keep) = slot.discard.take() {
             let bytes = std::mem::take(&mut slot.discarding);
+            slot.flight = bytes;
             return Next::Discard { keep, bytes };
         }
         // Inactive: H-5 rebalancing, then retirement.
@@ -3682,6 +3691,58 @@ mod tests {
             readers.slots.iter().any(|slot| slot.id == stuck.id),
             "the detached reader has not exited"
         );
+    }
+
+    /// Amendment R62 [S2c] (re-review R61 P1-2): source 0's reader holds
+    /// three discarded kept frames (3f, as R59's witness sets up) and,
+    /// with no decode to start, is dispatched a discard-only job. Outside
+    /// the lock it stalls and is detached. Its charges stay its own until
+    /// it comes back: the room beside it is C less them, so a set that
+    /// fits C but not beside them falls back (K-3) rather than waiting on
+    /// it. Once it has released them and asks for its next step, they are
+    /// gone from it.
+    #[test]
+    fn a_dispatched_discard_stays_charged_to_its_reader() {
+        let mut readers = Model::new(20).with_budget(20 * F);
+        paused_step(&mut readers, 40, 36, 0);
+        let ready = post_paused(&mut readers, &[(0, 39, 36)], HashMap::new());
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let id = readers.slots[0].id;
+        let refill = loop {
+            if let Next::Decode {
+                at, version, bytes, ..
+            } = step_reader(&mut readers, id)
+            {
+                break (at, version, bytes);
+            }
+        };
+        deliver_ok(&mut readers, id, 0, refill);
+        assert_eq!(readers.slots[0].retained, BTreeSet::from([36, 37, 38]));
+        let steps = [(0, 35, 0), (1, 0, 0)];
+        let waited = post_paused(&mut readers, &steps, HashMap::from([(0, 2 * F)]));
+        assert!(matches!(waited, Admission::Wait { .. }), "it drains");
+        let Next::Discard { bytes, .. } = readers.next(id, Duration::ZERO, false) else {
+            panic!("a discard-only job");
+        };
+        assert_eq!(bytes, 3 * F, "36-38, reserved at f");
+        // It stalls outside the lock, detached.
+        let detached = [id];
+        assert_eq!(
+            readers.room(&detached),
+            20 * F - bytes,
+            "its discard counts"
+        );
+        let planned = plan_regions(&[(1u8, vec![5], vec![])], readers.limit());
+        let planned = planned.expect("a reader");
+        let set = 20 * F - bytes + F;
+        assert!(
+            readers.detained(&detached, &planned, set),
+            "K-3 falls back beside the stalled discard"
+        );
+        // It comes back: the bytes released, then its next step.
+        readers.release(bytes);
+        readers.next(id, Duration::ZERO, false);
+        assert_eq!(readers.room(&detached), 20 * F, "nothing left with it");
     }
 
     /// H-6: a reader retired while its decode ran (the preview went) stays
