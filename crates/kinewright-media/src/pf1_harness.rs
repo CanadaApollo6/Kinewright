@@ -696,16 +696,16 @@ fn pf1_play_baseline() {
     let adapter = GpuContext::headless(!hardware).expect("an adapter");
     let adapter = adapter.monitor_proof_metadata().adapter;
     let output = if device { "device" } else { "simulated" };
-    for (key, Workload(document, _media)) in play_workloads() {
-        for run in 0..runs {
-            let (_, _, line) = play_run(&document, Control::None, device);
+    play_lane(
+        play_workloads(),
+        runs,
+        |Workload(document, _media)| play_run(document, Control::None, device).2,
+        |key, run, line| {
             println!(
                 "PF1 play lane={lane} adapter={adapter} output={output} workload={key} run={run} {line}"
             );
-            assert_idle_discard(&line);
-            assert_valid(&line);
-        }
-    }
+        },
+    );
     if device || !wanted("controls") {
         return;
     }
@@ -749,13 +749,7 @@ fn seek_run(document: &Document, seed: u64) -> String {
     session.load(document);
     let counted = pf1_clock::start_run();
     let n = document.duration.0;
-    let mut state = seed;
-    let mut next = |bound: i64| {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        (state % bound as u64) as i64
-    };
+    let mut next = seek_rng(seed);
     let op = |target: i64| {
         session.drain();
         let from = Instant::now();
@@ -765,70 +759,208 @@ fn seek_run(document: &Document, seed: u64) -> String {
         let latency = session.wait_frame(target, issued, from, Duration::from_secs(10));
         latency.unwrap_or(f64::INFINITY)
     };
-    let mut random: Vec<f64> = (0..200).map(|_| op(next(n))).collect();
-    // Amendment R61 (review B2): the setup and reposition seeks' latencies,
-    // reported only through their timeouts.
-    let mut setup = Vec::new();
-    // Steps start from where the transport actually is.
-    let mut at = next(n - 13);
-    setup.push(op(at));
-    let (mut forward, mut plus_one, mut backward) = (Vec::new(), Vec::new(), Vec::new());
-    for _ in 0..200 {
-        if at + 12 >= n {
-            at = next(n - 13);
-            setup.push(op(at));
-        }
-        let step = 1 + next(12);
-        at += step;
-        let latency = op(at);
-        forward.push(latency);
-        if step == 1 {
-            plus_one.push(latency);
-        }
-    }
-    let (clock, cpu) = (pf1_clock::snapshot(), pf1_clock::process_cpu_ms());
-    let mut taps = Vec::new();
-    let traced = trace_requested();
-    start_trace(traced);
-    for _ in 0..200 {
-        if at < 12 {
-            at = 12 + next(n - 12);
-            setup.push(op(at));
-        }
-        at -= 1 + next(12);
-        let before = pf1_clock::snapshot();
-        pf1_clock::trace(pf1_clock::Event::Step, at);
-        let latency = op(at);
-        pf1_clock::trace(pf1_clock::Event::Seen, at);
-        taps.push((latency, before, pf1_clock::snapshot()));
-        backward.push(latency);
-    }
-    let events = pf1_clock::trace_off();
-    if traced {
-        write_trace(seed, &events);
-    }
-    let back = backward_counts(&taps, clock, pf1_clock::process_cpu_ms() - cpu);
-    let target = next(n - 800);
-    setup.push(op(target));
+    let mut phase = BackwardPhase::new(seed);
+    let (mut seeks, target) = seek_script(n, &mut next, |event| phase.step(event, op));
     let (drag, release_shown) = drag_and_release(&session, target, || 1 + next(4));
-    let timeouts = seek_timeouts([&random, &forward, &backward, &setup], release_shown);
+    let timeouts = seeks.timeouts(release_shown);
     let line = format!(
         "random_p95_ms={:.1} random_max_ms={:.1} forward_p95_ms={:.1} plus1_p95_ms={:.1} \
          plus1_n={} backward_combined_p95_ms={:.1} {drag} timeouts={timeouts} \
-         random_mean_ms={:.1} forward_mean_ms={:.1} {back}",
-        percentile(&mut random, 0.95),
-        percentile(&mut random, 1.0),
-        percentile(&mut forward, 0.95),
-        percentile(&mut plus_one, 0.95),
-        plus_one.len(),
-        percentile(&mut backward, 0.95),
-        mean(&random),
-        mean(&forward),
+         random_mean_ms={:.1} forward_mean_ms={:.1} {}",
+        percentile(&mut seeks.random, 0.95),
+        percentile(&mut seeks.random, 1.0),
+        percentile(&mut seeks.forward, 0.95),
+        percentile(&mut seeks.plus_one, 0.95),
+        seeks.plus_one.len(),
+        percentile(&mut seeks.backward, 0.95),
+        mean(&seeks.random),
+        mean(&seeks.forward),
+        phase.counts,
     );
     // Lead ruling after R51/R52: the session ends as P-play's and P-rss's
     // do, the engine's worker joined before the process moves on (an exit
     // 139 was the race of dropping it mid-teardown).
     format!("{line} {} {}", run_counts(counted), teardown(session))
+}
+
+/// P-seek's random draws: `next(bound)` in [0, bound) (xorshift from
+/// `seed`).
+fn seek_rng(seed: u64) -> impl FnMut(i64) -> i64 {
+    let mut state = seed;
+    move |bound: i64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state % bound as u64) as i64
+    }
+}
+
+/// Amendment R62 [S2c] (items 4 and 8): a P-seek op's kind. Each is
+/// recorded in one phase's latencies ([`SeekLatencies::record`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum SeekOp {
+    Random,
+    /// The forward phase's first seek: where the steps start.
+    Start,
+    Forward,
+    /// A forward step's reposition, near the end.
+    ForwardReposition,
+    /// A backward step's reposition, near the start.
+    BackwardReposition,
+    Backward,
+    /// The drag's start.
+    Target,
+}
+
+/// One event of P-seek's script.
+#[derive(Clone, Copy, Debug)]
+enum Seek {
+    /// An op: seek to the time and wait for its frame (its latency, ∞
+    /// when it timed out).
+    Op(SeekOp, i64),
+    /// The backward phase begins (`true`) or ends.
+    Backward(bool),
+}
+
+/// P-seek's latencies by phase.
+#[derive(Debug, Default)]
+struct SeekLatencies {
+    random: Vec<f64>,
+    forward: Vec<f64>,
+    plus_one: Vec<f64>,
+    backward: Vec<f64>,
+    /// Amendment R61 (review B2): the setup and reposition seeks and the
+    /// drag's start, reported only through their timeouts.
+    setup: Vec<f64>,
+}
+
+impl SeekLatencies {
+    /// Amendment R62 [S2c] (item 4): every op lands in a phase.
+    fn record(&mut self, kind: SeekOp, latency: f64) {
+        match kind {
+            SeekOp::Random => self.random.push(latency),
+            SeekOp::Forward => self.forward.push(latency),
+            SeekOp::Backward => self.backward.push(latency),
+            SeekOp::Start
+            | SeekOp::ForwardReposition
+            | SeekOp::BackwardReposition
+            | SeekOp::Target => self.setup.push(latency),
+        }
+    }
+
+    fn timeouts(&self, release_shown: bool) -> usize {
+        let phases = [&self.random, &self.forward, &self.backward, &self.setup];
+        seek_timeouts(phases.map(Vec::as_slice), release_shown)
+    }
+}
+
+/// Q-2 P-seek's script over `n` frames, `next` its random draws (in the
+/// order they have always been drawn), `step` running each event: 200
+/// random seeks; 200 forward steps (+1…+12) from a start, repositioned near
+/// the end; 200 backward steps (−1…−12), repositioned near the start, as
+/// the backward phase; then the drag's start. Every op is recorded by its
+/// kind (Amendment R62). Returns the latencies and the drag's start.
+fn seek_script(
+    n: i64,
+    next: &mut impl FnMut(i64) -> i64,
+    mut step: impl FnMut(Seek) -> f64,
+) -> (SeekLatencies, i64) {
+    let mut seeks = SeekLatencies::default();
+    let mut run = |event: Seek| {
+        let latency = step(event);
+        if let Seek::Op(kind, _) = event {
+            seeks.record(kind, latency);
+        }
+        latency
+    };
+    for _ in 0..200 {
+        run(Seek::Op(SeekOp::Random, next(n)));
+    }
+    // Steps start from where the transport actually is.
+    let mut at = next(n - 13);
+    run(Seek::Op(SeekOp::Start, at));
+    let mut plus_one = Vec::new();
+    for _ in 0..200 {
+        if at + 12 >= n {
+            at = next(n - 13);
+            run(Seek::Op(SeekOp::ForwardReposition, at));
+        }
+        let forward = 1 + next(12);
+        at += forward;
+        let latency = run(Seek::Op(SeekOp::Forward, at));
+        if forward == 1 {
+            plus_one.push(latency);
+        }
+    }
+    run(Seek::Backward(true));
+    for _ in 0..200 {
+        if at < 12 {
+            at = 12 + next(n - 12);
+            run(Seek::Op(SeekOp::BackwardReposition, at));
+        }
+        at -= 1 + next(12);
+        run(Seek::Op(SeekOp::Backward, at));
+    }
+    run(Seek::Backward(false));
+    let target = next(n - 800);
+    run(Seek::Op(SeekOp::Target, target));
+    seeks.plus_one = plus_one;
+    (seeks, target)
+}
+
+/// Amendment R55 / R56 / R61 (review A5): P-seek's backward phase around
+/// its ops: the clock and process CPU at its start, each backward step's
+/// counters (`Step` and `Seen` traced), and its counts at its end
+/// ([`backward_counts`]); traced only when `PF1_TRACE` asks
+/// ([`start_trace`]), the trace then written.
+struct BackwardPhase {
+    seed: u64,
+    traced: bool,
+    from: Option<([u64; pf1_clock::LEN], u64)>,
+    taps: Vec<(f64, [u64; pf1_clock::LEN], [u64; pf1_clock::LEN])>,
+    counts: String,
+}
+
+impl BackwardPhase {
+    fn new(seed: u64) -> Self {
+        Self {
+            seed,
+            traced: trace_requested(),
+            from: None,
+            taps: Vec::new(),
+            counts: String::new(),
+        }
+    }
+
+    /// Run `event`, an op by `op`.
+    fn step(&mut self, event: Seek, op: impl FnOnce(i64) -> f64) -> f64 {
+        match event {
+            Seek::Backward(true) => {
+                self.from = Some((pf1_clock::snapshot(), pf1_clock::process_cpu_ms()));
+                start_trace(self.traced);
+                0.0
+            }
+            Seek::Backward(false) => {
+                let events = pf1_clock::trace_off();
+                if self.traced {
+                    write_trace(self.seed, &events);
+                }
+                let (clock, cpu) = self.from.expect("the backward phase began");
+                let cpu = pf1_clock::process_cpu_ms() - cpu;
+                self.counts = backward_counts(&self.taps, clock, cpu);
+                0.0
+            }
+            Seek::Op(SeekOp::Backward, at) => {
+                let before = pf1_clock::snapshot();
+                pf1_clock::trace(pf1_clock::Event::Step, at);
+                let latency = op(at);
+                pf1_clock::trace(pf1_clock::Event::Seen, at);
+                self.taps.push((latency, before, pf1_clock::snapshot()));
+                latency
+            }
+            Seek::Op(_, at) => op(at),
+        }
+    }
 }
 
 /// Amendment R59: no reader idled holding discard charges in the run.
@@ -1077,11 +1209,49 @@ fn pf1_seek_baseline() {
         ("talk_recut", perf_fixtures::talk_recut),
         ("explainer_16x9", perf_fixtures::explainer_16x9),
     ];
-    for (key, make) in all.into_iter().filter(|(key, _)| wanted(key)) {
-        let Workload(document, _media) = make();
-        for run in 0..3 {
-            let line = seek_run(&document, 0x5EED_0000 + run);
-            println!("PF1 seek lane={lane} workload={key} run={run} {line}");
+    let workloads = (all.into_iter())
+        .filter(|(key, _)| wanted(key))
+        .map(|(key, make)| (key, make()));
+    seek_lane(
+        workloads,
+        |Workload(document, _media), seed| seek_run(document, seed),
+        |key, run, line| println!("PF1 seek lane={lane} workload={key} run={run} {line}"),
+    );
+}
+
+/// Amendment R62 [S2c] (item 8): P-play's measured runs: each workload
+/// `runs` times by `run`, each line reported, then checked where the lane
+/// runs it (R59: no reader idled holding discards; R61: a run Q-2 marks
+/// invalid fails the lane).
+fn play_lane<W>(
+    workloads: impl IntoIterator<Item = (&'static str, W)>,
+    runs: usize,
+    mut run: impl FnMut(&W) -> String,
+    mut report: impl FnMut(&str, usize, &str),
+) {
+    for (key, workload) in workloads {
+        for index in 0..runs {
+            let line = run(&workload);
+            report(key, index, &line);
+            assert_idle_discard(&line);
+            assert_valid(&line);
+        }
+    }
+}
+
+/// Amendment R62 [S2c] (items 4 and 8): P-seek's runs: each workload three
+/// times by `run` (seeds `0x5EED_0000` + run), each line reported, then
+/// checked where the lane runs it (R59: no reader idled holding discards;
+/// an op that timed out, any phase's, fails the lane).
+fn seek_lane<W>(
+    workloads: impl IntoIterator<Item = (&'static str, W)>,
+    mut run: impl FnMut(&W, u64) -> String,
+    mut report: impl FnMut(&str, u64, &str),
+) {
+    for (key, workload) in workloads {
+        for index in 0..3 {
+            let line = run(&workload, 0x5EED_0000 + index);
+            report(key, index, &line);
             assert_idle_discard(&line);
             // Amendment R59: a step that timed out fails the lane.
             let timeouts = (line.split_whitespace())
@@ -1089,7 +1259,7 @@ fn pf1_seek_baseline() {
                 .expect("the timeouts field");
             assert_eq!(
                 timeouts, "0",
-                "R59: {timeouts} P-seek step(s) timed out ({key}, run {run})"
+                "R59: {timeouts} P-seek step(s) timed out ({key}, run {index})"
             );
         }
     }
@@ -1415,15 +1585,108 @@ fn pf1_engine_clock_follows_the_stepped_simulated_driver() {
     engine.pause();
 }
 
-/// Amendment R61 (review A5): without `PF1_TRACE` the backward phase does
-/// not trace; with it, it does.
+/// Amendment R61 (review A5), R62 [S2c] (item 8, the trace-request
+/// wiring): P-seek's script through its backward phase. With a trace
+/// requested the backward phase's ops (its steps and repositions), and
+/// only they, run traced; without, no op does; tracing ends with the phase, and a phase reads the request from
+/// `PF1_TRACE`.
 #[test]
 fn the_backward_phase_traces_only_on_request() {
-    start_trace(false);
-    assert!(!pf1_clock::tracing(), "traced without PF1_TRACE");
-    start_trace(true);
-    assert!(pf1_clock::tracing(), "PF1_TRACE set, not traced");
-    pf1_clock::trace_off();
+    let requested = std::env::var_os("PF1_TRACE").is_some();
+    assert_eq!(BackwardPhase::new(0).traced, requested, "PF1_TRACE");
+    for requested in [false, true] {
+        let mut phase = BackwardPhase::new(0);
+        phase.traced = requested;
+        let mut seen: BTreeMap<SeekOp, BTreeSet<bool>> = BTreeMap::new();
+        let mut next = seek_rng(0x5EED_0000);
+        seek_script(1_000, &mut next, |event| {
+            phase.step(event, |_| {
+                if let Seek::Op(kind, _) = event {
+                    seen.entry(kind).or_default().insert(pf1_clock::tracing());
+                }
+                1.0
+            })
+        });
+        for (kind, traced) in &seen {
+            let phase = [SeekOp::BackwardReposition, SeekOp::Backward];
+            let expected = requested && phase.contains(kind);
+            assert_eq!(
+                traced,
+                &BTreeSet::from([expected]),
+                "{kind:?}, requested {requested}"
+            );
+        }
+        assert!(!pf1_clock::tracing(), "tracing ends with the phase");
+        assert_eq!(phase.taps.len(), 200, "every backward step tapped");
+        assert!(phase.counts.starts_with("count_back_hits="), "the counts");
+    }
+}
+
+/// Amendment R62 [S2c] (item 4): every P-seek op's timeout fails the lane.
+/// For each kind of op (the start, both repositions and the drag's start
+/// included), a script whose ops of that kind time out counts each of
+/// them, and a line with timeouts fails the lane.
+#[test]
+fn every_p_seek_op_timeout_fails_the_lane() {
+    use SeekOp::{Backward, BackwardReposition, Forward, ForwardReposition, Random, Start, Target};
+    let kinds = [
+        Random,
+        Start,
+        Forward,
+        ForwardReposition,
+        BackwardReposition,
+        Backward,
+        Target,
+    ];
+    let script = |lost: Option<SeekOp>| {
+        let mut ops = BTreeMap::<SeekOp, usize>::new();
+        let mut next = seek_rng(0x5EED_0000);
+        let (seeks, _) = seek_script(1_000, &mut next, |event| match event {
+            Seek::Op(kind, _) => {
+                *ops.entry(kind).or_default() += 1;
+                if Some(kind) == lost {
+                    f64::INFINITY
+                } else {
+                    1.0
+                }
+            }
+            Seek::Backward(_) => 0.0,
+        });
+        (ops, seeks.timeouts(true))
+    };
+    let (ops, timeouts) = script(None);
+    assert_eq!(timeouts, 0, "no op lost");
+    assert_eq!(ops.keys().copied().collect::<Vec<_>>(), kinds, "every kind");
+    let lane = |timeouts: usize| {
+        std::panic::catch_unwind(|| {
+            let line = format!("timeouts={timeouts} count_idle_discard=0 ");
+            seek_lane([("w", ())], |(), _| line.clone(), |_, _, _| {});
+        })
+    };
+    assert!(lane(0).is_ok(), "a clean line passes");
+    for kind in kinds {
+        let (_, timeouts) = script(Some(kind));
+        assert_eq!(timeouts, ops[&kind], "{kind:?}: each op's timeout counts");
+        assert!(lane(timeouts).is_err(), "{kind:?}: the lane fails");
+    }
+}
+
+/// Amendment R62 [S2c] (item 8): P-play's lane checks each run where it
+/// runs it: an invalid run, or one with a reader idle holding discards,
+/// fails it.
+#[test]
+fn a_p_play_run_is_checked_where_the_lane_runs_it() {
+    let lane = |line: &'static str| {
+        std::panic::catch_unwind(|| {
+            play_lane([("w", ())], 2, |()| line.to_owned(), |_, _, _| {});
+        })
+    };
+    let valid = lane("valid=true elapsed_s=60.00 count_idle_discard=0 ");
+    assert!(valid.is_ok(), "a valid run passes");
+    let invalid = lane("valid=false elapsed_s=61.90 count_idle_discard=0 ");
+    assert!(invalid.is_err(), "R61: an invalid run fails the lane");
+    let idle = lane("valid=true elapsed_s=60.00 count_idle_discard=1 ");
+    assert!(idle.is_err(), "R59: an idle discard fails the lane");
 }
 
 /// Amendment R61 (review B2): a setup or reposition seek that timed out
