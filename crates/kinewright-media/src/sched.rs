@@ -661,6 +661,12 @@ pub(crate) struct Readers<K, F> {
     /// Amendment R54 (K-1): per held window's source, an unconverted window
     /// frame's reservation, max(f, d) (d: its decoded frame, kept).
     kept_sizes: HashMap<K, usize>,
+    /// Amendment R64 [S2c] (F8): the current plan's times a reader keeps
+    /// decoded that another reader will decode (B, the fallback: a keeper
+    /// that is retiring or detached, or wanted by a kept region of its
+    /// own); `kept_handoffs` counts each as it is decoded again.
+    handoff: HashSet<(K, i64)>,
+    pub(crate) kept_handoffs: u64,
 }
 
 impl<K, F> Default for Readers<K, F> {
@@ -700,6 +706,8 @@ impl<K, F> Readers<K, F> {
             travel: SourceMemory::default(),
             windows: HashMap::new(),
             kept_sizes: HashMap::new(),
+            handoff: HashSet::new(),
+            kept_handoffs: 0,
         }
     }
 
@@ -850,35 +858,144 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         }
         self.pending.clear();
         let regions_len = regions.len();
-        for (key, mut region) in regions {
-            // Amendment R54 [S2c]: a continued window's kept frames join the
-            // source's first region with required times.
-            let kept = (!region.required.is_empty())
-                .then(|| continued.remove(&key))
-                .flatten();
-            if let Some(kept) = &kept {
-                region.required.extend(kept);
-            }
-            // Amendment R53 [S2c]: the reader that keeps the region's first
-            // frame decoded first, then the nearest.
+        // Amendment R54 [S2c]: a continued window's kept frames join the
+        // source's first region with required times.
+        let regions: Vec<(K, Region, Option<Vec<i64>>)> = (regions.into_iter())
+            .map(|(key, mut region)| {
+                let kept = (!region.required.is_empty())
+                    .then(|| continued.remove(&key))
+                    .flatten();
+                if let Some(kept) = &kept {
+                    region.required.extend(kept);
+                }
+                (key, region, kept)
+            })
+            .collect();
+        let keepers = self.keepers(&regions, detached);
+        for (index, (key, region, kept)) in regions.into_iter().enumerate() {
+            // Amendment R64 [S2c] (F8): a region goes to the reader that
+            // keeps its times decoded first (keeper affinity). Amendment
+            // R53 [S2c]: otherwise to the free reader that keeps its first
+            // frame decoded, then the nearest; never to another's keeper.
             let first = region.first();
-            let free = (self.slots.iter_mut())
-                .filter(|slot| slot.key == key && slot.state != ReaderState::Retiring)
-                .filter(|slot| slot.plan.required.is_empty() && slot.plan.lookahead.is_empty())
-                .min_by_key(|slot| {
-                    let near = slot.cursor.map_or(u64::MAX, |c| c.abs_diff(first));
-                    (!slot.retained.contains(&first), near)
-                });
+            let free = match keepers[index] {
+                Some(id) => (self.slots.iter_mut()).find(|slot| slot.id == id),
+                None => (self.slots.iter_mut())
+                    .filter(|slot| slot.key == key && slot.state != ReaderState::Retiring)
+                    .filter(|slot| !keepers.contains(&Some(slot.id)))
+                    .filter(|slot| slot.plan.required.is_empty() && slot.plan.lookahead.is_empty())
+                    .min_by_key(|slot| {
+                        let near = slot.cursor.map_or(u64::MAX, |c| c.abs_diff(first));
+                        (!slot.retained.contains(&first), near)
+                    }),
+            };
             let window = self.windows.get(&key).copied();
             match free {
                 Some(slot) => slot.plan = plan(version, region, window, kept.as_deref()),
                 None => self.pending.push((key, region)),
             }
         }
+        self.hand_off(detached);
         self.want = want(self.pool, regions_len);
         Posted {
             dropped: (frames, errors),
             ..self.assign(now)
+        }
+    }
+
+    /// Amendment R64 [S2c] (F8, keeper affinity): per region, the reader it
+    /// goes to because that reader keeps some of its times decoded: a
+    /// reader neither retiring nor `detached`. Each reader takes one
+    /// region: the one with most of its kept times required (then most
+    /// kept, then the first); a region with the kept times of two readers
+    /// goes to the one keeping more of them.
+    fn keepers(
+        &self,
+        regions: &[(K, Region, Option<Vec<i64>>)],
+        detached: &[u64],
+    ) -> Vec<Option<u64>> {
+        let mut wants: Vec<(
+            std::cmp::Reverse<usize>,
+            std::cmp::Reverse<usize>,
+            usize,
+            u64,
+        )> = Vec::new();
+        for (index, (key, region, _)) in regions.iter().enumerate() {
+            let keepers = (self.slots.iter())
+                .filter(|slot| &slot.key == key && slot.state != ReaderState::Retiring)
+                .filter(|slot| !detached.contains(&slot.id));
+            for slot in keepers {
+                let kept =
+                    |times: &[i64]| times.iter().filter(|t| slot.retained.contains(t)).count();
+                let required = kept(&region.required);
+                let all = required + kept(&region.lookahead);
+                if all > 0 {
+                    wants.push((
+                        std::cmp::Reverse(required),
+                        std::cmp::Reverse(all),
+                        index,
+                        slot.id,
+                    ));
+                }
+            }
+        }
+        wants.sort_unstable();
+        let mut keepers = vec![None; regions.len()];
+        let mut taken = HashSet::new();
+        for (_, _, index, id) in wants {
+            if keepers[index].is_none() && taken.insert(id) {
+                keepers[index] = Some(id);
+            }
+        }
+        keepers
+    }
+
+    /// Amendment R64 [S2c] (F8, B: the fallback): a time a reader keeps
+    /// decoded that the plan gave another reader (or a waiting region) is
+    /// decoded again there. A live reader's kept times outside its new
+    /// plan go out through a discard, their reservations riding it (R57,
+    /// R59): the time is then missing, and admission reserves it for its
+    /// new reader. A retiring or detached reader's stay with it (F3: its
+    /// charges do not grow after detention decided), D13's gap. Each such
+    /// time is counted when it is decoded again (`kept_handoffs`).
+    fn hand_off(&mut self, detached: &[u64]) {
+        self.handoff.clear();
+        let wanted = &self.wanted;
+        for slot in &mut self.slots {
+            let own: Vec<i64> = (slot.plan.required.iter())
+                .chain(&slot.plan.lookahead)
+                .copied()
+                .filter(|at| slot.retained.contains(at))
+                .collect();
+            let elsewhere = |at: &i64| {
+                !own.contains(at)
+                    && wanted
+                        .get(&slot.key)
+                        .is_some_and(|wanted| wanted.contains(at))
+            };
+            let handed: Vec<i64> = slot.retained.iter().copied().filter(elsewhere).collect();
+            if handed.is_empty() {
+                continue;
+            }
+            self.handoff
+                .extend(handed.iter().map(|at| (slot.key.clone(), *at)));
+            if slot.state == ReaderState::Retiring || detached.contains(&slot.id) {
+                continue;
+            }
+            let low = own.iter().min().copied().unwrap_or(i64::MAX);
+            let bound = own.iter().max().copied().unwrap_or(i64::MIN);
+            let gone: Vec<i64> = (slot.retained.iter())
+                .copied()
+                .filter(|at| !(low..=bound).contains(at))
+                .collect();
+            for at in gone {
+                slot.retained.remove(&at);
+                if let Some(bytes) = self.reserved.remove(&(slot.key.clone(), at)) {
+                    slot.discarding = slot.discarding.saturating_add(bytes);
+                }
+            }
+            let narrowed = |(l, b): (i64, i64)| (l.max(low), b.min(bound));
+            slot.discard = Some(slot.discard.map_or((low, bound), narrowed));
         }
     }
 
@@ -1542,6 +1659,19 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             gone = std::mem::take(&mut slot.retained);
         }
         self.unkept(&key, gone);
+        // Amendment R64 [S2c] (F8): a kept time handed to this reader is
+        // decoded again (a refill's window, or this decode's time).
+        let again = match from {
+            Some(start) => (start..=at)
+                .filter(|t| self.handoff.remove(&(key.clone(), *t)))
+                .count(),
+            None => usize::from(self.handoff.remove(&(key.clone(), at))),
+        };
+        if again > 0 {
+            self.kept_handoffs += again as u64;
+            #[cfg(test)]
+            crate::pf1_clock::add(crate::pf1_clock::KEPT_HANDOFF, again as u64);
+        }
         self.merged_rewinds += u64::from(rewind);
         Next::Decode {
             at,
@@ -4367,6 +4497,151 @@ mod tests {
             "each job's fold is counted, no merge: {seen:?}"
         );
         bounded(&seen, readers.merged_rewinds);
+    }
+
+    /// Source 0's reader refilled [36, 39] (C = 20f): 39 is converted and
+    /// it keeps 36–38 decoded. Returns its id.
+    fn keeping_36_to_38(readers: &mut Model) -> u64 {
+        paused_step(readers, 40, 36, 0);
+        let ready = post_paused(readers, &[(0, 39, 36)], HashMap::new());
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let id = (readers.slots.iter().find(|slot| slot.key == 0)).map(|slot| slot.id);
+        let id = id.expect("source 0's reader");
+        let refill = loop {
+            if let Next::Decode {
+                at, version, bytes, ..
+            } = step_reader(readers, id)
+            {
+                break (at, version, bytes);
+            }
+        };
+        assert_eq!(refill.0, 39, "the refill's t");
+        deliver_ok(readers, id, 0, refill);
+        assert_eq!(
+            readers.slot(id).expect("it").retained,
+            BTreeSet::from([36, 37, 38])
+        );
+        id
+    }
+
+    /// Playback of source 0's `regions` (required, lookahead), G = 0, as
+    /// the preview posts it (no window held; `kept`, max(f, d)).
+    fn post_playback(
+        readers: &mut Model,
+        regions: &[(&[i64], &[i64])],
+        kept: usize,
+    ) -> Posted<u8, Fr> {
+        let regions = (regions.iter())
+            .map(|(required, lookahead)| {
+                let region = Region {
+                    required: required.to_vec(),
+                    lookahead: lookahead.to_vec(),
+                    merged: false,
+                };
+                (0u8, region)
+            })
+            .collect();
+        readers.hold(HashMap::new(), HashMap::from([(0u8, kept)]));
+        let posted = readers.post(regions, (HashMap::from([(0u8, F)]), 0), Duration::ZERO);
+        readers.release(posted.dropped.0.iter().map(Fr::bytes).sum());
+        posted
+    }
+
+    /// Amendment R64 [S2c] (F8, keeper affinity; seed 16102's shape):
+    /// source 0's reader keeps 36–38 decoded. Playback requires 25 and 37,
+    /// two regions, 25's first. 37's region goes to the reader that keeps
+    /// 37 (it converts it); 25's takes a new reader. Before the fix 25's
+    /// region took the only free reader, and a new one decoded 37 again
+    /// while the first kept it, its reservation consumed (K-1).
+    #[test]
+    fn a_region_goes_to_the_reader_that_keeps_its_times() {
+        let mut readers = Model::new(20).with_budget(20 * F);
+        let id = keeping_36_to_38(&mut readers);
+        let posted = post_playback(&mut readers, &[(&[25], &[26, 27]), (&[37], &[38])], F);
+        let keeper = readers.slot(id).expect("the keeper");
+        assert_eq!(
+            (keeper.plan.required.clone(), keeper.plan.lookahead.clone()),
+            (vec![37], vec![38]),
+            "37's region goes to its keeper"
+        );
+        assert_eq!(keeper.discard, None, "it keeps 37 and 38");
+        assert_eq!(posted.spawn.len(), 1, "25's region takes a new reader");
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        let next = step_reader(&mut readers, id);
+        assert!(
+            matches!(
+                next,
+                Next::Decode {
+                    at: 37,
+                    from: None,
+                    ..
+                }
+            ),
+            "{next:?}"
+        );
+        assert!(readers.slot(id).expect("it").converting, "a conversion");
+        let new = posted.spawn[0].0;
+        step_reader(&mut readers, new);
+        let next = step_reader(&mut readers, new);
+        assert!(matches!(next, Next::Decode { at: 25, .. }), "{next:?}");
+        assert_eq!(readers.kept_handoffs, 0, "nothing decoded again");
+    }
+
+    /// Amendment R64 [S2c] (F8, B: the fallback): source 0's reader keeps
+    /// 36–38 decoded. Playback requires 36 and 38, two regions; the keeper
+    /// takes one (36's, the first of equals). Its kept times outside its
+    /// new plan (37, 38) go out through a discard, 38's reservation riding
+    /// it (K-1); 38 is then missing, admission reserves it for the new
+    /// reader, which decodes it again: counted once.
+    #[test]
+    fn a_kept_time_its_keeper_cannot_take_is_discarded_and_counted() {
+        let mut readers = Model::new(20).with_budget(20 * F);
+        let id = keeping_36_to_38(&mut readers);
+        let reserved = |readers: &Model, at: i64| readers.reserved.get(&(0, at)).copied();
+        let charge = reserved(&readers, 38).expect("38 reserved");
+        let posted = post_playback(&mut readers, &[(&[36], &[]), (&[38], &[])], F);
+        let keeper = readers.slot(id).expect("the keeper");
+        assert_eq!(keeper.plan.required, [36], "the keeper's own region");
+        assert_eq!(keeper.retained, BTreeSet::from([36]));
+        assert_eq!(keeper.discard, Some((36, 36)), "37 and 38 go out");
+        assert_eq!(keeper.discarding, charge, "38's charge rides the discard");
+        assert_eq!(reserved(&readers, 38), None, "38 is missing");
+        assert_eq!(posted.spawn.len(), 1, "38's region takes a new reader");
+        assert!(matches!(readers.admit(0), Admission::Ready { .. }));
+        assert_eq!(
+            reserved(&readers, 38),
+            Some(F),
+            "reserved for the new reader"
+        );
+        let own = reserved(&readers, 36).expect("36 reserved");
+        let next = step_reader(&mut readers, id);
+        let Next::Decode {
+            at, discard, bytes, ..
+        } = next
+        else {
+            panic!("{next:?}");
+        };
+        assert_eq!(
+            (at, discard),
+            (36, Some((36, 36))),
+            "36 converts, the discard rides"
+        );
+        assert_eq!(bytes, own + charge, "36's charge and 38's");
+        let new = posted.spawn[0].0;
+        step_reader(&mut readers, new);
+        let next = step_reader(&mut readers, new);
+        assert!(
+            matches!(
+                next,
+                Next::Decode {
+                    at: 38,
+                    from: None,
+                    ..
+                }
+            ),
+            "{next:?}"
+        );
+        assert_eq!(readers.kept_handoffs, 1, "38 decoded again, counted");
     }
 
     /// Step reader `id` once as its thread would, granting in full;

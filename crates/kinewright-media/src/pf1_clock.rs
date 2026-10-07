@@ -38,7 +38,9 @@ pub(crate) const KEPT_BYTES: usize = 14;
 pub(crate) const WINDOWS_FULL: usize = 15;
 pub(crate) const ADMIT_WAITS: usize = 16; // count, total ns, longest ns
 pub(crate) const IDLE_DISCARD: usize = 19;
-pub(crate) const LEN: usize = 20;
+/// Amendment R64 (F8): kept times decoded again by another reader.
+pub(crate) const KEPT_HANDOFF: usize = 20;
+pub(crate) const LEN: usize = 21;
 
 static COUNTS: [AtomicU64; LEN] = [const { AtomicU64::new(0) }; LEN];
 

@@ -568,20 +568,23 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
 /// Amendment R59: one run's load-independent counters since `from`: frames
 /// decoded and converted, the preview's admission waits (count, total and
 /// longest) and the invariant "a reader idle while holding discard
-/// charges", which must stay 0.
+/// charges", which must stay 0. Amendment R64 (F8): kept times another
+/// reader decoded again (`kept_handoff_redecode`, expected rare).
 fn run_counts(from: [u64; pf1_clock::LEN]) -> String {
-    use pf1_clock::{ADMIT_WAITS, CONVERT_T, CONVERT_W, DECODED, IDLE_DISCARD};
+    use pf1_clock::{ADMIT_WAITS, CONVERT_T, CONVERT_W, DECODED, IDLE_DISCARD, KEPT_HANDOFF};
     let to = pf1_clock::snapshot();
     let d = |i: usize| to[i] - from[i];
     format!(
         "count_run_decoded={} count_run_converted={} count_admit_waits={} \
-         count_admit_wait_ms={:.1} count_admit_wait_max_ms={:.1} count_idle_discard={}",
+         count_admit_wait_ms={:.1} count_admit_wait_max_ms={:.1} count_idle_discard={} \
+         count_kept_handoff_redecode={}",
         d(DECODED),
         d(CONVERT_T) + d(CONVERT_W),
         d(ADMIT_WAITS),
         d(ADMIT_WAITS + 1) as f64 / 1e6,
         to[ADMIT_WAITS + 2] as f64 / 1e6,
         d(IDLE_DISCARD),
+        d(KEPT_HANDOFF),
     )
 }
 

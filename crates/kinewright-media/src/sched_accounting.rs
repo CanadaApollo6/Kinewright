@@ -911,6 +911,7 @@ impl World {
     /// A reader asks for its next step (`read`'s loop head).
     fn step(&mut self, id: u64) {
         let now = self.now;
+        let counted = self.readers.kept_handoffs;
         let next = self.readers.next(id, now, false);
         let slot = (self.readers.slots.iter()).find(|slot| slot.id == id);
         let retain = self.readers.retaining(id);
@@ -969,7 +970,7 @@ impl World {
             }
         };
         if let Next::Decode { at, from, .. } = next {
-            self.check_redecode(id, (at, from.is_some()));
+            self.check_redecode(id, (at, from.is_some()), counted);
         }
         if matches!(next, Next::Wait { .. }) {
             self.reach.waits += 1;
@@ -1030,8 +1031,11 @@ impl World {
 
     /// I6 (Amendment R64, F8): reader `id`'s decode of `at` (a refill's:
     /// and of the window times it keeps) decodes no time another live
-    /// reader (neither retiring nor detached) keeps decoded.
-    fn check_redecode(&self, id: u64, (at, refill): (i64, bool)) {
+    /// reader (neither retiring nor detached) keeps decoded, but on B's
+    /// path: that reader's slot no longer keeps it, its discard drops it,
+    /// and the scheduler counted the decode (`kept_handoffs` past
+    /// `counted`).
+    fn check_redecode(&mut self, id: u64, (at, refill): (i64, bool), counted: u64) {
         let agent = self.agents.iter().find(|agent| agent.id == id);
         let agent = agent.expect("the agent");
         let key = agent.key;
@@ -1046,20 +1050,27 @@ impl World {
             let Some(decoder) = &other.decoder else {
                 continue;
             };
-            let retiring = (self.readers.slots.iter())
-                .any(|slot| slot.id == other.id && slot.state == ReaderState::Retiring);
-            if retiring || self.detached.contains(&other.id) {
+            let slot = (self.readers.slots.iter()).find(|slot| slot.id == other.id);
+            let Some(slot) = slot.filter(|slot| slot.state != ReaderState::Retiring) else {
+                continue;
+            };
+            if self.detached.contains(&other.id) {
                 continue;
             }
-            let twice: Vec<i64> = (decoder.times().into_iter())
-                .filter(|t| times.contains(t))
-                .collect();
-            assert!(
-                twice.is_empty(),
-                "I6: reader {id} decodes {twice:?} of source {key} while reader {} keeps them \
-                 decoded",
-                other.id
-            );
+            for t in decoder.times().iter().filter(|t| times.contains(t)) {
+                let outside = |(low, bound): (i64, i64)| !(low..=bound).contains(t);
+                let handed = !slot.retained.contains(t)
+                    && (slot.discard.is_some_and(outside)
+                        || matches!(other.doing, Doing::Discard(keep, _) if outside(keep)));
+                assert!(
+                    handed && self.readers.kept_handoffs > counted,
+                    "I6: reader {id} decodes {t} of source {key} while reader {} keeps it decoded \
+                     (handed {handed}, counted {})",
+                    other.id,
+                    self.readers.kept_handoffs - counted
+                );
+                self.reach.handoffs += 1;
+            }
         }
     }
 
@@ -1593,6 +1604,7 @@ fn sequence(seed: u64, reach: &mut Reach) {
         }
         panic!("seed {seed} {run:?}: {message}\n  ops: {trace}");
     }
+    world.reach.redecoded = world.readers.kept_handoffs;
     reach.add(&world.reach);
 }
 
@@ -1729,4 +1741,63 @@ fn a_kept_required_frame_counts_at_its_held_charge_in_k3() {
         "K-3's fallback: {:?}",
         world.reach
     );
+}
+
+/// The run seed 16102 drew (`Kept`): C = 20f, P = 4, d = 3f on source 0.
+const RUN_16102: Run = Run {
+    budget: 20 * F,
+    pool: 4,
+    decoded: [3 * F, F / 2],
+    gop: [4, 3],
+    floor: [6, 0],
+    posts: 8,
+    retires: 0,
+    returns: 1,
+    runs: 2,
+    discards: 4,
+    profile: Profile::Kept,
+};
+
+/// Amendment R64 [S2c] (F8): seed 16102's scenario. A paused step to 38
+/// refills its window, and reader 0 keeps 36 and 37 decoded. Playback
+/// then requires 25 and 37 (two regions): 37's goes to reader 0, which
+/// converts it; 25's to a new reader. Before the fix, 25's region took
+/// reader 0 (the only free reader of the source) and a new reader decoded
+/// 37 again while reader 0 kept it, its reservation consumed (I2, I6).
+#[test]
+fn a_region_goes_to_the_reader_that_keeps_its_times() {
+    use Fixed::{Op as Do, Post};
+    let world = fixed(
+        RUN_16102,
+        vec![
+            Post(vec![(0, vec![39], vec![])], true, 6 * F),
+            Do(Op::Run),
+            Post(vec![(0, vec![38], vec![])], true, 6 * F),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(
+                vec![(0, vec![25, 37], vec![26, 27, 28, 38, 39])],
+                false,
+                16 * F,
+            ),
+            Do(Op::Admit),
+            Do(Op::Step(1)),
+            Do(Op::Grant(1)),
+            Do(Op::Step(1)),
+            Do(Op::Run),
+        ],
+    );
+    let slot = |id: u64| (world.readers.slots.iter()).find(|slot| slot.id == id);
+    assert!(
+        world
+            .readers
+            .rings
+            .get(&0)
+            .is_some_and(|ring| ring.contains_key(&37)),
+        "37 is converted:\n{}",
+        world.snapshot()
+    );
+    assert_eq!(world.reach.conversions, 1, "reader 0 converted 37 (once)");
+    assert_eq!(world.readers.kept_handoffs, 0, "nothing was decoded again");
+    assert!(slot(1).is_some(), "25's region took a new reader");
 }
