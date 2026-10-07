@@ -1575,7 +1575,12 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         };
         let key = slot.key.clone();
         if let Some(at) = slot.plan.required.iter().find(|t| !resolved(t)) {
-            let reserved = self.reserved.contains_key(&(key, *at));
+            let held = |t: &i64| self.reserved.contains_key(&(key.clone(), *t));
+            // Amendment R63 [S2c] (K-2, F4): a refill's t waits until its
+            // window's times are reserved too (it keeps them as it decodes).
+            let refill = (slot.plan.window).is_some_and(|(_, t)| t == *at);
+            let window = !refill || (slot.plan.required.iter()).all(|t| resolved(t) || held(t));
+            let reserved = held(at) && window;
             return if reserved {
                 Ok((*at, true))
             } else {
@@ -3830,6 +3835,51 @@ mod tests {
             .map(|slot| slot.flight + slot.discarding)
             .sum();
         assert_eq!(readers.live().0, ring + reserved + flight, "K-1 exact");
+    }
+
+    /// Amendment R63 [S2c] (F4, K-1): a refill's t waits for its window.
+    /// C = 40f, d = 2f. Playback requires 19 and 22, each reserved at f
+    /// beside G = 30f (its frame still rendering). A paused step back to 19
+    /// refills [4, 19]: 19 stays reserved (its charge, f), but the window's
+    /// times (2f each) do not fit beside G, so admission waits, and the
+    /// reader waits too. Before the fix it dispatched 19's refill because
+    /// 19 was reserved, and kept 4–18 decoded uncharged (seed 2686's
+    /// shape). Once G is released the window is reserved and the refill
+    /// goes.
+    #[test]
+    fn a_refill_waits_until_its_window_is_reserved() {
+        let mut readers = Model::new(20).with_budget(40 * F);
+        assert_eq!(paused_step(&mut readers, 20, 0, 0), [20]);
+        post_playback(&mut readers, &[(&[19, 22], &[])], 2 * F);
+        let ready = readers.admit(30 * F);
+        assert!(matches!(ready, Admission::Ready { .. }), "19, 22 and G fit");
+        let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::from([(0, 2 * F)]));
+        assert!(
+            !matches!(ready, Admission::Ready { .. }),
+            "the window waits on G"
+        );
+        assert_eq!(readers.reserved.get(&(0, 19)), Some(&F), "19 carried");
+        let a = readers.slots[0].id;
+        for _ in 0..4 {
+            let next = step_reader(&mut readers, a);
+            assert!(
+                !matches!(next, Next::Decode { .. }),
+                "the refill waits for its window"
+            );
+        }
+        readers.release(30 * F);
+        let ready = readers.admit(0);
+        assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+        let refill = loop {
+            if let Next::Decode { at, from, .. } = step_reader(&mut readers, a) {
+                break (at, from);
+            }
+        };
+        assert_eq!(refill, (19, Some(4)), "the refill, its window reserved");
+        assert!(
+            (4..19).all(|at| readers.reserved.get(&(0, at)) == Some(&(2 * F))),
+            "max(f, d)"
+        );
     }
 
     /// Amendment R61 [S2c] (review A2a, K-3): C = 20f. Source 0's reader
