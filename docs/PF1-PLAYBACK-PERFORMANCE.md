@@ -1026,9 +1026,11 @@ direct evidence on the gate's protocol; **PB**: pending an S0 baseline.
 | G15 | Settled-idle RSS ≤ S0 baseline + 4 MiB for every workload and a title-only document | P-rss, LL pinned | S2b-4 | — | PB |
 | G8 | L-1 ≤ 40 ms, L-2 ≤ 110 ms (one source; provisional, fixed from S0 and an S2b-2 run under permits), L-3 +1 step ≤ 20 ms, L-4a backward hit ≤ 20 ms, L-5 ≥ 10 / 7 distinct stamped frames/s received during the 30 Hz drag at GOP 60 / 250, L-6 release target shown (S2a) | P-seek, LL, LH | S2c | — (T3 decoder-level) | PB |
 | G7a | 0 full-frame readbacks on the app display path | counter, CI | S3a | 1 per frame | D |
-| G7b | GPU encode ≤ 2 ms per frame | LH | S3a | — (19 ms is CPU encode) | PB |
+| G7b | Encode compute-pass p99 ≤ 2 ms in each of three warm P-play runs (R68) | LH | S3a | — (19 ms is CPU encode) | PB |
 | G2 | G1's criterion for `explainer_16x9`, `reel_9x16`, `feed_4x5`, `talk_recut` | P-play, LH | S3b | — | PB |
 | G4 | typical, `explainer_16x9` ≥ 24 fps; `blend_heavy_1080p`, `reel_9x16` ≥ 15 fps (provisional) | P-play, LL | S3b | — | PB |
+
+**R68/R68a/R70 [S3a].** G7b uses device-requested wgpu timestamps for the encode compute pass. Report n, p50, p95, p99 and max per warm `typical_1080p` P-play run; only p99 is gated. Present intervals stay paired against the unchanged S2c close binary (`cand-62a29b1`); submission-to-map latency is candidate-only information. Run LH I5/G-6 and G7b last, only after three RTX3090 utilization samples below 10%, five seconds apart. Otherwise both are pending (3090 busy); never alter the inference server or other GPU processes. The laptop's RTX4050 is correctness-only. R70's S3a production stop is 1,375 added nonblank lines; witnesses/runner have no line cap and share scaffolding.
 
 **Amendment R48 [S2b] G3 on LH is environment-blocked until S4's pinned run
 (Riel, 2026-10-05).** On an idle desktop the RTX 3090 stays mostly at P8
@@ -1344,7 +1346,7 @@ open with ⌊P / R⌋ threads; before S2b-3, each ring holds the S1d window.
 | S2b-3 | K-1…K-5 admission, `draining`, K-3 fallback, eviction | I12 + earlier; G17 | ~250 |
 | S2b-4 | H-7 idle, synchronous-decoder release on park, stress test, playback gates | I10, I15 (stress) + earlier; G1, G6, G14, G15 | ~150 |
 | S2c | S-2 shadow-anchored continuation, S-3 backward window, witnesses | C-4 + earlier; G8 | ~560 |
-| S3a | G-2…G-7 display correctness: encode, fence, rebind rule, bounded wait, Terminal handoff, flag readback, lifetimes, self-check, premultiply, app registration | I1b, I5, I6, I16 + earlier; G7a, G7b | ~950 |
+| S3a | G-2…G-7 display correctness: encode, fence, rebind rule, bounded wait, Terminal handoff, flag readback, lifetimes, self-check, premultiply, app registration | I1b, I5, I6, I16 + earlier; G7a, G7b | ~1,250 production; tests/runner uncapped (R70) |
 | S3b | Staging ring, U-2 residency | I17 + earlier; G2, G4 | ~450 |
 | S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes; the GPU state pinned and recorded | all; on LH at the pinned run: G3 (R48) and L-4a (R58); on LL at the pinned run: L-4a re-confirmed (17.6 ms at S2c, not re-confirmable on a loaded machine); the `seek_gop60` counters R65 and R67 waived (admission waits, windows filled) re-checked with more runs; D13's active RSS scenario (RSS during window cancellation, R61) | ~80 |
 

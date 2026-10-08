@@ -7081,3 +7081,35 @@ where pre's median is ≥ 20 a run, and the small-counter rule below that.)
 **Rulings (R67).** The windows-filled rise is waived explicitly (not attributed to F13), and no extra rotations are run. `6336c4d`,
 `34955fa` and `25cff0a` are accepted with the R66 commits. Nothing is pushed. Next come Astra's quick re-check, the
 push gate on the laptop, and then the push.
+
+## E14 PF1 S3a Phase 2d — GPU display, partial until the remaining gates
+
+Phase 2d follows R68/R68a/R69/R70. The S3a source is split into the opt-in encoder, GPU timestamp instrumentation, native app activation, and this evidence. D15 remains `6edf77f`. Nothing was pushed. CI-W and the lead's review rounds remain pending; this section does not close S3a.
+
+**Implementation.** The media engine's default transport stays CPU; the native app explicitly enables its display session on the shared egui-wgpu device. The three-slot display pool conserves ownership across free, pending, reserved, bound and retiring holders. A strictly later root epoch, one rebind per epoch, bounded acquisition and repaint wakeups govern reuse. Terminal disarms transfers, frees the app's native texture registration, then retires resources through observed GPU completion. Resizes retain old allocations through a post-release completion token. Device loss and receiver disconnection return charges; the latter preserves the CPU preview route.
+
+The 192 KiB exact SDR/premultiply tables drive a storage-texture encode. Self-checks sweep all f16 input patterns with asymmetric opaque channels, independent alpha, and reachable premultiply pairs. A broken table falls back to CPU without a user event. GPU non-finite flags keep their issued stamp. Full-frame readback accounting excludes diagnostic self-check copies.
+
+GPU timing measures the encode compute pass with a device-requested `TIMESTAMP_QUERY`, never CPU wall time. Query resolve/readback allocations are ledgered. Zero, reversed or unavailable timestamps are not accepted as GPU duration samples. Encoded samples are collected even when their frame is abandoned before publication; submission-to-flags-map latency is candidate-only information (R70). The on-demand release runner warms the actual paced P-play path and drains shutdown samples.
+
+**Witnesses.** `display::tests` checks I5 on the all-pattern texture and ten exact frames from every production W builder, I6's sticky flags and stamped transport refusal, G-6 fallback, and I16 ownership/epoch/completion/resize/loss/disconnect/starvation rules. The real headless app fixture reuses the existing IN1 app harness and V5 paced callback: I1b checks all 65,536 actual Color32 premultiply entries; G7a binds eight new production playback frames with zero full-frame readbacks; app Drop frees its native texture id and returns ledger charges to zero. The forced CPU G7a control records one full-frame readback and fails the GPU-route assertion.
+
+Raw runtime red/green summaries, device identities, gate logs, timing/load records, source counts and cleanup are in the main checkout's `target/review/pf/s3a-phase2-report.md` and `target/review/pf/s3a-logs/s3a-phase2d-*`. Compilation failures, fixture setup failures and a SIGKILL-interrupted earlier media run are excluded from pass evidence. The interruption's cause is unproven.
+
+**Local commits.** `abd743e` opt-in display encoder/ownership/self-check; `fb7dfc7` encode-pass timestamp instrumentation; `019481d` native app activation. Each source commit passed its laptop workspace build/clippy, touched-file formatting and full affected-crate tests. The app commit additionally passed the full workspace stage gate and an explicit app build.
+
+**Stage gate:** 3,567 passed, 0 failed, 94 ignored across 36 test programs, one test thread. Media library: 1,079 passed, 59 ignored (1,422.37 s); app: 793 passed, 4 ignored (69.69 s). Slow-test lint: 49 markers and 45 on-demand allowlist entries agree. Final RTX4050 correctness: all 13 display tests passed (278.74 s), with every W builder's ten frames exact; all three app witnesses passed (0.83 s). All 22 mutation controls have runtime red/green summary lines in the report.
+
+**LL, information only** (`llvmpipe`, Vulkan, software fallback, GPU claim false):
+
+| Run | Encode samples | p50 ms | p95 ms | p99 ms | max ms |
+|---|---:|---:|---:|---:|---:|
+| 0 | 1,799 | 1.032243 | 1.393081 | 1.677657 | 2.250668 |
+| 1 | 1,799 | 1.053924 | 1.478637 | 2.028550 | 4.860773 |
+| 2 | 1,799 | 1.050442 | 1.417126 | 1.761418 | 2.214646 |
+
+All three candidate runs and their three interleaved unchanged `cand-62a29b1` references exited 0 with Q-2 valid and zero missed callbacks. Begin/end one-minute load ranged 1.54–9.88; top-five CPU and GPU state samples were recorded. Candidate/reference present-p95 ratios were 1.053269, 1.056120 and 1.055239 (median 1.055239); the higher candidate p95 is reported without causal attribution or an improvement claim. Present intervals and candidate-only map-latency quartiles are in the report. The reference hash is unchanged (`d20efde4…`); candidate `019481d` is `c63a2ea4…`.
+
+**G7b and LH correctness: pending (3090 busy).** The final R68a check at 06:53:29/34/39 UTC on 2026-10-08 read 96%, 96%, 95% utilization, P2, 20,119 MiB used. No LH tests or timing were run. No Tensorfold/other GPU process was changed or signalled. No LH pass is inferred from the RTX4050 or LL results. CI-W and the lead's reviews remain pending.
+
+**R70 source budget against `193c1b3`:** 1,127 added nonblank production lines, including shader, app integration and timing; 1,157 test/witness/runner lines. This is below the approximately 1,250 production allowance and 1,375 stop. Test utilities are conservatively counted as production where their cfg includes `test-util`. The runner and app fixture reuse production W builders, the existing IN1 app harness and the existing V5 paced callback. No additional design amendment is proposed.
