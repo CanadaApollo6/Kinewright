@@ -360,6 +360,7 @@ impl GpuContext {
         let info = adapter.get_info();
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("Kinewright compositor device"),
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             required_limits: compositor_required_limits(wgpu::Limits::default()),
             ..Default::default()
         };
@@ -1297,8 +1298,10 @@ impl Compositor {
         } else {
             encoder.clear_buffer(&slot.flags, 0, None);
         }
+        let submitted = std::time::Instant::now();
         let (index, done) = self.submit_tracked([encoder.finish()]);
         let result = crate::display::mapped_bytes(&self.gpu, &slot.flags, index.clone());
+        display.record_timing(index, submitted.elapsed());
         let result = result.and_then(|bytes| {
             let stride = usize::try_from(self.validity_stride).expect("validity stride fits usize");
             match bytes.chunks(stride).position(|b| b[..4] != [0; 4]) {

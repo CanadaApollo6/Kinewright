@@ -3798,8 +3798,9 @@ fn native_wgpu_configuration() -> eframe::WgpuConfiguration {
     let mut configuration = eframe::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
         setup.instance_descriptor.backends = eframe::wgpu::Backends::PRIMARY;
-        setup.device_descriptor = Arc::new(|_| eframe::wgpu::DeviceDescriptor {
+        setup.device_descriptor = Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
             label: Some("Kinewright shared native device"),
+            required_features: adapter.features() & eframe::wgpu::Features::TIMESTAMP_QUERY,
             required_limits: compositor_required_limits(eframe::wgpu::Limits::default()),
             ..Default::default()
         });

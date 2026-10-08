@@ -1628,6 +1628,9 @@ impl Preview {
             self.settle_titles();
             frame
         };
+        if let Some(pool) = &display {
+            pool.collect_timing();
+        }
         if frame.is_err()
             && let (Some(pool), Some(id)) = (&mut display, id)
         {

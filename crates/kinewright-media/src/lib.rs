@@ -9,7 +9,7 @@ pub mod color_pipeline;
 mod compositor;
 mod conversion;
 mod display;
-pub use display::{DisplayConfig, DisplayFrame, DisplaySession, DisplayStatus};
+pub use display::{DisplayConfig, DisplayFrame, DisplaySession, DisplayStatus, DisplayTiming};
 mod decode;
 mod derived;
 mod derived_cache;

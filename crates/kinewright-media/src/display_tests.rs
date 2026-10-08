@@ -665,3 +665,256 @@ fn i16_paused_starvation_retries_after_a_real_lease_release() {
         "the real preview exhausted its two-interval wait"
     );
 }
+
+#[test]
+fn g7b_requested_device_queries_measure_the_encode_pass() {
+    let gpu = gpu();
+    assert!(
+        gpu.device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY),
+        "the requested device must enable timestamps"
+    );
+    let (session, shared) = DisplayPool::session(&config());
+    let mut pool = DisplayPool::new(gpu.clone(), &config(), shared).unwrap();
+    assert_eq!(
+        gpu.ledger().live_bytes(),
+        192 * 1024 + 256 + 16,
+        "timestamp buffers charged at API size"
+    );
+    let compositor = Compositor::new(gpu.clone());
+    let frame = WorkingFrame {
+        width: 8,
+        height: 8,
+        pixels: Arc::new(vec![f16::from_f32(0.5); 8 * 8 * 4]),
+    };
+    let id = pool.acquire((8, 8), Duration::ZERO, || false).unwrap();
+    let (encoder, slot) = pool.slot(id);
+    let result = compositor.render_display(
+        (8, 8),
+        &[CompositorLayer {
+            frame: &frame,
+            effects: &[],
+            transition: TransitionRenderParams::default(),
+            mode: LayerMode {
+                blend: BlendMode::Normal,
+                role: crate::compositor::LayerRole::Pixels,
+            },
+        }],
+        None,
+        encoder,
+        slot,
+    );
+    pool.collect_timing();
+    pool.abandon(id); // no publication: dropped encodes still belong in the sample population
+    result.unwrap();
+    let timings = session.timings();
+    assert_eq!(timings.len(), 1);
+    let sample = timings[0];
+    assert!(
+        sample
+            .encode_ms
+            .is_some_and(|ms| ms.is_finite() && ms > 0.0),
+        "real nonzero compute-pass timestamps required"
+    );
+    assert!(sample.submission_to_map_ms.is_finite() && sample.submission_to_map_ms >= 0.0);
+    assert!(session.timings().is_empty(), "samples are consumed once");
+    let (_, _, readback) = pool.encoder.timestamps.as_ref().unwrap();
+    let mut commands = gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    commands.clear_buffer(readback, 0, None);
+    pool.encoder
+        .record_timing(gpu.queue.submit([commands.finish()]), Duration::ZERO);
+    pool.collect_timing();
+    assert!(
+        session.timings()[0].encode_ms.is_none(),
+        "zero query results are unavailable, never a zero-duration pass"
+    );
+    assert_eq!(gpu.full_frame_readbacks(), 0);
+    drop((session, pool, compositor));
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+
+#[test]
+#[ignore = "S3a G7b/LL timing: release binary, isolated lane, load recorded"]
+#[allow(clippy::assertions_on_constants)]
+fn s3a_g7b_play_timing() {
+    use crate::{
+        FfmpegMediaEngine,
+        audio::{AudioDiagnostics, simulated::SimulatedAudio},
+        perf_fixtures::{Workload, cuts},
+        test_support::TempDirectory,
+    };
+    use kinewright_core::{MediaEvent, Playback, PlaybackState};
+    fn consume(
+        session: &mut DisplaySession,
+        engine: &FfmpegMediaEngine,
+        epoch: &mut u64,
+    ) -> Option<(TimeCode, TimeCode)> {
+        session.advance(*epoch);
+        let received = session.reserve().and_then(|frame| {
+            let position = engine.position();
+            let current = frame.stamp.epoch == engine.stamp().epoch;
+            let arrival = (current && position >= frame.at).then_some((frame.at, position));
+            if current && frame.at == position {
+                engine.ack_presented(frame.stamp, frame.at, Instant::now(), false);
+                session.bind(*epoch, frame);
+            }
+            arrival
+        });
+        *epoch += 1;
+        received
+    }
+    fn record(run: usize, timings: Vec<DisplayTiming>, encode: &mut Vec<f64>, maps: &mut Vec<f64>) {
+        for timing in timings {
+            let sample = timing
+                .encode_ms
+                .expect("requested-device timestamps required");
+            println!(
+                "S3A_SAMPLE run={run} encode_ms={sample:.6} map_ms={:.6}",
+                timing.submission_to_map_ms
+            );
+            encode.push(sample);
+            maps.push(timing.submission_to_map_ms);
+        }
+    }
+    let stats = |mut values: Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        [0.50, 0.95, 0.99, 1.0].map(|p| {
+            values
+                .get(((values.len() as f64 * p).ceil() as usize).saturating_sub(1))
+                .copied()
+                .unwrap_or(f64::NAN)
+        })
+    };
+    assert!(!cfg!(debug_assertions), "release timing only");
+    let Workload(document, _media) = cuts((1920, 1080), 600, 3, 360, 15);
+    let runs: usize = std::env::var("S3A_RUNS").map_or(3, |s| s.parse().unwrap());
+    let offset: usize = std::env::var("S3A_RUN_OFFSET").map_or(0, |s| s.parse().unwrap());
+    assert!((1..=3).contains(&runs), "one to three bounded timing runs");
+    for run in offset..offset + runs {
+        let gpu = gpu();
+        let temp = TempDirectory::new("s3a-timing");
+        let audio = SimulatedAudio::paced();
+        let engine = FfmpegMediaEngine::new_for_harness(
+            gpu.clone(),
+            temp.root().into(),
+            Some(audio.clone()),
+            Arc::default(),
+            Arc::new(AudioDiagnostics::default()),
+        )
+        .unwrap();
+        let mut session = engine.enable_display(config());
+        engine.set_document(Arc::new(document.clone()));
+        let initialize = Instant::now();
+        loop {
+            if let Some(frame) = session.reserve() {
+                session.bind(0, frame);
+                break;
+            }
+            assert!(
+                initialize.elapsed() < Duration::from_secs(120),
+                "display initialization deadline"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            session.status(),
+            DisplayStatus::Gpu,
+            "timing requires GPU route"
+        );
+        let events = engine.events();
+        events.try_iter().for_each(drop);
+        let mut epoch = 1;
+        engine.play(TimeCode::ZERO);
+        let warm = Instant::now();
+        while warm.elapsed() < Duration::from_secs(2) {
+            consume(&mut session, &engine, &mut epoch);
+            drop(session.timings());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        engine.pause();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let event = events
+                .recv_deadline(deadline)
+                .expect("warm-up pause completed");
+            assert!(event.error().is_none(), "warm-up error: {event:?}");
+            if event == MediaEvent::PlaybackStateChanged(PlaybackState::Paused) {
+                break;
+            }
+        }
+        let paused = Instant::now() + Duration::from_secs(120);
+        loop {
+            session.advance(epoch);
+            epoch += 1;
+            if let Some(frame) = session.reserve()
+                && frame.stamp == engine.stamp()
+                && frame.at == engine.position()
+            {
+                break;
+            }
+            assert!(Instant::now() < paused, "warm-up paused frame completed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(session.timings());
+        let before = gpu.full_frame_readbacks();
+        let missed = audio.missed_periods();
+        let start = Instant::now();
+        let (mut previous, mut last_frame) = (None, None);
+        let (mut encode, mut maps, mut present) = (Vec::new(), Vec::new(), Vec::new());
+        engine.play(TimeCode::ZERO);
+        while engine.position() < document.duration && start.elapsed() < Duration::from_secs(66) {
+            if let Some((at, _)) = consume(&mut session, &engine, &mut epoch)
+                && last_frame.is_none_or(|last| at > last)
+            {
+                let arrived = start.elapsed().as_secs_f64() * 1000.0;
+                if let Some(previous) = previous {
+                    present.push(arrived - previous);
+                }
+                previous = Some(arrived);
+                last_frame = Some(at);
+            }
+            record(run, session.timings(), &mut encode, &mut maps);
+            for event in events.try_iter() {
+                assert!(event.error().is_none(), "P-play error: {event:?}");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        let missed = audio.missed_periods() - missed;
+        let nominal = document.duration.0 as f64 * 1000.0 * f64::from(document.fps.denominator())
+            / f64::from(document.fps.numerator());
+        let valid = engine.position() >= document.duration
+            && crate::pf1_harness::q2_valid(elapsed * 1000.0, nominal, missed);
+        session.terminal();
+        let finished = engine.finished();
+        drop(engine);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        );
+        record(run, session.timings(), &mut encode, &mut maps);
+        assert_eq!(gpu.full_frame_readbacks() - before, 0);
+        assert!(!encode.is_empty(), "nonempty GPU samples required");
+        let count = encode.len();
+        let [p50, p95, encode_p99, max] = stats(encode);
+        let p99 = encode_p99;
+        println!(
+            "S3A_G7B run={run} n={count} p50_ms={p50:.6} p95_ms={p95:.6} p99_ms={p99:.6} max_ms={max:.6} adapter={:?} valid={valid} elapsed_s={elapsed:.3} missed_callbacks={missed}",
+            gpu.monitor_proof_metadata()
+        );
+        let [p50, p95, p99, max] = stats(present);
+        println!(
+            "S3A_INFO run={run} candidate_map_ms={:?} present_p50_ms={p50:.6} present_p95_ms={p95:.6} present_p99_ms={p99:.6} present_max_ms={max:.6}",
+            stats(maps)
+        );
+        drop(session);
+        assert_eq!(gpu.ledger().live_bytes(), 0);
+        assert!(valid, "P-play Q-2 validity");
+        if std::env::var("S3A_HARDWARE").ok().as_deref() == Some("1") {
+            assert!(encode_p99 <= 2.0, "G7b p99 gate");
+        }
+    }
+}

@@ -18,6 +18,11 @@ pub struct DisplayConfig {
     pub premultiply: Box<[u8; 65536]>,
     pub repaint: Arc<dyn Fn() + Send + Sync>,
 }
+#[derive(Clone, Copy, Debug)]
+pub struct DisplayTiming {
+    pub encode_ms: Option<f64>,
+    pub submission_to_map_ms: f64,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DisplayStatus {
     Pending,
@@ -26,6 +31,7 @@ pub enum DisplayStatus {
 }
 #[derive(Default)]
 struct Exchange {
+    timing: std::collections::VecDeque<DisplayTiming>,
     ready: Option<DisplayFrame>,
     returned: Vec<usize>,
     terminal: bool,
@@ -73,6 +79,10 @@ pub struct DisplaySession {
     last_rebind: Option<u64>,
 }
 impl DisplaySession {
+    #[must_use]
+    pub fn timings(&self) -> Vec<DisplayTiming> {
+        self.shared.lock().timing.drain(..).collect()
+    }
     #[must_use]
     pub fn status(&self) -> DisplayStatus {
         self.shared.lock().status.unwrap_or(DisplayStatus::Pending)
@@ -219,6 +229,12 @@ pub(crate) struct DisplayEncoder {
     pipeline: wgpu::ComputePipeline,
     table: Ledgered<wgpu::Buffer>,
     pub(crate) executions: AtomicU64,
+    timestamps: Option<(
+        wgpu::QuerySet,
+        Ledgered<wgpu::Buffer>,
+        Ledgered<wgpu::Buffer>,
+    )>,
+    timing: Mutex<Option<DisplayTiming>>,
 }
 impl DisplayEncoder {
     pub(crate) fn new(gpu: GpuContext, config: &DisplayConfig) -> Result<Self, MediaError> {
@@ -267,11 +283,37 @@ impl DisplayEncoder {
         let index = gpu.queue.submit([commands.finish()]);
         complete(&gpu, index);
         drop(staging);
+        let timestamps = gpu
+            .device
+            .features()
+            .contains(wgpu::Features::TIMESTAMP_QUERY)
+            .then(|| {
+                let queries = gpu.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: Some("display timestamps"),
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 2,
+                });
+                (
+                    queries,
+                    buffer(
+                        &gpu,
+                        256,
+                        wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                    ),
+                    buffer(
+                        &gpu,
+                        16,
+                        wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    ),
+                )
+            });
         let encoder = Self {
             gpu,
             pipeline,
             table,
             executions: AtomicU64::new(0),
+            timestamps,
+            timing: Mutex::default(),
         };
         let checked = encoder.self_check(config);
         if let Some(error) = pollster::block_on(scope.pop()) {
@@ -314,12 +356,38 @@ impl DisplayEncoder {
             });
         let mut pass = commands.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("display encode"),
-            timestamp_writes: None,
+            timestamp_writes: self.timestamps.as_ref().map(|(query_set, _, _)| {
+                wgpu::ComputePassTimestampWrites {
+                    query_set,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: Some(1),
+                }
+            }),
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &bindings, &[]);
         pass.dispatch_workgroups(input.width().div_ceil(8), input.height().div_ceil(8), 1);
         drop(pass);
+        if let Some((queries, resolve, readback)) = &self.timestamps {
+            commands.resolve_query_set(queries, 0..2, resolve, 0);
+            commands.copy_buffer_to_buffer(resolve, 0, readback, 0, 16);
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn record_timing(&self, index: wgpu::SubmissionIndex, latency: Duration) {
+        let encode_ms = self.timestamps.as_ref().and_then(|(_, _, readback)| {
+            let bytes = mapped_bytes(&self.gpu, readback, index).ok()?;
+            let [start, end] = std::array::from_fn(|i| {
+                u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap())
+            });
+            let ticks = end.checked_sub(start)?;
+            let ms = ticks as f64 * f64::from(self.gpu.queue.get_timestamp_period()) / 1e6;
+            (ms.is_finite() && ms > 0.0).then_some(ms)
+        });
+        *self.timing.lock().unwrap_or_else(PoisonError::into_inner) = Some(DisplayTiming {
+            encode_ms,
+            submission_to_map_ms: latency.as_secs_f64() * 1000.0,
+        });
     }
     fn self_check(&self, config: &DisplayConfig) -> Result<(), MediaError> {
         // Opaque asymmetric RGB, independent alpha, then every reachable premultiply pair.
@@ -576,6 +644,21 @@ impl DisplayPool {
             view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
             allocation_id: id,
             exchange: Arc::downgrade(&self.shared),
+        }
+    }
+    pub(crate) fn collect_timing(&self) {
+        if let Some(timing) = self
+            .encoder
+            .timing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            let mut state = self.shared.lock();
+            if state.timing.len() == 2048 {
+                state.timing.pop_front();
+            }
+            state.timing.push_back(timing);
         }
     }
     pub(crate) fn publish(&self, frame: DisplayFrame) {

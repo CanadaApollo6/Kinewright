@@ -88,3 +88,4 @@ new_harness_e2e kiro_splits_then_deletes_via_the_live_mcp_server crates/kinewrig
 new_harness_e2e muse_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs any on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
 new_harness_e2e opencode_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs any on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
 new_harness_e2e qwen_splits_then_deletes_via_the_live_mcp_server crates/kinewright-agent/tests/new_harness_e2e.rs any on-demand  # live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1
+kinewright_media display::tests::s3a_g7b_play_timing crates/kinewright-media/src/display_tests.rs any on-demand  # S3a GPU encode timestamps and LL information: isolated release P-play with recorded load
