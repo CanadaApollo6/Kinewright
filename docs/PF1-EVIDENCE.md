@@ -5994,7 +5994,7 @@ and fixed it, and the closing re-time ran at `c90d062` (E13.6.10). What stays op
 E13.6.10. Both Astra stage-close reviews then said do not close; Amendment R61 fixed their findings (E13.6.11).
 R62–R64 replaced its re-time gate with work-counter equivalence and added a seeded model of the scheduler's
 accounting (E13.6.12). R66 fixed three more paths of its one charge rule, made the model's oracle its own and
-re-ran the gate; R67 accepted the one counter that moved, windows filled, as F13's effect (E13.6.13).
+re-ran the gate; R67 waived the one counter that moved, windows filled, explicitly rather than attributing it (E13.6.13).
 
 #### E13.6.1 S2c-5, open GOP (b)
 
@@ -7012,7 +7012,7 @@ records shift every seed's walk, so seeded counts are not comparable across R64 
 | F7 | seeded (25, lowest 66) + fixed | 158 (66) | was fixed case only |
 | F8 (A) | seeded + 2 fixed | 128 (11) (R64) | — |
 | F8 (B, `hand_off` removed) | seeded + 3 fixed | 515 (55) | was the F12 fixed case only |
-| F9 | seeded (24, lowest 86) | 212 (55) | was not caught at 3k |
+| F9 | seeded (24, lowest 55) | 212 (55) | was not caught at 3k |
 | F10 | seeded + fixed | 81 (167) (R64) | — |
 | F11 | seeded + fixed | 9,253 (5) (R64) | — |
 | F12 | seeded (4, lowest 1417) + 2 fixed | 39 (1417) | was fixed case only |
@@ -7058,9 +7058,11 @@ where pre's median is ≥ 20 a run, and the small-counter rule below that.)
 - **`seek_gop60` windows filled: outside R65's band, accepted under R67.**
   - Per run, cand had 52, 56, 60, 54, 52 and 60 (pooled mean 55.67) and pre had 53, 52, 59, 55, 48 and 44 (51.83):
     +7.4%.
-  - The rise is **attributed to F13 by direction only; no run isolates it.** F13 and its fit reserve a kept time
-    at max(f, d) where the old code reserved f, so less room is left and more windows stop full. R66 predicted
-    that direction before the run, and part of pre's lower count is the under-charge F13 fixes.
+  - **Accepted as an explicit waiver, not a causal attribution.** The counter counts a refill that keeps nothing
+    and a window whose conversion queue empties; it is not a budget-full stop (Astra's R67 re-check corrected the
+    lead's first reading). F13 changes what admission reserves, so it can plausibly move the counter, but no run
+    isolates F13, and the counts here neither establish that cause nor exclude reduced window coverage. No
+    starvation or lost-window scenario was found in review.
   - The noise is the same size as the shift: pre's own two rotations differ by 10.4% (medians 53 and 48).
   - Pre's level moves with load. At R64's gate, at load 19–25, pre filled 41–44 windows a run, and that gate was
     also outside the band on this counter (1.060).
@@ -7076,6 +7078,6 @@ where pre's median is ≥ 20 a run, and the small-counter rule below that.)
 - E13.6.12 now says plainly that `seek_gop60` admission waits rose from 45 to 49 over 12 runs and that the rise is
   not attributed.
 
-**Rulings (R67).** The windows-filled rise is accepted as F13's effect, and no extra rotations are run. `6336c4d`,
+**Rulings (R67).** The windows-filled rise is waived explicitly (not attributed to F13), and no extra rotations are run. `6336c4d`,
 `34955fa` and `25cff0a` are accepted with the R66 commits. Nothing is pushed. Next come Astra's quick re-check, the
 push gate on the laptop, and then the push.

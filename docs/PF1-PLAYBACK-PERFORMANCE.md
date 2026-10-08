@@ -1295,17 +1295,18 @@ change except as stated here (E13.6.13).
   exemptions are D13's kept-but-not-required gap, which ends when a plan requires the time again and admission
   reserves it, and F3's retiring reader.
 
-**Amendment R67 [S2c] The windows-filled rise is F13's (lead ruling, 2026-10-07).** At R66's re-run of the R62 gate,
+**Amendment R67 [S2c] The windows-filled rise is waived (lead ruling, 2026-10-07).** At R66's re-run of the R62 gate,
 `seek_gop60`'s windows filled rose: cand/pre 1.057 and 1.125, median 1.091; pooled, 55.67 a run against 51.83
-(+7.4%). Every work counter stayed within R65's band (E13.6.13). The rise is accepted as F13's behaviour change, not
-judged a divergence:
-- F13 and its fit reserve a kept time at max(f, d) where the old code reserved f, so less room is left and more
-  windows stop full; R66 predicted that direction before the run, and the old build's lower count was in part the
-  under-charge F13 fixes;
-- pre's own two rotations differ by 10.4% (medians 53 and 48), more than the shift.
+(+7.4%). Windows filled counts a refill that keeps nothing and a window whose conversion queue empties, not a
+budget-full stop. The rise is waived explicitly, not attributed:
+- every work counter stayed within R65's band, seek decodes are unchanged, and timeouts and guard trips are 0
+  (E13.6.13);
+- pre's own two rotations differ by 10.4% (medians 53 and 48), more than the shift;
+- F13 changes what admission reserves and may move the counter, but no run isolates it, and the counts do not
+  exclude reduced window coverage.
 
-The attribution is by direction only; no run isolates it. The gate is PASSED under R65 and R67 with the change
-recorded. S4's pinned run re-checks windows filled, with R65's admission waits.
+The gate is PASSED under R65 and R67 with the change recorded. S4's pinned run re-checks windows filled, with R65's
+admission waits.
 
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
