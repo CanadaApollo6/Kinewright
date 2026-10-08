@@ -102,3 +102,5 @@ mcp_server au6_a4_the_multicam_cuts_leave_the_master_audio_untouched crates/kine
 mcp_server au6_a5a_the_delivery_lands_on_the_ebu_r128_target crates/kinewright-agent/tests/mcp_server.rs  # 74/86
 mcp_server r28_solo_peak_resources_and_elapsed crates/kinewright-agent/tests/mcp_server.rs  # 82/84
 mcp_server solo_strip_inside_byte_budget crates/kinewright-agent/tests/mcp_server.rs  # 103/104
+
+kinewright_media sched::tests::the_reader_model_holds_for_every_short_sequence crates/kinewright-media/src/sched.rs # laptop Linux 147.82 s (D15 baseline); Windows unmeasured

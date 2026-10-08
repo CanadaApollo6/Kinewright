@@ -3310,6 +3310,10 @@ mod tests {
     /// leaf. Bounded exploration of the pure transitions: condvar wake-ups
     /// and cache clears are not modelled (their witnesses are in preview).
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_reader_model_holds_for_every_short_sequence() {
         let mut cells = BTreeSet::new();
         let mut visited = 0;
