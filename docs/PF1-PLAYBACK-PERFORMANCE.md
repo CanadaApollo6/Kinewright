@@ -1346,7 +1346,7 @@ open with ⌊P / R⌋ threads; before S2b-3, each ring holds the S1d window.
 | S2c | S-2 shadow-anchored continuation, S-3 backward window, witnesses | C-4 + earlier; G8 | ~560 |
 | S3a | G-2…G-7 display correctness: encode, fence, rebind rule, bounded wait, Terminal handoff, flag readback, lifetimes, self-check, premultiply, app registration | I1b, I5, I6, I16 + earlier; G7a, G7b | ~950 |
 | S3b | Staging ring, U-2 residency | I17 + earlier; G2, G4 | ~450 |
-| S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes; the GPU state pinned and recorded | all; on LH at the pinned run: G3 (R48) and L-4a (R58); D13's active RSS scenario (RSS during window cancellation, R61) | ~80 |
+| S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes; the GPU state pinned and recorded | all; on LH at the pinned run: G3 (R48) and L-4a (R58); on LL at the pinned run: L-4a re-confirmed (17.6 ms at S2c, not re-confirmable on a loaded machine); the `seek_gop60` counters R65 and R67 waived (admission waits, windows filled) re-checked with more runs; D13's active RSS scenario (RSS during window cancellation, R61) | ~80 |
 
 The total is about 5,560 lines (rev 3: 5,830): R15/R16 remove ≈ 450 from S2b;
 the paint marker, Terminal handoff and shadow-seek anchor add ≈ 180.
