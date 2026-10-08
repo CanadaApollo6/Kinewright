@@ -1278,6 +1278,35 @@ within 5%. One under 20 a run passes when the pooled per-run means differ by at 
 cand's per-run range overlaps pre's. A counter that must be 0 stays 0. Under it the R62 gate passed (E13.6.12). F10,
 F11 and F12 are accepted as same-rule fixes; D15 is deferred to S3.
 
+**Amendment R66 [S2c] The one charge rule on three more paths (lead ruling, 2026-10-07).** No R53–R65 semantics
+change except as stated here (E13.6.13).
+- **Admission reserves a kept time at its kept charge (F13).** A missing required time that a reader still keeps
+  decoded is reserved at max(charge, d), as K-3 counts it. R61's fit of a continued window counts every frame the
+  same way, the job's own and the continuation's, so a continuation never fits that admission cannot admit.
+- **A dispatched discard keeps its times until it is served (F14).** A reader's discard-only job keeps the kept
+  times it drops (`dispatched`) until the reader is back from it, and on close, failure and stop they go; a post
+  made meanwhile hands them off (B), and their redecode is counted. A refill's result clips the times a pending
+  discard drops to what its decoder kept, and a reader retired while it refilled keeps only what its decoder kept.
+  A retiring reader's failed result keeps nothing.
+- **A panic exit releases kept charges (F15).** `fail_start`, which a reader's panic exit calls (R43), releases its
+  kept times through `unkept`, as `exited` does (F9).
+- **The model's oracle is its own (item 4).** I1's charges and I3's H come from the model's records (the windows it
+  holds, f, d, and which reader keeps which time), never from the scheduler's helpers. The exact K-1 check's only
+  exemptions are D13's kept-but-not-required gap, which ends when a plan requires the time again and admission
+  reserves it, and F3's retiring reader.
+
+**Amendment R67 [S2c] The windows-filled rise is F13's (lead ruling, 2026-10-07).** At R66's re-run of the R62 gate,
+`seek_gop60`'s windows filled rose: cand/pre 1.057 and 1.125, median 1.091; pooled, 55.67 a run against 51.83
+(+7.4%). Every work counter stayed within R65's band (E13.6.13). The rise is accepted as F13's behaviour change, not
+judged a divergence:
+- F13 and its fit reserve a kept time at max(f, d) where the old code reserved f, so less room is left and more
+  windows stop full; R66 predicted that direction before the run, and the old build's lower count was in part the
+  under-charge F13 fixes;
+- pre's own two rotations differ by 10.4% (medians 53 and 48), more than the shift.
+
+The attribution is by direction only; no run isolates it. The gate is PASSED under R65 and R67 with the change
+recorded. S4's pinned run re-checks windows filled, with R65's admission waits.
+
 **Rec:** L-1m/L-2m and L-4b; S-3's counters (Amendment R54): backward hits served pre-converted against hits
 that waited for a conversion, windows fully converted, and frames decoded per refill; R55's per-frame
 conversion time (t and window, LL and LH), converter threads, a hit's wait split into conversion and render, and

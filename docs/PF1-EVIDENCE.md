@@ -5993,7 +5993,8 @@ timing out on the candidate only. Amendment R59 found the cause (a reader idling
 and fixed it, and the closing re-time ran at `c90d062` (E13.6.10). What stays open is listed at the end of
 E13.6.10. Both Astra stage-close reviews then said do not close; Amendment R61 fixed their findings (E13.6.11).
 R62–R64 replaced its re-time gate with work-counter equivalence and added a seeded model of the scheduler's
-accounting (E13.6.12).
+accounting (E13.6.12). R66 fixed three more paths of its one charge rule, made the model's oracle its own and
+re-ran the gate; R67 accepted the one counter that moved, windows filled, as F13's effect (E13.6.13).
 
 #### E13.6.1 S2c-5, open GOP (b)
 
@@ -6871,9 +6872,11 @@ the gate exited 0; `guard --final`: 4 candidate lanes, 0 trips. Load at lane sta
 
 (cand / pre per rotation, each the median of the lane's 3 runs → the median over rotations.)
 
-- Decodes on `seek_gop60` are identical run for run (12,793 / 12,712 / 12,653 on both binaries, and the same refill
-  and hit counts): the workload is deterministic and so is the work. `kept_handoff_redecode` is 0 in every
-  candidate run.
+- Decodes on `seek_gop60` are identical run for run in the gate's two rotations (12,793 / 12,712 / 12,653 on both
+  binaries, and the same refill and hit counts). *Corrected under Amendment R66 item 5:* they are not identical in
+  the diagnostic rotations (r64c): pre3's second run decoded 12,711 and pre4's 12,916, against cand's 12,712 in
+  both. The workload is close to deterministic, not exactly so. `kept_handoff_redecode` is 0 in every candidate
+  run.
 - Windows filled and admission waits vary run to run within each binary (windows 39–46, waits 2–7 on `pre`), as
   conversion races the steps. With 3–5 waits a run, one more wait is a 20–33% change.
 - **Diagnostic only, beyond the gate (r64c):** two more `seek_gop60` rotations (`plan-r64c.txt`, guard 0 trips, load
@@ -6887,7 +6890,10 @@ the gate exited 0; `guard --final`: 4 candidate lanes, 0 trips. Load at lane sta
   under 20 passes when the pooled per-run means differ by at most max(1, 25% of pre's mean) and cand's per-run
   range overlaps pre's; a counter that must be 0 stays 0. `seek_gop60` admission waits, pooled over the four
   rotations (the last two diagnostic): cand 49 waits in 12 runs (**4.08** a run, range 3–5), pre 45 in 12
-  (**3.75**, range 2–7): a difference of 0.33, ranges overlapping, so it passes. Windows filled stays on the band
+  (**3.75**, range 2–7): a difference of 0.33, ranges overlapping, so it passes. *Stated plainly under Amendment
+  R66 item 5:* `seek_gop60` admission waits went from 45 to 49 over 12 runs, and that rise is not attributed (to
+  F4 or to timing); R65's rule is a tolerance, not proof that the work is unchanged. S4's pinned run re-checks
+  admission waits with more runs. Windows filled stays on the band
   and passes at 1.012 over the four rotations. F4's possible waits do not show where waits are many:
   `explainer_16x9`'s, about 54 a run, are at 0.98. Decodes match run for run, and timeouts, idle with discards and
   `kept_handoff_redecode` are 0.
@@ -6949,3 +6955,127 @@ seeds (the lowest failing seed). Log: `r62/r64-revert-final.txt` and `r64-revert
 - **Open, not blockers (R65): F11's gate.** `preview::` twice hit the known Vulkan-loader SIGSEGV (in
   `vkCreateInstance`), and one run of `a_backward_drag_matches_fresh_seeks_and_refills_once_per_window` failed
   with its details lost; 3 solo and 6 full reruns passed. Not reproduced.
+
+#### E13.6.13 Amendments R66–R67: the one charge rule on three more paths, and the re-gate (2026-10-07)
+
+Astra's re-review of R65 (`target/review/pf/rereview-r65.md`) found three more paths that missed R63's one charge
+rule. The R66 ruling took them as same-rule fixes and made the model's oracle independent of the scheduler's
+helpers. Every fix has a red-first witness, a fast-tier (3k) mutation or an explicit fixed case, and its own
+commit. The per-commit gates are build, `clippy -D warnings --all-targets -p kinewright-media`, rustfmt on the
+touched files, and the affected tests. Because of the desktop crash, all CPU work ran on the laptop (`-j4`, 4 test
+threads, nice). The counter gate ran on the desktop, alone. Logs are in `s2c-logs/s2c7/r66/` (the laptop's copies
+in `laptop/`) and `s2c-timing/r66/`.
+
+**The commits (on `ae0cd3b`).**
+
+| Commit | What | Red-first witness (red, then green) |
+|---|---|---|
+| `29ed1d7` F13 | `admit` and recharge reserve a missing required time a reader still keeps at max(charge, d) (`kept_charge`), as K-3 counts it, not at f. Model: D13's exemption ends once a plan requires the time again and admission reserves it | fixed case `a_kept_time_required_again_is_admitted_at_its_kept_charge` (Astra's scenario: A keeps 37 at d = 3f, playback at 25 releases 37, playback requires it again before A advances): red I2 on `ae0cd3b` and with the fix alone removed from the final tree |
+| `3754ad4` F14 | a discard-only job's dropped times stay tracked (`dispatched`) until the reader is back from serving it, and go on close, failure and stop; a post made meanwhile hands them off, and a redecode is counted. Model: an exact handoff-redecode count per time against its own handoff record, not "the counter moved" | fixed case `a_time_a_dispatched_discard_drops_is_counted_when_decoded_again` (A's discard of 37 dispatched, A suspended before it is served, regions 25 and 37 posted): red I6 exact, counted 0 against 1 |
+| `6336c4d` (found by F14's exact count, seeds 3325, 868 and 3517) | `refilled` clips a retiring reader's refill, and the times a pending discard drops, to what its decoder kept (`kept_from`); a retiring reader's failed result keeps nothing | `a_retired_readers_refill_keeps_only_what_its_decoder_kept`: red I6 exact. `a_refill_clips_the_times_its_pending_discard_drops`: red I6 exact on 26. Its first version was vacuous (green with the clip removed, since no discard was pending) and was re-set with a paused in-window step beside G = 55f |
+| `34955fa` (F13 on R61's fit; seed 29956 at 30k, I5) | `fit_continued` counts the base set and each level at `kept_charge`, so a continuation never fits that admission cannot admit | `a_continued_window_fits_beside_a_kept_time_at_its_kept_charge` (the continuation is cut to 8–18): red I5 |
+| `83bf318` F15 | `fail_start`, which a panic exit calls (R43), releases the slot's kept times through `unkept`, as `exited` does (F9). Model: a panic outcome for a decoding reader that goes through `fail_start` (`Outcome::Panic`, `panicked`); the run asserts it is reached | fixed case `a_panicking_readers_kept_frames_return_to_their_charge` (A panics serving 36 with 36 and 37 kept at 3f): red I1, 37 reserved 30 against its charge of 10 |
+| `a45d09b` item 4 | the model's oracle: I1's charges come from the model's own held windows (set at a planned post, cleared at a fallback and a clear, clipped on a current refill; asserted equal to the scheduler's), f, each kept frame's d and which reader keeps which time. I3's H is the sum of the model's charges over the required set, then cross-checked against the scheduler's figure. No check calls `frame_bytes` or `required_bytes` for its expected value | 3k and 30k clean |
+| `25cff0a` | unit witness of `6336c4d`'s failed-result path, a race the model cannot reach (the read loop checks the stop flag outside the lock, so a retiring reader can deliver an Err) | `sched::tests::a_retiring_readers_failed_refill_keeps_nothing`: red "nothing kept" |
+| `62a29b1` | three fixed cases reduced by ddmin, for the rows the oracle change cost the 3k column (below) | `a_detached_readers_discard_charges_count_in_the_room` (seed 5580, 10 steps, A2b); `a_continued_window_fits_beside_a_detached_readers_charges` (seed 4156, 9 steps, item 5); `a_detached_readers_dispatched_discard_counts_in_the_room` (seed 3413, 22 steps, item 6) |
+
+Each red was shown with the fix's lines alone removed from the final tree (`r66-*-red*.log`), and each witness is
+green at its commit and on `62a29b1` (`r66-cases-green-final.log`; gate `r66-gate-R1.log`: 57 passed, fmt and
+clippy clean). `6336c4d`, `34955fa` and `25cff0a` go beyond the ruling's three blockers. R67 accepts them as
+same-rule fixes: R64's superseded-refill clip applied to a retiring reader, and F13 applied to R61's fit.
+
+**The revert table on the new oracle.** The 3k column was re-run for every row: on `a45d09b` for every row, then on
+`62a29b1` for A2b, items 5 and 6, and the failed-result path. `25cff0a` and `62a29b1` add tests only, so they can only
+add catches to the `a45d09b` rows. The 30k column was re-run for each row whose 3k result changed and for each new
+row. Other rows keep R64's 30k figures, which were measured on R64's walk. The panic outcome and the held-window
+records shift every seed's walk, so seeded counts are not comparable across R64 and R66. Logs:
+`laptop/mut/r66-3k-*.log`, `r66-3k-b-*.log` and `r66-30k-*.log`, with their summaries.
+
+| Reverted | 3k (fast tier) | 30k: seeds failing (lowest) | Against R64 |
+|---|---|---|---|
+| A1 (R61) | seeded + 4 fixed | 775 (9) (R64) | — |
+| A2a (R61) | seeded + 4 fixed | 877 (8) (R64) | — |
+| A2b (R61) | fixed case only (on `a45d09b`: **not caught**) | 10 (5580) | was seeded |
+| A3 (R61) | seeded + 4 fixed | 8,754 (2) (R64) | — |
+| item 1 | **not caught** | 0 (R64) | as before (R64 item 3) |
+| item 2 | seeded | 576 (173) (R64) | — |
+| item 5 | fixed case only (on `a45d09b`: **not caught**) | 11 (4156) | was seeded |
+| item 6 | fixed case only (on `a45d09b`: **not caught**) | 8 (3413) | was seeded |
+| item 7 | seeded | 333 (107) (R64) | — |
+| F1 | seeded + fixed | 114 (11) (R64) | — |
+| F2 | seeded | 66 (187) (R64) | — |
+| F3 | seeded + fixed | 12 (674) (R64) | — |
+| F4 | fixed case only | 5 (3123) (R64) | — |
+| F5 | seeded + fixed | 2,071 (5) (R64) | — |
+| F6 (model side) | seeded | 37 (270) (R64) | — |
+| F6 (read loop) | not caught (outside the model) | 0 (R64) | as before |
+| F7 | seeded (25, lowest 66) + fixed | 158 (66) | was fixed case only |
+| F8 (A) | seeded + 2 fixed | 128 (11) (R64) | — |
+| F8 (B, `hand_off` removed) | seeded + 3 fixed | 515 (55) | was the F12 fixed case only |
+| F9 | seeded (24, lowest 86) | 212 (55) | was not caught at 3k |
+| F10 | seeded + fixed | 81 (167) (R64) | — |
+| F11 | seeded + fixed | 9,253 (5) (R64) | — |
+| F12 | seeded (4, lowest 1417) + 2 fixed | 39 (1417) | was fixed case only |
+| F13 | seeded + 2 fixed | 1,716 (5) | new |
+| F13 on the fit (`34955fa`) | fixed case only | 1 (7952) | new |
+| F14 | seeded (1, seed 2319) + fixed | 1 (2319) | new |
+| F15 | seeded (5, lowest 184) + fixed | 43 (184) | new |
+| retiring refill clip (`6336c4d`) | seeded + fixed | 18 (868) | new |
+| pending-discard clip (`6336c4d`) | fixed case only | 3 (17816) | new |
+| retiring failed result (`6336c4d`) | not caught (outside the model) | 0 | new; witnessed by `25cff0a` |
+
+- **The bar.** Every R63 row and every R66 row is caught by the fast tier, except:
+  - item 1, which R64 item 3 accepted, as before;
+  - F6's read-loop side and the retiring failed result, which are outside the model. Each has a deterministic
+    witness.
+- **The cost of the oracle change.** On `a45d09b` the seeded 3k walk no longer caught A2b, item 5 or item 6. Each
+  is now caught at 3k by a fixed case that ddmin reduced from its lowest 30k seed (`62a29b1`).
+- **Coverage.** In random seeds `reach.handoffs` (a live keeper of a time another reader decodes) is 0 at 30k; only
+  the fixed cases reach it. Counted redecodes are reached 437 times at 30k.
+
+**The slow tier.** `the_readers_accounting_holds_for_300k_seeded_sequences` at `62a29b1`, on the laptop (4 threads,
+nice, others' load about 45): green, 199.28 s test time, 228 s wall (`laptop/r66-slow-300k.log`).
+
+**The fast tier, partial.** Only the media library was re-run (`cargo test -p kinewright-media --lib`, 4 threads, at
+`62a29b1`, laptop): 1,067 passed, 0 failed, 57 ignored, 608 s (`laptop/r66-media-lib.log.gz`). The workspace fast
+tier was not re-run here; it belongs to the push gate.
+
+**The gate (R66 item 6.4): PASSED under R65 and R67, with a behaviour change recorded.** The R62 counter gate was
+run again: LL COUNT P-seek, `cand-43b2625` (`0225653b…`, pre) against `cand-62a29b1` (`d20efde4…`, built at
+`62a29b1` with only docs uncommitted), tracing off, 2 rotations per workload, alternated (`plan-r66.txt`). It ran
+on the desktop from 20:10:56 to 20:23:54 with no other desktop cargo work. All 8 lanes exited 0, and
+`guard --final` checked 4 candidate lanes with 0 trips. Load at lane start was 0.17–10.1, with others' processes
+annotated (R50). Logs: `s2c-timing/r66/timing-r66.log`, `table-r66.txt`, `samples-r66.log.gz`.
+
+(cand / pre per rotation, each the median of the lane's 3 runs → the median over rotations. R65 applies the 5% band
+where pre's median is ≥ 20 a run, and the small-counter rule below that.)
+
+| Workload | Decodes (refill + run) | CPU per refill | Hits pre-converted | Windows filled | Admission waits | Timeouts; idle with discards (cand) | Hit p95 (info) |
+|---|---|---|---|---|---|---|---|
+| `seek_gop60` | 1.000, 1.000 → **1.000** | 0.993, 0.976 → **0.984** | 0.981, 1.114 → **1.047** | 1.057, 1.125 → **1.091** (R67) | pre 9.5 a run < 20: pooled cand 11.17 (67 in 6), pre 9.50 (57 in 6), difference 1.67 ≤ 2.38, ranges 9–15 and 4–16 overlap → **pass** | 0; 0 | 0.99, 0.82 |
+| `explainer_16x9` | 0.997, 1.002 → **1.000** | 0.986, 1.071 → **1.029** | 1.096, 0.949 → **1.023** | 1.059, 0.990 → **1.025** | 0.966, 0.949 → **0.957** | 0; 0 | 0.95, 1.20 |
+
+- **`seek_gop60` windows filled: outside R65's band, accepted under R67.**
+  - Per run, cand had 52, 56, 60, 54, 52 and 60 (pooled mean 55.67) and pre had 53, 52, 59, 55, 48 and 44 (51.83):
+    +7.4%.
+  - The rise is **attributed to F13 by direction only; no run isolates it.** F13 and its fit reserve a kept time
+    at max(f, d) where the old code reserved f, so less room is left and more windows stop full. R66 predicted
+    that direction before the run, and part of pre's lower count is the under-charge F13 fixes.
+  - The noise is the same size as the shift: pre's own two rotations differ by 10.4% (medians 53 and 48).
+  - Pre's level moves with load. At R64's gate, at load 19–25, pre filled 41–44 windows a run, and that gate was
+    also outside the band on this counter (1.060).
+- **The work is unchanged within the band.** Decodes, CPU per refill and hits pre-converted are within 5% on both
+  workloads, and admission waits pass on both. Timeouts and idle with discards are 0. `kept_handoff_redecode` is 0
+  in all 12 candidate runs.
+- **Rechecked at S4.** S4's pinned run re-checks windows filled, along with R65's admission waits (E13.6.12), with
+  more runs.
+
+**Evidence corrections (R66 item 5).** These are made in place in E13.6.12:
+- "decodes identical run for run" now holds for the gate's two rotations only. In the diagnostic rotations pre3's
+  second run decoded 12,711 and pre4's 12,916, against cand's 12,712.
+- E13.6.12 now says plainly that `seek_gop60` admission waits rose from 45 to 49 over 12 runs and that the rise is
+  not attributed.
+
+**Rulings (R67).** The windows-filled rise is accepted as F13's effect, and no extra rotations are run. `6336c4d`,
+`34955fa` and `25cff0a` are accepted with the R66 commits. Nothing is pushed. Next come Astra's quick re-check, the
+push gate on the laptop, and then the push.
