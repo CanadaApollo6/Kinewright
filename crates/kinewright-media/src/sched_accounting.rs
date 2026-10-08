@@ -2492,3 +2492,153 @@ fn a_panicking_readers_kept_frames_return_to_their_charge() {
     );
     assert_eq!(world.reach.panics, 1, "reader 0 panicked");
 }
+
+/// The run seed 5580 drew (R66's generator).
+const RUN_5580: Run = Run {
+    budget: 20 * F,
+    pool: 2,
+    decoded: [2 * F, F / 2],
+    gop: [4, 6],
+    floor: [0, 0],
+    posts: 8,
+    retires: 1,
+    returns: 1,
+    runs: 0,
+    discards: 4,
+    profile: Profile::Kept,
+};
+
+/// Amendment R66 [S2c] (item 4's re-run): seed 5580's scenario under the
+/// R66 generator, reduced (ddmin) to 10 steps. R61's A2b: the room a post
+/// fits in is C less the detached readers' charges, their discards held
+/// as well as their decodes in flight. The panic operation (F15) moved
+/// the seeded walk, and no seed in 3,000 reached A2b any more; this case
+/// keeps it in the fast tier (reverted, I3 fails: H + G over C less the
+/// detached readers' charges).
+#[test]
+fn a_detached_readers_discard_charges_count_in_the_room() {
+    use Fixed::{Op as Do, Post, Stall};
+    fixed(
+        RUN_5580,
+        vec![
+            Post(
+                vec![(0, vec![43], vec![]), (1, vec![21], vec![])],
+                true,
+                16 * F,
+            ),
+            Do(Op::Step(1)),
+            Do(Op::Grant(1)),
+            Post(vec![(1, vec![20], vec![])], true, F),
+            Do(Op::Step(1)),
+            Post(vec![(0, vec![41], vec![]), (1, vec![18], vec![])], true, 0),
+            Stall(Op::Clear, vec![1]),
+            Do(Op::Return(1)),
+            Do(Op::Finish(1, Outcome::Ok)),
+            Post(vec![(1, vec![7], vec![8, 9, 10])], false, 19 * F),
+        ],
+    );
+}
+
+/// The run seed 4156 drew (R66's generator).
+const RUN_4156: Run = Run {
+    budget: 30 * F,
+    pool: 2,
+    decoded: [2 * F, 2 * F],
+    gop: [12, 48],
+    floor: [0, 4],
+    posts: 8,
+    retires: 3,
+    returns: 1,
+    runs: 1,
+    discards: 4,
+    profile: Profile::Discards,
+};
+
+/// Amendment R66 [S2c] (item 4's re-run): seed 4156's scenario under the
+/// R66 generator, reduced (ddmin) to 9 steps. R62 item 5: a continued
+/// window fits in the room detached readers leave (`Readers::room`), not
+/// in C. No seed in 3,000 reached it after the panic operation (F15)
+/// moved the seeded walk; this case keeps it in the fast tier (reverted,
+/// I3 fails).
+#[test]
+fn a_continued_window_fits_beside_a_detached_readers_charges() {
+    use Fixed::{Op as Do, Post, Stall};
+    fixed(
+        RUN_4156,
+        vec![
+            Post(vec![(1, vec![23], vec![])], true, F),
+            Post(vec![(0, vec![18], vec![])], true, 3 * F),
+            Stall(Op::Forget(0), vec![]),
+            Post(
+                vec![(0, vec![17], vec![]), (1, vec![43], vec![])],
+                true,
+                25 * F,
+            ),
+            Do(Op::Run),
+            Post(vec![(0, vec![16], vec![])], true, 3 * F),
+            Do(Op::Step(2)),
+            Stall(Op::Forget(0), vec![2]),
+            Post(vec![(0, vec![13], vec![])], true, 26 * F),
+        ],
+    );
+}
+
+/// The run seed 3413 drew (R66's generator).
+const RUN_3413: Run = Run {
+    budget: 30 * F,
+    pool: 4,
+    decoded: [2 * F, F],
+    gop: [4, 48],
+    floor: [0, 4],
+    posts: 4,
+    retires: 0,
+    returns: 4,
+    runs: 0,
+    discards: 1,
+    profile: Profile::Discards,
+};
+
+/// Amendment R66 [S2c] (item 4's re-run): seed 3413's scenario under the
+/// R66 generator, reduced (ddmin) to 22 steps. R62 item 6: a dispatched
+/// discard stays charged to its reader (`flight`) until it is served, so
+/// a detached reader's discard counts in the room. No seed in 3,000
+/// reached it after the panic operation (F15) moved the seeded walk; this
+/// case keeps it in the fast tier (reverted, I3 fails).
+#[test]
+fn a_detached_readers_dispatched_discard_counts_in_the_room() {
+    use Fixed::{Op as Do, Post, Stall};
+    fixed(
+        RUN_3413,
+        vec![
+            Post(vec![(0, vec![22], vec![])], true, 0),
+            Do(Op::Step(0)),
+            Do(Op::Grant(0)),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Post(
+                vec![
+                    (0, vec![24], vec![25, 26, 27]),
+                    (1, vec![22], vec![23, 24, 25]),
+                ],
+                false,
+                25 * F,
+            ),
+            Post(vec![(0, vec![8], vec![]), (1, vec![21], vec![])], true, 0),
+            Do(Op::Step(1)),
+            Do(Op::Grant(1)),
+            Do(Op::Step(1)),
+            Do(Op::Step(0)),
+            Do(Op::Finish(0, Outcome::Ok)),
+            Do(Op::Finish(1, Outcome::Ok)),
+            Post(vec![(1, vec![13], vec![])], true, 27 * F),
+            Post(vec![(0, vec![25], vec![])], true, 26 * F),
+            Do(Op::Step(1)),
+            Stall(Op::Clear, vec![1]),
+            Do(Op::Step(0)),
+            Stall(Op::Clear, vec![0]),
+            Do(Op::Return(0)),
+            Do(Op::Exited(0)),
+            Post(vec![(1, vec![15], vec![16, 17, 18])], false, 25 * F),
+        ],
+    );
+}
