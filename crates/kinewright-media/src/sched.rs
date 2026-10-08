@@ -3950,6 +3950,36 @@ mod tests {
         assert_eq!(live - readers.live().0, 15 * 2 * F, "K-1 exact");
     }
 
+    /// Amendment R66 [S2c] (K-1): a reader retired while its refill was in
+    /// flight, whose decode then fails, keeps nothing. The read loop checks
+    /// its stop flag outside the lock, so a retirement can land between
+    /// that check and the result's delivery; the loop has already dropped
+    /// the decoder's kept frames (item 7's rule). Reader A refills [4, 19],
+    /// keeping 4–18 at 3f; the window is no longer held (their charge is
+    /// f); A retires and its failure is delivered: its slot keeps nothing
+    /// and every reservation shrinks to f (before the fix the slot kept
+    /// 4–18 at 3f until A exited).
+    #[test]
+    fn a_retiring_readers_failed_refill_keeps_nothing() {
+        let mut readers = Model::new(20).with_budget(100 * F);
+        let a = refilled_4_to_19(&mut readers);
+        let ReaderState::Decoding { version, .. } = readers.slot(a).expect("A").state else {
+            panic!("A refills");
+        };
+        readers.hold(HashMap::new(), HashMap::from([(0, 3 * F)]));
+        readers.slot(a).expect("A").state = ReaderState::Retiring;
+        let live = readers.live().0;
+        let error = MediaError::Backend("the decode fails".to_owned());
+        let _ = readers.deliver(a, 19, version, Err(error), Duration::ZERO);
+        assert!(
+            readers.slot(a).expect("A").retained.is_empty(),
+            "nothing kept"
+        );
+        let charged = |at: i64| readers.reserved.get(&(0, at)).copied();
+        assert!((4..19).all(|at| charged(at) == Some(F)), "every one f");
+        assert_eq!(live - readers.live().0, 15 * 2 * F, "K-1 exact");
+    }
+
     /// Amendment R64 [S2c] (K-1): a refill a newer post superseded keeps
     /// only from where its decode produced the window (its key frame).
     /// Reader A's refill of [4, 19] is in flight, keeping 4–18 at 3f.
