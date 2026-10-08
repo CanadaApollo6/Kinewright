@@ -179,6 +179,7 @@ pub fn compositor_required_limits(mut limits: wgpu::Limits) -> wgpu::Limits {
 
 #[derive(Clone)]
 pub struct GpuContext {
+    full_frame_readbacks: Arc<AtomicU64>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     provenance: GpuProvenance,
@@ -276,6 +277,7 @@ impl GpuContext {
                 gpu_claim: false,
             },
             ledger: Arc::default(),
+            full_frame_readbacks: Arc::default(),
         }
     }
 
@@ -303,7 +305,14 @@ impl GpuContext {
                 gpu_claim: !software_fallback,
             },
             ledger: Arc::default(),
+            full_frame_readbacks: Arc::default(),
         }
+    }
+
+    /// Actual full-frame monitor/proof copies, excluding display flags and self-check.
+    #[must_use]
+    pub fn full_frame_readbacks(&self) -> u64 {
+        self.full_frame_readbacks.load(Ordering::Relaxed)
     }
 
     /// MO2 R28: the GPU bytes every compositor on this context holds.
@@ -666,7 +675,7 @@ const FAILED_FRAME_WAIT: Duration = Duration::from_millis(100);
 
 /// MO2 R28 (ME16): every frame-path wait polls through here, so the tests can
 /// observe and override it (`ledger_probes::hook`).
-fn frame_poll(
+pub(crate) fn frame_poll(
     device: &wgpu::Device,
     wait: wgpu::PollType,
 ) -> Result<wgpu::PollStatus, wgpu::PollError> {
@@ -1261,6 +1270,53 @@ impl Compositor {
         readback
     }
 
+    pub(crate) fn display_gpu(&self) -> GpuContext {
+        self.gpu.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn full_frame_readbacks(&self) -> u64 {
+        self.gpu.full_frame_readbacks()
+    }
+
+    pub(crate) fn render_display<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        library: Option<&LutLibrary>,
+        display: &crate::display::DisplayEncoder,
+        slot: &mut crate::display::DisplaySlot,
+    ) -> Result<(), MediaError> {
+        let (w, h) = resolution;
+        let (output, mut frame, mut encoder) = self.composite(w, h, layers, library, None)?;
+        display.encode(&mut encoder, &output, &slot.texture);
+        let flags = frame.validity.as_ref().or(frame.pooled_flags.as_ref());
+        let bytes = flags.map_or(4, |b| b.size());
+        slot.flags(&self.gpu, bytes);
+        if let Some(flags) = flags {
+            encoder.copy_buffer_to_buffer(flags, 0, &slot.flags, 0, bytes);
+        } else {
+            encoder.clear_buffer(&slot.flags, 0, None);
+        }
+        let (index, done) = self.submit_tracked([encoder.finish()]);
+        let result = crate::display::mapped_bytes(&self.gpu, &slot.flags, index.clone());
+        let result = result.and_then(|bytes| {
+            let stride = usize::try_from(self.validity_stride).expect("validity stride fits usize");
+            match bytes.chunks(stride).position(|b| b[..4] != [0; 4]) {
+                Some(layer) => Err(MediaError::NonFiniteRender {
+                    layer,
+                    clip: None,
+                    at: None,
+                }),
+                None => Ok(()),
+            }
+        });
+        if !done.load(Ordering::Acquire) {
+            frame.pending = Some(done);
+        }
+        self.finish_frame(output, frame);
+        result
+    }
+
     /// Composite the supplied bottom-to-top layers and encode the result with
     /// the supplied delivery description (CC1 3, delivery branch).
     ///
@@ -1430,7 +1486,9 @@ impl Compositor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: OUTPUT_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let output = self.gpu.charge_texture(output);
@@ -2303,6 +2361,7 @@ impl Compositor {
 
     /// The readback behind [`Self::for_each_linear_pixel`], visiting each
     /// pixel's raw f16 bits (PF1 G-1 indexes its monitor table by them).
+    #[allow(clippy::too_many_lines)]
     fn for_each_pixel_bits(
         &self,
         width: u32,
@@ -2312,6 +2371,9 @@ impl Compositor {
         frame: &mut FrameResources,
         mut visit: impl FnMut([u16; 4]) -> Result<(), MediaError>,
     ) -> Result<(), MediaError> {
+        self.gpu
+            .full_frame_readbacks
+            .fetch_add(1, Ordering::Relaxed);
         let row_bytes = width.saturating_mul(8);
         let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -7883,7 +7945,7 @@ mod tests {
 /// The final verification's ledger probes, retained (final-mo2-1 B1/B2/S1).
 #[cfg(test)]
 #[path = "mo2_ledger_probes.rs"]
-mod ledger_probes;
+pub(crate) mod ledger_probes;
 
 /// MO2 R28 (ME14): one monitor frame split into its phases, for the perf
 /// lanes' printed breakdown.

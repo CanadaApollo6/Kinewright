@@ -932,6 +932,47 @@ impl FrameRenderer {
             .map(|frame| (frame, started.elapsed()))
     }
 
+    pub(crate) fn display_gpu(&self) -> GpuContext {
+        self.compositor.display_gpu()
+    }
+
+    pub(crate) fn render_display(
+        &mut self,
+        document: &Document,
+        at: TimeCode,
+        resolution: (u32, u32),
+        (scale, supplied, strategy): (RenderScale, Option<&SuppliedFrames>, DecodeStrategy),
+        (encoder, slot): (
+            &crate::display::DisplayEncoder,
+            &mut crate::display::DisplaySlot,
+        ),
+    ) -> Result<(), MediaError> {
+        let scheduled = supplied.is_some();
+        if scheduled {
+            self.used_titles = Some(HashSet::new());
+        }
+        let video = supplied.map_or(Video::Decode(strategy), Video::Supplied);
+        let result = self
+            .decoded_layers(document, at, resolution, scale, video)
+            .and_then(|decoded| {
+                self.compositor
+                    .render_display(
+                        resolution,
+                        &compositor_layers(&decoded),
+                        Some(&self.lut_library),
+                        encoder,
+                        slot,
+                    )
+                    .map_err(attribute_layer(&decoded, at))
+            });
+        if scheduled {
+            let used = self.used_titles.take().unwrap_or_default();
+            self.title_cache.retain(|key, _| used.contains(key));
+            self.title_order.retain(|key| used.contains(key));
+        }
+        result
+    }
+
     /// MO2 R28 (ME13): hold decoded sources resident for compositor frames.
     #[cfg(test)]
     pub(crate) fn set_cache_budget(&mut self, bytes: usize) {

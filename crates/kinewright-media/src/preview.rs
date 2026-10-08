@@ -264,6 +264,7 @@ pub(crate) struct LaneState {
     /// Stamped transport failures, for the worker's R-2 test.
     pub(crate) failures: Vec<(FrameStamp, MediaError)>,
     pub(crate) wakeup: Option<Wakeup>,
+    pub(crate) display: Option<(crate::DisplayConfig, Arc<crate::display::Shared>)>,
     /// H-2/H-3 (S2b-1): the readers' plans, states, rings and failures;
     /// K-1 (S2b-3): the scheduler's live bytes.
     pub(crate) readers: Readers<VideoSourceKey, Pinned>,
@@ -584,7 +585,7 @@ impl Lane {
         self.acks_overflowed.store(0, Ordering::Relaxed);
     }
 
-    fn notify(&self) {
+    pub(crate) fn notify(&self) {
         self.ready.notify_all();
     }
 
@@ -1184,10 +1185,20 @@ pub(crate) enum Attempt {
     Pending,
 }
 
+enum Image {
+    Cpu(FrameTexture),
+    Gpu(crate::DisplayFrame),
+}
+struct Rendered {
+    at: TimeCode,
+    stamp: FrameStamp,
+    image: Image,
+}
+
 /// A rendered playback frame waiting for its due time.
 struct Held {
     version: u64,
-    frame: PreviewFrame,
+    frame: Rendered,
     deadline: Instant,
 }
 
@@ -1209,6 +1220,7 @@ pub(crate) struct Preview {
     /// A version whose playback job has nothing more to render.
     parked: Option<u64>,
     held: Option<Held>,
+    display: Option<crate::display::DisplayPool>,
     /// R-4 fairness: one agent job after each transport attempt.
     agent_turn: bool,
     /// Re-review 2 D4: the newest playback frame (epoch, frame) published;
@@ -1244,6 +1256,7 @@ impl Drop for Preview {
     /// detached, its thread left to exit on its own (it owns its `Lane`),
     /// and counted in `shutdown_detached_readers`.
     fn drop(&mut self) {
+        self.held = None;
         let frames = {
             let mut state = self.lane.lock();
             state.readers.retire_all();
@@ -1303,6 +1316,7 @@ impl Preview {
             next_at: 0,
             parked: None,
             held: None,
+            display: None,
             agent_turn: false,
             published: None,
             readers: Vec::new(),
@@ -1447,12 +1461,13 @@ impl Preview {
     }
 
     /// Render one monitor frame; `Ok(None)` when a test fault withholds it.
-    fn render_monitor(
+    #[allow(clippy::too_many_lines)]
+    fn render_transport(
         &mut self,
         scene: &Scene,
         at: TimeCode,
         wait: &FrameWait,
-    ) -> Result<Option<FrameTexture>, Halt> {
+    ) -> Result<Option<Image>, Halt> {
         let document = &*scene.document;
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
@@ -1467,11 +1482,18 @@ impl Preview {
             let duration = u32::try_from(document.duration.0).unwrap_or(u32::MAX);
             let rgba = Arc::new(duration.to_le_bytes().to_vec());
             let (width, height) = (1, 1);
-            return Ok(Some(FrameTexture {
+            return Ok(Some(Image::Cpu(FrameTexture {
                 width,
                 height,
                 rgba,
-            }));
+            })));
+        }
+        let configuration = self.lane.lock().display.take();
+        if let Some((config, shared)) = configuration {
+            self.display =
+                crate::display::DisplayPool::new(self.renderer.display_gpu(), &config, shared)
+                    .map_err(|error| eprintln!("{error}"))
+                    .ok();
         }
         let horizon = if wait.playback.is_some() {
             PREFETCH_FRAMES
@@ -1511,8 +1533,51 @@ impl Preview {
         // R38 D2: an agent job run while the wait was suspended binds its
         // own document's LUT library; composite with this scene's.
         self.bind(Some(scene.generation), &scene.lut);
+        let mut display = self.display.take().filter(|pool| !pool.terminal());
+        let sdr = document.color_context.monitoring
+            == kinewright_core::ColorContext::sdr_rec709().monitoring;
+        let id = if let Some(pool) = display.as_mut().filter(|_| sdr) {
+            let timeout = Duration::from_secs_f64(2.0 * frame_ms(document.fps) / 1000.0);
+            loop {
+                let cancelled = || {
+                    let state = self.lane.lock();
+                    state.shutdown || state.version != wait.version
+                };
+                if let Some(id) = pool.acquire(resolution, timeout, cancelled) {
+                    break Some(id);
+                }
+                if pool.terminal() {
+                    break None;
+                }
+                self.lane.counters().stats.slot_starved += 1;
+                if cancelled() || wait.playback.is_some() {
+                    self.display = display;
+                    return Err(if cancelled() {
+                        Halt::Superseded
+                    } else {
+                        Halt::Held { agent: false }
+                    });
+                }
+            }
+        } else {
+            None
+        };
         let frame = if let Some((frames, pins, generated)) = frames {
-            let frame = (self.renderer).render_scheduled(document, at, resolution, scale, &frames);
+            let frame = if let (Some(pool), Some(id)) = (&mut display, id) {
+                self.renderer
+                    .render_display(
+                        document,
+                        at,
+                        resolution,
+                        (scale, Some(&frames), DecodeStrategy::Seek),
+                        pool.slot(id),
+                    )
+                    .map(|()| Image::Gpu(pool.candidate(id, at, wait.paused.unwrap_or_default())))
+            } else {
+                self.renderer
+                    .render_scheduled(document, at, resolution, scale, &frames)
+                    .map(Image::Cpu)
+            };
             // Amendment R55 (Rec): a paused job's wait for its frames, and its render.
             #[cfg(test)]
             if wait.playback.is_none() {
@@ -1545,16 +1610,53 @@ impl Preview {
             } else {
                 DecodeStrategy::Seek
             };
-            let frame = (self.renderer).render_live(document, at, resolution, scale, strategy);
+            let frame = if let (Some(pool), Some(id)) = (&mut display, id) {
+                self.renderer
+                    .render_display(
+                        document,
+                        at,
+                        resolution,
+                        (scale, None, strategy),
+                        pool.slot(id),
+                    )
+                    .map(|()| Image::Gpu(pool.candidate(id, at, wait.paused.unwrap_or_default())))
+            } else {
+                self.renderer
+                    .render_live(document, at, resolution, scale, strategy)
+                    .map(Image::Cpu)
+            };
             self.settle_titles();
             frame
         };
+        if frame.is_err()
+            && let (Some(pool), Some(id)) = (&mut display, id)
+        {
+            pool.abandon(id);
+        }
+        if display.is_some() {
+            self.display = display;
+        }
         let frame = frame.map_err(Halt::Failed)?;
         #[cfg(test)]
         if !self.faults.publish_after_render() {
             return Ok(None);
         }
         Ok(Some(frame))
+    }
+
+    #[cfg(test)]
+    fn render_monitor(
+        &mut self,
+        scene: &Scene,
+        at: TimeCode,
+        wait: &FrameWait,
+    ) -> Result<Option<FrameTexture>, Halt> {
+        self.render_transport(scene, at, wait).map(|image| {
+            image.map(|image| match image {
+                Image::Cpu(frame) => frame,
+                Image::Gpu(_) => panic!("CPU witness opted into display"),
+            })
+        })
     }
 
     /// Amendment R41 (Windows CI run 36528931046; U-1): a new document
@@ -1990,8 +2092,25 @@ impl Preview {
         }
     }
 
-    fn publish(&self, frame: PreviewFrame) {
-        send_latest(&self.frames_tx, &self.frames_drop_rx, frame);
+    fn publish(&self, frame: Rendered) {
+        match frame.image {
+            Image::Cpu(texture) => send_latest(
+                &self.frames_tx,
+                &self.frames_drop_rx,
+                PreviewFrame {
+                    at: frame.at,
+                    stamp: frame.stamp,
+                    texture,
+                },
+            ),
+            Image::Gpu(mut image) => {
+                image.stamp = frame.stamp;
+                self.display
+                    .as_ref()
+                    .expect("display owns the lease")
+                    .publish(image);
+            }
+        }
         let wakeup = self.lane.lock().wakeup.clone();
         if let Some(wakeup) = wakeup {
             wakeup();
@@ -2013,11 +2132,11 @@ impl Preview {
             paused: Some(job.stamp),
             since: Instant::now(),
         };
-        match self.render_monitor(&job.scene, at, &wait) {
-            Ok(Some(texture)) => self.publish(PreviewFrame {
+        match self.render_transport(&job.scene, at, &wait) {
+            Ok(Some(texture)) => self.publish(Rendered {
                 at,
                 stamp: job.stamp,
-                texture,
+                image: texture,
             }),
             Err(Halt::Superseded) => self.lane.counters().stats.paused_abandoned += 1,
             Ok(None) | Err(Halt::Held { .. }) => {}
@@ -2083,7 +2202,7 @@ impl Preview {
             paused: None,
             since: started,
         };
-        let rendered = self.render_monitor(&job.scene, at, &terms);
+        let rendered = self.render_transport(&job.scene, at, &terms);
         let took = started.elapsed().as_secs_f64() * 1_000.0;
         self.render_ewma_ms = if self.render_ewma_ms == 0.0 {
             took
@@ -2102,10 +2221,10 @@ impl Preview {
                 return Err(Attempt::Parked);
             }
         };
-        let frame = PreviewFrame {
+        let frame = Rendered {
             at,
             stamp: job.stamp,
-            texture,
+            image: texture,
         };
         let deadline = Instant::now() + wait;
         Ok(Held {

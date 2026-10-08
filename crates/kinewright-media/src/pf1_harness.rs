@@ -336,7 +336,7 @@ fn frame_ms(document: &Document) -> f64 {
 }
 
 /// Q-2 P-play's workloads: W-1 plus MO2's two, unchanged builders at 60 s.
-fn play_workloads() -> Vec<(&'static str, Workload)> {
+pub(crate) fn play_workloads() -> Vec<(&'static str, Workload)> {
     let all: [Builder; 6] = [
         ("typical_1080p", typical_60s),
         ("blend_heavy_1080p", || perf_fixtures::blend_heavy(1_800)),

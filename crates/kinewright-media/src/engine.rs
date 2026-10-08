@@ -645,6 +645,15 @@ impl FfmpegMediaEngine {
         self.finished.clone()
     }
 
+    /// Opt in to SDR display; initialization and self-check run on the preview.
+    pub fn enable_display(&self, config: crate::DisplayConfig) -> crate::DisplaySession {
+        let (session, shared) = crate::display::DisplayPool::session(&config);
+        let old = self.lane.lock().display.replace((config, shared));
+        drop(old);
+        self.lane.notify();
+        session
+    }
+
     /// Register a trusted transcript for this engine session after verifying
     /// that its content identity, frame rate, asset id, and word ranges match
     /// the referenced media. This is the ingestion seam for reproducible

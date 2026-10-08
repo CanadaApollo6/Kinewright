@@ -130,7 +130,7 @@ impl Drop for TransferTable {
 
 /// PF1 G-1: BT.709 monitor codes per f16 bit pattern, RGB then alpha, each
 /// entry computed by `encode_monitor_rgba8`'s own f32 math.
-static MONITOR: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
+pub(crate) static MONITOR: LazyLock<(Vec<u8>, Vec<u8>)> = LazyLock::new(|| {
     (0..=u16::MAX)
         .map(|bits| {
             let [rgb, _, _, alpha] = encode_monitor_rgba8([f16::from_bits(bits).to_f32(); 4]);

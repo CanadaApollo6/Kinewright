@@ -35,7 +35,7 @@ pub(super) fn count_upload_copy() {
     UPLOAD_COPIES.set(UPLOAD_COPIES.get() + 1);
 }
 
-fn with_hook<T>(
+pub(crate) fn with_hook<T>(
     hook: impl FnMut(&wgpu::Device, &wgpu::PollType) -> Option<Poll> + 'static,
     body: impl FnOnce() -> T,
 ) -> T {

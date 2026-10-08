@@ -8,6 +8,8 @@ mod clock;
 pub mod color_pipeline;
 mod compositor;
 mod conversion;
+mod display;
+pub use display::{DisplayConfig, DisplayFrame, DisplaySession, DisplayStatus};
 mod decode;
 mod derived;
 mod derived_cache;
