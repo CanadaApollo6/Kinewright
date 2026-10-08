@@ -4100,21 +4100,21 @@ fn fill_ring(
 /// default device; only test builds can select the simulated one.
 pub(crate) enum OutputDevice {
     Default,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     Simulated(simulated::SimulatedAudio),
 }
 
 /// An opened output device, before its stream exists.
 enum Sink {
     Cpal(cpal::Device, cpal::SampleFormat, cpal::StreamConfig),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     Simulated(simulated::SimulatedAudio),
 }
 
 /// PF1 V-5: the stream that pops the ring through [`render_output`].
 enum AudioOutput {
     Cpal(cpal::Stream),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     Simulated(simulated::SimulatedOutput),
 }
 
@@ -4301,12 +4301,12 @@ impl AudioRuntime {
                 let supported = device.default_output_config().map_err(backend)?;
                 Sink::Cpal(device, supported.sample_format(), supported.config())
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-util"))]
             OutputDevice::Simulated(audio) => Sink::Simulated(audio.clone()),
         };
         let (sample_rate, channels) = match &sink {
             Sink::Cpal(_, _, config) => (config.sample_rate, config.channels),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-util"))]
             Sink::Simulated(_) => (simulated::RATE, simulated::CHANNELS),
         };
         let capacity = usize::try_from(sample_rate)
@@ -4332,7 +4332,7 @@ impl AudioRuntime {
                 monitor_gain_tenth_db,
                 Arc::clone(diagnostics),
             )?),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-util"))]
             Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach(
                 consumer,
                 Arc::clone(position_samples),
@@ -4416,7 +4416,7 @@ impl AudioRuntime {
     pub(crate) fn play(&self) -> Result<(), MediaError> {
         match &self.output {
             AudioOutput::Cpal(stream) => stream.play().map_err(backend),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-util"))]
             AudioOutput::Simulated(output) => {
                 output.set_playing(true);
                 Ok(())
@@ -4427,7 +4427,7 @@ impl AudioRuntime {
     pub(crate) fn pause(&self) -> Result<(), MediaError> {
         match &self.output {
             AudioOutput::Cpal(stream) => stream.pause().map_err(backend),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-util"))]
             AudioOutput::Simulated(output) => {
                 output.set_playing(false);
                 Ok(())
@@ -4554,7 +4554,7 @@ fn monitor_linear_gain(tenth_db: i32) -> f32 {
 }
 
 /// PF1 V-5 (S0): the device-free output the harness drives.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 pub(crate) mod simulated;
 
 /// PF1 V-1: pops whole interleaved programme frames while the ring holds

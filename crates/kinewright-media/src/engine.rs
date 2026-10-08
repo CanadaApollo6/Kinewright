@@ -505,6 +505,28 @@ impl FfmpegMediaEngine {
         Self::start(gpu, data_dir, config, options)
     }
 
+    /// Test fixtures only: run the existing V-5 paced output without an audio device.
+    ///
+    /// # Errors
+    /// Returns the ordinary media initialization errors.
+    #[cfg(feature = "test-util")]
+    pub fn new_with_paced_test_audio(
+        gpu: GpuContext,
+        data_dir: PathBuf,
+    ) -> Result<Self, MediaError> {
+        Self::start(
+            gpu,
+            data_dir,
+            DerivedAnalysisConfig::default(),
+            EngineOptions {
+                output_device: OutputDevice::Simulated(
+                    crate::audio::simulated::SimulatedAudio::paced(),
+                ),
+                ..EngineOptions::default()
+            },
+        )
+    }
+
     // The engine's threads and their shared state are wired in one place
     // (the test-only teardown signal takes it past the limit).
     #[allow(clippy::too_many_lines)]

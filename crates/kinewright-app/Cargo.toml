@@ -27,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+pollster.workspace = true
 proptest.workspace = true
 # The person-path tests read `au6_scenarios` / `cc7_scenarios` and generate
 # media through `test_support`; none of that is in a shipping path.

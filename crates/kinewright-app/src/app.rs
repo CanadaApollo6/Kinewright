@@ -286,9 +286,43 @@ fn router_apply_accepted(
 /// A reply applied on the UI thread (`KinewrightApp::off_ui`).
 pub(crate) type UiReply = Box<dyn FnOnce(&mut KinewrightApp, &egui::Context) + Send>;
 
+pub(crate) struct NativeDisplay {
+    session: kinewright_media::DisplaySession,
+    renderer: eframe::egui_wgpu::RenderState,
+    picture: Option<(egui::TextureId, egui::Vec2)>,
+}
+impl NativeDisplay {
+    fn clear(&mut self) {
+        if let Some((id, _)) = self.picture.take() {
+            self.renderer.renderer.write().free_texture(&id);
+        }
+    }
+    fn terminal(&mut self) {
+        self.clear();
+        self.session.terminal();
+    }
+}
+impl Drop for NativeDisplay {
+    fn drop(&mut self) {
+        self.terminal();
+    }
+}
+fn premultiply_table() -> Box<[u8; 65536]> {
+    (0..=u16::MAX)
+        .map(|i| {
+            let [v, a] = i.to_le_bytes();
+            egui::Color32::from_rgba_unmultiplied(v, v, v, a).r()
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+        .try_into()
+        .unwrap()
+}
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct KinewrightApp {
+    /// Return display leases before any media-engine arcs are dropped.
+    pub(crate) native_display: Option<NativeDisplay>,
     pub(crate) projects: Vec<ProjectSession>,
     pub(crate) focused_project: usize,
     next_project_id: u64,
@@ -674,6 +708,7 @@ impl KinewrightApp {
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            native_display: None,
             presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
@@ -2880,15 +2915,25 @@ impl KinewrightApp {
         Box::new(move || (playback.stamp(), playing.then(|| playback.position())))
     }
 
+    pub(crate) fn program_picture(&self) -> Option<(egui::TextureId, egui::Vec2)> {
+        self.texture
+            .as_ref()
+            .map(|t| (t.id(), t.size_vec2()))
+            .or_else(|| self.native_display.as_ref().and_then(|d| d.picture))
+    }
     /// The preview texture is gone: nothing describes or marks it (R-2).
     pub(crate) fn clear_preview(&mut self) {
         self.texture = None;
+        if let Some(display) = &mut self.native_display {
+            display.clear();
+        }
         self.presenter.clear();
         self.pending_resume = None;
     }
 
     /// PF1 R-2: the last step of `ui`, after every transport call in the
     /// pass, binds the newest valid candidate and writes the display cell.
+    #[allow(clippy::cast_precision_loss)]
     fn finalize_preview(&mut self, ctx: &egui::Context) {
         // Review A F2: the CPU image is prepared before the final stamp and
         // clock check; the cell and the texture then bind together. The
@@ -2896,6 +2941,52 @@ impl KinewrightApp {
         // audio clock (R33): a frame that expires between them is bound, and
         // its paint is acked expired (`PaintMarker::record`).
         let now = self.paint_clock();
+        let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        debug_assert_eq!(ctx.viewport_id(), egui::ViewportId::ROOT);
+        if let Some(display) = &mut self.native_display
+            && let Some(frame) = display.session.reserve()
+        {
+            if display.session.can_bind(epoch) {
+                let mut renderer = display.renderer.renderer.write();
+                // Prepare a native binding without changing the stable id, then revalidate.
+                let prepared = renderer.register_native_texture(
+                    &display.renderer.device,
+                    &frame.view,
+                    eframe::wgpu::FilterMode::Linear,
+                );
+                if self.presenter.bind_gpu(&frame, &now) {
+                    let id = display.picture.map_or(prepared, |(id, _)| id);
+                    if id != prepared {
+                        renderer.update_egui_texture_from_wgpu_texture_with_sampler_options(
+                            &display.renderer.device,
+                            &frame.view,
+                            eframe::wgpu::SamplerDescriptor {
+                                min_filter: eframe::wgpu::FilterMode::Linear,
+                                mag_filter: eframe::wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            },
+                            id,
+                        );
+                        renderer.free_texture(&prepared);
+                    }
+                    drop(renderer);
+                    display.picture = Some((
+                        id,
+                        egui::vec2(frame.dimensions.0 as f32, frame.dimensions.1 as f32),
+                    ));
+                    let at = frame.at;
+                    display.session.bind(epoch, frame);
+                    self.texture = None;
+                    if !self.resume_after_scrub && !self.playing {
+                        self.focused_mut().position = at;
+                    }
+                } else {
+                    renderer.free_texture(&prepared);
+                }
+            } else {
+                display.session.defer(frame);
+            }
+        }
         let prepare = |frame: &PreviewFrame| {
             let texture = &frame.texture;
             let size = [texture.width, texture.height]
@@ -2903,6 +2994,9 @@ impl KinewrightApp {
             egui::ColorImage::from_rgba_unmultiplied(size, texture.rgba.as_slice())
         };
         if let Some((PreviewFrame { at, .. }, image)) = self.presenter.finalize(now, prepare) {
+            if let Some(display) = &mut self.native_display {
+                display.clear();
+            }
             if let Some(texture) = &mut self.texture {
                 texture.set(image, egui::TextureOptions::LINEAR);
             } else {
@@ -3075,10 +3169,18 @@ impl KinewrightApp {
 }
 
 impl eframe::App for KinewrightApp {
+    fn on_exit(&mut self) {
+        if let Some(display) = &mut self.native_display {
+            display.terminal();
+        }
+    }
     /// PF1 R-5 (R17): a paint mark from an earlier root epoch is acked once
     /// per bound image.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        if let Some(display) = &mut self.native_display {
+            display.session.advance(epoch);
+        }
         self.acknowledge_paint(epoch);
     }
 
@@ -3135,8 +3237,9 @@ impl eframe::App for KinewrightApp {
         self.show_solo_dialog(ui.ctx());
         self.screenshot.update(ui.ctx());
         self.finalize_preview(ui.ctx());
+        let picture_present = self.program_picture().is_some();
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
-            && probe.frame(ui.ctx(), began, self.texture.is_some())
+            && probe.frame(ui.ctx(), began, picture_present)
         {
             self.allow_close = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -3842,7 +3945,17 @@ pub(crate) fn run() -> eframe::Result {
             let repaint_context = creation_context.egui_ctx.clone();
             media.set_event_wakeup(move || repaint_context.request_repaint());
             let startup = std::env::args().nth(1).map(PathBuf::from);
+            let repaint_context = creation_context.egui_ctx.clone();
+            let display = media.enable_display(kinewright_media::DisplayConfig {
+                premultiply: premultiply_table(),
+                repaint: Arc::new(move || repaint_context.request_repaint()),
+            });
             let mut app = KinewrightApp::new(media, startup);
+            app.native_display = Some(NativeDisplay {
+                session: display,
+                renderer: render_state.clone(),
+                picture: None,
+            });
             app.performance = crate::performance::PerformanceProbe::from_environment(started);
             Ok(Box::new(app))
         }),
@@ -5633,9 +5746,16 @@ pub(crate) mod in1_tests {
     /// `Core` actor, a real engine behind the trait arcs, and default UI
     /// state everywhere else. There is deliberately no window, no model, and
     /// no audio device — the same terms §9 lays down.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        in1_harness_with_engine(document, engine)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn in1_harness_with_engine(
+        document: Document,
+        engine: Arc<FfmpegMediaEngine>,
+    ) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let playback: Arc<dyn Playback> = engine.clone();
         let analysis: Arc<dyn Analysis> = engine.clone();
         let exporter: Arc<dyn Export> = engine.clone();
@@ -5719,6 +5839,7 @@ pub(crate) mod in1_tests {
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            native_display: None,
             presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
@@ -10578,6 +10699,7 @@ mod in2b_tests {
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            native_display: None,
             presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
@@ -14988,5 +15110,204 @@ mod in2b_tests {
         app.show_motion_plan_dialog(&ctx);
         assert!(app.motion_plan_dialog.is_none());
         crate::app::in1_tests::in1_shutdown(&mut app);
+    }
+}
+
+#[cfg(test)]
+mod s3a_tests {
+    use super::*;
+    #[test]
+    fn i1b_every_premultiply_pair_matches_color32() {
+        let (app, engine, gpu, _context, _temp) = display_app();
+        let table = premultiply_table();
+        finish(app, engine, &gpu);
+        for a in 0..=255u8 {
+            for v in 0..=255u8 {
+                assert_eq!(
+                    table[usize::from(a) * 256 + usize::from(v)],
+                    egui::Color32::from_rgba_unmultiplied(v, v, v, a).r()
+                );
+            }
+        }
+    }
+    type DisplayFixture = (
+        KinewrightApp,
+        Arc<FfmpegMediaEngine>,
+        GpuContext,
+        egui::Context,
+        kinewright_media::test_support::TempDirectory,
+    );
+    #[allow(clippy::too_many_lines)]
+    fn display_app() -> DisplayFixture {
+        let mut descriptor =
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        descriptor.backends = eframe::wgpu::Backends::PRIMARY;
+        let instance = eframe::wgpu::Instance::new(descriptor);
+        let render = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &native_wgpu_configuration(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        ))
+        .unwrap();
+        println!("S3A_APP adapter={:?}", render.adapter.get_info());
+        let gpu = GpuContext::new_with_adapter_info(
+            render.device.clone(),
+            render.queue.clone(),
+            render.adapter.get_info(),
+        );
+        if let Ok(expected) = std::env::var("S3A_EXPECT_ADAPTER") {
+            assert!(
+                render.adapter.get_info().name.contains(&expected),
+                "required adapter: {expected}"
+            );
+        }
+        let temp = kinewright_media::test_support::TempDirectory::new("s3a-app");
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_paced_test_audio(gpu.clone(), temp.root().into()).unwrap(),
+        );
+        let context = egui::Context::default();
+        let repaint = context.clone();
+        let session = engine.enable_display(kinewright_media::DisplayConfig {
+            premultiply: premultiply_table(),
+            repaint: Arc::new(move || repaint.request_repaint()),
+        });
+        let mut document = Document {
+            resolution: (64, 64),
+            ..Document::default()
+        };
+        for op in [
+            Operation::AddTrack {
+                track: kinewright_core::Track {
+                    id: TrackId(1),
+                    kind: kinewright_core::TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                },
+            },
+            Operation::AddSolidClip {
+                track: TrackId(1),
+                timeline_start: TimeCode::ZERO,
+                duration: TimeCode(60),
+                color: kinewright_core::SolidColor {
+                    r: 180,
+                    g: 90,
+                    b: 45,
+                },
+            },
+        ] {
+            op.apply(&mut document).unwrap();
+        }
+        document.validate().unwrap();
+        let (mut app, engine) = in1_tests::in1_harness_with_engine(document.clone(), engine);
+        app.frames = engine.frames();
+        app.media_events = engine.events();
+        app.native_display = Some(NativeDisplay {
+            session,
+            renderer: render,
+            picture: None,
+        });
+        engine.set_document(Arc::new(document));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.program_picture().is_none() && Instant::now() < deadline {
+            while let Ok(frame) = app.frames.try_recv() {
+                app.presenter.collect(frame);
+            }
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                app.finalize_preview(ui.ctx());
+            });
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        println!(
+            "S3A_APP route={:?} readbacks={}",
+            app.native_display.as_ref().unwrap().session.status(),
+            gpu.full_frame_readbacks()
+        );
+        assert_eq!(
+            app.native_display.as_ref().unwrap().session.status(),
+            kinewright_media::DisplayStatus::Gpu,
+            "runtime GPU route required"
+        );
+        assert!(
+            app.native_display.as_ref().unwrap().picture.is_some(),
+            "a successful production GPU frame was bound"
+        );
+        println!("S3A_APP route=Gpu");
+        (app, engine, gpu, context, temp)
+    }
+    fn finish(app: KinewrightApp, engine: Arc<FfmpegMediaEngine>, gpu: &GpuContext) {
+        let display = app.native_display.as_ref().unwrap();
+        let renderer = Arc::clone(&display.renderer.renderer);
+        let id = display.picture.unwrap().0;
+        assert!(renderer.read().texture(&id).is_some());
+        drop(engine);
+        drop(app); // receiver disconnection, without on_exit
+        assert!(
+            renderer.read().texture(&id).is_none(),
+            "Drop frees the native id"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while gpu.ledger().live_bytes() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            gpu.ledger().live_bytes(),
+            0,
+            "app Drop returns leases and completion releases charges"
+        );
+    }
+    #[test]
+    fn i16_app_drop_frees_native_id_and_retires_every_charge() {
+        let (app, engine, gpu, _context, _temp) = display_app();
+        finish(app, engine, &gpu);
+    }
+    #[test]
+    fn app_playback_does_no_readback() {
+        let (mut app, engine, gpu, context, _temp) = display_app();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        println!(
+            "S3A_APP route={:?} readbacks={}",
+            app.native_display.as_ref().unwrap().session.status(),
+            gpu.full_frame_readbacks()
+        );
+        assert_eq!(
+            app.native_display.as_ref().unwrap().session.status(),
+            kinewright_media::DisplayStatus::Gpu,
+            "runtime GPU route required"
+        );
+        assert!(
+            app.program_picture().is_some(),
+            "a successful production GPU frame was bound"
+        );
+        let before = gpu.full_frame_readbacks();
+        engine.play(TimeCode::ZERO);
+        app.playing = true;
+        let mut frames = 0;
+        let mut last = app.presenter.bound_for_test().map(|cell| cell.frame_id);
+        while frames < 8 && Instant::now() < deadline {
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                let ctx = ui.ctx();
+                app.native_display
+                    .as_mut()
+                    .unwrap()
+                    .session
+                    .advance(ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT));
+                app.finalize_preview(ctx);
+            });
+            if let Some(cell) = app.presenter.bound_for_test()
+                && last != Some(cell.frame_id)
+            {
+                last = Some(cell.frame_id);
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        engine.pause();
+        assert!(
+            frames >= 8,
+            "successful production playback frames required"
+        );
+        assert_eq!(gpu.full_frame_readbacks() - before, 0, "full-frame copies");
+        finish(app, engine, &gpu);
     }
 }

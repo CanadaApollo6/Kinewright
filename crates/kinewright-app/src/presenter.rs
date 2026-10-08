@@ -157,6 +157,27 @@ impl Presenter {
         chosen
     }
 
+    pub(crate) fn bind_gpu(&mut self, frame: &kinewright_media::DisplayFrame, now: &Now) -> bool {
+        let (latest, playing) = now();
+        let shown = read(&self.cell);
+        if frame.stamp.epoch != latest.epoch
+            || playing.is_some_and(|at| at != frame.at)
+            || shown.is_some_and(|c| c.stamp.epoch == latest.epoch && c.stamp.seq > frame.stamp.seq)
+        {
+            return false;
+        }
+        self.next_frame_id += 1;
+        write(
+            &self.cell,
+            Some(DisplayCell {
+                stamp: frame.stamp,
+                at: frame.at,
+                frame_id: self.next_frame_id,
+                stale: false,
+            }),
+        );
+        true
+    }
     /// The texture was dropped or replaced by something that is not a frame.
     pub(crate) fn clear(&mut self) {
         self.candidates.clear();
@@ -164,6 +185,10 @@ impl Presenter {
         write(&self.mark, None);
     }
 
+    #[cfg(test)]
+    pub(crate) fn bound_for_test(&self) -> Option<DisplayCell> {
+        read(&self.cell)
+    }
     pub(crate) fn stale(&self) -> bool {
         read(&self.cell).is_some_and(|cell| cell.stale)
     }

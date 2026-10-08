@@ -2293,6 +2293,7 @@ dependencies = [
  "kinewright-core",
  "kinewright-media",
  "kinewright-project",
+ "pollster",
  "proptest",
  "rfd",
  "serde",

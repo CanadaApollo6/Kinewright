@@ -928,7 +928,10 @@ impl KinewrightApp {
             ui,
             egui::vec2(available_width, frame_height),
             "SOURCE",
-            source_texture.as_ref(),
+            source_texture
+                .as_ref()
+                .map(|t| (t.id(), t.size_vec2()))
+                .as_ref(),
             if blocked {
                 source_state.label()
             } else if revalidation_pending {
@@ -979,13 +982,10 @@ impl KinewrightApp {
             scrubbing: self.qc_mask.is_scrubbing(),
         };
         let qc_mask_texture = self.qc_mask_texture(ui.ctx(), qc_mask_conditions);
-        let texture = self.texture.clone();
-        let picture = viewer_picture(
-            blocked,
-            matte_texture.as_ref(),
-            qc_mask_texture.as_ref(),
-            texture.as_ref(),
-        );
+        let texture = self.program_picture();
+        let matte = matte_texture.as_ref().map(|t| (t.id(), t.size_vec2()));
+        let mask = qc_mask_texture.as_ref().map(|t| (t.id(), t.size_vec2()));
+        let picture = viewer_picture(blocked, matte.as_ref(), mask.as_ref(), texture.as_ref());
         let frame = Self::paint_viewer_frame(
             ui,
             egui::vec2(available_width, frame_height),
@@ -1437,7 +1437,7 @@ impl KinewrightApp {
         ui: &mut egui::Ui,
         size: egui::Vec2,
         label: &str,
-        texture: Option<&egui::TextureHandle>,
+        texture: Option<&(egui::TextureId, egui::Vec2)>,
         message: &str,
         message_color: egui::Color32,
         sense: egui::Sense,
@@ -1454,13 +1454,13 @@ impl KinewrightApp {
             color::TEXT_MUTED,
         );
         if let Some(texture) = texture {
-            let source = texture.size_vec2();
+            let source = texture.1;
             if source.x > 0.0 && source.y > 0.0 {
                 let inset = rect.shrink2(egui::vec2(space::FOUR, space::FOUR));
                 let scale = (inset.width() / source.x).min(inset.height() / source.y);
                 let image_rect = egui::Rect::from_center_size(inset.center(), source * scale);
                 painter.image(
-                    texture.id(),
+                    texture.0,
                     image_rect,
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,

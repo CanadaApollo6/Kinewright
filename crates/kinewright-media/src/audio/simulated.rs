@@ -1,6 +1,6 @@
 //! PF1 V-5: the device-free audio output. It pops the ring through the
 //! production [`render_output`] in 1,024-frame, 48 kHz stereo callbacks,
-//! stepped by [`SimulatedAudio::advance`] (CI) or paced in real time (P-play).
+//! stepped by `SimulatedAudio::advance` (CI) or paced in real time (P-play).
 
 use std::{
     sync::{
@@ -51,6 +51,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl SimulatedAudio {
     /// Callbacks run only when the test calls [`Self::advance`].
+    #[cfg(test)]
     pub(crate) fn stepped() -> Self {
         Self::default()
     }
@@ -65,6 +66,7 @@ impl SimulatedAudio {
 
     /// One callback of `frames` if a playing stream is open; `false` if none.
     /// Its failed pops are recorded where they happen (R22).
+    #[cfg(test)]
     pub(crate) fn advance(&self, frames: usize) -> bool {
         self.callback(frames, None)
     }
@@ -106,12 +108,14 @@ impl SimulatedAudio {
 
     /// Deadlines the paced driver missed; a timing run with any is invalid.
     /// Read under the stream lock, so it includes every completed callback.
+    #[cfg(test)]
     pub(crate) fn missed_periods(&self) -> u64 {
         let _completed = lock(&self.0.stream);
         self.0.missed_periods.load(Ordering::Relaxed)
     }
 
     /// Q-3 clock freeze: the paced driver runs no callback for `duration`.
+    #[cfg(test)]
     pub(crate) fn freeze(&self, duration: Duration) {
         *lock(&self.0.frozen_until) = Some(Instant::now() + duration);
     }
