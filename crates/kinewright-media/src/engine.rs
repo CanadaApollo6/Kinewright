@@ -670,6 +670,7 @@ impl FfmpegMediaEngine {
     /// Opt in to SDR display; initialization and self-check run on the preview.
     pub fn enable_display(&self, config: crate::DisplayConfig) -> crate::DisplaySession {
         let (session, shared) = crate::display::DisplayPool::session(&config);
+        *shared.lane.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&self.lane);
         let old = self.lane.lock().display.replace((config, shared));
         drop(old);
         self.lane.notify();

@@ -1221,6 +1221,7 @@ pub(crate) struct Preview {
     parked: Option<u64>,
     held: Option<Held>,
     display: Option<crate::display::DisplayPool>,
+    paused_slot_wait: Option<u64>,
     /// R-4 fairness: one agent job after each transport attempt.
     agent_turn: bool,
     /// Re-review 2 D4: the newest playback frame (epoch, frame) published;
@@ -1317,6 +1318,7 @@ impl Preview {
             parked: None,
             held: None,
             display: None,
+            paused_slot_wait: None,
             agent_turn: false,
             published: None,
             readers: Vec::new(),
@@ -1395,6 +1397,16 @@ impl Preview {
             if state.shutdown {
                 break None;
             }
+            if self
+                .display
+                .as_ref()
+                .is_some_and(crate::display::DisplayPool::terminal)
+            {
+                drop(state);
+                drop(self.display.take());
+                state = self.lane.lock();
+                continue;
+            }
             while let Some(job) = state.agent.pop_front() {
                 if !job.cancel.load(Ordering::Acquire) {
                     state.agent.push_front(job);
@@ -1411,14 +1423,25 @@ impl Preview {
                 superseded_jobs.extend(state.transport.take());
             }
             let parked = self.parked == Some(state.version);
-            let runnable = (state.transport.as_ref())
-                .map(|job| job.kind)
-                .filter(|kind| matches!(kind, JobKind::Paused(_)) || !parked);
+            let runnable =
+                (state.transport.as_ref())
+                    .map(|job| job.kind)
+                    .filter(|kind| match kind {
+                        JobKind::Paused(_) => {
+                            self.paused_slot_wait != Some(state.version)
+                                || self
+                                    .display
+                                    .as_ref()
+                                    .is_none_or(crate::display::DisplayPool::slot_available)
+                        }
+                        JobKind::Playback { .. } => !parked,
+                    });
             if !state.agent.is_empty() && (self.agent_turn || runnable.is_none()) {
                 break state.agent.pop_front().map(Work::Agent);
             }
             match runnable {
                 Some(JobKind::Paused(_)) => {
+                    self.paused_slot_wait = None;
                     let version = state.version;
                     break state.transport.take().map(|job| Work::Paused(job, version));
                 }
@@ -1538,26 +1561,22 @@ impl Preview {
             == kinewright_core::ColorContext::sdr_rec709().monitoring;
         let id = if let Some(pool) = display.as_mut().filter(|_| sdr) {
             let timeout = Duration::from_secs_f64(2.0 * frame_ms(document.fps) / 1000.0);
-            loop {
-                let cancelled = || {
-                    let state = self.lane.lock();
-                    state.shutdown || state.version != wait.version
-                };
-                if let Some(id) = pool.acquire(resolution, timeout, cancelled) {
-                    break Some(id);
-                }
-                if pool.terminal() {
-                    break None;
-                }
+            let cancelled = || {
+                let state = self.lane.lock();
+                state.shutdown || state.version != wait.version
+            };
+            if let Some(id) = pool.acquire(resolution, timeout, cancelled) {
+                Some(id)
+            } else if pool.terminal() {
+                None
+            } else {
                 self.lane.counters().stats.slot_starved += 1;
-                if cancelled() || wait.playback.is_some() {
-                    self.display = display;
-                    return Err(if cancelled() {
-                        Halt::Superseded
-                    } else {
-                        Halt::Held { agent: false }
-                    });
-                }
+                self.display = display;
+                return Err(if cancelled() {
+                    Halt::Superseded
+                } else {
+                    Halt::Held { agent: false }
+                });
             }
         } else {
             None
@@ -2142,7 +2161,14 @@ impl Preview {
                 image: texture,
             }),
             Err(Halt::Superseded) => self.lane.counters().stats.paused_abandoned += 1,
-            Ok(None) | Err(Halt::Held { .. }) => {}
+            Err(Halt::Held { .. }) => {
+                let mut state = self.lane.lock();
+                if !state.shutdown && state.version == version && state.transport.is_none() {
+                    state.transport = Some(job.clone());
+                    self.paused_slot_wait = Some(version);
+                }
+            }
+            Ok(None) => {}
             Err(Halt::Failed(error)) => self.fail(job.stamp, error),
         }
     }

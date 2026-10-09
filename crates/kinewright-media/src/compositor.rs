@@ -180,6 +180,7 @@ pub fn compositor_required_limits(mut limits: wgpu::Limits) -> wgpu::Limits {
 #[derive(Clone)]
 pub struct GpuContext {
     full_frame_readbacks: Arc<AtomicU64>,
+    lost: Arc<AtomicBool>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     provenance: GpuProvenance,
@@ -267,9 +268,11 @@ struct GpuProvenance {
 impl GpuContext {
     #[must_use]
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let lost = Self::watch_loss(&device);
         Self {
             device,
             queue,
+            lost,
             provenance: GpuProvenance {
                 backend: "unknown".to_owned(),
                 adapter: "unknown".to_owned(),
@@ -295,9 +298,11 @@ impl GpuContext {
         info: wgpu::AdapterInfo,
     ) -> Self {
         let software_fallback = info.device_type == wgpu::DeviceType::Cpu;
+        let lost = Self::watch_loss(&device);
         Self {
             device,
             queue,
+            lost,
             provenance: GpuProvenance {
                 backend: info.backend.to_string(),
                 adapter: info.name,
@@ -307,6 +312,25 @@ impl GpuContext {
             ledger: Arc::default(),
             full_frame_readbacks: Arc::default(),
         }
+    }
+
+    fn watch_loss(device: &wgpu::Device) -> Arc<AtomicBool> {
+        let lost = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&lost);
+        device.set_device_lost_callback(move |_, _| flag.store(true, Ordering::Release));
+        lost
+    }
+    pub(crate) fn device_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn poll_device_loss(&self) -> bool {
+        // Destroy reports loss once queued work is drained; preserve normal panics otherwise.
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        self.device_lost()
     }
 
     /// Actual full-frame monitor/proof copies, excluding display flags and self-check.
@@ -1287,6 +1311,33 @@ impl Compositor {
         display: &crate::display::DisplayEncoder,
         slot: &mut crate::display::DisplaySlot,
     ) -> Result<(), MediaError> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_display_inner(resolution, layers, library, display, slot)
+        }));
+        match result {
+            Ok(result) => result,
+            Err(_) if self.gpu.poll_device_loss() => {
+                crate::display::complete(&self.gpu, self.gpu.queue.submit([]));
+                Err(MediaError::Backend(
+                    "display: device lost during encode".to_owned(),
+                ))
+            }
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+    fn render_display_inner<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        library: Option<&LutLibrary>,
+        display: &crate::display::DisplayEncoder,
+        slot: &mut crate::display::DisplaySlot,
+    ) -> Result<(), MediaError> {
+        if self.gpu.device_lost() {
+            return Err(MediaError::Backend(
+                "display: device lost before encode".to_owned(),
+            ));
+        }
         let (w, h) = resolution;
         let (output, mut frame, mut encoder) = self.composite(w, h, layers, library, None)?;
         display.encode(&mut encoder, &output, &slot.texture);

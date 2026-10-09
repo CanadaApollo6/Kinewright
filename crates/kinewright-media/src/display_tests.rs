@@ -330,12 +330,13 @@ fn i5_production_workloads_match_ten_frames_exactly() {
     let gpu = gpu();
     let cfg = config();
     let (session, shared) = DisplayPool::session(&cfg);
-    let mut pool = DisplayPool::new(gpu.clone(), &cfg, shared).unwrap();
+    let pool = DisplayPool::new(gpu.clone(), &cfg, shared);
     assert_eq!(
         session.status(),
         DisplayStatus::Gpu,
         "runtime GPU route required"
     );
+    let mut pool = pool.expect("GPU route was asserted before accessing the pool");
     let workloads = crate::pf1_harness::play_workloads();
     assert_eq!(workloads.len(), 6, "I5 requires every original W workload");
     for (name, Workload(document, _media)) in workloads {
@@ -751,12 +752,13 @@ fn s3a_g7b_play_timing() {
         session: &mut DisplaySession,
         engine: &FfmpegMediaEngine,
         epoch: &mut u64,
-    ) -> Option<(TimeCode, TimeCode)> {
+    ) -> Option<(TimeCode, TimeCode, Instant)> {
         session.advance(*epoch);
         let received = session.reserve().and_then(|frame| {
             let position = engine.position();
             let current = frame.stamp.epoch == engine.stamp().epoch;
-            let arrival = (current && position >= frame.at).then_some((frame.at, position));
+            let arrival =
+                (current && position >= frame.at).then_some((frame.at, position, frame.published));
             if current && frame.at == position {
                 engine.ack_presented(frame.stamp, frame.at, Instant::now(), false);
                 session.bind(*epoch, frame);
@@ -791,6 +793,7 @@ fn s3a_g7b_play_timing() {
     assert!(!cfg!(debug_assertions), "release timing only");
     let Workload(document, _media) = cuts((1920, 1080), 600, 3, 360, 15);
     let runs: usize = std::env::var("S3A_RUNS").map_or(3, |s| s.parse().unwrap());
+    let poll_us = std::env::var("S3A_CONSUMER_POLL_US").map_or(5000, |s| s.parse().unwrap());
     let offset: usize = std::env::var("S3A_RUN_OFFSET").map_or(0, |s| s.parse().unwrap());
     assert!((1..=3).contains(&runs), "one to three bounded timing runs");
     for run in offset..offset + runs {
@@ -863,13 +866,25 @@ fn s3a_g7b_play_timing() {
         let missed = audio.missed_periods();
         let start = Instant::now();
         let (mut previous, mut last_frame) = (None, None);
+        let mut publications = Vec::new();
+        let mut receipt_lags = Vec::new();
+        let mut trace = Vec::new();
+        let mut last_publication = None;
         let (mut encode, mut maps, mut present) = (Vec::new(), Vec::new(), Vec::new());
         engine.play(TimeCode::ZERO);
         while engine.position() < document.duration && start.elapsed() < Duration::from_secs(66) {
-            if let Some((at, _)) = consume(&mut session, &engine, &mut epoch)
+            if let Some((at, _, published)) = consume(&mut session, &engine, &mut epoch)
                 && last_frame.is_none_or(|last| at > last)
             {
                 let arrived = start.elapsed().as_secs_f64() * 1000.0;
+                let publication_ms =
+                    published.saturating_duration_since(start).as_secs_f64() * 1000.0;
+                if let Some(last) = last_publication {
+                    publications.push(publication_ms - last);
+                }
+                last_publication = Some(publication_ms);
+                receipt_lags.push(arrived - publication_ms);
+                trace.push((at.0, publication_ms, arrived));
                 if let Some(previous) = previous {
                     present.push(arrived - previous);
                 }
@@ -880,7 +895,7 @@ fn s3a_g7b_play_timing() {
             for event in events.try_iter() {
                 assert!(event.error().is_none(), "P-play error: {event:?}");
             }
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::sleep(Duration::from_micros(poll_us));
         }
         let elapsed = start.elapsed().as_secs_f64();
         let missed = audio.missed_periods() - missed;
@@ -888,6 +903,7 @@ fn s3a_g7b_play_timing() {
             / f64::from(document.fps.numerator());
         let valid = engine.position() >= document.duration
             && crate::pf1_harness::q2_valid(elapsed * 1000.0, nominal, missed);
+        let starvation = engine.stats().slot_starved;
         session.terminal();
         let finished = engine.finished();
         drop(engine);
@@ -910,6 +926,18 @@ fn s3a_g7b_play_timing() {
             "S3A_INFO run={run} candidate_map_ms={:?} present_p50_ms={p50:.6} present_p95_ms={p95:.6} present_p99_ms={p99:.6} present_max_ms={max:.6}",
             stats(maps)
         );
+        println!(
+            "S3A_DIAG run={run} poll_us={poll_us} publication_ms={:?} receipt_lag_ms={:?} slot_starved={starvation}",
+            stats(publications),
+            stats(receipt_lags)
+        );
+        if std::env::var("S3A_PRESENT_TRACE").is_ok() {
+            for (at, publication_ms, arrival_ms) in trace {
+                println!(
+                    "S3A_PRESENT_TRACE run={run} at={at} publication_ms={publication_ms:.6} arrival_ms={arrival_ms:.6}"
+                );
+            }
+        }
         drop(session);
         assert_eq!(gpu.ledger().live_bytes(), 0);
         assert!(valid, "P-play Q-2 validity");
@@ -917,4 +945,104 @@ fn s3a_g7b_play_timing() {
             assert!(encode_p99 <= 2.0, "G7b p99 gate");
         }
     }
+}
+
+#[path = "display_r71_tests.rs"]
+mod r71;
+
+#[test]
+fn r71_paused_starvation_yields_to_agent_before_release() {
+    use crate::{FfmpegMediaEngine, test_support::TempDirectory};
+    use kinewright_core::Playback;
+    let gpu = gpu();
+    let temp = TempDirectory::new("s3a-starvation");
+    let engine =
+        FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu.clone(), temp.root().into()).unwrap();
+    let mut session = engine.enable_display(config());
+    let mut document = crate::mo2_fixtures::document(vec![crate::mo2_fixtures::solid(
+        1,
+        [180, 90, 45],
+        BlendMode::Normal,
+        vec![],
+    )]);
+    document.resolution = (8, 8);
+    engine.set_document(Arc::new(document));
+    let events = engine.events();
+    let next = |session: &DisplaySession, at: TimeCode| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(frame) = session.reserve() {
+                println!(
+                    "S3A_PAUSED candidate={:?}/{:?} latest={:?}",
+                    frame.at,
+                    frame.stamp,
+                    engine.stamp()
+                );
+                if frame.at == at && frame.stamp == engine.stamp() {
+                    return frame;
+                }
+            }
+            for event in events.try_iter() {
+                assert!(event.error().is_none(), "paused display error: {event:?}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "paused display deadline at {at:?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    session.bind(0, next(&session, TimeCode(0)));
+    engine.seek(TimeCode(1));
+    session.bind(0, next(&session, TimeCode(1)));
+    engine.seek(TimeCode(2));
+    let reserved = next(&session, TimeCode(2));
+    assert_eq!(session.status(), DisplayStatus::Gpu);
+    engine.seek(TimeCode(3));
+    let issued = engine.stamp();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while engine.stats().slot_starved == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let starved = engine.stats().slot_starved;
+    assert!(
+        session.reserve().is_none(),
+        "every lease is held during starvation"
+    );
+    let (reply, received) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = kinewright_core::Analysis::cache_inventory(&engine);
+            let _ = reply.send(result);
+        });
+        let before_release = received.recv_timeout(Duration::from_secs(2));
+        drop(reserved);
+        println!(
+            "R71_F3 agent_before_release={:?}",
+            before_release.as_ref().map(|r| r.families.len())
+        );
+        // Release before asserting so the baseline can unwind rather than hang.
+        assert!(
+            before_release.is_ok(),
+            "agent reply must arrive while all leases remain held"
+        );
+    });
+    let retried = next(&session, TimeCode(3));
+    assert_eq!(
+        retried.stamp, issued,
+        "paused retry preserves its issued identity"
+    );
+    drop(retried);
+    session.terminal();
+    let finished = engine.finished();
+    drop((session, engine));
+    assert_eq!(
+        finished.recv_timeout(Duration::from_secs(30)),
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    );
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+    assert!(
+        starved > 0,
+        "the real preview exhausted its two-interval wait"
+    );
 }

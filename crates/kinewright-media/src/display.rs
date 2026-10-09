@@ -6,6 +6,7 @@ use crate::{
 use half::f16;
 use kinewright_core::{FrameStamp, MediaError, TimeCode};
 use std::{
+    cell::{Cell, RefCell},
     sync::{
         Arc, Condvar, Mutex, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -35,12 +36,16 @@ struct Exchange {
     ready: Option<DisplayFrame>,
     returned: Vec<usize>,
     terminal: bool,
+    closing: bool,
     status: Option<DisplayStatus>,
 }
 pub(crate) struct Shared {
     state: Mutex<Exchange>,
     release: Condvar,
     repaint: Arc<dyn Fn() + Send + Sync>,
+    pub(crate) lane: Mutex<Weak<crate::preview::Lane>>,
+    #[cfg(test)]
+    writing_panic: Mutex<Option<&'static str>>,
     #[cfg(test)]
     before_wait: Mutex<Option<(std::sync::mpsc::Sender<()>, Arc<std::sync::Barrier>)>>,
 }
@@ -48,11 +53,35 @@ impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, Exchange> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+    fn wake_preview(&self) {
+        if let Some(lane) = self
+            .lane
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .upgrade()
+        {
+            // Pair with next_work's predicate check under the scheduler lock.
+            let _state = lane.lock();
+            lane.notify();
+        }
+    }
+    #[cfg(test)]
+    fn writing_step(&self, step: &str) {
+        let mut hook = self.writing_panic.lock().unwrap();
+        let panic = hook.as_ref().is_some_and(|expected| *expected == step);
+        if panic {
+            hook.take();
+        }
+        drop(hook);
+        assert!(!panic, "R71 Writing {step} panic");
+    }
     fn give(&self, id: usize) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(state.returned.len() < 3);
         state.returned.push(id);
         self.release.notify_all();
+        drop(state);
+        self.wake_preview();
     }
 }
 /// Non-cloneable reserved, Ready, Bound or Retiring lease. Drop returns it.
@@ -62,6 +91,9 @@ pub struct DisplayFrame {
     pub dimensions: (u32, u32),
     pub view: wgpu::TextureView,
     pub allocation_id: usize,
+    publication: u64,
+    #[cfg(test)]
+    published: Instant,
     exchange: Weak<Shared>,
 }
 impl Drop for DisplayFrame {
@@ -93,16 +125,22 @@ impl DisplaySession {
     }
     #[must_use]
     pub fn reserve(&self) -> Option<DisplayFrame> {
-        self.shared.lock().ready.take()
+        let mut state = self.shared.lock();
+        if state.terminal || state.closing {
+            None
+        } else {
+            state.ready.take()
+        }
     }
     pub fn defer(&self, frame: DisplayFrame) {
         let old = {
             let mut state = self.shared.lock();
             if state.terminal
+                || state.closing
                 || state
                     .ready
                     .as_ref()
-                    .is_some_and(|new| new.stamp.seq > frame.stamp.seq)
+                    .is_some_and(|new| new.publication > frame.publication)
             {
                 Some(frame)
             } else {
@@ -114,12 +152,19 @@ impl DisplaySession {
     /// # Panics
     /// Panics on a second rebind in an epoch or an unretired previous rebind.
     pub fn bind(&mut self, epoch: u64, frame: DisplayFrame) {
+        let state = self.shared.lock();
+        if state.terminal || state.closing {
+            drop(state);
+            drop(frame);
+            return;
+        }
         assert!(self.can_bind(epoch));
         if let Some(old) = self.bound.replace(frame) {
             assert!(self.retiring.is_none());
             self.retiring = Some((epoch, old));
             self.last_rebind = Some(epoch);
         }
+        drop(state);
         (self.shared.repaint)();
     }
     pub fn advance(&mut self, epoch: u64) {
@@ -143,6 +188,7 @@ impl DisplaySession {
             self.shared.release.notify_all();
         }
         drop(leases);
+        self.shared.wake_preview();
         (self.shared.repaint)();
     }
 }
@@ -502,7 +548,23 @@ pub(crate) fn mapped_bytes(
         .recv()
         .map_err(|e| MediaError::Backend(format!("display: map callback {e}")))?;
     result.map_err(|e| MediaError::Backend(format!("display: map {e}")))?;
-    let bytes = buffer.get_mapped_range(..).to_vec();
+    if gpu.device_lost() {
+        return Err(MediaError::Backend(
+            "display: device lost after map".to_owned(),
+        ));
+    }
+    let bytes = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        buffer.get_mapped_range(..).to_vec()
+    }));
+    let bytes = match bytes {
+        Ok(bytes) => bytes,
+        Err(_) if gpu.poll_device_loss() => {
+            return Err(MediaError::Backend(
+                "display: device lost after map".to_owned(),
+            ));
+        }
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
     buffer.unmap();
     Ok(bytes)
 }
@@ -538,10 +600,23 @@ fn read_texture(gpu: &GpuContext, texture: &wgpu::Texture) -> Result<Vec<u8>, Me
         .collect())
 }
 
+struct WritingLease {
+    id: usize,
+    shared: Option<Arc<Shared>>,
+}
+impl Drop for WritingLease {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.take() {
+            shared.give(self.id);
+        }
+    }
+}
 pub(crate) struct DisplayPool {
     pub(crate) encoder: DisplayEncoder,
     slots: [Option<DisplaySlot>; 3],
     free: Vec<usize>,
+    writing: [RefCell<Option<WritingLease>>; 3],
+    publication: Cell<u64>,
     shared: Arc<Shared>,
 }
 impl DisplayPool {
@@ -550,6 +625,9 @@ impl DisplayPool {
             state: Mutex::new(Exchange::default()),
             release: Condvar::new(),
             repaint: Arc::clone(&config.repaint),
+            lane: Mutex::default(),
+            #[cfg(test)]
+            writing_panic: Mutex::default(),
             #[cfg(test)]
             before_wait: Mutex::default(),
         });
@@ -584,8 +662,13 @@ impl DisplayPool {
             encoder: result?,
             slots: Default::default(),
             free: vec![0, 1, 2],
+            writing: Default::default(),
+            publication: Cell::new(0),
             shared,
         })
+    }
+    pub(crate) fn slot_available(&self) -> bool {
+        !self.free.is_empty() || !self.shared.lock().returned.is_empty()
     }
     pub(crate) fn terminal(&self) -> bool {
         self.shared.lock().terminal
@@ -607,6 +690,12 @@ impl DisplayPool {
                 return None;
             }
             if let Some(id) = self.free.pop() {
+                *self.writing[id].borrow_mut() = Some(WritingLease {
+                    id,
+                    shared: Some(Arc::clone(&self.shared)),
+                });
+                #[cfg(test)]
+                self.shared.writing_step("allocation");
                 if self.slots[id]
                     .as_ref()
                     .is_none_or(|s| (s.texture.width(), s.texture.height()) != dims)
@@ -637,14 +726,24 @@ impl DisplayPool {
     }
     pub(crate) fn candidate(&self, id: usize, at: TimeCode, stamp: FrameStamp) -> DisplayFrame {
         let texture = &self.slots[id].as_ref().expect("acquired").texture;
-        DisplayFrame {
+        let mut writing = self.writing[id].borrow_mut().take().expect("Writing lease");
+        let publication = self.publication.get() + 1;
+        self.publication.set(publication);
+        #[cfg(test)]
+        self.shared.writing_step("candidate");
+        let frame = DisplayFrame {
+            #[cfg(test)]
+            published: Instant::now(),
+            publication,
             at,
             stamp,
             dimensions: (texture.width(), texture.height()),
             view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
             allocation_id: id,
             exchange: Arc::downgrade(&self.shared),
-        }
+        };
+        writing.shared = None;
+        frame
     }
     pub(crate) fn collect_timing(&self) {
         if let Some(timing) = self
@@ -662,9 +761,15 @@ impl DisplayPool {
         }
     }
     pub(crate) fn publish(&self, frame: DisplayFrame) {
+        #[cfg(test)]
+        let frame = {
+            let mut frame = frame;
+            frame.published = Instant::now();
+            frame
+        };
         let old = {
             let mut state = self.shared.lock();
-            if state.terminal {
+            if state.terminal || state.closing {
                 Some(frame)
             } else {
                 state.ready.replace(frame)
@@ -674,15 +779,26 @@ impl DisplayPool {
         (self.shared.repaint)();
     }
     pub(crate) fn abandon(&mut self, id: usize) {
+        let mut writing = self.writing[id].borrow_mut().take().expect("Writing lease");
+        writing.shared = None;
         self.free.push(id);
     }
 }
 impl Drop for DisplayPool {
     fn drop(&mut self) {
-        let ready = self.shared.lock().ready.take();
+        let ready = {
+            let mut state = self.shared.lock();
+            state.closing = true;
+            state.ready.take()
+        };
         drop(ready);
+        for writing in &self.writing {
+            drop(writing.borrow_mut().take());
+        }
         // App Drop transfers Bound/Retiring even when on_exit was never called.
         while self.free.len() < 3 {
+            let ready = self.shared.lock().ready.take();
+            drop(ready);
             let mut state = self.shared.lock();
             self.free.extend(std::mem::take(&mut state.returned));
             if self.free.len() < 3 {
