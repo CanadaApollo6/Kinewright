@@ -7224,90 +7224,106 @@ checkout: SHA256 `101c40f07bed3d508dd5a55af284724f66db15c460b6f17c3441afbf8f0ad0
 The reference remains `s2c-timing/bins/cand-62a29b1` (`d20efde4…`); complete
 binary identities, manifests and commands are in `r73/release-identity.json`.
 
-**Post-fix R74 preflight (2026-10-09): pending (3090 busy).** R74 supersedes
-the old below-10% idle check. The new three samples below are not saturated,
-but the explicit non-Kinewright compute-query condition is met: the driver
-lists voxtype, Slack, T3 and Claude as C+G and returns them in
-`--query-compute-apps`. These appear to be the expected desktop rendering
-contexts; no Tensorfold or saturation attribution is made. A desktop-context
-exemption was requested but not received before the stop. No LH lane launched.
+**Post-fix LH provenance and per-lane evidence (R74a).**
 
-**Post-fix LH provenance and per-lane evidence.**
+**Status: post-fix LH measurement complete (R74a, 2026-10-09).** LH correctness trio PASS; G7b PASS; paired I4 PASS. This supersedes bb592a3's literal-R74 preflight stop. CI-W and lead stage acceptance remain separate.
 
-**Status: pending (3090 busy). No LH lane launched.** The explicit R74
-`--query-compute-apps` condition is met, even though GPU utilisation is below
-80% and the listed processes appear to be the expected desktop rendering load.
-No Tensorfold process is identified and no compute saturation is claimed.
-The driver reports voxtype, Slack, T3 and Claude as C+G; all four also appear
-in the compute-only query. An exemption for these desktop rendering contexts
-was requested; none was received before this stop. This stop applies the query
-condition, not the superseded below-10% idle rule.
+Measurement worktree: `pf1/impl` at `bb592a320bd9fffebfa24debd4b71710e7cbcc0c`. The preserved a4eb605 candidate SHA256 is `101c40f07bed3d508dd5a55af284724f66db15c460b6f17c3441afbf8f0ad03f`; the same LL reference `s2c-timing/bins/cand-62a29b1` has SHA256 `d20efde471b2c4d6f256011cc548b1087e4c5f81715f5ea13fd4589fc3f6fd70`. The previous source identity was rechecked: 217 manifest files, cfg(test)-only F4 changes and the equivalent callback binding; production and tracked WGSL match the preserved candidate. No cargo, source edits, rebuild, push or laptop SSH.
 
-Worktree: `pf1/impl` at `9787be9615cf09e93507f8b8970de0a66501ed30`.
-Production matches `a4eb605` using `final-rust-source-identity.json`:
-217 manifest files checked; the three differing files are F4 test-only changes
-plus an equivalent local binding of the unchanged queue-completion callback.
-After removing cfg(test) items and normalizing that equivalent binding,
-`display.rs` is identical; the two other changed modules are cfg(test)-only.
-All tracked WGSL files match. Both preserved binary hashes match the LL run.
-No rebuild was needed, no cargo ran, and no source was changed.
+Artifacts: `/home/riels/kw-logs/pf1-lh-r74a/`. Plans, runner/analyser, `source-identity.json`, both timing and 5 s sampler logs, each lane's `*-preflight.log` / `.json` (full nvidia-smi tables with Types), actual runner PID records, lane timeout PIDs and descendant inventories are retained. Launchers are recorded separately. Runs were serialized at nice 10, one test thread, normal CPU allocation and a 600 s timeout.
 
-Candidate: `cand-r71-a4eb605-101c40f07bed`, SHA256
-`101c40f07bed3d508dd5a55af284724f66db15c460b6f17c3441afbf8f0ad03f`.
-Reference: `s2c-timing/bins/cand-62a29b1`, SHA256
-`d20efde471b2c4d6f256011cc548b1087e4c5f81715f5ea13fd4589fc3f6fd70`.
-Identity evidence and prepared serial plan: `/home/riels/kw-logs/pf1-lh-r74/`.
-The plan preserves LL's candidate/reference present A B A B A B pairing and
-three reference/candidate I4 pairs; the F12 control is 5000 versus 1000 µs.
-The preflight evidence is `initial-preflight.json` / `initial-preflight.log`.
-An earlier partial preflight log is excluded; the complete three-sample record
-below is the accepted gate check. There are no runner or test PIDs because no
-lane was started.
+**Correctness.** All three lanes identify NVIDIA GeForce RTX 3090 / Vulkan, `software_fallback=false`, `gpu_claim=true`. W prints `frames=10 route=GPU exact=true` for typical_1080p, blend_heavy_1080p, explainer_16x9, reel_9x16, feed_4x5 and talk_recut. G-6 is the intentional broken-table CPU fallback / scratch-release witness, not parity evidence.
 
-| Sample time EDT | Utilisation | Memory MiB | Pstate | Compute-query PIDs |
-|---|---:|---:|---|---|
-| 2026/10/09 17:36:12.082 | 32 % | 1385 | P8 | 2803, 166671, 2184397, 3470089 |
-| 2026/10/09 17:36:17.078 | 37 % | 1371 | P8 | 2803, 166671, 2184397, 3470089 |
-| 2026/10/09 17:36:22.081 | 32 % | 1389 | P8 | 2803, 166671, 2184397, 3470089 |
+**G7b: warm typical_1080p P-play, encode-pass GPU timestamps.** Canonical runs are LH-candidate-0/1/2; the extra candidate-1 rerun is present-pair evidence and is not substituted into this trio. All canonical runs have Q-2 valid, zero missed callbacks.
 
-Processes: 2803 voxtype-osd-gtk4; 166671 Slack GPU process; 2184397 T3 GPU
-process; 3470089 Claude desktop GPU process. Raw process names and GPU state
-are preserved alongside the planned lane logs. No process was changed or
-signalled.
+| Run | n | p50 ms | p95 ms | p99 ms | max ms |
+|---|---:|---:|---:|---:|---:|
+| 0 | 1764 | 0.129952 | 0.150752 | 0.156864 | 0.176416 |
+| 1 | 1698 | 0.130496 | 0.151072 | 0.155552 | 0.175584 |
+| 2 | 1799 | 0.129728 | 0.150752 | 0.156704 | 0.184224 |
 
-Per-lane exits and raw `test result` lines: **not available, not run** for each
-lane below. No passing test, GPU-route witness, Q-2 result or timing gate is
-inferred from the preflight or prepared plan.
+Every p99 ≤2 ms: **PASS**. Maxima are recorded, not gated. Submission-to-map candidate-only p50/p95/p99/max ms: [4.086725, 4.293983000000001, 5.02086, 9.273396]; [4.070569, 4.284205999999999, 4.731781, 7.096726]; [4.04791, 4.231242, 4.405082, 6.909389].
 
-- `LH-correctness-bits`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-correctness-W`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-correctness-G6`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-candidate-0`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-reference-0`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-candidate-1`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-reference-1`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-candidate-2`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-reference-2`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-I4-reference-0`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-I4-candidate-0`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-I4-reference-1`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-I4-candidate-1`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-I4-reference-2`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-I4-candidate-2`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-F12-poll-5000`: exit=n/a; raw `test result`=n/a (not run).
-- `LH-F12-poll-1000`: exit=n/a; raw `test result`=n/a (not run).
+**Present interval (information).** Candidate/reference alternation follows LL. Initial pair 1's reference failed Q-2 (`valid=false`, one missed callback, exit 101). The full candidate/reference pair was rerun once; both reruns passed with zero missed callbacks. The failed attempt remains excluded, with its raw failure preserved. All three accepted reference rows have `passes=false` for broader P-play counters despite valid Q-2 and exit 0: this is present information, not a P-play stage gate or causal improvement claim.
 
-G7b runs 0/1/2: n/p50/p95/p99/max all n/a; the p99 ≤2 ms gate remains
-unproven. I4 pairs 0/1/2: reference/candidate mean-ms ratios and median n/a;
-the median ≤1.05 gate remains unproven. Present pairs 0/1/2: p95 ratios and
-median n/a. F12 5 ms versus 1 ms hardware verdict: unproven; the accepted LL
-polling diagnosis remains LL-only. Historical pre-fix LH numbers do not
-establish this candidate.
+| Pair | Candidate p50 / p95 / max ms | Reference p50 / p95 / max ms | p95 ratio |
+|---|---|---|---:|
+| 0 | 33.728911 / 45.599575 / 110.321779 | 64.000000 / 85.500000 / 170.000000 | 0.533328 |
+| 1 (rerun) | 35.481969 / 45.569101 / 86.664628 | 63.600000 / 85.100000 / 86.300000 | 0.535477 |
+| 2 | 35.480487 / 45.575122 / 50.779156 | 33.200000 / 43.000000 / 84.900000 | 1.059887 |
 
-Cleanup: no build output or owned `/tmp/kinewright-*` fixtures were created;
-the worktree target was already absent and remains absent. Existing fixtures
-belonging to other runs/processes were preserved. Only this report and the
-matching E14 evidence documentation were changed. No push.
+Median present p95 ratio: **0.535477**, information only. Reference spread and recorded load are retained.
+
+**Paired I4: r28_end_to_end_tracked, typical_1080p, E13 protocol.** Each external test contributes the mean of its three internal R28 run means, matching LL. All six tests pass on RTX 3090.
+
+| Pair | Reference mean ms | Candidate mean ms | Candidate/reference |
+|---|---:|---:|---:|
+| 0 | 73.803333 | 69.663333 | 0.943905 |
+| 1 | 67.496667 | 67.746667 | 1.003704 |
+| 2 | 66.720000 | 67.490000 | 1.011541 |
+
+Median ratio **1.003704 ≤1.05: PASS**. This is the prescribed paired gate under recorded load.
+
+**F12 hardware confirmation: 5 ms versus 1 ms measurement-consumer poll.** Both controls pass Q-2 with zero missed callbacks and zero slot starvation.
+
+| Poll µs | Publication p95 ms | Receipt-lag p95 ms | Present p95 ms | Trace frames |
+|---:|---:|---:|---:|---:|
+| 5000 | 42.731215 | 4.827753 | 45.516414 | 1800 |
+| 1000 | 42.943288 | 1.708613 | 43.099395 | 1798 |
+
+Present p95 fell 2.417019 ms (5.31%); publication p95 changed +0.212073 ms (+0.50%). Receipt-lag p95 changed from 4.827753 to 1.708613 ms. Per-frame tail median receipt-lag delta: 2.831404 versus 0.511933 ms. **LH verdict: consistent with LL's measurement-consumer receipt quantization.** Producer cadence, receipt lag and traces are reported separately; no application-speed improvement or additional production defect is established. The canonical 5 ms protocol and production source are unchanged.
+
+**Per-lane exits and raw test result lines (including excluded attempt).**
+
+- `LH-correctness-bits`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 0.46s`.
+- `LH-correctness-W`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 161.92s`.
+- `LH-correctness-G6`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 0.32s`.
+- `LH-candidate-0`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 66.12s`.
+- `LH-reference-0`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1122 filtered out; finished in 66.63s`.
+- `LH-candidate-1`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 66.92s`.
+- `LH-reference-1`: exit=101; `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1122 filtered out; finished in 66.96s`.
+- `LH-candidate-1-rerun`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 65.83s`.
+- `LH-reference-1-rerun`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1122 filtered out; finished in 66.29s`.
+- `LH-candidate-2`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 65.60s`.
+- `LH-reference-2`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1122 filtered out; finished in 65.53s`.
+- `LH-I4-reference-0`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1122 filtered out; finished in 75.23s`.
+- `LH-I4-candidate-0`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 70.49s`.
+- `LH-I4-reference-1`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1122 filtered out; finished in 68.52s`.
+- `LH-I4-candidate-1`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 68.65s`.
+- `LH-I4-reference-2`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1122 filtered out; finished in 67.99s`.
+- `LH-I4-candidate-2`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 68.45s`.
+- `LH-F12-poll-5000`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 64.56s`.
+- `LH-F12-poll-1000`: exit=0; `test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1146 filtered out; finished in 64.51s`.
+
+The initial aggregate ended `success=False` because of the retained reference failure. It is not called green. Accepted results exclude only that invalid reference and use the complete replacement pair.
+
+**GPU preflights (three samples, 5 s apart before every lane).** Triples below are chronological utilisation % / memory MiB / pstate. Every full table shows only G/C+G desktop contexts; maximum per-process allocation across all 57 samples is 234 MiB, below 2 GiB. No pure-C co-tenant or all-three ≥80% group occurred. R74a exempts the desktop C+G contexts; utilisation/load are recorded.
+
+| Lane | Sample times EDT | Util % ×3 | Memory MiB ×3 | Pstate ×3 |
+|---|---|---|---|---|
+| LH-correctness-bits | 17:39:21.482 / 17:39:26.482 / 17:39:31.479 | 31 / 36 / 31 | 1223 / 1256 / 1223 | P8 / P8 / P8 |
+| LH-correctness-W | 17:39:35.377 / 17:39:40.386 / 17:39:45.384 | 12 / 32 / 33 | 1223 / 1223 / 1223 | P5 / P8 / P8 |
+| LH-correctness-G6 | 17:42:30.032 / 17:42:35.037 / 17:42:40.034 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-candidate-0 | 17:42:43.882 / 17:42:48.883 / 17:42:53.883 | 1 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-reference-0 | 17:44:02.751 / 17:44:07.754 / 17:44:12.754 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-candidate-1 | 17:45:22.068 / 17:45:27.069 / 17:45:32.069 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-reference-1 | 17:46:41.727 / 17:46:46.727 / 17:46:51.730 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-candidate-1-rerun | 17:49:04.484 / 17:49:09.482 / 17:49:14.484 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-reference-1-rerun | 17:50:23.376 / 17:50:28.376 / 17:50:33.380 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-candidate-2 | 17:51:42.322 / 17:51:47.320 / 17:51:52.320 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P5 / P8 / P8 |
+| LH-reference-2 | 17:53:01.170 / 17:53:06.171 / 17:53:11.168 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-I4-reference-0 | 17:54:20.010 / 17:54:25.010 / 17:54:30.009 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-I4-candidate-0 | 17:55:48.855 / 17:55:53.852 / 17:55:58.852 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-I4-reference-1 | 17:57:12.677 / 17:57:17.680 / 17:57:22.680 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-I4-candidate-1 | 17:58:33.813 / 17:58:38.814 / 17:58:43.812 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-I4-reference-2 | 17:59:55.063 / 18:00:00.065 / 18:00:05.065 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-I4-candidate-2 | 18:01:15.687 / 18:01:20.689 / 18:01:25.690 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-F12-poll-5000 | 18:02:36.736 / 18:02:41.737 / 18:02:46.734 | 0 / 0 / 0 | 1223 / 1223 / 1223 | P8 / P8 / P8 |
+| LH-F12-poll-1000 | 18:03:53.909 / 18:03:58.910 / 18:04:03.909 | 0 / 0 / 0 | 1223 / 1222 / 1222 | P8 / P8 / P8 |
+
+Begin/end one-minute CPU load: 1.74–22.77; 1107 >20% CPU contamination annotations (repeated samples included). Full top-five, pstate/clocks/power and 5 s sampler records are alongside the logs. No external process was changed or signalled.
+
+Cleanup: removed 0 recorded-PID-owned `/tmp/kinewright-*` fixtures (0 apparent bytes); verified absent. Other fixtures are preserved. The worktree target remains absent. Inventory: `cleanup-inventory.json`. Candidate/reference hashes and production identity were rechecked after measurement. Only E14 is committed; the main-checkout report is review evidence. No push.
 
 **Post-fix LL I4 (F10, E13 paired protocol).** Each external R28 test contributes
 the mean of its three internal run means. All six tests passed.
@@ -7320,7 +7336,7 @@ the mean of its three internal run means. All six tests passed.
 
 Median 0.935835 ≤ 1.05: **LL I4 PASS**. This establishes the prescribed
 no-regression gate under recorded load; it is not a causal improvement claim.
-LH I4 is pending. Raw means and lane exits are in `r73/LL-I4-plan-timing.log`.
+LH I4 is reported above. LL raw means and lane exits are in `r73/LL-I4-plan-timing.log`.
 
 **Post-fix LL information.** The three canonical candidate/reference pairs
 passed their test and Q-2 checks, with zero missed callbacks. Encode sample
@@ -7344,7 +7360,7 @@ steady p95 appears after publication, in the timing harness's consumer poll;
 the producer cadence is essentially unchanged. No native app defect is
 established and no F12 production fix is made. The canonical 5 ms protocol stays
 unchanged; any measurement-consumer update belongs to a separately agreed
-measurement/S3b change. Hardware confirmation remains pending.
+measurement/S3b change. LH hardware confirmation is recorded above.
 
 The first 500 µs control and one rerun failed Q-2 (2 and 1 missed callbacks,
 exits 101); they are excluded from paced evidence. The valid comparison uses
@@ -7355,7 +7371,7 @@ aggregate is represented as green, and `ALL DONE` is completion only. The cause
 of those missed callbacks is not proven. The report retains the exact accepted
 and excluded runs, trace facts, cleanup inventory and any owed work.
 
-S3a remains open for post-fix LH and CI-W. The RTX4050 rerun and the laptop's
+Post-fix LH is complete; S3a remains open for CI-W and lead stage acceptance. The RTX4050 rerun and the laptop's
 log, build and owned-fixture cleanup remain owed under R73 for when the laptop
 returns.
 
