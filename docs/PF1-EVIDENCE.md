@@ -7392,3 +7392,57 @@ job got one rerun, and it passed. The test predates S3a (R53, S2c) and
 passed on Linux in both tiers. It is recorded as a Windows timing flake; a
 second failure would be a finding. The lead accepts S3a. The RTX 4050 rerun
 and the laptop cleanup remain owed under R73.
+
+
+## E15 — PF1 S3b (partial; U-1)
+
+U-1 adds two completion-owned mapped upload batches and writes working rows
+directly into the charged staging allocation. Reuse requires observed real
+submission completion and successful delivery of every registered write-map
+callback. Abandoned, never-submitted batches release without a callback wait;
+registered maps settle on their owning batch, including loss and unwinding.
+Native buffer destruction releases abandoned mappings without a device call.
+The index manifest identifies the exact gated U-1 tree; U-2 test-only
+instrumentation prepared during the media runtime was outside that tree.
+
+Runtime reds (lavapipe, one media test thread; compilation/setup failures are
+excluded):
+
+- Pre-fix staging identity and intermediate-copy behaviour:
+  `test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1148 filtered out; finished in 0.43s`
+- Completion-observation guard removed:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1153 filtered out; finished in 0.28s`
+- Registered-map settlement guard removed:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1153 filtered out; finished in 0.27s`
+- Old-map/new-submission generation isolation:
+  `test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 1153 filtered out; finished in 0.38s`
+- Abandoned Writing retirement removed:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1154 filtered out; finished in 0.22s`
+- Pending loss-map retention guard removed:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1154 filtered out; finished in 0.23s`
+
+Restored seven U-1 witnesses:
+
+`test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1148 filtered out; finished in 1.14s`
+
+Final per-commit media gate (exit 0):
+
+```text
+test result: ok. 1096 passed; 0 failed; 59 ignored; 0 measured; 0 filtered out; finished in 1047.34s
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 22.79s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.02s
+test result: ok. 12 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 2.67s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Workspace build and clippy `--workspace --all-targets -- -D warnings` passed;
+touched-file rustfmt and slow-test lint passed. Every cargo invocation used
+`source scripts/setup-ffmpeg.sh` and `CARGO_BUILD_JOBS=4 nice -n 10 cargo`; media
+tests used one thread. The conservative added nonblank production Rust count
+is **319**, excluding test-only instrumentation. No push.
+
+**Partial:** U-2, idle maintenance/parked retry, the pending-map
+engine-before-session witness, D14, D12, stage gate and R75 measurements are
+still owed. Existing R71 teardown tests passing are not substitutes for the
+new pending-map engine witness. No S3b performance or stage-close claim.

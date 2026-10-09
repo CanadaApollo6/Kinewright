@@ -599,6 +599,45 @@ pub trait CompositorInput {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
     fn upload_bytes(&self) -> Vec<u8>;
+
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        let bytes = self.upload_bytes();
+        #[cfg(test)]
+        s3b_tests::intermediate(bytes.len());
+        write_upload_rows(
+            &bytes,
+            mapped,
+            pitch,
+            self.width(),
+            self.height(),
+            Self::BYTES_PER_PIXEL,
+        )
+    }
+}
+
+fn write_upload_rows(
+    bytes: &[u8],
+    mapped: &mut wgpu::BufferViewMut,
+    pitch: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<(), MediaError> {
+    let row = width as usize * stride as usize;
+    if row == 0 || bytes.len() != row * height as usize {
+        return Err(MediaError::Backend(
+            "invalid compositor input frame".to_owned(),
+        ));
+    }
+    for (index, source) in bytes.chunks_exact(row).enumerate() {
+        let start = index * pitch;
+        mapped.slice(start..start + row).copy_from_slice(source);
+    }
+    Ok(())
 }
 
 impl CompositorInput for FrameTexture {
@@ -617,6 +656,14 @@ impl CompositorInput for FrameTexture {
     fn upload_bytes(&self) -> Vec<u8> {
         (*self.rgba).clone()
     }
+
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        write_upload_rows(&self.rgba, mapped, pitch, self.width, self.height, 4)
+    }
 }
 
 impl CompositorInput for WorkingFrame {
@@ -634,6 +681,45 @@ impl CompositorInput for WorkingFrame {
 
     fn upload_bytes(&self) -> Vec<u8> {
         self.upload_bytes()
+    }
+
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        #[cfg(target_endian = "little")]
+        return write_upload_rows(
+            bytemuck::cast_slice(&self.pixels),
+            mapped,
+            pitch,
+            self.width,
+            self.height,
+            8,
+        );
+        #[cfg(target_endian = "big")]
+        {
+            if self.width == 0
+                || self.pixels.len() != self.width as usize * self.height as usize * 4
+            {
+                return Err(MediaError::Backend(
+                    "invalid compositor input frame".to_owned(),
+                ));
+            }
+            for (index, row) in self
+                .pixels
+                .chunks_exact(self.width as usize * 4)
+                .enumerate()
+            {
+                for (column, value) in row.iter().enumerate() {
+                    let start = index * pitch + column * 2;
+                    mapped
+                        .slice(start..start + 2)
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -693,6 +779,30 @@ pub struct Compositor {
     /// and unfinished frames, atlas staging — charged until a poll marks the
     /// submission done.
     retired: Mutex<Vec<(Arc<AtomicBool>, FrameResources)>>,
+    upload_ring: Mutex<upload_ring::UploadRing>,
+}
+
+#[path = "upload_ring.rs"]
+mod upload_ring;
+
+impl Drop for Compositor {
+    fn drop(&mut self) {
+        crate::display::complete(&self.gpu, self.gpu.queue.submit([]));
+        self.sweep_retired();
+        loop {
+            let mut ring = self
+                .upload_ring
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            ring.advance();
+            if !ring.pending() {
+                break;
+            }
+            drop(ring);
+            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+            std::thread::yield_now();
+        }
+    }
 }
 
 /// MO2 R28 (ME15): the longest a failed frame waits for its queued writes.
@@ -825,7 +935,11 @@ impl TexturePool {
 }
 
 /// MO2 R28 (ME15): a staged source — pool key, texture, staging + row bytes.
-type LayerUpload = (TexturePoolKey, HeldTexture, (Ledgered<wgpu::Buffer>, u32));
+type LayerUpload = (
+    TexturePoolKey,
+    HeldTexture,
+    (Arc<Ledgered<wgpu::Buffer>>, u32),
+);
 
 struct LayerResources {
     /// The uploaded source texture; `None` for an adjustment or a backdrop,
@@ -833,7 +947,7 @@ struct LayerResources {
     source: Option<(TexturePoolKey, HeldTexture)>,
     /// MO2 R28 (ME15): the source's staging buffer and its padded row bytes,
     /// copied into `source` at the head of the frame's commands.
-    upload: Option<(Ledgered<wgpu::Buffer>, u32)>,
+    upload: Option<(Arc<Ledgered<wgpu::Buffer>>, u32)>,
     /// The atlas this layer's bind group reads; held so the texture outlives
     /// the queue submission even if the cache evicts it meanwhile.
     _lut_atlas: Arc<LutAtlas>,
@@ -848,6 +962,7 @@ struct LayerResources {
 /// submitted, then recycled.
 #[derive(Default)]
 struct FrameResources {
+    upload_batch: Option<upload_ring::UploadLease>,
     layers: Vec<LayerResources>,
     /// MO2 R13: pooled accumulator snapshots A (and B).
     snapshots: Vec<(TexturePoolKey, HeldTexture)>,
@@ -1211,6 +1326,7 @@ impl Compositor {
             identity_lut: Arc::new(CubeLut::identity()),
             lut_atlas_cache: Mutex::new(Vec::new()),
             texture_pool: Mutex::new(TexturePool::default()),
+            upload_ring: Mutex::default(),
             dummy_accumulator,
             dummy_validity,
             validity_stride,
@@ -1351,6 +1467,9 @@ impl Compositor {
         }
         let submitted = std::time::Instant::now();
         let (index, done) = self.submit_tracked([encoder.finish()]);
+        if let Some(batch) = &frame.upload_batch {
+            batch.submitted(done.clone());
+        }
         let result = crate::display::mapped_bytes(&self.gpu, &slot.flags, index.clone());
         display.record_timing(index, submitted.elapsed());
         let result = result.and_then(|bytes| {
@@ -1629,6 +1748,7 @@ impl Compositor {
     /// the full-raster backdrop from it; a special entering layer then
     /// re-snapshots the shifted backdrop (into B for an adjustment, whose
     /// source stays `D0` in A).
+    #[allow(clippy::too_many_lines)]
     fn stage_layers<F: CompositorInput>(
         &self,
         width: u32,
@@ -1638,6 +1758,24 @@ impl Compositor {
         matte_debug: Option<MatteDebugSelection>,
         frame: &mut FrameResources,
     ) -> Result<Vec<Step>, MediaError> {
+        if layers
+            .iter()
+            .any(|layer| layer.mode.role != LayerRole::Adjustment)
+        {
+            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+            self.sweep_retired();
+            self.upload_ring
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .advance();
+            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+            frame.upload_batch = Some(
+                self.upload_ring
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .acquire()?,
+            );
+        }
         let splits = |layer: &CompositorLayer<'_, F>| {
             layer.mode.is_special() || layer.transition.backdrop.is_some()
         };
@@ -1717,9 +1855,15 @@ impl Compositor {
             let debug_node = matte_debug
                 .filter(|selection| selection.layer_index == index)
                 .map(|selection| selection.active_node);
-            frame
-                .layers
-                .push(self.layer_resources(layer, width, height, library, debug_node, &bindings)?);
+            frame.layers.push(self.layer_resources(
+                layer,
+                width,
+                height,
+                library,
+                debug_node,
+                &bindings,
+                frame.upload_batch.as_ref(),
+            )?);
             schedule(Step::Draw(frame.layers.len() - 1));
         }
         frame.validity = validity;
@@ -1885,6 +2029,7 @@ impl Compositor {
             && params.rotation == 0.0
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn layer_resources<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
@@ -1893,6 +2038,7 @@ impl Compositor {
         library: Option<&LutLibrary>,
         matte_debug_node: Option<usize>,
         bindings: &LayerBindings<'_>,
+        batch: Option<&upload_ring::UploadLease>,
     ) -> Result<LayerResources, MediaError> {
         let binding = self.lut_binding(layer.effects, library)?;
         let cube_lut = &binding.legacy_lut;
@@ -1939,7 +2085,8 @@ impl Compositor {
         let (source, view, upload) = if let Some(snapshot) = bindings.source {
             (None, snapshot.clone(), None)
         } else {
-            let (key, texture, upload) = self.upload_layer(layer)?;
+            let (key, texture, upload) =
+                self.upload_layer(layer, batch.expect("pixel batch acquired"))?;
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             (Some((key, texture)), view, Some(upload))
         };
@@ -1962,13 +2109,9 @@ impl Compositor {
     fn upload_layer<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
+        batch: &upload_ring::UploadLease,
     ) -> Result<LayerUpload, MediaError> {
-        let expected_len = usize::try_from(layer.frame.width())
-            .unwrap_or_default()
-            .saturating_mul(usize::try_from(layer.frame.height()).unwrap_or_default())
-            .saturating_mul(usize::try_from(F::BYTES_PER_PIXEL).unwrap_or_default());
-        let upload_bytes = layer.frame.upload_bytes();
-        if upload_bytes.len() != expected_len || expected_len == 0 {
+        if layer.frame.width() == 0 || layer.frame.height() == 0 {
             return Err(MediaError::Backend(
                 "invalid compositor input frame".to_owned(),
             ));
@@ -1979,13 +2122,16 @@ impl Compositor {
             format: F::FORMAT,
         };
         let row = layer.frame.width().saturating_mul(F::BYTES_PER_PIXEL);
-        let rows = upload_bytes.chunks_exact(row as usize);
-        let upload = self.staging_rows(
-            "Kinewright layer upload staging",
-            (row, pool_key.height),
-            rows,
-        );
+        let pitch = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = batch.buffer(&self.gpu, u64::from(pitch) * u64::from(pool_key.height));
+        layer
+            .frame
+            .write_upload(&mut buffer.get_mapped_range_mut(..), pitch as usize)?;
+        batch.unmap_current();
+        let upload = (buffer, pitch);
         let texture = self.acquire_layer_texture(pool_key);
+        #[cfg(test)]
+        s3b_tests::upload(&upload.0);
         Ok((pool_key, texture, upload))
     }
 
@@ -2009,6 +2155,10 @@ impl Compositor {
             self.retain(done, frame);
         }
         self.sweep_retired();
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .advance();
     }
 
     /// MO2 R28 (ME16): submit, with a flag set once that work completes.
@@ -2019,9 +2169,10 @@ impl Compositor {
         let done = Arc::new(AtomicBool::new(false));
         let index = self.gpu.queue.submit(commands);
         let flag = Arc::clone(&done);
-        self.gpu
-            .queue
-            .on_submitted_work_done(move || flag.store(true, Ordering::Release));
+        let callback = move || flag.store(true, Ordering::Release);
+        #[cfg(test)]
+        let callback = s3b_tests::complete_callback(callback);
+        self.gpu.queue.on_submitted_work_done(callback);
         (index, done)
     }
 
@@ -2041,6 +2192,10 @@ impl Compositor {
             self.release_layer_textures(frame);
         }
         self.sweep_retired();
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .advance();
     }
 
     /// MO2 R28 (ME15): a charged, mapped-at-creation `MAP_WRITE | COPY_SRC`
@@ -2468,6 +2623,9 @@ impl Compositor {
         }
         let (index, done) = self.submit_tracked([encoder.finish()]);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        if let Some(batch) = &frame.upload_batch {
+            batch.submitted(done.clone());
+        }
         let callback = move |result| {
             let _ = sender.send(result);
         };
@@ -8000,6 +8158,10 @@ mod tests {
 #[cfg(test)]
 #[path = "mo2_ledger_probes.rs"]
 pub(crate) mod ledger_probes;
+
+#[cfg(test)]
+#[path = "s3b_tests.rs"]
+mod s3b_tests;
 
 /// MO2 R28 (ME14): one monitor frame split into its phases, for the perf
 /// lanes' printed breakdown.

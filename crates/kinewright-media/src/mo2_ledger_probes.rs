@@ -49,6 +49,9 @@ pub(crate) fn with_completion_hold<T>(
 /// ME16: every frame-path poll on this thread passes here first; a hook may
 /// observe it (`None`: poll for real) or answer in its place.
 pub(super) fn hook(device: &wgpu::Device, wait: &wgpu::PollType) -> Option<Poll> {
+    if matches!(wait, wgpu::PollType::Poll) {
+        return None;
+    }
     HOOK.with_borrow_mut(|hook| hook.as_mut().and_then(|hook| hook(device, wait)))
 }
 
@@ -61,7 +64,14 @@ pub(crate) fn with_hook<T>(
     hook: impl FnMut(&wgpu::Device, &wgpu::PollType) -> Option<Poll> + 'static,
     body: impl FnOnce() -> T,
 ) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HOOK.set(None);
+        }
+    }
     HOOK.set(Some(Box::new(hook)));
+    let _reset = Reset;
     let result = body();
     HOOK.set(None);
     result
@@ -156,8 +166,7 @@ fn final_ledger_exact_resources_and_lifetime() {
     assert_eq!(held._staging.1, held._uniform.size() + held._grade.size());
     assert_eq!(held._uniform.1, held._uniform.size());
     assert_eq!(held._grade.1, held._grade.size());
-    let expected =
-        baseline + output.1 + held._uniform.1 + held._grade.1 + held._staging.1 + upload.1;
+    let expected = baseline + output.1 + held._uniform.1 + held._grade.1 + held._staging.1;
     assert_eq!(
         gpu.ledger().live_bytes(),
         expected,
@@ -192,7 +201,9 @@ fn final_ledger_upload_padding_counterexample() {
             let layers = [layer(&src)];
             settle(&gpu);
             let (before, live) = (backend_bytes(&gpu), gpu.ledger().live_bytes());
-            let (_, texture, (staging, row)) = c.upload_layer(&layers[0]).unwrap();
+            let old_ring = c.upload_ring.lock().unwrap().charged_bytes();
+            let batch = c.upload_ring.lock().unwrap().acquire().unwrap();
+            let (_, texture, (staging, row)) = c.upload_layer(&layers[0], &batch).unwrap();
             let backend = backend_bytes(&gpu) - before;
             let requested = u64::from(width * 8).next_multiple_of(256) * u64::from(height);
             let tag = format!("{width}x{height}");
@@ -208,14 +219,15 @@ fn final_ledger_upload_padding_counterexample() {
             );
             assert_eq!(staging.1, requested, "{tag}: charged exactly");
             assert_eq!(
-                gpu.ledger().live_bytes() - live,
-                requested + texture.1,
+                gpu.ledger().live_bytes(),
+                live - old_ring + requested + texture.1,
                 "{tag}: staging + a new pooled texture"
             );
             if height == 64 {
                 println!("LEDGER_UPLOAD {tag} charged={requested} backend_delta={backend}");
             }
-            drop((texture, staging));
+            drop((texture, staging, batch));
+            c.upload_ring.lock().unwrap().advance();
             // The frame copies exactly that staging into its source.
             let (output, resources, encoder) =
                 c.composite(width, height, &layers, None, None).unwrap();
@@ -415,6 +427,7 @@ fn rev2_callback_completion_overrules_error_status() {
     let src = frame(17, 3);
     c.render_working((17, 3), &[layer(&src)]).unwrap();
     let base = gpu.ledger().live_bytes();
+    let ring_base = c.upload_ring.lock().unwrap().charged_bytes();
     let staged = failed_frame(&c, &src);
     c.retire_failed(staged, |device, wait| {
         device.poll(wait).unwrap();
@@ -422,7 +435,10 @@ fn rev2_callback_completion_overrules_error_status() {
     });
     assert_eq!(retired(&c), 0);
     // The two-layer frame pools a two-slot flag buffer; all else releases.
-    assert_eq!(gpu.ledger().live_bytes(), base + c.validity_stride);
+    assert_eq!(
+        gpu.ledger().live_bytes(),
+        base - ring_base + c.validity_stride
+    );
 }
 
 /// Rereview-2 G07: every staging refusal — malformed pixels, a missing LUT,
@@ -585,11 +601,7 @@ fn waits_for_completion(wait: &wgpu::PollType) -> bool {
 /// Every charge a retained frame still holds.
 fn owned(r: &FrameResources) -> u64 {
     let layers = r.layers.iter().map(|l| {
-        l.source.as_ref().map_or(0, |(_, t)| t.1)
-            + l.upload.as_ref().map_or(0, |(b, _)| b.1)
-            + l._uniform.1
-            + l._grade.1
-            + l._staging.1
+        l.source.as_ref().map_or(0, |(_, t)| t.1) + l._uniform.1 + l._grade.1 + l._staging.1
     });
     layers.sum::<u64>()
         + r.snapshots.iter().map(|(_, t)| t.1).sum::<u64>()
@@ -604,6 +616,7 @@ fn inventory(c: &Compositor) -> u64 {
     let atlases = c.lut_atlas_cache.lock().unwrap();
     let pool = c.texture_pool.lock().unwrap();
     c.dummy_accumulator.1.1
+        + c.upload_ring.lock().unwrap().charged_bytes()
         + c.dummy_validity.1
         + atlases.iter().map(|a| a.texture.1).sum::<u64>()
         + pool.shapes.values().flatten().map(|t| t.1).sum::<u64>()
@@ -758,6 +771,7 @@ fn rev3_repeated_readback_poll_errors_all_entries() {
     entry(&c, &src, 0, true).unwrap();
     empty_pools(&c);
     let base = gpu.ledger().live_bytes();
+    let ring_base = c.upload_ring.lock().unwrap().charged_bytes();
     for cycle in 0..3 {
         for i in 0..16 {
             let weak = std::rc::Rc::downgrade(&c);
@@ -808,12 +822,19 @@ fn rev3_repeated_readback_poll_errors_all_entries() {
         settle(&gpu);
         c.sweep_retired();
         assert_eq!(retired(&c), 0);
-        assert_eq!(gpu.ledger().live_bytes(), base, "cycle={cycle}: recovered");
+        assert_eq!(
+            gpu.ledger().live_bytes(),
+            base - ring_base + c.upload_ring.lock().unwrap().charged_bytes(),
+            "cycle={cycle}: recovered"
+        );
         for which in 0..4 {
             entry(&c, &src, which, true).unwrap();
         }
         empty_pools(&c);
-        assert_eq!(gpu.ledger().live_bytes(), base);
+        assert_eq!(
+            gpu.ledger().live_bytes(),
+            base - ring_base + c.upload_ring.lock().unwrap().charged_bytes()
+        );
     }
     assert!(retired(&c) > 0, "teardown with frames pending");
     drop(c);

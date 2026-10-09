@@ -21,6 +21,7 @@ repository = "https://github.com/CanadaApollo6/Kinewright"
 ab_glyph = "=0.2.32"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
 base64 = "=0.23.1"
+bytemuck = "=1.25.2"
 cpal = "=0.18.1"
 crossbeam-channel = "=0.5.16"
 eframe = "=0.35.0"
