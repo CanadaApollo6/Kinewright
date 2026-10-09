@@ -7121,8 +7121,9 @@ All three candidate runs and their three interleaved unchanged `cand-62a29b1` re
 PID 3004347's uncollected run is lost and the rendered F1 check was rerun
 locally. Every cargo command used `CARGO_BUILD_JOBS=4 nice -n 10 cargo`,
 with FFmpeg sourced, a separate worktree target, serialized heavy commands,
-and one test thread for media (two or fewer elsewhere). Future verification
-commands and fixture children were additionally restricted to four CPU cores.
+and one test thread for media (two or fewer elsewhere). After detecting FFmpeg's automatic thread count, cargo verification commands and
+fixture children were additionally restricted to four CPU cores. Accepted native
+timing lanes used the normal CPU allocation, nice 10, and one test thread.
 No laptop SSH, push, Tensorfold action, or main-checkout build occurred.
 
 R72 accepts retained registrations: at most one CPU and one native texture,
@@ -7168,7 +7169,82 @@ allocation and candidate-view construction: each was runtime-red on exact
 charges after the fix. The final destruction probe recorded
 `iterations=12 hangs=0 panics=0`; each iteration asserts exact zero charges.
 F9 reported ten exact GPU-route frames on all six workloads. Total added
-nonblank Rust/shader lines versus `193c1b3`: 1,315 production, 2,236 tests.
+nonblank Rust/shader lines versus `193c1b3`: 1,315 production, 2,235 tests.
 Production remains below 1,375; this fix round's production changes address
 F1–F8. Source manifests and raw per-finding red/green summaries accompany the
 R71 report. The final workspace fast tier and release/lane results follow there.
+
+
+**Final local fast tier and release (R73).** On `a4eb605`, the source-bound
+workspace fast tier passed: 3,579 passed, zero failed, 94 ignored across
+36 test programs. Workspace build, all-target clippy `-D warnings`, touched-file
+formatting and slow-test lint passed; 49 markers and 45 allowlist entries agree.
+This is local fast-tier evidence, not CI-W or an aggregate slow-tier result.
+Each command's before/after source manifest is unchanged. The final Rust hashes
+also match all 13 isolated witness logs and the release build. The later evidence
+commit changes only this document; it does not change that tested Rust source.
+
+The post-fix release harness is preserved at
+`target/review/pf/s3a-fix-r71/bins/cand-r71-a4eb605-101c40f07bed` in the main
+checkout: SHA256 `101c40f07bed3d508dd5a55af284724f66db15c460b6f17c3441afbf8f0ad03f`.
+The reference remains `s2c-timing/bins/cand-62a29b1` (`d20efde4…`); complete
+binary identities, manifests and commands are in `r73/release-identity.json`.
+
+**Post-fix R68a check: pending (3090 busy).** At 19:56:34/39/44 UTC on
+2026-10-09, nvidia-smi sampled 34%/36%/35% GPU utilization, P5, at five-second
+intervals. All must be below 10%; this check fails. GPU state and compute-PID
+samples are preserved in `r73/r68a-idle.log`. No process was changed or signalled
+on that GPU, and no utilization attribution to Tensorfold is made. No LH lane
+was launched. The post-fix LH correctness trio, G7b ×3, paired present information,
+I4 and F12 hardware confirmation remain **pending (3090 busy)**. Historical
+540818d LH passes above do not establish this candidate.
+
+**Post-fix LL I4 (F10, E13 paired protocol).** Each external R28 test contributes
+the mean of its three internal run means. All six tests passed.
+
+| Pair | Reference mean ms | Candidate mean ms | Candidate/reference |
+|---|---:|---:|---:|
+| 0 | 77.916667 | 68.373333 | 0.877519 |
+| 1 | 75.293333 | 71.833333 | 0.954046 |
+| 2 | 71.586667 | 66.993333 | 0.935835 |
+
+Median 0.935835 ≤ 1.05: **LL I4 PASS**. This establishes the prescribed
+no-regression gate under recorded load; it is not a causal improvement claim.
+LH I4 is pending. Raw means and lane exits are in `r73/LL-I4-plan-timing.log`.
+
+**Post-fix LL information.** The three canonical candidate/reference pairs
+passed their test and Q-2 checks, with zero missed callbacks. Encode sample
+counts: 1704/1779/1781; encode p99: 4.344111/2.729578/3.297489 ms. These are
+software-lane information, never G7b gate proof. Present p95 was
+51.018454/45.751131/45.720494 ms versus 43.1/43.2/43.1 ms; median ratio
+1.060800. Two reference P-play rows reported `passes=false`; their test/Q-2
+checks passed, and this comparison is present information rather than a
+P-play stage gate. Full quartiles, maxima, counters and flags are retained.
+R50 load was recorded: begin/end one-minute load across canonical/diagnostic
+attempts ranged 8.23–31.69, with 5 s contamination sampling and top-five/GPU
+state records. No quiet-window or load-attributed performance claim is made.
+
+**F12 verdict on LL: measurement-consumer polling quantization.** A valid 1 ms
+control reduced present p95 from 45.813703 to 43.798822 ms, while publication
+p95 stayed 43.281396 versus 43.324317 ms (0.10% difference). Receipt-lag p95
+fell from 4.805471 to 1.770448 ms. Both runs had Q-2 true, zero missed callbacks
+and zero slot starvation. The per-frame tail trace's median receipt-lag change
+was 3.112296 ms at 5 ms polling versus 0.629647 ms at 1 ms polling. The extra
+steady p95 appears after publication, in the timing harness's consumer poll;
+the producer cadence is essentially unchanged. No native app defect is
+established and no F12 production fix is made. The canonical 5 ms protocol stays
+unchanged; any measurement-consumer update belongs to a separately agreed
+measurement/S3b change. Hardware confirmation remains pending.
+
+The first 500 µs control and one rerun failed Q-2 (2 and 1 missed callbacks,
+exits 101); they are excluded from paced evidence. The valid comparison uses
+the later 1 ms control on the same binary. The initial four-core timing trials
+are also excluded: one Q-2 failure and one completed capacity-limited trial.
+Failed/interrupted logs remain archived, with owned PIDs recorded. No failed
+aggregate is represented as green, and `ALL DONE` is completion only. The cause
+of those missed callbacks is not proven. The report retains the exact accepted
+and excluded runs, trace facts, cleanup inventory and any owed work.
+
+S3a remains open for post-fix LH, CI-W and the lead's narrow R72 re-review.
+The RTX4050 rerun and laptop log/build/owned-fixture cleanup remain owed under
+R73 when the laptop returns; no SSH or push occurred.
