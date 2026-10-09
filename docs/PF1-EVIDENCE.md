@@ -7224,14 +7224,90 @@ checkout: SHA256 `101c40f07bed3d508dd5a55af284724f66db15c460b6f17c3441afbf8f0ad0
 The reference remains `s2c-timing/bins/cand-62a29b1` (`d20efde4…`); complete
 binary identities, manifests and commands are in `r73/release-identity.json`.
 
-**Post-fix R68a check: pending (3090 busy).** At 19:56:34/39/44 UTC on
-2026-10-09, nvidia-smi sampled 34%/36%/35% GPU utilization, P5, at five-second
-intervals. All must be below 10%; this check fails. GPU state and compute-PID
-samples are preserved in `r73/r68a-idle.log`. No process was changed or signalled
-on that GPU, and no utilization attribution to Tensorfold is made. No LH lane
-was launched. The post-fix LH correctness trio, G7b ×3, paired present information,
-I4 and F12 hardware confirmation remain **pending (3090 busy)**. Historical
-540818d LH passes above do not establish this candidate.
+**Post-fix R74 preflight (2026-10-09): pending (3090 busy).** R74 supersedes
+the old below-10% idle check. The new three samples below are not saturated,
+but the explicit non-Kinewright compute-query condition is met: the driver
+lists voxtype, Slack, T3 and Claude as C+G and returns them in
+`--query-compute-apps`. These appear to be the expected desktop rendering
+contexts; no Tensorfold or saturation attribution is made. A desktop-context
+exemption was requested but not received before the stop. No LH lane launched.
+
+**Post-fix LH provenance and per-lane evidence.**
+
+**Status: pending (3090 busy). No LH lane launched.** The explicit R74
+`--query-compute-apps` condition is met, even though GPU utilisation is below
+80% and the listed processes appear to be the expected desktop rendering load.
+No Tensorfold process is identified and no compute saturation is claimed.
+The driver reports voxtype, Slack, T3 and Claude as C+G; all four also appear
+in the compute-only query. An exemption for these desktop rendering contexts
+was requested; none was received before this stop. This stop applies the query
+condition, not the superseded below-10% idle rule.
+
+Worktree: `pf1/impl` at `9787be9615cf09e93507f8b8970de0a66501ed30`.
+Production matches `a4eb605` using `final-rust-source-identity.json`:
+217 manifest files checked; the three differing files are F4 test-only changes
+plus an equivalent local binding of the unchanged queue-completion callback.
+After removing cfg(test) items and normalizing that equivalent binding,
+`display.rs` is identical; the two other changed modules are cfg(test)-only.
+All tracked WGSL files match. Both preserved binary hashes match the LL run.
+No rebuild was needed, no cargo ran, and no source was changed.
+
+Candidate: `cand-r71-a4eb605-101c40f07bed`, SHA256
+`101c40f07bed3d508dd5a55af284724f66db15c460b6f17c3441afbf8f0ad03f`.
+Reference: `s2c-timing/bins/cand-62a29b1`, SHA256
+`d20efde471b2c4d6f256011cc548b1087e4c5f81715f5ea13fd4589fc3f6fd70`.
+Identity evidence and prepared serial plan: `/home/riels/kw-logs/pf1-lh-r74/`.
+The plan preserves LL's candidate/reference present A B A B A B pairing and
+three reference/candidate I4 pairs; the F12 control is 5000 versus 1000 µs.
+The preflight evidence is `initial-preflight.json` / `initial-preflight.log`.
+An earlier partial preflight log is excluded; the complete three-sample record
+below is the accepted gate check. There are no runner or test PIDs because no
+lane was started.
+
+| Sample time EDT | Utilisation | Memory MiB | Pstate | Compute-query PIDs |
+|---|---:|---:|---|---|
+| 2026/10/09 17:36:12.082 | 32 % | 1385 | P8 | 2803, 166671, 2184397, 3470089 |
+| 2026/10/09 17:36:17.078 | 37 % | 1371 | P8 | 2803, 166671, 2184397, 3470089 |
+| 2026/10/09 17:36:22.081 | 32 % | 1389 | P8 | 2803, 166671, 2184397, 3470089 |
+
+Processes: 2803 voxtype-osd-gtk4; 166671 Slack GPU process; 2184397 T3 GPU
+process; 3470089 Claude desktop GPU process. Raw process names and GPU state
+are preserved alongside the planned lane logs. No process was changed or
+signalled.
+
+Per-lane exits and raw `test result` lines: **not available, not run** for each
+lane below. No passing test, GPU-route witness, Q-2 result or timing gate is
+inferred from the preflight or prepared plan.
+
+- `LH-correctness-bits`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-correctness-W`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-correctness-G6`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-candidate-0`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-reference-0`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-candidate-1`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-reference-1`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-candidate-2`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-reference-2`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-I4-reference-0`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-I4-candidate-0`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-I4-reference-1`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-I4-candidate-1`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-I4-reference-2`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-I4-candidate-2`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-F12-poll-5000`: exit=n/a; raw `test result`=n/a (not run).
+- `LH-F12-poll-1000`: exit=n/a; raw `test result`=n/a (not run).
+
+G7b runs 0/1/2: n/p50/p95/p99/max all n/a; the p99 ≤2 ms gate remains
+unproven. I4 pairs 0/1/2: reference/candidate mean-ms ratios and median n/a;
+the median ≤1.05 gate remains unproven. Present pairs 0/1/2: p95 ratios and
+median n/a. F12 5 ms versus 1 ms hardware verdict: unproven; the accepted LL
+polling diagnosis remains LL-only. Historical pre-fix LH numbers do not
+establish this candidate.
+
+Cleanup: no build output or owned `/tmp/kinewright-*` fixtures were created;
+the worktree target was already absent and remains absent. Existing fixtures
+belonging to other runs/processes were preserved. Only this report and the
+matching E14 evidence documentation were changed. No push.
 
 **Post-fix LL I4 (F10, E13 paired protocol).** Each external R28 test contributes
 the mean of its three internal run means. All six tests passed.
