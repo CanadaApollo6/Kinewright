@@ -7096,9 +7096,9 @@ GPU timing measures the encode compute pass with a device-requested `TIMESTAMP_Q
 
 Raw runtime red/green summaries, device identities, gate logs, timing/load records, source counts and cleanup are in the main checkout's `target/review/pf/s3a-phase2-report.md` and `target/review/pf/s3a-logs/s3a-phase2d-*`. Compilation failures, fixture setup failures and a SIGKILL-interrupted earlier media run are excluded from pass evidence. The interruption's cause is unproven.
 
-**Local commits.** `abd743e` opt-in display encoder/ownership/self-check; `fb7dfc7` encode-pass timestamp instrumentation; `019481d` native app activation. Each source commit passed its laptop workspace build/clippy, touched-file formatting and full affected-crate tests. The app commit additionally passed the full workspace stage gate and an explicit app build.
+**Local commits.** `abd743e` opt-in display encoder/ownership/self-check; `fb7dfc7` encode-pass timestamp instrumentation; `019481d` native app activation. Each source commit has recorded laptop workspace build/clippy, touched-file formatting and affected-crate test logs. The `fb7dfc7` gate has no gate-bound source manifest; later synchronization is not proof of that earlier tested snapshot. The app commit additionally passed the full workspace stage gate and an explicit app build.
 
-**Stage gate:** 3,567 passed, 0 failed, 94 ignored across 36 test programs, one test thread. Media library: 1,079 passed, 59 ignored (1,422.37 s); app: 793 passed, 4 ignored (69.69 s). Slow-test lint: 49 markers and 45 on-demand allowlist entries agree. Final RTX4050 correctness: all 13 display tests passed (278.74 s), with every W builder's ten frames exact; all three app witnesses passed (0.83 s). All 22 mutation controls have runtime red/green summary lines in the report.
+**Local fast-suite stage gate (CI-W and the slow tier are not established by this run):** 3,567 passed, 0 failed, 94 ignored across 36 test programs, one test thread. Media library: 1,079 passed, 59 ignored (1,422.37 s); app: 793 passed, 4 ignored (69.69 s). Slow-test lint: 49 markers and 45 on-demand allowlist entries agree. Final RTX4050 correctness: all 13 display tests passed (278.74 s), with every W builder's ten frames exact; all three app witnesses passed (0.83 s). The report records 22 mutation controls. R71 review found that I5 parity-route red failed at the constructor `unwrap`, before the route assertion; that red is excluded until the R71 rerun.
 
 **LL, information only** (`llvmpipe`, Vulkan, software fallback, GPU claim false):
 
@@ -7110,6 +7110,65 @@ Raw runtime red/green summaries, device identities, gate logs, timing/load recor
 
 All three candidate runs and their three interleaved unchanged `cand-62a29b1` references exited 0 with Q-2 valid and zero missed callbacks. Begin/end one-minute load ranged 1.54–9.88; top-five CPU and GPU state samples were recorded. Candidate/reference present-p95 ratios were 1.053269, 1.056120 and 1.055239 (median 1.055239); the higher candidate p95 is reported without causal attribution or an improvement claim. Present intervals and candidate-only map-latency quartiles are in the report. The reference hash is unchanged (`d20efde4…`); candidate `019481d` is `c63a2ea4…`.
 
-**G7b and LH correctness: pending (3090 busy).** The final R68a check at 06:53:29/34/39 UTC on 2026-10-08 read 96%, 96%, 95% utilization, P2, 20,119 MiB used. No LH tests or timing were run. No Tensorfold/other GPU process was changed or signalled. No LH pass is inferred from the RTX4050 or LL results. CI-W and the lead's reviews remain pending.
+**LH lead run at `540818d` (2026-10-08 03:07–03:16 EDT).** R68a's three idle samples permitted this run after the worker's earlier busy check. Exact self-check, six-workload/ten-frame parity, and broken-table fallback all passed on the RTX 3090. G7b **passed** separately in all three warm runs: n = 1800/1799/1799; p50 = 0.130944/0.130272/0.130784 ms; p95 = 0.149536/0.147776/0.148256 ms; p99 = 0.153408/0.152512/0.153184 ms; max = 0.182240/0.177952/0.186816 ms. Q-2 was valid with zero missed callbacks in each run. Present-p95 candidate/reference ratios were 1.0638/1.0635/1.0632, median 1.0635 (information). Candidate submission-to-map p50 was about 4.03 ms, p95 4.17 ms, p99 4.28 ms; max 5.26–5.50 ms. CPU load was recorded (0.66–15.18); GPU P8 at the idle check. Raw evidence: `target/review/pf/s3a-lh-results.md` and `s3a-logs/s3a-phase2d-LH-*` in the main checkout. These pre-fix results must be superseded by post-R71-fix reruns; they do not establish the post-fix candidate.
+
+**Timing log interpretation (R71 F11).** `ALL DONE` establishes runner completion only. Success additionally requires every lane exit to be zero and its validity/gate assertions to pass. The corrected analyser recognizes `PF1 play` after the test prefix on the same line and retains pair 2. Post-fix I4 on both LL/LH and G7b/LH correctness are reported below. R73 relocates cargo gates to this desktop; CI-W remains lead-owned.
 
 **R70 source budget against `193c1b3`:** 1,127 added nonblank production lines, including shader, app integration and timing; 1,157 test/witness/runner lines. This is below the approximately 1,250 production allowance and 1,375 stop. Test utilities are conservatively counted as production where their cfg includes `test-util`. The runner and app fixture reuse production W builders, the existing IN1 app harness and the existing V5 paced callback. No additional design amendment is proposed.
+
+
+**R71 fix round under R72/R73 (2026-10-09).** The laptop is unavailable;
+PID 3004347's uncollected run is lost and the rendered F1 check was rerun
+locally. Every cargo command used `CARGO_BUILD_JOBS=4 nice -n 10 cargo`,
+with FFmpeg sourced, a separate worktree target, serialized heavy commands,
+and one test thread for media (two or fewer elsewhere). Future verification
+commands and fixture children were additionally restricted to four CPU cores.
+No laptop SSH, push, Tensorfold action, or main-checkout build occurred.
+
+R72 accepts retained registrations: at most one CPU and one native texture,
+each with its own live cell. Same-route late binding remains; a handoff keeps
+the inactive registration until its next route rebind, clear, or teardown.
+Worst additional CPU retention is 8,294,400 bytes (about 8 MiB) at 1080p RGBA.
+The actual-render GPU→CPU→GPU→CPU witness recorded
+`route_counts=[1, 2, 2, 2, 2, 2, 2]`, with zero after clear and teardown.
+Rebinding reuses the native registration without an extra temporary id.
+
+Exact-540818d runtime reds for F1–F9, including F4's early-slot-uncharge
+mutation and F9's forced fallback, are archived with before/after source
+manifests in `target/review/pf/s3a-fix-r71/r73/`. F9 fails at the GPU route
+assertion, not the constructor. The repeated F6 destruction probe exposed
+delayed loss-callback delivery; the panic path now drains queued work before
+confirming loss and otherwise propagates ordinary panics. The final 12-run
+probe recorded zero hangs, zero propagated panics and exact zero charges.
+F12 uses test-only publication/receipt traces and the unchanged default 5 ms
+consumer poll, with a 500 µs diagnostic knob; no F12 production fix is made.
+
+The RTX4050 correctness rerun, laptop log retrieval and laptop build/owned
+fixture cleanup remain **owed when the laptop returns**, under R73. The
+RTX4050 rerun is not an S3a close blocker. CI-W remains owed to the lead.
+Post-fix gates, committed source identities, lane results and the F12 verdict
+are recorded in the updated R71 fix report; historical timing above never
+establishes the post-fix binary.
+
+
+**Local fix gates and witnesses.** Media commit `307b465` passed workspace
+build, all-target clippy with `-D warnings`, touched-file formatting, slow-test
+lint and the full affected media suite: 1,152 passed, zero failed, 27 ignored.
+App commit `2726b14` passed the same gates, the explicit app build and the full
+app suite: 797 passed, zero failed, two ignored. Committed bytes were checked
+against each gate's source manifest. An earlier app gate failed its structural
+source scanner because it counted a test-only receiver wait; the shared witness
+helper now uses the existing bounded `try_recv` pattern. That failed gate and the
+interrupted earlier media gate are retained and excluded from green evidence.
+
+Final isolated F1–F9 greens and the R72 bound ran on the committed Rust source.
+The F6 construction witness additionally proves the Writing guard covers both
+allocation and candidate-view construction: each was runtime-red on exact
+540818d production with only cfg(test) fault hooks, then finished with zero
+charges after the fix. The final destruction probe recorded
+`iterations=12 hangs=0 panics=0`; each iteration asserts exact zero charges.
+F9 reported ten exact GPU-route frames on all six workloads. Total added
+nonblank Rust/shader lines versus `193c1b3`: 1,315 production, 2,236 tests.
+Production remains below 1,375; this fix round's production changes address
+F1–F8. Source manifests and raw per-finding red/green summaries accompany the
+R71 report. The final workspace fast tier and release/lane results follow there.

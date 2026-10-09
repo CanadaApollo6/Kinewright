@@ -893,6 +893,17 @@ premultiply table (from `Color32::from_rgba_unmultiplied`) and the `repaint`
 hook in `DisplayConfig`; media returns `wgpu::TextureView`s, with no egui
 dependency.
 
+**R72 [S3a R71 F1] Retained route registrations.** Keep at most one CPU
+and one native texture registration, each with its route's live display cell.
+A laid-out paint marker retains that cell across CPU/GPU handoffs; same-route
+late binding updates it. Rebind reuses the existing native id without a
+second temporary registration. The inactive registration remains until that
+route's next rebind, clear, or teardown. The worst additional CPU retention
+is one 1080p RGBA texture: 8,294,400 bytes (about 8 MiB). The rendered
+GPU→CPU→GPU→CPU witness checks the two-registration bound, with zero after
+clear and teardown. Native Bound/Retiring leases retain the ordinary epoch
+and post-egui completion ownership rules.
+
 **G-4 [S3a] Slot fence: root full-frame epoch (R11, R17).** e =
 `ctx.cumulative_frame_nr_for(ViewportId::ROOT)`, read in `App::logic` and
 `App::ui`; the app creates no other viewport (debug-asserted). One stable
