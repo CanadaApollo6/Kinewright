@@ -61,6 +61,9 @@ fn write<T>(shared: &Shared<T>, value: Option<T>) -> Option<T> {
 pub(crate) struct Presenter {
     candidates: Vec<PreviewFrame>,
     cell: Shared<DisplayCell>,
+    cpu_cell: Shared<DisplayCell>,
+    gpu_cell: Shared<DisplayCell>,
+    using_gpu: bool,
     mark: Shared<PaintMark>,
     next_frame_id: u64,
     acked: Option<u64>,
@@ -153,6 +156,10 @@ impl Presenter {
             },
             _ => return None,
         };
+        if chosen.is_some() {
+            self.cell = Arc::clone(&self.cpu_cell);
+            self.using_gpu = false;
+        }
         write(&self.cell, Some(cell));
         chosen
     }
@@ -167,6 +174,8 @@ impl Presenter {
             return false;
         }
         self.next_frame_id += 1;
+        self.cell = Arc::clone(&self.gpu_cell);
+        self.using_gpu = true;
         write(
             &self.cell,
             Some(DisplayCell {
@@ -178,10 +187,16 @@ impl Presenter {
         );
         true
     }
+    pub(crate) fn using_gpu(&self) -> bool {
+        self.using_gpu
+    }
     /// The texture was dropped or replaced by something that is not a frame.
     pub(crate) fn clear(&mut self) {
         self.candidates.clear();
         write(&self.cell, None);
+        write(&self.cpu_cell, None);
+        write(&self.gpu_cell, None);
+        self.using_gpu = false;
         write(&self.mark, None);
     }
 
@@ -194,8 +209,8 @@ impl Presenter {
     }
 
     /// The marker for this layout pass of root epoch `epoch`: it holds the
-    /// cell itself, never a copied stamp, so a later binding in the same pass
-    /// is what it marks.
+    /// cell for the laid-out texture route. A same-route rebind updates it;
+    /// a route switch keeps this cell and that texture alive through paint.
     pub(crate) fn marker(&self, epoch: u64, now: Now) -> PaintMarker {
         let (cell, mark) = (Arc::clone(&self.cell), Arc::clone(&self.mark));
         PaintMarker {

@@ -2916,10 +2916,11 @@ impl KinewrightApp {
     }
 
     pub(crate) fn program_picture(&self) -> Option<(egui::TextureId, egui::Vec2)> {
-        self.texture
-            .as_ref()
-            .map(|t| (t.id(), t.size_vec2()))
-            .or_else(|| self.native_display.as_ref().and_then(|d| d.picture))
+        if self.presenter.using_gpu() {
+            self.native_display.as_ref().and_then(|d| d.picture)
+        } else {
+            self.texture.as_ref().map(|t| (t.id(), t.size_vec2()))
+        }
     }
     /// The preview texture is gone: nothing describes or marks it (R-2).
     pub(crate) fn clear_preview(&mut self) {
@@ -2948,15 +2949,16 @@ impl KinewrightApp {
         {
             if display.session.can_bind(epoch) {
                 let mut renderer = display.renderer.renderer.write();
-                // Prepare a native binding without changing the stable id, then revalidate.
-                let prepared = renderer.register_native_texture(
-                    &display.renderer.device,
-                    &frame.view,
-                    eframe::wgpu::FilterMode::Linear,
-                );
+                // Prepare only the first registration. Reuse the retained native id on rebind.
+                let prepared = display.picture.is_none().then(|| {
+                    renderer.register_native_texture(
+                        &display.renderer.device,
+                        &frame.view,
+                        eframe::wgpu::FilterMode::Linear,
+                    )
+                });
                 if self.presenter.bind_gpu(&frame, &now) {
-                    let id = display.picture.map_or(prepared, |(id, _)| id);
-                    if id != prepared {
+                    let id = if let Some((id, _)) = display.picture {
                         renderer.update_egui_texture_from_wgpu_texture_with_sampler_options(
                             &display.renderer.device,
                             &frame.view,
@@ -2967,8 +2969,10 @@ impl KinewrightApp {
                             },
                             id,
                         );
-                        renderer.free_texture(&prepared);
-                    }
+                        id
+                    } else {
+                        prepared.expect("first native registration")
+                    };
                     drop(renderer);
                     display.picture = Some((
                         id,
@@ -2976,11 +2980,11 @@ impl KinewrightApp {
                     ));
                     let at = frame.at;
                     display.session.bind(epoch, frame);
-                    self.texture = None;
+                    // Keep the CPU id: this pass may have laid it out before the route switch.
                     if !self.resume_after_scrub && !self.playing {
                         self.focused_mut().position = at;
                     }
-                } else {
+                } else if let Some(prepared) = prepared {
                     renderer.free_texture(&prepared);
                 }
             } else {
@@ -2994,9 +2998,8 @@ impl KinewrightApp {
             egui::ColorImage::from_rgba_unmultiplied(size, texture.rgba.as_slice())
         };
         if let Some((PreviewFrame { at, .. }, image)) = self.presenter.finalize(now, prepare) {
-            if let Some(display) = &mut self.native_display {
-                display.clear();
-            }
+            // Keep the native id and its Bound lease through a laid-out GPU paint.
+            // The next GPU rebind retires it under the normal root-epoch fence.
             if let Some(texture) = &mut self.texture {
                 texture.set(image, egui::TextureOptions::LINEAR);
             } else {
@@ -15238,12 +15241,14 @@ mod s3a_tests {
     fn finish(app: KinewrightApp, engine: Arc<FfmpegMediaEngine>, gpu: &GpuContext) {
         let display = app.native_display.as_ref().unwrap();
         let renderer = Arc::clone(&display.renderer.renderer);
-        let id = display.picture.unwrap().0;
-        assert!(renderer.read().texture(&id).is_some());
+        let id = display.picture.map(|picture| picture.0);
+        if let Some(id) = id {
+            assert!(renderer.read().texture(&id).is_some());
+        }
         drop(engine);
         drop(app); // receiver disconnection, without on_exit
         assert!(
-            renderer.read().texture(&id).is_none(),
+            id.is_none_or(|id| renderer.read().texture(&id).is_none()),
             "Drop frees the native id"
         );
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -15309,5 +15314,8 @@ mod s3a_tests {
         );
         assert_eq!(gpu.full_frame_readbacks() - before, 0, "full-frame copies");
         finish(app, engine, &gpu);
+    }
+    mod r71 {
+        include!("display_r71_tests.rs");
     }
 }
