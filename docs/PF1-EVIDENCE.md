@@ -7279,6 +7279,14 @@ aggregate is represented as green, and `ALL DONE` is completion only. The cause
 of those missed callbacks is not proven. The report retains the exact accepted
 and excluded runs, trace facts, cleanup inventory and any owed work.
 
-S3a remains open for post-fix LH, CI-W and the lead's narrow R72 re-review.
-The RTX4050 rerun and laptop log/build/owned-fixture cleanup remain owed under
-R73 when the laptop returns; no SSH or push occurred.
+S3a remains open for post-fix LH and CI-W. The RTX4050 rerun and the laptop's
+log, build and owned-fixture cleanup remain owed under R73 for when the laptop
+returns.
+
+**Independent re-review (2026-10-09).** A fresh Astra xhigh reviewed
+`540818d..2d6faa4` (`target/review/pf/s3a-review/r2/`). F1–F3, F5–F9, R72,
+F11, F12 and the 1,315-line budget passed. Its one blocker was F4: the witness
+did not separate encode completion from completion of the later consumer.
+`b10aaec` reworked the witness, with no production-behaviour change, and a
+second fresh Astra check (`s3a-review/r3/`) closed F4. No review finding
+remains open.
