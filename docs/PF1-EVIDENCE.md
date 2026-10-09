@@ -7371,7 +7371,7 @@ aggregate is represented as green, and `ALL DONE` is completion only. The cause
 of those missed callbacks is not proven. The report retains the exact accepted
 and excluded runs, trace facts, cleanup inventory and any owed work.
 
-Post-fix LH is complete; S3a remains open for CI-W and lead stage acceptance. The RTX4050 rerun and the laptop's
+Post-fix LH is complete; CI-W and lead acceptance follow below. The RTX4050 rerun and the laptop's
 log, build and owned-fixture cleanup remain owed under R73 for when the laptop
 returns.
 
@@ -7382,3 +7382,13 @@ did not separate encode completion from completion of the later consumer.
 `b10aaec` reworked the witness, with no production-behaviour change, and a
 second fresh Astra check (`s3a-review/r3/`) closed F4. No review finding
 remains open.
+
+**S3a closed (2026-10-09).** CI run 37992860857 on `9787be9` (`[slow-tier]`) is
+green on Linux and Windows, fast and slow tiers. Its first attempt failed one
+Windows fast-tier test, `preview::tests::a_newer_job_cancels_the_rest_of_the_window`
+(`preview.rs:3344`: frame 16 of the old window was converted after the newer
+post). That run used the WARP software adapter. Under R69's flaky-test rule the
+job got one rerun, and it passed. The test predates S3a (R53, S2c) and
+passed on Linux in both tiers. It is recorded as a Windows timing flake; a
+second failure would be a finding. The lead accepts S3a. The RTX 4050 rerun
+and the laptop cleanup remain owed under R73.
