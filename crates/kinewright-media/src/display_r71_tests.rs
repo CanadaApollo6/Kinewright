@@ -514,8 +514,9 @@ fn within<T: Send + 'static>(
 fn r71_consumer_submission_retains_slot_until_release_observed() {
     let gpu = gpu();
     let ledger = gpu.shared_ledger();
+    let baseline = ledger.live_bytes();
     let (mut session, shared) = DisplayPool::session(&config());
-    let mut pool = DisplayPool::new(gpu.clone(), &config(), shared).unwrap();
+    let mut pool = DisplayPool::new(gpu.clone(), &config(), Arc::clone(&shared)).unwrap();
     let id = pool.acquire((8, 8), Duration::ZERO, || false).unwrap();
     let frame = WorkingFrame {
         width: 8,
@@ -524,19 +525,47 @@ fn r71_consumer_submission_retains_slot_until_release_observed() {
     };
     let compositor = Compositor::new(gpu.clone());
     let (encoder, slot) = pool.slot(id);
-    compositor
-        .render_display(
-            (8, 8),
-            &[CompositorLayer {
-                frame: &frame,
-                effects: &[],
-                transition: TransitionRenderParams::default(),
-                mode: LayerMode::NORMAL,
-            }],
-            None,
-            encoder,
-            slot,
-        )
+    // Record the actual encode submission polled by render_display's flags map.
+    let encode_fence = Arc::new(Mutex::new(None));
+    let recorded_fence = Arc::clone(&encode_fence);
+    crate::compositor::ledger_probes::with_hook(
+        move |_, wait| {
+            if let wgpu::PollType::Wait {
+                submission_index: Some(index),
+                ..
+            } = wait
+            {
+                *recorded_fence.lock().unwrap() = Some(index.clone());
+            }
+            None
+        },
+        || {
+            compositor
+                .render_display(
+                    (8, 8),
+                    &[CompositorLayer {
+                        frame: &frame,
+                        effects: &[],
+                        transition: TransitionRenderParams::default(),
+                        mode: LayerMode::NORMAL,
+                    }],
+                    None,
+                    encoder,
+                    slot,
+                )
+                .unwrap();
+        },
+    );
+    let encode = encode_fence
+        .lock()
+        .unwrap()
+        .take()
+        .expect("encode fence observed");
+    gpu.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(encode.clone()),
+            timeout: None,
+        })
         .unwrap();
     // Encoding and its flags map have completed. This later submission reads the slot as a texture.
     let output = gpu.device.create_buffer(&wgpu::BufferDescriptor {
@@ -593,40 +622,105 @@ fn r71_consumer_submission_retains_slot_until_release_observed() {
     let identity = pool.slots[id].as_ref().unwrap().texture.clone();
     drop(compositor);
     let expected = ledger.live_bytes();
-    session.terminal();
-    let (tx, rx) = mpsc::channel();
-    let barrier = Arc::new(Barrier::new(2));
-    let wait = Arc::clone(&barrier);
-    let observed = Arc::clone(&ledger);
-    let dropper = thread::spawn(move || {
-        let mut first = true;
-        crate::compositor::ledger_probes::with_hook(
-            move |_, _| {
-                if first {
-                    first = false;
-                    tx.send(observed.live_bytes()).unwrap();
-                    wait.wait();
-                }
-                None
-            },
-            || drop(pool),
-        );
-    });
-    let charged = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    println!(
-        "R71_F4 identity={identity:?} encode_completed=true later_consumer_submitted=true charged_before_release_poll={charged} expected={expected}"
+    let consumer_identity = format!("{consumer:?}");
+    let encode_identity = format!("{encode:?}");
+    assert_ne!(
+        encode_identity, consumer_identity,
+        "consumer follows encode"
     );
-    barrier.wait();
-    dropper.join().unwrap();
+    *shared.release_probe.lock().unwrap() = Some(Box::new(move |pool, release| {
+        use crate::compositor::ledger_probes::{with_completion_hold, with_hook};
+        let gpu = pool.encoder.gpu.clone();
+        let release_identity = format!("{release:?}");
+        assert_ne!(
+            release_identity, encode_identity,
+            "release must not use encode fence"
+        );
+        assert_ne!(
+            release_identity, consumer_identity,
+            "release fence follows consumer"
+        );
+        let (held_tx, held_rx) = mpsc::sync_channel(1);
+        let (polled_tx, polled_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let (pending_tx, pending_rx) = mpsc::sync_channel(1);
+        let completed = Arc::new(AtomicBool::new(false));
+        let waiter_done = Arc::clone(&completed);
+        let waiter = thread::spawn(move || {
+            with_completion_hold(held_tx, || {
+                let mut first = true;
+                with_hook(
+                    move |device, wait| {
+                        if !first {
+                            // The first successful poll returned to production;
+                            // the held callback must keep its completion loop alive.
+                            pending_tx.send(()).unwrap();
+                            resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                            return None;
+                        }
+                        first = false;
+                        let wgpu::PollType::Wait {
+                            submission_index: Some(index),
+                            ..
+                        } = wait
+                        else {
+                            panic!("release must poll its submission");
+                        };
+                        let polled_identity = format!("{index:?}");
+                        let result = device.poll(wait.clone());
+                        polled_tx.send((polled_identity, result.is_ok())).unwrap();
+                        Some(result)
+                    },
+                    || complete(&gpu, release),
+                );
+            });
+            waiter_done.store(true, Ordering::Release);
+        });
+        // A real successful poll delivered this callback, but its production
+        // done flag is still false. The waiter cannot return until we run it.
+        let callback = held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (polled_identity, poll_succeeded) =
+            polled_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let wait_reentered = pending_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+        let completion_withheld = !completed.load(Ordering::Acquire);
+        let retained = pool.slots[id]
+            .as_ref()
+            .is_some_and(|slot| *slot.texture == identity);
+        let charged = pool.encoder.gpu.ledger().live_bytes();
+        println!(
+            "R71_F4 encode={encode_identity} consumer={consumer_identity} release={release_identity} polled={polled_identity} poll_succeeded={poll_succeeded} completion_wait_reentered={wait_reentered} consumer_completion_withheld={completion_withheld} identity_retained={retained} charges={charged} expected={expected}"
+        );
+        callback();
+        let _ = resume_tx.send(());
+        waiter.join().unwrap();
+        assert!(completed.load(Ordering::Acquire));
+        assert_eq!(
+            polled_identity, release_identity,
+            "observed the post-consumer fence"
+        );
+        assert!(poll_succeeded && wait_reentered && completion_withheld);
+        assert!(
+            retained,
+            "original allocation must remain while consumer completion is withheld"
+        );
+        assert_eq!(
+            charged, expected,
+            "exact charges while consumer completion is withheld"
+        );
+        assert_eq!(*pool.slots[id].as_ref().unwrap().texture, identity);
+        assert_eq!(pool.encoder.gpu.ledger().live_bytes(), expected);
+    }));
+    session.terminal();
+    drop(pool);
     let bytes = mapped_bytes(&gpu, &readback, consumer).unwrap();
     assert_eq!(
         u32::from_le_bytes(bytes.try_into().unwrap()),
         u32::from(expected_sample),
         "the later consumer sampled the encoded slot"
     );
-    assert_eq!(
-        charged, expected,
-        "later consumer submission owns the exact slot charge until release is observed"
+    assert_eq!(ledger.live_bytes(), baseline);
+    println!(
+        "R71_F4 consumer_completed=true allocation_released=true charges={} baseline={baseline}",
+        ledger.live_bytes()
     );
-    assert_eq!(ledger.live_bytes(), 0);
 }

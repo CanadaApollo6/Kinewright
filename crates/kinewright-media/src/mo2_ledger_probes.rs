@@ -18,10 +18,32 @@ use half::f16;
 
 type Poll = Result<wgpu::PollStatus, wgpu::PollError>;
 type Hook = Box<dyn FnMut(&wgpu::Device, &wgpu::PollType) -> Option<Poll>>;
+pub(crate) type Completion = Box<dyn FnOnce() + Send>;
 
 thread_local! {
     static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
     static UPLOAD_COPIES: Cell<usize> = const { Cell::new(0) };
+    static COMPLETION_HOLD: RefCell<Option<std::sync::mpsc::SyncSender<Completion>>> = const { RefCell::new(None) };
+}
+
+/// F4: withhold observation of real queue completion, rather than a poll status.
+pub(crate) fn hold_completion(callback: impl FnOnce() + Send + 'static) -> Completion {
+    COMPLETION_HOLD.with_borrow_mut(|hold| -> Completion {
+        match hold.take() {
+            Some(sender) => Box::new(move || sender.send(Box::new(callback)).unwrap()),
+            None => Box::new(callback),
+        }
+    })
+}
+
+pub(crate) fn with_completion_hold<T>(
+    sender: std::sync::mpsc::SyncSender<Completion>,
+    body: impl FnOnce() -> T,
+) -> T {
+    COMPLETION_HOLD.set(Some(sender));
+    let result = body();
+    COMPLETION_HOLD.set(None);
+    result
 }
 
 /// ME16: every frame-path poll on this thread passes here first; a hook may

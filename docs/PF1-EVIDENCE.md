@@ -7134,9 +7134,11 @@ The actual-render GPU→CPU→GPU→CPU witness recorded
 `route_counts=[1, 2, 2, 2, 2, 2, 2]`, with zero after clear and teardown.
 Rebinding reuses the native registration without an extra temporary id.
 
-Exact-540818d runtime reds for F1–F9, including F4's early-slot-uncharge
-mutation and F9's forced fallback, are archived with before/after source
-manifests in `target/review/pf/s3a-fix-r71/r73/`. F9 fails at the GPU route
+The initial F1–F9 controls and F9's forced fallback are archived with
+before/after source manifests in `target/review/pf/s3a-fix-r71/r73/`.
+Re-review excluded F4's initial early-slot-uncharge control: it cleared slots
+before the completion wait and did not distinguish encode from consumer
+completion. The revised F4 control and witness are recorded below. F9 fails at the GPU route
 assertion, not the constructor. The repeated F6 destruction probe exposed
 delayed loss-callback delivery; the panic path now drains queued work before
 confirming loss and otherwise propagates ordinary panics. The final 12-run
@@ -7169,10 +7171,42 @@ allocation and candidate-view construction: each was runtime-red on exact
 charges after the fix. The final destruction probe recorded
 `iterations=12 hangs=0 panics=0`; each iteration asserts exact zero charges.
 F9 reported ten exact GPU-route frames on all six workloads. Total added
-nonblank Rust/shader lines versus `193c1b3`: 1,315 production, 2,235 tests.
-Production remains below 1,375; this fix round's production changes address
+nonblank Rust/shader lines versus `193c1b3` after the F4 follow-up:
+1,315 production, 2,367 tests. F4 adds zero production lines; production
+behavior is unchanged. Production remains below 1,375; this fix round's production changes address
 F1–F8. Source manifests and raw per-finding red/green summaries accompany the
 R71 report. The final workspace fast tier and release/lane results follow there.
+
+
+**F4 completion-boundary follow-up (independent re-review r2).** The witness
+records and completes the actual encode fence before submitting its texture
+consumer. A cfg(test)-only pool probe runs the unchanged production completion
+wait; a callback gate withholds its completion observation after a real
+successful poll of the post-consumer release fence. The first successful poll
+returns to production and the witness observes its wait loop re-entering before
+permitting the callback. While completion observation is withheld,
+the witness compares the pool's actual texture with the original wgpu texture
+handle and checks all 197,392 charged bytes. It then permits the callback,
+checks the retained identity again, samples the consumer output, and verifies
+release back to the original zero-byte baseline.
+
+The red control polls the captured encode fence and releases slots on that
+successful encode completion, before waiting for the post-consumer fence.
+It is not the prior unconditional clear. It fails at the retained-allocation
+assertion while completion observation is withheld: `completion_wait_reentered=true identity_retained=false
+charges=196880 expected=197392`. Restored green records
+`identity_retained=true charges=197392 expected=197392`, followed by
+`consumer_completed=true allocation_released=true charges=0 baseline=0`.
+Raw red: `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;
+1147 filtered out; finished in 0.27s`. Raw green: `test result: ok. 1 passed;
+0 failed; 0 ignored; 0 measured; 1147 filtered out; finished in 0.27s`.
+Both are runtime llvmpipe/Vulkan witnesses, not hardware timing evidence.
+Mutation patch, red/restored source snapshots, per-command source manifests,
+gate logs and owned-output cleanup inventory are retained outside the main
+build target at `/home/riels/kw-logs/pf1-f4-r2/`; the updated R71 report records
+the gate exits. Two compile-only control setup failures are excluded from red
+evidence. This scoped follow-up changes no production behavior and makes no
+new LH, RTX4050, CI-W or timing claim.
 
 
 **Final local fast tier and release (R73).** On `a4eb605`, the source-bound

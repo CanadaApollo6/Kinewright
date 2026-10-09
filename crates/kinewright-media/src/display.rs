@@ -39,6 +39,8 @@ struct Exchange {
     closing: bool,
     status: Option<DisplayStatus>,
 }
+#[cfg(test)]
+type ReleaseProbe = Box<dyn FnOnce(&DisplayPool, wgpu::SubmissionIndex) + Send>;
 pub(crate) struct Shared {
     state: Mutex<Exchange>,
     release: Condvar,
@@ -48,6 +50,8 @@ pub(crate) struct Shared {
     writing_panic: Mutex<Option<&'static str>>,
     #[cfg(test)]
     before_wait: Mutex<Option<(std::sync::mpsc::Sender<()>, Arc<std::sync::Barrier>)>>,
+    #[cfg(test)]
+    release_probe: Mutex<Option<ReleaseProbe>>,
 }
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, Exchange> {
@@ -513,8 +517,10 @@ impl Drop for DisplayEncoder {
 pub(crate) fn complete(gpu: &GpuContext, index: wgpu::SubmissionIndex) {
     let done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&done);
-    gpu.queue
-        .on_submitted_work_done(move || flag.store(true, Ordering::Release));
+    let callback = move || flag.store(true, Ordering::Release);
+    #[cfg(test)]
+    let callback = crate::compositor::ledger_probes::hold_completion(callback);
+    gpu.queue.on_submitted_work_done(callback);
     let mut wait_index = Some(index);
     while !done.load(Ordering::Acquire) {
         let result = frame_poll(
@@ -630,6 +636,8 @@ impl DisplayPool {
             writing_panic: Mutex::default(),
             #[cfg(test)]
             before_wait: Mutex::default(),
+            #[cfg(test)]
+            release_probe: Mutex::default(),
         });
         (
             DisplaySession {
@@ -815,6 +823,16 @@ impl Drop for DisplayPool {
                 );
             }
         }
+        #[cfg(test)]
+        let complete = |gpu: &GpuContext, index| {
+            // Run the same completion wait while inspecting the pool.
+            let probe = self.shared.release_probe.lock().unwrap().take();
+            if let Some(probe) = probe {
+                probe(self, index);
+            } else {
+                crate::display::complete(gpu, index);
+            }
+        };
         complete(&self.encoder.gpu, self.encoder.gpu.queue.submit([]));
     }
 }
