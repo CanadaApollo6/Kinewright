@@ -259,6 +259,7 @@ impl<V> KeptFrames<V> {
     /// Amendment R54: the first window time the last refill's decode
     /// produced (`None`: none). Amendment R63 (F2): kept, or left to the
     /// ring that holds it.
+    #[cfg(test)]
     pub(crate) const fn kept_from(&self) -> Option<i64> {
         self.from
     }
@@ -275,8 +276,7 @@ impl<V> KeptFrames<V> {
         self.frames.iter()
     }
 
-    /// The times kept, ascending.
-    #[cfg(test)]
+    /// The exact grid times the decoder keeps, ascending.
     pub(crate) fn times(&self) -> Vec<i64> {
         let mut times: Vec<i64> = (self.frames.iter())
             .flat_map(|kept| kept.times.iter().copied())
@@ -632,6 +632,7 @@ pub(crate) struct Readers<K, F> {
     rings: HashMap<K, BTreeMap<i64, F>>,
     failures: HashMap<(K, i64), (u64, MediaError)>,
     required: HashSet<(K, i64)>,
+    continuation: HashSet<(K, i64)>,
     wanted: HashMap<K, HashSet<i64>>,
     /// Required regions no reader could take yet (no free slot).
     pending: Vec<(K, Region)>,
@@ -696,6 +697,7 @@ impl<K, F> Readers<K, F> {
             rings: HashMap::new(),
             failures: HashMap::new(),
             required: HashSet::new(),
+            continuation: HashSet::new(),
             wanted: HashMap::new(),
             pending: Vec::new(),
             budget: usize::MAX,
@@ -796,6 +798,10 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
 
     /// [`Self::post`], its continued windows fitted in the room `detached`
     /// readers leave ([`Self::room`], Amendment R62).
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one atomic plan/accounting transition"
+    )]
     fn post_within(
         &mut self,
         regions: Vec<(K, Region)>,
@@ -830,6 +836,11 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
         let (mut continued, bounds) = self.continued(&regions);
         let room = self.room(detached);
         let keep = self.fit_continued(&mut continued, &bounds, room);
+        self.continuation = continued
+            .iter()
+            .flat_map(|(key, kept)| kept.iter().map(|at| (key.clone(), *at)))
+            .filter(|frame| !self.required.contains(frame))
+            .collect();
         for (key, kept) in &continued {
             self.required
                 .extend(kept.iter().map(|at| (key.clone(), *at)));
@@ -1236,8 +1247,20 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// and their reservations return. Amendment R61 [S2c]: only while that
     /// plan is current. A refill a newer post superseded clips only the
     /// reader's kept times (what its decoder holds); the newer plan's
-    /// required set, window and reservations stay as posted.
-    pub(crate) fn refilled(&mut self, id: u64, (t, version): (i64, u64), kept_from: Option<i64>) {
+    /// window and explicit targets stay as posted; R75 D14 removes only
+    /// unavailable optional continuation belonging to this refill.
+    #[cfg(test)]
+    pub(crate) fn refilled(&mut self, id: u64, frame: (i64, u64), kept_from: Option<i64>) {
+        let kept = (kept_from.unwrap_or(frame.0)..frame.0).collect();
+        self.refilled_exact(id, frame, &kept);
+    }
+
+    pub(crate) fn refilled_exact(
+        &mut self,
+        id: u64,
+        (t, version): (i64, u64),
+        kept: &BTreeSet<i64>,
+    ) {
         let Some(slot) = self.slot(id) else {
             return;
         };
@@ -1248,16 +1271,21 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             return;
         }
         let key = slot.key.clone();
-        let from = kept_from.unwrap_or(t).min(t);
-        let kept = slot.retained.split_off(&from);
-        let clipped = std::mem::replace(&mut slot.retained, kept);
+        let from = kept.first().copied().unwrap_or(t).min(t);
+        let clipped = slot
+            .retained
+            .extract_if(.., |at| !kept.contains(at))
+            .collect();
         // Amendment R66 [S2c] (F8, B): so are the times its pending
         // discard drops (its decoder kept none below `from`).
-        slot.dropping.retain(|at| *at >= from);
+        slot.dropping.retain(|at| kept.contains(at));
         let current = !retiring && slot.plan.version == version;
         if !current {
             // Amendment R64 [S2c] (K-1): the times it does not keep shrink
             // to their charge (no reader keeps them decoded).
+            if !retiring {
+                self.shorten_unavailable(&key, &clipped);
+            }
             self.unkept(&key, clipped);
             return;
         }
@@ -1281,6 +1309,39 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             self.required.remove(&frame);
             if let Some(bytes) = self.reserved.remove(&frame) {
                 released = released.saturating_add(bytes);
+            }
+        }
+        self.release(released);
+        self.required_bytes = self.required_set_bytes();
+    }
+
+    /// D14: only unavailable optional continuation belonging to this refill.
+    fn shorten_unavailable(&mut self, key: &K, absent: &BTreeSet<i64>) {
+        let gone: HashSet<i64> = absent.iter().copied().filter(|at| {
+            self.continuation.contains(&(key.clone(), *at))
+                && !self.rings.get(key).is_some_and(|ring| ring.contains_key(at))
+                && !self.slots.iter().any(|slot| slot.key == *key &&
+                    (slot.retained.contains(at) || slot.dropping.contains(at) || slot.dispatched.contains(at)
+                    || matches!(slot.state, ReaderState::Decoding { at: flying, .. } if flying == *at)))
+        }).collect();
+        for slot in self.slots.iter_mut().filter(|slot| slot.key == *key) {
+            slot.plan.required.retain(|at| !gone.contains(at));
+        }
+        for (source, region) in &mut self.pending {
+            if source == key {
+                region.required.retain(|at| !gone.contains(at));
+            }
+        }
+        if let Some(wanted) = self.wanted.get_mut(key) {
+            wanted.retain(|at| !gone.contains(at));
+        }
+        let mut released = 0usize;
+        for at in gone {
+            let frame = (key.clone(), at);
+            self.required.remove(&frame);
+            self.continuation.remove(&frame);
+            if let Some(bytes) = self.reserved.remove(&frame) {
+                released += bytes;
             }
         }
         self.release(released);
@@ -2532,6 +2593,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    include!("s3b_d14_sched_tests.rs");
 
     /// A model frame: its value, its reservation, and whether a render
     /// pins it (the preview's `Arc` count).
@@ -3767,7 +3829,8 @@ mod tests {
     /// 10–18). While that decode runs, a newer post requires `target`: a
     /// seek below the window (3, 2) or a step inside it (8, with the
     /// window's kept frames below it continued). The refill then completes
-    /// with `kept_from` = 10. The target stays required and reserved, the
+    /// with exact kept coverage from 10. R75 D14 removes only unavailable
+    /// optional continuation after supersession. The target stays required and reserved, the
     /// held window as posted, and the reader delivers the target; nothing
     /// stays charged once the job is done but the ring's frames.
     #[test]
@@ -3799,6 +3862,13 @@ mod tests {
             );
             let window = readers.windows.get(&0).copied();
             readers.refilled(id, (refill.0, refill.1), Some(10));
+            if target == 8 {
+                assert_eq!(
+                    readers.required,
+                    HashSet::from([(0, target)]),
+                    "R75 D14: only unavailable optional continuation is shortened"
+                );
+            }
             assert!(
                 readers.required.contains(&(0, target)),
                 "{target}: still required"
@@ -3818,6 +3888,13 @@ mod tests {
             );
             deliver_ok(&mut readers, id, 0, refill);
             let decoded = walk(&mut readers, id, 0);
+            if target == 8 {
+                assert_eq!(
+                    decoded,
+                    vec![target],
+                    "no optional re-decode; explicit target progresses"
+                );
+            }
             assert!(decoded.contains(&target), "{target}: decoded {decoded:?}");
             let resolved = readers.resolve(&[(0, target)]).expect("resolved");
             assert_eq!(

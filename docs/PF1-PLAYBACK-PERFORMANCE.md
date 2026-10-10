@@ -1235,9 +1235,11 @@ never drops them: a deadlock until the next post. E13.6.6 warned of this.
 not close (E13.6.11). No R53–R60 semantics change except as stated here.
 - **A refill completes only against its own plan.** A refill's completion (`Readers::refilled`) carries the plan
   version it was started under. It always clips the reader's own kept set to what its decoder kept. It clips the
-  plan, the required set, the held window and the reservations only if that version is still current. A
-  completion superseded by a newer post leaves the newer plan whole. A continued window time below what the
-  decoder kept then stays required and is decoded normally (with a seek).
+  held window only if that version is still current. R75 M4 [S3b] narrows superseded completion: the
+  scheduler receives exact kept coverage and may shorten only unavailable optional continuation requirements
+  belonging to that refill. Every explicit target (including several per source), ring frame and other keeper
+  remains protected. Only reservations for removed optional requirements return; admission and progress keep
+  their existing contract. Necessary GOP pre-roll is distinct from redundant scheduled requests/conversions.
 - **A continued window fits K-3.** When a post continues a held window (R54/R57), the continued times join the
   required set only while H + G ≤ C, nearest t first, in the scheduler's terms (max(f, d) for an unconverted
   window time). The rest are cut, down to t alone. The kept frames of the cut times are discarded like R57's frames
@@ -1358,7 +1360,7 @@ open with ⌊P / R⌋ threads; before S2b-3, each ring holds the S1d window.
 | S2b-4 | H-7 idle, synchronous-decoder release on park, stress test, playback gates | I10, I15 (stress) + earlier; G1, G6, G14, G15 | ~150 |
 | S2c | S-2 shadow-anchored continuation, S-3 backward window, witnesses | C-4 + earlier; G8 | ~560 |
 | S3a | G-2…G-7 display correctness: encode, fence, rebind rule, bounded wait, Terminal handoff, flag readback, lifetimes, self-check, premultiply, app registration | I1b, I5, I6, I16 + earlier; G7a, G7b | ~1,250 production; tests/runner uncapped (R70) |
-| S3b | Staging ring, U-2 residency | I17 + earlier; G2, G4 | ~450 |
+| S3b | Staging ring, U-2 residency, maintenance/teardown, D14, D12 experiment | I17 + earlier; G2, G4 | ~790 production; stop at actual written 850 (R77); tests/harness/model/docs uncapped |
 | S4 | `PF1_PINS`, evidence, docs, PERFORMANCE lanes; the GPU state pinned and recorded | all; on LH at the pinned run: G3 (R48) and L-4a (R58); on LL at the pinned run: L-4a re-confirmed (17.6 ms at S2c, not re-confirmable on a loaded machine); the `seek_gop60` counters R65 and R67 waived (admission waits, windows filled) re-checked with more runs; D13's active RSS scenario (RSS during window cancellation, R61) | ~80 |
 
 The total is about 5,560 lines (rev 3: 5,830): R15/R16 remove ≈ 450 from S2b;
@@ -1401,5 +1403,5 @@ Opus. *CI on push*, Windows included.
 | D11 | Bounded streaming, row banding and a lazy `decoded_layers` for required sets > C (preview or full resolution) | R15: kept out of the scheduler core; K-3 falls back to today's path | export-performance slice (D3 owner) | G17 fails, or a full-resolution set exceeds C in the session |
 | D12 | The working-frame step (RGBA64 to the working frame, after swscale) | Amendment R56: 3.6–5.2 ms a frame, about 80% of a conversion (E13.6.7). After R57's row-wise fill (E13.6.9, r57w): t 1.87–2.61 ms and a window frame 2.11–3.31 ms (×0.49–0.72), against whole conversions of 2.9–3.2 ms on LL and 3.2–4.2 ms on LH, so it is still most of a conversion. t, window frames and playback all pay it. Our own Rust code, not swscale | S3/S4 | S3/S4 planning |
 | D13 | Charging a cancelled window's decoded frames until the reader drops them | Amendment R56: after a post outside a held window, that window's kept decoded frames stay in its reader until the reader's next decode or close, uncharged. Bounded: one window per reader, at most B − 1 = 15 decoded frames. Charging them could deadlock admission | S4 | S4's G15 RSS check, plus an active scenario (R61 item 11): RSS sampled *during* cancellation, not only at settled idle. A P-seek-style backward stepper on a 1080p GOP-60 source refills a window, then posts outside it (a jump far back, then forward) before the window converts, repeatedly, with RSS sampled every 100 ms. The peak RSS above the idle baseline is recorded against the bound (one window per reader, B − 1 decoded frames at d each) |
-| D14 | Extra decodes after a superseded refill | Amendment R62 item 3: after a refill superseded mid-decode (R61's version check), the newer plan's continued times below the decoder's `kept_from` stay required though no reader keeps them, so the reader decodes them again, with one seek. Bounded: at most B − 1 = 15 required times plus the GOP pre-roll, once per superseded refill; their reservations hold their charge until each converts | S3 | the S3 backlog: a refill completion that hands the newer plan what the decoder kept |
+| D14 | Extra decodes after a superseded refill | R75 M4 [S3b]: exact successful-refill coverage shortens only unavailable optional continuation tied to the superseded refill. Preserve every explicit target, ring and other keeper. Reservations of removed optional work return exactly; held windows, admissibility and progress remain intact. Measure redundant scheduled requests and conversions separately from necessary decoder pre-roll | S3b | runtime supersession witnesses, independent accounting model and amended R61 oracle in the same commit |
 | D15 | The exhaustive reader-model test's fast-tier time | Amendment R65: `sched::tests::the_reader_model_holds_for_every_short_sequence` (S2b, `72246d3`) takes about 120 s in the fast tier. It predates S2c and stays as it is until S3 | S3 | the S3 backlog: move it to the slow tier, or shrink it |

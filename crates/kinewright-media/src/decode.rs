@@ -2277,12 +2277,6 @@ impl VideoDecoder {
         result
     }
 
-    /// Amendment R54 [S2c]: the first window time the last refill kept
-    /// (`None`: it kept nothing).
-    pub(crate) fn kept_from(&self) -> Option<i64> {
-        self.retained.kept_from()
-    }
-
     /// Amendment R54 (K-1): d, an upper bound on one decoded frame's
     /// bytes as the decoder keeps it: its pixel format's planes at the
     /// decoder's default buffer geometry (every plane's stride a multiple
@@ -2374,9 +2368,7 @@ impl VideoDecoder {
         self.probe.fail_conversion = Some(at);
     }
 
-    /// Amendment R56 (trace) test support: the grid frames the decoder
-    /// keeps decoded, ascending.
-    #[cfg(test)]
+    /// Exact grid coverage for successful-refill accounting (R75 D14), ascending.
     pub(crate) fn kept_times(&self) -> Vec<i64> {
         self.retained.times()
     }

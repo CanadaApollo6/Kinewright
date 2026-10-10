@@ -349,6 +349,8 @@ struct World {
     /// The last post's job and the readers the last retirement detached
     /// (`PF1_MODEL_EMIT`'s transcript).
     posted_job: Option<(Vec<Times>, bool, usize)>,
+    /// Post inputs include a new refill window, excluding later continuation.
+    required_by_post: HashSet<(u8, i64)>,
     stalled_now: Vec<u64>,
     /// The operation being applied, until it is transcribed.
     applying: Option<Op>,
@@ -383,6 +385,7 @@ impl World {
             played: None,
             script: None,
             posted_job: None,
+            required_by_post: HashSet::new(),
             stalled_now: Vec::new(),
             applying: None,
             handoff: HashSet::new(),
@@ -879,6 +882,7 @@ impl World {
     /// its G.
     fn post_job(&mut self, mut per_source: Vec<Times>, paused: bool, generated: usize) {
         self.posted_job = Some((per_source.clone(), paused, generated));
+        self.required_by_post.clear();
         self.drop_job();
         self.reach.posts += 1;
         let demand: Vec<(u8, i64)> = (per_source.iter())
@@ -923,6 +927,10 @@ impl World {
                 return;
             }
         };
+        self.required_by_post = per_source
+            .iter()
+            .flat_map(|(key, times, _)| times.iter().map(|at| (*key, *at)))
+            .collect();
         // The windows this post holds, of the sources it plans.
         let planned_keys: HashSet<u8> = (per_source.iter())
             .filter(|(_, required, lookahead)| !required.is_empty() || !lookahead.is_empty())
@@ -1301,6 +1309,7 @@ impl World {
         let mut decoder = agent.decoder.take().unwrap_or_default();
         let result = self.decoded(&mut decoder, (key, at, from), &retain, outcome);
         let kept_from = decoder.kept_from();
+        let actual_kept: BTreeSet<_> = decoder.times().into_iter().collect();
         let agent = (self.agents.iter_mut()).find(|agent| agent.id == id);
         let agent = agent.expect("the agent");
         let stopped = result.is_err() && agent.stop || matches!(result, Err(MediaError::Cancelled));
@@ -1330,7 +1339,28 @@ impl World {
                 // A current refill's window starts where its decoder kept.
                 *start = (*start).max(kept_from.unwrap_or(at).min(at));
             }
-            self.readers.refilled(id, (at, version), kept_from);
+            // Independent D14 oracle: the dispatched decoder's promised times,
+            // actual exact decoded coverage, explicit demand and other owners.
+            // It does not read the scheduler's continuation provenance.
+            let before = self.readers.required.clone();
+            let explicit = &self.required_by_post;
+            let removable: HashSet<_> = before.iter().filter(|(source, time)| {
+                *source == key && retain.contains(time) && !actual_kept.contains(time)
+                    && !explicit.contains(&(*source, *time))
+                    && !self.readers.rings.get(source).is_some_and(|ring| ring.contains_key(time))
+                    && !self.agents.iter().any(|other| other.id != id && other.key == key &&
+                        (other.decoder.as_ref().is_some_and(|decoder| decoder.times().contains(time))
+                        || matches!(other.doing, Doing::Decode {at: flying, ..} if flying == *time)
+                        || matches!(other.doing, Doing::Decode {from: Some(_), ..}) && other.retain.contains(time)))
+            }).copied().collect();
+            self.readers.refilled_exact(id, (at, version), &actual_kept);
+            if version != self.readers.version && !retiring {
+                let expected: HashSet<_> = before.difference(&removable).copied().collect();
+                assert_eq!(
+                    self.readers.required, expected,
+                    "D14 independent exact handoff oracle"
+                );
+            }
         }
         // `pinned`: f is exact and reserved; the hold keeps f.
         let result = result.and_then(|()| {
@@ -2640,5 +2670,43 @@ fn a_detached_readers_dispatched_discard_counts_in_the_room() {
             Do(Op::Exited(0)),
             Post(vec![(1, vec![15], vec![16, 17, 18])], false, 25 * F),
         ],
+    );
+}
+
+#[test]
+fn s3b_d14_independent_model_checks_superseded_optional_handoff() {
+    use Fixed::{Op as Do, Post};
+    let run = Run {
+        budget: 100 * F,
+        pool: 2,
+        decoded: [3 * F, F],
+        gop: [10, 6],
+        floor: [0, 0],
+        posts: 0,
+        retires: 0,
+        returns: 1,
+        runs: 0,
+        discards: 0,
+        profile: Profile::Kept,
+    };
+    let world = fixed(
+        run,
+        vec![
+            Post(vec![(0, vec![20], vec![])], true, 0),
+            Do(Op::Run),
+            Post(vec![(0, vec![19], vec![])], true, 0),
+            Do(Op::Step(0)),
+            Post(vec![(0, vec![8], vec![])], true, 0),
+            Do(Op::Finish(0, Outcome::Ok)),
+        ],
+    );
+    assert_eq!(
+        world.reach.stale_refills, 1,
+        "the supersession path actually ran"
+    );
+    assert_eq!(
+        world.readers.required,
+        HashSet::from([(0, 8)]),
+        "explicit target only; fixed() also checked exact charges and settled progress"
     );
 }
