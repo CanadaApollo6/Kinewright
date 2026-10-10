@@ -7446,3 +7446,78 @@ is **319**, excluding test-only instrumentation. No push.
 engine-before-session witness, D14, D12, stage gate and R75 measurements are
 still owed. Existing R71 teardown tests passing are not substitutes for the
 new pending-map engine witness. No S3b performance or stage-close claim.
+
+### U-2 — submitted texture residency (partial stage)
+
+U-2 extends the existing texture pool with semantic/time/shape/allocation
+identity and weak CPU allocation tokens. Candidates publish at actual submit,
+latest sampling completion follows queue submission order, and unsubmitted
+frame pins prevent recycling. Active plus evicted-in-flight entries share the
+64 MiB budget; idle shape recycling retains its separate 256 MiB budget.
+Staging is acquired lazily, so a repeated paused title moves zero upload bytes
+(first upload 460800 bytes, second 0, identical output bytes).
+
+Runtime reds (actual GPU paths on lavapipe except the pure key-construction
+assertions; no compilation failure or skipped device counted):
+
+- Baseline positive second paused title upload:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1155 filtered out; finished in 0.26s`
+- Allocation identity alias:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.24s`
+- Same-allocation shape alias:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.25s`
+- Source-time alias:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.32s`
+- Source semantics alias:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.00s`
+- Title semantics alias:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.00s`
+- CPU allocation retained without its original Hold:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.25s`
+- Document clear omitted:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.64s`
+- Partial entry published before submit:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.22s`
+- Sampling-completion guard omitted:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.23s`
+- Unsubmitted-pin guard omitted:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.23s`
+- Residency cap enlarged to 128 MiB:
+  `test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1163 filtered out; finished in 0.30s`
+
+Restored nine U-2 witnesses (byte-exact source hashes match the full media gate):
+
+`test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 1155 filtered out; finished in 1.46s`
+
+Final per-commit media gate, exit 0:
+
+```text
+test result: ok. 1105 passed; 0 failed; 59 ignored; 0 measured; 0 filtered out; finished in 1042.57s
+test result: ok. 3 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 22.36s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.90s
+test result: ok. 12 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 2.67s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+Workspace build and all-target clippy passed (exit 0); touched-file rustfmt,
+diff check and slow-test manifest lint passed. Cargo used the R73 prefix and
+FFmpeg shell setup; media ran with one thread. No new ignore was added.
+
+**Budget stop / Amendment R77 (proposed):** implemented cumulative production
+Rust is **555** added nonblank non-test lines (compositor 356, ring 152,
+render 47). The uncompiled maintenance draft reaches **672** cumulative
+production Rust lines. Adding the still-reserved D14 75 and D12 35 yields
+**782**, above R76's 760 stop; five manifest/lock additions are additional
+build-input lines (conservative all-source forecast 787). Further implementation
+stops for the lead's R75 re-estimate ruling. Proposed scope approximately
+790 lines, new stop 850; no contract, witness, commit order or gate waiver.
+D12's 35 lines remain reserved and cannot be reallocated if dropped.
+
+**Still partial:** scheduled idle expiry, parked acquisition/agent progress,
+late callback wakeups, pending-map engine-before-session teardown, repeated
+paused decoded-video upload, D14, D12, full workspace stage gate, CI-W and all
+R75 native measurements/reference rebuild. The maintenance prototype is only
+under untracked `review-pf/s3b/draft/`; it is not compiled or committed.
+Passing legacy R71 tests does not close the new pending-map engine witness.
+No performance or S3b stage-close claim, no push.

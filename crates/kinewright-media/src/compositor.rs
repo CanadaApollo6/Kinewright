@@ -599,6 +599,9 @@ pub trait CompositorInput {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
     fn upload_bytes(&self) -> Vec<u8>;
+    fn residency(&self) -> Option<(ResidencyKey, std::sync::Weak<Vec<f16>>)> {
+        None
+    }
 
     fn write_upload(
         &self,
@@ -864,6 +867,9 @@ struct TexturePool {
     /// Every retained shape, least recently used first.
     recency: Vec<TexturePoolKey>,
     bytes: u64,
+    residents: HashMap<ResidencyKey, Resident>,
+    retiring: Vec<Resident>,
+    resident_bytes: u64,
 }
 
 impl TexturePool {
@@ -934,6 +940,148 @@ impl TexturePool {
     }
 }
 
+const RESIDENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const RESIDENT_MAX_ENTRIES: usize = 128;
+const RESIDENT_EXPIRY: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ResidentContent {
+    Video(Arc<crate::render::VideoSourceKey>),
+    Generated(crate::render::TitleCacheKey),
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResidencyKey {
+    content: ResidentContent,
+    at: kinewright_core::TimeCode,
+    allocation: usize,
+    shape: (u32, u32),
+}
+
+impl ResidencyKey {
+    pub(crate) fn new(
+        content: ResidentContent,
+        at: kinewright_core::TimeCode,
+        frame: &WorkingFrame,
+    ) -> Self {
+        Self {
+            content,
+            at,
+            allocation: Arc::as_ptr(&frame.pixels) as usize,
+            shape: (frame.width, frame.height),
+        }
+    }
+}
+
+struct Resident {
+    pixels: std::sync::Weak<Vec<f16>>,
+    texture: Arc<HeldTexture>,
+    shape: TexturePoolKey,
+    used: std::time::Instant,
+    done: Arc<AtomicBool>,
+}
+
+impl TexturePool {
+    fn resident(&mut self, key: &ResidencyKey) -> Option<Arc<HeldTexture>> {
+        let entry = self.residents.get(key)?;
+        entry.pixels.upgrade()?;
+        Some(entry.texture.clone())
+    }
+
+    fn publish(&mut self, frame: &FrameResources, done: &Arc<AtomicBool>) {
+        for layer in &frame.layers {
+            let (Some((key, pixels)), Some((shape, texture))) = (&layer.residency, &layer.source)
+            else {
+                continue;
+            };
+            if let Some(entry) = self
+                .residents
+                .get_mut(key)
+                .filter(|entry| Arc::ptr_eq(&entry.texture, texture))
+            {
+                entry.done = done.clone();
+                entry.used = std::time::Instant::now();
+            } else if let Some(entry) = self
+                .retiring
+                .iter_mut()
+                .find(|e| Arc::ptr_eq(&e.texture, texture))
+            {
+                entry.done = done.clone();
+            } else if layer.upload.is_some()
+                && !self.residents.contains_key(key)
+                && texture_pool_bytes(*shape) <= RESIDENT_MAX_BYTES
+            {
+                self.make_room(texture_pool_bytes(*shape));
+                if self.resident_bytes + texture_pool_bytes(*shape) > RESIDENT_MAX_BYTES
+                    || self.residents.len() + self.retiring.len() >= RESIDENT_MAX_ENTRIES
+                {
+                    continue;
+                }
+                self.resident_bytes += texture_pool_bytes(*shape);
+                self.residents.insert(
+                    key.clone(),
+                    Resident {
+                        pixels: pixels.clone(),
+                        texture: texture.clone(),
+                        shape: *shape,
+                        used: std::time::Instant::now(),
+                        done: done.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    fn make_room(&mut self, bytes: u64) {
+        while self.resident_bytes + bytes > RESIDENT_MAX_BYTES
+            || self.residents.len() + self.retiring.len() >= RESIDENT_MAX_ENTRIES
+        {
+            let Some(key) = self
+                .residents
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.retiring
+                .push(self.residents.remove(&key).expect("selected resident"));
+            self.maintain(false);
+        }
+    }
+
+    fn maintain(&mut self, clear: bool) {
+        let now = std::time::Instant::now();
+        let expired: Vec<_> = self
+            .residents
+            .iter()
+            .filter(|(_, e)| clear || now.duration_since(e.used) >= RESIDENT_EXPIRY)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.retiring
+                .push(self.residents.remove(&key).expect("selected resident"));
+        }
+        let mut index = 0;
+        while index < self.retiring.len() {
+            let entry = &self.retiring[index];
+            if entry.done.load(Ordering::Acquire) && Arc::strong_count(&entry.texture) == 1 {
+                let entry = self.retiring.swap_remove(index);
+                self.resident_bytes -= texture_pool_bytes(entry.shape);
+                self.store(
+                    entry.shape,
+                    Arc::try_unwrap(entry.texture)
+                        .unwrap_or_else(|_| unreachable!("sole pool owner")),
+                );
+            } else {
+                index += 1;
+            }
+        }
+        self.evict(&[]);
+    }
+}
+
 /// MO2 R28 (ME15): a staged source — pool key, texture, staging + row bytes.
 type LayerUpload = (
     TexturePoolKey,
@@ -944,10 +1092,11 @@ type LayerUpload = (
 struct LayerResources {
     /// The uploaded source texture; `None` for an adjustment or a backdrop,
     /// which sample an accumulator snapshot instead.
-    source: Option<(TexturePoolKey, HeldTexture)>,
+    source: Option<(TexturePoolKey, Arc<HeldTexture>)>,
     /// MO2 R28 (ME15): the source's staging buffer and its padded row bytes,
     /// copied into `source` at the head of the frame's commands.
     upload: Option<(Arc<Ledgered<wgpu::Buffer>>, u32)>,
+    residency: Option<(ResidencyKey, std::sync::Weak<Vec<f16>>)>,
     /// The atlas this layer's bind group reads; held so the texture outlives
     /// the queue submission even if the cache evicts it meanwhile.
     _lut_atlas: Arc<LutAtlas>,
@@ -1466,10 +1615,7 @@ impl Compositor {
             encoder.clear_buffer(&slot.flags, 0, None);
         }
         let submitted = std::time::Instant::now();
-        let (index, done) = self.submit_tracked([encoder.finish()]);
-        if let Some(batch) = &frame.upload_batch {
-            batch.submitted(done.clone());
-        }
+        let (index, done) = self.submit_frame(encoder.finish(), &frame);
         let result = crate::display::mapped_bytes(&self.gpu, &slot.flags, index.clone());
         display.record_timing(index, submitted.elapsed());
         let result = result.and_then(|bytes| {
@@ -1758,24 +1904,17 @@ impl Compositor {
         matte_debug: Option<MatteDebugSelection>,
         frame: &mut FrameResources,
     ) -> Result<Vec<Step>, MediaError> {
-        if layers
-            .iter()
-            .any(|layer| layer.mode.role != LayerRole::Adjustment)
-        {
-            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
-            self.sweep_retired();
-            self.upload_ring
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .advance();
-            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
-            frame.upload_batch = Some(
-                self.upload_ring
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .acquire()?,
-            );
-        }
+        let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+        self.sweep_retired();
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .advance();
+        let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+        self.texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .maintain(false);
         let splits = |layer: &CompositorLayer<'_, F>| {
             layer.mode.is_special() || layer.transition.backdrop.is_some()
         };
@@ -1862,7 +2001,7 @@ impl Compositor {
                 library,
                 debug_node,
                 &bindings,
-                frame.upload_batch.as_ref(),
+                &mut frame.upload_batch,
             )?);
             schedule(Step::Draw(frame.layers.len() - 1));
         }
@@ -1957,7 +2096,13 @@ impl Compositor {
             return;
         };
         let mut hot = Vec::new();
-        let sources = frame.layers.into_iter().filter_map(|layer| layer.source);
+        let sources = frame
+            .layers
+            .into_iter()
+            .filter_map(|layer| layer.source)
+            .filter_map(|(key, texture)| {
+                Arc::try_unwrap(texture).ok().map(|texture| (key, texture))
+            });
         for (key, texture) in sources.chain(frame.snapshots) {
             if !hot.contains(&key) {
                 hot.push(key);
@@ -2038,7 +2183,7 @@ impl Compositor {
         library: Option<&LutLibrary>,
         matte_debug_node: Option<usize>,
         bindings: &LayerBindings<'_>,
-        batch: Option<&upload_ring::UploadLease>,
+        batch: &mut Option<upload_ring::UploadLease>,
     ) -> Result<LayerResources, MediaError> {
         let binding = self.lut_binding(layer.effects, library)?;
         let cube_lut = &binding.legacy_lut;
@@ -2082,13 +2227,39 @@ impl Compositor {
         } else {
             &self.sampler
         };
+        let residency = bindings
+            .source
+            .is_none()
+            .then(|| layer.frame.residency())
+            .flatten();
         let (source, view, upload) = if let Some(snapshot) = bindings.source {
             (None, snapshot.clone(), None)
-        } else {
-            let (key, texture, upload) =
-                self.upload_layer(layer, batch.expect("pixel batch acquired"))?;
+        } else if let Some(texture) = residency.as_ref().and_then(|(key, _)| {
+            self.texture_pool
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .resident(key)
+        }) {
+            let key = TexturePoolKey {
+                width: layer.frame.width(),
+                height: layer.frame.height(),
+                format: F::FORMAT,
+            };
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            (Some((key, texture)), view, Some(upload))
+            (Some((key, texture)), view, None)
+        } else {
+            if batch.is_none() {
+                *batch = Some(
+                    self.upload_ring
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .acquire()?,
+                );
+            }
+            let (key, texture, upload) =
+                self.upload_layer(layer, batch.as_ref().expect("acquired batch"))?;
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (Some((key, Arc::new(texture))), view, Some(upload))
         };
         let mut resources = self.bind_layer(
             source,
@@ -2100,6 +2271,7 @@ impl Compositor {
             bindings,
         );
         resources.upload = upload;
+        resources.residency = residency;
         Ok(resources)
     }
 
@@ -2159,6 +2331,32 @@ impl Compositor {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .advance();
+    }
+
+    fn submit_frame(
+        &self,
+        command: wgpu::CommandBuffer,
+        frame: &FrameResources,
+    ) -> (wgpu::SubmissionIndex, Arc<AtomicBool>) {
+        let mut pool = self
+            .texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let submitted = self.submit_tracked([command]);
+        if let Some(batch) = &frame.upload_batch {
+            batch.submitted(submitted.1.clone());
+        }
+        #[cfg(test)]
+        s3b_tests::submitted_uploads(frame);
+        pool.publish(frame, &submitted.1);
+        submitted
+    }
+
+    pub(crate) fn clear_residency(&self) {
+        self.texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .maintain(true);
     }
 
     /// MO2 R28 (ME16): submit, with a flag set once that work completes.
@@ -2237,7 +2435,7 @@ impl Compositor {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn bind_layer(
         &self,
-        source: Option<(TexturePoolKey, HeldTexture)>,
+        source: Option<(TexturePoolKey, Arc<HeldTexture>)>,
         view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         params: &LayerParams,
@@ -2311,6 +2509,7 @@ impl Compositor {
         LayerResources {
             source,
             upload: None,
+            residency: None,
             _lut_atlas: atlas,
             _uniform: uniform,
             _grade: grade,
@@ -2621,11 +2820,8 @@ impl Compositor {
         if let Some(flags) = flags {
             encoder.copy_buffer_to_buffer(flags, 0, &buffer, pixel_bytes, flag_bytes);
         }
-        let (index, done) = self.submit_tracked([encoder.finish()]);
+        let (index, done) = self.submit_frame(encoder.finish(), frame);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        if let Some(batch) = &frame.upload_batch {
-            batch.submitted(done.clone());
-        }
         let callback = move |result| {
             let _ = sender.send(result);
         };
@@ -8161,7 +8357,7 @@ pub(crate) mod ledger_probes;
 
 #[cfg(test)]
 #[path = "s3b_tests.rs"]
-mod s3b_tests;
+pub(crate) mod s3b_tests;
 
 /// MO2 R28 (ME14): one monitor frame split into its phases, for the perf
 /// lanes' printed breakdown.
@@ -8174,10 +8370,10 @@ pub(crate) mod phases {
     /// [`Compositor::render_monitor_with_luts`], timed: staging + upload
     /// recording, GPU passes + readback (submit to mapped), monitor encode,
     /// and the whole frame they partition.
-    pub(crate) fn monitor(
+    pub(crate) fn monitor<F: CompositorInput>(
         compositor: &Compositor,
         (width, height): (u32, u32),
-        layers: &[CompositorLayer<'_, WorkingFrame>],
+        layers: &[CompositorLayer<'_, F>],
         monitoring: &ColorDescription,
         library: Option<&LutLibrary>,
     ) -> Result<([Duration; 3], Duration), MediaError> {

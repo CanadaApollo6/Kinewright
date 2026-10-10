@@ -8,6 +8,7 @@ type Delivery = Box<dyn FnOnce() + Send>;
 type DeliverySender = std::sync::mpsc::SyncSender<Delivery>;
 
 thread_local! {
+    static SUBMITTED_BYTES: Cell<u64> = const { Cell::new(0) };
     static COPIES: Cell<usize> = const { Cell::new(0) };
     static UPLOADS: RefCell<Vec<wgpu::Buffer>> = const { RefCell::new(Vec::new()) };
     static MAP_HOLD: RefCell<Option<DeliverySender>> = const { RefCell::new(None) };
@@ -300,4 +301,316 @@ fn s3b_u1_fills_staging_without_an_intermediate_copy() {
     COPIES.set(0);
     assert!(!render(&c, &frame()).is_empty());
     assert_eq!(COPIES.get(), 0, "intermediate upload allocation bytes");
+}
+
+pub(super) fn submitted_uploads(frame: &FrameResources) {
+    let bytes = frame
+        .layers
+        .iter()
+        .filter(|layer| layer.upload.is_some())
+        .filter_map(|layer| layer.source.as_ref())
+        .map(|(key, _)| texture_pool_bytes(*key))
+        .sum::<u64>();
+    SUBMITTED_BYTES.set(SUBMITTED_BYTES.get() + bytes);
+}
+
+pub(crate) fn uploaded_bytes<T>(body: impl FnOnce() -> T) -> (T, u64) {
+    SUBMITTED_BYTES.set(0);
+    let result = body();
+    (result, SUBMITTED_BYTES.get())
+}
+
+struct Deferred(Option<Delivery>);
+impl Deferred {
+    fn deliver(mut self) {
+        self.0.take().expect("owned delivery")();
+    }
+}
+impl Drop for Deferred {
+    fn drop(&mut self) {
+        if let Some(delivery) = self.0.take() {
+            delivery();
+        }
+    }
+}
+
+struct ResidentInput {
+    frame: WorkingFrame,
+    content: ResidentContent,
+    at: kinewright_core::TimeCode,
+}
+
+impl ResidentInput {
+    fn new(id: u64) -> Self {
+        Self {
+            frame: frame(),
+            content: ResidentContent::Generated((
+                ClipId(id),
+                (17, 3),
+                crate::render::Generated::Title(kinewright_core::Title::default()),
+            )),
+            at: kinewright_core::TimeCode::ZERO,
+        }
+    }
+}
+
+impl CompositorInput for ResidentInput {
+    const FORMAT: wgpu::TextureFormat = WorkingFrame::FORMAT;
+    const BYTES_PER_PIXEL: u32 = WorkingFrame::BYTES_PER_PIXEL;
+    const LINEAR: bool = true;
+    fn width(&self) -> u32 {
+        self.frame.width
+    }
+    fn height(&self) -> u32 {
+        self.frame.height
+    }
+    fn upload_bytes(&self) -> Vec<u8> {
+        self.frame.upload_bytes()
+    }
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        self.frame.write_upload(mapped, pitch)
+    }
+    fn residency(&self) -> Option<(ResidencyKey, std::sync::Weak<Vec<f16>>)> {
+        Some((
+            ResidencyKey::new(self.content.clone(), self.at, &self.frame),
+            Arc::downgrade(&self.frame.pixels),
+        ))
+    }
+}
+
+fn resident_layer(input: &ResidentInput) -> CompositorLayer<'_, ResidentInput> {
+    CompositorLayer {
+        frame: input,
+        effects: &[],
+        transition: TransitionRenderParams::default(),
+        mode: LayerMode::NORMAL,
+    }
+}
+
+fn resident_draw(c: &Compositor, input: &ResidentInput) -> Vec<f32> {
+    c.render_working((input.width(), input.height()), &[resident_layer(input)])
+        .unwrap()
+        .pixels
+}
+
+pub(crate) fn residents(c: &Compositor) -> (usize, u64, Vec<std::sync::Weak<Vec<f16>>>) {
+    let pool = c.texture_pool.lock().unwrap();
+    (
+        pool.residents.len(),
+        pool.resident_bytes,
+        pool.residents
+            .values()
+            .map(|entry| entry.pixels.clone())
+            .collect(),
+    )
+}
+
+#[test]
+fn s3b_u2_identity_requires_the_allocation_shape_and_time() {
+    let c = Compositor::new(fixture_gpu_or_skip().expect("actual GPU required"));
+    let original = ResidentInput::new(1);
+    let original_key = original.residency().unwrap().0;
+    let first = resident_draw(&c, &original);
+    let (hit, bytes) = uploaded_bytes(|| resident_draw(&c, &original));
+    assert_eq!(first, hit);
+    assert_eq!(bytes, 0);
+    let mut replacement = ResidentInput::new(1);
+    assert_ne!(
+        replacement.residency().unwrap().0,
+        original_key,
+        "allocation identity"
+    );
+    let (_, bytes) = uploaded_bytes(|| resident_draw(&c, &replacement));
+    assert_eq!(bytes, 17 * 3 * 8);
+    replacement.frame.pixels = original.frame.pixels.clone();
+    replacement.frame.width = 3;
+    replacement.frame.height = 17;
+    assert_ne!(
+        replacement.residency().unwrap().0,
+        original_key,
+        "same allocation changed shape"
+    );
+    let (_, bytes) = uploaded_bytes(|| resident_draw(&c, &replacement));
+    assert_eq!(bytes, 17 * 3 * 8);
+    replacement.frame = original.frame.clone();
+    replacement.at = kinewright_core::TimeCode(1);
+    assert_ne!(
+        replacement.residency().unwrap().0,
+        original_key,
+        "source time"
+    );
+    let (_, bytes) = uploaded_bytes(|| resident_draw(&c, &replacement));
+    assert_eq!(bytes, 17 * 3 * 8);
+    assert_eq!(c.gpu.ledger().live_bytes(), ledger_probes::inventory(&c));
+}
+
+#[test]
+fn s3b_u2_failed_later_layer_never_publishes_the_first_upload() {
+    let c = Compositor::new(fixture_gpu_or_skip().expect("actual GPU required"));
+    let input = ResidentInput::new(1);
+    let mut invalid = ResidentInput::new(2);
+    invalid.frame.pixels = Arc::new(vec![]);
+    let result = c.render_working((17, 3), &[resident_layer(&input), resident_layer(&invalid)]);
+    assert!(result.is_err(), "real later staging failure");
+    assert_eq!(residents(&c).0, 0, "no partially published frame");
+    let (first, bytes) = uploaded_bytes(|| resident_draw(&c, &input));
+    assert_eq!(bytes, 17 * 3 * 8, "retry performs a real upload");
+    let (second, bytes) = uploaded_bytes(|| resident_draw(&c, &input));
+    assert_eq!(first, second);
+    assert_eq!(bytes, 0);
+    assert_eq!(c.gpu.ledger().live_bytes(), ledger_probes::inventory(&c));
+}
+
+#[test]
+fn s3b_u2_eviction_waits_for_observed_sampling_completion() {
+    let gpu = fixture_gpu_or_skip().expect("actual GPU required");
+    let c = Compositor::new(gpu.clone());
+    resident_draw(&c, &ResidentInput::new(0)); // atlas initialized before the barrier
+    let input = ResidentInput::new(1);
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    COMPLETE_HOLD.set(Some(tx));
+    resident_draw(&c, &input);
+    let delivery = Deferred(Some(
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("real queue callback"),
+    ));
+    c.clear_residency();
+    assert_eq!(residents(&c).0, 0, "eligibility ends immediately");
+    assert_eq!(
+        residents(&c).1,
+        17 * 3 * 8,
+        "in-flight eviction stays charged"
+    );
+    assert_eq!(
+        gpu.ledger().live_bytes(),
+        ledger_probes::inventory(&c),
+        "each charge held once"
+    );
+    delivery.deliver();
+    settled(&c);
+    c.sweep_retired();
+    c.texture_pool.lock().unwrap().maintain(false);
+    assert_eq!(residents(&c).1, 0);
+    assert_eq!(gpu.ledger().live_bytes(), ledger_probes::inventory(&c));
+    drop(c);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+
+#[test]
+fn s3b_u2_an_unsubmitted_pin_prevents_recycling() {
+    let gpu = fixture_gpu_or_skip().expect("actual GPU required");
+    let c = Compositor::new(gpu.clone());
+    let input = ResidentInput::new(1);
+    resident_draw(&c, &input);
+    let (output, frame, encoder) = c
+        .composite(17, 3, &[resident_layer(&input)], None, None)
+        .unwrap();
+    let old = frame.layers[0].source.as_ref().unwrap().1.0.clone();
+    c.clear_residency();
+    assert_eq!(residents(&c).1, 17 * 3 * 8, "unsubmitted sample pin held");
+    let next = ResidentInput::new(2);
+    resident_draw(&c, &next);
+    let texture = c
+        .texture_pool
+        .lock()
+        .unwrap()
+        .residents
+        .values()
+        .next()
+        .unwrap()
+        .texture
+        .0
+        .clone();
+    assert_ne!(old, texture, "pinned texture cannot be overwritten");
+    drop((old, texture, output, encoder));
+    c.retire_failed(frame, frame_poll);
+    c.texture_pool.lock().unwrap().maintain(false);
+    assert_eq!(residents(&c).1, 17 * 3 * 8, "only the newer entry remains");
+    assert_eq!(gpu.ledger().live_bytes(), ledger_probes::inventory(&c));
+    drop(c);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
+}
+
+fn resident_upload(c: &Compositor, input: &ResidentInput) {
+    let mut frame = FrameResources::default();
+    c.stage_layers(
+        input.width(),
+        input.height(),
+        &[resident_layer(input)],
+        None,
+        None,
+        &mut frame,
+    )
+    .unwrap();
+    let mut encoder = c
+        .gpu
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    copy_uploads(&mut encoder, &frame);
+    let (index, done) = c.submit_frame(encoder.finish(), &frame);
+    c.gpu
+        .device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(index),
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .unwrap();
+    if done.load(Ordering::Acquire) {
+        c.release_layer_textures(frame);
+    } else {
+        c.retain(done, frame);
+    }
+    c.sweep_retired();
+    c.upload_ring.lock().unwrap().advance();
+}
+
+#[test]
+fn s3b_u2_resident_and_retiring_bytes_share_the_budget() {
+    let gpu = fixture_gpu_or_skip().expect("actual GPU required");
+    let c = Compositor::new(gpu.clone());
+    resident_draw(&c, &ResidentInput::new(100));
+    c.clear_residency();
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    COMPLETE_HOLD.set(Some(tx));
+    let mut delivery = None;
+    let pixels = Arc::new(vec![f16::from_f32(0.5); 1024 * 1024 * 4]);
+    for id in 0..9 {
+        let mut input = ResidentInput::new(id);
+        input.frame = WorkingFrame {
+            width: 1024,
+            height: 1024,
+            pixels: pixels.clone(),
+        };
+        let ((), bytes) = uploaded_bytes(|| resident_upload(&c, &input));
+        if id == 0 {
+            delivery = Some(Deferred(Some(
+                rx.recv_timeout(Duration::from_secs(5))
+                    .expect("actual sampling completion"),
+            )));
+        }
+        assert_eq!(bytes, 8 * 1024 * 1024);
+        assert!(
+            residents(&c).1 <= 64 * 1024 * 1024,
+            "64 MiB includes retirement"
+        );
+        assert_eq!(gpu.ledger().live_bytes(), ledger_probes::inventory(&c));
+    }
+    assert_eq!(
+        residents(&c).0,
+        7,
+        "in-flight retirement takes one entry's bytes"
+    );
+    assert_eq!(residents(&c).1, 64 * 1024 * 1024);
+    delivery.take().unwrap().deliver();
+    settled(&c);
+    c.sweep_retired();
+    c.texture_pool.lock().unwrap().maintain(false);
+    assert_eq!(residents(&c).1, 56 * 1024 * 1024);
+    assert_eq!(gpu.ledger().live_bytes(), ledger_probes::inventory(&c));
+    drop(c);
+    assert_eq!(gpu.ledger().live_bytes(), 0);
 }

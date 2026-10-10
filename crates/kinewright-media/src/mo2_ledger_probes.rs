@@ -612,20 +612,45 @@ fn owned(r: &FrameResources) -> u64 {
 }
 
 /// Everything the compositor holds charged, listed independently.
-fn inventory(c: &Compositor) -> u64 {
+pub(super) fn inventory(c: &Compositor) -> u64 {
     let atlases = c.lut_atlas_cache.lock().unwrap();
     let pool = c.texture_pool.lock().unwrap();
+    let retired = c.retired.lock().unwrap();
+    let sources = retired
+        .iter()
+        .flat_map(|(_, frame)| &frame.layers)
+        .filter_map(|layer| layer.source.as_ref().map(|(_, texture)| texture.as_ref()));
+    let textures = pool
+        .shapes
+        .values()
+        .flatten()
+        .chain(pool.residents.values().map(|entry| entry.texture.as_ref()))
+        .chain(pool.retiring.iter().map(|entry| entry.texture.as_ref()))
+        .chain(sources);
+    let mut ids = Vec::new();
+    let mut bytes = 0;
+    for texture in textures {
+        if !ids.contains(&&texture.0) {
+            ids.push(&texture.0);
+            bytes += texture.1;
+        }
+    }
     c.dummy_accumulator.1.1
-        + c.upload_ring.lock().unwrap().charged_bytes()
         + c.dummy_validity.1
+        + c.upload_ring.lock().unwrap().charged_bytes()
         + atlases.iter().map(|a| a.texture.1).sum::<u64>()
-        + pool.shapes.values().flatten().map(|t| t.1).sum::<u64>()
+        + bytes
         + c.flag_pool.lock().unwrap().as_ref().map_or(0, |b| b.1)
-        + c.retired
-            .lock()
-            .unwrap()
+        + retired
             .iter()
-            .map(|(_, r)| owned(r))
+            .map(|(_, r)| {
+                owned(r)
+                    - r.layers
+                        .iter()
+                        .filter_map(|l| l.source.as_ref())
+                        .map(|(_, t)| t.1)
+                        .sum::<u64>()
+            })
             .sum::<u64>()
 }
 

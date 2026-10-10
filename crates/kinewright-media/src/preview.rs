@@ -2411,6 +2411,55 @@ pub(crate) mod tests {
     };
 
     /// A preview driven step by step on the test thread (no `run` loop).
+    #[test]
+    fn s3b_u2_title_eviction_releases_the_cpu_hold_while_gpu_residency_remains() {
+        let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+        let document = Arc::new(title_card((64, 64), 4));
+        preview.lane.post(Some(job(
+            &document,
+            JobKind::Paused(TimeCode::ZERO),
+            stamp(1, 1),
+        )));
+        let work = preview.next_work(false).expect("paused work");
+        preview.execute(work);
+        frames
+            .recv_timeout(Duration::from_secs(5))
+            .expect("actual GPU render published");
+        let gpu = preview.renderer.display_gpu();
+        let (entries, bytes, weak) = preview.renderer.s3b_residents();
+        assert_eq!((entries, bytes), (1, 64 * 64 * 8));
+        assert!(weak[0].upgrade().is_some());
+        assert_eq!(
+            preview.lane.lock().readers.live().0,
+            64 * 64 * 8,
+            "real title Hold"
+        );
+        let gpu_bytes = gpu.ledger().live_bytes();
+        preview.renderer.clear_titles();
+        preview.settle_titles();
+        assert_eq!(
+            preview.lane.lock().readers.live().0,
+            0,
+            "real CPU charge returned"
+        );
+        assert!(
+            weak[0].upgrade().is_none(),
+            "GPU lookup metadata does not retain CPU pixels"
+        );
+        assert_eq!(
+            preview.renderer.s3b_residents().1,
+            bytes,
+            "GPU texture still resident"
+        );
+        assert_eq!(
+            gpu.ledger().live_bytes(),
+            gpu_bytes,
+            "original GPU charge remains exactly"
+        );
+        drop(preview);
+        assert_eq!(gpu.ledger().live_bytes(), 0);
+    }
+
     pub(crate) fn test_preview(clock: Arc<SharedClock>) -> (Preview, Receiver<PreviewFrame>) {
         test_preview_on(Arc::default(), clock)
     }

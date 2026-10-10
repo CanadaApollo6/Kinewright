@@ -18,8 +18,8 @@ use crate::{
     TimelineVisualLayer,
     cache::FrameCache,
     compositor::{
-        Compositor, CompositorLayer, DeliveryFrame, GpuContext, LayerMode, LayerRole,
-        MatteRenderTarget, MonitorPurpose,
+        Compositor, CompositorInput, CompositorLayer, DeliveryFrame, GpuContext, LayerMode,
+        LayerRole, MatteRenderTarget, MonitorPurpose, ResidencyKey, ResidentContent,
     },
     decode::VideoDecoder,
     derived_cache::CacheStats,
@@ -81,11 +81,41 @@ impl RenderScale {
 /// slice the ordinary render composites, so a proof can never target a layer
 /// the production path would not have produced.
 struct DecodedLayer {
+    identity: Option<(ResidentContent, TimeCode)>,
     clip: ClipId,
     frame: WorkingFrame,
     effects: Vec<Effect>,
     transition: TransitionRenderParams,
     mode: LayerMode,
+}
+
+impl CompositorInput for DecodedLayer {
+    const FORMAT: wgpu::TextureFormat = WorkingFrame::FORMAT;
+    const BYTES_PER_PIXEL: u32 = WorkingFrame::BYTES_PER_PIXEL;
+    const LINEAR: bool = true;
+    fn width(&self) -> u32 {
+        self.frame.width
+    }
+    fn height(&self) -> u32 {
+        self.frame.height
+    }
+    fn upload_bytes(&self) -> Vec<u8> {
+        self.frame.upload_bytes()
+    }
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        self.frame.write_upload(mapped, pitch)
+    }
+    fn residency(&self) -> Option<(ResidencyKey, std::sync::Weak<Vec<half::f16>>)> {
+        let (content, at) = self.identity.as_ref()?;
+        Some((
+            ResidencyKey::new(content.clone(), *at, &self.frame),
+            Arc::downgrade(&self.frame.pixels),
+        ))
+    }
 }
 
 /// MO2 R10: the compositor names the offending layer; the renderer knows
@@ -719,6 +749,7 @@ impl FrameRenderer {
 
     pub(crate) fn clear(&mut self) -> CacheStats {
         let stats = self.cache_stats();
+        self.compositor.clear_residency();
         self.video_sources.clear();
         self.source_order.clear();
         self.title_cache.clear();
@@ -1165,6 +1196,10 @@ impl FrameRenderer {
                         }
                     };
                     decoded_layers.push(DecodedLayer {
+                        identity: Some((
+                            ResidentContent::Video(Arc::new(source_key(asset, scale))),
+                            layer.source.source_at,
+                        )),
                         clip: layer.source.clip,
                         frame,
                         effects: layer.effects,
@@ -1175,6 +1210,10 @@ impl FrameRenderer {
                 TimelineVisualLayer::Title(layer) => {
                     let content = Generated::Title(layer.title);
                     decoded_layers.push(DecodedLayer {
+                        identity: Some((
+                            ResidentContent::Generated((layer.clip, resolution, content.clone())),
+                            TimeCode::ZERO,
+                        )),
                         clip: layer.clip,
                         frame: self.generated_frame(layer.clip, resolution, content)?,
                         effects: layer.effects,
@@ -1185,6 +1224,10 @@ impl FrameRenderer {
                 TimelineVisualLayer::Solid(layer) => {
                     let content = Generated::Solid([layer.color.r, layer.color.g, layer.color.b]);
                     decoded_layers.push(DecodedLayer {
+                        identity: Some((
+                            ResidentContent::Generated((layer.clip, resolution, content.clone())),
+                            TimeCode::ZERO,
+                        )),
                         clip: layer.clip,
                         frame: self.generated_frame(layer.clip, resolution, content)?,
                         effects: layer.effects,
@@ -1195,6 +1238,7 @@ impl FrameRenderer {
                 // MO2 R18: the compositor ignores an adjustment's frame and
                 // samples the composite below it instead.
                 TimelineVisualLayer::Adjustment(layer) => decoded_layers.push(DecodedLayer {
+                    identity: None,
                     clip: layer.clip,
                     frame: ADJUSTMENT_FRAME.clone(),
                     effects: layer.effects,
@@ -1599,11 +1643,11 @@ fn validate_managed_context(document: &Document) -> Result<(), MediaError> {
 }
 
 /// Borrow the staged layers as compositor layers, preserving z-order.
-fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, WorkingFrame>> {
+fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, DecodedLayer>> {
     layers
         .iter()
         .map(|layer| CompositorLayer {
-            frame: &layer.frame,
+            frame: layer,
             effects: &layer.effects,
             transition: layer.transition,
             mode: layer.mode,
@@ -1682,6 +1726,163 @@ mod tests {
         lut_store::LutStore,
         test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
+
+    #[test]
+    fn s3b_u2_second_paused_upload_moves_zero_bytes() {
+        let mut renderer = test_renderer().expect("actual GPU required");
+        let document = title_document(vec![]);
+        let draw = |renderer: &mut FrameRenderer| {
+            renderer
+                .render_live(
+                    &document,
+                    TimeCode::ZERO,
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    DecodeStrategy::Seek,
+                )
+                .unwrap()
+        };
+        let (first, first_bytes) =
+            crate::compositor::s3b_tests::uploaded_bytes(|| draw(&mut renderer));
+        let (second, second_bytes) =
+            crate::compositor::s3b_tests::uploaded_bytes(|| draw(&mut renderer));
+        assert_eq!(*first.rgba, *second.rgba, "native working input parity");
+        assert_eq!(first_bytes, 320 * 180 * 8, "real first submitted upload");
+        assert_eq!(second_bytes, 0, "same paused CPU allocation is resident");
+    }
+
+    #[test]
+    fn s3b_u2_semantic_key_uses_the_production_source_and_title_identity() {
+        let frame = WorkingFrame {
+            width: 1,
+            height: 1,
+            pixels: Arc::new(vec![f16::from_f32(0.5); 4]),
+        };
+        let source = VideoSourceKey::new(
+            AssetId(1),
+            Path::new("old.mkv"),
+            &MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(64)),
+                byte_len: Some(7),
+            },
+            Rational::new(30, 1).unwrap(),
+            &ColorDescription::unknown(),
+            None,
+            Some(640),
+        );
+        let make = |content| {
+            DecodedLayer {
+                identity: Some((content, TimeCode(3))),
+                clip: ClipId(1),
+                frame: frame.clone(),
+                effects: vec![],
+                transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
+            }
+            .residency()
+            .unwrap()
+            .0
+        };
+        let key = make(ResidentContent::Video(Arc::new(source.clone())));
+        let mut variants = vec![];
+        let mut changed = source.clone();
+        changed.asset = AssetId(2);
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.path = "relinked.mkv".into();
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.fingerprint = (&MediaSourceFingerprint {
+            content_sha256: Some("b".repeat(64)),
+            byte_len: Some(8),
+        })
+            .into();
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.description = (&ColorDescription {
+            transfer: ColorTransfer::Srgb,
+            ..ColorDescription::unknown()
+        })
+            .into();
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.assumption = Some(ColorSourceProfileAssumption::D65);
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.fps = Rational::new(24, 1).unwrap();
+        variants.push(changed);
+        let mut changed = source;
+        changed.max_width = Some(1280);
+        variants.push(changed);
+        for source in variants {
+            assert_ne!(
+                key,
+                make(ResidentContent::Video(Arc::new(source))),
+                "same allocation, changed source input"
+            );
+        }
+        let original = make(ResidentContent::Generated((
+            ClipId(1),
+            (1, 1),
+            Generated::Title(Title::default()),
+        )));
+        let changed = make(ResidentContent::Generated((
+            ClipId(1),
+            (1, 1),
+            Generated::Title(Title {
+                text: "changed".into(),
+                ..Title::default()
+            }),
+        )));
+        assert_ne!(
+            original, changed,
+            "same allocation, same clip, changed title"
+        );
+    }
+
+    #[test]
+    fn s3b_u2_document_replacement_with_reused_ids_clears_eligibility() {
+        let mut renderer = test_renderer().expect("actual GPU required");
+        let document = title_document(vec![]);
+        let first = renderer
+            .render_live(
+                &document,
+                TimeCode::ZERO,
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .unwrap();
+        assert_eq!(
+            crate::compositor::s3b_tests::residents(&renderer.compositor).0,
+            1
+        );
+        renderer.clear();
+        assert_eq!(
+            crate::compositor::s3b_tests::residents(&renderer.compositor).0,
+            0,
+            "new document never inherits eligibility"
+        );
+        let (second, bytes) = crate::compositor::s3b_tests::uploaded_bytes(|| {
+            renderer
+                .render_live(
+                    &document,
+                    TimeCode::ZERO,
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    DecodeStrategy::Seek,
+                )
+                .unwrap()
+        });
+        assert_eq!(*first.rgba, *second.rgba);
+        assert_eq!(bytes, 320 * 180 * 8, "reused IDs upload the new allocation");
+    }
+
+    impl FrameRenderer {
+        pub(crate) fn s3b_residents(&self) -> (usize, u64, Vec<std::sync::Weak<Vec<f16>>>) {
+            crate::compositor::s3b_tests::residents(&self.compositor)
+        }
+    }
 
     fn test_renderer() -> Option<FrameRenderer> {
         Some(FrameRenderer::new(fixture_gpu_or_skip()?))
