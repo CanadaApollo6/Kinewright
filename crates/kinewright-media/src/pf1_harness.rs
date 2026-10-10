@@ -1713,3 +1713,5 @@ fn an_invalid_p_play_run_fails_the_lane() {
     let invalid = std::panic::catch_unwind(|| assert_valid("valid=false elapsed_s=61.90"));
     assert!(invalid.is_err(), "valid=false passed");
 }
+
+include!("s3b_native_harness.rs");
