@@ -747,6 +747,19 @@ impl FrameRenderer {
         self.lut_library = library;
     }
 
+    pub(crate) fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.compositor.set_wake(wake);
+    }
+    pub(crate) fn maintain(&self) {
+        self.compositor.maintain();
+    }
+    pub(crate) fn maintenance_deadline(&self) -> Option<std::time::Instant> {
+        self.compositor.maintenance_deadline()
+    }
+    pub(crate) fn upload_available(&self) -> bool {
+        self.compositor.upload_available()
+    }
+
     pub(crate) fn clear(&mut self) -> CacheStats {
         let stats = self.cache_stats();
         self.compositor.clear_residency();
@@ -1879,6 +1892,9 @@ mod tests {
     }
 
     impl FrameRenderer {
+        pub(crate) fn s3b_park_maps(&self) -> Vec<crate::compositor::s3b_tests::Deferred> {
+            crate::compositor::s3b_tests::parked_maps(&self.compositor)
+        }
         pub(crate) fn s3b_residents(&self) -> (usize, u64, Vec<std::sync::Weak<Vec<f16>>>) {
             crate::compositor::s3b_tests::residents(&self.compositor)
         }

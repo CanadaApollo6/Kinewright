@@ -4,7 +4,7 @@ use super::*;
 use crate::gpu_test_support::fixture_gpu_or_skip;
 use crate::timeline::TransitionRenderParams;
 
-type Delivery = Box<dyn FnOnce() + Send>;
+pub(crate) type Delivery = Box<dyn FnOnce() + Send>;
 type DeliverySender = std::sync::mpsc::SyncSender<Delivery>;
 
 thread_local! {
@@ -320,11 +320,37 @@ pub(crate) fn uploaded_bytes<T>(body: impl FnOnce() -> T) -> (T, u64) {
     (result, SUBMITTED_BYTES.get())
 }
 
-struct Deferred(Option<Delivery>);
+pub(crate) struct Deferred(Option<Delivery>);
 impl Deferred {
-    fn deliver(mut self) {
+    pub(crate) fn deliver(mut self) {
         self.0.take().expect("owned delivery")();
     }
+}
+
+pub(crate) fn delay_next_map() -> std::sync::mpsc::Receiver<Delivery> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    MAP_HOLD.set(Some(tx));
+    rx
+}
+
+/// Delay delivery of real write-map results for both submitted batches.
+pub(crate) fn parked_maps(c: &Compositor) -> Vec<Deferred> {
+    (0..2)
+        .map(|_| {
+            let lease = c.upload_ring.lock().unwrap().acquire().unwrap();
+            let resources = staged(c, &lease);
+            drop((lease, resources));
+            settled(c);
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            MAP_HOLD.set(Some(tx));
+            c.upload_ring.lock().unwrap().advance();
+            settled(c);
+            Deferred(Some(
+                rx.recv_timeout(Duration::from_secs(5))
+                    .expect("real map callback"),
+            ))
+        })
+        .collect()
 }
 impl Drop for Deferred {
     fn drop(&mut self) {

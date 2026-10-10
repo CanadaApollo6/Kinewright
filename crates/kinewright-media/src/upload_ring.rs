@@ -32,11 +32,28 @@ impl Default for Batch {
 }
 
 #[derive(Default)]
-pub(super) struct UploadRing(Vec<Arc<Mutex<Batch>>>);
+pub(super) struct UploadRing(Vec<Arc<Mutex<Batch>>>, Option<Arc<dyn Fn() + Send + Sync>>);
 
 pub(super) struct UploadLease(Arc<Mutex<Batch>>);
 
 impl UploadRing {
+    fn ready(batch: &Arc<Mutex<Batch>>) -> bool {
+        Arc::strong_count(batch) == 1
+            && matches!(
+                batch.lock().unwrap_or_else(PoisonError::into_inner).phase,
+                Phase::Mapped
+            )
+    }
+    pub(super) fn available(&self) -> bool {
+        self.0.len() < 2 || self.0.iter().any(Self::ready)
+    }
+    pub(super) fn set_wake(&mut self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.1 = Some(wake);
+    }
+    pub(super) fn wake(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        self.1.clone()
+    }
+
     #[cfg(test)]
     pub(super) fn charged_bytes(&self) -> u64 {
         self.0
@@ -58,13 +75,7 @@ impl UploadRing {
         let batch = self
             .0
             .iter()
-            .find(|batch| {
-                Arc::strong_count(batch) == 1
-                    && matches!(
-                        batch.lock().unwrap_or_else(PoisonError::into_inner).phase,
-                        Phase::Mapped
-                    )
-            })
+            .find(|batch| Self::ready(batch))
             .cloned()
             .or_else(|| {
                 if self.0.len() == 2 {
@@ -92,8 +103,12 @@ impl UploadRing {
                 let buffers = state.buffers.clone();
                 for buffer in buffers {
                     let (tx, rx) = sync_channel(1);
+                    let wake = self.wake();
                     let callback = move |result| {
                         let _ = tx.try_send(result);
+                        if let Some(wake) = wake {
+                            wake();
+                        }
                     };
                     #[cfg(test)]
                     let callback = super::s3b_tests::map_callback(callback);

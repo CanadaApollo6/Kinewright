@@ -9,7 +9,7 @@ use crate::{
     Compositor, CompositorLayer, LayerMode, frame::WorkingFrame, timeline::TransitionRenderParams,
 };
 use kinewright_core::BlendMode;
-fn config() -> DisplayConfig {
+pub(crate) fn config() -> DisplayConfig {
     DisplayConfig {
         premultiply: (0..=u16::MAX)
             .map(|i| ((f32::from(i & 255) * (f32::from(i >> 8) / 255.0)) + 0.5) as u8)

@@ -744,6 +744,7 @@ impl Drop for CancelOnDrop {
 }
 
 pub(crate) enum Work {
+    Maintenance,
     Agent(AgentJob),
     Paused(TransportJob, u64),
     Playback(TransportJob, u64),
@@ -1304,6 +1305,12 @@ impl Preview {
         clock: Arc<SharedClock>,
         frames: (Sender<PreviewFrame>, Receiver<PreviewFrame>),
     ) -> Self {
+        let weak = Arc::downgrade(&lane);
+        renderer.set_wake(Arc::new(move || {
+            if let Some(lane) = weak.upgrade() {
+                lane.ready.notify_all();
+            }
+        }));
         Self {
             lane,
             renderer,
@@ -1351,6 +1358,7 @@ impl Preview {
     /// back to back while no transport job is runnable.
     pub(crate) fn execute(&mut self, work: Work) {
         match work {
+            Work::Maintenance => self.renderer.maintain(),
             Work::Agent(job) => {
                 let playing = self.playback_running();
                 if playing {
@@ -1422,22 +1430,28 @@ impl Preview {
             if superseded {
                 superseded_jobs.extend(state.transport.take());
             }
+            let upload_ready = self.renderer.upload_available();
             let parked = self.parked == Some(state.version);
             let runnable =
                 (state.transport.as_ref())
                     .map(|job| job.kind)
                     .filter(|kind| match kind {
                         JobKind::Paused(_) => {
-                            self.paused_slot_wait != Some(state.version)
-                                || self
-                                    .display
-                                    .as_ref()
-                                    .is_none_or(crate::display::DisplayPool::slot_available)
+                            upload_ready
+                                && (self.paused_slot_wait != Some(state.version)
+                                    || self
+                                        .display
+                                        .as_ref()
+                                        .is_none_or(crate::display::DisplayPool::slot_available))
                         }
-                        JobKind::Playback { .. } => !parked,
+                        JobKind::Playback { .. } => !parked && upload_ready,
                     });
-            if !state.agent.is_empty() && (self.agent_turn || runnable.is_none()) {
-                break state.agent.pop_front().map(Work::Agent);
+            let agent = state.agent.iter().position(|job| {
+                !job.cancel.load(Ordering::Acquire)
+                    && (upload_ready || !matches!(job.work, AgentWork::Thumbnail { .. }))
+            });
+            if let Some(agent) = agent.filter(|_| self.agent_turn || runnable.is_none()) {
+                break state.agent.remove(agent).map(Work::Agent);
             }
             match runnable {
                 Some(JobKind::Paused(_)) => {
@@ -1461,7 +1475,16 @@ impl Preview {
                     self.lane.ready.notify_all();
                 }
                 None if !wait => break None,
-                None => state = state.wait(&self.lane.ready),
+                None => {
+                    if let Some(deadline) = self.renderer.maintenance_deadline() {
+                        state = state.wait_timeout(
+                            &self.lane.ready,
+                            deadline.saturating_duration_since(Instant::now()),
+                        );
+                        break Some(Work::Maintenance);
+                    }
+                    state = state.wait(&self.lane.ready);
+                }
             }
         };
         drop(state);
@@ -1556,6 +1579,10 @@ impl Preview {
         // R38 D2: an agent job run while the wait was suspended binds its
         // own document's LUT library; composite with this scene's.
         self.bind(Some(scene.generation), &scene.lut);
+        self.renderer.maintain();
+        if !self.renderer.upload_available() {
+            return Err(Halt::Held { agent: false });
+        }
         let mut display = self.display.take().filter(|pool| !pool.terminal());
         let sdr = document.color_context.monitoring
             == kinewright_core::ColorContext::sdr_rec709().monitoring;
@@ -1764,6 +1791,7 @@ impl Preview {
     /// H-2/H-3: post the job's plan, start the readers it needs, admit its
     /// required set (K-2), then `FrameWait` until every required frame has
     /// a result or a current failure. `None`: K-3's synchronous fallback.
+    #[allow(clippy::too_many_lines)]
     fn schedule(
         &mut self,
         demand: &ReaderDemand,
@@ -1801,6 +1829,9 @@ impl Preview {
         let mut generated = Some(demand.generated_uncharged(&self.charged));
         let mut granted = None;
         loop {
+            drop(state);
+            self.renderer.maintain();
+            state = lane.lock();
             if generated.is_some() || state.readers.unreserved() {
                 let unlocked;
                 (state, unlocked) = self.admit((&lane, state), &mut generated, &mut granted);
@@ -1818,7 +1849,11 @@ impl Preview {
             // K-2: nothing renders before its whole set is reserved.
             let resolved =
                 (state.readers.resolve(&demand.required)).filter(|_| generated.is_none());
-            let agent = |job: &AgentJob| !job.cancel.load(Ordering::Acquire);
+            let upload_ready = self.renderer.upload_available();
+            let agent = |job: &AgentJob| {
+                !job.cancel.load(Ordering::Acquire)
+                    && (upload_ready || !matches!(job.work, AgentWork::Thumbnail { .. }))
+            };
             let view = WaitView {
                 shutdown: state.shutdown,
                 superseded: wait.superseded(&lane, &state),
@@ -1851,10 +1886,8 @@ impl Preview {
                 WaitStep::Suspend => {
                     // R-4: a paused wait runs the agent job, demands posted.
                     let position = state.agent.iter().position(agent);
-                    let discarded: Vec<_> = state.agent.drain(..position.unwrap_or(0)).collect();
-                    let job = state.agent.pop_front();
+                    let job = position.and_then(|index| state.agent.remove(index));
                     drop(state);
-                    drop(discarded);
                     if let Some(job) = job {
                         self.run_agent(job, true);
                         self.owe_generated(demand, &mut generated, granted.as_ref());
@@ -2047,6 +2080,8 @@ impl Preview {
             state.wait_timeout(ready, HOLD_POLL)
         } else if state.version != wait.version {
             let deadline = wait.since + self.lane.drag_deadline();
+            state.wait_timeout(ready, deadline.saturating_duration_since(Instant::now()))
+        } else if let Some(deadline) = self.renderer.maintenance_deadline() {
             state.wait_timeout(ready, deadline.saturating_duration_since(Instant::now()))
         } else {
             state.wait(ready)
@@ -2409,6 +2444,8 @@ pub(crate) mod tests {
         cc1_fixtures::fallback_gpu, compositor::live_table_frames, engine::FfmpegMediaEngine,
         perf_fixtures::title_card, test_support::TempDirectory,
     };
+
+    include!("s3b_maintenance_tests.rs");
 
     /// A preview driven step by step on the test thread (no `run` loop).
     #[test]

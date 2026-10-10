@@ -839,4 +839,4 @@ impl Drop for DisplayPool {
 
 #[cfg(test)]
 #[path = "display_tests.rs"]
-mod tests;
+pub(crate) mod tests;

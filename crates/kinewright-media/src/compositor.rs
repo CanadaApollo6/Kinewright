@@ -1904,17 +1904,7 @@ impl Compositor {
         matte_debug: Option<MatteDebugSelection>,
         frame: &mut FrameResources,
     ) -> Result<Vec<Step>, MediaError> {
-        let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
-        self.sweep_retired();
-        self.upload_ring
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .advance();
-        let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
-        self.texture_pool
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .maintain(false);
+        self.maintain();
         let splits = |layer: &CompositorLayer<'_, F>| {
             layer.mode.is_special() || layer.transition.backdrop.is_some()
         };
@@ -2333,6 +2323,57 @@ impl Compositor {
             .advance();
     }
 
+    pub(crate) fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_wake(wake);
+    }
+    pub(crate) fn upload_available(&self) -> bool {
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .available()
+    }
+    pub(crate) fn maintain(&self) {
+        for _ in 0..2 {
+            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+            self.upload_ring
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .advance();
+        }
+        self.sweep_retired();
+        self.texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .maintain(false);
+    }
+    pub(crate) fn maintenance_deadline(&self) -> Option<std::time::Instant> {
+        let pool = self
+            .texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let expiry = pool
+            .residents
+            .values()
+            .map(|e| e.used + RESIDENT_EXPIRY)
+            .min();
+        let pending = !pool.retiring.is_empty()
+            || !self
+                .retired
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+            || self
+                .upload_ring
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pending();
+        let settle_at = pending.then(|| std::time::Instant::now() + Duration::from_millis(1));
+        expiry.into_iter().chain(settle_at).min()
+    }
+
     fn submit_frame(
         &self,
         command: wgpu::CommandBuffer,
@@ -2367,7 +2408,17 @@ impl Compositor {
         let done = Arc::new(AtomicBool::new(false));
         let index = self.gpu.queue.submit(commands);
         let flag = Arc::clone(&done);
-        let callback = move || flag.store(true, Ordering::Release);
+        let wake = self
+            .upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wake();
+        let callback = move || {
+            flag.store(true, Ordering::Release);
+            if let Some(wake) = wake {
+                wake();
+            }
+        };
         #[cfg(test)]
         let callback = s3b_tests::complete_callback(callback);
         self.gpu.queue.on_submitted_work_done(callback);
