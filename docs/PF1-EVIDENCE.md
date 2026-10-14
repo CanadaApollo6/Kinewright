@@ -7394,7 +7394,7 @@ second failure would be a finding. The lead accepts S3a. The RTX 4050 rerun
 and the laptop cleanup remain owed under R73.
 
 
-## E15 — PF1 S3b (partial; U-1)
+## E15 — PF1 S3b: staging ring, U-2 residency, maintenance, D14 (D12 dropped)
 
 U-1 adds two completion-owned mapped upload batches and writes working rows
 directly into the charged staging allocation. Reuse requires observed real
@@ -7521,3 +7521,138 @@ R75 native measurements/reference rebuild. The maintenance prototype is only
 under untracked `review-pf/s3b/draft/`; it is not compiled or committed.
 Passing legacy R71 tests does not close the new pending-map engine witness.
 No performance or S3b stage-close claim, no push.
+
+### Maintenance, teardown and D14 (`fbfbc9d`, `984b099`)
+
+R77 accepted the U-2 stop proposal above (about 790 lines, stop at 850 on the
+actual written count). `fbfbc9d` adds the worker maintenance deadline: resident
+entries expire after two seconds idle without a further request; pending write
+maps and parked acquisition wake the worker; agent work keeps being served while
+the ring is exhausted; engine-before-session teardown drains pending maps within
+a bound. Runtime reds (expiry, park, late callback, repeated paused decoded
+video, teardown) each failed on their named mutation, and the restored set
+passed:
+
+`test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 1148 filtered out; finished in 5.33s`
+
+`984b099` implements R75 M4's narrowed D14. After a successful refill the
+scheduler receives the decoder's exact kept coverage. A superseded completion
+removes only unavailable optional continuation requirements belonging to that
+refill. Every explicit target, ring frame and other keeper stays required. The
+design text (D14 and the R61 item), the independent `sched_accounting` model and
+the old oracle were amended in the same commit. Real-decoder witness, baseline
+red then green:
+
+```text
+S3B_D14 target=8 scheduled_optional=4 optional_conversions=4 target_received=10 target_converted=1
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 1168 filtered out; finished in 0.50s
+S3B_D14 target=8 scheduled_optional=0 optional_conversions=0 target_received=10 target_converted=1
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1168 filtered out; finished in 0.71s
+```
+
+Redundant scheduled requests and conversions fell 4 → 0. The necessary GOP
+pre-roll for the target (10 received, 1 converted) is unchanged. The amended
+model passed 12,000 seeds (24,000 settles):
+`test result: ok. 17 passed; 0 failed; 1 ignored; 0 measured; 1154 filtered out; finished in 3.63s`.
+
+### D12: dropped (`eb84b3c`)
+
+Under R75 the working-frame step was an experiment. Safe fixed-size block append
+removed the real allocation-site zero-prefill (`output_prefill_bytes` 408 → 0)
+and kept bit parity across blocks, tails and padded strides. Three adjacent
+paired R57 P-seek runs per lane gave median window working-step ratios of
+**1.147 LL** and **1.055 LH** (after/before), under substantial recorded foreign
+CPU load. The evidence does not support keeping it, so it was dropped:
+production `decode.rs` is exactly `984b099`, and the reserved lines were not
+reallocated (design §15 D12). The before/after binaries and sources are kept in
+the review directory.
+
+### R75 native measurements (desktop, 2026-10-09 to 2026-10-14)
+
+`eb84b3c` adds the test-only paired native harness (`s3b_native_harness.rs`,
+three on-demand lanes in `ci/ignored-tests.txt`). Reference: a harness-only
+rebuild of `58f6cd8`; its production sources are verified exact by manifest
+(219 inputs). Candidate: `eb84b3c`. Binaries are named by commit and sha256
+(`s3b-reference58-58f6cd8-bcd89a3f9a42`, `s3b-final-eb84b3c-939f0b2c3758`).
+Both use the enabled native display route, the canonical 5 ms consumer poll and
+2 s warm-up. G4 counts distinct current, unexpired, bound and acknowledged due
+frames once over measured wall time, with late frames counted separately. G2
+keeps G1's fixed due-frame denominator and present-p95 criterion. Each lane
+asserts Q2 validity; candidate lanes also assert the gate, so every assertion
+affects the exit. Three valid post-warm-up pairs per workload, one lane at a
+time, with load recorded (R50). Every LH lane recorded the three-sample R74a
+preflight: no foreign pure-compute process, a largest foreign allocation of
+562 MiB, and utilisation 0% (23–25% before the G18 LH exports).
+
+| Gate | Workloads | Valid pairs | Candidate result |
+|---|---|---|---|
+| G4, LL (llvmpipe) | typical, explainer ≥ 24 fps; blend_heavy, reel ≥ 15 fps | 3/3 each, 24 exits 0 | lowest fps 29.93 / 29.96 / 29.28 / 28.91 — **pass** |
+| G2, LH (RTX 3090) | explainer, reel, feed_4x5, talk_recut: G1's criterion | 3/3 each, 24 exits 0 | worst miss rate 0.778%, worst present p95 45.01 ms — **pass** |
+| I4, LL and LH | paired median mean ratio ≤ 1.05 vs `58f6cd8` | 3 pairs each, 12 exits 0 | LL **0.8858**, LH **0.7920** — **pass** |
+| G18 | canonical 120-frame export | 12 exports, 4 exits 0 | every file sha256 `fe87e67c…d979b88` (3,375,562 bytes) — **pass** |
+
+Per-pair I4 ratios: LL 0.8962 / 0.8858 / 0.8855; LH 0.7920 / 0.8087 / 0.7847.
+These are recorded runs on one desktop. They are consistent with the gates
+holding there; they say nothing about other load or hardware. The G4 pairs of
+2026-10-09 and reel pair 1 (2026-10-13) ran under heavy recorded foreign load:
+rustc, cc1 and clippy up to 354% CPU, kswapd0, tensorfold, and load1 up to
+21.5. The weakest candidate row, reel run 0 at 28.91 fps with 65 dropped,
+coincides with that load. G4 reel pair 2, G2, I4 and G18 ran in quiet windows
+on 2026-10-14 (01:15–01:33 and 06:05–06:57).
+
+Information only, not gated:
+- The reference's LH feed_4x5 runs all show 27.36 fps, 158 dropped and present
+  p95 65 ms; every candidate run shows 29.99 fps with 0 dropped.
+- The I4 ledger peak rose from 58,986,924 to 125,341,100 bytes, within R28's
+  384 MiB ceiling, which every lane asserts.
+- Candidate G18 export wall-time medians were 25.4 s LL and 26.2 s LH, against
+  the reference's 30.3 s and 31.9 s.
+
+Every raw summary line is in the main checkout's
+`target/review/pf/s3b-report.md`, with load samples and preflights under
+`target/review/pf/s3b/work/`.
+
+**Production budget.** **752** added nonblank non-test production lines against
+`58f6cd8` (compositor 406, upload ring 166, sched 63, render 59, preview 55,
+decode 3), under R77's stop of 850. Recounted on 2026-10-14 with the unchanged
+counting script. The cumulative written count including the discarded D12 draft
+was 768. Five build-input lines are tracked separately.
+
+**Stage gate on a Linux box (2026-10-14, `eb84b3c`).** Rust 1.99.0, the
+pinned FFmpeg 8.0 (libavcodec 62.11.100), Mesa 25.0.7 lavapipe; `nice -n 19`,
+`-j 4`, one heavy cargo at a time, MemAvailable ≥ 6 GiB before each step.
+Touched-file rustfmt, workspace build and all-target clippy `-D warnings`
+passed, as did slow-test lint. The fast tier totals **3,605 passed, 0 failed,
+97 ignored**, identical to the desktop's stage gate at `eb84b3c`. The media
+library's 62 ignores are exactly the manifest plus Linux-allowlist entries.
+Two qualifications:
+- At `RUST_TEST_THREADS=4`, the media library process died with SIGSEGV twice
+  in the `cc1_fixtures` GPU tests. The crash is in native code, since the
+  workspace forbids `unsafe_code`. The media package therefore ran at one test
+  thread, as every desktop S3b gate did (R73).
+- A memory watchdog (no swap on that box) stopped the one-thread run at the
+  seeded stress test. The library completed in three processes, running each
+  test once.
+
+The R69 known flakes passed. Raw summary lines are in the review report.
+
+**CI.** Run 38485967934 on `eb84b3c` (attempt 1, not rerun) failed. Linux
+passed. The Windows fast tier failed one test on the WARP adapter,
+`compositor::ledger_probes::rev3_repeated_readback_poll_errors_all_entries`:
+`mo2_ledger_probes.rs:808`, where the poll hook received
+`Wait { submission_index: Some(5), timeout: Some(100ms) }`. Only
+`retire_failed` issues that bounded wait. A scratch repro on lavapipe shows the
+path: with both upload-ring batches held, a hooked readback entry fails before
+submit with `upload ring exhausted` and reaches exactly that wait. The test's
+hook answers completion waits without polling, so on an adapter whose
+completion is asynchronous, earlier frames may not release their batches in
+time. That WARP timing caused the CI failure is inferred, not observed.
+
+A push of documentation alone runs no workflow (`ci.yml` `paths-ignore`), and
+`eb84b3c` is already on the remote.
+
+**Review panel.** Pending at the time of this commit.
+
+**Status.** S3b's implementation, R75 measurements and local gates are
+complete. S3b closes when CI is green on Linux and Windows in both tiers. The
+RTX 4050 rerun owed under R73 since S3a is still owed. No push.
