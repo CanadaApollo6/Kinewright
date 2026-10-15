@@ -13,6 +13,14 @@ thread_local! {
     static UPLOADS: RefCell<Vec<wgpu::Buffer>> = const { RefCell::new(Vec::new()) };
     static MAP_HOLD: RefCell<Option<DeliverySender>> = const { RefCell::new(None) };
     static COMPLETE_HOLD: RefCell<Option<DeliverySender>> = const { RefCell::new(None) };
+    static SWEPT: RefCell<Option<std::sync::mpsc::Sender<()>>> = const { RefCell::new(None) };
+}
+
+/// Teardown's first sweep of the retired frames (`Compositor::drop`).
+pub(super) fn swept() {
+    if let Some(tx) = SWEPT.take() {
+        let _ = tx.send(());
+    }
 }
 
 pub(super) fn intermediate(bytes: usize) {
@@ -282,13 +290,18 @@ fn s3b_u1_teardown_sweeps_a_failed_frame_completed_after_its_first_sweep() {
         .recv_timeout(Duration::from_secs(5))
         .expect("real completion held");
     let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let (swept_tx, swept_rx) = std::sync::mpsc::channel();
     let teardown = std::thread::spawn(move || {
+        SWEPT.set(Some(swept_tx));
         drop(c);
         done_tx.send(()).unwrap();
     });
-    let waited = done_rx.recv_timeout(Duration::from_millis(300)).is_err();
+    // Deliver only after teardown's first sweep found the frame unfinished.
+    let first = swept_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    let waited = done_rx.try_recv().is_err();
     delivery();
     let ended = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    assert!(first, "teardown swept before the completion was delivered");
     assert!(waited, "teardown waits while the completion is held");
     assert!(ended, "teardown ends once the completion is delivered");
     teardown.join().unwrap();

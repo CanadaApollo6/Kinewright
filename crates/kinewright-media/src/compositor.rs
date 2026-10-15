@@ -794,6 +794,8 @@ impl Drop for Compositor {
         loop {
             // A retired failed frame owns its Writing lease until swept.
             self.sweep_retired();
+            #[cfg(test)]
+            s3b_tests::swept();
             let mut ring = self
                 .upload_ring
                 .lock()
