@@ -12,13 +12,13 @@ name: CI
 on:
   push:
     paths-ignore:
-      - 'docs/**'
+      - 'docs/**/*.md'
       - '**/*.md'
       - 'LICENSE*'
       - '.gitignore'
   pull_request:
     paths-ignore:
-      - 'docs/**'
+      - 'docs/**/*.md'
       - '**/*.md'
       - 'LICENSE*'
       - '.gitignore'

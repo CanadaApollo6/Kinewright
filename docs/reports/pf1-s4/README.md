@@ -1,52 +1,39 @@
 # PF1 S4 runner reproduction checkpoint
 
-This is a bounded S4a checkpoint, not PF1 acceptance. The retained count is 450/450, including c3bb9e1. The native harness does not yet emit the required live collector JSON. The Linux launcher therefore rejects current binaries instead of manufacturing selected-adapter, driver, policy or metric readback. No lane was run for this checkpoint.
+Run 3 is a partial checkpoint at the actual 650/650 retained-line stop. It does not complete S4a or authorize lanes. Shipping production changes remain zero. The LL collector, strict NVIDIA table parser, complete paired native integration, replacement-series workflow and live/resume integration witnesses remain owed under R81. LH policy collection remains in S4c after Q1.
 
 ## Versioned contract
 
-`docs/PF1-PINS.schema.json` is the strict v1 schema. `scripts/pf1/validate.py` implements the portable subset of JSON Schema used here, nested artifact rehashing, GPU state checks and gate decisions. `scripts/pf1/test_validate.py` contains the same standard-library witnesses for CI-L and CI-W. Resolve their introducing commit with `git log -1 --format=%H -- scripts/pf1/validate.py docs/PF1-PINS.schema.json docs/PF1-PINS.json`; the implementation report records its literal hash. The parent parser checkpoint is c3bb9e199c2708da9134092a511a07337c30dcb0.
+`docs/PF1-PINS.schema.json` defines the strict v1 interchange format. `scripts/pf1/validate.py` validates original artifact bytes, nested provenance, gate contracts and decisions. `scripts/pf1/launch.py` owns Linux child cleanup. `scripts/pf1/test_validate.py` runs the portable witnesses on both CI platforms and the disposable process-group witness on Linux. Resolve the checkpoint commit with `git log -1 --format=%H -- scripts/pf1/validate.py scripts/pf1/launch.py`. The report records the literal commit.
 
-`docs/PF1-PINS.json` and `example/` are synthetic contract fixtures. They contain no measured binary, production source, media, machine, GPU approval or CI evidence. The example policy's authority field illustrates the schema only. The file named synthetic.txt is deliberately labelled. A synthetic gate pass is not PF1 acceptance. Real pins must replace every synthetic input, source, harness, binary, approval and raw-log reference with independently collected artifacts under the supplied evidence root.
+The pins and `example/` tree are synthetic fixtures, including their approval records and selected adapter. They are not accepted pins or measured evidence. Git attributes preserve the checked-in hash inputs as LF on Windows. The tests exercise an autocrlf checkout without normalizing arbitrary evidence bytes. Non-Markdown docs changes now trigger CI, including schema and fixture changes.
 
 ```bash
 python3 scripts/pf1/test_validate.py
 python3 scripts/pf1/validate.py --pins docs/PF1-PINS.json --run docs/reports/pf1-s4/example/status.json --root .
 ```
 
-Windows uses `py -3` in place of `python3`. The validator has no Linux launch dependencies. Exit 0 means this pins record's complete gate passed; 1 means a failed decision; 2 means invalid or incomplete evidence; 75 means GPU busy, an environment-limited absolute miss, or a report-only result. `--spec-only` checks launch inputs and prints launch_spec_valid. It does not claim acceptance. CPU magnitude never gates. GitHub CI has no WARP timing leg; deterministic Windows GPU coverage remains in the existing jobs.
+Windows uses `py -3`. Exit 0 means this supported contract passed, 1 means a failed decision, 2 means invalid/incomplete evidence, 75 means a valid pending/environment-limited/report-only result, and 101 means a collected runtime failure. `--spec-only` does not accept a gate. The launcher still needs the corresponding native failure classification integration. CPU load remains annotation-only. GitHub CI has no WARP timing leg.
 
-## Immutable Linux runner archive
+The implemented registry names workload sets, protocols and lanes. G15 requires all six playback workloads plus title-only and three fresh-child measurements. G18 uses the unchanged canonical 24-clip, 120-frame export lane and S0. Timing comparisons require three pairs. G7a is an absolute one-build, one-run oracle, with no fabricated comparator. Other gates without an implemented registry contract return unsupported/incomplete; their obligations remain open. R65 requires all registered work/zero rows and all six three-seed rotations. The counter-name/readback mapping still requires native integration verification.
 
-Local content-addressed archive:
+R74a's final preflight sample must precede run start by at most ten seconds. Policy sampling coverage is independently checked. Required metric semantics precede busy/runtime dispositions. G3 and VM-D6 floors do not use R50's shared-miss exemption. The reference full-range spread used by R50 remains the accepted plan's inferred operational definition, to be confirmed before real measurements.
 
-`/home/riels/Projects/Personal/Kinewright/target/review/pf/s4/archives/43c456b7cbd46c0b3dc66d7331a1042419776ddf9d9d093882607603ccc6aa48.tar`
+## Immutable runner archive
 
-SHA-256: `43c456b7cbd46c0b3dc66d7331a1042419776ddf9d9d093882607603ccc6aa48`.
-
-It contains work/lane.py, work/final-measure.py, work/final-figures.py, work/parents.json and the three original parents under parents/. All parent hashes are in work/parents.json. The archive has fixed member timestamps, is read-only, and is not regenerated on extraction. Its stable location is local to this workstation; no remote copy or push is claimed. Restore by its digest, not by copying the mutable s4/work directory:
+Archive SHA-256 is `65524e8e64092f290d901ec2d90d088ef1c255af076059ac0d411584b6439e15`. Its seven members include the three extensions, the parent hash manifest and the unchanged S3b parent sources. Member bytes are checked after writing. The archive is local and read-only; no remote copy is claimed.
 
 ```bash
-pf1_archive=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4/archives/43c456b7cbd46c0b3dc66d7331a1042419776ddf9d9d093882607603ccc6aa48.tar
-printf '%s  %s\n' 43c456b7cbd46c0b3dc66d7331a1042419776ddf9d9d093882607603ccc6aa48 "$pf1_archive" | sha256sum --check
+pf1_archive=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4/archives/65524e8e64092f290d901ec2d90d088ef1c255af076059ac0d411584b6439e15.tar
+printf '%s  %s\n' 65524e8e64092f290d901ec2d90d088ef1c255af076059ac0d411584b6439e15 "$pf1_archive" | sha256sum --check
 mkdir -p target/pf1-s4-reproduction
 tar -xf "$pf1_archive" -C target/pf1-s4-reproduction
 ```
 
-The report's runner-archive.json records each member and versioned contract hash. Its existing-records.json names the old input/source/binary/log records and missing fields; none is relabelled as S4 evidence. No real S4 pins, accepted reference binary or raw measurement log is supplied by the synthetic example.
+The original checkpoint archive remains immutable at SHA-256 `43c456b7cbd46c0b3dc66d7331a1042419776ddf9d9d093882607603ccc6aa48`. The run-3 report and `s4/s4a-r3/runner-archive.json` bind both archives and every member. `PF1_REPO` must identify this checkpoint, since the restored Linux runner imports its versioned validator and child-lifecycle module.
 
-## Collector and execution contract
+## Runner limitations
 
-A frozen series manifest is `{"gates":[{"pins":{"path":"relative/pins.json","sha256":"<64 lowercase hex>"},"test":"existing_test_name"}]}`. Every gate must be explicitly listed. Each pins protocol.order lists the exact workload/pair/arm/seed sequence; manifests include all arm builds and input identities. Ordinary comparisons name accepted-S3b, G18/G15 name S0, and the three R65 comparisons name their historical or intervening bases. The cumulative R65 comparison is diagnostic and cannot return acceptance. Complete cached aggregate statuses are rehashed before reuse. Attempts use exclusive journals and files; an incomplete or failed series is retained and requires an explicitly ruled new series, not silent retry filtering.
+A frozen series is `{"gates":[{"pins":{"path":"relative/pins.json","sha256":"<sha256>"},"test":"existing_test_name"}]}`. Exact arm/order/seed manifests remain required. Aggregate resume rehashes artifacts, but deterministic integration witnesses and the approved complete-replacement contract are unfinished. The old blanket replacement rejection remains conservative and is not an approved completed workflow.
 
-The future test-only collector must atomically publish PF1_RECORD within ten seconds of device creation and refresh its gpu readback during sampling. Its final object follows schema $defs/run, including actual device-creation metadata, approved-policy readback, timestamped telemetry covering started_s through ended_s, identity hashes, CPU annotation and metrics. The Linux launcher supplies actual exit/command/relevant environment, preflight, raw artifact hashes and fingerprint. It checks identity before launch, checks live readback during monitoring, and terminates its owned process group on invalid readback. A collector schema file is an interchange contract; current S3B_ADAPTER text lacks vendor/device/driver/UUID/policy fields and is intentionally insufficient.
-
-After the collector is implemented and a lane is separately authorized:
-
-```bash
-export PF1_REPO=/home/riels/Projects/Personal/Kinewright-pf1
-export PF1_ROOT=/absolute/evidence/root
-python3 target/pf1-s4-reproduction/work/final-measure.py /absolute/series.json
-python3 target/pf1-s4-reproduction/work/final-figures.py /absolute/series.json
-```
-
-The launcher remains Linux-specific. Windows and manual VM collectors must emit the same portable records. This checkpoint does not add those collectors, authorize GPU settings, dispatch CI, run lanes, implement D13 hooks, or resolve Q1/Q5. Further collector integration and decision/runner oracle coverage need Amendment R81 and a new retained-line allowance. Source completeness and S4a acceptance remain partial until then.
+The runner now starts its owned process group directly and cleans it in a finally path through bounded TERM, KILL and reap. Its disposable child witness includes ignored TERM and an exit racing cleanup. Invalid readback remains recorded through the parent attempt journal. Complete launcher integration remains partial. The existing native harness does not emit PF1_RECORD, and the runner still rejects missing readback. Do not run LL or LH from this checkpoint. No GPU settings, lane, CI dispatch, D13 implementation or PF1 closure is authorized here.
