@@ -1344,6 +1344,8 @@ impl World {
             // It does not read the scheduler's continuation provenance.
             let before = self.readers.required.clone();
             let explicit = &self.required_by_post;
+            // A retiring reader's output is discarded (H-6), so that flight
+            // cannot supply a keeper. Its decoded frames stay protected (F3).
             let removable: HashSet<_> = before.iter().filter(|(source, time)| {
                 *source == key && retain.contains(time) && !actual_kept.contains(time)
                     && !explicit.contains(&(*source, *time))
@@ -1351,6 +1353,8 @@ impl World {
                     && !self.agents.iter().any(|other| other.id != id && other.key == key &&
                         (other.decoder.as_ref().is_some_and(|decoder| decoder.times().contains(time))
                         || matches!(other.doing, Doing::Decode {at: flying, ..} if flying == *time)
+                            && self.readers.slots.iter().any(|slot| slot.id == other.id
+                                && slot.state != ReaderState::Retiring)
                         || matches!(other.doing, Doing::Decode {from: Some(_), ..}) && other.retain.contains(time)))
             }).copied().collect();
             self.readers
@@ -2709,5 +2713,54 @@ fn s3b_d14_independent_model_checks_superseded_optional_handoff() {
         world.readers.required,
         HashSet::from([(0, 8)]),
         "explicit target only; fixed() also checked exact charges and settled progress"
+    );
+}
+
+/// Seed 184147, reduced to a retired decode of 30 beside a superseded
+/// refill of 39. The retired result is discarded, so it cannot make the
+/// refill's unavailable optional time 30 available to the current plan.
+#[test]
+fn s3b_d14_model_retiring_decode_is_not_an_available_keeper() {
+    use Fixed::{Op as Do, Post, Stall};
+    let world = fixed(
+        Run {
+            budget: 40 * F,
+            pool: 8,
+            decoded: [2 * F, F],
+            gop: [12, 48],
+            floor: [0, 4],
+            posts: 0,
+            retires: 0,
+            returns: 1,
+            runs: 0,
+            discards: 0,
+            profile: Profile::Holders,
+        },
+        vec![
+            Post(vec![(0, vec![30], vec![]), (1, vec![23], vec![])], true, 0),
+            Do(Op::Step(0)),
+            Do(Op::Grant(0)),
+            Do(Op::Step(0)),
+            Stall(Op::Forget(0), vec![0]),
+            Post(vec![(0, vec![40], vec![])], true, 0),
+            Do(Op::Run),
+            Post(vec![(0, vec![39], vec![])], true, 0),
+            Do(Op::Step(2)),
+            Do(Op::Return(0)),
+            Post(vec![(0, vec![38], vec![])], true, 0),
+            Do(Op::Finish(2, Outcome::Ok)),
+            Do(Op::Run),
+        ],
+    );
+    assert_eq!(world.reach.stale_refills, 1, "the superseded refill ran");
+    assert_eq!(
+        world.readers.required,
+        HashSet::from([(0, 36), (0, 37), (0, 38)]),
+        "only exact available continuation and the explicit target stay"
+    );
+    assert!(world.readers.resolve(&[(0, 38)]).is_some(), "progress");
+    assert!(
+        !world.readers.rings[&0].contains_key(&30),
+        "the retired decode cannot publish its result"
     );
 }
