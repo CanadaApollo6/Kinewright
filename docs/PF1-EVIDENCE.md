@@ -7651,8 +7651,28 @@ time. That WARP timing caused the CI failure is inferred, not observed.
 A push of documentation alone runs no workflow (`ci.yml` `paths-ignore`), and
 `eb84b3c` is already on the remote.
 
-**Review panel.** Pending at the time of this commit.
+**Review panel.** Round 1 led to `7120248`, which made three fixes:
+- teardown sweeps retired frames on every drain pass, so a failed frame whose
+  completion arrives late still returns its Writing lease;
+- a current refill narrows its window from `kept_from` again (R63 F2), while
+  D14's exact kept times only clip and shorten superseded continuation;
+- the WARP probe admits each hooked readback only once real maintenance has
+  freed ring capacity, and asserts the readback error, not a staging error.
 
-**Status.** S3b's implementation, R75 measurements and local gates are
-complete. S3b closes when CI is green on Linux and Windows in both tiers. The
-RTX 4050 rerun owed under R73 since S3a is still owed. No push.
+A narrow Astra re-review of `7120248` judged all three correct. Preview
+already parks and retries on ring exhaustion, so the probe change hides no
+user-facing failure. It raised one blocker: the teardown witness relied on a
+300 ms wait, so the old code could pass if the completion was delivered
+before the first sweep. The follow-up commit adds a test-only `swept()`
+signal after each sweep. The witness now delivers the held completion only
+after teardown's first sweep. It passes (0.32 s), and with the sweep moved
+back outside the loop it fails at runtime on "teardown ends once the
+completion is delivered" after its 5 s bound.
+
+The desktop gate at `7120248`: fmt, workspace clippy `-D warnings` and the
+slow-test lint passed, and the media library gave 1,117 passed, 0 failed,
+62 ignored at one test thread.
+
+**Status.** S3b's implementation, R75 measurements, local gates and review
+are complete. S3b closes when CI is green on Linux and Windows in both tiers.
+The RTX 4050 rerun owed under R73 since S3a is still owed.
