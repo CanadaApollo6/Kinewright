@@ -2,7 +2,7 @@
 fn s4_device(gpu: &GpuContext) -> serde_json::Value {
     let info = gpu.selected_adapter();
     serde_json::json!({
-        "selected": {"backend": info.backend.to_string(), "name": info.name,
+        "selected": {"backend": format!("{:?}", info.backend), "name": info.name,
             "vendor_id": info.vendor, "device_id": info.device, "driver": info.driver},
         "driver_info": info.driver_info,
         "software": info.device_type == wgpu::DeviceType::Cpu
@@ -36,6 +36,7 @@ fn s4_selected_device_readback() {
     let record = s4_device(&gpu);
     let info = gpu.selected_adapter();
     assert_eq!(record["selected"]["name"], info.name);
+    assert_eq!(record["selected"]["backend"], "Vulkan");
     assert_eq!(record["selected"]["driver"], info.driver);
     assert_eq!(record["selected"]["vendor_id"], info.vendor);
     assert_eq!(record["driver_info"], info.driver_info);

@@ -39,5 +39,6 @@ def collect(plan, root, work, launch):
                 json.dump(snapshot, output)
             if code:
                 return code if code in [2, 75, 101] else 2
+        v.require(v.read(destination)['series'] == series, 'cached series differs from frozen plan')
         verdicts.append(v.evaluate(pinfile, destination, root))
     return next((code for code in [2, 101, 1, 75] if code in verdicts), 0 if verdicts else 2)

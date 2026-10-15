@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 import validate as v
 import series as runner
 
@@ -247,6 +247,13 @@ class Pins(unittest.TestCase):
         self.assertEqual(runner.collect(plan,self.root,work,fake),0)
         with self.subTest(case='valid resume'):
             self.assertEqual(runner.collect(plan,self.root,work,lambda *a: self.fail('relaunch on resume')),0)
+        destination=work/'status-0.json'; cached=v.read(destination)
+        prior=self.root/'prior.json'; prior.write_text(json.dumps(dict(cached,runs=[],artifacts=[self.status['runs'][0]['logs'][0]],series=dict(id='prior',pins=v.digest(self.p)))))
+        for change in [dict(id='foreign'),dict(previous=dict(path='prior.json',sha256=v.digest(prior)),rejection=dict(exit=2,reason='interrupted predecessor'))]:
+            destination.write_text(json.dumps(dict(cached,series=dict(cached['series'],**change))))
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError,'cached series'):
+                runner.collect(plan,self.root,work,lambda *a: self.fail('relaunch on resume'))
+        destination.write_text(json.dumps(cached))
         leaf=self.root/self.status['runs'][0]['logs'][0]['path']
         for change in ['changed','missing']:
             if change=='changed': leaf.write_text('changed artifact')
@@ -270,6 +277,40 @@ class Pins(unittest.TestCase):
         self.pins['arms']=dict(reference='s4',candidate='s3b'); self.run_record(2)
     def test_protocol(self):
         self.configure('I4'); self.pins['protocol'].pop('warm_frames'); self.run_record(2)
+    def test_g3_parameters(self):
+        for missing in [('warm_frames',),('measured_frames',),('warm_frames','measured_frames')]:
+            self.setUp(); self.configure('G3'); self.pins['protocol'].update(warm_frames=30,measured_frames=300); self.run_record(0)
+            for key in missing: self.pins['protocol'].pop(key)
+            with self.subTest(missing=missing): self.run_record(2)
+    def test_g2_durations(self):
+        self.configure('G2'); required={w:240 if w=='talk_recut' else 60 for w in v.CONTRACTS['G2'][2]}
+        for duration in [60,240,{},dict(required,talk_recut=60),dict(required,feed_4x5=240),{k:d for k,d in required.items() if k!='talk_recut'}]:
+            self.pins['protocol']['duration_s']=duration
+            with self.subTest(duration=duration): self.run_record(2)
+        self.pins['protocol']['duration_s']=required; self.run_record(0)
+        self.assertEqual(required['talk_recut']*30,7200)
+        self.pins['protocol'].pop('duration_s'); self.run_record(2)
+    def test_denominator_precedence(self):
+        for gate,condition in [('I4','busy'),('I4','assertion'),('R65-historical','assertion')]:
+            self.setUp()
+            if gate!='I4': self.configure(gate)
+            self.status['runs'][0]['metrics']['mean_ms' if gate=='I4' else 'admission_waits']=0
+            if condition=='busy': self.status['runs'][0]['preflight'][0]['processes'][0]['kind']='C'
+            else: self.status['runs'][-1]['exit']=101
+            with self.subTest(gate=gate,condition=condition): self.run_record(2)
+        self.setUp(); self.configure('R65-historical')
+        for row in self.status['runs']: row['metrics']['admission_waits']=0
+        self.run_record(0)
+    def test_ancestry_once(self):
+        self.run_record(0); ref=self.status['runs'][0]['logs'][0]
+        for depth in range(1,6):
+            old=self.root/f'ancestor-{depth}.json'; old.write_text(json.dumps(dict(self.status,runs=[],artifacts=[ref])))
+            self.status['series']=dict(id=f'replacement-{depth}',pins=v.digest(self.p),previous=dict(path=old.name,sha256=v.digest(old)),rejection=dict(exit=2,reason='interrupted predecessor'))
+            with patch.object(v,'spec',wraps=v.spec) as checked:
+                self.run_record(0)
+                with self.subTest(depth=depth): self.assertEqual(checked.call_count,depth+1)
+        prior=v.read(old); prior['series']['pins']='f'*64; old.write_text(json.dumps(prior))
+        self.status['series']['previous']['sha256']=v.digest(old); self.run_record(2)
     def test_decision_edges(self):
         self.configure('G4')
         for candidate,expected in [([9,12,14],75),([5,12,14],1)]:

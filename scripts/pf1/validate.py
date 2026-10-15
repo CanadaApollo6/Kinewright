@@ -13,9 +13,9 @@ CONTRACTS = {
     'I4': ('LL LH', 'P-comp', {'typical_1080p'}, {'warm_frames': 30, 'measured_frames': 300}),
     'G18': ('LH', 'export', {'typical_1080p'}, {'export_clips': 24, 'frames': 120}),
     'G15': ('LL', 'P-rss', PLAY | {'title_only'}, {'children': 3}),
-    'G3': ('LH', 'P-comp', {'blend_heavy_1080p'}, {}),
+    'G3': ('LH', 'P-comp', {'blend_heavy_1080p'}, {'warm_frames': 30, 'measured_frames': 300}),
     'G4': ('LL', 'native-display', PLAY - {'feed_4x5', 'talk_recut'}, {'warmup_ms': 2000, 'duration_s': 60}),
-    'G2': ('LH', 'native-display', PLAY - {'typical_1080p', 'blend_heavy_1080p'}, {'warmup_ms': 2000, 'duration_s': 60}),
+    'G2': ('LH', 'native-display', PLAY - {'typical_1080p', 'blend_heavy_1080p'}, {'warmup_ms': 2000, 'duration_s': {w: 240 if w == 'talk_recut' else 60 for w in PLAY - {'typical_1080p', 'blend_heavy_1080p'}}}),
     'G1': ('LH', 'P-play', {'typical_1080p'}, {'warmup_ms': 2000, 'duration_s': 60}),
     'G6': ('LL LH', 'P-play', {'typical_1080p'}, {'warmup_ms': 2000, 'duration_s': 60}),
     'VM-D6': ('VM-W', 'VM', {'typical_1080p'}, {}),
@@ -190,7 +190,7 @@ def series_check(status, pins_path, root, seen):
     # Validate ancestry even when an incomplete predecessor fails before its rows.
     series_check(previous, pins_path, root, seen | {series['id']})
     try:
-        code = evaluate(pins_path, root / series['previous']['path'], root, seen | {series['id']})
+        code = evaluate(pins_path, root / series['previous']['path'], root, seen | {series['id']}, ancestry_checked=True)
     except (ValueError, OSError, KeyError, TypeError):
         code = 2
     rejection = series.get('rejection', {})
@@ -200,13 +200,13 @@ def series_check(status, pins_path, root, seen):
         artifact(root, disposition['record'])
         require(disposition['previous_sha256'] == series['previous']['sha256'], 'disposition targets another series')
 
-def evaluate(pins_path, run_path, root, seen=frozenset()):
+def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False):
     pins, builds, host = spec(pins_path, root)
     status = read(run_path)
     schema(status, SCHEMA['$defs']['status'])
     for ref in status.get('artifacts', []):
         artifact(root, ref)
-    series_check(status, pins_path, root, seen)
+    if not ancestry_checked: series_check(status, pins_path, root, seen)
     require((status['lane'], status['gate']) == (pins['lane'], pins['gate']), 'status lane/gate mismatch')
     rows, order = status['runs'], pins['protocol']['order']
     require(len(rows) == len(order), 'incomplete attempts')
@@ -231,11 +231,6 @@ def evaluate(pins_path, run_path, root, seen=frozenset()):
         for metric, rule in pins['metrics'].items():
             value = row['metrics'][metric]
             require(type(value) is bool if rule['unit'] == 'boolean' else isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) if rule['unit'] == 'sha256' else type(value) in [int, float] and math.isfinite(value) and value >= 0 and (rule['unit'] != 'percent' or value <= 100), 'invalid metric value/unit')
-    if busy:
-        return 75
-    require(all(r['validity'] != 'pending_gpu_busy' for r in rows), 'unsubstantiated busy status')
-    if any(r['exit'] != 0 for r in rows):
-        return 101
     verdicts = []
     for workload in {r['workload'] for r in rows}:
         arm_rows = {side: [r for r in rows if r['workload'] == workload and r['arm'] == arm] for side, arm in pins['arms'].items()}
@@ -257,6 +252,11 @@ def evaluate(pins_path, run_path, root, seen=frozenset()):
             elif decision != 'report':
                 passed = {'equal': lambda: a == b, 'zero': lambda: all(r['metrics'][metric] == 0 for r in rows), 'invariant': lambda: all(x is True for x in a+b), 'each_le': lambda: max(b) <= limit, 'delta': lambda: all(y <= x+limit for x, y in zip(a, b))}[decision]()
                 verdicts.append(0 if passed else 1)
+    if busy:
+        return 75
+    require(all(r['validity'] != 'pending_gpu_busy' for r in rows), 'unsubstantiated busy status')
+    if any(r['exit'] != 0 for r in rows):
+        return 101
     return 1 if 1 in verdicts else 75 if 75 in verdicts or pins['gate'] in ['PERFORMANCE', 'R65-cumulative'] or any(r['validity'] == 'environment_limited_at_load' for r in rows) else 0
 
 if __name__ == '__main__':
