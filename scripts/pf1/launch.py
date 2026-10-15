@@ -33,7 +33,7 @@ def live_record(path, token, started, now, pins, host, root, environment):
     mesa = re.search(r'\bMesa (\S+)', driver)
     llvm = re.search(r'\bLLVM ([\d.]+)', record['selected']['name'] + ' ' + driver)
     icd = environment.get('VK_DRIVER_FILES') or environment.get('VK_ICD_FILENAMES', '')
-    v.require(mesa and llvm and icd and ':' not in icd, 'missing LL driver/ICD readback')
+    v.require(mesa and llvm and icd and os.pathsep not in icd, 'missing LL driver/ICD readback')
     gpu = dict(selected=record['selected'], stack=dict(runtime=driver, mesa=mesa[1], llvm=llvm[1], icd_manifest_sha256=v.digest(Path(icd))), policy=dict(kind='software'), telemetry=dict(status='unavailable', reason='software adapter has no hardware clocks'))
     v.schema(gpu, v.SCHEMA['$defs']['gpu'])
     v.gpu_check(gpu, pins, host, root)

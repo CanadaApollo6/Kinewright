@@ -375,7 +375,7 @@ class Pins(unittest.TestCase):
 
     def test_checkout(self):
         repo = Path(__file__).resolve().parents[2]
-        paths = ['docs/PF1-PINS.json','docs/PF1-PINS.schema.json'] + [str(p.relative_to(repo)) for p in (repo/'docs/reports/pf1-s4/example').iterdir()]
+        paths = ['docs/PF1-PINS.json','docs/PF1-PINS.schema.json'] + [p.relative_to(repo).as_posix() for p in (repo/'docs/reports/pf1-s4/example').iterdir()]
         attrs = subprocess.check_output(['git','check-attr','eol','--']+paths, cwd=repo, text=True)
         subprocess.run(['git','-c','core.autocrlf=true','checkout-index','--all','--prefix='+str(self.root/'checkout')+'/'], cwd=repo, check=True, capture_output=True)
         for path in paths: self.assertEqual(subprocess.check_output(['git','show',':'+path], cwd=repo), (self.root/'checkout'/path).read_bytes())
