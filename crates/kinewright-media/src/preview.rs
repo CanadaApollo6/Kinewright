@@ -1042,13 +1042,17 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 // Amendment R54 [S2c]: a refill's window is clipped to what
                 // t's own decode kept.
                 if from.is_some() && result.is_ok() {
+                    let kept_from = decoder.as_ref().and_then(VideoDecoder::kept_from);
                     let kept = decoder
                         .as_ref()
                         .map(VideoDecoder::kept_times)
                         .unwrap_or_default()
                         .into_iter()
                         .collect();
-                    lane.lock().readers.refilled_exact(id, (at, version), &kept);
+                    let refill = (at, version);
+                    lane.lock()
+                        .readers
+                        .refilled_exact(id, refill, kept_from, &kept);
                 }
                 let result = pinned(result, size, hold);
                 // Amendment R62 [S2c] (K-1): on any failure the scheduler

@@ -803,6 +803,15 @@ fn rev3_repeated_readback_poll_errors_all_entries() {
             let expected = std::rc::Rc::new(Cell::new(0));
             let seen = std::rc::Rc::clone(&expected);
             let ledger = gpu.clone();
+            // S3b: the hook answers waits without polling, so on an adapter
+            // that completes asynchronously (CI's WARP) both upload batches
+            // may still be held. Poll for real, outside the hook, until the
+            // ring can stage this entry.
+            let admit = Instant::now() + Duration::from_secs(5);
+            while !c.upload_available() {
+                assert!(Instant::now() < admit, "cycle={cycle} i={i}: ring held");
+                c.maintain();
+            }
             let result = with_hook(
                 move |_, wait| {
                     assert!(waits_for_completion(wait), "{wait:?}");
@@ -826,8 +835,9 @@ fn rev3_repeated_readback_poll_errors_all_entries() {
                 || entry(&c, &src, i % 4, i % 8 >= 4),
             );
             let case = format!("cycle={cycle} i={i}");
+            // The entry reached its unfinished readback, not a staging error.
             assert!(
-                matches!(result, Err(MediaError::Backend(_))),
+                matches!(&result, Err(MediaError::Backend(m)) if m.starts_with("wgpu readback ")),
                 "{case}: {result:?}"
             );
             assert_eq!(

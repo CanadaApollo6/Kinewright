@@ -791,8 +791,9 @@ mod upload_ring;
 impl Drop for Compositor {
     fn drop(&mut self) {
         crate::display::complete(&self.gpu, self.gpu.queue.submit([]));
-        self.sweep_retired();
         loop {
+            // A retired failed frame owns its Writing lease until swept.
+            self.sweep_retired();
             let mut ring = self
                 .upload_ring
                 .lock()

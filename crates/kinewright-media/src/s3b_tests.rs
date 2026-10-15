@@ -253,6 +253,48 @@ fn s3b_u1_device_loss_settles_registered_maps_and_teardown() {
     );
 }
 
+/// Review round 1 (Astra 2, Sonnet 3): a failed frame retires holding its
+/// Writing lease; its real completion arrives only after teardown's first
+/// sweep, and teardown must still end with every charge returned.
+#[test]
+fn s3b_u1_teardown_sweeps_a_failed_frame_completed_after_its_first_sweep() {
+    let gpu = fixture_gpu_or_skip().expect("actual GPU required");
+    let c = Compositor::new(gpu.clone());
+    let good = frame();
+    render(&c, &good);
+    let bad = WorkingFrame {
+        width: 17,
+        height: 3,
+        pixels: Arc::new(Vec::new()),
+    };
+    let layer = |frame| CompositorLayer {
+        frame,
+        effects: &[],
+        transition: TransitionRenderParams::default(),
+        mode: LayerMode::NORMAL,
+    };
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    COMPLETE_HOLD.set(Some(tx));
+    let failed = c.render_working((17, 3), &[layer(&good), layer(&bad)]);
+    assert!(failed.is_err(), "real later staging failure");
+    assert_eq!(c.retired.lock().unwrap().len(), 1, "retired with its lease");
+    let delivery = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("real completion held");
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let teardown = std::thread::spawn(move || {
+        drop(c);
+        done_tx.send(()).unwrap();
+    });
+    let waited = done_rx.recv_timeout(Duration::from_millis(300)).is_err();
+    delivery();
+    let ended = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
+    assert!(waited, "teardown waits while the completion is held");
+    assert!(ended, "teardown ends once the completion is delivered");
+    teardown.join().unwrap();
+    assert_eq!(gpu.ledger().live_bytes(), 0, "every charge returned");
+}
+
 fn frame() -> WorkingFrame {
     WorkingFrame {
         width: 17,

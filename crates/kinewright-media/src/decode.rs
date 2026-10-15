@@ -2277,6 +2277,12 @@ impl VideoDecoder {
         result
     }
 
+    /// Amendment R54 [S2c]: the first window time the last refill kept
+    /// (`None`: it kept nothing).
+    pub(crate) fn kept_from(&self) -> Option<i64> {
+        self.retained.kept_from()
+    }
+
     /// Amendment R54 (K-1): d, an upper bound on one decoded frame's
     /// bytes as the decoder keeps it: its pixel format's planes at the
     /// decoder's default buffer geometry (every plane's stride a multiple

@@ -259,7 +259,6 @@ impl<V> KeptFrames<V> {
     /// Amendment R54: the first window time the last refill's decode
     /// produced (`None`: none). Amendment R63 (F2): kept, or left to the
     /// ring that holds it.
-    #[cfg(test)]
     pub(crate) const fn kept_from(&self) -> Option<i64> {
         self.from
     }
@@ -1248,17 +1247,20 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
     /// plan is current. A refill a newer post superseded clips only the
     /// reader's kept times (what its decoder holds); the newer plan's
     /// window and explicit targets stay as posted; R75 D14 removes only
-    /// unavailable optional continuation belonging to this refill.
+    /// unavailable optional continuation belonging to this refill, by the
+    /// exact `kept` times. A current refill still clips by `kept_from`,
+    /// which covers times left to the ring (R63 F2).
     #[cfg(test)]
     pub(crate) fn refilled(&mut self, id: u64, frame: (i64, u64), kept_from: Option<i64>) {
         let kept = (kept_from.unwrap_or(frame.0)..frame.0).collect();
-        self.refilled_exact(id, frame, &kept);
+        self.refilled_exact(id, frame, kept_from, &kept);
     }
 
     pub(crate) fn refilled_exact(
         &mut self,
         id: u64,
         (t, version): (i64, u64),
+        kept_from: Option<i64>,
         kept: &BTreeSet<i64>,
     ) {
         let Some(slot) = self.slot(id) else {
@@ -1271,7 +1273,7 @@ impl<K: Clone + Eq + Hash, F: Weighed> Readers<K, F> {
             return;
         }
         let key = slot.key.clone();
-        let from = kept.first().copied().unwrap_or(t).min(t);
+        let from = kept_from.unwrap_or(t).min(t);
         let clipped = slot
             .retained
             .extract_if(.., |at| !kept.contains(at))

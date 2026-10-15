@@ -1353,7 +1353,8 @@ impl World {
                         || matches!(other.doing, Doing::Decode {at: flying, ..} if flying == *time)
                         || matches!(other.doing, Doing::Decode {from: Some(_), ..}) && other.retain.contains(time)))
             }).copied().collect();
-            self.readers.refilled_exact(id, (at, version), &actual_kept);
+            self.readers
+                .refilled_exact(id, (at, version), kept_from, &actual_kept);
             if version != self.readers.version && !retiring {
                 let expected: HashSet<_> = before.difference(&removable).copied().collect();
                 assert_eq!(

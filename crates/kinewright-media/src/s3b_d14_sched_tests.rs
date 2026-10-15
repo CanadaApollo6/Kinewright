@@ -28,7 +28,7 @@ fn s3b_d14_only_unavailable_optional_continuation_is_removed() {
         let original_window = readers.windows.clone();
         // Only 6 and 10 onward actually kept; 4/5/7 were optional promises.
         let kept: BTreeSet<i64> = std::iter::once(6).chain(10..19).collect();
-        readers.refilled_exact(id, (refill.0, refill.1), &kept);
+        readers.refilled_exact(id, (refill.0, refill.1), Some(6), &kept);
         let required: BTreeSet<i64> = readers
             .required
             .iter()
@@ -102,7 +102,7 @@ fn s3b_d14_a_second_keeper_preserves_the_optional_time() {
             readers.slots.push(keeper);
         }
         let ring = readers.ring_times(&0);
-        readers.refilled_exact(id, (19, version), &(10..19).collect());
+        readers.refilled_exact(id, (19, version), Some(10), &(10..19).collect());
         assert!(
             readers.required.contains(&(0, 5)),
             "another live keeper protects the optional time; ring={ring_keeper}"
@@ -115,4 +115,43 @@ fn s3b_d14_a_second_keeper_preserves_the_optional_time() {
         assert!(readers.required.contains(&(0, 8)), "explicit target stays");
         assert_eq!(readers.ring_times(&0), ring, "ring contents preserved");
     }
+}
+
+/// Review round 1 (Astra 3): a current refill whose first produced frame the
+/// ring holds keeps its window from that frame (R63 F2). D14's exact kept
+/// times exclude the ring's frame and must not narrow a current window.
+#[test]
+fn s3b_d14_a_current_refill_keeps_coverage_the_ring_holds() {
+    let mut readers = Model::new(20).with_budget(100 * F);
+    assert_eq!(paused_step(&mut readers, 20, 0, 0), [20]);
+    let ten = Fr {
+        value: frame(0, 10),
+        bytes: F,
+        pinned: false,
+    };
+    assert!(readers.reserve(F, usize::MAX));
+    readers.rings.entry(0).or_default().insert(10, ten);
+    let ready = post_paused(&mut readers, &[(0, 19, 0)], HashMap::from([(0, 3 * F)]));
+    assert!(matches!(ready, Admission::Ready { .. }), "the window fits");
+    let id = readers.slots[0].id;
+    let version = loop {
+        if let Next::Decode {
+            at, from, version, ..
+        } = step_reader(&mut readers, id)
+        {
+            assert_eq!((at, from), (19, Some(4)), "the refill");
+            break version;
+        }
+    };
+    assert_eq!(readers.windows.get(&0), Some(&(4, 19)));
+    let ring_ten = readers.required.contains(&(0, 10));
+    // The decode produced 10..=18 (its GOP starts at 10); the ring keeps 10.
+    readers.refilled_exact(id, (19, version), Some(10), &(11..19).collect());
+    assert_eq!(
+        readers.windows.get(&0),
+        Some(&(10, 19)),
+        "a current window starts at the first produced frame"
+    );
+    assert_eq!(readers.required.contains(&(0, 10)), ring_ten, "10 stays");
+    assert!(readers.rings[&0].contains_key(&10), "10 stays the ring's");
 }
