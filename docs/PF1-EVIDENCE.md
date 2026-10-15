@@ -7727,6 +7727,7 @@ then passed. Stress across the changed tests ran 1,100 executions under a CPU
 hog with no failures. Reports are in `target/review/pf/s3b/`:
 `r53-flake.md`, `thumbnail-gauge-flake.md` and `stopped-window-flake.md`.
 
-**Status.** S3b's implementation, R75 measurements, local gates and review
-are complete. S3b closes when CI is green on Linux and Windows in both tiers.
+**Status.** **S3b CLOSED 2026-10-15 at `7408c84`.** CI 38711153625 is green
+on Linux and Windows in both tiers. Implementation, R75 measurements, local
+gates and review are complete.
 The RTX 4050 rerun owed under R73 since S3a is still owed.
