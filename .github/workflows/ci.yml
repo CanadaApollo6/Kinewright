@@ -49,6 +49,9 @@ jobs:
         with:
           python-version: '3.13'
 
+      - name: PF1 portable pins witnesses
+        run: python scripts/pf1/test_validate.py
+
       - name: Check formatting
         run: cargo fmt --check
 
@@ -134,6 +137,9 @@ jobs:
 
       - name: Install native build dependencies
         run: ./scripts/install-linux-deps.sh
+
+      - name: PF1 portable pins witnesses
+        run: python scripts/pf1/test_validate.py
 
       - name: Check formatting
         run: cargo fmt --check

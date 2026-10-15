@@ -1,0 +1,9 @@
+{
+  "authority": "synthetic-example",
+  "basis": "accepted-S3b",
+  "source_sha256": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
+  "record": {
+    "path": "docs/reports/pf1-s4/example/synthetic.txt",
+    "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+  }
+}

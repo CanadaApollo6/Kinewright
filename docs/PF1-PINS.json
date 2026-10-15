@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "lane": "LH",
+  "gate": "I4",
+  "arms": {
+    "reference": "s3b",
+    "candidate": "s4"
+  },
+  "inputs": {
+    "path": "docs/reports/pf1-s4/example/inputs.json",
+    "sha256": "ddbd0cb1b8ddd7e1abb34b957d20f714887ec28cb6fd28957665e03793d8342f"
+  },
+  "builds": {
+    "path": "docs/reports/pf1-s4/example/builds.json",
+    "sha256": "a564ef251df93e67396a0680aef5cf5ba8d525f120d2b17c77612e6b90c8d185"
+  },
+  "host": {
+    "path": "docs/reports/pf1-s4/example/host.json",
+    "sha256": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
+  },
+  "gpu": {
+    "selected": {
+      "backend": "Vulkan",
+      "name": "synthetic-example-adapter",
+      "vendor_id": 4318,
+      "device_id": 0,
+      "driver": "example",
+      "uuid": "synthetic-uuid"
+    },
+    "stack": {
+      "runtime": "example-vulkan",
+      "mesa": "example",
+      "llvm": "example",
+      "icd_manifest_sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+    },
+    "policy": {
+      "kind": "hardware",
+      "approval": {
+        "path": "docs/reports/pf1-s4/example/policy-approval.json",
+        "sha256": "4e36066397f9073c23e6a8bfb70c153cf4c771fac492f3935926912c579c6aff"
+      },
+      "requested": {
+        "graphics_mhz": [
+          100,
+          200
+        ],
+        "memory_mhz": [
+          100,
+          200
+        ],
+        "power_w": [
+          100,
+          200
+        ],
+        "pstates": [
+          "P0",
+          "P2"
+        ]
+      },
+      "observed": {
+        "timestamp_s": 1700000015,
+        "graphics_mhz": 150,
+        "memory_mhz": 150,
+        "power_w": 150,
+        "pstate": "P2"
+      }
+    },
+    "telemetry": [
+      {
+        "timestamp_s": 1700000015,
+        "graphics_mhz": 150,
+        "memory_mhz": 150,
+        "power_w": 150,
+        "pstate": "P2"
+      }
+    ]
+  },
+  "protocol": {
+    "name": "P-comp",
+    "poll_ms": 5,
+    "sample_ms": 100,
+    "runs": 3,
+    "order": [
+      {
+        "workload": "typical_1080p",
+        "pair": 0,
+        "arm": "s3b",
+        "seed": 11
+      },
+      {
+        "workload": "typical_1080p",
+        "pair": 0,
+        "arm": "s4",
+        "seed": 11
+      },
+      {
+        "workload": "typical_1080p",
+        "pair": 1,
+        "arm": "s3b",
+        "seed": 22
+      },
+      {
+        "workload": "typical_1080p",
+        "pair": 1,
+        "arm": "s4",
+        "seed": 22
+      },
+      {
+        "workload": "typical_1080p",
+        "pair": 2,
+        "arm": "s3b",
+        "seed": 33
+      },
+      {
+        "workload": "typical_1080p",
+        "pair": 2,
+        "arm": "s4",
+        "seed": 33
+      }
+    ]
+  },
+  "metrics": {
+    "mean_ms": {
+      "decision": "ratio",
+      "unit": "ms",
+      "scope": "paired_median",
+      "limit": 1.05
+    }
+  }
+}
