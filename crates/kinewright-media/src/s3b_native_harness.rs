@@ -10,19 +10,31 @@ fn s4_device(gpu: &GpuContext) -> serde_json::Value {
 }
 
 fn s4_publish(gpu: &GpuContext, measured: Option<(bool, f64)>) {
+    s4_publish_metrics(
+        gpu,
+        serde_json::json!({"name": "native-display", "poll_ms": 5,
+            "warmup_ms": 2000, "duration_s": 60}),
+        measured.map(|(valid, fps)| (valid, serde_json::json!({"fps": fps}))),
+    );
+}
+
+fn s4_publish_metrics(
+    gpu: &GpuContext,
+    protocol: serde_json::Value,
+    measured: Option<(bool, serde_json::Value)>,
+) {
     if let Ok(path) = std::env::var("PF1_RECORD") {
         let mut record = s4_device(gpu);
         record["token"] = std::env::var("PF1_TOKEN").expect("collector token").into();
-        record["protocol"] = serde_json::json!({"name": "native-display", "poll_ms": 5,
-            "warmup_ms": 2000, "duration_s": 60});
+        record["protocol"] = protocol;
         record["timestamp_s"] = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs_f64()
             .into();
-        if let Some((valid, fps)) = measured {
+        if let Some((valid, metrics)) = measured {
             record["valid"] = valid.into();
-            record["metrics"] = serde_json::json!({"fps": fps});
+            record["metrics"] = metrics;
         }
         let temporary = format!("{path}.tmp");
         std::fs::write(&temporary, serde_json::to_vec(&record).unwrap()).unwrap();

@@ -1772,9 +1772,29 @@ impl DecoderFrame for WorkingFrame {
 
 /// H-5: a synchronous decoder's frame threads, min(P, 16).
 pub(crate) fn default_threads() -> usize {
+    // Replace only the CPU-count input in tests; share the cap below.
+    #[cfg(test)]
+    use s4_cpu as std;
     std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(16)
+}
+
+#[cfg(test)]
+thread_local! {
+    static S4_PARALLELISM: std::cell::Cell<Option<std::num::NonZeroUsize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+mod s4_cpu {
+    pub use std::num;
+    pub mod thread {
+        pub fn available_parallelism() -> std::io::Result<std::num::NonZeroUsize> {
+            super::super::S4_PARALLELISM
+                .with(std::cell::Cell::get)
+                .map_or_else(std::thread::available_parallelism, Ok)
+        }
+    }
 }
 
 pub(crate) struct VideoDecoder {
@@ -3162,6 +3182,21 @@ mod tests {
     use super::*;
     use kinewright_core::classify_source_with_assumption;
     use std::time::Duration;
+
+    #[test]
+    fn s4_sync_decoder_thread_cap() {
+        let workload = crate::perf_fixtures::cuts((64, 64), 60, 1, 60, 1);
+        for p in [1, 2, 3, 20] {
+            S4_PARALLELISM.set(std::num::NonZeroUsize::new(p));
+            let decoder = VideoDecoder::open(workload.1[0].0.path(), workload.0.fps).unwrap();
+            assert_eq!(decoder.decoder.threading().count, p.min(16), "P={p}");
+            assert!(
+                decoder.stop.is_none(),
+                "synchronous open, outside the reader pool"
+            );
+        }
+        S4_PARALLELISM.set(None);
+    }
 
     #[test]
     fn ffmpeg_color_enums_map_known_and_unspecified_values() {

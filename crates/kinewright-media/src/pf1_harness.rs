@@ -1276,10 +1276,11 @@ fn pf1_rss_baseline() {
     let lane = lane().1;
     let mut all = play_workloads();
     all.push(("title_only", perf_fixtures::title_only()));
-    for (key, Workload(document, _media)) in all {
+    all.retain(|(key, _)| wanted(key));
+    for (key, Workload(document, _media)) in all.iter().flat_map(|w| std::iter::repeat_n(w, 3)) {
         let temp = TempDirectory::new("pf1-rss");
         let path = temp.path("document.json");
-        std::fs::write(&path, serde_json::to_vec(&document).expect("serialises")).expect("writes");
+        std::fs::write(&path, serde_json::to_vec(document).expect("serialises")).expect("writes");
         let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "--exact",
@@ -1289,7 +1290,9 @@ fn pf1_rss_baseline() {
             ])
             .args(["--test-threads=1"])
             .env("PF1_RSS_DOCUMENT", &path)
-            .output()
+            .env("PF1_RECORD", temp.path("record.json"))
+            .env("PF1_TOKEN", "g15-development")
+            .s4_output()
             .expect("the P-rss child runs");
         let stdout = String::from_utf8_lossy(&child.stdout);
         let stderr = String::from_utf8_lossy(&child.stderr);
@@ -1302,6 +1305,10 @@ fn pf1_rss_baseline() {
         let line = (stdout.lines()).find_map(|line| Some(&line[line.find("PF1 rss ")?..]));
         let line = line.unwrap_or_else(|| panic!("no P-rss result: {stdout}{stderr}"));
         println!("{line} lane={lane} workload={key}");
+        println!(
+            "PF1 G15 workload={key} record={}",
+            std::fs::read_to_string(temp.path("record.json")).expect("G15 record")
+        );
     }
 }
 
@@ -1322,12 +1329,20 @@ fn pf1_rss_child() {
     let show = |m: ProcessMemory| format!("{:.1}/{}", mib(m.rss), m.threads);
     let before = memory();
     let session = Session::new(Some(SimulatedAudio::paced()), Arc::default(), lane().0);
+    let protocol = serde_json::json!({"name": "P-rss", "poll_ms": 5, "children": 3});
+    s4_publish_metrics(&session.gpu, protocol.clone(), None);
     thread::sleep(Duration::from_millis(500));
     let constructed = memory();
     session.load(&document);
     let first = memory();
     thread::sleep(Duration::from_secs(6));
     let settled = memory();
+    session.assert_no_error("G15 settled idle");
+    s4_publish_metrics(
+        &session.gpu,
+        protocol,
+        Some((true, serde_json::json!({"settled_bytes": settled.rss}))),
+    );
     let peak_reset = reset_peak();
     session.engine.play(TimeCode::ZERO);
     thread::sleep(Duration::from_secs(10));
@@ -1343,6 +1358,7 @@ fn pf1_rss_child() {
     // so the process never exits while the worker is still destroying the
     // GPU device.
     let teardown = teardown(session);
+    assert!(teardown.contains("teardown_complete=true"), "{teardown}");
     println!(
         "PF1 rss before={} constructed={} first_render={} settled_idle={} playing={} \
          playing_peak_mib={:.1}{} played_s={:.1} {teardown}",
@@ -1715,3 +1731,4 @@ fn an_invalid_p_play_run_fails_the_lane() {
 }
 
 include!("s3b_native_harness.rs");
+include!("pf1_s4_child.rs");

@@ -2405,6 +2405,14 @@ impl Preview {
                         pixels: (*frame.rgba).clone(),
                     });
                 self.settle_titles();
+                #[cfg(test)]
+                let result = if self.faults.fail_render.swap(false, Ordering::AcqRel) {
+                    Err(MediaError::Backend(
+                        "preview-thread: injected agent render failure".to_owned(),
+                    ))
+                } else {
+                    result
+                };
                 self.reply(&cancel, &reply, result);
             }
             AgentWork::CacheStats { clear, reply } => {
@@ -2598,6 +2606,51 @@ pub(crate) mod tests {
         let reply = response.try_recv().expect("one reply");
         assert!(response.try_recv().is_err(), "a second reply");
         reply
+    }
+
+    #[test]
+    fn s4_agent_failure_is_reply_only() {
+        let clock = Arc::new(SharedClock::new());
+        let (mut preview, frames) = test_preview(Arc::clone(&clock));
+        let document = Arc::new(title_card((64, 64), 30));
+        clock.set_fps(document.fps);
+        preview.lane.post(Some(job(
+            &document,
+            JobKind::Playback {
+                from: TimeCode::ZERO,
+            },
+            stamp(1, 1),
+        )));
+        let (reply, response) = bounded(1);
+        preview.faults.fail_render.store(true, Ordering::Release);
+        preview.run_agent(
+            AgentJob {
+                work: AgentWork::Thumbnail {
+                    document,
+                    lut: Arc::default(),
+                    at: TimeCode::ZERO,
+                    max_width: 64,
+                    reply,
+                },
+                cancel: Arc::default(),
+            },
+            false,
+        );
+        let error = one_reply(&response).expect_err("one failed agent reply");
+        assert!(
+            matches!(error, MediaError::Backend(message) if message.starts_with("preview-thread: "))
+        );
+        assert!(
+            preview.lane.lock().failures.is_empty(),
+            "no transport failure event"
+        );
+        let playback = preview.next_work(false).expect("playback continues");
+        assert!(matches!(playback, Work::Playback(_, _)));
+        preview.execute(playback);
+        assert_eq!(
+            frames.try_recv().expect("real GPU playback frame").at,
+            TimeCode::ZERO
+        );
     }
 
     fn agent_flag(work: Option<Work>) -> Arc<AtomicBool> {
