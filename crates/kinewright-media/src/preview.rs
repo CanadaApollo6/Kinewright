@@ -342,6 +342,9 @@ pub(crate) struct Lane {
     /// I10/I15: an injected advance of the readers' clock.
     #[cfg(test)]
     pub(crate) skew: Mutex<Duration>,
+    /// Test support: freeze the reader clock independently of wall time.
+    #[cfg(test)]
+    reader_clock: Mutex<Option<Duration>>,
     /// Test support: each reader decode first takes one message from this
     /// gate (or proceeds once its sender is gone).
     #[cfg(test)]
@@ -432,6 +435,8 @@ impl Lane {
             epoch: Instant::now(),
             #[cfg(test)]
             skew: Mutex::default(),
+            #[cfg(test)]
+            reader_clock: Mutex::default(),
             #[cfg(test)]
             drag_deadline: Mutex::default(),
             #[cfg(test)]
@@ -614,6 +619,10 @@ impl Lane {
 
     /// The readers' clock (H-2), advanced by tests (never a sleep).
     pub(crate) fn now(&self) -> Duration {
+        #[cfg(test)]
+        if let Some(now) = *self.reader_clock.lock().expect("reader clock") {
+            return now;
+        }
         let now = self.epoch.elapsed();
         #[cfg(test)]
         let now = now + *self.skew.lock().expect("skew");
@@ -1117,6 +1126,22 @@ fn pinned(
 
 #[cfg(test)]
 impl Lane {
+    /// Freeze before starting readers, so a live-state assertion has no
+    /// wall-clock deadline. Retirement tests advance this clock explicitly.
+    pub(crate) fn freeze_reader_clock(&self) {
+        *self.reader_clock.lock().expect("reader clock") = Some(Duration::ZERO);
+    }
+
+    pub(crate) fn advance_reader_clock(&self, by: Duration) {
+        *self
+            .reader_clock
+            .lock()
+            .expect("reader clock")
+            .as_mut()
+            .expect("reader clock frozen") += by;
+        self.work.notify_all();
+    }
+
     /// Test support, before reader `id` decodes `at`: the gate, `hold_at`
     /// and `panic_at`.
     fn before_decode(&self, id: u64, at: i64) {
@@ -3087,6 +3112,21 @@ pub(crate) mod tests {
             .any(|slot| matches!(slot.state, crate::sched::ReaderState::Decoding { .. }))
     }
 
+    /// Every required result of the applied plan has arrived, and no
+    /// conversion can append another history record for it.
+    fn plan_settled(state: &LaneState) -> bool {
+        !decoding(state)
+            && state.readers.slots.iter().all(|slot| {
+                let required = slot
+                    .plan
+                    .required
+                    .iter()
+                    .map(|at| (slot.key.clone(), *at))
+                    .collect::<Vec<_>>();
+                state.readers.resolve(&required).is_some()
+            })
+    }
+
     /// A preview thread on `lane`, its readers gated; returns the gate.
     fn gated_preview(
         lane: &Arc<Lane>,
@@ -3455,18 +3495,7 @@ pub(crate) mod tests {
             reference(&document, 25).0[..],
             "C-5 at 25"
         );
-        wait_until(&lane, |state| {
-            !decoding(state)
-                && state.readers.slots.iter().all(|slot| {
-                    let required = slot
-                        .plan
-                        .required
-                        .iter()
-                        .map(|at| (slot.key.clone(), *at))
-                        .collect::<Vec<_>>();
-                    state.readers.resolve(&required).is_some()
-                })
-        });
+        wait_until(&lane, plan_settled);
         let decodes = lane.decodes.lock().expect("decodes").clone();
         let cancelled: Vec<_> = (decodes.iter())
             .filter(|d| (4..17).contains(&d.at))
@@ -3487,7 +3516,8 @@ pub(crate) mod tests {
 
     /// Amendment R53 [S2c] (C-5): a step into the part of the window not yet
     /// converted waits for its conversion and decodes nothing new. The
-    /// reader is held before 17 (19, 18 done); a step to 14 is posted. It
+    /// reader is held before 17 (19, 18 done); a step to 14 is applied
+    /// before 17 is released. It
     /// keeps the window (no refill): 14 is converted from the refill's
     /// decoded frame, with no decoded frame and no seek, and shows the
     /// fresh seek's bytes.
@@ -3504,11 +3534,19 @@ pub(crate) mod tests {
         shown_at(&frames, 19);
         wait_until(&lane, |state| decoding_at(state, 17));
         let seeks = lane.counters().stats.reader_seeks;
+        let (planned, applied) = bounded(1);
+        *lane.plan_posted.lock().expect("plan posted") = Some(planned);
         lane.post(Some(job(
             &document,
             JobKind::Paused(TimeCode(14)),
             stamp(1, 3),
         )));
+        // Keep 17 in flight until the new demand actually reaches the readers.
+        assert_eq!(
+            applied.recv_timeout(Duration::from_secs(60)),
+            Ok((14, 3)),
+            "the step's reader plan must be applied before releasing 17"
+        );
         drop(release);
         let shown = shown_at(&frames, 14);
         assert_eq!(
@@ -3516,7 +3554,7 @@ pub(crate) mod tests {
             reference(&document, 14).0[..],
             "C-5 at 14"
         );
-        wait_until(&lane, |state| !decoding(state));
+        wait_until(&lane, plan_settled);
         assert_eq!(lane.counters().stats.reader_seeks, seeks, "no seek");
         let decodes = lane.decodes.lock().expect("decodes").clone();
         let step = (decodes.iter()).filter(|d| d.at == 14).collect::<Vec<_>>();
@@ -3540,7 +3578,8 @@ pub(crate) mod tests {
     /// Amendment R53 [S2c] (C-5): a step to the window frame whose
     /// conversion is in flight waits for that conversion; it is not
     /// re-decoded. The reader is held before 17 (19, 18 done, 17 handed to
-    /// it); a step to 17 is posted. It keeps the window (no refill): 17 is
+    /// it); a step to 17 is applied before 17 is released. It keeps the
+    /// window (no refill): 17 is
     /// converted once, with no decoded frame and no seek, and shows the
     /// fresh seek's bytes.
     #[test]
@@ -3556,11 +3595,19 @@ pub(crate) mod tests {
         shown_at(&frames, 19);
         wait_until(&lane, |state| decoding_at(state, 17));
         let seeks = lane.counters().stats.reader_seeks;
+        let (planned, applied) = bounded(1);
+        *lane.plan_posted.lock().expect("plan posted") = Some(planned);
         lane.post(Some(job(
             &document,
             JobKind::Paused(TimeCode(17)),
             stamp(1, 3),
         )));
+        // Keep 17 in flight until the new demand actually reaches the readers.
+        assert_eq!(
+            applied.recv_timeout(Duration::from_secs(60)),
+            Ok((17, 3)),
+            "the step's reader plan must be applied before releasing 17"
+        );
         drop(release);
         let shown = shown_at(&frames, 17);
         assert_eq!(
@@ -3568,7 +3615,7 @@ pub(crate) mod tests {
             reference(&document, 17).0[..],
             "C-5 at 17"
         );
-        wait_until(&lane, |state| !decoding(state));
+        wait_until(&lane, plan_settled);
         assert_eq!(lane.counters().stats.reader_seeks, seeks, "no seek");
         let decodes = lane.decodes.lock().expect("decodes").clone();
         let step = (decodes.iter()).filter(|d| d.at == 17).collect::<Vec<_>>();
@@ -3849,6 +3896,8 @@ pub(crate) mod tests {
         let mut workload = crate::perf_fixtures::one_vfr_source((320, 180), 90);
         workload.0.resolution = (90, 1600);
         let (document, lane, frames, thread) = r54_preview(&workload, 20);
+        let (release, held) = bounded::<()>(0);
+        *lane.hold_at.lock().expect("hold") = Some((6, held));
         *lane.fail_conversion.lock().expect("fail") = Some(6);
         *lane.stop_at.lock().expect("stop") = Some(6);
         lane.post(Some(job(
@@ -3857,14 +3906,34 @@ pub(crate) mod tests {
             stamp(1, 2),
         )));
         shown_at(&frames, 19);
-        let stopped =
-            |state: &LaneState| lane.cancelled.load(Ordering::Acquire) > 0 && !decoding(state);
-        wait_until(&lane, stopped);
+        // Publication follows schedule's return, so the stop cannot race
+        // another admission pass that would reserve 6 again.
+        wait_until(&lane, |state| decoding_at(state, 6));
+        let before = lane.cancelled.load(Ordering::Acquire);
+        drop(release);
+        wait_until(&lane, |state| {
+            lane.cancelled.load(Ordering::Acquire) > before && !decoding(state)
+        });
+        assert_eq!(lane.cancelled.load(Ordering::Acquire), before + 1);
+        assert!(lane.fail_conversion.lock().expect("fail").is_none());
+        assert!(lane.stop_at.lock().expect("stop").is_none());
         let decodes = lane.decodes.lock().expect("decodes").clone();
         assert_eq!(
             decodes.last().map(|d| d.at),
             Some(6),
             "the reader stopped converting 6: {decodes:?}"
+        );
+        let six = decodes
+            .iter()
+            .filter(|d| d.at == 6 && d.version == 2)
+            .collect::<Vec<_>>();
+        let [six] = six[..] else {
+            panic!("one version-2 conversion at 6: {decodes:?}");
+        };
+        assert_eq!((six.received, six.seeks), (0, 0), "{six:?}");
+        assert!(
+            six.held > 0,
+            "the stopped conversion held raw frames: {six:?}"
         );
         let state = lane.lock();
         let (reserved, kept) = state.readers.reservations();
@@ -4374,6 +4443,7 @@ pub(crate) mod tests {
     fn idle_readers_retire_at_the_quiescence_deadline() {
         let (document, _workload) = cut_document();
         let (mut preview, _frames) = test_preview(Arc::new(SharedClock::new()));
+        preview.lane.freeze_reader_clock();
         preview.run_paused(
             &job(&document, JobKind::Paused(TimeCode(0)), stamp(1, 1)),
             0,
@@ -4381,8 +4451,7 @@ pub(crate) mod tests {
         let lane = Arc::clone(&preview.lane);
         // R37: source 0's two layers (0 and 14) are two regions.
         assert_eq!(lane.lock().readers.slots.len(), 3, "one reader per region");
-        *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
-        lane.work.notify_all();
+        lane.advance_reader_clock(crate::sched::QUIESCENCE);
         wait_until(&lane, |state| state.readers.slots.is_empty());
         let rings = lane.lock().readers.ring_bytes();
         // Source 0 at 0 and 14 (two layers), source 1 at 7.
@@ -4442,6 +4511,7 @@ pub(crate) mod tests {
         let (document, _workload) = cut_document();
         let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
         let paused = job(&document, JobKind::Paused(TimeCode(0)), stamp(1, 1));
+        preview.lane.freeze_reader_clock();
         preview.run_paused(&paused, 0);
         assert!(frames.try_recv().is_ok(), "the paused frame");
         let lane = Arc::clone(&preview.lane);
@@ -4452,8 +4522,7 @@ pub(crate) mod tests {
         preview.execute(work);
         assert!(one_reply(&response).is_ok());
         assert_eq!(lane.lock().readers.ring_bytes(), (0, 0), "cleared");
-        *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
-        lane.work.notify_all();
+        lane.advance_reader_clock(crate::sched::QUIESCENCE);
         wait_until(&lane, |state| state.readers.slots.is_empty());
         assert_eq!(lane.permits_in_use(), 0, "no permits kept");
         assert_eq!(lane.lock().readers.live().0, 0, "no bytes kept");
@@ -4761,6 +4830,7 @@ pub(crate) mod tests {
         two.tracks.truncate(2);
         let (one, two) = (Arc::new(one), Arc::new(two));
         let lane = Arc::new(Lane::with_parallelism(20));
+        lane.freeze_reader_clock();
         let (gate, frames, thread) = gated_preview(&lane);
         *lane.gate.lock().expect("gate") = None;
         drop(gate);
@@ -4791,8 +4861,6 @@ pub(crate) mod tests {
         let shown = frames.recv_timeout(Duration::from_secs(60));
         assert_eq!(shown.expect("published").at, TimeCode(4));
         // Both close: the wide one to shrink, the short one before growth.
-        // (A reader idle for `QUIESCENCE` may retire instead; it also
-        // closes, so this holds from then on whatever the timing.)
         wait_until(&lane, |state| {
             state.readers.slots.iter().all(|slot| slot.threads == 0)
         });
@@ -6096,6 +6164,7 @@ pub(crate) mod tests {
         let (document, _workload) = cut_document();
         for phase in 0..4 {
             let lane = Arc::<Lane>::default();
+            lane.freeze_reader_clock();
             let (mut gate, frames, thread) = gated_preview(&lane);
             lane.post(Some(job(
                 &document,
@@ -6112,7 +6181,13 @@ pub(crate) mod tests {
                 frames
                     .recv_timeout(Duration::from_secs(60))
                     .expect("published");
-                wait_until(&lane, |state| !decoding(state));
+                wait_until(&lane, |state| {
+                    state.readers.slots.len() == 3
+                        && state.readers.slots.iter().all(|slot| {
+                            matches!(slot.state, crate::sched::ReaderState::Idle { .. })
+                        })
+                });
+                assert_eq!(lane.open_decoders(|_| true), 3, "live idle readers");
                 let (closed, gated) = bounded(0);
                 *lane.gate.lock().expect("gate") = Some(gated);
                 gate = closed;

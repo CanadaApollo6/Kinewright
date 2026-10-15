@@ -298,11 +298,14 @@ fn s3b_u1_teardown_sweeps_a_failed_frame_completed_after_its_first_sweep() {
     });
     // Deliver only after teardown's first sweep found the frame unfinished.
     let first = swept_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-    let waited = done_rx.try_recv().is_err();
+    let unfinished_at_sweep_observation = done_rx.try_recv().is_err();
     delivery();
     let ended = done_rx.recv_timeout(Duration::from_secs(5)).is_ok();
     assert!(first, "teardown swept before the completion was delivered");
-    assert!(waited, "teardown waits while the completion is held");
+    assert!(
+        unfinished_at_sweep_observation,
+        "no teardown completion was queued when the first sweep was observed"
+    );
     assert!(ended, "teardown ends once the completion is delivered");
     teardown.join().unwrap();
     assert_eq!(gpu.ledger().live_bytes(), 0, "every charge returned");

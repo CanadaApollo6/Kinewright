@@ -4296,6 +4296,7 @@ mod tests {
         assert_eq!(threads(&lane), (0, 0), "+0 threads at construction");
         let workload = crate::perf_fixtures::cuts((160, 90), 60, 3, 9, 10);
         let frames = engine.frames();
+        engine.lane.freeze_reader_clock();
         engine.set_document(Arc::new(workload.0.clone()));
         assert!(frames.recv_timeout(Duration::from_secs(60)).is_ok());
         // R37: frame 0 shows source 0 at 0 and 14, two regions.
@@ -4308,8 +4309,7 @@ mod tests {
         // renderer; they close when it parks (it notifies `ready` after).
         engine.thumbnail_at(TimeCode(20), 64).expect("a thumbnail");
         crate::preview::tests::wait_until(&lane, |_| engine.decoders.open() == 0);
-        *lane.skew.lock().expect("skew") = crate::sched::QUIESCENCE;
-        lane.work.notify_all();
+        lane.advance_reader_clock(crate::sched::QUIESCENCE);
         crate::preview::tests::wait_until(&lane, |state| state.readers.slots.is_empty());
         assert_eq!(threads(&lane), (1, 0), "settled: the parked preview alone");
     }
@@ -5097,6 +5097,7 @@ mod tests {
         let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
         let gauge = engine.decoder_gauge();
         let frames = engine.frames();
+        engine.lane.freeze_reader_clock();
         engine.set_document(Arc::new(document));
         let first = frames
             .recv_timeout(Duration::from_secs(60))
