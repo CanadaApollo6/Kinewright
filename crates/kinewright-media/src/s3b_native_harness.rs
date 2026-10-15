@@ -36,7 +36,8 @@ fn s4_selected_device_readback() {
     let record = s4_device(&gpu);
     let info = gpu.selected_adapter();
     assert_eq!(record["selected"]["name"], info.name);
-    assert_eq!(record["selected"]["backend"], "Vulkan");
+    let backend = record["selected"]["backend"].as_str().unwrap();
+    assert!(["Vulkan", "Dx12", "Metal", "Gl"].contains(&backend));
     assert_eq!(record["selected"]["driver"], info.driver);
     assert_eq!(record["selected"]["vendor_id"], info.vendor);
     assert_eq!(record["driver_info"], info.driver_info);

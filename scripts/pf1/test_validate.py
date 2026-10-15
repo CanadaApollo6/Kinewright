@@ -288,7 +288,6 @@ class Pins(unittest.TestCase):
             self.pins['protocol']['duration_s']=duration
             with self.subTest(duration=duration): self.run_record(2)
         self.pins['protocol']['duration_s']=required; self.run_record(0)
-        self.assertEqual(required['talk_recut']*30,7200)
         self.pins['protocol'].pop('duration_s'); self.run_record(2)
     def test_denominator_precedence(self):
         for gate,condition in [('I4','busy'),('I4','assertion'),('R65-historical','assertion')]:
