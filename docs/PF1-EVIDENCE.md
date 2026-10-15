@@ -7673,6 +7673,30 @@ The desktop gate at `7120248`: fmt, workspace clippy `-D warnings` and the
 slow-test lint passed, and the media library gave 1,117 passed, 0 failed,
 62 ignored at one test thread.
 
+**D14 slow-tier oracle fix.** The first slow-tier CI run on D14 code
+(`c9dbe4d`) failed on both operating systems. The only failure was seed
+184147 of the 300k accounting model, on the D14 independent handoff oracle.
+The 3k fast tier had passed, so this was the first time the case was
+exercised.
+- **Who was wrong.** The scheduler was right and the oracle was wrong. The
+  oracle counted a retiring reader's in-flight decode of time 30 as another
+  keeper. `Readers::deliver` hands a retiring reader's result back instead of
+  putting it in the ring (H-6), so that output can never become available.
+  Shortening the unavailable optional requirement is therefore exactly R75
+  M4's contract.
+- **The fix.** The oracle now accepts an in-flight decode as a keeper only
+  from a reader that is not retiring. A retiring reader's decoded frames, and
+  a refill's promised coverage, stay protected (F3, R66).
+- **The witness.** The seed reduces to a 13-step fixed case,
+  `s3b_d14_model_retiring_decode_is_not_an_available_keeper`, now in the fast
+  tier. It is red on the old oracle and green after the fix. It pins the
+  required set `{36, 37, 38}`, progress to target 38, and time 30's absence
+  from the ring.
+- **Evidence.** The 300k survey before the fix found that seed as the only
+  failure. After the fix the strict 300k test fails nothing. Production
+  changed by 0 lines. The media library gave 1,118 passed, 0 failed,
+  62 ignored. The full report is `target/review/pf/s3b/d14-oracle-fix.md`.
+
 **Status.** S3b's implementation, R75 measurements, local gates and review
 are complete. S3b closes when CI is green on Linux and Windows in both tiers.
 The RTX 4050 rerun owed under R73 since S3a is still owed.
