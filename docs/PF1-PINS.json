@@ -117,7 +117,9 @@
         "arm": "s4",
         "seed": 33
       }
-    ]
+    ],
+    "warm_frames": 30,
+    "measured_frames": 300
   },
   "metrics": {
     "mean_ms": {

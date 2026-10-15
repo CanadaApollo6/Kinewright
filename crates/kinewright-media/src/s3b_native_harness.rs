@@ -1,4 +1,50 @@
 // Shared harness-only R75 comparison; included inside pf1_harness on both trees.
+fn s4_device(gpu: &GpuContext) -> serde_json::Value {
+    let info = gpu.selected_adapter();
+    serde_json::json!({
+        "selected": {"backend": info.backend.to_string(), "name": info.name,
+            "vendor_id": info.vendor, "device_id": info.device, "driver": info.driver},
+        "driver_info": info.driver_info,
+        "software": info.device_type == wgpu::DeviceType::Cpu
+    })
+}
+
+fn s4_publish(gpu: &GpuContext, measured: Option<(bool, f64)>) {
+    if let Ok(path) = std::env::var("PF1_RECORD") {
+        let mut record = s4_device(gpu);
+        record["token"] = std::env::var("PF1_TOKEN").expect("collector token").into();
+        record["protocol"] = serde_json::json!({"name": "native-display", "poll_ms": 5,
+            "warmup_ms": 2000, "duration_s": 60});
+        record["timestamp_s"] = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64()
+            .into();
+        if let Some((valid, fps)) = measured {
+            record["valid"] = valid.into();
+            record["metrics"] = serde_json::json!({"fps": fps});
+        }
+        let temporary = format!("{path}.tmp");
+        std::fs::write(&temporary, serde_json::to_vec(&record).unwrap()).unwrap();
+        std::fs::rename(temporary, path).unwrap();
+    }
+}
+
+#[test]
+fn s4_selected_device_readback() {
+    let gpu = GpuContext::headless(true).expect("software correctness adapter");
+    let record = s4_device(&gpu);
+    let info = gpu.selected_adapter();
+    assert_eq!(record["selected"]["name"], info.name);
+    assert_eq!(record["selected"]["driver"], info.driver);
+    assert_eq!(record["selected"]["vendor_id"], info.vendor);
+    assert_eq!(record["driver_info"], info.driver_info);
+    assert_eq!(
+        record["software"],
+        info.device_type == wgpu::DeviceType::Cpu
+    );
+}
+
 fn s3b_native_consume(
     native: &mut crate::DisplaySession,
     session: &Session,
@@ -54,8 +100,12 @@ fn s3b_native_consume(
     reason = "one native timing lifecycle shared by both sides"
 )]
 fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
+    if std::env::var_os("PF1_RECORD").is_some() {
+        assert!((document.duration.0 as f64 * frame_ms(document) - 60_000.0).abs() < 1e-5);
+    }
     let audio = SimulatedAudio::paced();
     let session = Session::new(Some(audio.clone()), Arc::default(), lane().0);
+    s4_publish(&session.gpu, None);
     let metadata = session.gpu.monitor_proof_metadata();
     assert_eq!(
         metadata.software_fallback,
@@ -197,6 +247,7 @@ fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
     );
     drop(native);
     assert_eq!(gpu.ledger().live_bytes(), 0, "every charge returned");
+    s4_publish(&gpu, Some((metrics.valid, fps)));
     (metrics, fps, line)
 }
 
@@ -212,6 +263,7 @@ fn s3b_native_play_lane() {
         "bounded R75 run indices"
     );
     let reference = std::env::var("S3B_SIDE").ok().as_deref() == Some("reference");
+    let collecting = std::env::var_os("PF1_RECORD").is_some();
     let workloads = play_workloads();
     assert_eq!(workloads.len(), 1, "one workload per bounded lane");
     let mut failures = Vec::new();
@@ -220,23 +272,54 @@ fn s3b_native_play_lane() {
             pf1_clock::start_run();
             let (metrics, fps, line) = s3b_native_run(&document);
             println!("S3B_NATIVE lane={lane} workload={key} run={run} {line}");
-            if !metrics.valid {
-                failures.push(format!("{key}/{run}: Q2 invalid"));
-            }
-            if !reference && hardware && !metrics.g1_metric() {
-                failures.push(format!("{key}/{run}: G2 failed"));
-            }
             let floor = match key {
                 "typical_1080p" | "explainer_16x9" => 24.0,
                 "blend_heavy_1080p" | "reel_9x16" => 15.0,
                 _ => f64::NAN,
             };
-            if !reference && !hardware && (!fps.is_finite() || fps < floor) {
-                failures.push(format!("{key}/{run}: G4 fps {fps} < {floor}"));
+            if !s4_measurement_only(collecting, reference, hardware, &metrics, fps, floor) {
+                failures.push(format!("{key}/{run}: invalid Q2 or absolute gate miss"));
             }
         }
     }
     assert!(failures.is_empty(), "R75 native gates: {failures:?}");
+}
+
+fn s4_measurement_only(
+    collecting: bool,
+    reference: bool,
+    hardware: bool,
+    metrics: &PlayMetrics,
+    fps: f64,
+    floor: f64,
+) -> bool {
+    collecting
+        || (metrics.valid
+            && (reference
+                || if hardware {
+                    metrics.g1_metric()
+                } else {
+                    fps.is_finite() && fps >= floor
+                }))
+}
+
+#[test]
+fn s4_shared_misses_reach_the_paired_decision() {
+    let mut metrics = s3b_native_metrics(&Trace::default(), 300, 33.333, &BTreeSet::new());
+    metrics.valid = true;
+    for reference in [false, true] {
+        assert!(s4_measurement_only(
+            true, reference, false, &metrics, 10.0, 24.0
+        ));
+        assert_eq!(
+            s4_measurement_only(false, reference, false, &metrics, 10.0, 24.0),
+            reference
+        );
+    }
+    metrics.valid = false;
+    assert!(!s4_measurement_only(
+        false, true, false, &metrics, 30.0, 24.0
+    ));
 }
 
 // R57's unchanged P-seek operation/seed protocol, split only to interleave pairs.

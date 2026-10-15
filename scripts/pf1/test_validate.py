@@ -11,7 +11,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
 import validate as v
+import series as runner
 
 MUTATIONS = {
     'schema': ("    if '$ref' in rule:", "    return\n    if '$ref' in rule:"),
@@ -41,12 +43,21 @@ MUTATIONS = {
     'export_equal': ("'equal': lambda: a == b", "'equal': lambda: True"),
     'r65_small': ("abs(statistics.mean(b) - statistics.mean(a)) <= max(1, .25 * statistics.mean(a)) and max(min(a), min(b)) <= min(max(a), max(b))", "True"),
     'owned_cleanup': ('[signal.SIGTERM, signal.SIGKILL]', '[signal.SIGTERM]'),
+    'gpu_table': ("v.require(match is not None, 'unrecognized GPU process row')", "if match is None: continue"),
+    'live': ("v.gpu_check(gpu, pins, host, root)", "pass"),
+    'replacement': ("disposition['previous_sha256'] == series['previous']['sha256']", "True"),
+    'resume': ("if not destination.exists():", "if True:"),
+    'reference': ("single or reference == expected", "True"),
+    'protocol': ("all(protocol.get(key) == value for key, value in parameters.items())", "True"),
+    'denominator': ("require(all(x > 0 for x in a), 'zero reference denominator')", "if not all(x > 0 for x in a): return 0"),
+    'role': ("role = 'reference' if entry['arm'] == pins['arms'].get('reference') else 'candidate'", "role = entry['arm']"),
+    'runner_exit': ("return code if code in [2, 75, 101] else 2", "return 0"),
     'r50': ("else 75 for x, y in zip(a, b)", "else 0 for x, y in zip(a, b)"),
 }
 if '--mutation' in sys.argv:
     index = sys.argv.index('--mutation'); name = sys.argv[index+1]; del sys.argv[index:index+2]
     old, new = MUTATIONS[name]
-    target = launch if name == 'owned_cleanup' else v
+    target = runner if name in ['resume', 'role', 'runner_exit'] else launch if name in ['owned_cleanup', 'gpu_table', 'live'] else v
     source = Path(target.__file__).read_text(); assert old in source
     exec(compile(source.replace(old, new), target.__file__, 'exec'), target.__dict__)
 
@@ -59,6 +70,7 @@ class Pins(unittest.TestCase):
         self.pins = v.read(repo/'docs/PF1-PINS.json'); self.status = v.read(self.root/'docs/reports/pf1-s4/example/status.json')
     def run_record(self, expected, resign=True):
         self.p.write_text(json.dumps(self.pins), encoding='utf-8')
+        self.status['series']['pins'] = v.digest(self.p)
         for row in self.status['runs']:
             row['identity']['pins'] = v.digest(self.p)
             if resign: row['fingerprint'] = v.fingerprint(row)
@@ -150,6 +162,119 @@ class Pins(unittest.TestCase):
             self.setUp()
             for sample in self.status['runs'][0]['preflight']: sample['timestamp_s'] += offset
             self.run_record(2)
+
+    def test_gpu_table(self):
+        text = (Path(__file__).resolve().parents[2]/'docs/reports/pf1-s4/example/nvidia-processes.txt').read_text()
+        start = text.index('|    0   N/A')
+        end = text.index('+---', start)
+        empty = text[:start] + '|  No running processes found |\n' + text[end:]
+        bad = text[:start] + '| 0 N/A N/A 123 X /worker N/A |\n' + text[end:]
+        variants = [(text,0,0),(empty,0,0),('Processes:\n',0,2),(text[:end],0,2),(bad,0,2),(text.replace('|    0   N/A','|    1   N/A'),0,2),(text,1,2),(text.replace('C+G','C'),0,75),(text.replace('498MiB','2049MiB'),0,75)]
+        for table, query_exit, expected in variants:
+            with self.subTest(table=table, query_exit=query_exit):
+                try:
+                    samples = [launch.gpu_sample(dict(exit=0,output=table),dict(exit=query_exit,output='0, synthetic-uuid, 0'),1700000000+i*5,set()) for i in range(3)]
+                    for row in self.status['runs']: row['preflight'] = samples
+                    self.run_record(expected)
+                except ValueError:
+                    self.assertEqual(expected,2)
+        for row in self.status['runs']:
+            row['preflight'] = [launch.gpu_sample(dict(exit=0,output=empty),dict(exit=0,output='0, synthetic-uuid, 80'),1700000000+i*5,set()) for i in range(3)]
+        self.run_record(75)
+        with self.assertRaises(SystemExit) as raised:
+            launch.checked(launch.gpu_sample,dict(exit=0,output='Processes:\n'),dict(exit=0,output='0, synthetic-uuid, 0'),1700000000,set())
+        self.assertEqual(raised.exception.code,2)
+
+    def test_live(self):
+        self.configure('G4')
+        path = self.root/'live.json'
+        raw = dict(token='fresh', timestamp_s=12, selected=dict(backend='Vulkan',name='llvmpipe (LLVM 20.1.5, 256 bits)',vendor_id=65541,device_id=0,driver='llvmpipe'), driver_info='Mesa 25.1.0',software=True)
+        raw['protocol'] = dict(name='native-display',poll_ms=5,warmup_ms=2000,duration_s=60)
+        icd = self.root/'lvp.json'; icd.write_text('fake ICD manifest')
+        gpu = dict(selected=raw['selected'],stack=dict(runtime=raw['driver_info'],mesa='25.1.0',llvm='20.1.5',icd_manifest_sha256=v.digest(icd)),policy=dict(kind='software'),telemetry=dict(status='unavailable',reason='software adapter has no hardware clocks'))
+        self.pins['gpu'] = copy.deepcopy(gpu)
+        clock = Mock(return_value=15)
+        check = lambda: launch.live_record(path,'fresh',10,clock(),self.pins,dict(os='linux'),self.root,dict(VK_ICD_FILENAMES=str(icd)))
+        self.assertIsNone(check())
+        clock.return_value=21
+        with self.assertRaises(ValueError): check()
+        clock.return_value=15; path.write_text(json.dumps(raw))
+        self.assertEqual(check()[1],gpu)
+        for changed in [dict(timestamp_s=9),dict(timestamp_s=16),dict(token='stale'),dict(protocol={})]:
+            path.write_text(json.dumps(dict(raw,**changed)))
+            with self.assertRaises(ValueError): check()
+        path.write_text(json.dumps(raw))
+        process = Mock(); process.poll.side_effect=[None,None,0]
+        def change_device():
+            raw['selected']['vendor_id']=123; path.write_text(json.dumps(raw))
+        with self.assertRaisesRegex(ValueError,'adapter/stack mismatch'):
+            launch.monitor(process,check,change_device,lambda seconds: None)
+
+    def test_replacement(self):
+        for row in self.status['runs']:
+            if row['arm']=='s4': row['metrics']['mean_ms']=200
+        self.run_record(1)
+        old = self.root/'old.json'; shutil.copyfile(self.root/'status.json',old)
+        previous = dict(path='old.json',sha256=v.digest(old))
+        self.status['series']=dict(id='replacement',pins=v.digest(self.p),previous=previous,rejection=dict(exit=1,reason='all wall ratios rejected'))
+        for row in self.status['runs']: row['metrics']['mean_ms']=100
+        self.run_record(2)
+        disposition=self.root/'disposition.json'
+        ref=self.status['runs'][0]['logs'][0]
+        disposition.write_text(json.dumps(dict(authority='synthetic ruling',previous_sha256=previous['sha256'],reason='dispose of all rejected ratios',record=ref)))
+        self.status['series']['rejection']['disposition']=dict(path='disposition.json',sha256=v.digest(disposition))
+        self.run_record(0)
+        data=v.read(disposition); data['previous_sha256']='f'*64; disposition.write_text(json.dumps(data))
+        self.status['series']['rejection']['disposition']['sha256']=v.digest(disposition); self.run_record(2)
+        self.status['series']['pins']='f'*64
+        with self.assertRaisesRegex(ValueError,'cross-pins'): v.series_check(self.status,self.p,self.root,frozenset())
+        self.status['series']['pins']=v.digest(self.p)
+        self.status['series']['id']='synthetic-original'
+        with self.assertRaisesRegex(ValueError,'repeated'): v.series_check(self.status,self.p,self.root,frozenset())
+        prior=v.read(old); prior['runs']=[]; prior['artifacts']=[ref]
+        old.write_text(json.dumps(prior))
+        self.status['series']=dict(id='complete-replacement',pins=v.digest(self.p),previous=dict(path='old.json',sha256=v.digest(old)),rejection=dict(exit=2,reason='interrupted series'))
+        self.run_record(0)
+
+    def test_resume(self):
+        self.configure('G4'); self.run_record(0)
+        plan=dict(id='fresh-series',gates=[dict(pins=dict(path='pins.json',sha256=v.digest(self.p)),series={})])
+        def fake(index, ordinal, entry, role, *args):
+            self.assertEqual(role,'reference' if entry['arm']=='s3b' else 'candidate')
+            return 0,self.status['runs'][ordinal]
+        work=self.root/'series'
+        self.assertEqual(runner.collect(plan,self.root,work,fake),0)
+        with self.subTest(case='valid resume'):
+            self.assertEqual(runner.collect(plan,self.root,work,lambda *a: self.fail('relaunch on resume')),0)
+        leaf=self.root/self.status['runs'][0]['logs'][0]['path']
+        for change in ['changed','missing']:
+            if change=='changed': leaf.write_text('changed artifact')
+            else: leaf.unlink()
+            with self.assertRaises((ValueError,OSError)): runner.collect(plan,self.root,work,fake)
+
+    def test_runner_outcomes(self):
+        self.configure('G4')
+        for reference,candidate,exit_code,expected in [(10,10,0,75),(30,10,0,1),(30,30,101,101)]:
+            for row in self.status['runs']: row['metrics']['fps']=reference if row['arm']=='s3b' else candidate
+            self.run_record(75 if expected==75 else 1 if expected==1 else 0)
+            plan=dict(id=str(expected),gates=[dict(pins=dict(path='pins.json',sha256=v.digest(self.p)),series={})])
+            fake=Mock(side_effect=lambda index,ordinal,*args:(exit_code,self.status['runs'][ordinal]))
+            self.assertEqual(runner.collect(plan,self.root,self.root/str(expected),fake),expected)
+            self.assertEqual(fake.call_count,1 if exit_code else len(self.status['runs']))
+
+    def test_reference(self):
+        self.configure('G18')
+        self.pins['arms']=dict(reference='s4',candidate='s3b'); self.run_record(2)
+    def test_protocol(self):
+        self.configure('I4'); self.pins['protocol'].pop('warm_frames'); self.run_record(2)
+    def test_decision_edges(self):
+        self.configure('G4')
+        for candidate,expected in [([9,12,14],75),([5,12,14],1)]:
+            for row in self.status['runs']: row['metrics']['fps']=([10,12,14] if row['arm']=='s3b' else candidate)[row['pair']]
+            self.run_record(expected)
+        self.setUp(); self.configure('R65-historical')
+        for row in self.status['runs']: row['metrics']['admission_waits']=[0,100,100][row['pair']%3]
+        self.run_record(2)
 
     def test_unsupported(self):
         self.pins['gate']='G16'; self.status['gate']='G16'; self.run_record(2)

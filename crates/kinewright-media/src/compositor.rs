@@ -259,6 +259,8 @@ impl<T> Drop for Ledgered<T> {
 
 #[derive(Clone)]
 struct GpuProvenance {
+    #[cfg(test)]
+    selected: Option<wgpu::AdapterInfo>,
     backend: String,
     adapter: String,
     software_fallback: bool,
@@ -274,6 +276,8 @@ impl GpuContext {
             queue,
             lost,
             provenance: GpuProvenance {
+                #[cfg(test)]
+                selected: None,
                 backend: "unknown".to_owned(),
                 adapter: "unknown".to_owned(),
                 software_fallback: false,
@@ -304,6 +308,8 @@ impl GpuContext {
             queue,
             lost,
             provenance: GpuProvenance {
+                #[cfg(test)]
+                selected: Some(info.clone()),
                 backend: info.backend.to_string(),
                 adapter: info.name,
                 software_fallback,
@@ -350,6 +356,11 @@ impl GpuContext {
     #[cfg(test)]
     pub(crate) fn shared_ledger(&self) -> Arc<GpuLedger> {
         Arc::clone(&self.ledger)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_adapter(&self) -> &wgpu::AdapterInfo {
+        self.provenance.selected.as_ref().expect("selected adapter")
     }
 
     /// A texture charged at its bytes (uncompressed formats, one mip).

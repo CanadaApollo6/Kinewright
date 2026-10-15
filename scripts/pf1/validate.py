@@ -10,14 +10,14 @@ import statistics
 SCHEMA = json.loads((Path(__file__).resolve().parents[2] / 'docs/PF1-PINS.schema.json').read_text())
 PLAY = set('typical_1080p blend_heavy_1080p explainer_16x9 reel_9x16 feed_4x5 talk_recut'.split())
 CONTRACTS = {
-    'I4': ('LL LH', 'P-comp', {'typical_1080p'}, {}),
+    'I4': ('LL LH', 'P-comp', {'typical_1080p'}, {'warm_frames': 30, 'measured_frames': 300}),
     'G18': ('LH', 'export', {'typical_1080p'}, {'export_clips': 24, 'frames': 120}),
     'G15': ('LL', 'P-rss', PLAY | {'title_only'}, {'children': 3}),
     'G3': ('LH', 'P-comp', {'blend_heavy_1080p'}, {}),
-    'G4': ('LL', 'native-display', PLAY - {'feed_4x5', 'talk_recut'}, {}),
-    'G2': ('LH', 'native-display', PLAY - {'typical_1080p', 'blend_heavy_1080p'}, {}),
-    'G1': ('LH', 'P-play', {'typical_1080p'}, {}),
-    'G6': ('LL LH', 'P-play', PLAY, {}),
+    'G4': ('LL', 'native-display', PLAY - {'feed_4x5', 'talk_recut'}, {'warmup_ms': 2000, 'duration_s': 60}),
+    'G2': ('LH', 'native-display', PLAY - {'typical_1080p', 'blend_heavy_1080p'}, {'warmup_ms': 2000, 'duration_s': 60}),
+    'G1': ('LH', 'P-play', {'typical_1080p'}, {'warmup_ms': 2000, 'duration_s': 60}),
+    'G6': ('LL LH', 'P-play', {'typical_1080p'}, {'warmup_ms': 2000, 'duration_s': 60}),
     'VM-D6': ('VM-W', 'VM', {'typical_1080p'}, {}),
     'G7a': ('CI-L CI-W', 'correctness', {'app_readback'}, {}),
     **{gate: ('LL', 'counters', {'seek_gop60', 'explainer_16x9'}, {}) for gate in ['R65-historical', 'R65-intervening', 'R65-cumulative']},
@@ -171,10 +171,42 @@ def spec(pins_path, root):
     gpu_check(pins['gpu'], pins, host, root)
     return pins, builds, host
 
-def evaluate(pins_path, run_path, root):
+def series_check(status, pins_path, root, seen):
+    series = status['series']
+    require(series['id'] not in seen and len(seen) < 16 and series['pins'] == digest(pins_path), 'repeated/cross-pins series')
+    if 'previous' not in series:
+        require('rejection' not in series, 'rejection without predecessor')
+        return
+    artifact(root, series['previous'])
+    previous = read(root / series['previous']['path'])
+    schema(previous, SCHEMA['$defs']['status'])
+    require(previous['runs'] or previous.get('artifacts'), 'predecessor has no attempt artifacts')
+    for ref in previous.get('artifacts', []):
+        artifact(root, ref)
+    for row in previous['runs']:
+        require(row['fingerprint'] == fingerprint(row), 'changed predecessor row')
+        for ref in row['logs']:
+            artifact(root, ref)
+    # Validate ancestry even when an incomplete predecessor fails before its rows.
+    series_check(previous, pins_path, root, seen | {series['id']})
+    try:
+        code = evaluate(pins_path, root / series['previous']['path'], root, seen | {series['id']})
+    except (ValueError, OSError, KeyError, TypeError):
+        code = 2
+    rejection = series.get('rejection', {})
+    require(code != 0 and rejection.get('exit') == code and bool(rejection.get('reason')), 'missing/incorrect rejection reason')
+    if code == 1 or code in [2, 101] and previous['runs']:
+        disposition = artifact(root, rejection['disposition'], 'disposition')
+        artifact(root, disposition['record'])
+        require(disposition['previous_sha256'] == series['previous']['sha256'], 'disposition targets another series')
+
+def evaluate(pins_path, run_path, root, seen=frozenset()):
     pins, builds, host = spec(pins_path, root)
     status = read(run_path)
     schema(status, SCHEMA['$defs']['status'])
+    for ref in status.get('artifacts', []):
+        artifact(root, ref)
+    series_check(status, pins_path, root, seen)
     require((status['lane'], status['gate']) == (pins['lane'], pins['gate']), 'status lane/gate mismatch')
     rows, order = status['runs'], pins['protocol']['order']
     require(len(rows) == len(order), 'incomplete attempts')

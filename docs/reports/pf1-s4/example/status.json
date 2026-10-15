@@ -19,7 +19,7 @@
         "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
         "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
         "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
-        "pins": "007fdc1f7a6457e71427e2bf2346a6f7a397805a72e86026c513ad1b8e9df22e",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
         "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
       },
       "gpu": {
@@ -143,7 +143,7 @@
           "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
         }
       ],
-      "fingerprint": "f1364051f5bd797d802a5087ddf59cbab82c3c09315669a500b842c6289febbe",
+      "fingerprint": "73ebb07cd86ea24298a38ee3e6304d15936a472a3d3d51cc823cdd2e6878d7de",
       "started_s": 1700000015,
       "ended_s": 1700000015.1
     },
@@ -164,7 +164,7 @@
         "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
         "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
         "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
-        "pins": "007fdc1f7a6457e71427e2bf2346a6f7a397805a72e86026c513ad1b8e9df22e",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
         "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
       },
       "gpu": {
@@ -288,7 +288,7 @@
           "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
         }
       ],
-      "fingerprint": "ceeb67499015dee4c250ff23a07a57fffd27a9f922fe949eb512fc9079c235ac",
+      "fingerprint": "a0ab66ddfdbbd1471e23449d83fc469b06a9ac6a658480f99fe77d1aa0f2774e",
       "started_s": 1700000015,
       "ended_s": 1700000015.1
     },
@@ -309,7 +309,7 @@
         "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
         "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
         "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
-        "pins": "007fdc1f7a6457e71427e2bf2346a6f7a397805a72e86026c513ad1b8e9df22e",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
         "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
       },
       "gpu": {
@@ -433,7 +433,7 @@
           "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
         }
       ],
-      "fingerprint": "a0de5d18a89dc2cdda7517a8ceeb7e317069165402c71365f6d57c73da2a0960",
+      "fingerprint": "6cfd826666faa3980e61af278c35943100c0b6572736a7f2ce4d4bf697f938a9",
       "started_s": 1700000015,
       "ended_s": 1700000015.1
     },
@@ -454,7 +454,7 @@
         "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
         "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
         "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
-        "pins": "007fdc1f7a6457e71427e2bf2346a6f7a397805a72e86026c513ad1b8e9df22e",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
         "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
       },
       "gpu": {
@@ -578,7 +578,7 @@
           "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
         }
       ],
-      "fingerprint": "2ca2f98816d6629158c3c79118ad55fa9bc25c77d9dfb51b9386ae32c068dafb",
+      "fingerprint": "9dd8ffd8db2f8bd8ccaa3e34a35099d94a1a5333b3bdb342f28a930b334a2394",
       "started_s": 1700000015,
       "ended_s": 1700000015.1
     },
@@ -599,7 +599,7 @@
         "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
         "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
         "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
-        "pins": "007fdc1f7a6457e71427e2bf2346a6f7a397805a72e86026c513ad1b8e9df22e",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
         "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
       },
       "gpu": {
@@ -723,7 +723,7 @@
           "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
         }
       ],
-      "fingerprint": "f3f7226fac73465ca1a66cec29eba7faae8989afaa0e0a0616977d600c0aee1e",
+      "fingerprint": "721436f462d8be234d9ed6ca906c9c33eecf6f30d1a0ea3667698b3aacf51e23",
       "started_s": 1700000015,
       "ended_s": 1700000015.1
     },
@@ -744,7 +744,7 @@
         "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
         "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
         "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
-        "pins": "007fdc1f7a6457e71427e2bf2346a6f7a397805a72e86026c513ad1b8e9df22e",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
         "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
       },
       "gpu": {
@@ -868,9 +868,13 @@
           "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
         }
       ],
-      "fingerprint": "9ae93dc80dd17e428668ab8b694650bb9897e4cc8459aef93a7beda2de57dd22",
+      "fingerprint": "94edb1213daf28494a1fdd3169d187f514145fcefe321bfccc34e4da331e5cce",
       "started_s": 1700000015,
       "ended_s": 1700000015.1
     }
-  ]
+  ],
+  "series": {
+    "id": "synthetic-original",
+    "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811"
+  }
 }
