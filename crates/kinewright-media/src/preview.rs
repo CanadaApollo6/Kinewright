@@ -350,6 +350,10 @@ pub(crate) struct Lane {
     /// sender is gone.
     #[cfg(test)]
     pub(crate) hold_at: Mutex<Option<(i64, Receiver<()>)>>,
+    /// Amendment R53's ordering witness: signal the next applied reader
+    /// plan's target and transport version, after releasing `Sched`.
+    #[cfg(test)]
+    plan_posted: Mutex<Option<Sender<(i64, u64)>>>,
     /// K-2: reader decodes that ended `Cancelled`.
     #[cfg(test)]
     pub(crate) cancelled: std::sync::atomic::AtomicUsize,
@@ -434,6 +438,8 @@ impl Lane {
             gate: Mutex::default(),
             #[cfg(test)]
             hold_at: Mutex::default(),
+            #[cfg(test)]
+            plan_posted: Mutex::default(),
             #[cfg(test)]
             cancelled: std::sync::atomic::AtomicUsize::default(),
             #[cfg(test)]
@@ -1852,6 +1858,13 @@ impl Preview {
             if let Some(posted) = posted.take() {
                 drop(state);
                 self.started(posted, demand);
+                #[cfg(test)]
+                {
+                    let planned = lane.plan_posted.lock().expect("plan posted").take();
+                    if let Some(planned) = planned {
+                        let _ = planned.send((at.0, wait.version));
+                    }
+                }
                 state = lane.lock();
                 continue;
             }
@@ -3405,9 +3418,10 @@ pub(crate) mod tests {
 
     /// Amendment R53 [S2c]: a newer job cancels the window's remaining
     /// conversions between frames. The reader is held before 17 (19, 18
-    /// done); a forward jump to 25 is posted; once it shows, no frame below
-    /// 17 of the old window was converted, and 17 itself, converted for the
-    /// old plan, decoded nothing.
+    /// done); a forward jump to 25 is posted and its reader plan applied
+    /// before 17 is released. Once it shows and the plan is served, no frame
+    /// below 17 of the old window was converted, and 17 itself, converted
+    /// for the old plan, decoded nothing.
     #[test]
     fn a_newer_job_cancels_the_rest_of_the_window() {
         let (_workload, document, lane, frames, thread) = r53_preview();
@@ -3420,11 +3434,20 @@ pub(crate) mod tests {
         )));
         shown_at(&frames, 19);
         wait_until(&lane, |state| decoding_at(state, 17));
+        let (planned, applied) = bounded(1);
+        *lane.plan_posted.lock().expect("plan posted") = Some(planned);
         lane.post(Some(job(
             &document,
             JobKind::Paused(TimeCode(25)),
             stamp(1, 3),
         )));
+        // `Lane::post` only queues transport work. Keep 17 held until the
+        // preview applies 25's reader plan, which cancels the old window.
+        assert_eq!(
+            applied.recv_timeout(Duration::from_secs(60)),
+            Ok((25, 3)),
+            "25's reader plan must be applied before releasing 17"
+        );
         drop(release);
         let shown = shown_at(&frames, 25);
         assert_eq!(
@@ -3432,7 +3455,18 @@ pub(crate) mod tests {
             reference(&document, 25).0[..],
             "C-5 at 25"
         );
-        wait_until(&lane, |state| !decoding(state));
+        wait_until(&lane, |state| {
+            !decoding(state)
+                && state.readers.slots.iter().all(|slot| {
+                    let required = slot
+                        .plan
+                        .required
+                        .iter()
+                        .map(|at| (slot.key.clone(), *at))
+                        .collect::<Vec<_>>();
+                    state.readers.resolve(&required).is_some()
+                })
+        });
         let decodes = lane.decodes.lock().expect("decodes").clone();
         let cancelled: Vec<_> = (decodes.iter())
             .filter(|d| (4..17).contains(&d.at))
