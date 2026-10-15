@@ -5137,8 +5137,9 @@ mod tests {
     }
 
     /// Review B F4: `sync_decoders` counts the decoders this engine's
-    /// renderers hold: open after a render, closed by a cache clear, and
-    /// none after teardown. `live_table_bytes` is nonzero after an SDR
+    /// renderers hold: the thumbnail decoder stays counted while held
+    /// through shutdown entry, and none remain after teardown.
+    /// `live_table_bytes` is nonzero after an SDR
     /// render and sane (no underflow) after teardown.
     #[test]
     fn sync_decoders_counts_open_decoders_until_teardown() {
@@ -5146,7 +5147,15 @@ mod tests {
         let crate::perf_fixtures::Workload(document, _media) =
             crate::perf_fixtures::cuts((160, 90), 30, 1, 2, 10);
         let gpu = fallback_gpu().context();
-        let engine = FfmpegMediaEngine::new_with_gpu_and_data_dir(gpu, temp.root().into()).unwrap();
+        let faults = Arc::new(Faults::default());
+        let engine = FfmpegMediaEngine::new_for_harness(
+            gpu,
+            temp.root().into(),
+            None,
+            Arc::clone(&faults),
+            Arc::default(),
+        )
+        .unwrap();
         let gauge = engine.decoder_gauge();
         let frames = engine.frames();
         engine.set_document(Arc::new(document));
@@ -5164,11 +5173,37 @@ mod tests {
         assert_eq!(stats.live_table_bytes % table, 0, "{stats:?}");
         engine.preview_cache_command(true).unwrap();
         assert_eq!(engine.stats().sync_decoders, 0, "cleared");
+        let (started, begun) = bounded(1);
+        let (release, held) = bounded::<()>(0);
+        let lane = Arc::clone(&engine.lane);
+        // Queue the hold before rendering: after the reply, idle cleanup
+        // must not close the thumbnail decoder before these assertions.
+        *faults.on_agent.lock().unwrap() = Some(Box::new(move || {
+            assert!(lane.try_push(AgentJob {
+                work: AgentWork::Hold {
+                    started,
+                    release: held,
+                },
+                cancel: Arc::default(),
+            }));
+        }));
         engine.thumbnail_at(TimeCode(15), 64).unwrap();
-        assert!(gauge.open() >= 1, "the thumbnail opened one");
+        begun
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the preview holds the thumbnail decoder");
+        assert_eq!(gauge.open(), 1, "the thumbnail opened one");
+        assert_eq!(engine.stats().sync_decoders, 1, "the live engine gauge");
+        let finished = engine.finished();
+        let lane = Arc::clone(&engine.lane);
         drop(engine);
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
-        while frames.recv_deadline(deadline).is_ok() {}
+        crate::preview::tests::wait_until(&lane, |state| state.shutdown);
+        assert_eq!(gauge.open(), 1, "still open at shutdown entry");
+        drop(release);
+        assert_eq!(
+            finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "the worker joined the preview and finished teardown",
+        );
         assert_eq!(gauge.open(), 0, "teardown closed every decoder");
         // What outlives it is whole tables the registry keeps (process
         // wide), never a count driven below zero by the teardown.
