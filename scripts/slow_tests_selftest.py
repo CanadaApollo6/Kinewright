@@ -131,6 +131,13 @@ def set_os(name_fragment: str, os_name: str):
 
 
 CC7_HARDWARE = "cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware"
+R79_PROBE_LOG = """test decode::tests::still_probe_failure_rides_backend_unclassified ... [png @ 0x7f9d54000e80] Invalid PNG signature 0x6E6F742061207374.
+[image2 @ 0x7f9d5405ba80] Could not find codec parameters for stream 0 (Video: png, none): unspecified size
+Consider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options
+[png @ 0x7f9d54019f40] Invalid PNG signature 0x6E6F742061207374.
+[image2 @ 0x7f9d54001580] Could not find codec parameters for stream 0 (Video: png, none): unspecified size
+Consider increasing the value for the 'analyzeduration' (0) and 'probesize' (5000000) options
+ok"""
 
 
 class PlainAndColour(unittest.TestCase):
@@ -231,6 +238,29 @@ class PartialParse(unittest.TestCase):
             lines[at: at + 1] = [f"{name} ... [h264 @ 000001F4A934BE80] late frame", outcome]
             code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
             self.assertEqual(code, 0, out)
+
+    def test_r79_literal_multiline_probe_log_keeps_the_result(self):
+        for windows in (False, True):
+            lines = self.lines(windows)
+            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            lines[at: at + 1] = R79_PROBE_LOG.splitlines()
+            code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
+            self.assertEqual(code, 0, out)
+
+    def test_r79_continuations_require_the_exact_message_and_immediate_context(self):
+        advice = R79_PROBE_LOG.splitlines()[2]
+        for text in (
+            R79_PROBE_LOG.replace(advice, "arbitrary text"),
+            R79_PROBE_LOG.replace("Could not find codec parameters", "unrelated FFmpeg message"),
+            R79_PROBE_LOG.replace(advice, advice + " trailing garbage"),
+            R79_PROBE_LOG.replace(advice, advice + "\n" + advice),
+            R79_PROBE_LOG.replace(advice, "[png @ 0x1] other message\n" + advice),
+        ):
+            with self.subTest(text=text):
+                lines = self.lines()
+                at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+                lines[at: at + 1] = text.splitlines()
+                self.assert_unparsable(lines, "summary says")
 
     def test_a_result_split_with_the_message_prefix_before_test_is_rejoined(self):
         # pf1 R47 gate log: the prefix landed before `test`, the message after " ... ", and `ok`
