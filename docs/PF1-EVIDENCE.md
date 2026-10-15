@@ -7697,6 +7697,36 @@ exercised.
   changed by 0 lines. The media library gave 1,118 passed, 0 failed,
   62 ignored. The full report is `target/review/pf/s3b/d14-oracle-fix.md`.
 
+**Timing-test races.** That run (`f0190db`) ran the Linux fast tier three
+times, and it failed each time on a different timing test. The preview code
+was identical to the green `c9dbe4d`. All three were test races, not
+production defects. Each fix is test-only, and the only additions are
+`#[cfg(test)]` hooks.
+- `a_newer_job_cancels_the_rest_of_the_window` (R53; also failed once on
+  Windows in S3a). `Lane::post` only queues work, so frame 17 could be
+  released before 25's reader plan was applied. A `plan_posted`
+  acknowledgement now orders the plan before the release (`692e46a`).
+- `sync_decoders_counts_open_decoders_until_teardown`. Idle decoder cleanup
+  (S2b-4) may close the thumbnail decoder before the test reads the gauge. A
+  queued agent hold now keeps it open through the check (`04ec542`).
+- `a_stopped_window_conversion_leaves_nothing_kept`. A stop inside the
+  preview's scheduling pass leaves the required frame 6 missing, and the
+  current plan legitimately decodes it again. The F6 cleanup itself ran: the
+  second decode of 6 started with `held=0`. The test now holds 6 until frame
+  19 publishes (`401b41b`).
+
+An audit of every hook-timed test found more with the same ordering
+assumptions, and `401b41b` hardens them too:
+- two window-step witnesses now wait for the applied-plan acknowledgement;
+- six tests that assumed a reader stays alive (idle readers retire after
+  `QUIESCENCE` of real time) now use a frozen, test-only reader clock;
+- the S3b teardown "waits" claim now matches what it proves.
+
+Each fix was shown red under forced ordering, or caught its mutation, and
+then passed. Stress across the changed tests ran 1,100 executions under a CPU
+hog with no failures. Reports are in `target/review/pf/s3b/`:
+`r53-flake.md`, `thumbnail-gauge-flake.md` and `stopped-window-flake.md`.
+
 **Status.** S3b's implementation, R75 measurements, local gates and review
 are complete. S3b closes when CI is green on Linux and Windows in both tiers.
 The RTX 4050 rerun owed under R73 since S3a is still owed.
