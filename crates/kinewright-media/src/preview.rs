@@ -4458,6 +4458,42 @@ pub(crate) mod tests {
         assert_eq!(rings.0, 3, "retirement keeps the frames");
     }
 
+    /// R79-0: real wall-clock expiry retires idle readers without a post
+    /// or an injected clock advance. The timeout also bounds the mutant.
+    #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
+    fn idle_readers_retire_after_natural_quiescence() {
+        let (document, _workload) = cut_document();
+        let (mut preview, _frames) = test_preview_on(
+            Arc::new(Lane::with_parallelism(3)),
+            Arc::new(SharedClock::new()),
+        );
+        preview.run_paused(
+            &job(&document, JobKind::Paused(TimeCode(0)), stamp(1, 1)),
+            0,
+        );
+        let lane = Arc::clone(&preview.lane);
+        assert!(lane.reader_clock.lock().expect("reader clock").is_none());
+        assert_eq!(*lane.skew.lock().expect("skew"), Duration::ZERO);
+        assert_eq!(lane.open_decoders(|_| true), 3, "real decoders opened");
+        let deadline = Instant::now() + crate::sched::QUIESCENCE + Duration::from_secs(5);
+        let mut state = lane.lock();
+        assert_eq!(state.readers.slots.len(), 3, "real readers started");
+        while !state.readers.slots.is_empty() {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("natural QUIESCENCE expiry did not retire idle readers");
+            state = state.wait_timeout(&lane.ready, left);
+        }
+        drop(state);
+        assert_eq!(lane.open_decoders(|_| true), 0, "expiry closed decoders");
+        drop(preview);
+        assert_eq!(lane.counters().stats.shutdown_detached_readers, 0);
+    }
+
     /// Review A F3 (M58), on the real condvar: at P = 3, A holds every
     /// permit; B then C queue for one each. A exits and notifies; C wakes
     /// first, sees B at the head and sleeps again; only then does B wake and

@@ -104,3 +104,4 @@ mcp_server r28_solo_peak_resources_and_elapsed crates/kinewright-agent/tests/mcp
 mcp_server solo_strip_inside_byte_budget crates/kinewright-agent/tests/mcp_server.rs  # 103/104
 
 kinewright_media sched::tests::the_reader_model_holds_for_every_short_sequence crates/kinewright-media/src/sched.rs # laptop Linux 147.82 s (D15 baseline); Windows unmeasured
+kinewright_media preview::tests::idle_readers_retire_after_natural_quiescence crates/kinewright-media/src/preview.rs # R79-0 real five-second QUIESCENCE; CI time unmeasured
