@@ -5025,10 +5025,11 @@ mod tests {
         let fps = Rational::new(10, 1).unwrap();
         let (mut worker, audio, _events) = stepped_worker(fps, TimeCode(500));
         let diagnostics = Arc::clone(&worker.audio_diagnostics);
+        diagnostics.set_stall_clock(0);
         audio.advance(CALLBACK_FRAMES);
         diagnostics.reset_stall();
-        for _ in 0..20 {
-            thread::sleep(Duration::from_millis(5));
+        for step in 1..=20 {
+            diagnostics.set_stall_clock(step * 5_000);
             audio.advance(CALLBACK_FRAMES);
         }
         let smooth = diagnostics.max_stall_ms(true);
@@ -5036,7 +5037,7 @@ mod tests {
         for _ in 0..60 {
             audio.advance(CALLBACK_FRAMES);
         }
-        thread::sleep(Duration::from_millis(150));
+        diagnostics.set_stall_clock(250_000);
         assert!(diagnostics.max_stall_ms(true) >= 150.0, "stalled now");
         worker.tick();
         audio.advance(CALLBACK_FRAMES);

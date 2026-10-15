@@ -4144,6 +4144,8 @@ pub(crate) struct AudioDiagnostics {
     /// callback that advanced it (µs since `origin`), and the longest gap
     /// between two advancing callbacks since the latest `play`.
     origin: std::sync::OnceLock<std::time::Instant>,
+    #[cfg(test)]
+    stall_clock_micros: AtomicU64,
     last_advance_micros: AtomicU64,
     max_stall_micros: AtomicU64,
     /// The device's playback timestamp minus its callback timestamp, never
@@ -4162,6 +4164,8 @@ impl Default for AudioDiagnostics {
             programme_end: AtomicU64::new(u64::MAX),
             programme_consumed: AtomicBool::default(),
             origin: std::sync::OnceLock::default(),
+            #[cfg(test)]
+            stall_clock_micros: AtomicU64::new(u64::MAX),
             last_advance_micros: AtomicU64::default(),
             max_stall_micros: AtomicU64::default(),
             latency_micros: AtomicU64::default(),
@@ -4192,8 +4196,20 @@ impl AudioDiagnostics {
     }
 
     fn micros_now(&self) -> u64 {
+        #[cfg(test)]
+        {
+            let now = self.stall_clock_micros.load(Ordering::Acquire);
+            if now != u64::MAX {
+                return now;
+            }
+        }
         let origin = *self.origin.get_or_init(std::time::Instant::now);
         u64::try_from(origin.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_stall_clock(&self, micros: u64) {
+        self.stall_clock_micros.store(micros, Ordering::Release);
     }
 
     /// A callback advanced the clock (R31 b).
