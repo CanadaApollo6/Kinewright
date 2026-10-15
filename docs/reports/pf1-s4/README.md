@@ -21,11 +21,11 @@ R74a's final preflight sample must precede run start by at most ten seconds. Pol
 
 ## Immutable runner archive
 
-Archive SHA-256 is `65524e8e64092f290d901ec2d90d088ef1c255af076059ac0d411584b6439e15`. Its seven members include the three extensions, the parent hash manifest and the unchanged S3b parent sources. Member bytes are checked after writing. The archive is local and read-only; no remote copy is claimed.
+Archive SHA-256 is `4aaba41b5c54331291889bdbdbc07b2a4111b809f210815c9552d205621b7dab`. Its seven members include the three extensions, the parent hash manifest and the unchanged S3b parent sources. Member bytes are checked after writing. The archive is local and read-only; no remote copy is claimed.
 
 ```bash
-pf1_archive=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4/archives/65524e8e64092f290d901ec2d90d088ef1c255af076059ac0d411584b6439e15.tar
-printf '%s  %s\n' 65524e8e64092f290d901ec2d90d088ef1c255af076059ac0d411584b6439e15 "$pf1_archive" | sha256sum --check
+pf1_archive=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4/archives/4aaba41b5c54331291889bdbdbc07b2a4111b809f210815c9552d205621b7dab.tar
+printf '%s  %s\n' 4aaba41b5c54331291889bdbdbc07b2a4111b809f210815c9552d205621b7dab "$pf1_archive" | sha256sum --check
 mkdir -p target/pf1-s4-reproduction
 tar -xf "$pf1_archive" -C target/pf1-s4-reproduction
 ```

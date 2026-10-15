@@ -1,4 +1,3 @@
-"""Owned Linux child lifecycle; never signals an inventory process."""
 from contextlib import contextmanager
 import os
 import signal

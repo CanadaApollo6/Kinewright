@@ -1,4 +1,3 @@
-"""Portable PF1 artifact validation. Launchers and device collectors stay outside this module."""
 import argparse
 import hashlib
 import itertools
@@ -10,7 +9,6 @@ import statistics
 
 SCHEMA = json.loads((Path(__file__).resolve().parents[2] / 'docs/PF1-PINS.schema.json').read_text())
 PLAY = set('typical_1080p blend_heavy_1080p explainer_16x9 reel_9x16 feed_4x5 talk_recut'.split())
-# Only these complete contracts may produce gate_pass. Other gates remain incomplete.
 CONTRACTS = {
     'I4': ('LL LH', 'P-comp', {'typical_1080p'}, {}),
     'G18': ('LH', 'export', {'typical_1080p'}, {'export_clips': 24, 'frames': 120}),
@@ -20,20 +18,17 @@ CONTRACTS = {
     'G2': ('LH', 'native-display', PLAY - {'typical_1080p', 'blend_heavy_1080p'}, {}),
     'G1': ('LH', 'P-play', {'typical_1080p'}, {}),
     'G6': ('LL LH', 'P-play', PLAY, {}),
-    'G16': ('LL LH', 'P-play', PLAY, {}),
-    'G14': ('LH', 'P-play', PLAY, {}),
     'VM-D6': ('VM-W', 'VM', {'typical_1080p'}, {}),
     'G7a': ('CI-L CI-W', 'correctness', {'app_readback'}, {}),
     **{gate: ('LL', 'counters', {'seek_gop60', 'explainer_16x9'}, {}) for gate in ['R65-historical', 'R65-intervening', 'R65-cumulative']},
 }
-COUNTERS = {name: ('R65', 'count', 0) for name in 'admission_waits windows_filled count_run_decoded count_run_converted count_refill_decoded count_refill_converted count_back_hits count_back_refills count_back_hits_preconverted count_refills_started conv_t_n conv_w_n'.split()}
+COUNTERS = {name: ('R65', 'count', 0) for name in 'admission_waits windows_filled count_run_decoded count_run_converted count_refill_decoded count_refill_converted count_back_hits count_back_refills count_back_hits_preconverted count_refills_started count_kept_handoff_redecode conv_t_n conv_w_n'.split()}
 COUNTERS.update({name: ('zero', 'count', 0) for name in ['timeouts', 'count_idle_discard', 'guard_trips']})
 RULES = {
     'I4': {'mean_ms': ('ratio', 'ms', 1.05)},
     'G18': {'wall_ms': ('ratio', 'ms', 1.05), 'output_sha256': ('equal', 'sha256', 0)},
     'G15': {'settled_bytes': ('delta', 'byte', 4194304)},
     'G3': {'fps': ('each_ge', 'fps', 60)},
-    'G16': {'stall_ms': ('R50_abs', 'ms', 100)}, 'G14': {'held_ms': ('R50_abs', 'ms', 100)},
     **{gate: {'miss_pct': ('R50_abs', 'percent', 1), 'present_p95_ms': ('R50_abs', 'ms', 50)} for gate in ['G1', 'G2']},
     'G6': {'present_ratio': ('R50_abs', 'ratio', 3)},
     'G7a': {'readbacks': ('zero', 'count', 0)}, 'VM-D6': {'fps': ('each_ge', 'fps', 20)},

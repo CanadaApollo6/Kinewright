@@ -1,4 +1,3 @@
-"""Synthetic artifact witnesses; --mutation NAME changes only the named decision."""
 import copy
 import itertools
 import fnmatch
@@ -31,6 +30,7 @@ MUTATIONS = {
     'incomplete': ("len(rows) == len(order)", "True"),
     'exit': ("any(r['exit'] != 0 for r in rows)", "False"),
     'environment': ("any(r['validity'] == 'environment_limited_at_load' for r in rows)", "False"),
+    'unsupported': ("require(gate in CONTRACTS, 'unsupported/incomplete gate contract')", "gate = 'I4'"),
     'contract': ("pins['lane'] in lanes.split() and protocol['name'] == name and set(inputs[pins['arms']['candidate']]) == workloads", "True"),
     'freshness': ("0 <= started_s - samples[-1]['timestamp_s'] <= 10", "True"),
     'strict_floor': ("pins['gate'] in ['G3', 'VM-D6'] or ", ""),
@@ -151,6 +151,8 @@ class Pins(unittest.TestCase):
             for sample in self.status['runs'][0]['preflight']: sample['timestamp_s'] += offset
             self.run_record(2)
 
+    def test_unsupported(self):
+        self.pins['gate']='G16'; self.status['gate']='G16'; self.run_record(2)
     def test_export_equal(self):
         self.configure('G18'); self.status['runs'][1]['metrics']['output_sha256']='b'*64; self.run_record(1)
     def test_export_time(self):
@@ -179,9 +181,13 @@ class Pins(unittest.TestCase):
     def test_counter_registry(self):
         for change in ['omit','downgrade']:
             self.setUp(); self.configure('R65-historical'); self.run_record(0)
-            if change=='omit': self.pins['metrics'].pop('timeouts')
-            else: self.pins['metrics']['timeouts'].update(decision='R65',scope='paired_median')
-            self.run_record(2)
+            if change=='omit':
+                self.pins['metrics'].pop('timeouts')
+                for row in self.status['runs']:
+                    row['metrics'].pop('timeouts')
+            else:
+                self.pins['metrics']['timeouts'].update(decision='R65',scope='paired_median')
+            with self.subTest(change=change): self.run_record(2)
     def test_rotation_seeds(self):
         self.configure('R65-historical')
         for row in self.pins['protocol']['order']+self.status['runs']: row['seed']=11
@@ -203,9 +209,9 @@ class Pins(unittest.TestCase):
         repo = Path(__file__).resolve().parents[2]
         paths = ['docs/PF1-PINS.json','docs/PF1-PINS.schema.json'] + [str(p.relative_to(repo)) for p in (repo/'docs/reports/pf1-s4/example').iterdir()]
         attrs = subprocess.check_output(['git','check-attr','eol','--']+paths, cwd=repo, text=True)
-        self.assertTrue(all(line.endswith(': lf') for line in attrs.splitlines()))
         subprocess.run(['git','-c','core.autocrlf=true','checkout-index','--all','--prefix='+str(self.root/'checkout')+'/'], cwd=repo, check=True, capture_output=True)
         for path in paths: self.assertEqual(subprocess.check_output(['git','show',':'+path], cwd=repo), (self.root/'checkout'/path).read_bytes())
+        self.assertTrue(all(line.endswith(': lf') for line in attrs.splitlines()))
     def test_ci_trigger(self):
         workflow = (Path(__file__).resolve().parents[2]/'.github/workflows/ci.yml').read_text()
         ignores = re.findall(r"^      - '([^']+)'", workflow, re.M)
