@@ -23,7 +23,10 @@ def collect(plan, root, work, launch):
             with (work/f'attempts-{index}.jsonl').open('x') as journal:
                 for ordinal, entry in enumerate(pins['protocol']['order']):
                     role = 'reference' if entry['arm'] == pins['arms'].get('reference') else 'candidate'
-                    code, row = launch(index, ordinal, entry, role, pinfile, pins, builds, item)
+                    try:
+                        code, row = launch(index, ordinal, entry, role, pinfile, pins, builds, item)
+                    except (OSError, ValueError) as error:
+                        code, row = 2, dict(validity='invalid_evidence', exit=2, reason=str(error))
                     journal.write(json.dumps(dict(entry=entry, exit=code, row=row))+'\n')
                     journal.flush()
                     rows.append(row)

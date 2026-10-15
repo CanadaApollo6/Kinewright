@@ -1,6 +1,6 @@
 # PF1 S4a run 4 reproduction checkpoint
 
-Run 4 retains 994 counted lines against the final 1000 stop, with zero shipping production changes. Acceptance still requires the lead's narrow re-review and both hosted CI platforms. No timing lane, GPU setting change, SSH or push was performed. The run report records checks and outstanding verification.
+Run 4 stops at exactly 1000 retained counted lines against the final 1000 stop, with zero shipping production changes. Acceptance still requires the lead's narrow re-review and both hosted CI platforms. No timing lane, GPU setting change, SSH or push was performed. The run report records checks and outstanding verification.
 
 ## Versioned contract
 
@@ -32,7 +32,7 @@ Use this commit's validator, schema, launch and series modules. Include the actu
 
 ## Collection and replacements
 
-A series plan has the form `{"id":"unique-attempt-id","gates":[{"pins":{"path":"relative/pins.json","sha256":"<sha256>"},"test":"existing_test_name","series":{}}]}`. The wrapper creates an exclusive attempt journal and immutable series manifest under `work/series-<id>`. It saves every returned attempt and hashes the journal plus attempt artifacts, including malformed/busy raw output. Resume checks the saved plan and revalidates every referenced artifact. It never relaunches a cached aggregate automatically.
+A series plan has the form `{"id":"unique-attempt-id","gates":[{"pins":{"path":"relative/pins.json","sha256":"<sha256>"},"test":"existing_test_name","series":{}}]}`. The wrapper creates an exclusive attempt journal and immutable series manifest under `work/series-<id>`. It records returned attempts and caught OSError/ValueError launcher failures, writes a rejected aggregate, and hashes the journal plus attempt artifacts, including malformed/busy raw output. Resume checks the saved plan and revalidates every referenced artifact. It never relaunches a cached aggregate automatically.
 
 For a manually initiated complete replacement, choose a new ID and set the gate's `series` to `{"previous":{"path":"old/status-0.json","sha256":"<sha256>"},"rejection":{"exit":2,"reason":"explicit rejected-series reason"}}`. The old status must identify its original series and exact pins hash. Complete replacement uses the entire frozen order, not selected successful pairs. Cross-pins links, repeated ancestry and a predecessor without attempt artifacts are invalid. Rejection codes must match the predecessor's evaluated disposition. Keep every rejected status, journal, raw file and hash.
 
@@ -40,4 +40,4 @@ A threshold-failed predecessor requires a hashed `rejection.disposition` object 
 
 The minimal collector is LL/lavapipe native G4. Its test-only hook reads the selected session's `AdapterInfo`, emits software status, driver information and final fps/Q2 validity, and publishes atomically. The launcher derives Mesa/LLVM and the configured single ICD manifest hash from that readback, verifies it against pins, and binds publications to a fresh per-launch token and the launch timestamp. The monitor checks before every sampling step. Absolute misses reach complete paired decisions; genuine correctness assertions still return 101. The preflight's final sample must be at or before actual launch and at most ten seconds old.
 
-Real LL collection is unmeasured in this unit. Other protocols do not acquire a collector merely by appearing in the portable registry. Native I4/R65/RSS collection and complete parent-interruption recovery remain unproven. LH UUID correlation, hardware policy readback and native LH integration stay in S4c after Q1. D13 stays in S4b; E16 and closure stay in S4c. Q1/Q5 and all historical unresolved measurements remain open.
+Real LL collection is unmeasured in this unit. Host manifest integrity is checked, but current CPU/RAM/OS readback is not compared at launch. Other protocols do not acquire a collector merely by appearing in the portable registry. Native I4/R65/RSS collection and complete parent-interruption recovery remain unproven. LH UUID correlation, hardware policy readback and native LH integration stay in S4c after Q1. D13 stays in S4b; E16 and closure stay in S4c. Q1/Q5 and all historical unresolved measurements remain open.

@@ -52,12 +52,13 @@ MUTATIONS = {
     'denominator': ("require(all(x > 0 for x in a), 'zero reference denominator')", "if not all(x > 0 for x in a): return 0"),
     'role': ("role = 'reference' if entry['arm'] == pins['arms'].get('reference') else 'candidate'", "role = entry['arm']"),
     'runner_exit': ("return code if code in [2, 75, 101] else 2", "return 0"),
+    'launch_error': ("code, row = 2, dict(validity='invalid_evidence', exit=2, reason=str(error))", "raise"),
     'r50': ("else 75 for x, y in zip(a, b)", "else 0 for x, y in zip(a, b)"),
 }
 if '--mutation' in sys.argv:
     index = sys.argv.index('--mutation'); name = sys.argv[index+1]; del sys.argv[index:index+2]
     old, new = MUTATIONS[name]
-    target = runner if name in ['resume', 'role', 'runner_exit'] else launch if name in ['owned_cleanup', 'gpu_table', 'live'] else v
+    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live'] else v
     source = Path(target.__file__).read_text(); assert old in source
     exec(compile(source.replace(old, new), target.__file__, 'exec'), target.__dict__)
 
@@ -261,6 +262,8 @@ class Pins(unittest.TestCase):
             fake=Mock(side_effect=lambda index,ordinal,*args:(exit_code,self.status['runs'][ordinal]))
             self.assertEqual(runner.collect(plan,self.root,self.root/str(expected),fake),expected)
             self.assertEqual(fake.call_count,1 if exit_code else len(self.status['runs']))
+        self.assertEqual(runner.collect(plan,self.root,self.root/'launch-error',Mock(side_effect=OSError('disposable launcher error'))),2)
+        self.assertTrue((self.root/'launch-error/status-0.json').exists())
 
     def test_reference(self):
         self.configure('G18')
