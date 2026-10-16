@@ -7,12 +7,19 @@ struct D13Probe {
     native: bool,
 }
 
-struct D13Sampler<'a>(&'a D13Probe, Option<thread::JoinHandle<u64>>);
+struct D13Sampler<'a>(&'a D13Probe, Option<thread::JoinHandle<u64>>, Instant);
 impl Drop for D13Sampler<'_> {
     fn drop(&mut self) {
         self.0.done.store(true, Ordering::Release);
         if let Some(sampler) = self.1.take() {
-            let _ = sampler.join();
+            while !sampler.is_finished() && Instant::now() < self.2 {
+                thread::sleep(SAMPLE);
+            }
+            if sampler.is_finished() {
+                let _ = sampler.join();
+            } else {
+                eprintln!("D13 sampler did not stop by the cleanup deadline");
+            }
         }
     }
 }
@@ -24,8 +31,8 @@ impl D13Probe {
         lane: &crate::preview::Lane,
         sampler: thread::JoinHandle<u64>,
     ) -> u64 {
-        let mut sampler = D13Sampler(self, Some(sampler));
         let until = Instant::now() + Duration::from_secs(30);
+        let mut sampler = D13Sampler(self, Some(sampler), until);
         self.ledger.release();
         let cleanup = teardown_until(session, until);
         let cleaned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -66,6 +73,9 @@ impl D13Probe {
             let version = tag & u64::from(u32::MAX);
             let ids = self.ledger.retained();
             let mut samples = self.samples.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.done.load(Ordering::Acquire) {
+                break;
+            }
             let time = if self.native {
                 self.epoch.elapsed().as_micros()
             } else {
