@@ -1,5 +1,28 @@
 # PF1 S4 reproduction checkpoints
 
+## S4c round 3 frozen-input checkpoint
+
+R91 limits new lanes to LL G4/G15/D13; LH G1/G2/G14 move to PF1-LH,
+deferred, not passed. This input checkpoint does not establish a native verdict.
+The shared test-only `pf1_harness::s4_prepare_inputs` exports one selected workload
+into a new `PF1_ROOT/PF1_PREPARE` directory before pins are frozen. The preparation
+copies each source, rewrites the document to those paths, and checks the exported
+bytes. Invoke it with `PF1_ONLY=<workload>` and `--ignored --exact`.
+
+The launcher forwards the pinned workload manifest with its digest. The native
+importer verifies the document, exact media list/paths and every media digest;
+its publications carry the three consumed manifest digests. Launch and final
+readback rehash both the manifests and nested media files and reject omitted or
+substituted consumption. Preparation is separate from measurement.
+
+Runner archive: `target/review/pf/s4/archives/226fd2764305be0c9982b6111f691d208ac74176d75f7302c67e1aa29245a9d4.tar`,
+SHA-256 `226fd2764305be0c9982b6111f691d208ac74176d75f7302c67e1aa29245a9d4`. Restore it as below using that digest and this commit's versioned
+modules. `s4/s4c/round-3/input-runner-archive.json` binds the seven members.
+Control `Wrapper.test_frozen_consumption --mutation consumption` removes the
+consumption guard in a private runner copy; the native hash control is recorded
+with its restored green under the round-3 logs. The native collectors and final
+lane outcomes are recorded separately in the round-3 report.
+
 ## S4c round 2 host and runner checkpoint
 
 This checkpoint adds Linux CPU, total physical RAM, kernel version and

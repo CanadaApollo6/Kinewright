@@ -346,7 +346,9 @@ pub(crate) fn play_workloads() -> Vec<(&'static str, Workload)> {
         ("talk_recut", perf_fixtures::talk_recut),
     ];
     let wanted = all.into_iter().filter(|(key, _)| wanted(key));
-    wanted.map(|(key, make)| (key, make())).collect()
+    wanted
+        .map(|(key, make)| (key, s4_input(key).unwrap_or_else(make)))
+        .collect()
 }
 
 fn typical_60s() -> Workload {
@@ -1278,7 +1280,12 @@ fn pf1_rss_baseline() {
     assert_release();
     let lane = lane().1;
     let mut all = play_workloads();
-    all.push(("title_only", perf_fixtures::title_only()));
+    if wanted("title_only") {
+        all.push((
+            "title_only",
+            s4_input("title_only").unwrap_or_else(perf_fixtures::title_only),
+        ));
+    }
     all.retain(|(key, _)| wanted(key));
     for (key, Workload(document, _media)) in all.iter().flat_map(|w| std::iter::repeat_n(w, 3)) {
         let temp = TempDirectory::new("pf1-rss");
@@ -1326,8 +1333,10 @@ fn pf1_rss_child() {
         return;
     };
     assert_release();
-    let document: Document =
-        serde_json::from_slice(&std::fs::read(path).expect("reads")).expect("a document");
+    let document: Document = s4_input(&std::env::var("PF1_ONLY").unwrap_or_default()).map_or_else(
+        || serde_json::from_slice(&std::fs::read(path).expect("reads")).expect("a document"),
+        |w| w.0,
+    );
     if let Ok(frozen) = std::env::var("PF1_D13_CALIBRATION") {
         let calibration: serde_json::Value =
             serde_json::from_str(&frozen).expect("D13 calibration");
@@ -1751,5 +1760,6 @@ fn an_invalid_p_play_run_fails_the_lane() {
 
 include!("s3b_native_harness.rs");
 include!("pf1_s4_child.rs");
+include!("pf1_s4_inputs.rs");
 
 include!("pf1_d13.rs");

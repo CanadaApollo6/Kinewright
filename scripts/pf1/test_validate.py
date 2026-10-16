@@ -222,16 +222,32 @@ class Pins(unittest.TestCase):
             launch.checked(launch.gpu_sample,dict(exit=0,output='Processes:\n'),dict(exit=0,output='0, synthetic-uuid, 0'),1700000000,set())
         self.assertEqual(raised.exception.code,2)
 
+    def freeze_inputs(self):
+        inputs = v.read(self.root/self.pins['inputs']['path'])
+        for workloads in inputs.values():
+            for key, value in workloads.items():
+                media = self.root/(key+'-media.json')
+                media.write_text(json.dumps(dict(files=[])))
+                value['media'] = dict(path=media.name, sha256=v.digest(media))
+                manifest = self.root/(key+'-workload.json')
+                manifest.write_text(json.dumps(dict(key=key, document=value['document'], media=value['media'])))
+                value['workload'] = dict(path=manifest.name, sha256=v.digest(manifest))
+        path = self.root/self.pins['inputs']['path']
+        path.write_text(json.dumps(inputs))
+        self.pins['inputs']['sha256'] = v.digest(path)
+
     def test_live(self):
         self.configure('G4')
+        self.freeze_inputs()
         path = self.root/'live.json'
         raw = dict(token='fresh', timestamp_s=12, selected=dict(backend='Vulkan',name='llvmpipe (LLVM 20.1.5, 256 bits)',vendor_id=65541,device_id=0,driver='llvmpipe'), driver_info='Mesa 25.1.0',software=True)
         raw['protocol'] = dict(name='native-display',poll_ms=5,warmup_ms=2000,duration_s=60)
+        raw['consumed'] = launch.input_binding(self.pins, self.root, 0)
         icd = self.root/'lvp.json'; icd.write_text('fake ICD manifest')
         gpu = dict(selected=raw['selected'],stack=dict(runtime=raw['driver_info'],mesa='25.1.0',llvm='20.1.5',icd_manifest_sha256=v.digest(icd)),policy=dict(kind='software'),telemetry=dict(status='unavailable',reason='software adapter has no hardware clocks'))
         self.pins['gpu'] = copy.deepcopy(gpu)
         clock = Mock(return_value=15)
-        check = lambda: launch.live_record(path,'fresh',10,clock(),self.pins,dict(os='linux'),self.root,dict(VK_ICD_FILENAMES=str(icd)))
+        check = lambda: launch.live_record(path,'fresh',10,clock(),self.pins,dict(os='linux'),self.root,dict(VK_ICD_FILENAMES=str(icd),PF1_ROW='0'))
         self.assertIsNone(check())
         clock.return_value=21
         with self.assertRaises(ValueError): check()

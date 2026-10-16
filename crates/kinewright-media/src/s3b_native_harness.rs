@@ -25,6 +25,11 @@ fn s4_publish_metrics(
 ) {
     if let Ok(path) = std::env::var("PF1_RECORD") {
         let mut record = s4_device(gpu);
+        S4_INPUT.with_borrow(|slot| {
+            if let Some(consumed) = slot {
+                record["consumed"] = consumed.clone();
+            }
+        });
         record["token"] = std::env::var("PF1_TOKEN").expect("collector token").into();
         record["protocol"] = protocol;
         record["timestamp_s"] = std::time::SystemTime::now()

@@ -50,6 +50,8 @@ def live_record(path, token, started, now, pins, host, root, environment):
         v.require(now-started < 10, 'missing live collector readback')
         return None
     record = v.read(path)
+    expected = input_binding(pins, root, int(environment['PF1_ROW']))
+    v.require(record.get('consumed') == expected, 'frozen inputs omitted/substituted/unconsumed')
     v.require(record['token'] == token and started <= record['timestamp_s'] <= now, 'stale/future collector publication')
     v.schema(record['selected'], v.SCHEMA['$defs']['selected'])
     required = dict(name=pins['protocol']['name'], poll_ms=5, **v.CONTRACTS[pins['gate']][3])
@@ -64,6 +66,23 @@ def live_record(path, token, started, now, pins, host, root, environment):
     v.schema(gpu, v.SCHEMA['$defs']['gpu'])
     v.gpu_check(gpu, pins, host, root)
     return record, gpu
+
+def input_binding(pins, root, ordinal):
+    entry = pins['protocol']['order'][ordinal]
+    value = v.artifact(root, pins['inputs'], 'inputs')[entry['arm']][entry['workload']]
+    for key in ['workload', 'media', 'document']:
+        v.artifact(root, value[key])
+    manifest = v.read(root/value['workload']['path'])
+    v.require(manifest == dict(key=entry['workload'], document=value['document'], media=value['media']), 'substituted input manifest')
+    for ref in v.read(root/value['media']['path'])['files']:
+        v.artifact(root, ref)
+    return {key: value[key]['sha256'] for key in ['workload', 'media', 'document']}
+
+def input_environment(pins, root, ordinal):
+    input_binding(pins, root, ordinal)
+    entry = pins['protocol']['order'][ordinal]
+    value = v.read(root/pins['inputs']['path'])[entry['arm']][entry['workload']]
+    return dict(PF1_FROZEN_INPUT=str(root/value['workload']['path']), PF1_FROZEN_SHA256=value['workload']['sha256'])
 
 def gpu_sample(table, query, timestamp, owned):
     v.require(table['exit'] == query['exit'] == 0, 'failed GPU query')

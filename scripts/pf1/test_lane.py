@@ -13,13 +13,22 @@ import validate as v
 import launch
 
 CHILD = '''#!/usr/bin/env python3
-import json, os, signal, sys, time
+import hashlib, json, os, signal, sys, time
 from pathlib import Path
 case = os.environ['PF1_FIXTURE_CASE']
 print('child_pid=' + str(os.getpid()), flush=True)
 print('seed=' + os.environ['PF1_SEED'], flush=True)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 record = json.loads(Path(os.environ['PF1_FIXTURE']).read_text())
+inputs = json.loads(Path(os.environ['PF1_FIXTURE_INPUTS']).read_text())
+row = json.loads(Path(os.environ['PF1_PINS']).read_text())['protocol']['order'][int(os.environ['PF1_ROW'])]
+value = inputs[row['arm']][row['workload']]
+record['consumed'] = {key: value[key]['sha256'] for key in ['workload', 'media', 'document']}
+record['consumed']['workload'] = hashlib.sha256(Path(os.environ['PF1_FROZEN_INPUT']).read_bytes()).hexdigest()
+if case == 'unconsumed':
+    record.pop('consumed')
+if case == 'substituted':
+    record['consumed']['document'] = 'f' * 64
 record.update(token=os.environ['PF1_TOKEN'], timestamp_s=time.time())
 path = Path(os.environ['PF1_RECORD'])
 def publish():
@@ -44,6 +53,7 @@ if case != 'no-final':
 '''
 
 MUTATIONS = {
+    'consumption': ('launch.py', "record.get('consumed') == expected", 'True'),
     'publication': ('lane.py', "pins.require(collected is not None,'missing final collector record')", "collected = collected or (json.loads(Path(env['PF1_FIXTURE']).read_text()) | dict(valid=True,metrics=dict(fps=30)),spec['gpu'])"),
     'final': ('lane.py', "pins.require('metrics' in raw and type(raw.get('valid')) is bool,'missing final measurements')", "raw.update(valid=True,metrics=raw.get('metrics',dict(fps=30)))"),
     'receipt': ('lane.py', "receipt=receipt_ref)", "receipt=None)"),
@@ -69,11 +79,16 @@ import test_validate as fixtures
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux wrapper integration')
 class Wrapper(unittest.TestCase):
+    def test_frozen_consumption(self):
+        self.pipeline('unconsumed', 2)
+        self.pipeline('substituted', 2)
+
     def setUp(self):
         self.fixture = fixtures.Pins()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.fixture.configure('G4')
+        self.fixture.freeze_inputs()
         self.fixture.run_record(0)
         self.temp = tempfile.TemporaryDirectory(prefix='kinewright-s4c-wrapper-')
         self.addCleanup(self.temp.cleanup)
@@ -121,7 +136,7 @@ class Wrapper(unittest.TestCase):
         nvidia = tools / 'nvidia-smi'
         nvidia.write_text('#!/bin/sh\nprintf "synthetic GPU inventory\\n"\n')
         nvidia.chmod(0o755)
-        self.env = dict(os.environ, PF1_REPO=str(self.root / 'repo'), PF1_ROOT=str(self.root), PF1_FIXTURE=str(self.root / 'fixture.json'), VK_DRIVER_FILES=str(icd), PATH=str(tools) + os.pathsep + os.environ['PATH'])
+        self.env = dict(os.environ, PF1_REPO=str(self.root / 'repo'), PF1_ROOT=str(self.root), PF1_FIXTURE=str(self.root / 'fixture.json'), PF1_FIXTURE_INPUTS=str(self.root / self.pins['inputs']['path']), VK_DRIVER_FILES=str(icd), PATH=str(tools) + os.pathsep + os.environ['PATH'])
 
     def pipeline(self, case, expected):
         self.env['PF1_FIXTURE_CASE'] = case
