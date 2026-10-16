@@ -95,3 +95,4 @@ kinewright_media pf1_harness::s3b_native_play_lane crates/kinewright-media/src/s
 kinewright_media pf1_harness::s3b_d12_working_step_lane crates/kinewright-media/src/s3b_native_harness.rs any on-demand  # S3b paired release evidence with load and bounded owned runner
 
 kinewright_media pf1_harness::s3b_i4_lane crates/kinewright-media/src/s3b_native_harness.rs any on-demand  # S3b paired release evidence with load and bounded owned runner
+kinewright_media pf1_harness::s4_d13_active crates/kinewright-media/src/pf1_d13.rs any on-demand  # PF1 D13: three fresh release children and 30 active retention cycles

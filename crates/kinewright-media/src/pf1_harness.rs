@@ -1325,6 +1325,16 @@ fn pf1_rss_child() {
     assert_release();
     let document: Document =
         serde_json::from_slice(&std::fs::read(path).expect("reads")).expect("a document");
+    if let Ok(frozen) = std::env::var("PF1_D13_CALIBRATION") {
+        let calibration: serde_json::Value =
+            serde_json::from_str(&frozen).expect("D13 calibration");
+        d13_run(
+            &document,
+            calibration["d_bytes"].as_u64().expect("d") as usize,
+            true,
+        );
+        return;
+    }
     let memory = || process_memory().expect("process memory");
     let show = |m: ProcessMemory| format!("{:.1}/{}", mib(m.rss), m.threads);
     let before = memory();
@@ -1732,3 +1742,5 @@ fn an_invalid_p_play_run_fails_the_lane() {
 
 include!("s3b_native_harness.rs");
 include!("pf1_s4_child.rs");
+
+include!("pf1_d13.rs");

@@ -357,6 +357,8 @@ pub(crate) struct Lane {
     /// plan's target and transport version, after releasing `Sched`.
     #[cfg(test)]
     plan_posted: Mutex<Option<Sender<(i64, u64)>>>,
+    #[cfg(test)]
+    pub(crate) d13: Option<Arc<crate::s4_d13::Ledger>>,
     /// K-2: reader decodes that ended `Cancelled`.
     #[cfg(test)]
     pub(crate) cancelled: std::sync::atomic::AtomicUsize,
@@ -412,6 +414,10 @@ pub(crate) struct Lane {
 
 impl Default for Lane {
     fn default() -> Self {
+        #[cfg(test)]
+        if crate::s4_d13::START.with_borrow(Option::is_some) {
+            return Self::with_parallelism(1);
+        }
         Self::with_parallelism(thread::available_parallelism().map_or(1, usize::from))
     }
 }
@@ -445,6 +451,8 @@ impl Lane {
             hold_at: Mutex::default(),
             #[cfg(test)]
             plan_posted: Mutex::default(),
+            #[cfg(test)]
+            d13: crate::s4_d13::START.with_borrow(Clone::clone),
             #[cfg(test)]
             cancelled: std::sync::atomic::AtomicUsize::default(),
             #[cfg(test)]
@@ -933,6 +941,8 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
     // Amendment R43: declared first, so it runs last (after `Sched` is
     // released and the decoder closed), on return and on unwind alike.
     let _exit = Exit { lane, id };
+    #[cfg(test)]
+    crate::s4_d13::START.with_borrow_mut(|slot| slot.clone_from(&lane.d13));
     let mut decoder: Option<VideoDecoder> = None;
     let mut threads = 0;
     let mut state = lane.lock();
@@ -940,7 +950,16 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
         let now = lane.now();
         let shutdown = state.shutdown;
         match state.readers.next(id, now, shutdown) {
-            Next::Retire => break,
+            Next::Retire => {
+                #[cfg(test)]
+                {
+                    drop(state);
+                    if let Some(d13) = &lane.d13 {
+                        d13.boundary(None);
+                    }
+                }
+                break;
+            }
             Next::Wait { until } => {
                 #[cfg(test)]
                 crate::pf1_clock::waits(id);
@@ -966,6 +985,10 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
             }
             Next::Close => {
                 drop(state);
+                #[cfg(test)]
+                if let Some(d13) = &lane.d13 {
+                    d13.boundary(None);
+                }
                 drop(decoder.take());
                 #[cfg(test)]
                 lane.decoder_open(id, false);
@@ -992,6 +1015,10 @@ fn read(lane: &Arc<Lane>, id: u64, spec: &SourceSpec, stop: &Arc<AtomicBool>) {
                 let hold = Hold::adopt(lane, bytes);
                 #[cfg(test)]
                 lane.before_decode(id, at);
+                #[cfg(test)]
+                if let Some(d13) = &lane.d13 {
+                    d13.boundary(Some(at));
+                }
                 let seeks = decoder.as_ref().map_or(0, VideoDecoder::seek_count);
                 #[cfg(test)]
                 let before = DecodeRecord::work(decoder.as_ref());
@@ -1093,6 +1120,10 @@ fn discard<'a>(
     (id, keep, bytes): (u64, (i64, i64), usize),
 ) -> Sched<'a> {
     drop(state);
+    #[cfg(test)]
+    if let Some(d13) = &lane.d13 {
+        d13.boundary(None);
+    }
     if let Some(decoder) = decoder {
         decoder.discard_kept_outside(keep);
     }
@@ -1126,6 +1157,25 @@ fn pinned(
 
 #[cfg(test)]
 impl Lane {
+    pub(crate) fn s4_applied(&self) -> Receiver<(i64, u64)> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        *self.plan_posted.lock().expect("applied") = Some(tx);
+        rx
+    }
+    pub(crate) fn s4_absent(&self, at: i64) -> bool {
+        let state = self.lock();
+        state
+            .readers
+            .slots
+            .iter()
+            .all(|s| !state.readers.ring_times(&s.key).contains(&at))
+    }
+    pub(crate) fn s4_clean(&self) -> bool {
+        let state = self.lock();
+        let clean = state.agent.is_empty() && state.readers.slots.is_empty();
+        drop(state);
+        clean && self.permits.lock().expect("permits").in_use() == 0
+    }
     /// Freeze before starting readers, so a live-state assertion has no
     /// wall-clock deadline. Retirement tests advance this clock explicitly.
     pub(crate) fn freeze_reader_clock(&self) {

@@ -415,6 +415,10 @@ pub struct FfmpegMediaEngine {
 }
 
 impl FfmpegMediaEngine {
+    #[cfg(test)]
+    pub(crate) fn s4_lane(&self) -> Arc<Lane> {
+        Arc::clone(&self.lane)
+    }
     /// Wake an event-driven consumer after publishing a preview frame or event.
     ///
     /// Install this before requesting work. The callback runs on the media

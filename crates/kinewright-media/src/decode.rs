@@ -1539,6 +1539,8 @@ impl DecoderProbe {
 struct PendingVideoFrame {
     first_grid_frame: i64,
     decoded: Option<ffmpeg::frame::Video>,
+    #[cfg(test)]
+    s4: Option<crate::s4_d13::Registration>,
 }
 
 pub(crate) struct ManagedSource {
@@ -1841,6 +1843,10 @@ pub(crate) struct VideoDecoder {
     retained: KeptFrames<KeptFrame>,
     #[cfg(test)]
     probe: DecoderProbe,
+    #[cfg(test)]
+    s4_window: u64,
+    #[cfg(test)]
+    s4_owner: Option<crate::s4_d13::Owner>,
 }
 
 /// Amendment R53 [S2c]: a refill window's decoded frame, kept unconverted
@@ -1849,6 +1855,8 @@ struct KeptFrame {
     #[cfg_attr(not(test), allow(dead_code))]
     pts: Option<i64>,
     decoded: ffmpeg::frame::Video,
+    #[cfg(test)]
+    _s4: Option<crate::s4_d13::Registration>,
 }
 
 impl VideoDecoder {
@@ -2064,6 +2072,10 @@ impl VideoDecoder {
             retained: KeptFrames::default(),
             #[cfg(test)]
             probe: DecoderProbe::default(),
+            #[cfg(test)]
+            s4_window: 0,
+            #[cfg(test)]
+            s4_owner: crate::s4_d13::Owner::new(),
         })
     }
 
@@ -2277,6 +2289,10 @@ impl VideoDecoder {
         retain: BTreeSet<i64>,
         cache: &mut FrameCache<T>,
     ) -> Result<(), MediaError> {
+        #[cfg(test)]
+        {
+            self.s4_window += 1;
+        }
         self.retained.clear();
         (self.retaining, self.retain) = (Some((start.0, t.0)), retain);
         let result = self.decode_paused(None, t, cache);
@@ -2681,6 +2697,8 @@ impl VideoDecoder {
                 return Ok(true);
             }
             let next = PendingVideoFrame {
+                #[cfg(test)]
+                s4: self.s4_owner.as_ref().map(|o| o.register(&decoded, 0)),
                 first_grid_frame,
                 decoded: Some(decoded),
             };
@@ -2749,7 +2767,24 @@ impl VideoDecoder {
                 let decoded = decoded.ok_or_else(|| {
                     MediaError::Backend("pending video frame has no pixels".to_owned())
                 })?;
-                self.retained.push(times, KeptFrame { pts, decoded });
+                #[cfg(test)]
+                let s4 = self
+                    .s4_owner
+                    .as_ref()
+                    .map(|o| o.register(&decoded, self.s4_window));
+                #[cfg(test)]
+                if below {
+                    pending.s4.take();
+                }
+                self.retained.push(
+                    times,
+                    KeptFrame {
+                        pts,
+                        decoded,
+                        #[cfg(test)]
+                        _s4: s4,
+                    },
+                );
             }
             if first <= last && raw_last < to {
                 return Ok(());
