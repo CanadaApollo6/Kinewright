@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::{
     cell::RefCell,
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 thread_local! {
@@ -122,7 +122,7 @@ impl Ledger {
     }
 
     pub(crate) fn snapshot(&self) -> serde_json::Value {
-        let state = self.state.lock().expect("D13 ledger");
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let valid = !state.invalid && self.check(&state);
         let snapshot = serde_json::to_value(&*state).expect("D13 records");
         drop(state);
@@ -133,7 +133,7 @@ impl Ledger {
     pub(crate) fn retained(&self) -> Vec<u64> {
         self.state
             .lock()
-            .expect("D13 ledger")
+            .unwrap_or_else(PoisonError::into_inner)
             .records
             .iter()
             .filter(|(_, r)| !r.retired && r.window != 0)
@@ -142,13 +142,13 @@ impl Ledger {
     }
 
     pub(crate) fn retired(&self, ids: &[u64]) -> bool {
-        let state = self.state.lock().expect("D13 ledger");
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         ids.iter()
             .all(|id| state.records.get(id).is_some_and(|r| r.retired))
     }
 
     pub(crate) fn closed(&self) -> bool {
-        let state = self.state.lock().expect("D13 ledger");
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.owners.values().all(|live| !live) && state.records.values().all(|r| r.retired)
     }
 }
@@ -158,18 +158,19 @@ impl Owner {
     pub(crate) fn new() -> Option<Self> {
         START.with_borrow(|ledger| {
             ledger.as_ref().map(|ledger| {
-                let mut state = ledger.state.lock().expect("D13 ledger");
+                let mut state = ledger.state.lock().unwrap_or_else(PoisonError::into_inner);
                 assert!(state.owners.len() < 256, "D13 owner history overflow");
                 state.next += 1;
                 let id = state.next;
                 state.owners.insert(id, true);
+                state.invalid = state.invalid || !ledger.check(&state);
                 Self(Arc::clone(ledger), id)
             })
         })
     }
 
     pub(crate) fn register(&self, frame: &Video, window: u64) -> Registration {
-        let mut state = self.0.state.lock().expect("D13 ledger");
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
         assert!(
             state.records.len() < 100_000,
             "D13 registration history overflow"
@@ -194,7 +195,7 @@ impl Drop for Owner {
         self.0
             .state
             .lock()
-            .expect("D13 ledger")
+            .unwrap_or_else(PoisonError::into_inner)
             .owners
             .insert(self.1, false);
     }
@@ -202,7 +203,7 @@ impl Drop for Owner {
 pub(crate) struct Registration(Arc<Ledger>, u64);
 impl Drop for Registration {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().expect("D13 ledger");
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
         let record = state.records.get_mut(&self.1).expect("registered identity");
         assert!(!record.retired, "D13 double retire");
         record.retired = true;

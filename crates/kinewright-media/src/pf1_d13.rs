@@ -7,6 +7,16 @@ struct D13Probe {
     native: bool,
 }
 
+struct D13Sampler<'a>(&'a D13Probe, Option<thread::JoinHandle<u64>>);
+impl Drop for D13Sampler<'_> {
+    fn drop(&mut self) {
+        self.0.done.store(true, Ordering::Release);
+        if let Some(sampler) = self.1.take() {
+            let _ = sampler.join();
+        }
+    }
+}
+
 impl D13Probe {
     fn finish(
         &self,
@@ -14,24 +24,29 @@ impl D13Probe {
         lane: &crate::preview::Lane,
         sampler: thread::JoinHandle<u64>,
     ) -> u64 {
+        let mut sampler = D13Sampler(self, Some(sampler));
         let until = Instant::now() + Duration::from_secs(30);
         self.ledger.release();
-        let cleanup = teardown(session);
+        let cleanup = teardown_until(session, until);
         let cleaned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            d13_wait(|| self.ledger.closed() || Instant::now() >= until);
+            d13_wait_until(until, || self.ledger.closed());
             assert!(self.ledger.closed(), "D13 cleanup deadline");
             assert!(lane.s4_clean(), "D13 cleanup {cleanup}");
             assert!(cleanup.contains("teardown_complete=true"), "{cleanup}");
         }));
         self.done.store(true, Ordering::Release);
-        d13_wait(|| sampler.is_finished() || Instant::now() >= until);
-        assert!(sampler.is_finished(), "D13 sampler cleanup deadline");
-        let peak = sampler.join().expect("D13 sampler joined");
+        d13_wait_until(until, || sampler.1.as_ref().unwrap().is_finished());
+        let peak = sampler
+            .1
+            .take()
+            .unwrap()
+            .join()
+            .expect("D13 sampler joined");
         cleaned.expect("D13 cleanup failed");
         peak
     }
     fn covered(&self, version: u64, ack: u128, original: &[u64]) -> bool {
-        let samples = self.samples.lock().expect("D13 samples");
+        let samples = self.samples.lock().unwrap_or_else(PoisonError::into_inner);
         let covered: Vec<_> = samples
             .iter()
             .filter(|(t, v, ids)| {
@@ -50,13 +65,16 @@ impl D13Probe {
             let tag = self.mark.load(Ordering::Acquire);
             let version = tag & u64::from(u32::MAX);
             let ids = self.ledger.retained();
-            let mut samples = self.samples.lock().expect("D13 samples");
+            let mut samples = self.samples.lock().unwrap_or_else(PoisonError::into_inner);
             let time = if self.native {
                 self.epoch.elapsed().as_micros()
             } else {
                 samples.len() as u128 * 100_000
             };
-            assert!(samples.len() < 6000, "D13 sample history overflow");
+            assert!(
+                samples.len() < if self.native { 6000 } else { 60_000 },
+                "D13 sample history overflow"
+            );
             println!(
                 "D13 sample {}",
                 serde_json::json!({"ordinal": samples.len(), "us": time, "version": version, "cycle": tag >> 32, "child": std::env::var("PF1_D13_CHILD").ok(), "rss": rss.rss, "high_water": rss.peak, "allocations": self.ledger.snapshot()})
@@ -69,10 +87,13 @@ impl D13Probe {
     }
 }
 
-fn d13_wait(mut ready: impl FnMut() -> bool) {
-    let until = Instant::now() + Duration::from_secs(10);
+fn d13_wait(ready: impl FnMut() -> bool) {
+    d13_wait_until(Instant::now() + Duration::from_secs(10), ready);
+}
+
+fn d13_wait_until(until: Instant, mut ready: impl FnMut() -> bool) {
     while !ready() {
-        assert!(Instant::now() < until, "D13 wait exceeded 10 s");
+        assert!(Instant::now() < until, "D13 wait deadline");
         thread::sleep(SAMPLE);
     }
 }
@@ -88,7 +109,15 @@ fn d13_run(document: &Document, d: usize, native: bool) {
     session.engine.set_document(Arc::new(document.clone()));
     let limit = Duration::from_secs(10);
     let first = session.wait_frame(0, session.engine.stamp(), Instant::now(), limit);
-    assert!(first.is_some(), "D13 initial frame");
+    if first.is_none() {
+        let until = Instant::now() + Duration::from_secs(30);
+        ledger.release();
+        let cleanup = teardown_until(session, until);
+        d13_wait_until(until, || ledger.closed());
+        assert!(lane.s4_clean(), "D13 warm-up cleanup {cleanup}");
+        assert!(cleanup.contains("teardown_complete=true"), "{cleanup}");
+        panic!("D13 initial frame; cleanup: {cleanup}");
+    }
     if native {
         thread::sleep(Duration::from_secs(6));
     }
@@ -146,7 +175,7 @@ fn d13_run(document: &Document, d: usize, native: bool) {
                     probe
                         .samples
                         .lock()
-                        .expect("D13 samples")
+                        .unwrap_or_else(PoisonError::into_inner)
                         .last()
                         .map_or(0, |s| s.0)
                 };

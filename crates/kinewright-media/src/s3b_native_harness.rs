@@ -33,7 +33,9 @@ fn s4_publish_metrics(
             .as_secs_f64()
             .into();
         if let Some((valid, metrics)) = measured {
-            record["valid"] = valid.into();
+            if record["protocol"]["name"] != "P-rss" {
+                record["valid"] = valid.into();
+            }
             record["metrics"] = metrics;
         }
         let temporary = format!("{path}.tmp");

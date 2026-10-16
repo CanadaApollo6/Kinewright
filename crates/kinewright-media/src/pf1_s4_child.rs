@@ -45,6 +45,8 @@ impl S4Output for std::process::Command {
                 break status;
             }
             if Instant::now() >= deadline {
+                eprintln!("S4 child stdout: {:?}", std::fs::read_to_string(&stdout));
+                eprintln!("S4 child stderr: {:?}", std::fs::read_to_string(&stderr));
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "S4 child exceeded 600 s",

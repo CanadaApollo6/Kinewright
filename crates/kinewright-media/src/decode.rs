@@ -3219,6 +3219,20 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn s4_transient_third_decoder_must_latch() {
+        let workload = crate::perf_fixtures::cuts((64, 64), 60, 1, 60, 1);
+        let ledger = crate::s4_d13::Ledger::new(1);
+        crate::s4_d13::START.with_borrow_mut(|slot| *slot = Some(Arc::clone(&ledger)));
+        let decoders: Vec<_> = (0..3)
+            .map(|_| VideoDecoder::open(workload.1[0].0.path(), workload.0.fps).unwrap())
+            .collect();
+        crate::s4_d13::START.with_borrow_mut(|slot| *slot = None);
+        drop(decoders);
+        assert!(ledger.closed());
+        assert!(std::panic::catch_unwind(|| ledger.snapshot()).is_err());
+    }
+
+    #[test]
     fn s4_sync_decoder_thread_cap() {
         let workload = crate::perf_fixtures::cuts((64, 64), 60, 1, 60, 1);
         for p in [1, 2, 3, 20] {

@@ -19,7 +19,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, atomic::Ordering},
+    sync::{Arc, PoisonError, atomic::Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -616,6 +616,10 @@ fn wait_answer(
 /// outlives it: ledger charges, decoders, conversion tables, and the
 /// process's threads and current RSS.
 fn teardown(session: Session) -> String {
+    teardown_until(session, Instant::now() + Duration::from_secs(30))
+}
+
+fn teardown_until(session: Session, deadline: Instant) -> String {
     let Session {
         engine,
         frames,
@@ -630,7 +634,6 @@ fn teardown(session: Session) -> String {
         gpu.shared_ledger(),
     );
     drop((engine, frames, events, diagnostics));
-    let deadline = Instant::now() + Duration::from_secs(30);
     let complete = matches!(
         finished.recv_deadline(deadline),
         Err(crossbeam_channel::RecvTimeoutError::Disconnected)
@@ -1328,6 +1331,12 @@ fn pf1_rss_child() {
     if let Ok(frozen) = std::env::var("PF1_D13_CALIBRATION") {
         let calibration: serde_json::Value =
             serde_json::from_str(&frozen).expect("D13 calibration");
+        assert_eq!(calibration["B"], 16);
+        assert_eq!(calibration["reader_cap"], 2);
+        assert_eq!(
+            calibration["media_sha256"],
+            crate::sha256::sha256_file(&document.media_pool[0].path).expect("fixture hash")
+        );
         d13_run(
             &document,
             calibration["d_bytes"].as_u64().expect("d") as usize,
