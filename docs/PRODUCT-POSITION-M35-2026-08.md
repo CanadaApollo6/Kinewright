@@ -5,6 +5,8 @@
 > AU1–AU5 have landed since. The living plan is
 > [Roadmap and development workflows](ROADMAP-AND-WORKFLOWS.md)
 > (Premiere-class first; After Effects later).
+>
+> Re-scored in [Product position - October 2026](PRODUCT-POSITION-2026-10.md).
 
 ## Bottom line
 
