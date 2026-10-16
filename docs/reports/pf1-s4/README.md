@@ -132,3 +132,11 @@ A threshold-failed predecessor requires a hashed `rejection.disposition` object 
 The minimal collector is LL/lavapipe native G4. Its test-only hook reads the selected session's `AdapterInfo`, emits software status, driver information and final fps/Q2 validity, and publishes atomically. The launcher derives Mesa/LLVM and the configured single ICD manifest hash from that readback, verifies it against pins, and binds publications to a fresh per-launch token and the launch timestamp. The monitor checks before every sampling step. Absolute misses reach complete paired decisions; genuine correctness assertions still return 101. The preflight's final sample must be at or before actual launch and at most ten seconds old.
 
 Real LL collection is unmeasured in this unit. Host manifest integrity is checked, but current CPU/RAM/OS readback is not compared at launch. Other protocols do not acquire a collector merely by appearing in the portable registry. Native I4/R65/RSS collection and complete parent-interruption recovery remain unproven. LH UUID correlation, hardware policy readback and native LH integration stay in S4c after Q1. D13 stays in S4b; E16 and closure stay in S4c. Q1/Q5 and all historical unresolved measurements remain open.
+
+The S4c G15 parent now consumes the wrapper token and publication path and runs
+one fresh native child per frozen order row. Its final record includes the child
+PID, value, successful reap/exit receipt and `native_children=1`. The 42-row
+portable G15 contract therefore means 42 children. The parent logs each child's
+stdout and stderr before checking its exit; failed children cannot supply
+accepted measurements. `pf1_s4_publish.rs` is the shared test-only publication
+owner used by the historical overlays; moving it is included in the line count.

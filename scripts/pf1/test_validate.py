@@ -16,6 +16,7 @@ import validate as v
 import series as runner
 
 MUTATIONS = {
+    'native_count': ("record['native_children'] == 1", 'True'),
     'schema': ("    if '$ref' in rule:", "    return\n    if '$ref' in rule:"),
     'duplicate': ("len(result) == len(items)", "True"),
     'nonfinite': ("require(False, 'nonfinite ' + x)", "0"),
@@ -61,7 +62,7 @@ MUTATIONS = {
 if '--mutation' in sys.argv:
     index = sys.argv.index('--mutation'); name = sys.argv[index+1]; del sys.argv[index:index+2]
     old, new = MUTATIONS[name]
-    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline'] else v
+    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline', 'native_count'] else v
     source = Path(target.__file__).read_text(); assert old in source
     exec(compile(source.replace(old, new), target.__file__, 'exec'), target.__dict__)
 
@@ -221,6 +222,15 @@ class Pins(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             launch.checked(launch.gpu_sample,dict(exit=0,output='Processes:\n'),dict(exit=0,output='0, synthetic-uuid, 0'),1700000000,set())
         self.assertEqual(raised.exception.code,2)
+
+    def test_native_receipt(self):
+        raw = dict(native_children=1, publisher_pid=42, native_cleanup=dict(pid=42, reaped=True, exit=0))
+        launch.native_check(raw)
+        for key, value in [('native_children', 3), ('reaped', False), ('exit', 101), ('pid', 43)]:
+            altered = copy.deepcopy(raw)
+            (altered if key == 'native_children' else altered['native_cleanup'])[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                launch.native_check(altered)
 
     def freeze_inputs(self):
         inputs = v.read(self.root/self.pins['inputs']['path'])

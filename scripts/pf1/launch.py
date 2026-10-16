@@ -52,6 +52,8 @@ def live_record(path, token, started, now, pins, host, root, environment):
     record = v.read(path)
     expected = input_binding(pins, root, int(environment['PF1_ROW']))
     v.require(record.get('consumed') == expected, 'frozen inputs omitted/substituted/unconsumed')
+    if pins['gate'] in ['G15', 'D13'] and record.get('valid') is True:
+        native_check(record)
     v.require(record['token'] == token and started <= record['timestamp_s'] <= now, 'stale/future collector publication')
     v.schema(record['selected'], v.SCHEMA['$defs']['selected'])
     required = dict(name=pins['protocol']['name'], poll_ms=5, **v.CONTRACTS[pins['gate']][3])
@@ -66,6 +68,10 @@ def live_record(path, token, started, now, pins, host, root, environment):
     v.schema(gpu, v.SCHEMA['$defs']['gpu'])
     v.gpu_check(gpu, pins, host, root)
     return record, gpu
+
+def native_check(record):
+    cleanup = record['native_cleanup']
+    v.require(record['native_children'] == 1 and cleanup['reaped'] is True and cleanup['exit'] == 0 and cleanup['pid'] == record['publisher_pid'], 'native child count/cleanup mismatch')
 
 def input_binding(pins, root, ordinal):
     entry = pins['protocol']['order'][ordinal]

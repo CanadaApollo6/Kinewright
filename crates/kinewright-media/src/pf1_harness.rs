@@ -1287,9 +1287,21 @@ fn pf1_rss_baseline() {
         ));
     }
     all.retain(|(key, _)| wanted(key));
-    for (key, Workload(document, _media)) in all.iter().flat_map(|w| std::iter::repeat_n(w, 3)) {
+    let collecting = std::env::var_os("PF1_RECORD").is_some();
+    let repeats = if collecting { 1 } else { 3 };
+    if collecting {
+        assert_eq!(all.len(), 1, "one frozen G15 workload per wrapper row");
+    }
+    let mut children = 0;
+    for (key, Workload(document, _media)) in
+        all.iter().flat_map(|w| std::iter::repeat_n(w, repeats))
+    {
         let temp = TempDirectory::new("pf1-rss");
         let path = temp.path("document.json");
+        let record = std::env::var_os("PF1_RECORD")
+            .map_or_else(|| temp.path("record.json"), std::path::PathBuf::from);
+        let receipt = temp.path("receipt.json");
+        let token = std::env::var("PF1_TOKEN").unwrap_or_else(|_| "g15-development".into());
         std::fs::write(&path, serde_json::to_vec(document).expect("serialises")).expect("writes");
         let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([
@@ -1300,12 +1312,14 @@ fn pf1_rss_baseline() {
             ])
             .args(["--test-threads=1"])
             .env("PF1_RSS_DOCUMENT", &path)
-            .env("PF1_RECORD", temp.path("record.json"))
-            .env("PF1_TOKEN", "g15-development")
+            .env("PF1_RECORD", &record)
+            .env("PF1_TOKEN", &token)
+            .env("PF1_CHILD_RECEIPT", &receipt)
             .s4_output()
             .expect("the P-rss child runs");
         let stdout = String::from_utf8_lossy(&child.stdout);
         let stderr = String::from_utf8_lossy(&child.stderr);
+        println!("S4 native stdout: {stdout}\nS4 native stderr: {stderr}");
         assert!(
             child.status.success(),
             "the P-rss child failed ({}): {stdout}{stderr}",
@@ -1314,12 +1328,18 @@ fn pf1_rss_baseline() {
         // libtest prints `test … ... ` on the same line before the output.
         let line = (stdout.lines()).find_map(|line| Some(&line[line.find("PF1 rss ")?..]));
         let line = line.unwrap_or_else(|| panic!("no P-rss result: {stdout}{stderr}"));
-        println!("{line} lane={lane} workload={key}");
-        println!(
-            "PF1 G15 workload={key} record={}",
-            std::fs::read_to_string(temp.path("record.json")).expect("G15 record")
+        let mut published = s4_import_child(&child, &record, &receipt, &token);
+        assert!(
+            published["metrics"]["settled_bytes"].is_u64(),
+            "G15 settled value"
         );
+        children += 1;
+        published["native_children"] = children.into();
+        s4_write_record(&record, &published);
+        println!("{line} lane={lane} workload={key}");
+        println!("PF1 G15 workload={key} record={published}");
     }
+    assert_eq!(children, all.len() * repeats, "exact fresh-child count");
 }
 
 /// One P-rss measurement: before the engine, constructed (no document), first
