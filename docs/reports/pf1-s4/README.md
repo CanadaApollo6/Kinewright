@@ -1,5 +1,31 @@
 # PF1 S4 reproduction checkpoints
 
+## S4c round 2 host and runner checkpoint
+
+This checkpoint adds Linux CPU, total physical RAM, kernel version and
+architecture comparison before child launch. RAM means the OS-addressable
+physical-page total (`SC_PHYS_PAGES * SC_PAGE_SIZE`), never available/free RAM.
+Readback is retained in the attempt receipt, including a mismatch that launches
+no child. Portable mocked readback witnesses run on both OSes; Linux wrapper
+integration does not claim a Windows launch implementation.
+
+Gate dispatch uses fully qualified, exact test names. The frozen order's seed
+is forwarded as `PF1_SEED`; an unsealed sibling series journal blocks collection
+without changing its bytes. Each lane has a 590-second alarm that unwinds owned
+child cleanup, bounded two-second diagnostic queries, and a 599-second external
+watchdog with one second before KILL. A hard interruption still requires a ruling
+on the preserved unsealed series; automatic sealing remains deferred.
+
+The seven-member immutable runner archive is
+`target/review/pf/s4/archives/5aa36aac6fe7191ece8f7ebd068790486f1734d88d757a21cff188281864162d.tar`,
+SHA-256 `5aa36aac6fe7191ece8f7ebd068790486f1734d88d757a21cff188281864162d`.
+Use the restore/check commands below with this digest and this checkpoint's
+versioned modules. `s4/s4c/commit-2/runner-archive.json` binds all member hashes;
+the round-2 report records controls, checks, line counts and the re-forecast.
+Additional wrapper controls are `host`, `dispatch`, `unsealed` and `seed`;
+portable controls are `host_shape`, `host_ram` and `deadline`. These are contract
+witnesses and do not supply native G4/G15/D13 or LH acceptance.
+
 ## S4c wrapper witness
 
 The S4c wrapper checkpoint covers a real disposable publishing process through

@@ -10,12 +10,14 @@ import tempfile
 import unittest
 
 import validate as v
+import launch
 
 CHILD = '''#!/usr/bin/env python3
 import json, os, signal, sys, time
 from pathlib import Path
-case = sys.argv[1]
+case = os.environ['PF1_FIXTURE_CASE']
 print('child_pid=' + str(os.getpid()), flush=True)
+print('seed=' + os.environ['PF1_SEED'], flush=True)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 record = json.loads(Path(os.environ['PF1_FIXTURE']).read_text())
 record.update(token=os.environ['PF1_TOKEN'], timestamp_s=time.time())
@@ -45,12 +47,16 @@ MUTATIONS = {
     'publication': ('lane.py', "pins.require(collected is not None,'missing final collector record')", "collected = collected or (json.loads(Path(env['PF1_FIXTURE']).read_text()) | dict(valid=True,metrics=dict(fps=30)),spec['gpu'])"),
     'final': ('lane.py', "pins.require('metrics' in raw and type(raw.get('valid')) is bool,'missing final measurements')", "raw.update(valid=True,metrics=raw.get('metrics',dict(fps=30)))"),
     'receipt': ('lane.py', "receipt=receipt_ref)", "receipt=None)"),
-    'assertion': ('lane.py', "code=101 if process is not None and process.returncode==101 and cleanup.get('reaped') else 2", "code=2"),
+    'assertion': ('lane.py', "code=101 if process is not None and process.returncode==101 and cleanup.get('reaped') else 75 if code==75 else 2", "code=2"),
     'readback': ('launch.py', "v.gpu_check(gpu, pins, host, root)", "pass"),
     'kill': ('launch.py', '[signal.SIGTERM, signal.SIGKILL]', '[signal.SIGTERM]'),
     'validity': ('lane.py', "pins.require(raw['valid'],'collector correctness/validity failed')", 'pass'),
     'failure_pins': ('validate.py', "receipt['pins'] == digest(pins_path)", 'True'),
     'failure_order': ('validate.py', "all(receipt[k] == x for k, x in pins['protocol']['order'][len(status['runs'])].items())", 'True'),
+    'host': ('launch.py', "all(host[key] == value for key, value in actual.items())", 'True'),
+    'dispatch': ('launch.py', "test == TESTS[spec['gate']]", 'True'),
+    'seed': ('final-measure.py', "PF1_SEED=str(entry['seed'])", "PF1_SEED=str(entry['pair'])"),
+    'unsealed': ('final-measure.py', "v.require(journal.with_name(journal.name.replace('attempts-','status-').replace('.jsonl','.json')).is_file(),", "v.require(True,"),
 }
 mutation = None
 if '--mutation' in sys.argv:
@@ -87,7 +93,7 @@ class Wrapper(unittest.TestCase):
         shutil.copyfile(repo / 'docs/PF1-PINS.schema.json', self.root / 'repo/docs/PF1-PINS.schema.json')
         if mutation:
             name, old, new = MUTATIONS[mutation]
-            path = (self.runners if name == 'lane.py' else modules) / name
+            path = (self.runners if name in ['lane.py', 'final-measure.py'] else modules) / name
             source = path.read_text()
             self.assertIn(old, source)
             path.write_text(source.replace(old, new))
@@ -95,6 +101,9 @@ class Wrapper(unittest.TestCase):
         self.child.write_text(CHILD)
         self.child.chmod(0o755)
         self.pins = v.read(self.root / 'pins.json')
+        host_path = self.root / self.pins['host']['path']
+        host_path.write_text(json.dumps(v.read(host_path) | launch.host_readback()))
+        self.pins['host']['sha256'] = v.digest(host_path)
         builds_path = self.root / self.pins['builds']['path']
         builds = v.read(builds_path)
         for build in builds.values():
@@ -115,7 +124,8 @@ class Wrapper(unittest.TestCase):
         self.env = dict(os.environ, PF1_REPO=str(self.root / 'repo'), PF1_ROOT=str(self.root), PF1_FIXTURE=str(self.root / 'fixture.json'), VK_DRIVER_FILES=str(icd), PATH=str(tools) + os.pathsep + os.environ['PATH'])
 
     def pipeline(self, case, expected):
-        plan = dict(id=case, gates=[dict(pins=dict(path='pins.json', sha256=v.digest(self.root / 'pins.json')), test=case, series={})])
+        self.env['PF1_FIXTURE_CASE'] = case
+        plan = dict(id=case, gates=[dict(pins=dict(path='pins.json', sha256=v.digest(self.root / 'pins.json')), test=launch.TESTS['G4'], series={})])
         plan_path = self.root / (case + '-plan.json')
         plan_path.write_text(json.dumps(plan))
         work = self.runners / ('series-' + case)
@@ -136,6 +146,8 @@ class Wrapper(unittest.TestCase):
                     v.artifact(self.root, receipt_ref)
                 else:
                     self.assertEqual(row['fingerprint'], v.fingerprint(row))
+                    self.assertEqual(row['environment']['PF1_SEED'], str(row['seed']))
+                    self.assertIn('--exact', row['command'])
                     receipt_ref = row['logs'][-1]
                 receipt = v.read(self.root / receipt_ref['path'])
                 self.assertEqual(receipt['pins'], plan['gates'][0]['pins']['sha256'])
@@ -201,6 +213,57 @@ class Wrapper(unittest.TestCase):
     def test_shared(self): self.pipeline('shared', 75)
     def test_candidate(self): self.pipeline('candidate', 1)
     def test_validity(self): self.pipeline('invalid-final', 2)
+
+    def test_runner_guards(self):
+        self.env['PF1_FIXTURE_CASE'] = 'pass'
+        for case in ['dispatch', 'unsealed']:
+            with self.subTest(case=case):
+                plan = dict(id=case, gates=[dict(pins=dict(path='pins.json', sha256=v.digest(self.root / 'pins.json')), test='wrong_test' if case == 'dispatch' else launch.TESTS['G4'], series={})])
+                if case == 'unsealed':
+                    predecessor = self.runners / 'series-interrupted'
+                    predecessor.mkdir()
+                    journal = predecessor / 'attempts-0.jsonl'
+                    journal.write_bytes(b'{"partial":')
+                plan_path = self.root / (case + '.json')
+                plan_path.write_text(json.dumps(plan))
+                result = subprocess.run([sys.executable, str(self.runners / 'final-measure.py'), str(plan_path)], env=self.env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                if case == 'dispatch':
+                    receipt = v.read(self.runners / 'series-dispatch/0-0-receipt.json')
+                    self.assertEqual(receipt['reason'], 'test does not implement pinned gate/protocol')
+                    self.assertEqual(receipt['cleanup'], {})
+                else:
+                    self.assertIn('unsealed predecessor blocks collection', result.stdout)
+                    self.assertEqual(journal.read_bytes(), b'{"partial":')
+                    self.assertFalse((self.runners / 'series-unsealed').exists())
+        if os.environ.get('PF1_WITNESS_ROOT'):
+            shutil.copytree(self.root, Path(os.environ['PF1_WITNESS_ROOT']) / ((mutation or 'restored') + '-runner'))
+
+    def test_host(self):
+        host_path = self.root / self.pins['host']['path']
+        original = v.read(host_path)
+        for key in launch.host_readback():
+            with self.subTest(key=key):
+                changed = dict(original)
+                changed[key] = original[key] + 4096 if key == 'ram_bytes' else 'other'
+                if key == 'os': changed[key] = 'windows'
+                host_path.write_text(json.dumps(changed))
+                self.pins['host']['sha256'] = v.digest(host_path)
+                (self.root / 'pins.json').write_text(json.dumps(self.pins))
+                self.env['PF1_FIXTURE_CASE'] = 'pass'
+                plan = dict(id='host-' + key, gates=[dict(pins=dict(path='pins.json', sha256=v.digest(self.root / 'pins.json')), test=launch.TESTS['G4'], series={})])
+                plan_path = self.root / ('host-' + key + '.json')
+                plan_path.write_text(json.dumps(plan))
+                result = subprocess.run([sys.executable, str(self.runners / 'final-measure.py'), str(plan_path)], env=self.env, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                work = self.runners / ('series-host-' + key)
+                receipt = v.read(work / '0-0-receipt.json')
+                self.assertEqual(receipt['host'], launch.host_readback())
+                self.assertEqual(receipt['reason'], 'current host differs from pins')
+                self.assertEqual(receipt['cleanup'], {})
+                self.assertFalse((work / 'logs/0-0.log').exists())
+        if os.environ.get('PF1_WITNESS_ROOT'):
+            shutil.copytree(self.root, Path(os.environ['PF1_WITNESS_ROOT']) / ((mutation or 'restored') + '-host'))
 
 
 if __name__ == '__main__':

@@ -54,15 +54,51 @@ MUTATIONS = {
     'runner_exit': ("return code if code in [2, 75, 101] else 2", "return 0"),
     'launch_error': ("code, row = 2, dict(validity='invalid_evidence', exit=2, reason=str(error))", "raise"),
     'r50': ("else 75 for x, y in zip(a, b)", "else 0 for x, y in zip(a, b)"),
+    'host_shape': ("set(actual) == {'os', 'version', 'architecture', 'cpu', 'ram_bytes'}", 'True'),
+    'deadline': ('signal.setitimer(signal.ITIMER_REAL, seconds)', 'pass'),
+    'host_ram': ("os.sysconf('SC_PHYS_PAGES')", "os.sysconf('SC_AVPHYS_PAGES')"),
 }
 if '--mutation' in sys.argv:
     index = sys.argv.index('--mutation'); name = sys.argv[index+1]; del sys.argv[index:index+2]
     old, new = MUTATIONS[name]
-    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live'] else v
+    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline'] else v
     source = Path(target.__file__).read_text(); assert old in source
     exec(compile(source.replace(old, new), target.__file__, 'exec'), target.__dict__)
 
 class Pins(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux invocation watchdog')
+    def test_deadline(self):
+        cleanup = {}
+        previous = launch.signal.getsignal(launch.signal.SIGALRM)
+        try:
+            with self.assertRaisesRegex(TimeoutError, 'complete invocation deadline'):
+                with launch.owned_child([sys.executable, '-c', 'import time; time.sleep(2)'], cleanup=cleanup) as process:
+                    launch.arm_deadline(.05)
+                    process.wait(timeout=4)
+            self.assertTrue(cleanup['reaped'])
+            self.assertIsNotNone(process.returncode)
+        finally:
+            launch.signal.setitimer(launch.signal.ITIMER_REAL, 0)
+            launch.signal.signal(launch.signal.SIGALRM, previous)
+
+    def test_host_readback(self):
+        with patch.object(launch.platform, 'system', return_value='Linux'), patch.object(launch.platform, 'release', return_value='kernel'), patch.object(launch.platform, 'machine', return_value='x86_64'), patch.object(Path, 'read_text', return_value='model name : CPU\nmodel name : CPU\n'), patch.object(os, 'sysconf', create=True, side_effect=lambda key: {'SC_PHYS_PAGES': 1000, 'SC_AVPHYS_PAGES': 100, 'SC_PAGE_SIZE': 4096}[key]):
+            self.assertEqual(launch.host_readback(), dict(os='linux', version='kernel', architecture='x86_64', cpu='CPU', ram_bytes=4096000))
+        with patch.object(launch.platform, 'system', return_value='Windows'), self.assertRaises(ValueError):
+            launch.host_readback()
+        for text in ['', 'model name : CPU A\nmodel name : CPU B']:
+            with patch.object(launch.platform, 'system', return_value='Linux'), patch.object(Path, 'read_text', return_value=text), self.assertRaises(ValueError):
+                launch.host_readback()
+
+    def test_host_shape(self):
+        actual = dict(os='linux', version='kernel', architecture='x86_64', cpu='CPU', ram_bytes=1024)
+        launch.host_check(actual, actual)
+        for key in actual:
+            incomplete = dict(actual)
+            incomplete.pop(key)
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'incomplete host readback'):
+                launch.host_check(actual, incomplete)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='kinewright-pf1-pins-'); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name); self.p = self.root/'pins.json'

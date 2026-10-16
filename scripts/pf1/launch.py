@@ -3,8 +3,34 @@ import os
 import signal
 import subprocess
 import re
+import platform
 import validate as v
 from pathlib import Path
+
+TESTS = {'G4': 'pf1_harness::s3b_native_play_lane', 'G15': 'pf1_harness::pf1_rss_baseline',
+         'D13': 'pf1_harness::s4_d13_active', 'G1': 'pf1_harness::pf1_play_baseline',
+         'G2': 'pf1_harness::s3b_native_play_lane', 'G14': 'pf1_harness::pf1_play_baseline'}
+
+def test_check(spec, test):
+    v.require(test == TESTS[spec['gate']], 'test does not implement pinned gate/protocol')
+
+def arm_deadline(seconds):
+    def expired(signum, frame):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        raise TimeoutError('complete invocation deadline')
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+def host_readback():
+    v.require(platform.system() == 'Linux', 'unsupported host readback')
+    models = {line.split(':', 1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name')}
+    v.require(len(models) == 1, 'missing/ambiguous CPU model')
+    return dict(os='linux', version=platform.release(), architecture=platform.machine(),
+                cpu=models.pop(), ram_bytes=os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE'))
+
+def host_check(host, actual):
+    v.require(all(host[key] == value for key, value in actual.items()), 'current host differs from pins')
+    v.require(set(actual) == {'os', 'version', 'architecture', 'cpu', 'ram_bytes'}, 'incomplete host readback')
 
 def checked(fn, *args):
     try:
