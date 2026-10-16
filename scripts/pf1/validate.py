@@ -208,6 +208,17 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
         artifact(root, ref)
     if not ancestry_checked: series_check(status, pins_path, root, seen)
     require((status['lane'], status['gate']) == (pins['lane'], pins['gate']), 'status lane/gate mismatch')
+    if 'failure' in status:
+        failure = status['failure']
+        artifact(root, failure['receipt'])
+        receipt = read(root / failure['receipt']['path'])
+        require(receipt['exit'] == failure['exit'] and bool(receipt['reason']), 'failure receipt mismatch')
+        require(receipt['pins'] == digest(pins_path), 'cross-pins failure receipt')
+        require(len(status['runs']) < len(pins['protocol']['order']) and all(receipt[k] == x for k, x in pins['protocol']['order'][len(status['runs'])].items()), 'failure entry/order mismatch')
+        for ref in receipt['logs']:
+            artifact(root, ref)
+        require(failure['exit'] != 101 or receipt['cleanup']['reaped'] and receipt['cleanup']['returncode'] == 101, 'unsubstantiated assertion exit')
+        return failure['exit']
     rows, order = status['runs'], pins['protocol']['order']
     require(len(rows) == len(order), 'incomplete attempts')
     busy = False

@@ -1,4 +1,46 @@
-# PF1 S4a run 4 reproduction checkpoint
+# PF1 S4 reproduction checkpoints
+
+## S4c wrapper witness
+
+The S4c wrapper checkpoint covers a real disposable publishing process through
+measure, lane, collection, cached resume and figures. Its pins and adapter are
+synthetic; it supplies no native LL/LH measurement or PF1 closure claim.
+The report and source/log manifests live under the main checkout's
+`target/review/pf/s4/s4c/commit-1/`; `target/review/pf/s4c-report.md` records the
+checkpoint commit, counted lines, gate results and remaining allocation.
+
+The immutable runner archive is
+`target/review/pf/s4/archives/8334078951a2ebb8959caced0a16f47adf4886166e8bf50e15df15b814d28376.tar`
+in the main checkout. Its SHA-256 is
+`8334078951a2ebb8959caced0a16f47adf4886166e8bf50e15df15b814d28376`.
+It contains the three wrappers, their unchanged S3b parents and parent hashes.
+`s4/s4c/commit-1/runner-archive.json` records every member hash. Restore by this
+digest, check the archive's SHA-256 before extraction, then set `PF1_RUNNERS` to
+the extracted directory and run `python3 scripts/pf1/test_lane.py` from this
+implementation commit. The versioned validator, schema, launch and series
+modules must come from the same commit. Mutation controls use
+`--mutation publication|final|receipt|assertion|readback|kill|validity|failure_pins|failure_order` with the
+corresponding test named in the report. These are executable synthetic witnesses,
+not replacement native collectors.
+
+```bash
+pf1_archive=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4/archives/8334078951a2ebb8959caced0a16f47adf4886166e8bf50e15df15b814d28376.tar
+printf '%s  %s\n' 8334078951a2ebb8959caced0a16f47adf4886166e8bf50e15df15b814d28376 "$pf1_archive" | sha256sum --check
+mkdir -p target/pf1-s4c-reproduction
+tar -xf "$pf1_archive" -C target/pf1-s4c-reproduction
+PF1_RUNNERS="$PWD/target/pf1-s4c-reproduction" PYTHONDONTWRITEBYTECODE=1 nice -n 19 python3 scripts/pf1/test_lane.py
+```
+
+Each spawned attempt writes an exclusive receipt after owned-child cleanup,
+including the direct child's reap/exit result, attempted signals, launch token,
+pins digest and raw artifact hashes. Success rows bind that receipt in their
+fingerprint; failed series bind it explicitly and preserve assertion exit 101
+through figures and resume. Incomplete publication and malformed readback remain
+invalid evidence. A changed raw artifact invalidates cached results.
+Automatic sealing after a hard-killed parent remains deferred under R89-3;
+an interrupted unsealed real series blocks further collection.
+
+## S4a run 4 reproduction checkpoint
 
 Run 4 stops at exactly 1000 retained counted lines against the final 1000 stop, with zero shipping production changes. Acceptance still requires the lead's narrow re-review and both hosted CI platforms. No timing lane, GPU setting change, SSH or push was performed. The run report records checks and outstanding verification.
 

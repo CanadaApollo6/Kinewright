@@ -64,12 +64,15 @@ def gpu_sample(table, query, timestamp, owned):
     return dict(timestamp_s=timestamp, uuid=uuid, utilization_pct=float(utilization), processes=processes, complete=True)
 
 @contextmanager
-def owned_child(command, **options):
+def owned_child(command, cleanup=None, **options):
+    cleanup = {} if cleanup is None else cleanup
     process = subprocess.Popen(command, start_new_session=True, **options)
+    cleanup.update(pid=process.pid, signals=[], reaped=False)
     try:
         yield process
     finally:
         for sig in [signal.SIGTERM, signal.SIGKILL]:
+            cleanup['signals'].append(sig.name)
             try:
                 os.killpg(process.pid, sig)
             except ProcessLookupError:
@@ -82,3 +85,4 @@ def owned_child(command, **options):
             except subprocess.TimeoutExpired:
                 pass
         process.wait(timeout=1)
+        cleanup.update(reaped=True, returncode=process.returncode)

@@ -35,6 +35,8 @@ def collect(plan, root, work, launch):
             snapshot = dict(lane=pins['lane'], gate=pins['gate'], series=series,
                             runs=[row for row in rows if 'fingerprint' in row],
                             artifacts=[dict(path=path.relative_to(root).as_posix(), sha256=v.digest(path)) for path in [Path(journal.name), *sorted(work.glob(f'{index}-*'))] if path.is_file()])
+            if code and 'receipt' in rows[-1]:
+                snapshot['failure'] = dict(exit=code, receipt=rows[-1]['receipt'])
             with destination.open('x') as output:
                 json.dump(snapshot, output)
             if code:
