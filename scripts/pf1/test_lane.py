@@ -17,6 +17,7 @@ import hashlib, json, os, signal, sys, time
 from pathlib import Path
 case = os.environ['PF1_FIXTURE_CASE']
 print('child_pid=' + str(os.getpid()), flush=True)
+print('native_nice=' + str(os.getpriority(os.PRIO_PROCESS, 0)), flush=True)
 print('seed=' + os.environ['PF1_SEED'], flush=True)
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
 record = json.loads(Path(os.environ['PF1_FIXTURE']).read_text())
@@ -53,6 +54,7 @@ if case != 'no-final':
 '''
 
 MUTATIONS = {
+    'priority': ('lane.py', 'os.setpriority(os.PRIO_PROCESS,0,19)', 'pass'),
     'consumption': ('launch.py', "record.get('consumed') == expected", 'True'),
     'publication': ('lane.py', "pins.require(collected is not None,'missing final collector record')", "collected = collected or (json.loads(Path(env['PF1_FIXTURE']).read_text()) | dict(valid=True,metrics=dict(fps=30)),spec['gpu'])"),
     'final': ('lane.py', "pins.require('metrics' in raw and type(raw.get('valid')) is bool,'missing final measurements')", "raw.update(valid=True,metrics=raw.get('metrics',dict(fps=30)))"),
@@ -79,6 +81,14 @@ import test_validate as fixtures
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux wrapper integration')
 class Wrapper(unittest.TestCase):
+    def test_priority(self):
+        self.pipeline('priority', 0)
+        expected = min(19, os.getpriority(os.PRIO_PROCESS, 0) + 10)
+        for path in (self.runners/'series-priority/logs').glob('*.log'):
+            self.assertIn('native_nice=' + str(expected), path.read_text())
+            samples = path.with_name(path.stem + '-load.jsonl')
+            self.assertEqual(json.loads(samples.read_text().splitlines()[-1])['monitor_nice'], 19)
+
     def test_frozen_consumption(self):
         self.pipeline('unconsumed', 2)
         self.pipeline('substituted', 2)

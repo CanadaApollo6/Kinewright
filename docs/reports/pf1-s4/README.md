@@ -174,3 +174,21 @@ The complete S0 build source is retained in
 command in `s0-build.json`. `s0-overlay.patch` and `s0-overlay.json` identify the
 counted test-only differences and shared file hashes. The selected-device witness
 has a runtime red with its metadata omitted, followed by a restored green.
+
+The final S4c runner archive is
+`target/review/pf/s4/archives/421745d3d7d983eb9b9fef14abcde62b035c70fbcb43bfee971f5cedc746c29f.tar`,
+SHA-256 `421745d3d7d983eb9b9fef14abcde62b035c70fbcb43bfee971f5cedc746c29f`.
+`round-3/priority-runner-archive.json` records its seven members. The launch
+supervisor starts at nice 0 so its owned native command can start at nice 10;
+after spawning it, the lane sampler lowers itself to nice 19. Load records retain
+sampler and observed process priorities. Python checks run at nice 19. The
+priority bootstrap witness additionally runs from nice 0 to exercise this
+transition; removing it is a runtime red. It does not measure GPU performance.
+
+Acceptance runs import the frozen Python modules under
+`target/review/pf/s4/s4c/round-3/frozen-repo`. The pins bind those actual modules,
+the actual wrappers, source archives, production snapshots, approval records,
+release binaries, prepared inputs, host, software adapter and calibration before
+launch. `frozen-series.json` indexes the three plans. The G4 reference rebuild uses
+the accepted S3b shipping state with the common current test overlay; the candidate
+has the same shipping implementation, so these pairs establish no speedup.
