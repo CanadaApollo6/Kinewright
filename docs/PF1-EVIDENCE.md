@@ -7396,11 +7396,13 @@ and the laptop cleanup remain owed under R73.
 
 ## E15 — PF1 S3b: staging ring, U-2 residency, maintenance, D14 (D12 dropped)
 
-**S4c reconciliation (R91).** E15 is the historical S3b record, closed at
+**S4c reconciliation (R91/R92).** E15 is the historical S3b record, closed at
 `7408c84`; its earlier timings are not new S4 acceptance. E16 records the bounded
 C-plus-frozen-input continuation, its exact source/collector identities and actual
 LL outcomes. The final accepted S3b shipping state is rebuilt with the common
-current test overlay for G4; that comparison establishes no speedup. The named
+test overlay for G4; R92's final-source series passes all 24 fresh rows and
+supersedes the original Q2-invalid attempt without changing its bytes. That
+comparison establishes no speedup. The named
 R91 deferrals and limitations below qualify the PF1 closure while preserving
 E15's original results and the unexplained 8,250 ms hold.
 
@@ -7765,7 +7767,7 @@ The RTX 4050 rerun owed under R73 since S3a is still owed.
 
 ## E16 — S4c, R91 C plus frozen inputs
 
-**Partial: G4 requires lead disposition; G15 and D13 collected.** Source is committed at
+**LL native acceptance complete; qualified closure awaits reviews and CI.** Source is committed at
 `4783d5f`, **1,190/1,200** retained counted lines (including 31 S0 overlay lines),
 zero shipping changes, zero unsafe additions and zero lint changes. Workspace
 build, all-target Clippy, formatting, slow-test lint, 53 portable tests, 13 wrapper
@@ -7773,7 +7775,7 @@ tests and the affected native witnesses pass. Full workspace fast tier passed (3
 
 | Scope | Recorded result |
 |---|---|
-| G4, four workloads / 24 rows | First collection stopped at row 3: Q2 invalid, three missed paced callbacks. The first two blend rows were valid at 29.68 and 25.49 fps; the third was 29.07 fps but invalid. This is incomplete acceptance, not an R50 shared miss, threshold pass or deferral. Lead disposition is required. |
+| G4, four workloads / 24 rows | R92's single fresh final-source series passes all 24 rows, with zero missed callbacks and both arms above every floor. Six-row ranges: blend 29.526–29.959 fps (floor 15), explainer 29.859–29.959 (24), reel 29.826–29.926 (15), typical 29.776–29.959 (24). Aggregate, cached figures and independent validation exit 0. The original row 0-2 is invalid evidence, neither a threshold pass nor a miss, and its series/finding are explicitly superseded. |
 | G15, seven workloads / 42 children | First collection stopped before metrics on the startup bug. After its fix, all 42 fresh children passed; cached figures exit 0. Every one of the 21 pairs is within S0 + 4,194,304 bytes; the largest delta is +2,727,936 bytes (title-only pair 1). |
 | D13, three children / 30 cycles each | The final-source series passed all three fresh children × 30 cycles, oracle/cleanup true, and cached figures exit 0. U=93,312,000 bytes from d=3,110,400. Whole-process RSS deltas are 99,082,240 / 94,298,112 / 104,382,464 bytes: all exceed U and remain report-only; no numerical RSS allowance is resolved. |
 
@@ -7783,6 +7785,27 @@ Evidence root: main-checkout `target/review/pf/s4/s4c/round-3/`. The original
 `startup-final/frozen-series.json`, with separate binary/source/harness hashes,
 unchanged prepared inputs, fixed thresholds and the previous-context link.
 No old row is reused. The complete report is `target/review/pf/s4c-report.md`.
+
+R92's context is `target/review/pf/s4/s4c/round-4/frozen-series.json` and its
+series is `work/series-s4c-r4-G4`. `supersession.json` and
+`supersession-outcome.json` link the original series, `G4-finding.json`, invalid
+row 0-2 and the new accepted status. All 22 original files retain their hashes.
+The final candidate binary is `60e265acb95685922bbe64fd2d042f8e282f5e609de5cc061bee15f69cdf54f2`.
+The accepted-S3b reference retains its exact historical binary and source; only
+unused G15 Rust code differs between its 9efb932 overlay and final source.
+The G4 path, paced driver, inputs, seeds, order, polling and floors are unchanged.
+Each row was checked before the next launch; no row was rerun. The unchanged
+collection code then read the saved rows to seal the aggregate, launching no child.
+
+R92-2 diagnostics retain all 360 new five-second load samples (all contaminated;
+one-minute load range 6.22–20.59), plus start/end process and GPU readbacks.
+Other projects' jobs were untouched; no worker build or test overlapped timing.
+Both original and new native processes were observed at nice 10. New snapshots
+observe every media/pacer-group thread at nice 10, Linux priority 30,
+SCHED_OTHER; an individual pacer TID is identified by source/name/wait-state
+inference. Original thread snapshots do not exist: their nice/priority is
+explicitly source-derived, not a retrospective observation. These diagnostics
+do not gate and establish no cause for the original missed callbacks.
 
 The G15 failure interval included diagnostics performed before child launch;
 it is not a pure hash-duration measurement. The fixed runner starts its deadline
@@ -7796,15 +7819,21 @@ native temporaries and cleanup receipt are preserved; the owned group is gone.
 S0 has no engine-finished receiver: its original post-measurement drop is
 retained, and successful process exit plus parent reap supplies cleanup. The
 candidate also verifies bounded engine teardown. The G4 reference rebuild uses
-the accepted S3b shipping implementation with the common 9efb932 test overlay;
+the accepted S3b shipping implementation with the 9efb932 test overlay;
 these pairs establish no speedup. The selected software adapter is lavapipe,
 Mesa 26.2.4-arch1.1 / LLVM 23.1.1. Native jobs use nice 10, the sampler nice 19,
 and load/contamination are recorded every five seconds as R50 annotations.
 No GPU setting changed. Memory-start checks are recorded separately.
 
-The current proposed closure is **not yet PF1 closure**: G4 has an unresolved
-in-scope Q2 finding; source reviews plus both-OS/both-tier CI are still required. Qualified claims
-remain limited to the actual LL evidence on this lavapipe host.
+Proposed qualified closure: **On this desktop's recorded lavapipe stack, LL G4
+passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks,
+and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks;
+whole-process active RSS remains unresolved/report-only, and every named
+deferral below remains deferred, not passed.** This makes no RTX 3090 playback
+or supported-hardware-wide claim. PF1 closure still requires reviews A/B,
+the fix round, a narrow Astra re-check and both-OS/both-tier CI. Round 4 adds zero
+counted lines; the total remains 1,190/1,200. Earlier source checks and fast-tier
+results above are round-3 evidence; no new build or workspace test is claimed.
 
 D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
 

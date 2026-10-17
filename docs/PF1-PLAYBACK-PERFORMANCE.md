@@ -1407,17 +1407,36 @@ Opus. *CI on push*, Windows included.
 | D15 | The exhaustive reader-model test's fast-tier time | Amendment R65: `sched::tests::the_reader_model_holds_for_every_short_sequence` (S2b, `72246d3`) takes about 120 s in the fast tier. It predates S2c and stays as it is until S3 | S3 | the S3 backlog: move it to the slow tier, or shrink it |
 
 
-## S4c qualified scope and closure (R91)
+## S4c qualified scope and closure (R91/R92)
 
 R91 limits fresh acceptance to LL G4/G15/D13 on the identified desktop lavapipe
 stack, with shared frozen-input preparation/consumption. The source checkpoint is
-`4783d5f` at 1,190 counted lines. G15 (42 children) and D13 (three × 30 cycles) pass their native contracts; G4 remains incomplete after a Q2-invalid row. Full workspace fast and strict Linux log verification pass;
+`4783d5f` at 1,190 counted lines. R92's fresh G4 series passes all 24 valid rows
+with zero missed callbacks and every fps floor met; G15 (42 children) and D13
+(three × 30 cycles) pass their native contracts. The original invalid G4 series
+and finding are explicitly superseded with every byte preserved. Full workspace
+fast and strict Linux log verification passed on the same source in round 3;
 E16 in [PF1-EVIDENCE.md](PF1-EVIDENCE.md#e16--s4c-r91-c-plus-frozen-inputs) records the
 actual outcomes and the proposed post-review/CI closure. S3b's historical results
 remain in E15. The G4 reference uses the accepted S3b shipping implementation with
 the common test overlay; this comparison does not establish a speedup. S0 cleanup
 is successful process exit plus parent reap, while the candidate also observes
 its bounded engine teardown.
+
+Proposed qualified closure: on this desktop's recorded lavapipe stack, LL G4
+passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks,
+and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks;
+whole-process active RSS remains unresolved/report-only, and every named
+deferral below remains deferred, not passed. Reviews A/B, the fix round, a narrow
+Astra re-check and both-OS/both-tier CI still precede PF1 closure. No RTX 3090
+playback or supported-hardware-wide claim is made. Round 4 adds zero counted lines.
+
+R92-2 process/thread priority and five-second load diagnostics for both attempts
+are under `target/review/pf/s4/s4c/round-4/`. All 360 new load samples have
+contamination annotations (one-minute load 6.22–20.59); load does not gate.
+Native nice 10 is observed for both attempts. The new media/pacer thread group
+is observed at nice 10, Linux priority 30, SCHED_OTHER; the original per-thread
+priority is source-derived because no old thread snapshot survives.
 
 The D13 independent oracle measures the union of safe plane spans and lifetime
 generations. Its retained-frame decision is separate from whole-process RSS;

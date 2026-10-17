@@ -91,11 +91,15 @@ Measure Windows independently. Investigate source verification concurrency and
 thumbnail LRU updates only with a workload that exposes their actual cost.
 
 
-## PF1 S4c qualified evidence (R91)
+## PF1 S4c qualified evidence (R91/R92)
 
 Fresh S4c collection is limited to desktop LL G4/G15/D13 on lavapipe, with frozen
 documents/media, source-bound release binaries and native child receipts. It is
-source-bound at `4783d5f` (1,190 counted lines): G15 and D13 native contracts pass, G4 remains incomplete with an in-scope Q2 finding, and full workspace fast plus strict Linux log verification pass. E16 in
+source-bound at `4783d5f` (1,190 counted lines): R92's single fresh G4 series
+passes all 24 valid rows with zero missed callbacks and both arms above every
+floor; G15 and D13 native contracts pass. The original invalid G4 series and
+finding are explicitly superseded, with their bytes unchanged. Full workspace
+fast plus strict Linux log verification passed on this source in round 3. E16 in
 [PF1-EVIDENCE.md](PF1-EVIDENCE.md#e16--s4c-r91-c-plus-frozen-inputs) and the main-checkout
 `target/review/pf/s4c-report.md` carry the exact outcomes, raw evidence and source
 identity. The standing report-only PERFORMANCE lanes above are deferred; these
@@ -104,6 +108,22 @@ state with a common test overlay and makes no speedup claim. S0 cleanup uses
 successful process exit and parent reap; the candidate also checks its engine's
 bounded teardown. Whole-process active RSS remains report-only pending a separate
 allowance; G15's 4 MiB limit is only for settled idle.
+
+The six-row G4 fps ranges are blend 29.526–29.959 (floor 15), explainer
+29.859–29.959 (24), reel 29.826–29.926 (15), and typical 29.776–29.959 (24).
+Aggregate validation and cached figures exit 0. R92-2 diagnostics for both
+attempts are under `target/review/pf/s4/s4c/round-4/`: native nice 10 is observed;
+new media/pacer-group threads are observed at nice 10, Linux priority 30,
+SCHED_OTHER. Original per-thread priority is source-derived, not observed.
+All 360 new five-second load samples contain contamination annotations;
+one-minute load ranges from 6.22 to 20.59 and does not gate. Other projects'
+processes were untouched; no worker build or test overlapped timing.
+
+The proposed qualified closure covers LL G4, G15 and D13's retained-plane
+oracle/cleanup on this lavapipe host, with whole-process active RSS unresolved
+and every named deferral below deferred, not passed. Reviews A/B, the fix round,
+a narrow Astra re-check and both-OS/both-tier CI remain before PF1 closure.
+Round 4 adds zero counted lines and makes no RTX 3090 playback claim.
 
 D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
 

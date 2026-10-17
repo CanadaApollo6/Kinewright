@@ -1,12 +1,76 @@
 # PF1 S4 reproduction checkpoints
 
+## R92 round-4 G4 acceptance and supersession
+
+**G4 PASS:** one complete fresh series on frozen candidate source `4783d5f`,
+24/24 valid rows, zero missed callbacks, every floor met for both arms. The
+aggregate, cached figures and independent validation each exit 0. Counted
+increment: zero; total **1,190/1,200**. No row was rerun. Reviews A/B, the fix
+round, narrow re-check and both-OS/both-tier CI still precede PF1 closure.
+
+The main-checkout evidence is `target/review/pf/s4/s4c/round-4/`;
+`frozen-series.json` binds pins, plan, actual harness and binaries before launch.
+The plan is `plan-G4.json`, ID `s4c-r4-G4`; rows and the standard aggregate are
+under `target/review/pf/s4/work/series-s4c-r4-G4/`.
+Pins SHA-256: `722272a27e02fffbcd913a49d6ea19e0c3524e3f055214524be91e758f99cc36`.
+Candidate binary SHA-256:
+`60e265acb95685922bbe64fd2d042f8e282f5e609de5cc061bee15f69cdf54f2`.
+The accepted-S3b reference retains binary
+`a556703cd1f39a787da720d453782e34a8d08b2a0a4f9c5ff91d4292c80e1a34`
+and its exact 9efb932 test-overlay source. Only unused G15 Rust code differs
+from final source; G4 and the paced driver are unchanged. These pairs establish
+no speedup. The actual frozen Python root remains
+`s4c/round-3/startup-final/frozen-repo`; the runner archive remains `8dab58af...`
+as fully identified below.
+
+`supersession.json` links the original series, `G4-finding.json`, row 0-2 and
+R92's authorization. `supersession-outcome.json` links the new accepted status.
+All 22 original files retain their hashes. The original 29.07 fps Q2-invalid
+row is neither a threshold pass nor a miss. This external supersession record
+binds both pin sets: the unchanged validator forbids cross-pins ancestry, so
+no fabricated same-pins predecessor is supplied.
+
+Collection used one `setsid nohup timeout --kill-after=1 599 python3
+.../work/lane.py` invocation per pinned row, with the exact environment/command
+saved in its receipt/status. The unchanged lane alarm is 590 seconds and the
+native timeout is 570. After each row, before the next launch, require exit 0,
+validity `valid`, and fps ≥ 15 for blend/reel or ≥ 24 for explainer/typical,
+for either arm. Any invalid row or miss stops collection without a rerun.
+The unchanged `series.collect` then read those saved rows to write its journal
+and aggregate, with zero further native launches (`aggregation.json`). No new
+retained executable source was written.
+
+Audit the sealed series without launching native children:
+
+```bash
+source scripts/setup-ffmpeg.sh
+pf1_root=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4
+PF1_ROOT="$pf1_root" PF1_REPO="$pf1_root/s4c/round-3/startup-final/frozen-repo" PYTHONDONTWRITEBYTECODE=1 nice -n 19 python3 "$pf1_root/work/final-figures.py" "$pf1_root/s4c/round-4/plan-G4.json"
+PYTHONDONTWRITEBYTECODE=1 nice -n 19 python3 "$pf1_root/s4c/round-3/startup-final/frozen-repo/scripts/pf1/validate.py" --pins "$pf1_root/s4c/round-4/pins-G4.json" --run "$pf1_root/work/series-s4c-r4-G4/status-0.json" --root "$pf1_root"
+```
+
+`original-priority-load-diagnostic.json` preserves all 44 original load samples
+by hash. Original native nice 10 is observed; original thread nice/priority is
+source-derived because no thread snapshot survives. The new
+`priority-load-diagnostic.json` indexes every native task snapshot and all 360
+five-second load samples (all contaminated, one-minute load 6.22–20.59), plus
+start/end readbacks. Every media/pacer-group thread is observed at nice 10,
+Linux priority 30, SCHED_OTHER; exact TID attribution uses source/name/wait-state
+inference. The llvmpipe disk worker lowers itself to nice 19/SCHED_BATCH.
+The launch bootstrap stays at nice 0 only to spawn native nice 10; the lane
+sampler and independent diagnostic run at nice 19. Other projects' jobs were
+untouched; load is annotation-only under R50. No worker build or test overlapped
+timing. Round-3 source checks and fast-tier results below remain historical
+evidence on the identical source; no new build or workspace test is claimed.
+
 ## R91 round-3 final-source context
 
 Source: `4783d5f`, **1,190 counted lines**. The authoritative report is the
 main-checkout `target/review/pf/s4c-report.md`. First collection: G4 exit 2
 (Q2 invalid, three missed callbacks, only 3/24 rows), G15 exit 2 (startup), D13 exit
-0 (three children, 30 cycles each). These bytes remain unchanged. G4 is an open
-in-scope finding and is not silently rerun or deferred.
+0 (three children, 30 cycles each). These bytes remain unchanged. G4 was an open
+in-scope finding at round 3; the R92 section above records its authorized full
+replacement and supersession.
 
 The startup fix starts the launch clock after diagnostics and gives G15 input
 consumption one native owner. Actual selected-device readiness may precede input
