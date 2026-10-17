@@ -21,6 +21,7 @@ MUTATIONS = {
     'd13_spacing': ("times[0] >= ack+100000 and times[1] >= ack+200000 and times[1]-times[0] >= 100000", 'True'),
     'd13_calibration': ("record['calibration_sha256'] == protocol['calibration']['sha256'] and metrics['u_bytes'] == 30*protocol['d_bytes']", 'True'),
     'native_count': ("record['native_children'] == 1", 'True'),
+    'native_types': ("all(type(value) is int for value in [record['native_children'], record['publisher_pid'], cleanup['pid'], cleanup['exit']]) and cleanup['pid'] > 0", 'True'),
     'schema': ("    if '$ref' in rule:", "    return\n    if '$ref' in rule:"),
     'duplicate': ("len(result) == len(items)", "True"),
     'nonfinite': ("require(False, 'nonfinite ' + x)", "0"),
@@ -66,7 +67,7 @@ MUTATIONS = {
 if '--mutation' in sys.argv:
     index = sys.argv.index('--mutation'); name = sys.argv[index+1]; del sys.argv[index:index+2]
     old, new = MUTATIONS[name]
-    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline', 'native_count'] else v
+    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline', 'native_count', 'native_types'] else v
     source = Path(target.__file__).read_text(); assert old in source
     exec(compile(source.replace(old, new), target.__file__, 'exec'), target.__dict__)
 
@@ -300,7 +301,7 @@ class Pins(unittest.TestCase):
     def test_native_receipt(self):
         raw = dict(native_children=1, publisher_pid=42, native_cleanup=dict(pid=42, reaped=True, exit=0))
         launch.native_check(raw)
-        for key, value in [('native_children', 3), ('reaped', False), ('exit', 101), ('pid', 43)]:
+        for key, value in [('native_children', 3), ('native_children', True), ('reaped', False), ('exit', 101), ('exit', False), ('pid', 43)]:
             altered = copy.deepcopy(raw)
             (altered if key == 'native_children' else altered['native_cleanup'])[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):

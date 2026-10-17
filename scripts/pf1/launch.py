@@ -73,6 +73,7 @@ def live_record(path, token, started, now, pins, host, root, environment):
 
 def native_check(record):
     cleanup = record['native_cleanup']
+    v.require(all(type(value) is int for value in [record['native_children'], record['publisher_pid'], cleanup['pid'], cleanup['exit']]) and cleanup['pid'] > 0, 'malformed native receipt numbers')
     v.require(record['native_children'] == 1 and cleanup['reaped'] is True and cleanup['exit'] == 0 and cleanup['pid'] == record['publisher_pid'], 'native child count/cleanup mismatch')
 
 def input_binding(pins, root, ordinal):
