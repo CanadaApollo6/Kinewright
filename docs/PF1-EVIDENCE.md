@@ -7790,6 +7790,8 @@ tests and the affected native witnesses pass. Full workspace fast tier passed (3
 | G4, four workloads / 24 rows | R92's single fresh final-source series passes all 24 rows, with zero missed callbacks and both arms above every floor. Six-row ranges: blend 29.526–29.959 fps (floor 15), explainer 29.859–29.959 (24), reel 29.826–29.926 (15), typical 29.776–29.959 (24). Aggregate, cached figures and independent validation exit 0. The original row 0-2 is invalid evidence, neither a threshold pass nor a miss, and its series/finding are explicitly superseded. |
 | G15, seven workloads / 42 children | First collection stopped before metrics on the startup bug. After its fix, all 42 fresh children passed; cached figures exit 0. Every one of the 21 pairs is within S0 + 4,194,304 bytes; the largest delta is +2,727,936 bytes (title-only pair 1). |
 | D13, three children / 30 cycles each | The final-source series passed all three fresh children × 30 cycles, oracle/cleanup true, and cached figures exit 0. U=93,312,000 bytes from d=3,110,400. Whole-process RSS deltas are 99,082,240 / 94,298,112 / 104,382,464 bytes: all exceed U and remain report-only; no numerical RSS allowance is resolved. |
+| G1, PF1-LH / 6 rows | **G1 passed** the frozen `typical_1080p` P-play workload/protocol in all three candidate runs on this RTX 3090 under the recorded default driver policy (validator exit 0; Q3 slowdown sensitivity checked). **A-1:** consumed-input receipts check frozen bytes at import and later checks, not bytes opened by the decoder; substitution/restoration and container-internal resources are not detected. This is not a speedup, supported-hardware real-time or overall PF1-completion claim. |
+| G2, PF1-LH / 24 rows | **G2 passed** the frozen `explainer_16x9`, `feed_4x5`, `reel_9x16` and full 240 s `talk_recut` native-display workload/protocols in all three candidate runs per workload on this RTX 3090 under the recorded default driver policy (validator exit 0; missed outcomes ≤1% and presentation p95 ≤50 ms). **A-1:** consumed-input receipts check frozen bytes at import and later checks, not bytes opened by the decoder; substitution/restoration and container-internal resources are not detected. This is not a speedup, supported-hardware real-time or overall PF1-completion claim, nor a held-age bound. |
 
 Evidence root: main-checkout `target/review/pf/s4/s4c/round-3/`. The original
 `frozen-series.json` and first statuses remain intact; restoring runner archive
@@ -7860,13 +7862,17 @@ D13 cleanup failure can emit one late `D13 sample` line within the same already-
 
 G3 and LH L4a remain unresolved under driver defaults; G3 also appears in the accepted deferrals below.
 
-### Unexplained holds
+### Unexplained holds and named finding H-T
 
 The historical 8,250 ms hold remains unexplained.
 
+**H-T, "LH talk holds" (PF1-H, unscheduled).** On the full 240 s talk, P-play's G14 consumer records 0.2–1.6 s holds in both arms. The separate native engine counter records 315–1,365 ms holds. Retained evidence has maxima only, without hold-event timestamps, so correlation and cause are unknown. When scheduled, H-T will capture hold start/end in a clock aligned with sampler and rehash events (test-only), collect fresh frozen evidence, rerun G14 talk, and describe correlation with monitor ticks and rehash, pstate, decoder/render/consumer phase, and foreign load. H-T links to the standing "~1 s holds" finding and the unexplained 8,250 ms hold; neither is asserted to share a cause.
+
 ### Pending invalid/incomplete
 
-The preserved G4 attempt is superseded by the round-4 series; the first G15 attempt is sealed through `startup-final/previous-context.json`. Neither supplies passing rows. PF1-LH now has a completed R74a busy/75 failure, with no native child or timing result; its G1/G2/G14 and Q3 evidence remains pending, not passed.
+The preserved G4 attempt is superseded by the round-4 series; the first G15 attempt is sealed through `startup-final/previous-context.json`. Neither supplies passing rows. The original PF1-LH R74a busy/75 attempt remains sealed with no native child or timing result; it is distinct from the completed fresh series and its R50 shared timing misses.
+
+**G14 remains pending/report-only, exit 75, never a pass.** Under the frozen P-play protocols on this RTX 3090 under the recorded default driver policy, `talk_recut` has two R50 shared candidate/reference misses of the 100 ms held-age bound. Neither candidate miss exceeds its reference by more than the frozen 1259.274580 ms reference full range. The other five workloads meet the bound in these rows; the overall G14 result remains pending. Hold-event timestamps were not retained, so coincidence with monitor activity, GPU state or foreign load is unknown. **A-1:** consumed-input receipts check frozen bytes at import and later checks, not bytes opened by the decoder; substitution/restoration and container-internal resources are not detected. No cause, speedup, supported-hardware real-time or overall PF1-completion claim follows.
 
 ### Accepted deferrals
 
@@ -7879,11 +7885,31 @@ The R91 qualified scope carries these named deferrals, each **deferred, not pass
 
 G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
 
+PF1-H remains unscheduled: A-1's full decoder-bound snapshot, B-3's G4 floors in pins, B-4's G15 field rename, and H-T remain separate from passed gates.
 
 **Superseded by R94:** PF1-LH entry items under R93 (these do not defer PF1 gates): the full decoder-bound input snapshot (A-1); G4 floors in the pins schema (B-3); renaming G15's legacy protocol field (B-4); and a Linux CI job restoring the runner archive and running `test_lane.py` with `PF1_RUNNERS` (B-5).
 
+## PF1-LH R97 checkpoint (2026-10-17)
 
-## PF1-LH R94 checkpoint (2026-10-17)
+R97 records qualified PF1-LH closure from the post-lane evidence check of source `9236f0e` and the fresh `fix2/fresh/` series. All 70 frozen invocations completed. Main-checkout `target/review/pf/pflh-review/evidence.md` retains the accepted evidence check; `target/review/pf/r97-rulings.md` records the disposition. The results retain the following workload and A-1 limits.
+
+**G1 passed** the frozen `typical_1080p` P-play workload/protocol in all three candidate runs on this RTX 3090 under the recorded default driver policy (validator exit 0; Q3 slowdown sensitivity checked). **A-1:** consumed-input receipts check frozen bytes at import and later checks, not bytes opened by the decoder; substitution/restoration and container-internal resources are not detected. This is not a speedup, supported-hardware real-time or overall PF1-completion claim.
+
+**G2 passed** the frozen `explainer_16x9`, `feed_4x5`, `reel_9x16` and full 240 s `talk_recut` native-display workload/protocols in all three candidate runs per workload on this RTX 3090 under the recorded default driver policy (validator exit 0; missed outcomes ≤1% and presentation p95 ≤50 ms). **A-1:** consumed-input receipts check frozen bytes at import and later checks, not bytes opened by the decoder; substitution/restoration and container-internal resources are not detected. This is not a speedup, supported-hardware real-time or overall PF1-completion claim, nor a held-age bound.
+
+**G14 remains pending/report-only, exit 75, never a pass.** Under the frozen P-play protocols on this RTX 3090 under the recorded default driver policy, `talk_recut` has two R50 shared candidate/reference misses of the 100 ms held-age bound. Neither candidate miss exceeds its reference by more than the frozen 1259.274580 ms reference full range. The other five workloads meet the bound in these rows; the overall G14 result remains pending. Hold-event timestamps were not retained, so coincidence with monitor activity, GPU state or foreign load is unknown. **A-1:** consumed-input receipts check frozen bytes at import and later checks, not bytes opened by the decoder; substitution/restoration and container-internal resources are not detected. No cause, speedup, supported-hardware real-time or overall PF1-completion claim follows.
+
+Q3 slowdown and freeze sensitivity are both confirmed. **A-1:** consumed-input receipts check frozen bytes at import and later checks, not bytes opened by the decoder; substitution/restoration and container-internal resources are not detected. These controls establish sensitivity, not normal playback acceptance.
+
+R95-2 supersession of E12.18.4 and E13.4.9 is limited to these newly measured workloads and protocols on this RTX 3090 under recorded defaults. It does not establish historical upper bounds or change old logs. Five-second GPU readbacks remain sampled states, with no residency or cause claim.
+
+**H-T, "LH talk holds" (PF1-H, unscheduled).** On the full 240 s talk, P-play's G14 consumer records 0.2–1.6 s holds in both arms. The separate native engine counter records 315–1,365 ms holds. Retained evidence has maxima only, without hold-event timestamps, so correlation and cause are unknown. When scheduled, H-T will capture hold start/end in a clock aligned with sampler and rehash events (test-only), collect fresh frozen evidence, rerun G14 talk, and describe correlation with monitor ticks and rehash, pstate, decoder/render/consumer phase, and foreign load. H-T links to the standing "~1 s holds" finding and the unexplained 8,250 ms hold; neither is asserted to share a cause.
+
+**Separate unresolved items and deferrals.** G3/LH L4a remain unresolved under driver defaults. The historical 8,250 ms hold remains unexplained. Active whole-process RSS remains report-only, with no numerical allowance. PF1-H is unscheduled: A-1's full decoder-bound snapshot, B-3's G4 floors in pins, B-4's G15 field rename, and H-T. Every other unclosed R89/R91 deferral remains deferred, not passed.
+
+## PF1-LH historical R94 checkpoint (2026-10-17)
+
+**Historical checkpoint.** This section records the R94 status before the completed fresh series and R97 disposition above. Pending evidence, CI and resumption statements below describe that earlier checkpoint.
 
 Implementation is committed at `a229df0`, **767/950 retained counted lines**, zero shipping lines, no unsafe additions and no lint-policy change. The G14 held-age calculation accounts for completed intervals and both measurement boundaries. Its deterministic 150 ms gap was reported as 95 ms by the removed calculation; the witness is a literal runtime red and restored green. Collector, policy, cached-publication, workload/control and CI archive guards also have runtime assertion reds followed by restored greens. Per-commit verification passes, including **65 portable tests and 16 Linux wrapper tests**. Full workspace fast tier passed (3622 passed, 0 failed, 100 expected ignores, 36 summaries), and strict Linux `verify-fast --os linux` exited 0. Raw logs and summary hashes are under `target/review/pf/s4/pflh/final/fast.json` and `s4/pflh/logs/`.
 
@@ -7906,7 +7932,7 @@ Proposed current closure qualification, pending the R96 re-check, CI and R95-1 a
 **Yes.** `main` at `b6354cb` contains the G14 pass in E12.18.4 (85.1 ms, introduced by `6545ab8`) and the G14 “Pass without the tap” in E13.4.9 (85.1–85.3 ms, introduced by `3d15190`); both rely on P-play's `held_max` calculation. The corrected gap witness invalidates treating that old sampled maximum as a complete upper-bound proof. Those historical claims have not been revalidated with the corrected metric; their recorded values and sealed logs remain unchanged. The witness does not establish that either historical run actually contained the counterexample. E16's LL G4 fps, G15 settled RSS and D13 oracle/cleanup claims do not rely on P-play `held_max`. The measurement repair does not explain the historical 8,250 ms hold. `merged-held-age-claims.log`, `merged-held-age-claims-blame.log` and the implementation report retain the audit.
 
 
-### PF1-LH R96 fix checkpoint (2026-10-17)
+### PF1-LH historical R96 fix checkpoint (2026-10-17)
 
 Code commit `701177eab05bdf581fd48c8b20141193b1674ed7` fixes the LH loader guard, UTC-anchored preflight spacing, the single-run native collection assertion, Q3 exit classification, and B-5 hosted priority/timeout. The retained total is **785/950**, forecast **785**, zero shipping lines. The fixed CI bundle is SHA-256 `2511139e716da7025cabbc8a619ebed06e529021244715a8eadfa2a3b6b01ea2`; the complete runner archive is `9d0e95601c73eea597f503db0a2b2b1a9f367cee251d4c138e6add6f753a76d6`. Synthetic loader, delayed-query spacing, and Q3 witnesses have runtime reds and restored greens under `target/review/pf/s4/pflh/fix/`. They establish no RTX 3090 playback or hardware-control result.
 
