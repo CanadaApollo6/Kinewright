@@ -296,6 +296,13 @@ class PartialParse(unittest.TestCase):
         self.assertEqual(
             st.strip_ffmpeg_log("[x @ 0x1] test a::b ... ignored, slow tier"), "test a::b ... ignored, slow tier"
         )
+        # Windows run 39003986680: FFmpeg's lowercase deprecation warning glued to `ok`.
+        self.assertEqual(
+            st.strip_ffmpeg_log(
+                "test a::b ... [swscaler @ 0000028DABD9D300] okdeprecated pixel format used, make sure you did set range correctly"
+            ),
+            "test a::b ... ok",
+        )
 
     def test_a_result_line_with_no_ffmpeg_fragment_and_no_outcome_is_not_joined(self):
         lines = self.lines()
