@@ -52,7 +52,7 @@ impl D13Probe {
         cleaned.expect("D13 cleanup failed");
         peak
     }
-    fn covered(&self, version: u64, ack: u128, original: &[u64]) -> bool {
+    fn covered(&self, version: u64, ack: u128, original: &[u64]) -> Option<[u128; 2]> {
         let samples = self.samples.lock().unwrap_or_else(PoisonError::into_inner);
         let covered: Vec<_> = samples
             .iter()
@@ -62,7 +62,8 @@ impl D13Probe {
             .collect();
         covered
             .windows(2)
-            .any(|pair| pair[1].0 >= ack + 200_000 && pair[1].0 - pair[0].0 >= 100_000)
+            .find(|pair| pair[1].0 >= ack + 200_000 && pair[1].0 - pair[0].0 >= 100_000)
+            .map(|pair| [pair[0].0, pair[1].0])
     }
     fn sample(&self, idle: u64) -> u64 {
         let mut peak = idle;
@@ -114,6 +115,7 @@ fn d13_run(document: &Document, d: usize, native: bool) {
     START.with_borrow_mut(|slot| *slot = Some(Arc::clone(&ledger)));
     let session = Session::new(None, Arc::default(), false);
     START.with_borrow_mut(|slot| *slot = None);
+    let publication = d13_start(&session.gpu, d, native);
     let lane = session.engine.s4_lane();
     lane.freeze_reader_clock();
     session.engine.set_document(Arc::new(document.clone()));
@@ -142,6 +144,7 @@ fn d13_run(document: &Document, d: usize, native: bool) {
     });
     let observed = Arc::clone(&probe);
     let sampler = thread::spawn(move || observed.sample(idle));
+    let mut intervals = Vec::new();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (start, target, back, forward) = if native {
             (969, 957, 180, 1200)
@@ -189,7 +192,9 @@ fn d13_run(document: &Document, d: usize, native: bool) {
                         .last()
                         .map_or(0, |s| s.0)
                 };
-                d13_wait(|| probe.covered(version, ack, &original));
+                d13_wait(|| probe.covered(version, ack, &original).is_some());
+                intervals.push(serde_json::json!({"cycle":cycle, "target":at, "version":version,
+                    "ack_us":ack, "identities":original, "sample_us":probe.covered(version, ack, &original).unwrap()}));
             }
             ledger.release();
             shown(forward, session.engine.stamp());
@@ -203,25 +208,89 @@ fn d13_run(document: &Document, d: usize, native: bool) {
         serde_json::json!({"U": 30*d, "d_r": d, "idle": idle, "peak": peak, "peak_minus_idle": peak-idle, "excess": i128::from(peak-idle) - (30*d) as i128})
     );
     result.unwrap_or_else(|error| std::panic::resume_unwind(error));
+    d13_publish_result(publication, intervals, idle, peak, d);
+}
+
+fn d13_start(gpu: &GpuContext, d: usize, native: bool) -> Option<(GpuContext, serde_json::Value)> {
+    if !native {
+        return None;
+    }
+    let protocol = serde_json::json!({"name":"D13", "poll_ms":5, "children":3, "cycles":30, "B":16, "reader_cap":2, "d_bytes":d});
+    s4_publish_metrics(gpu, protocol.clone(), None);
+    Some((gpu.clone(), protocol))
+}
+
+fn d13_publish_result(
+    publication: Option<(GpuContext, serde_json::Value)>,
+    intervals: Vec<serde_json::Value>,
+    idle: u64,
+    peak: u64,
+    d: usize,
+) {
+    let Some((gpu, protocol)) = publication else {
+        return;
+    };
+    assert_eq!(intervals.len(), 60, "D13 complete cancellation coverage");
+    s4_publish_metrics(
+        &gpu,
+        protocol,
+        Some((
+            true,
+            serde_json::json!({
+        "oracle_ok":true, "cleanup_ok":true, "idle_bytes":idle, "peak_bytes":peak,
+        "peak_minus_idle_bytes":peak-idle, "u_bytes":30*d}),
+        )),
+    );
+    if let Ok(path) = std::env::var("PF1_RECORD") {
+        let path = std::path::Path::new(&path);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        record["d13_intervals"] = intervals.into();
+        record["calibration_sha256"] = std::env::var("PF1_D13_CALIBRATION_SHA256")
+            .expect("frozen calibration")
+            .into();
+        s4_write_record(path, &record);
+    }
 }
 
 #[test]
 #[ignore = "PF1 D13 parent: release LL development series"]
 fn s4_d13_active() {
     assert_release();
-    let Workload(document, _media) = perf_fixtures::seek_gop60();
-    let calibration = crate::s4_d13::calibrate(&document.media_pool[0].path);
+    let collecting = std::env::var_os("PF1_RECORD").is_some();
+    let Workload(document, _media) =
+        s4_input("seek_gop60").unwrap_or_else(perf_fixtures::seek_gop60);
+    let calibration = if collecting {
+        serde_json::from_str(&std::env::var("PF1_D13_CALIBRATION").expect("frozen calibration"))
+            .unwrap()
+    } else {
+        crate::s4_d13::calibrate(&document.media_pool[0].path)
+    };
     let temp = TempDirectory::new("d13");
     let path = temp.path("document.json");
     std::fs::write(&path, serde_json::to_vec(&document).expect("document"))
         .expect("write document");
-    let frozen = serde_json::to_vec(&calibration).expect("calibration");
+    let frozen = if collecting {
+        std::env::var("PF1_D13_CALIBRATION").unwrap().into_bytes()
+    } else {
+        serde_json::to_vec(&calibration).expect("calibration")
+    };
     println!(
         "D13 calibration sha256={} {}",
         crate::sha256::sha256_bytes(&frozen),
         calibration
     );
-    for child in 0..3 {
+    let offset: usize = if collecting {
+        std::env::var("S3B_RUN_OFFSET").unwrap().parse().unwrap()
+    } else {
+        0
+    };
+    assert!(offset < 3);
+    for child in offset..if collecting { offset + 1 } else { 3 } {
+        let record = std::env::var_os("PF1_RECORD")
+            .map_or_else(|| temp.path("record.json"), std::path::PathBuf::from);
+        let receipt = temp.path("receipt.json");
+        let token = std::env::var("PF1_TOKEN").unwrap_or_else(|_| "d13-development".into());
         let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "--exact",
@@ -232,6 +301,13 @@ fn s4_d13_active() {
             ])
             .env("PF1_RSS_DOCUMENT", &path)
             .env("PF1_D13_CHILD", child.to_string())
+            .env("PF1_RECORD", &record)
+            .env("PF1_TOKEN", &token)
+            .env("PF1_CHILD_RECEIPT", &receipt)
+            .env(
+                "PF1_D13_CALIBRATION_SHA256",
+                crate::sha256::sha256_bytes(&frozen),
+            )
             .env(
                 "PF1_D13_CALIBRATION",
                 String::from_utf8(frozen.clone()).expect("JSON"),
@@ -243,7 +319,9 @@ fn s4_d13_active() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.status.success(), "D13 child={child} failed");
+        let mut published = s4_import_child(&output, &record, &receipt, &token);
+        published["native_children"] = 1.into();
+        s4_write_record(&record, &published);
     }
 }
 

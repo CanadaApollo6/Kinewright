@@ -10,6 +10,7 @@ import statistics
 SCHEMA = json.loads((Path(__file__).resolve().parents[2] / 'docs/PF1-PINS.schema.json').read_text())
 PLAY = set('typical_1080p blend_heavy_1080p explainer_16x9 reel_9x16 feed_4x5 talk_recut'.split())
 CONTRACTS = {
+    'D13': ('LL', 'D13', {'seek_gop60'}, {'children': 3, 'cycles': 30, 'B': 16, 'reader_cap': 2}),
     'I4': ('LL LH', 'P-comp', {'typical_1080p'}, {'warm_frames': 30, 'measured_frames': 300}),
     'G18': ('LH', 'export', {'typical_1080p'}, {'export_clips': 24, 'frames': 120}),
     'G15': ('LL', 'P-rss', PLAY | {'title_only'}, {'children': 3}),
@@ -25,6 +26,7 @@ CONTRACTS = {
 COUNTERS = {name: ('R65', 'count', 0) for name in 'admission_waits windows_filled count_run_decoded count_run_converted count_refill_decoded count_refill_converted count_back_hits count_back_refills count_back_hits_preconverted count_refills_started count_kept_handoff_redecode conv_t_n conv_w_n'.split()}
 COUNTERS.update({name: ('zero', 'count', 0) for name in ['timeouts', 'count_idle_discard', 'guard_trips']})
 RULES = {
+    'D13': {**{k: ('invariant', 'boolean', 0) for k in ['oracle_ok', 'cleanup_ok']}, **{k: ('report', 'byte', 0) for k in ['idle_bytes', 'peak_bytes', 'peak_minus_idle_bytes', 'u_bytes']}},
     'I4': {'mean_ms': ('ratio', 'ms', 1.05)},
     'G18': {'wall_ms': ('ratio', 'ms', 1.05), 'output_sha256': ('equal', 'sha256', 0)},
     'G15': {'settled_bytes': ('delta', 'byte', 4194304)},
@@ -119,11 +121,33 @@ def preflight(samples, uuid, started_s):
     require(0 <= started_s - samples[-1]['timestamp_s'] <= 10, 'future/stale preflight; launch within ten seconds of final sample')
     return all(s['utilization_pct'] >= 80 for s in samples) or any(not p['owned'] and (p['kind'] == 'C' or p['memory_bytes'] > 2147483648) for s in samples for p in s['processes'])
 
+def frozen_input(root, key, value):
+    for kind in ['workload', 'media', 'document']:
+        artifact(root, value[kind])
+    require(read(root/value['workload']['path']) == dict(key=key, document=value['document'], media=value['media']), 'substituted input manifest')
+    for ref in read(root/value['media']['path'])['files']:
+        artifact(root, ref)
+    return {kind: value[kind]['sha256'] for kind in ['workload', 'media', 'document']}
+
+def d13_check(record, pins):
+    protocol, metrics = pins['protocol'], record['metrics']
+    require(record['calibration_sha256'] == protocol['calibration']['sha256'] and metrics['u_bytes'] == 30*protocol['d_bytes'], 'D13 calibration/U mismatch')
+    require(metrics['peak_bytes'] >= metrics['idle_bytes'] and metrics['peak_minus_idle_bytes'] == metrics['peak_bytes']-metrics['idle_bytes'], 'D13 RSS report mismatch')
+    rows = record['d13_intervals']
+    require([(r['cycle'], r['target']) for r in rows] == [(cycle, target) for cycle in range(30) for target in [180, 1200]], 'D13 missing/duplicate cancellation')
+    require(len({r['version'] for r in rows}) == 60 and all(type(r['version']) is int and r['version'] > 0 for r in rows), 'D13 repeated/invalid applied plan')
+    for row in rows:
+        times, ids, ack = row['sample_us'], row['identities'], row['ack_us']
+        require(len(times) == 2 and all(type(t) is int and t > 0 for t in times) and type(ack) is int and ack >= 0, 'D13 timestamp shape')
+        require(times[0] >= ack+100000 and times[1] >= ack+200000 and times[1]-times[0] >= 100000, 'D13 missing two-sample live interval')
+        require(ids and len(ids) == len(set(ids)) and all(type(i) is int and i > 0 for i in ids), 'D13 retained identities missing')
+
+
 def spec(pins_path, root):
     pins = read(pins_path)
     schema(pins, SCHEMA['$defs']['pins'])
     inputs, builds, host = [artifact(root, pins[k], k) for k in ['inputs', 'builds', 'host']]
-    single = pins['gate'] == 'G7a'
+    single = pins['gate'] in ['G7a', 'D13']
     require(set(inputs) == set(builds) and set(pins['arms'].values()) <= builds.keys() and len(set(pins['arms'].values())) == (1 if single else 2), 'arm manifest mismatch')
     require(('reference' not in pins['arms']) == single and len(builds) == (1 if single else 3 if pins['gate'].startswith('R65-') else 2), 'unexpected comparator')
     for arm, build in builds.items():
@@ -136,6 +160,8 @@ def spec(pins_path, root):
         for workload in inputs[arm].values():
             for key in ['workload', 'media', 'document']:
                 artifact(root, workload[key])
+        if pins['gate'] in ['G4', 'G15', 'D13']:
+            for key, workload in inputs[arm].items(): frozen_input(root, key, workload)
     gate, protocol = pins['gate'], pins['protocol']
     require(gate in CONTRACTS, 'unsupported/incomplete gate contract')
     lanes, name, workloads, parameters = CONTRACTS[gate]
@@ -155,7 +181,7 @@ def spec(pins_path, root):
         require(rule['scope'] == ('report' if rule['decision'] == 'report' else 'paired_median' if rule['decision'] in ['ratio', 'R65'] else 'invariant' if rule['decision'] in ['invariant', 'zero', 'equal'] else 'each_run'), 'metric scope mismatch')
         require(key in rules and (rule['decision'], rule['unit'], rule['limit']) == rules[key], 'metric decision/unit/threshold mismatch')
     require(pins['metrics'].keys() == rules.keys(), 'missing required metric')
-    require(protocol['runs'] == (1 if single else 18 if gate.startswith('R65-') else 3), 'required run count')
+    require(protocol['runs'] == (1 if gate == 'G7a' else 18 if gate.startswith('R65-') else 3), 'required run count')
     expected_rows = {(w, pair, arm) for w in inputs[pins['arms']['candidate']] for pair in range(protocol['runs']) for arm in builds}
     require({(r['workload'], r['pair'], r['arm']) for r in protocol['order']} == expected_rows and len(protocol['order']) == len(expected_rows), 'incomplete/duplicate order')
     require(all(len({r['seed'] for r in protocol['order'] if r['workload'] == w and r['pair'] == pair}) == 1 for w, pair, _ in expected_rows), 'paired seeds differ')
@@ -168,6 +194,13 @@ def spec(pins_path, root):
             seeds = inputs[pins['arms']['candidate']][workload]['seeds']
             require(len(seeds) == len(set(seeds)) == 3 and all(r['pair'] == i // 3 and r['seed'] == seeds[(i // 3) % 3] for i, r in enumerate(orders)), 'six three-seed rotation schedule required')
             require(all({tuple(r['arm'] for r in orders[i:i+3]) for i in range(seed*3, len(orders), 9)} == set(itertools.permutations(builds)) for seed in range(3)), 'unbalanced counter rotations')
+    if gate == 'D13':
+        artifact(root, protocol['calibration'])
+        calibration = read(root/protocol['calibration']['path'])
+        media = read(root/inputs[pins['arms']['candidate']]['seek_gop60']['media']['path'])['files']
+        require(len(media) == 1 and calibration['media_sha256'] == media[0]['sha256'], 'D13 calibration source mismatch')
+        require(calibration['method'] == 'safe measured plane span union' and calibration['B'] == 16 and calibration['reader_cap'] == 2 and type(calibration['d_bytes']) is int and calibration['d_bytes'] == protocol['d_bytes'], 'D13 independent calibration mismatch')
+        require(calibration['frames'] == 1800 and calibration['shape']['width'] == 1920 and calibration['shape']['height'] == 1080, 'D13 calibration shape mismatch')
     gpu_check(pins['gpu'], pins, host, root)
     return pins, builds, host
 
@@ -222,6 +255,7 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
     rows, order = status['runs'], pins['protocol']['order']
     require(len(rows) == len(order), 'incomplete attempts')
     busy = False
+    native_pids = set()
     for row, expected in zip(rows, order):
         require(all(row[k] == v for k, v in expected.items()) and row['attempt'] == 0 and row['supersedes'] == '', 'attempt/order mismatch; preserve failures in a new ruled series')
         build = builds[row['arm']]
@@ -230,6 +264,26 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
         require(row['fingerprint'] == fingerprint(row), 'stale status fingerprint')
         for ref in row['logs']:
             artifact(root, ref)
+        if pins['gate'] in ['G4', 'G15', 'D13']:
+            path = Path(row['environment']['PF1_RECORD'])
+            require(path.resolve().is_relative_to(root.resolve()), 'collector outside evidence root')
+            matches = [ref for ref in row['logs'] if root/ref['path'] == path]
+            require(len(matches) == 1, 'missing/duplicate collector artifact')
+            ref = matches[0]
+            artifact(root, ref)
+            raw = read(path)
+            protocol = dict(name=pins['protocol']['name'],poll_ms=5,**CONTRACTS[pins['gate']][3])
+            if pins['gate'] == 'D13': protocol['d_bytes'] = pins['protocol']['d_bytes']
+            require(raw['protocol'] == protocol, 'collector protocol mismatch')
+            require(raw['valid'] is True and raw['metrics'] == row['metrics'] and raw['selected'] == row['gpu']['selected'], 'collector final mismatch')
+            require(raw['token'] == row['environment']['PF1_TOKEN'] and row['started_s'] <= raw['timestamp_s'] <= row['ended_s'], 'collector publication mismatch')
+            require(raw['consumed'] == frozen_input(root, row['workload'], read(root/pins['inputs']['path'])[row['arm']][row['workload']]), 'collector input mismatch')
+            if pins['gate'] != 'G4':
+                from launch import native_check
+                native_check(raw)
+                require(raw['publisher_pid'] not in native_pids, 'native child reused across rows')
+                native_pids.add(raw['publisher_pid'])
+            if pins['gate'] == 'D13': d13_check(raw, pins)
         gpu_check(row['gpu'], pins, host, root)
         telemetry = row['gpu']['telemetry']
         require(row['started_s'] < row['ended_s'], 'invalid run interval')

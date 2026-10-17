@@ -54,9 +54,11 @@ def live_record(path, token, started, now, pins, host, root, environment):
     v.require(record.get('consumed') == expected, 'frozen inputs omitted/substituted/unconsumed')
     if pins['gate'] in ['G15', 'D13'] and record.get('valid') is True:
         native_check(record)
+        if pins['gate'] == 'D13': v.d13_check(record, pins)
     v.require(record['token'] == token and started <= record['timestamp_s'] <= now, 'stale/future collector publication')
     v.schema(record['selected'], v.SCHEMA['$defs']['selected'])
     required = dict(name=pins['protocol']['name'], poll_ms=5, **v.CONTRACTS[pins['gate']][3])
+    if pins['gate'] == 'D13': required['d_bytes'] = pins['protocol']['d_bytes']
     v.require(record['protocol'] == required, 'collector protocol mismatch')
     v.require(pins['lane'] == 'LL' and record['software'] is True and record['selected']['backend'] == 'Vulkan', 'unsupported collector route')
     driver = record['driver_info']
@@ -76,19 +78,17 @@ def native_check(record):
 def input_binding(pins, root, ordinal):
     entry = pins['protocol']['order'][ordinal]
     value = v.artifact(root, pins['inputs'], 'inputs')[entry['arm']][entry['workload']]
-    for key in ['workload', 'media', 'document']:
-        v.artifact(root, value[key])
-    manifest = v.read(root/value['workload']['path'])
-    v.require(manifest == dict(key=entry['workload'], document=value['document'], media=value['media']), 'substituted input manifest')
-    for ref in v.read(root/value['media']['path'])['files']:
-        v.artifact(root, ref)
-    return {key: value[key]['sha256'] for key in ['workload', 'media', 'document']}
+    return v.frozen_input(root, entry['workload'], value)
 
 def input_environment(pins, root, ordinal):
     input_binding(pins, root, ordinal)
     entry = pins['protocol']['order'][ordinal]
     value = v.read(root/pins['inputs']['path'])[entry['arm']][entry['workload']]
-    return dict(PF1_FROZEN_INPUT=str(root/value['workload']['path']), PF1_FROZEN_SHA256=value['workload']['sha256'])
+    environment = dict(PF1_FROZEN_INPUT=str(root/value['workload']['path']), PF1_FROZEN_SHA256=value['workload']['sha256'])
+    if pins['gate'] == 'D13':
+        v.artifact(root, pins['protocol']['calibration'])
+        environment.update(PF1_D13_CALIBRATION=(root/pins['protocol']['calibration']['path']).read_text(), PF1_D13_CALIBRATION_SHA256=pins['protocol']['calibration']['sha256'])
+    return environment
 
 def gpu_sample(table, query, timestamp, owned):
     v.require(table['exit'] == query['exit'] == 0, 'failed GPU query')

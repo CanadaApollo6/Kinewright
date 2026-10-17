@@ -1360,6 +1360,11 @@ fn pf1_rss_child() {
     if let Ok(frozen) = std::env::var("PF1_D13_CALIBRATION") {
         let calibration: serde_json::Value =
             serde_json::from_str(&frozen).expect("D13 calibration");
+        assert_eq!(
+            crate::sha256::sha256_bytes(frozen.as_bytes()),
+            std::env::var("PF1_D13_CALIBRATION_SHA256").expect("calibration digest")
+        );
+        assert_eq!(calibration["ffmpeg"], ffmpeg_next::util::version());
         assert_eq!(calibration["B"], 16);
         assert_eq!(calibration["reader_cap"], 2);
         assert_eq!(

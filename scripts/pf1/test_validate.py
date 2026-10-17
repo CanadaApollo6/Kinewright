@@ -16,6 +16,10 @@ import validate as v
 import series as runner
 
 MUTATIONS = {
+    'collector_final': ("raw['valid'] is True and raw['metrics'] == row['metrics'] and raw['selected'] == row['gpu']['selected']", 'True'),
+    'd13_coverage': ("[(r['cycle'], r['target']) for r in rows] == [(cycle, target) for cycle in range(30) for target in [180, 1200]]", 'True'),
+    'd13_spacing': ("times[0] >= ack+100000 and times[1] >= ack+200000 and times[1]-times[0] >= 100000", 'True'),
+    'd13_calibration': ("record['calibration_sha256'] == protocol['calibration']['sha256'] and metrics['u_bytes'] == 30*protocol['d_bytes']", 'True'),
     'native_count': ("record['native_children'] == 1", 'True'),
     'schema': ("    if '$ref' in rule:", "    return\n    if '$ref' in rule:"),
     'duplicate': ("len(result) == len(items)", "True"),
@@ -109,6 +113,17 @@ class Pins(unittest.TestCase):
     def run_record(self, expected, resign=True):
         self.p.write_text(json.dumps(self.pins), encoding='utf-8')
         self.status['series']['pins'] = v.digest(self.p)
+        if self.pins['gate'] in ['G4', 'G15', 'D13']:
+            for index, row in enumerate(self.status['runs']):
+                path = self.root/f'collector-{index}.json'
+                row['environment'].update(PF1_RECORD=str(path), PF1_TOKEN='portable-synthetic')
+                value = v.read(self.root/self.pins['inputs']['path'])[row['arm']][row['workload']]
+                raw = dict(valid=True, metrics=row['metrics'], selected=row['gpu']['selected'], token='portable-synthetic', timestamp_s=row['started_s'], consumed={k:value[k]['sha256'] for k in ['workload','media','document']}, native_children=1, publisher_pid=index+42, native_cleanup=dict(pid=index+42,reaped=True,exit=0))
+                raw['protocol'] = dict(name=self.pins['protocol']['name'],poll_ms=5,**v.CONTRACTS[self.pins['gate']][3])
+                if self.pins['gate'] == 'D13': raw['protocol']['d_bytes'] = self.pins['protocol']['d_bytes']
+                if self.pins['gate'] == 'D13' and 'calibration' in self.pins['protocol']: raw.update(self.d13_record())
+                path.write_text(json.dumps(raw))
+                row['logs'] = [ref for ref in row['logs'] if ref['path'] != path.name] + [dict(path=path.name,sha256=v.digest(path))]
         for row in self.status['runs']:
             row['identity']['pins'] = v.digest(self.p)
             if resign: row['fingerprint'] = v.fingerprint(row)
@@ -156,9 +171,10 @@ class Pins(unittest.TestCase):
         builds = v.read(self.root/self.pins['builds']['path'])
         template = next(iter(v.read(self.root/self.pins['inputs']['path']).values()))['typical_1080p']
         bases = ['43b2625', '62a29b1', 'accepted-S3b'] if gate.startswith('R65-') else ['S0' if gate in ['G15', 'G18', 'VM-D6'] else 'accepted-S3b', 'candidate']
-        if gate == 'G7a':
+        if gate in ['G7a', 'D13']:
             self.pins['arms'].pop('reference')
             builds.pop('s3b')
+            bases = ['candidate']
         if gate.startswith('R65-'):
             builds['historical'] = copy.deepcopy(builds['s4'])
             self.pins['arms'] = dict(zip(['reference', 'candidate'], {'R65-historical':['s3b','s4'], 'R65-intervening':['s4','historical'], 'R65-cumulative':['s3b','historical']}[gate]))
@@ -174,7 +190,7 @@ class Pins(unittest.TestCase):
         self.pins['builds'] = put('builds.json', builds)
         self.pins['inputs'] = put('inputs.json', {a:{w:template for w in sorted(workloads)} for a in builds})
         rules = v.COUNTERS if gate.startswith('R65-') else v.RULES.get(gate, {'fps':('each_ge','fps',0)})
-        self.pins['metrics'] = {k:dict(decision=d, unit=u, limit=l, scope='paired_median' if d in ['ratio','R65'] else 'invariant' if d in ['equal','zero','invariant'] else 'each_run') for k,(d,u,l) in rules.items()}
+        self.pins['metrics'] = {k:dict(decision=d, unit=u, limit=l, scope='report' if d == 'report' else 'paired_median' if d in ['ratio','R65'] else 'invariant' if d in ['equal','zero','invariant'] else 'each_run') for k,(d,u,l) in rules.items()}
         order = []
         for workload in sorted(workloads):
             for rotation, arms in enumerate(itertools.permutations(builds) if gate.startswith('R65-') else [tuple(builds)]):
@@ -182,10 +198,68 @@ class Pins(unittest.TestCase):
                     order.extend(dict(workload=workload, pair=rotation*3+seed_index, arm=arm, seed=seed) for arm in arms)
         self.pins['protocol'] = dict(name=protocol, poll_ms=5, sample_ms=100, runs=18 if gate.startswith('R65-') else 1 if gate=='G7a' else 3, order=order, **parameters)
         row = self.status['runs'][0]
-        self.status['runs'] = [dict(copy.deepcopy(row), **entry, metrics={k:'a'*64 if u=='sha256' else 0 if d in ['zero','R50_abs'] else 100 for k,(d,u,l) in rules.items()}) for entry in order]
+        self.status['runs'] = [dict(copy.deepcopy(row), **entry, metrics={k:True if u=='boolean' else 'a'*64 if u=='sha256' else 0 if d in ['zero','R50_abs'] else 100 for k,(d,u,l) in rules.items()}) for entry in order]
         if self.pins['lane'] != 'LH':
             self.pins['gpu']['policy'] = {'kind':'software'}
             for row in self.status['runs']: row['gpu']['policy'] = {'kind':'software'}
+
+        if gate in ['G4','G15','D13']: self.freeze_inputs()
+        if gate == 'D13':
+            inputs = v.read(self.root/self.pins['inputs']['path'])
+            media = self.root/next(iter(inputs.values()))['seek_gop60']['media']['path']
+            media.write_text(json.dumps(dict(files=[dict(template['document'])])))
+            for workloads in inputs.values(): workloads['seek_gop60']['media']['sha256'] = v.digest(media)
+            for workloads in inputs.values():
+                value = workloads['seek_gop60']; path = self.root/value['workload']['path']
+                path.write_text(json.dumps(dict(key='seek_gop60',document=value['document'],media=value['media'])))
+                value['workload']['sha256'] = v.digest(path)
+            self.pins['inputs'] = put('inputs.json', inputs)
+            calibration = dict(media_sha256=template['document']['sha256'], method='safe measured plane span union', B=16,reader_cap=2,d_bytes=100,frames=1800,shape=dict(width=1920,height=1080))
+            self.pins['protocol'].update(d_bytes=100,calibration=put('calibration.json',calibration))
+            for row in self.status['runs']: row['metrics'].update(idle_bytes=100,peak_bytes=150,peak_minus_idle_bytes=50,u_bytes=3000)
+
+    def d13_record(self):
+        return dict(calibration_sha256=self.pins['protocol']['calibration']['sha256'],d13_intervals=[dict(cycle=c,target=t,version=2*c+i+1,ack_us=100000,identities=[1],sample_us=[200000,300000]) for c in range(30) for i,t in enumerate([180,1200])])
+
+    def test_native_cached_final(self):
+        self.configure('G15'); self.run_record(0)
+        row = self.status['runs'][0]
+        path = Path(row['environment']['PF1_RECORD']); raw = v.read(path)
+        for field, value in [('metrics', dict(settled_bytes=999)), ('consumed', {}), ('native_children', 3)]:
+            path.write_text(json.dumps(dict(raw, **{field:value})))
+            for ref in row['logs']:
+                if ref['path'] == path.name: ref['sha256'] = v.digest(path)
+            row['fingerprint'] = v.fingerprint(row)
+            status = self.root/'status.json'; status.write_text(json.dumps(self.status))
+            with self.subTest(field=field), self.assertRaises(ValueError): v.evaluate(self.p,status,self.root)
+
+    def test_frozen_nested_media(self):
+        self.configure('G4')
+        value = next(iter(v.read(self.root/self.pins['inputs']['path']).values()))['typical_1080p']
+        path = self.root/'nested-media'
+        path.write_bytes(b'frozen media')
+        media = self.root/value['media']['path']
+        media.write_text(json.dumps(dict(files=[dict(path=path.name,sha256=v.digest(path))])))
+        value['media']['sha256']=v.digest(media)
+        manifest = self.root/value['workload']['path']
+        manifest.write_text(json.dumps(dict(key='typical_1080p',document=value['document'],media=value['media'])))
+        value['workload']['sha256']=v.digest(manifest)
+        v.frozen_input(self.root,'typical_1080p',value)
+        path.write_bytes(b'changed media')
+        with self.assertRaises(ValueError): v.frozen_input(self.root,'typical_1080p',value)
+
+    def test_d13(self):
+        self.configure('D13'); self.run_record(0)
+        raw = dict(self.d13_record(), metrics=self.status['runs'][0]['metrics'])
+        v.d13_check(raw,self.pins)
+        for change in ['interval','incomplete','spacing','calibration']:
+            altered = copy.deepcopy(raw)
+            if change == 'interval': altered['d13_intervals'][0]['target']=999
+            elif change == 'incomplete': altered['d13_intervals'].pop()
+            elif change == 'spacing': altered['d13_intervals'][0]['sample_us']=[200000,299999]
+            else: altered['calibration_sha256']='f'*64
+            with self.subTest(change=change), self.assertRaises(ValueError): v.d13_check(altered,self.pins)
+        self.pins['protocol'].pop('calibration'); self.run_record(2)
 
     def test_contract(self):
         for gate in ['I4','G18','G15','G3','G4','G2','VM-D6','G7a']:
@@ -248,7 +322,6 @@ class Pins(unittest.TestCase):
 
     def test_live(self):
         self.configure('G4')
-        self.freeze_inputs()
         path = self.root/'live.json'
         raw = dict(token='fresh', timestamp_s=12, selected=dict(backend='Vulkan',name='llvmpipe (LLVM 20.1.5, 256 bits)',vendor_id=65541,device_id=0,driver='llvmpipe'), driver_info='Mesa 25.1.0',software=True)
         raw['protocol'] = dict(name='native-display',poll_ms=5,warmup_ms=2000,duration_s=60)

@@ -140,3 +140,17 @@ portable G15 contract therefore means 42 children. The parent logs each child's
 stdout and stderr before checking its exit; failed children cannot supply
 accepted measurements. `pf1_s4_publish.rs` is the shared test-only publication
 owner used by the historical overlays; moving it is included in the line count.
+
+D13 preparation also exports `calibration.json` from an independent decode of
+the copied GOP-60 source. Its hash and measured `d_bytes` are frozen in pins.
+The D13 wrapper order has one arm and three rows; each row starts one fresh child
+and runs 30 cycles. Every final record retains the 60 applied-plan intervals,
+nonempty lifetime identities, acknowledgement and two sample timestamps, native
+cleanup receipt and raw RSS figures. The retained-plane oracle and cleanup are
+invariants; whole-process RSS is report-only pending its separate ruling.
+
+Cached native G4/G15/D13 rows revalidate the final collector artifact, token,
+publication interval, protocol, metrics, selected adapter and consumed inputs.
+G15/D13 additionally require one successfully reaped child per row and distinct
+child PIDs; D13 rechecks calibration/U and every cancellation interval. Hashing a
+modified collector and re-signing its row cannot replace a missing measurement.

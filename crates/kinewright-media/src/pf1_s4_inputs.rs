@@ -93,6 +93,12 @@ fn s4_prepare_inputs() {
         serde_json::to_vec(&serde_json::json!({"files": files})).unwrap(),
     )
     .unwrap();
+    if key == "seek_gop60" {
+        let calibration = crate::s4_d13::calibrate(&document.media_pool[0].path);
+        let path = directory.join("calibration.json");
+        std::fs::write(&path, serde_json::to_vec(&calibration).unwrap()).unwrap();
+        println!("S4 calibration {}", reference(&path));
+    }
     let manifest = serde_json::json!({"key": key, "document": reference(&document_path), "media": reference(&media_path)});
     let path = directory.join("workload.json");
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
