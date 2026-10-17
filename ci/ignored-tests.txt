@@ -73,8 +73,8 @@ kinewright_media mo2_perf_fixtures::blend_heavy_holds_floors_on_the_fallback_ada
 kinewright_media mo2_perf_fixtures::r28_end_to_end_tracked crates/kinewright-media/src/mo2_perf_fixtures.rs any on-demand  # R28 end-to-end tracked lane (decode-bound until PF1)
 kinewright_media pf1_export_lane::pf1_export_lane crates/kinewright-media/src/pf1_export_lane.rs any on-demand  # PF1 G18: manual release export-time measurement (LH with PF1_HARDWARE=1); run with --release --ignored
 kinewright_media pf1_harness::pf1_play_baseline crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-play lane: manual release playback measurement (LL, or LH with PF1_HARDWARE=1); run with --release --ignored
-kinewright_media pf1_harness::pf1_rss_baseline crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-rss lane: manual release memory measurement; run with --release --ignored
-kinewright_media pf1_harness::pf1_rss_child crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-rss child: the subprocess pf1_rss_baseline spawns
+kinewright_media pf1_harness::pf1_rss_baseline crates/kinewright-media/src/pf1_g15.rs any on-demand  # PF1 P-rss lane: manual release memory measurement; run with --release --ignored
+kinewright_media pf1_harness::pf1_rss_child crates/kinewright-media/src/pf1_g15.rs any on-demand  # PF1 P-rss child: the subprocess pf1_rss_baseline spawns
 kinewright_media pf1_harness::pf1_seek_baseline crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-seek lane: manual release seek-latency measurement; run with --release --ignored
 
 # kinewright_project

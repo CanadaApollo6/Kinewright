@@ -154,3 +154,23 @@ publication interval, protocol, metrics, selected adapter and consumed inputs.
 G15/D13 additionally require one successfully reaped child per row and distinct
 child PIDs; D13 rechecks calibration/U and every cancellation interval. Hashing a
 modified collector and re-signing its row cannot replace a missing measurement.
+
+
+## S0 comparator overlay
+
+The S0 reference is `4082d5d2e860d88a46a6d01f5b3ac4357aebbf8d`, the final
+S0/R27 measurement state before S1. Both arms compile the identical shared
+`pf1_g15.rs`, input importer, publisher and child-receipt owner. The historical
+compositor adds only test-gated adapter metadata; its production projection and
+`lib.rs` match the original source. S0 has no engine-finished receiver: after
+measurement it drops its original session, and successful process exit plus
+parent reap supplies its cleanup receipt. The candidate also verifies its
+engine's bounded teardown record. No S0 internal worker-join claim is made.
+
+The complete S0 build source is retained in
+`target/review/pf/s4/s4c/round-3/6dcc2858d6c45e1d33769946472702782d070138826f82df32f26c4e5dc6a2f0.tar.gz`
+(SHA-256 `6dcc2858d6c45e1d33769946472702782d070138826f82df32f26c4e5dc6a2f0`). Restore by hash, link the pinned FFmpeg tree at
+`third_party/ffmpeg`, source `scripts/setup-ffmpeg.sh`, and use the release build
+command in `s0-build.json`. `s0-overlay.patch` and `s0-overlay.json` identify the
+counted test-only differences and shared file hashes. The selected-device witness
+has a runtime red with its metadata omitted, followed by a restored green.
