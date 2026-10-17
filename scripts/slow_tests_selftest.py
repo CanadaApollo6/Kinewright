@@ -303,6 +303,13 @@ class PartialParse(unittest.TestCase):
             ),
             "test a::b ... ok",
         )
+        # Windows run 39009547685: both prefixes before `test`, the message glued to `ok`.
+        self.assertEqual(
+            st.strip_ffmpeg_log(
+                "[swscaler @ 000001CAD4F80880] [swscaler @ 000001CA56845FC0] test a::b ... okNo accelerated colorspace conversion found from yuv420p to rgba64le."
+            ),
+            "test a::b ... ok",
+        )
 
     def test_a_result_line_with_no_ffmpeg_fragment_and_no_outcome_is_not_joined(self):
         lines = self.lines()
