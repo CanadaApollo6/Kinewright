@@ -85,12 +85,15 @@ DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 def strip_ffmpeg_log(line: str) -> str:
     """`line` without FFmpeg log fragments at its start, before a result's outcome, or after it."""
+    leading = FFMPEG_LOG_PREFIX.match(line) is not None
     line = FFMPEG_LOG_PREFIX.sub("", line)
     head, sep, rest = line.partition(" ... ")
     if not sep or not head.startswith("test "):
         return line
     stripped = FFMPEG_LOG_PREFIX.sub("", rest)
-    glued = stripped != rest  # an av_log prefix sat right before the outcome
+    # An av_log prefix sat right before the outcome, or at the line's start with its message
+    # glued after `ok` (Windows run 39009547685).
+    glued = stripped != rest or leading
     rest = stripped
     outcome = OUTCOME.match(rest)
     if outcome and glued and outcome.group() != "ignored" and GLUED_MESSAGE.match(rest, outcome.end()):
