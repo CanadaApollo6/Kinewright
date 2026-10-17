@@ -1,5 +1,60 @@
 # PF1 S4 reproduction checkpoints
 
+## R91 round-3 final-source context
+
+Source: `4783d5f`, **1,190 counted lines**. The authoritative report is the
+main-checkout `target/review/pf/s4c-report.md`. First collection: G4 exit 2
+(Q2 invalid, three missed callbacks, only 3/24 rows), G15 exit 2 (startup), D13 exit
+0 (three children, 30 cycles each). These bytes remain unchanged. G4 is an open
+in-scope finding and is not silently rerun or deferred.
+
+The startup fix starts the launch clock after diagnostics and gives G15 input
+consumption one native owner. Actual selected-device readiness may precede input
+validation; consumed hashes remain mandatory before metrics/final validity and
+on cached validation. No timing/RSS threshold or input was changed.
+
+The final-source G15/D13 plans and actual Python modules are under
+`target/review/pf/s4/s4c/round-3/startup-final/`. G15 passed all 42 fresh children (maximum paired delta +2,727,936 bytes versus a +4,194,304-byte limit); D13 passed all three fresh children × 30 cycles. Both cached figures runs exited 0. D13 whole-process RSS deltas were 99,082,240 / 94,298,112 / 104,382,464 bytes, all above U=93,312,000 and report-only. The full fast tier passed separately: 3,618 passed, 0 failed, 100 expected ignores; strict Linux `verify-fast` exited 0. `previous-context.json` links the sealed startup failure;
+the full new order uses no old rows. The new runner archive is
+`target/review/pf/s4/archives/8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916.tar`,
+SHA-256 `8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916`.
+`startup-final/runner-archive.json` records all seven member hashes. Its source
+archives contain the exact compiled trees; S0's production basis is `4082d5d`
+with the common `4783d5f` collector and the same 31-line test-only readback overlay.
+The binary metadata's Rust commit names the common overlay for S0, not a claim
+that its shipping implementation is the candidate's.
+
+Restore the archive by hash and use the frozen Python root named in the chosen
+`frozen-series.json`. The launch supervisor stays at nice 0 only to spawn owned
+native work at nice 10; the sampler lowers itself to 19. Checks run at nice 19.
+Wait for the 6 GiB start threshold, source FFmpeg, then run each plan serially via
+`setsid nohup python3 .../work/final-measure.py <plan>` and validate with
+`nice -n 19 python3 .../work/final-figures.py <plan>`. Each native/wrapper invocation
+has its own sub-600-second watchdog; the series schedules those invocations.
+Existing sealed series are audited on resume, never overwritten. An unsealed
+journal blocks further collection and requires a ruling.
+
+
+D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
+
+- AVBuffer padding beyond the plane spans is not observed;
+- FFmpeg-internal buffer-pool lifetimes are not observed;
+- identity means plane address plus a lifetime generation, and a generation is recorded at each registration so that a reused pooled address is a new identity.
+
+The historical 8,250 ms hold remains unexplained.
+
+The R91 qualified scope carries these named deferrals, each **deferred, not passed**:
+
+- I4, the LH part of I5, I8's lane-based L6, G3, G6, G7b, G8/L1–L6 and L4b, G11, G16, G17, both G18 decisions, R65 historical/intervening/cumulative, the standing PERFORMANCE reports, D6/the manual-VM WARP floor, and the RTX 4050 rerun;
+- automatic journal-only sealing (B3). Until it exists, an interrupted unsealed series blocks: preserve every byte, stop, and return for a ruling (critic §2);
+- the numerical whole-process RSS allowance, which stays unresolved;
+- the D13 witness-body refactor (R86 B-7).
+- the common LH collector and Q1(b) default-policy variant — deferred to PF1-LH, not passed;
+- LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
+
+G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
+
+
 ## S4c round 3 frozen-input checkpoint
 
 R91 limits new lanes to LL G4/G15/D13; LH G1/G2/G14 move to PF1-LH,
@@ -131,7 +186,15 @@ A threshold-failed predecessor requires a hashed `rejection.disposition` object 
 
 The minimal collector is LL/lavapipe native G4. Its test-only hook reads the selected session's `AdapterInfo`, emits software status, driver information and final fps/Q2 validity, and publishes atomically. The launcher derives Mesa/LLVM and the configured single ICD manifest hash from that readback, verifies it against pins, and binds publications to a fresh per-launch token and the launch timestamp. The monitor checks before every sampling step. Absolute misses reach complete paired decisions; genuine correctness assertions still return 101. The preflight's final sample must be at or before actual launch and at most ten seconds old.
 
-Real LL collection is unmeasured in this unit. Host manifest integrity is checked, but current CPU/RAM/OS readback is not compared at launch. Other protocols do not acquire a collector merely by appearing in the portable registry. Native I4/R65/RSS collection and complete parent-interruption recovery remain unproven. LH UUID correlation, hardware policy readback and native LH integration stay in S4c after Q1. D13 stays in S4b; E16 and closure stay in S4c. Q1/Q5 and all historical unresolved measurements remain open.
+At the S4a run-4 checkpoint, real LL collection and native I4/R65/RSS
+publication were unmeasured; current CPU/RAM/OS readback was not compared at
+launch. S4c adds the host comparison and G15/D13 publication. See the R91 section
+above for actual native outcomes. Other protocols do not acquire a collector
+merely by appearing in the portable registry. Native I4/R65 and complete
+parent-interruption recovery remain unproven. R91 defers LH UUID correlation,
+hardware policy readback and native LH integration to PF1-LH. R89 answers Q1/Q5
+on policy and qualified scope; its named measurement deferrals remain.
+
 
 The S4c G15 parent now consumes the wrapper token and publication path and runs
 one fresh native child per frozen order row. Its final record includes the child
@@ -175,7 +238,7 @@ command in `s0-build.json`. `s0-overlay.patch` and `s0-overlay.json` identify th
 counted test-only differences and shared file hashes. The selected-device witness
 has a runtime red with its metadata omitted, followed by a restored green.
 
-The final S4c runner archive is
+The pre-startup S4c runner archive is
 `target/review/pf/s4/archives/421745d3d7d983eb9b9fef14abcde62b035c70fbcb43bfee971f5cedc746c29f.tar`,
 SHA-256 `421745d3d7d983eb9b9fef14abcde62b035c70fbcb43bfee971f5cedc746c29f`.
 `round-3/priority-runner-archive.json` records its seven members. The launch

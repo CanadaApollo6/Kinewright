@@ -1405,3 +1405,39 @@ Opus. *CI on push*, Windows included.
 | D13 | Charging a cancelled window's decoded frames until the reader drops them | Amendment R56: after a post outside a held window, that window's kept decoded frames stay in its reader until the reader's next decode or close, uncharged. Bounded: one window per reader, at most B − 1 = 15 decoded frames. Charging them could deadlock admission | S4 | S4's G15 RSS check, plus an active scenario (R61 item 11): RSS sampled *during* cancellation, not only at settled idle. A P-seek-style backward stepper on a 1080p GOP-60 source refills a window, then posts outside it (a jump far back, then forward) before the window converts, repeatedly, with RSS sampled every 100 ms. The peak RSS above the idle baseline is recorded against the bound (one window per reader, B − 1 decoded frames at d each) |
 | D14 | Extra decodes after a superseded refill | R75 M4 [S3b]: exact successful-refill coverage shortens only unavailable optional continuation tied to the superseded refill. Preserve every explicit target, ring and other keeper. Reservations of removed optional work return exactly; held windows, admissibility and progress remain intact. Measure redundant scheduled requests and conversions separately from necessary decoder pre-roll | S3b | runtime supersession witnesses, independent accounting model and amended R61 oracle in the same commit |
 | D15 | The exhaustive reader-model test's fast-tier time | Amendment R65: `sched::tests::the_reader_model_holds_for_every_short_sequence` (S2b, `72246d3`) takes about 120 s in the fast tier. It predates S2c and stays as it is until S3 | S3 | the S3 backlog: move it to the slow tier, or shrink it |
+
+
+## S4c qualified scope and closure (R91)
+
+R91 limits fresh acceptance to LL G4/G15/D13 on the identified desktop lavapipe
+stack, with shared frozen-input preparation/consumption. The source checkpoint is
+`4783d5f` at 1,190 counted lines. G15 (42 children) and D13 (three × 30 cycles) pass their native contracts; G4 remains incomplete after a Q2-invalid row. Full workspace fast and strict Linux log verification pass;
+E16 in [PF1-EVIDENCE.md](PF1-EVIDENCE.md#e16--s4c-r91-c-plus-frozen-inputs) records the
+actual outcomes and the proposed post-review/CI closure. S3b's historical results
+remain in E15. The G4 reference uses the accepted S3b shipping implementation with
+the common test overlay; this comparison does not establish a speedup. S0 cleanup
+is successful process exit plus parent reap, while the candidate also observes
+its bounded engine teardown.
+
+The D13 independent oracle measures the union of safe plane spans and lifetime
+generations. Its retained-frame decision is separate from whole-process RSS;
+G15's settled-idle S0 + 4 MiB limit cannot become an active RSS allowance.
+
+D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
+
+- AVBuffer padding beyond the plane spans is not observed;
+- FFmpeg-internal buffer-pool lifetimes are not observed;
+- identity means plane address plus a lifetime generation, and a generation is recorded at each registration so that a reused pooled address is a new identity.
+
+The historical 8,250 ms hold remains unexplained.
+
+The R91 qualified scope carries these named deferrals, each **deferred, not passed**:
+
+- I4, the LH part of I5, I8's lane-based L6, G3, G6, G7b, G8/L1–L6 and L4b, G11, G16, G17, both G18 decisions, R65 historical/intervening/cumulative, the standing PERFORMANCE reports, D6/the manual-VM WARP floor, and the RTX 4050 rerun;
+- automatic journal-only sealing (B3). Until it exists, an interrupted unsealed series blocks: preserve every byte, stop, and return for a ruling (critic §2);
+- the numerical whole-process RSS allowance, which stays unresolved;
+- the D13 witness-body refactor (R86 B-7).
+- the common LH collector and Q1(b) default-policy variant — deferred to PF1-LH, not passed;
+- LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
+
+G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.

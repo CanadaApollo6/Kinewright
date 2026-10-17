@@ -89,3 +89,37 @@ and dropped-frame counts, mouse/keyboard-to-preview latency, repeated open/close
 cycles, long undo histories, many distinct source files, and export throughput.
 Measure Windows independently. Investigate source verification concurrency and
 thumbnail LRU updates only with a workload that exposes their actual cost.
+
+
+## PF1 S4c qualified evidence (R91)
+
+Fresh S4c collection is limited to desktop LL G4/G15/D13 on lavapipe, with frozen
+documents/media, source-bound release binaries and native child receipts. It is
+source-bound at `4783d5f` (1,190 counted lines): G15 and D13 native contracts pass, G4 remains incomplete with an in-scope Q2 finding, and full workspace fast plus strict Linux log verification pass. E16 in
+[PF1-EVIDENCE.md](PF1-EVIDENCE.md#e16--s4c-r91-c-plus-frozen-inputs) and the main-checkout
+`target/review/pf/s4c-report.md` carry the exact outcomes, raw evidence and source
+identity. The standing report-only PERFORMANCE lanes above are deferred; these
+LL checks do not replace those measurements. G4 uses the accepted S3b shipping
+state with a common test overlay and makes no speedup claim. S0 cleanup uses
+successful process exit and parent reap; the candidate also checks its engine's
+bounded teardown. Whole-process active RSS remains report-only pending a separate
+allowance; G15's 4 MiB limit is only for settled idle.
+
+D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
+
+- AVBuffer padding beyond the plane spans is not observed;
+- FFmpeg-internal buffer-pool lifetimes are not observed;
+- identity means plane address plus a lifetime generation, and a generation is recorded at each registration so that a reused pooled address is a new identity.
+
+The historical 8,250 ms hold remains unexplained.
+
+The R91 qualified scope carries these named deferrals, each **deferred, not passed**:
+
+- I4, the LH part of I5, I8's lane-based L6, G3, G6, G7b, G8/L1–L6 and L4b, G11, G16, G17, both G18 decisions, R65 historical/intervening/cumulative, the standing PERFORMANCE reports, D6/the manual-VM WARP floor, and the RTX 4050 rerun;
+- automatic journal-only sealing (B3). Until it exists, an interrupted unsealed series blocks: preserve every byte, stop, and return for a ruling (critic §2);
+- the numerical whole-process RSS allowance, which stays unresolved;
+- the D13 witness-body refactor (R86 B-7).
+- the common LH collector and Q1(b) default-policy variant — deferred to PF1-LH, not passed;
+- LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
+
+G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.

@@ -7396,6 +7396,36 @@ and the laptop cleanup remain owed under R73.
 
 ## E15 — PF1 S3b: staging ring, U-2 residency, maintenance, D14 (D12 dropped)
 
+**S4c reconciliation (R91).** E15 is the historical S3b record, closed at
+`7408c84`; its earlier timings are not new S4 acceptance. E16 records the bounded
+C-plus-frozen-input continuation, its exact source/collector identities and actual
+LL outcomes. The final accepted S3b shipping state is rebuilt with the common
+current test overlay for G4; that comparison establishes no speedup. The named
+R91 deferrals and limitations below qualify the PF1 closure while preserving
+E15's original results and the unexplained 8,250 ms hold.
+
+D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
+
+- AVBuffer padding beyond the plane spans is not observed;
+- FFmpeg-internal buffer-pool lifetimes are not observed;
+- identity means plane address plus a lifetime generation, and a generation is recorded at each registration so that a reused pooled address is a new identity.
+
+The historical 8,250 ms hold remains unexplained.
+
+The R91 qualified scope carries these named deferrals, each **deferred, not passed**:
+
+- I4, the LH part of I5, I8's lane-based L6, G3, G6, G7b, G8/L1–L6 and L4b, G11, G16, G17, both G18 decisions, R65 historical/intervening/cumulative, the standing PERFORMANCE reports, D6/the manual-VM WARP floor, and the RTX 4050 rerun;
+- automatic journal-only sealing (B3). Until it exists, an interrupted unsealed series blocks: preserve every byte, stop, and return for a ruling (critic §2);
+- the numerical whole-process RSS allowance, which stays unresolved;
+- the D13 witness-body refactor (R86 B-7).
+- the common LH collector and Q1(b) default-policy variant — deferred to PF1-LH, not passed;
+- LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
+
+G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
+
+**Original S3b record follows.**
+
+
 U-1 adds two completion-owned mapped upload batches and writes working rows
 directly into the charged staging allocation. Reuse requires observed real
 submission completion and successful delivery of every registered write-map
@@ -7731,3 +7761,66 @@ hog with no failures. Reports are in `target/review/pf/s3b/`:
 on Linux and Windows in both tiers. Implementation, R75 measurements, local
 gates and review are complete.
 The RTX 4050 rerun owed under R73 since S3a is still owed.
+
+
+## E16 — S4c, R91 C plus frozen inputs
+
+**Partial: G4 requires lead disposition; G15 and D13 collected.** Source is committed at
+`4783d5f`, **1,190/1,200** retained counted lines (including 31 S0 overlay lines),
+zero shipping changes, zero unsafe additions and zero lint changes. Workspace
+build, all-target Clippy, formatting, slow-test lint, 53 portable tests, 13 wrapper
+tests and the affected native witnesses pass. Full workspace fast tier passed (3,618 passed, 0 failed, 100 expected ignores, 36 summaries), and strict Linux `verify-fast` exited 0; no new hosted CI or Windows execution is claimed.
+
+| Scope | Recorded result |
+|---|---|
+| G4, four workloads / 24 rows | First collection stopped at row 3: Q2 invalid, three missed paced callbacks. The first two blend rows were valid at 29.68 and 25.49 fps; the third was 29.07 fps but invalid. This is incomplete acceptance, not an R50 shared miss, threshold pass or deferral. Lead disposition is required. |
+| G15, seven workloads / 42 children | First collection stopped before metrics on the startup bug. After its fix, all 42 fresh children passed; cached figures exit 0. Every one of the 21 pairs is within S0 + 4,194,304 bytes; the largest delta is +2,727,936 bytes (title-only pair 1). |
+| D13, three children / 30 cycles each | The final-source series passed all three fresh children × 30 cycles, oracle/cleanup true, and cached figures exit 0. U=93,312,000 bytes from d=3,110,400. Whole-process RSS deltas are 99,082,240 / 94,298,112 / 104,382,464 bytes: all exceed U and remain report-only; no numerical RSS allowance is resolved. |
+
+Evidence root: main-checkout `target/review/pf/s4/s4c/round-3/`. The original
+`frozen-series.json` and first statuses remain intact; restoring runner archive
+`421745d3...` revalidated G4=2, G15=2 and D13=0. The final-source context is
+`startup-final/frozen-series.json`, with separate binary/source/harness hashes,
+unchanged prepared inputs, fixed thresholds and the previous-context link.
+No old row is reused. The complete report is `target/review/pf/s4c-report.md`.
+
+The G15 failure interval included diagnostics performed before child launch;
+it is not a pure hash-duration measurement. The fixed runner starts its deadline
+after diagnostics. The parent no longer imports the media; the native child
+publishes actual device readiness, validates the frozen document/media before
+first render and the six-second settled-idle interval, and binds consumed hashes
+before any metric/final-validity publication is accepted. Both startup mutations
+are runtime reds followed by the restored 13-test wrapper green. The failed
+native temporaries and cleanup receipt are preserved; the owned group is gone.
+
+S0 has no engine-finished receiver: its original post-measurement drop is
+retained, and successful process exit plus parent reap supplies cleanup. The
+candidate also verifies bounded engine teardown. The G4 reference rebuild uses
+the accepted S3b shipping implementation with the common 9efb932 test overlay;
+these pairs establish no speedup. The selected software adapter is lavapipe,
+Mesa 26.2.4-arch1.1 / LLVM 23.1.1. Native jobs use nice 10, the sampler nice 19,
+and load/contamination are recorded every five seconds as R50 annotations.
+No GPU setting changed. Memory-start checks are recorded separately.
+
+The current proposed closure is **not yet PF1 closure**: G4 has an unresolved
+in-scope Q2 finding; source reviews plus both-OS/both-tier CI are still required. Qualified claims
+remain limited to the actual LL evidence on this lavapipe host.
+
+D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
+
+- AVBuffer padding beyond the plane spans is not observed;
+- FFmpeg-internal buffer-pool lifetimes are not observed;
+- identity means plane address plus a lifetime generation, and a generation is recorded at each registration so that a reused pooled address is a new identity.
+
+The historical 8,250 ms hold remains unexplained.
+
+The R91 qualified scope carries these named deferrals, each **deferred, not passed**:
+
+- I4, the LH part of I5, I8's lane-based L6, G3, G6, G7b, G8/L1–L6 and L4b, G11, G16, G17, both G18 decisions, R65 historical/intervening/cumulative, the standing PERFORMANCE reports, D6/the manual-VM WARP floor, and the RTX 4050 rerun;
+- automatic journal-only sealing (B3). Until it exists, an interrupted unsealed series blocks: preserve every byte, stop, and return for a ruling (critic §2);
+- the numerical whole-process RSS allowance, which stays unresolved;
+- the D13 witness-body refactor (R86 B-7).
+- the common LH collector and Q1(b) default-policy variant — deferred to PF1-LH, not passed;
+- LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
+
+G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
