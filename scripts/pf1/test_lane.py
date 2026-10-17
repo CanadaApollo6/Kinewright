@@ -65,6 +65,7 @@ if case != 'no-final':
 '''
 
 MUTATIONS = {
+    'archive': ('restore.py', "if hashlib.sha256(raw).hexdigest() != manifest['sha256']:", 'if False:'),
     'late_alarm': ('lane.py', ' row=None\n', ''),
     'startup_epoch': ('lane.py', '  started=time.time()\n  if lane', '  pass\n  if lane'),
     'startup_readiness': ('launch.py', "'metrics' in record or 'valid' in record", 'True'),
@@ -95,6 +96,21 @@ import test_validate as fixtures
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux wrapper integration')
 class Wrapper(unittest.TestCase):
+    def test_archive(self):
+        source = self.root/'repo/ci/pf1'
+        script = source/'restore.py'
+        destination = self.root/'archive-good'
+        result = subprocess.run([sys.executable,str(script),str(destination)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        for name in ['lane.py','final-measure.py','final-figures.py']:
+            self.assertEqual((destination/name).read_bytes(),(self.runners/name).read_bytes())
+        raw = bytearray((source/'runners.tar').read_bytes());raw[-1] ^= 1
+        corrupt = self.root/'corrupt.tar';corrupt.write_bytes(raw)
+        rejected = self.root/'archive-rejected'
+        result = subprocess.run([sys.executable,str(script),str(rejected),str(corrupt)],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,2,result.stderr)
+        self.assertFalse(rejected.exists())
+
     def test_lh(self):
         self.fixture.root = self.root
         self.fixture.p = self.root/'pins.json'
@@ -179,9 +195,10 @@ else: print(p['table'])
             shutil.copyfile(repo / 'scripts/pf1' / name, modules / name)
         (self.root / 'repo/docs').mkdir()
         shutil.copyfile(repo / 'docs/PF1-PINS.schema.json', self.root / 'repo/docs/PF1-PINS.schema.json')
+        shutil.copytree(repo/'ci/pf1', self.root/'repo/ci/pf1')
         if mutation:
             name, old, new = MUTATIONS[mutation]
-            path = (self.runners if name in ['lane.py', 'final-measure.py'] else modules) / name
+            path = (self.root/'repo/ci/pf1' if name=='restore.py' else self.runners if name in ['lane.py', 'final-measure.py'] else modules) / name
             source = path.read_text()
             self.assertIn(old, source)
             path.write_text(source.replace(old, new))

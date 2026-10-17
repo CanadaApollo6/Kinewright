@@ -1,0 +1,8 @@
+{
+  "sha256": "ff4af87c82759664301458fa35d28d5fcf7a82aade6718286852d31262cccb36",
+  "members": {
+    "final-figures.py": "f9d07bd5cd3e3f99ed073d79ac66bfb37ae5e80df5d3fc3ac55ac9b9e5c19822",
+    "final-measure.py": "882bb18fa28b76637eae22bfc68e1fee4c0c59d6177b3b710bd432c076a47040",
+    "lane.py": "bb5e4489a9b9b34679a3fc564e616378d646aa5c4e28083f75eb4de37f0c6eab"
+  }
+}
