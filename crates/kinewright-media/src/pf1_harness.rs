@@ -265,14 +265,18 @@ impl Trace {
         }
         let mut intervals: Vec<f64> = shown.windows(2).map(|w| w[1].0 - w[0].0).collect();
         m.present = [0.5, 0.95, 1.0].map(|p| percentile(&mut intervals, p));
-        // Held age: time since the latest presentation of a newer frame.
-        let (mut since, mut shown) = (0.0, shown.iter().peekable());
+        // Completed holds count even when the consumer skipped a poll.
+        let mut since = 0.0;
+        for &(presented, _) in &shown {
+            m.held_max = m.held_max.max(presented - since);
+            since = presented;
+        }
+        let boundary = self
+            .end
+            .unwrap_or_else(|| samples.last().map_or(0.0, |s| s.0));
+        m.held_max = m.held_max.max(boundary - since);
         let (mut value, mut changed) = (i64::MIN, 0.0);
         for &&(t, position) in &samples {
-            while let Some(&(presented, _)) = shown.next_if(|s| s.0 <= t) {
-                since = presented;
-            }
-            m.held_max = m.held_max.max(t - since);
             m.clock_stall_max = m.clock_stall_max.max(t - changed);
             if position != value {
                 (value, changed) = (position, t);
@@ -362,18 +366,28 @@ struct Session {
     gpu: GpuContext,
     /// This engine's audio diagnostics (R23).
     diagnostics: Arc<AudioDiagnostics>,
+    audio: Option<SimulatedAudio>,
+    faults: Arc<Faults>,
+    deadline: Instant,
     _data: TempDirectory,
 }
 
 impl Session {
     fn new(audio: Option<SimulatedAudio>, faults: Arc<Faults>, hardware: bool) -> Self {
+        let deadline = Instant::now() + Duration::from_secs(560);
         let gpu = GpuContext::headless(!hardware).expect("the lane's adapter");
         let data = TempDirectory::new("pf1-harness");
         let root = data.root().to_path_buf();
         let diagnostics = Arc::new(AudioDiagnostics::default());
         let shared = Arc::clone(&diagnostics);
-        let engine = FfmpegMediaEngine::new_for_harness(gpu.clone(), root, audio, faults, shared)
-            .expect("the harness engine starts");
+        let engine = FfmpegMediaEngine::new_for_harness(
+            gpu.clone(),
+            root,
+            audio.clone(),
+            Arc::clone(&faults),
+            shared,
+        )
+        .expect("the harness engine starts");
         let (frames, events) = (engine.frames(), engine.events());
         Self {
             engine,
@@ -381,6 +395,9 @@ impl Session {
             events,
             gpu,
             diagnostics,
+            audio,
+            faults,
+            deadline,
             _data: data,
         }
     }
@@ -388,8 +405,39 @@ impl Session {
     fn load(&self, document: &Document) {
         self.engine.set_document(Arc::new(document.clone()));
         let issued = self.engine.stamp();
-        let first = self.wait_frame(0, issued, Instant::now(), Duration::from_secs(120));
+        let from = Instant::now();
+        let limit = self.phase(document, 120).saturating_duration_since(from);
+        let first = self.wait_frame(0, issued, from, limit);
         first.expect("the first paused frame renders");
+    }
+
+    fn warm(&self, document: &Document) {
+        self.load(document);
+        self.engine.play(TimeCode::ZERO);
+        thread::sleep(Duration::from_secs(2));
+        self.engine.pause();
+        let paused = self.phase(document, 60);
+        let paused_event = MediaEvent::PlaybackStateChanged(PlaybackState::Paused);
+        loop {
+            let event = self
+                .events
+                .recv_deadline(paused)
+                .expect("warm-up paused within shared budget");
+            assert!(event.error().is_none(), "warm-up error: {event:?}");
+            if event == paused_event {
+                break;
+            }
+        }
+        self.drain();
+    }
+
+    fn phase(&self, document: &Document, seconds: u64) -> Instant {
+        s4_phase_deadline(
+            self.deadline,
+            Instant::now(),
+            Duration::from_secs(seconds),
+            s4_allowance(document),
+        )
     }
 
     /// The first `target` frame received after `from` that answers the
@@ -461,22 +509,25 @@ pub(crate) fn q2_valid(elapsed_ms: f64, nominal_ms: f64, missed_callbacks: u64) 
 /// the run the session is torn down and `teardown` records whether the
 /// preview thread finished, what the engine still holds, and the process's
 /// threads and current RSS (review B: RSS attribution).
-fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics, u64, String) {
-    let audio = (!device).then(SimulatedAudio::paced);
-    let faults = Arc::new(Faults::default());
-    let session = Session::new(audio.clone(), Arc::clone(&faults), lane().0);
-    session.load(document);
-    session.engine.play(TimeCode::ZERO);
-    thread::sleep(Duration::from_secs(2));
-    session.engine.pause();
-    let paused = Instant::now() + Duration::from_secs(60);
-    let paused_event = MediaEvent::PlaybackStateChanged(PlaybackState::Paused);
-    while session
-        .events
-        .recv_deadline(paused)
-        .is_ok_and(|e| e != paused_event)
-    {}
-    session.drain();
+fn play_run(
+    document: &Document,
+    control: Control,
+    device: bool,
+    ready: Option<Session>,
+) -> (PlayMetrics, u64, String) {
+    let session = ready.unwrap_or_else(|| {
+        Session::new(
+            (!device).then(SimulatedAudio::paced),
+            Arc::default(),
+            lane().0,
+        )
+    });
+    let faults = Arc::clone(&session.faults);
+    let audio = session.audio.clone();
+    if std::env::var_os("PF1_RECORD").is_some() {
+        s4_assert_duration(document, &std::env::var("PF1_ONLY").unwrap());
+    }
+    session.warm(document);
     let counters = || {
         let missed = audio.as_ref().map_or(0, SimulatedAudio::missed_periods);
         let [_, frames, _, post_end] = session.diagnostics.underruns();
@@ -492,6 +543,7 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
     let upper = 1.02 * nominal + 500.0;
     let (mut trace, mut armed, mut rejected) = (Trace::default(), true, 0);
     let start = Instant::now();
+    session.phase(document, 0);
     session.engine.play(TimeCode::ZERO);
     let mut next = start;
     loop {
@@ -563,7 +615,8 @@ fn play_run(document: &Document, control: Control, device: bool) -> (PlayMetrics
         m.passes(),
         engine_fields(&stats),
     );
-    let line = format!("{line} {} {}", run_counts(counted), teardown(session));
+    let cleanup = s4_finish_play(session, &m);
+    let line = format!("{line} {} {cleanup}", run_counts(counted));
     (m, underrun, line)
 }
 
@@ -628,14 +681,16 @@ fn teardown_until(session: Session, deadline: Instant) -> String {
         events,
         gpu,
         diagnostics,
+        audio,
         _data: data,
+        ..
     } = session;
     let (decoders, finished, ledger) = (
         engine.decoder_gauge(),
         engine.finished(),
         gpu.shared_ledger(),
     );
-    drop((engine, frames, events, diagnostics));
+    drop((engine, frames, events, diagnostics, audio));
     let complete = matches!(
         finished.recv_deadline(deadline),
         Err(crossbeam_channel::RecvTimeoutError::Disconnected)
@@ -701,14 +756,40 @@ fn pf1_play_baseline() {
     let runs = std::env::var("PF1_RUNS").map_or(if device { 1 } else { 3 }, |runs| {
         runs.parse().expect("PF1_RUNS is a count")
     });
-    let adapter = GpuContext::headless(!hardware).expect("an adapter");
-    let adapter = adapter.monitor_proof_metadata().adapter;
+    let mut ready = s4_ready("P-play");
+    let adapter = ready.as_ref().map_or_else(
+        || {
+            GpuContext::headless(!hardware)
+                .expect("an adapter")
+                .monitor_proof_metadata()
+                .adapter
+        },
+        |session| session.gpu.monitor_proof_metadata().adapter,
+    );
     let output = if device { "device" } else { "simulated" };
+    let workloads = play_workloads();
+    if std::env::var_os("PF1_RECORD").is_some() {
+        assert_eq!(
+            (workloads.len(), runs),
+            (1, 1),
+            "one workload/run/control per invocation"
+        );
+    }
     play_lane(
-        play_workloads(),
+        workloads,
         runs,
-        |Workload(document, _media)| play_run(document, Control::None, device).2,
+        |Workload(document, _media)| {
+            let control = match std::env::var("PF1_GATE").unwrap_or_default().as_str() {
+                "Q3-G1" => Control::Slowdown,
+                "Q3-G14" => Control::Freeze,
+                _ => Control::None,
+            };
+            play_run(document, control, device, ready.take()).2
+        },
         |key, run, line| {
+            let run = run
+                + std::env::var("S3B_RUN_OFFSET")
+                    .map_or(0, |value| value.parse::<usize>().unwrap());
             println!(
                 "PF1 play lane={lane} adapter={adapter} output={output} workload={key} run={run} {line}"
             );
@@ -725,7 +806,7 @@ fn pf1_play_baseline() {
         (Control::ClockFreeze, "G16"),
         (Control::Stall, "underrun_frames"),
     ] {
-        let (m, underrun, line) = play_run(&document, control, false);
+        let (m, underrun, line) = play_run(&document, control, false, None);
         let fails = match control {
             Control::Slowdown => !m.g1_metric(),
             Control::Freeze => !m.g14_metric(),
@@ -1242,7 +1323,9 @@ fn play_lane<W>(
             let line = run(&workload);
             report(key, index, &line);
             assert_idle_discard(&line);
-            assert_valid(&line);
+            if std::env::var_os("PF1_RECORD").is_none() {
+                assert_valid(&line);
+            }
         }
     }
 }
@@ -1307,6 +1390,35 @@ fn synthetic(n: i64, delay: f64, clock_gap: (f64, f64), mute: (f64, f64)) -> Tra
         }
     }
     trace
+}
+
+#[test]
+fn pf1_held_age_accounts_for_consumer_gaps_and_window_boundaries() {
+    for (samples, arrivals, end) in [
+        (
+            vec![(0.0, 0), (95.0, 1), (150.0, 2)],
+            vec![(0.0, 0, 0), (150.0, 2, 2)],
+            150.0,
+        ),
+        (vec![(95.0, 1), (150.0, 2)], vec![(150.0, 2, 2)], 150.0),
+        (
+            vec![(0.0, 0), (95.0, 1)],
+            vec![(0.0, 0, 0), (151.0, 2, 2)],
+            150.0,
+        ),
+    ] {
+        let trace = Trace {
+            samples,
+            arrivals,
+            end: Some(end),
+        };
+        let metrics = trace.metrics(3, 50.0);
+        assert!(
+            (metrics.held_max - 150.0).abs() < f64::EPSILON,
+            "{metrics:?}"
+        );
+        assert!(!metrics.g14_metric(), "a 150 ms hold must fail G14");
+    }
 }
 
 #[test]

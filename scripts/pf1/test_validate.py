@@ -16,6 +16,16 @@ import validate as v
 import series as runner
 
 MUTATIONS = {
+    'lh_cached': ("lh_gpu(raw, lh_samples(row['environment']), pins['gpu']['policy']) == row['gpu']", "True"),
+    'control_source': ("other['builds'] == pins['builds']", "True"),
+    'control_required': ("control_code != 0", "False"),
+    'control_sensitivity': ("return 0 if all(any(row['metrics'][key] > rule['limit'] for key,rule in pins['metrics'].items()) for row in rows) else 1", "return 0"),
+    'lh_identity': ("len(matches) == 1", "len(matches) >= 1"),
+    'lh_readback': ("fields[0] == uuid", "True"),
+    'icd_bytes': ("icd=Path(icd).read_bytes().decode('utf-8')", "icd=Path(icd).read_text()"),
+    'default_scope': ("pins['gate'] in ['G1', 'G2', 'G14', 'Q3-G1', 'Q3-G14']", "True"),
+    'default_uuid': ("observation['uuid'] == gpu['selected']['uuid']", "True"),
+    'default_coverage': ("any(row['started_s'] < x['timestamp_s'] < row['ended_s'] for x in telemetry)", "True"),
     'media_guard': ("not path.is_symlink() and path.is_file() and path.suffix.lower() in ['.mp4', '.wav']", 'path.is_file()'),
     'media_format': ("header[4:8] == b'ftyp' if path.suffix.lower() == '.mp4' else header[:4] == b'RIFF' and header[8:12] == b'WAVE'", 'True'),
     'receipt_exit': ("receipt['exit'] == row['exit'] == 0", 'True'),
@@ -75,11 +85,161 @@ MUTATIONS = {
 if '--mutation' in sys.argv:
     index = sys.argv.index('--mutation'); name = sys.argv[index+1]; del sys.argv[index:index+2]
     old, new = MUTATIONS[name]
-    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline', 'native_count', 'native_types'] else v
+    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['icd_bytes', 'lh_identity', 'lh_readback', 'owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline', 'native_count', 'native_types'] else v
     source = Path(target.__file__).read_text(); assert old in source
     exec(compile(source.replace(old, new), target.__file__, 'exec'), target.__dict__)
 
 class Pins(unittest.TestCase):
+    def lh_fixture(self):
+        uuid = 'GPU-b57f8cd6-b638-69a4-e9af-54ad6b8fc7f5'
+        record = dict(selected=dict(backend='Vulkan', name='NVIDIA GeForce RTX 3090', vendor_id=0x10de, device_id=0x2204, driver='NVIDIA'), software=False, driver_info='615.78.08')
+        probe = dict(inventory=dict(exit=0, output=f'0, {uuid}, NVIDIA GeForce RTX 3090, 0x220410DE, 615.78.08'), readback=dict(exit=0, output=f'{uuid}, 210, 405, P8, 350.00, 27.00'), icd=json.dumps(dict(ICD=dict(library_path='libGLX_nvidia.so.0'))))
+        return record, probe, uuid
+
+    def test_lh_identity(self):
+        record, probe, uuid = self.lh_fixture()
+        selected, stack = launch.lh_identity(record, probe)
+        self.assertEqual(selected, dict(record['selected'], uuid=uuid))
+        self.assertEqual(stack['mesa']['status'], 'unavailable')
+        self.assertIn('615.78.08', stack['runtime'])
+        changes = [
+            ('ambiguous', lambda r,p: p['inventory'].update(output=p['inventory']['output']+'\n'+p['inventory']['output'].replace('GPU-b57f8cd6', 'GPU-a57f8cd6'))),
+            ('name-only', lambda r,p: r['selected'].update(device_id=1)),
+            ('vendor', lambda r,p: r['selected'].update(vendor_id=1)),
+            ('software', lambda r,p: r.update(software=True)),
+            ('driver', lambda r,p: r.update(driver_info='other version')),
+            ('inventory', lambda r,p: p['inventory'].update(exit=1)),
+            ('truncated', lambda r,p: p['inventory'].update(output='0, '+uuid)),
+            ('UUID', lambda r,p: r['selected'].update(uuid='GPU-wrong')),
+            ('ICD', lambda r,p: p.update(icd=json.dumps(dict(ICD=dict(library_path='libvulkan_lvp.so'))))),
+        ]
+        for name, change in changes:
+            with self.subTest(name=name):
+                changed, other = copy.deepcopy(record), copy.deepcopy(probe)
+                change(changed, other)
+                with self.assertRaises(ValueError): launch.lh_identity(changed, other)
+
+    def test_lh_readback(self):
+        _, probe, uuid = self.lh_fixture()
+        observed = launch.lh_observation(probe, 100, uuid)
+        self.assertEqual((observed['graphics_mhz'], observed['power_limit_w'], observed['power_draw_w']), (210,350,27))
+        for text in [probe['readback']['output'].replace(uuid, 'GPU-other'), f'{uuid}, 210, 405, P8, 350', f'{uuid}, nan, 405, P8, 350, 27', f'{uuid}, 210, 405, BAD, 350, 27']:
+            changed = copy.deepcopy(probe); changed['readback']['output'] = text
+            with self.subTest(text=text), self.assertRaises(ValueError): launch.lh_observation(changed, 100, uuid)
+        probe['readback']['output'] = f'{uuid}, 0, 10000, P0, [Not Supported], [N/A]'
+        observed = launch.lh_observation(probe, 100, uuid)
+        self.assertEqual(observed['graphics_mhz'], 0)
+        self.assertIn('reason', observed['power_limit_w'])
+        self.assertIn('reason', observed['power_draw_w'])
+        probe['readback']['exit'] = 1
+        with self.assertRaises(ValueError): launch.lh_observation(probe, 100, uuid)
+
+    def test_icd_bytes(self):
+        record, probe, uuid = self.lh_fixture()
+        payload = (probe['icd']+'\r\n').encode()
+        path = self.root/'nvidia.json'; path.write_bytes(payload)
+        observed = launch.lh_probe(Mock(side_effect=[probe['inventory'],probe['readback']]),dict(VK_DRIVER_FILES=str(path),PF1_GPU_UUID=uuid))
+        self.assertEqual(launch.lh_identity(record, observed)[1]['icd_manifest_sha256'],v.hashlib.sha256(payload).hexdigest())
+
+    def default_policy(self):
+        self.configure('G1')
+
+    def use_default_policy(self):
+        record, probe, uuid = self.lh_fixture()
+        ruling = self.root/'r89.txt'; ruling.write_text('## R89-2:\n- Change no GPU setting.\n')
+        policy = dict(kind='recorded-default', ruling=dict(path=ruling.name, sha256=v.digest(ruling)))
+        for row in self.status['runs']:
+            times = [row['started_s']-.01, (row['started_s']+row['ended_s'])/2, row['ended_s']+.01]
+            row['gpu'] = launch.lh_gpu(record, [dict(utc=t, lh=probe) for t in times], policy)
+            for sample in row['preflight']: sample['uuid'] = uuid
+        self.pins['gpu'] = copy.deepcopy(self.status['runs'][0]['gpu'])
+        self.pins['protocol']['sample_ms'] = 5000
+
+    def test_recorded_default_policy(self):
+        self.default_policy()
+        for row in self.status['runs']:
+            for observation in row['gpu']['telemetry']:
+                observation.update(graphics_mhz=0, memory_mhz=100000, power_limit_w=1, power_draw_w=10000, pstate='P8')
+        self.run_record(0)
+        policy = self.pins['gpu']['policy']
+        with self.assertRaises(ValueError): v.schema(dict(policy, requested={}), v.SCHEMA['$defs']['policy'])
+        self.pins['gate'] = 'G3'
+        with self.assertRaises(ValueError): v.gpu_check(self.pins['gpu'], self.pins, dict(os='linux'), self.root)
+        self.pins['gate'] = 'G1'
+        self.pins['gpu']['telemetry'][0]['uuid'] = 'GPU-other'
+        with self.assertRaises(ValueError): v.gpu_check(self.pins['gpu'], self.pins, dict(os='linux'), self.root)
+
+    def test_default_policy_coverage(self):
+        self.default_policy()
+        row = self.status['runs'][0]; original = copy.deepcopy(row['gpu']['telemetry'])
+        for times in [[row['started_s']+.01, row['ended_s']-.01, row['ended_s']+.01], [row['started_s']-.02, row['started_s']-.01, row['ended_s']+.01], [row['started_s']-.01, row['ended_s']-.02, row['ended_s']-.01], [row['started_s']-.01, row['started_s']+.01, row['ended_s']+10]]:
+            row['gpu']['telemetry'] = [dict(x,timestamp_s=t) for x,t in zip(original,times)]
+            with self.subTest(times=times): self.run_record(2)
+
+    def test_lh_identity_cannot_change_between_samples(self):
+        record, probe, _ = self.lh_fixture()
+        other = copy.deepcopy(probe); other['icd'] += '\n'
+        with self.assertRaisesRegex(ValueError, 'changed during invocation'):
+            launch.lh_gpu(record, [dict(utc=10,lh=probe),dict(utc=15,lh=other)], dict(kind='recorded-default'))
+
+    def test_g14_contract(self):
+        self.configure('G14'); self.run_record(0)
+        self.assertEqual(len(self.status['runs']),36)
+        self.assertEqual(self.pins['metrics']['held_max_ms'],dict(decision='R50_abs',unit='ms',scope='each_run',limit=100))
+        original = copy.deepcopy(self.pins)
+        for change in [lambda p:p['metrics'].pop('held_max_ms'),lambda p:p['protocol'].pop('control'),lambda p:p['protocol']['duration_s'].update(talk_recut=60),lambda p:p['metrics']['held_max_ms'].update(limit=101)]:
+            altered = copy.deepcopy(original); change(altered); self.p.write_text(json.dumps(altered))
+            with self.assertRaises((ValueError,KeyError)): v.spec(self.p,self.root)
+        inputs = v.read(self.root/original['inputs']['path'])
+        for values in inputs.values(): values.pop('feed_4x5')
+        path=self.root/'missing-feed.json';path.write_text(json.dumps(inputs))
+        original['inputs']=dict(path=path.name,sha256=v.digest(path))
+        original['protocol']['order']=[r for r in original['protocol']['order'] if r['workload']!='feed_4x5']
+        self.p.write_text(json.dumps(original))
+        with self.assertRaises(ValueError): v.spec(self.p,self.root)
+
+    def test_q3_sensitivity(self):
+        for gate in ['Q3-G1','Q3-G14']:
+            self.setUp();self.configure(gate);self.run_record(0)
+            self.status['runs'][0]['metrics']={key:0 for key in self.pins['metrics']}
+            with self.subTest(gate=gate):self.run_record(1)
+
+    def test_lh_cached_samples(self):
+        self.configure('G14');self.run_record(0)
+        row=self.status['runs'][0];row['gpu']['telemetry'][0]['graphics_mhz']+=1
+        row['fingerprint']=v.fingerprint(row)
+        status=self.root/'status.json';status.write_text(json.dumps(self.status))
+        with self.assertRaisesRegex(ValueError,'cached LH readback mismatch'):v.evaluate(self.p,status,self.root)
+
+    def test_g14_control_requirement(self):
+        for gate in ['G1','G14']:
+            self.setUp();self.configure(gate);self.run_record(0)
+            binding=v.read(self.root/self.pins['protocol']['control']['path']);path=self.root/binding['status'];status=v.read(path)
+            saved=self.pins,self.status,self.p;self.p=self.root/binding['pins']['path'];self.pins=v.read(self.p);self.status=status
+            for row in status['runs']:row['metrics']={key:0 for key in row['metrics']}
+            self.run_record(1);self.pins,self.status,self.p=saved;self.run_record(1)
+            for code in [75,101]:
+                with self.subTest(gate=gate,control=code):
+                    child=self.root/binding['pins']['path'];receipt=self.root/'control-failure.json'
+                    receipt.write_text(json.dumps(dict(v.read(child)['protocol']['order'][0],exit=code,reason='synthetic control failure',pins=v.digest(child),logs=[],cleanup=dict(reaped=True,returncode=code))))
+                    failed=dict(status,runs=[],failure=dict(exit=code,receipt=dict(path=receipt.name,sha256=v.digest(receipt))))
+                    path.write_text(json.dumps(failed));self.run_record(code)
+            for content in ['{',None]:
+                if content is None:path.unlink()
+                else:path.write_text(content)
+                self.run_record(2)
+
+    def test_control_source(self):
+        self.configure('G14')
+        binding_path=self.root/self.pins['protocol']['control']['path'];binding=v.read(binding_path)
+        child_path=self.root/binding['pins']['path'];child=v.read(child_path)
+        builds=v.read(self.root/child['builds']['path']);binary=self.root/'other-binary';binary.write_bytes(b'other source-bound binary')
+        for build in builds.values():build['binary']=dict(path=binary.name,sha256=v.digest(binary))
+        path=self.root/'other-builds.json';path.write_text(json.dumps(builds));child['builds']=dict(path=path.name,sha256=v.digest(path))
+        child_path.write_text(json.dumps(child));binding['pins']['sha256']=v.digest(child_path)
+        binding_path.write_text(json.dumps(binding));self.pins['protocol']['control']['sha256']=v.digest(binding_path)
+        with self.assertRaisesRegex(ValueError,'control source/host mismatch'):v.control_binding(self.pins,self.root,v.read(self.root/self.pins['inputs']['path']))
+
     @unittest.skipUnless(sys.platform == 'linux', 'Linux invocation watchdog')
     def test_deadline(self):
         cleanup = {}
@@ -120,31 +280,73 @@ class Pins(unittest.TestCase):
         shutil.copytree(repo/'docs/reports/pf1-s4/example', self.root/'docs/reports/pf1-s4/example')
         self.pins = v.read(repo/'docs/PF1-PINS.json'); self.status = v.read(self.root/'docs/reports/pf1-s4/example/status.json')
     def run_record(self, expected, resign=True):
+        prefix = '' if self.p.name == 'pins.json' else self.p.stem+'-'
         self.p.write_text(json.dumps(self.pins), encoding='utf-8')
         self.status['series']['pins'] = v.digest(self.p)
-        if self.pins['gate'] in ['G4', 'G15', 'D13']:
+        if self.pins['gate'] in v.COLLECTED:
+            log = self.root/'native-fixture.log'; log.write_text('synthetic native log\n')
             for index, row in enumerate(self.status['runs']):
-                path = self.root/f'collector-{index}.json'
+                row['logs'] = [dict(path=log.name,sha256=v.digest(log))]
+                path = self.root/f'{prefix}collector-{index}.json'
                 row['environment'].update(PF1_RECORD=str(path), PF1_TOKEN='portable-synthetic')
                 value = v.read(self.root/self.pins['inputs']['path'])[row['arm']][row['workload']]
                 raw = dict(valid=True, metrics=row['metrics'], selected=row['gpu']['selected'], token='portable-synthetic', timestamp_s=row['started_s'], consumed={k:value[k]['sha256'] for k in ['workload','media','document']}, native_children=1, publisher_pid=index+42, native_cleanup=dict(pid=index+42,reaped=True,exit=0))
                 raw['protocol'] = dict(name=self.pins['protocol']['name'],poll_ms=5,**v.CONTRACTS[self.pins['gate']][3])
+                if self.pins['lane'] == 'LH':
+                    _, probe, _ = self.lh_fixture(); snapshots = []
+                    keys = ['graphics_mhz','memory_mhz','pstate','power_limit_w','power_draw_w']
+                    for observation in row['gpu']['telemetry']:
+                        observed = copy.deepcopy(probe)
+                        values = [observation['uuid']] + [str(observation[k]) if not isinstance(observation[k],dict) else observation[k]['reason'].removeprefix('nvidia-smi returned ') for k in keys]
+                        observed['readback']['output'] = ', '.join(values)
+                        snapshots.append(dict(utc=observation['timestamp_s'],lh=observed))
+                    samples = self.root/f'{prefix}lh-{index}.jsonl'
+                    samples.write_text(''.join(json.dumps(x)+'\n' for x in snapshots))
+                    row['logs'].append(dict(path=samples.name,sha256=v.digest(samples)))
+                    row['environment'].update(PF1_GATE=self.pins['gate'],PF1_LH_SAMPLES=str(samples))
+                    raw.update(driver_info=row['gpu']['stack']['runtime'].split(';')[0],software=False)
                 if self.pins['gate'] == 'D13': raw['protocol']['d_bytes'] = self.pins['protocol']['d_bytes']
                 if self.pins['gate'] == 'D13' and 'calibration' in self.pins['protocol']: raw.update(self.d13_record())
                 path.write_text(json.dumps(raw))
                 row['logs'] = [ref for ref in row['logs'] if ref['path'] != path.name] + [dict(path=path.name,sha256=v.digest(path))]
+                build = v.read(self.root/self.pins['builds']['path'])[row['arm']]
+                row['identity'].update({k:build[k]['sha256'] for k in ['binary','production','harness']},host=self.pins['host']['sha256'])
                 row['command'] = ['timeout', '--kill-after=1', '570', 'nice', '-n', '10', str(self.root/v.read(self.root/self.pins['builds']['path'])[row['arm']]['binary']['path']), '--exact', launch.TESTS[self.pins['gate']], '--ignored', '--nocapture', '--test-threads=1']
                 row['environment']['PF1_SEED'] = str(row['seed'])
-                receipt = self.root/f'receipt-{index}.json'
+                receipt = self.root/f'{prefix}receipt-{index}.json'
                 receipt.write_text(json.dumps(dict({k:row[k] for k in ['arm','workload','pair','seed','exit','command']}, host={k:v.read(self.root/self.pins['host']['path'])[k] for k in ['os','version','architecture','cpu','ram_bytes']}, pins=v.digest(self.p), token='portable-synthetic', cleanup=dict(reaped=True,returncode=0))))
                 row['logs'] = [ref for ref in row['logs'] if ref['path'] != receipt.name] + [dict(path=receipt.name,sha256=v.digest(receipt))]
         for row in self.status['runs']:
             row['identity']['pins'] = v.digest(self.p)
             if resign: row['fingerprint'] = v.fingerprint(row)
-        status = self.root/'status.json'; status.write_text(json.dumps(self.status), encoding='utf-8')
+        status = self.root/(prefix+'status.json'); status.write_text(json.dumps(self.status), encoding='utf-8')
         try: code = v.evaluate(self.p, status, self.root)
         except (ValueError, OSError, KeyError, TypeError): code = 2
         self.assertEqual(code, expected)
+
+    def control_fixture(self):
+        saved = self.pins, self.status, self.p
+        parent, status, _ = saved
+        gate = 'Q3-'+parent['gate']
+        entries = [entry for entry in parent['protocol']['order'] if entry['workload']=='typical_1080p' and entry['pair']==0]
+        inputs = v.read(self.root/parent['inputs']['path'])
+        path = self.root/(gate+'-inputs.json')
+        path.write_text(json.dumps({arm:{'typical_1080p':value['typical_1080p']} for arm,value in inputs.items()}))
+        self.pins = copy.deepcopy(parent)
+        self.pins.update(gate=gate,inputs=dict(path=path.name,sha256=v.digest(path)))
+        self.pins['protocol'] = dict(name='P-play',poll_ms=5,sample_ms=5000,runs=1,order=entries,**v.CONTRACTS[gate][3])
+        self.status = copy.deepcopy(status)
+        self.status['gate'] = gate
+        self.status['series'] = dict(id=gate,pins='a'*64)
+        self.status['runs'] = [row for row in self.status['runs'] if row['workload']=='typical_1080p' and row['pair']==0]
+        for row in self.status['runs']:
+            row['metrics'] = {key:rule['limit']+1 for key,rule in self.pins['metrics'].items()}
+        self.p = self.root/(gate+'-pins.json')
+        self.run_record(0)
+        control = dict(pins=dict(path=self.p.name,sha256=v.digest(self.p)),status=self.p.stem+'-status.json')
+        self.pins, self.status, self.p = saved
+        path = self.root/(gate+'-binding.json'); path.write_text(json.dumps(control))
+        self.pins['protocol']['control'] = dict(path=path.name,sha256=v.digest(path))
     def test_schema(self):
         for change in [lambda p: p.pop('host'), lambda p: p.update(extra=1), lambda p: p['gpu']['selected'].update(vendor_id=True), lambda p: p['gpu']['selected'].update(driver={'status':'unavailable','reason':'no'}), lambda p: p['protocol'].update(poll_ms=-1), lambda p: p['gpu']['selected'].update(name=''), lambda p: p['protocol'].update(sample_ms=float('inf'))]:
             p = copy.deepcopy(self.pins); change(p)
@@ -208,16 +410,21 @@ class Pins(unittest.TestCase):
         order = []
         for workload in sorted(workloads):
             for rotation, arms in enumerate(itertools.permutations(builds) if gate.startswith('R65-') else [tuple(builds)]):
-                for seed_index, seed in enumerate([11,22,33] if gate != 'G7a' else [11]):
+                for seed_index, seed in enumerate([11] if gate == 'G7a' or gate.startswith('Q3-') else [11,22,33]):
                     order.extend(dict(workload=workload, pair=rotation*3+seed_index, arm=arm, seed=seed) for arm in arms)
-        self.pins['protocol'] = dict(name=protocol, poll_ms=5, sample_ms=100, runs=18 if gate.startswith('R65-') else 1 if gate=='G7a' else 3, order=order, **parameters)
+        self.pins['protocol'] = dict(name=protocol, poll_ms=5, sample_ms=100, runs=18 if gate.startswith('R65-') else 1 if gate=='G7a' or gate.startswith('Q3-') else 3, order=order, **parameters)
         row = self.status['runs'][0]
         self.status['runs'] = [dict(copy.deepcopy(row), **entry, metrics={k:True if u=='boolean' else 'a'*64 if u=='sha256' else 0 if d in ['zero','R50_abs'] else 100 for k,(d,u,l) in rules.items()}) for entry in order]
         if self.pins['lane'] != 'LH':
             self.pins['gpu']['policy'] = {'kind':'software'}
             for row in self.status['runs']: row['gpu']['policy'] = {'kind':'software'}
 
-        if gate in ['G4','G15','D13']: self.freeze_inputs()
+        if gate in v.COLLECTED: self.freeze_inputs()
+        if gate in v.LH_PLAY: self.use_default_policy()
+        if gate.startswith('Q3-'):
+            for row in self.status['runs']:
+                row['metrics'] = {key:rule['limit']+1 for key,rule in self.pins['metrics'].items()}
+        if gate in ['G1','G14']: self.control_fixture()
         if gate == 'D13':
             inputs = v.read(self.root/self.pins['inputs']['path'])
             media = self.root/next(iter(inputs.values()))['seek_gop60']['media']['path']

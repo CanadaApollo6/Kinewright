@@ -25,6 +25,27 @@ on:
   workflow_dispatch:
 
 jobs:
+  pf1-wrapper:
+    name: Linux PF1 wrapper witnesses
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      # The runner context is unavailable in job-level env, so derive the path in a step.
+      - name: Set PF1 runner path
+        run: echo "PF1_RUNNERS=$RUNNER_TEMP/pf1-runners" >> "$GITHUB_ENV"
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Restore hash-verified PF1 runners
+        run: python3 ci/pf1/restore.py "$PF1_RUNNERS"
+      - name: PF1 wrapper witnesses (synthetic child, no GPU or FFmpeg)
+        run: python3 scripts/pf1/test_lane.py
+
   windows:
     name: Windows workspace
     runs-on: windows-latest
