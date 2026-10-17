@@ -78,7 +78,8 @@ FFMPEG_PROBE_ADVICE = re.compile(
     r"Consider increasing the value for the 'analyzeduration' \(\d+\) and 'probesize' \(\d+\) options"
 )
 OUTCOME = re.compile(r"^(?:ok|FAILED|ignored)")
-GLUED_MESSAGE = re.compile(r"[A-Z]")
+# FFmpeg's lowercase "deprecated pixel format used" warning can also glue on (Windows run 39003986680).
+GLUED_MESSAGE = re.compile(r"[A-Z]|deprecated pixel format used")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 
