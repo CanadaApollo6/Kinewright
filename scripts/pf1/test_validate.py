@@ -18,7 +18,7 @@ import series as runner
 MUTATIONS = {
     'lh_cached': ("lh_gpu(raw, lh_samples(row['environment']), pins['gpu']['policy']) == row['gpu']", "True"),
     'control_source': ("other['builds'] == pins['builds']", "True"),
-    'control_required': ("evaluate(control_pins, control_status, root) != 0", "False"),
+    'control_required': ("control_code != 0", "False"),
     'control_sensitivity': ("return 0 if all(any(row['metrics'][key] > rule['limit'] for key,rule in pins['metrics'].items()) for row in rows) else 1", "return 0"),
     'lh_identity': ("len(matches) == 1", "len(matches) >= 1"),
     'lh_readback': ("fields[0] == uuid", "True"),
@@ -218,6 +218,12 @@ class Pins(unittest.TestCase):
             saved=self.pins,self.status,self.p;self.p=self.root/binding['pins']['path'];self.pins=v.read(self.p);self.status=status
             for row in status['runs']:row['metrics']={key:0 for key in row['metrics']}
             self.run_record(1);self.pins,self.status,self.p=saved;self.run_record(1)
+            for code in [75,101]:
+                with self.subTest(gate=gate,control=code):
+                    child=self.root/binding['pins']['path'];receipt=self.root/'control-failure.json'
+                    receipt.write_text(json.dumps(dict(v.read(child)['protocol']['order'][0],exit=code,reason='synthetic control failure',pins=v.digest(child),logs=[],cleanup=dict(reaped=True,returncode=code))))
+                    failed=dict(status,runs=[],failure=dict(exit=code,receipt=dict(path=receipt.name,sha256=v.digest(receipt))))
+                    path.write_text(json.dumps(failed));self.run_record(code)
             for content in ['{',None]:
                 if content is None:path.unlink()
                 else:path.write_text(content)
