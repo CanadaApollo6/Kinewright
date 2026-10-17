@@ -72,13 +72,13 @@ fn s3b_native_consume(
     clippy::too_many_lines,
     reason = "one native timing lifecycle shared by both sides"
 )]
-fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
+fn s3b_native_run(document: &Document, ready: Option<Session>) -> (PlayMetrics, f64, String) {
     if std::env::var_os("PF1_RECORD").is_some() {
-        assert!((document.duration.0 as f64 * frame_ms(document) - 60_000.0).abs() < 1e-5);
+        s4_assert_duration(document, &std::env::var("PF1_ONLY").unwrap());
     }
-    let audio = SimulatedAudio::paced();
-    let session = Session::new(Some(audio.clone()), Arc::default(), lane().0);
-    s4_publish(&session.gpu, None);
+    let session = ready
+        .unwrap_or_else(|| Session::new(Some(SimulatedAudio::paced()), Arc::default(), lane().0));
+    let audio = session.audio.as_ref().expect("paced native audio").clone();
     let metadata = session.gpu.monitor_proof_metadata();
     assert_eq!(
         metadata.software_fallback,
@@ -103,7 +103,7 @@ fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
         .engine
         .enable_display(crate::display::tests::config());
     session.engine.set_document(Arc::new(document.clone()));
-    let until = Instant::now() + Duration::from_secs(120);
+    let until = session.phase(document, 120);
     let mut epoch = 0;
     while s3b_native_consume(&mut native, &session, &mut epoch, dimensions).is_none() {
         assert!(Instant::now() < until, "native initialization completed");
@@ -120,7 +120,7 @@ fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
         thread::sleep(SAMPLE);
     }
     session.engine.pause();
-    let pause_until = Instant::now() + Duration::from_secs(30);
+    let pause_until = session.phase(document, 30);
     loop {
         let event = session
             .events
@@ -131,7 +131,7 @@ fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
             break;
         }
     }
-    let until = Instant::now() + Duration::from_secs(120);
+    let until = session.phase(document, 120);
     while s3b_native_consume(&mut native, &session, &mut epoch, dimensions).is_none() {
         assert!(Instant::now() < until, "paused warm-up render finished");
         thread::sleep(SAMPLE);
@@ -144,6 +144,7 @@ fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
     let upper = 1.02 * nominal + 500.0;
     let work_before = pf1_clock::snapshot();
     let start = Instant::now();
+    session.phase(document, 0);
     session.engine.play(TimeCode::ZERO);
     let mut trace = Trace::default();
     let mut acknowledged = BTreeSet::new();
@@ -207,9 +208,15 @@ fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
     native.terminal();
     let finished = session.engine.finished();
     let gpu = session.gpu.clone();
+    let cleanup = s4_phase_deadline(
+        session.deadline,
+        Instant::now(),
+        Duration::from_secs(30),
+        Duration::ZERO,
+    );
     drop(session);
     assert_eq!(
-        finished.recv_timeout(Duration::from_secs(30)),
+        finished.recv_deadline(cleanup),
         Err(crossbeam_channel::RecvTimeoutError::Disconnected),
         "bounded native teardown"
     );
@@ -220,7 +227,17 @@ fn s3b_native_run(document: &Document) -> (PlayMetrics, f64, String) {
     );
     drop(native);
     assert_eq!(gpu.ledger().live_bytes(), 0, "every charge returned");
-    s4_publish(&gpu, Some((metrics.valid, fps)));
+    let gate = std::env::var("PF1_GATE").unwrap_or_else(|_| "G4".into());
+    let values = if gate == "G4" {
+        serde_json::json!({"fps": fps})
+    } else {
+        s4_play_values(&metrics, &gate)
+    };
+    s4_publish_metrics(
+        &gpu,
+        s4_protocol("native-display"),
+        Some((metrics.valid, values)),
+    );
     (metrics, fps, line)
 }
 
@@ -237,13 +254,14 @@ fn s3b_native_play_lane() {
     );
     let reference = std::env::var("S3B_SIDE").ok().as_deref() == Some("reference");
     let collecting = std::env::var_os("PF1_RECORD").is_some();
+    let mut ready = s4_ready("native-display");
     let workloads = play_workloads();
     assert_eq!(workloads.len(), 1, "one workload per bounded lane");
     let mut failures = Vec::new();
     for (key, Workload(document, _media)) in workloads {
         for run in offset..offset + runs {
             pf1_clock::start_run();
-            let (metrics, fps, line) = s3b_native_run(&document);
+            let (metrics, fps, line) = s3b_native_run(&document, ready.take());
             println!("S3B_NATIVE lane={lane} workload={key} run={run} {line}");
             let floor = match key {
                 "typical_1080p" | "explainer_16x9" => 24.0,
