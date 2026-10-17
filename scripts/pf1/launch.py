@@ -9,7 +9,7 @@ from pathlib import Path
 
 TESTS = {'G4': 'pf1_harness::s3b_native_play_lane', 'G15': 'pf1_harness::pf1_rss_baseline',
          'D13': 'pf1_harness::s4_d13_active', 'G1': 'pf1_harness::pf1_play_baseline',
-         'G2': 'pf1_harness::s3b_native_play_lane', 'G14': 'pf1_harness::pf1_play_baseline'}
+         'G2': 'pf1_harness::s3b_native_play_lane', 'G14': 'pf1_harness::pf1_play_baseline', 'Q3-G1': 'pf1_harness::pf1_play_baseline', 'Q3-G14': 'pf1_harness::pf1_play_baseline'}
 
 def test_check(spec, test):
     v.require(test == TESTS[spec['gate']], 'test does not implement pinned gate/protocol')
@@ -86,7 +86,7 @@ def lh_probe(read, environment):
     uuid = environment['PF1_GPU_UUID']
     return dict(inventory=read(['nvidia-smi', '--query-gpu=index,uuid,name,pci.device_id,driver_version', '--format=csv,noheader,nounits']),
                 readback=read(['nvidia-smi', '-i', uuid, '--query-gpu=uuid,clocks.gr,clocks.mem,pstate,power.limit,power.draw', '--format=csv,noheader,nounits']),
-                icd=Path(icd).read_text())
+                icd=Path(icd).read_bytes().decode('utf-8'))
 
 def lh_identity(record, probe):
     selected = record['selected']

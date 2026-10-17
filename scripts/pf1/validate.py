@@ -9,7 +9,11 @@ import statistics
 
 SCHEMA = json.loads((Path(__file__).resolve().parents[2] / 'docs/PF1-PINS.schema.json').read_text())
 PLAY = set('typical_1080p blend_heavy_1080p explainer_16x9 reel_9x16 feed_4x5 talk_recut'.split())
+LH_PLAY = {'G1', 'G2', 'G14', 'Q3-G1', 'Q3-G14'}
+COLLECTED = LH_PLAY | {'G4', 'G15', 'D13'}
 CONTRACTS = {
+    'G14': ('LH', 'P-play', PLAY, {'warmup_ms': 2000, 'duration_s': {w:240 if w=='talk_recut' else 60 for w in PLAY}}),
+    **{gate: ('LH', 'P-play', {'typical_1080p'}, {'warmup_ms':2000, 'duration_s':60, 'control':control}) for gate,control in [('Q3-G1','slowdown'),('Q3-G14','freeze')]},
     'D13': ('LL', 'D13', {'seek_gop60'}, {'children': 3, 'cycles': 30, 'B': 16, 'reader_cap': 2}),
     'I4': ('LL LH', 'P-comp', {'typical_1080p'}, {'warm_frames': 30, 'measured_frames': 300}),
     'G18': ('LH', 'export', {'typical_1080p'}, {'export_clips': 24, 'frames': 120}),
@@ -26,12 +30,13 @@ CONTRACTS = {
 COUNTERS = {name: ('R65', 'count', 0) for name in 'admission_waits windows_filled count_run_decoded count_run_converted count_refill_decoded count_refill_converted count_back_hits count_back_refills count_back_hits_preconverted count_refills_started count_kept_handoff_redecode conv_t_n conv_w_n'.split()}
 COUNTERS.update({name: ('zero', 'count', 0) for name in ['timeouts', 'count_idle_discard', 'guard_trips']})
 RULES = {
+    **{gate: {'held_max_ms': ('R50_abs', 'ms', 100)} for gate in ['G14', 'Q3-G14']},
     'D13': {**{k: ('invariant', 'boolean', 0) for k in ['oracle_ok', 'cleanup_ok']}, **{k: ('report', 'byte', 0) for k in ['idle_bytes', 'peak_bytes', 'peak_minus_idle_bytes', 'u_bytes']}},
     'I4': {'mean_ms': ('ratio', 'ms', 1.05)},
     'G18': {'wall_ms': ('ratio', 'ms', 1.05), 'output_sha256': ('equal', 'sha256', 0)},
     'G15': {'settled_bytes': ('delta', 'byte', 4194304)},
     'G3': {'fps': ('each_ge', 'fps', 60)},
-    **{gate: {'miss_pct': ('R50_abs', 'percent', 1), 'present_p95_ms': ('R50_abs', 'ms', 50)} for gate in ['G1', 'G2']},
+    **{gate: {'miss_pct': ('R50_abs', 'percent', 1), 'present_p95_ms': ('R50_abs', 'ms', 50)} for gate in ['G1', 'G2', 'Q3-G1']},
     'G6': {'present_ratio': ('R50_abs', 'ratio', 3)},
     'G7a': {'readbacks': ('zero', 'count', 0)}, 'VM-D6': {'fps': ('each_ge', 'fps', 20)},
 }
@@ -179,7 +184,7 @@ def spec(pins_path, root):
         for workload in inputs[arm].values():
             for key in ['workload', 'media', 'document']:
                 artifact(root, workload[key])
-        if pins['gate'] in ['G4', 'G15', 'D13']:
+        if pins['gate'] in COLLECTED:
             for key, workload in inputs[arm].items(): frozen_input(root, key, workload)
     gate, protocol = pins['gate'], pins['protocol']
     require(gate in CONTRACTS, 'unsupported/incomplete gate contract')
@@ -200,7 +205,7 @@ def spec(pins_path, root):
         require(rule['scope'] == ('report' if rule['decision'] == 'report' else 'paired_median' if rule['decision'] in ['ratio', 'R65'] else 'invariant' if rule['decision'] in ['invariant', 'zero', 'equal'] else 'each_run'), 'metric scope mismatch')
         require(key in rules and (rule['decision'], rule['unit'], rule['limit']) == rules[key], 'metric decision/unit/threshold mismatch')
     require(pins['metrics'].keys() == rules.keys(), 'missing required metric')
-    require(protocol['runs'] == (1 if gate == 'G7a' else 18 if gate.startswith('R65-') else 3), 'required run count')
+    require(protocol['runs'] == (1 if gate == 'G7a' or gate.startswith('Q3-') else 18 if gate.startswith('R65-') else 3), 'required run count')
     expected_rows = {(w, pair, arm) for w in inputs[pins['arms']['candidate']] for pair in range(protocol['runs']) for arm in builds}
     require({(r['workload'], r['pair'], r['arm']) for r in protocol['order']} == expected_rows and len(protocol['order']) == len(expected_rows), 'incomplete/duplicate order')
     require(all(len({r['seed'] for r in protocol['order'] if r['workload'] == w and r['pair'] == pair}) == 1 for w, pair, _ in expected_rows), 'paired seeds differ')
@@ -221,8 +226,25 @@ def spec(pins_path, root):
         require(len(media) == 1 and calibration['media_sha256'] == media[0]['sha256'], 'D13 calibration source mismatch')
         require(calibration['method'] == 'safe measured plane span union' and calibration['B'] == 16 and calibration['reader_cap'] == 2 and type(calibration['d_bytes']) is int and calibration['d_bytes'] == protocol['d_bytes'], 'D13 independent calibration mismatch')
         require(calibration['frames'] == 1800 and calibration['shape']['width'] == 1920 and calibration['shape']['height'] == 1080, 'D13 calibration shape mismatch')
+    if gate in LH_PLAY: require(pins['gpu']['policy']['kind'] == 'recorded-default', 'LH playback uses R89 Q1(b)')
+    if gate in ['G1', 'G14']: control_binding(pins, root, inputs)
     gpu_check(pins['gpu'], pins, host, root)
     return pins, builds, host
+
+def control_binding(pins, root, inputs):
+    artifact(root, pins['protocol']['control'])
+    control = read(root/pins['protocol']['control']['path'])
+    require(set(control) == {'pins', 'status'}, 'malformed control binding')
+    artifact(root, control['pins'])
+    path = root/control['pins']['path']
+    other, _, _ = spec(path, root)
+    require(other['gate'] == 'Q3-'+pins['gate'] and other['builds'] == pins['builds'] and other['host'] == pins['host'], 'control source/host mismatch')
+    require(all(other['gpu'][key] == pins['gpu'][key] for key in ['selected', 'stack', 'policy']), 'control device/policy mismatch')
+    frozen = artifact(root, other['inputs'], 'inputs')
+    require(all(frozen[arm]['typical_1080p'] == workloads['typical_1080p'] for arm,workloads in inputs.items()), 'control input mismatch')
+    status = (root/control['status']).resolve()
+    require(not Path(control['status']).is_absolute() and status.is_relative_to(root.resolve()), 'control status outside evidence root')
+    return path, status
 
 def series_check(status, pins_path, root, seen):
     series = status['series']
@@ -284,7 +306,7 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
         require(row['fingerprint'] == fingerprint(row), 'stale status fingerprint')
         for ref in row['logs']:
             artifact(root, ref)
-        if pins['gate'] in ['G4', 'G15', 'D13']:
+        if pins['gate'] in COLLECTED:
             from launch import TESTS, host_check
             receipt = read(root/row['logs'][-1]['path'])
             host_check(host, receipt['host'])
@@ -301,10 +323,17 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
             protocol = dict(name=pins['protocol']['name'],poll_ms=5,**CONTRACTS[pins['gate']][3])
             if pins['gate'] == 'D13': protocol['d_bytes'] = pins['protocol']['d_bytes']
             require(raw['protocol'] == protocol, 'collector protocol mismatch')
-            require(raw['valid'] is True and raw['metrics'] == row['metrics'] and raw['selected'] == row['gpu']['selected'], 'collector final mismatch')
+            selected = lambda value: {k:v for k,v in value.items() if k != 'uuid'} if pins['lane']=='LH' else value
+            require(raw['valid'] is True and raw['metrics'] == row['metrics'] and selected(raw['selected']) == selected(row['gpu']['selected']), 'collector final mismatch')
             require(raw['token'] == row['environment']['PF1_TOKEN'] and row['started_s'] <= raw['timestamp_s'] <= row['ended_s'], 'collector publication mismatch')
             require(raw['consumed'] == frozen_input(root, row['workload'], read(root/pins['inputs']['path'])[row['arm']][row['workload']]), 'collector input mismatch')
-            if pins['gate'] != 'G4':
+            if pins['lane'] == 'LH':
+                from launch import lh_gpu, lh_samples
+                require(row['environment']['PF1_GATE'] == pins['gate'], 'collector gate mismatch')
+                samples = Path(row['environment']['PF1_LH_SAMPLES'])
+                require(sum(root/ref['path'] == samples for ref in row['logs']) == 1, 'missing/duplicate LH sample artifact')
+                require(lh_gpu(raw, lh_samples(row['environment']), pins['gpu']['policy']) == row['gpu'], 'cached LH readback mismatch')
+            if pins['gate'] in ['G15', 'D13']:
                 from launch import native_check
                 native_check(raw)
                 require(raw['publisher_pid'] not in native_pids, 'native child reused across rows')
@@ -351,6 +380,12 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
     require(all(r['validity'] != 'pending_gpu_busy' for r in rows), 'unsubstantiated busy status')
     if any(r['exit'] != 0 for r in rows):
         return 101
+    if pins['gate'].startswith('Q3-'):
+        require(all(r['validity'] == 'valid' for r in rows), 'Q3 requires valid controls')
+        return 0 if all(any(row['metrics'][key] > rule['limit'] for key,rule in pins['metrics'].items()) for row in rows) else 1
+    if pins['gate'] in ['G1', 'G14'] and not any(code in [1,75] for code in verdicts):
+        control_pins, control_status = control_binding(pins, root, artifact(root, pins['inputs'], 'inputs'))
+        require(evaluate(control_pins, control_status, root) == 0, 'source-bound Q3 sensitivity control did not pass')
     return 1 if 1 in verdicts else 75 if 75 in verdicts or pins['gate'] in ['PERFORMANCE', 'R65-cumulative'] or any(r['validity'] == 'environment_limited_at_load' for r in rows) else 0
 
 if __name__ == '__main__':

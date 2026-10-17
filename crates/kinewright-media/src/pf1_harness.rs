@@ -615,7 +615,8 @@ fn play_run(
         m.passes(),
         engine_fields(&stats),
     );
-    let line = format!("{line} {} {}", run_counts(counted), teardown(session));
+    let cleanup = s4_finish_play(session, &m);
+    let line = format!("{line} {} {cleanup}", run_counts(counted));
     (m, underrun, line)
 }
 
@@ -755,14 +756,40 @@ fn pf1_play_baseline() {
     let runs = std::env::var("PF1_RUNS").map_or(if device { 1 } else { 3 }, |runs| {
         runs.parse().expect("PF1_RUNS is a count")
     });
-    let adapter = GpuContext::headless(!hardware).expect("an adapter");
-    let adapter = adapter.monitor_proof_metadata().adapter;
+    let mut ready = s4_ready("P-play");
+    let adapter = ready.as_ref().map_or_else(
+        || {
+            GpuContext::headless(!hardware)
+                .expect("an adapter")
+                .monitor_proof_metadata()
+                .adapter
+        },
+        |session| session.gpu.monitor_proof_metadata().adapter,
+    );
     let output = if device { "device" } else { "simulated" };
+    let workloads = play_workloads();
+    if std::env::var_os("PF1_RECORD").is_some() {
+        assert_eq!(
+            (workloads.len(), runs),
+            (1, 1),
+            "one workload/run/control per invocation"
+        );
+    }
     play_lane(
-        play_workloads(),
+        workloads,
         runs,
-        |Workload(document, _media)| play_run(document, Control::None, device, None).2,
+        |Workload(document, _media)| {
+            let control = match std::env::var("PF1_GATE").unwrap_or_default().as_str() {
+                "Q3-G1" => Control::Slowdown,
+                "Q3-G14" => Control::Freeze,
+                _ => Control::None,
+            };
+            play_run(document, control, device, ready.take()).2
+        },
         |key, run, line| {
+            let run = run
+                + std::env::var("S3B_RUN_OFFSET")
+                    .map_or(0, |value| value.parse::<usize>().unwrap());
             println!(
                 "PF1 play lane={lane} adapter={adapter} output={output} workload={key} run={run} {line}"
             );

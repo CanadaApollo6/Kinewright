@@ -96,9 +96,11 @@ import test_validate as fixtures
 @unittest.skipUnless(sys.platform == 'linux', 'Linux wrapper integration')
 class Wrapper(unittest.TestCase):
     def test_lh(self):
+        self.fixture.root = self.root
+        self.fixture.p = self.root/'pins.json'
+        self.fixture.pins = v.read(self.fixture.p)
         self.fixture.default_policy()
         self.fixture.freeze_inputs()
-        shutil.copytree(self.fixture.root, self.root, dirs_exist_ok=True)
         self.pins = self.fixture.pins
         host = self.root/self.pins['host']['path']
         host.write_text(json.dumps(v.read(host) | launch.host_readback()))

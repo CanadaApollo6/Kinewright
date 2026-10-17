@@ -184,3 +184,30 @@ fn s4_a_short_talk_document_is_rejected() {
     document.duration = TimeCode(7200);
     s4_assert_duration(&document, "talk_recut");
 }
+
+fn s4_finish_play(session: Session, metrics: &PlayMetrics) -> String {
+    let gpu = session.gpu.clone();
+    let cleanup = s4_phase_deadline(
+        session.deadline,
+        Instant::now(),
+        Duration::from_secs(30),
+        Duration::ZERO,
+    );
+    let cleanup = teardown_until(session, cleanup);
+    if std::env::var_os("PF1_RECORD").is_some() {
+        assert!(
+            cleanup.contains("teardown_complete=true") && cleanup.contains("teardown_decoders=0 "),
+            "bounded P-play cleanup: {cleanup}"
+        );
+        assert_eq!(gpu.ledger().live_bytes(), 0, "P-play charges returned");
+    }
+    s4_publish_metrics(
+        &gpu,
+        s4_protocol("P-play"),
+        Some((
+            metrics.valid,
+            s4_play_values(metrics, &std::env::var("PF1_GATE").unwrap_or_default()),
+        )),
+    );
+    cleanup
+}
