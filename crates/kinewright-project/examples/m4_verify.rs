@@ -262,20 +262,20 @@ fn generate_source(
 /// The frame at `requested`, or the engine's own error rather than a bare
 /// `Timeout` when the preview path fails.
 fn receive_frame(
-    frames: &crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    frames: &crossbeam_channel::Receiver<kinewright_core::PreviewFrame>,
     events: &crossbeam_channel::Receiver<MediaEvent>,
     requested: TimeCode,
 ) -> Result<kinewright_core::FrameTexture, Box<dyn Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         while let Ok(event) = events.try_recv() {
-            if let MediaEvent::Error(error) = event {
+            if let Some(error) = event.error() {
                 return Err(format!("preview frame {}: {error}", requested.0).into());
             }
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         match frames.recv_timeout(remaining.min(Duration::from_millis(50))) {
-            Ok((at, frame)) if at == requested => return Ok(frame),
+            Ok(frame) if frame.at == requested => return Ok(frame.texture),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) if !remaining.is_zero() => {}
             Ok(_) => {}
             Err(error) => return Err(error.into()),
@@ -291,7 +291,7 @@ fn wait_for_playback(
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         while let Ok(event) = events.try_recv() {
-            if let MediaEvent::Error(error) = event {
+            if let Some(error) = event.error() {
                 return Err(error.to_string());
             }
         }

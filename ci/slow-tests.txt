@@ -89,6 +89,7 @@ kinewright_media loudness::tests::the_997_hz_calibration_tone_reads_its_pinned_v
 kinewright_media loudness::tests::the_relative_gate_case_and_the_one_window_floor_hold crates/kinewright-media/src/loudness.rs  # 15/17
 kinewright_media mo2_fixtures::review_probes::review1_all_geometric_frames_independent_oracle crates/kinewright-media/src/mo2_review_probes.rs  # 61/66
 kinewright_media mo2_perf_fixtures::r28_ledger_holds_the_ceilings_and_releases_every_charge crates/kinewright-media/src/mo2_perf_fixtures.rs  # 197/198
+kinewright_media sched::accounting::the_readers_accounting_holds_for_300k_seeded_sequences crates/kinewright-media/src/sched_accounting.rs  # 85/- (local, 4 threads; not yet measured on CI)
 
 # mcp_server
 mcp_server au3_queue_export_normalizes_and_verifies_audio crates/kinewright-agent/tests/mcp_server.rs  # 16/18
@@ -101,3 +102,6 @@ mcp_server au6_a4_the_multicam_cuts_leave_the_master_audio_untouched crates/kine
 mcp_server au6_a5a_the_delivery_lands_on_the_ebu_r128_target crates/kinewright-agent/tests/mcp_server.rs  # 74/86
 mcp_server r28_solo_peak_resources_and_elapsed crates/kinewright-agent/tests/mcp_server.rs  # 82/84
 mcp_server solo_strip_inside_byte_budget crates/kinewright-agent/tests/mcp_server.rs  # 103/104
+
+kinewright_media sched::tests::the_reader_model_holds_for_every_short_sequence crates/kinewright-media/src/sched.rs # laptop Linux 147.82 s (D15 baseline); Windows unmeasured
+kinewright_media preview::tests::idle_readers_retire_after_natural_quiescence crates/kinewright-media/src/preview.rs # R79-0 real five-second QUIESCENCE; CI time unmeasured

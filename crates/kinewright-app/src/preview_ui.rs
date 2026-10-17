@@ -928,7 +928,10 @@ impl KinewrightApp {
             ui,
             egui::vec2(available_width, frame_height),
             "SOURCE",
-            source_texture.as_ref(),
+            source_texture
+                .as_ref()
+                .map(|t| (t.id(), t.size_vec2()))
+                .as_ref(),
             if blocked {
                 source_state.label()
             } else if revalidation_pending {
@@ -979,13 +982,10 @@ impl KinewrightApp {
             scrubbing: self.qc_mask.is_scrubbing(),
         };
         let qc_mask_texture = self.qc_mask_texture(ui.ctx(), qc_mask_conditions);
-        let texture = self.texture.clone();
-        let picture = viewer_picture(
-            blocked,
-            matte_texture.as_ref(),
-            qc_mask_texture.as_ref(),
-            texture.as_ref(),
-        );
+        let texture = self.program_picture();
+        let matte = matte_texture.as_ref().map(|t| (t.id(), t.size_vec2()));
+        let mask = qc_mask_texture.as_ref().map(|t| (t.id(), t.size_vec2()));
+        let picture = viewer_picture(blocked, matte.as_ref(), mask.as_ref(), texture.as_ref());
         let frame = Self::paint_viewer_frame(
             ui,
             egui::vec2(available_width, frame_height),
@@ -1003,6 +1003,19 @@ impl KinewrightApp {
             },
             viewer_sense(overlay.is_some() || transform_target.is_some()),
         );
+        // PF1 R-5: the Program picture is the bound preview frame: mark its
+        // paint (over the image rect, clipped to the viewer) for the ack.
+        let program = picture.is_some() && picture == texture.as_ref();
+        if let (true, Some(image_rect)) = (program, frame.image_rect) {
+            let epoch = ui.ctx().cumulative_frame_nr_for(egui::ViewportId::ROOT);
+            let marker = (self.presenter).marker(epoch, self.paint_clock());
+            marker.add_to(&ui.painter_at(frame.response.rect), image_rect);
+            // Nit: the caption is decided by `finalize_preview`, after every
+            // transport call of the pass; it describes the finalized binding.
+            let caption = ui.painter_at(image_rect);
+            let slot = caption.add(egui::Shape::Noop);
+            self.stale_caption = Some((caption, slot, image_rect));
+        }
         if let (Some(target), Some(image_rect)) = (&transform_target, frame.image_rect) {
             self.handle_transform_drag(ui, &frame.response, image_rect, target);
         }
@@ -1424,7 +1437,7 @@ impl KinewrightApp {
         ui: &mut egui::Ui,
         size: egui::Vec2,
         label: &str,
-        texture: Option<&egui::TextureHandle>,
+        texture: Option<&(egui::TextureId, egui::Vec2)>,
         message: &str,
         message_color: egui::Color32,
         sense: egui::Sense,
@@ -1441,13 +1454,13 @@ impl KinewrightApp {
             color::TEXT_MUTED,
         );
         if let Some(texture) = texture {
-            let source = texture.size_vec2();
+            let source = texture.1;
             if source.x > 0.0 && source.y > 0.0 {
                 let inset = rect.shrink2(egui::vec2(space::FOUR, space::FOUR));
                 let scale = (inset.width() / source.x).min(inset.height() / source.y);
                 let image_rect = egui::Rect::from_center_size(inset.center(), source * scale);
                 painter.image(
-                    texture.id(),
+                    texture.0,
                     image_rect,
                     egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
@@ -3295,4 +3308,12 @@ pub(crate) mod mo2_tests {
             in1_shutdown(&mut app);
         }
     }
+}
+
+/// The STALE caption over the Program image (bottom left).
+pub(crate) fn stale_caption(painter: &egui::Painter, image_rect: egui::Rect) -> egui::Shape {
+    let galley = painter.layout_job(theme::caps_label("STALE", color::STATUS_WARNING));
+    let pos = image_rect.left_bottom() + egui::vec2(space::TWO, -space::TWO);
+    let rect = egui::Align2::LEFT_BOTTOM.anchor_size(pos, galley.size());
+    egui::Shape::galley(rect.min, galley, color::STATUS_WARNING)
 }

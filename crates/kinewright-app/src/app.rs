@@ -17,8 +17,8 @@ use kinewright_core::{
     IncidentOutcome, IncidentSubject, InvestigatorPreferences, JournalCommand, LabelIncident,
     LiveAudioChange, MediaAsset, MediaError, MediaEvent, MixNoiseProfileRequest, MixSpectrumPoint,
     NOISE_PROFILE_BAND_COUNT, NOISE_PROFILE_PARAMETER_NAMES, Observed, Operation,
-    PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, Rational,
-    RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
+    PROJECT_FORMAT_VERSION, ParamValue, Playback, PlaybackState, PolicyClass, PreviewFrame,
+    Rational, RecoveryKind, SilenceStatus, TimeCode, TimelineRevision, Track, TrackId, TrackKind,
     recovery_description,
 };
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
@@ -283,9 +283,46 @@ fn router_apply_accepted(
     }
 }
 
+/// A reply applied on the UI thread (`KinewrightApp::off_ui`).
+pub(crate) type UiReply = Box<dyn FnOnce(&mut KinewrightApp, &egui::Context) + Send>;
+
+pub(crate) struct NativeDisplay {
+    session: kinewright_media::DisplaySession,
+    renderer: eframe::egui_wgpu::RenderState,
+    picture: Option<(egui::TextureId, egui::Vec2)>,
+}
+impl NativeDisplay {
+    fn clear(&mut self) {
+        if let Some((id, _)) = self.picture.take() {
+            self.renderer.renderer.write().free_texture(&id);
+        }
+    }
+    fn terminal(&mut self) {
+        self.clear();
+        self.session.terminal();
+    }
+}
+impl Drop for NativeDisplay {
+    fn drop(&mut self) {
+        self.terminal();
+    }
+}
+fn premultiply_table() -> Box<[u8; 65536]> {
+    (0..=u16::MAX)
+        .map(|i| {
+            let [v, a] = i.to_le_bytes();
+            egui::Color32::from_rgba_unmultiplied(v, v, v, a).r()
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+        .try_into()
+        .unwrap()
+}
 // Independent transport, agent, dialog, and window flags model separate UI state machines.
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct KinewrightApp {
+    /// Return display leases before any media-engine arcs are dropped.
+    pub(crate) native_display: Option<NativeDisplay>,
     pub(crate) projects: Vec<ProjectSession>,
     pub(crate) focused_project: usize,
     next_project_id: u64,
@@ -305,7 +342,7 @@ pub(crate) struct KinewrightApp {
     /// sends the library to the playback worker and stores it where the proof
     /// and export entry points read it.
     pub(crate) lut_publisher: Arc<FfmpegMediaEngine>,
-    pub(crate) frames: crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    pub(crate) frames: crossbeam_channel::Receiver<PreviewFrame>,
     pub(crate) media_events: crossbeam_channel::Receiver<MediaEvent>,
     pub(crate) visual_cache: crate::visual_cache::VisualCache,
     /// Per-harness detection, model catalog, and remembered picks, indexed
@@ -398,9 +435,18 @@ pub(crate) struct KinewrightApp {
     pub(crate) refuse_rename: Option<Arc<RefuseRename>>,
     pub(crate) media_cache_dialog_open: bool,
     pub(crate) media_cache_inventory: Option<kinewright_core::MediaCacheInventory>,
+    /// Review B (UI blocking): replies of agent-lane requests made off the
+    /// UI thread, applied on it by `poll_background`.
+    pub(crate) ui_replies: (mpsc::Sender<UiReply>, mpsc::Receiver<UiReply>),
+    /// Re-review B D2: the newest cache-inventory refresh and branch-frame
+    /// review; an off-UI reply of an older one is discarded.
+    pub(crate) cache_inventory_generation: u64,
+    pub(crate) branch_review_generation: u64,
     pub(crate) media_cache_clear_pending: Option<kinewright_core::MediaCacheFamily>,
     pub(crate) media_cache_clear_result: Option<kinewright_core::MediaCacheClearResult>,
     pub(crate) texture: Option<egui::TextureHandle>,
+    /// PF1 R-2/R-5: frame candidates, the display cell and paint marks.
+    pub(crate) presenter: crate::presenter::Presenter,
     pub(crate) color_scopes: crate::color_scopes_ui::ColorScopesState,
     /// CC6 §8.1 Colour QC: the read-only measurement window and its single
     /// worker. Nothing in it can reach the document.
@@ -436,6 +482,12 @@ pub(crate) struct KinewrightApp {
     /// document and never travels with a project.
     pub(crate) mixer_selection: Option<crate::mixer_ui::MixerSelection>,
     pub(crate) resume_after_scrub: bool,
+    /// Review A F4: a scrub released while playing resumes from `.1` once
+    /// the release target is bound under a stamp no older than `.0`.
+    pub(crate) pending_resume: Option<(kinewright_core::FrameStamp, TimeCode)>,
+    /// The Program viewer's reserved STALE caption slot for this pass, set
+    /// by `finalize_preview` from the finalized binding.
+    pub(crate) stale_caption: Option<(egui::Painter, egui::layers::ShapeIdx, egui::Rect)>,
     pub(crate) transcript_scope: TranscriptScope,
     pub(crate) material_tab: MaterialTab,
     pub(crate) show_material_strip: bool,
@@ -650,9 +702,14 @@ impl KinewrightApp {
             refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
+            ui_replies: std::sync::mpsc::channel(),
+            cache_inventory_generation: 0,
+            branch_review_generation: 0,
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            native_display: None,
+            presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
             noise_learn: NoiseLearnState::default(),
@@ -670,6 +727,8 @@ impl KinewrightApp {
                 &document,
             ),
             resume_after_scrub: false,
+            pending_resume: None,
+            stale_caption: None,
             transcript_scope: TranscriptScope::default(),
             material_tab: match std::env::var("KINEWRIGHT_SCREENSHOT_SHOW").as_deref() {
                 Ok("transcript") => MaterialTab::Transcript,
@@ -883,10 +942,11 @@ impl KinewrightApp {
         self.playback.pause();
         self.playing = false;
         self.resume_after_scrub = false;
+        self.pending_resume = None;
         self.meter_levels = [0.0; 2];
         self.mixer_levels = crate::mixer_ui::MixerMeterLevels::default();
         self.mixer_selection = None;
-        self.texture = None;
+        self.clear_preview();
         self.focused_project = index;
         let document = Arc::clone(&self.focused().document);
         let position = self.focused().position;
@@ -2459,6 +2519,9 @@ impl KinewrightApp {
     // Polling coordinates six independent channels and preserves their visible event ordering.
     #[allow(clippy::too_many_lines)]
     fn poll_background(&mut self, ctx: &egui::Context) {
+        while let Ok(reply) = self.ui_replies.1.try_recv() {
+            reply(self, ctx);
+        }
         self.poll_agent(ctx);
         self.poll_export(ctx);
         let session = self.focused();
@@ -2668,7 +2731,7 @@ impl KinewrightApp {
                     }
                     if project_index == self.focused_project {
                         if !media_changed_assets.is_empty() {
-                            self.texture = None;
+                            self.clear_preview();
                         }
                         let position = self.projects[project_index].position;
                         if !apply_live_audio_change(
@@ -2766,8 +2829,10 @@ impl KinewrightApp {
                 MediaEvent::PlaybackStateChanged(state) => {
                     self.playing = state == PlaybackState::Playing;
                 }
-                MediaEvent::Error(error) => {
+                MediaEvent::StampedError(stamp, _) if !stamp.is_current(self.playback.stamp()) => {}
+                MediaEvent::Error(error) | MediaEvent::StampedError(_, error) => {
                     self.playing = false;
+                    self.pending_resume = None;
                     let revision = self.focused().revision;
                     // `IN1b` §5.1 rule 12: the constructor is total after
                     // Part B, so both arms fold into one and IN1 §5.2 rule 6's
@@ -2792,18 +2857,149 @@ impl KinewrightApp {
         // so the generations it compares have settled for this tick.
         self.poll_sidecar_flush();
 
-        let mut newest_frame = None;
         while let Ok(frame) = self.frames.try_recv() {
-            newest_frame = Some(frame);
+            self.presenter.collect(frame);
         }
-        if let Some((at, frame)) = newest_frame {
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [
-                    usize::try_from(frame.width).unwrap_or_default(),
-                    usize::try_from(frame.height).unwrap_or_default(),
-                ],
-                frame.rgba.as_slice(),
-            );
+
+        if self.playing {
+            let position = self.playback.position();
+            self.focused_mut().position = position;
+            ctx.request_repaint_after(Duration::from_millis(10));
+        }
+    }
+
+    /// Review B (UI blocking): run `work` (an agent-lane request, which may
+    /// wait behind a render) off the UI thread; `apply` runs on the UI
+    /// thread with its result at the next pass.
+    pub(crate) fn off_ui<T: Send + 'static>(
+        &self,
+        ctx: &egui::Context,
+        work: impl FnOnce() -> T + Send + 'static,
+        apply: impl FnOnce(&mut Self, &egui::Context, T) + Send + 'static,
+    ) {
+        let (replies, ctx) = (self.ui_replies.0.clone(), ctx.clone());
+        thread::Builder::new()
+            .name("kinewright-ui-request".to_owned())
+            .spawn(move || {
+                let value = work();
+                let reply: UiReply = Box::new(move |app, ctx| apply(app, ctx, value));
+                let _ = replies.send(reply);
+                ctx.request_repaint();
+            })
+            .expect("failed to spawn a UI request worker");
+    }
+
+    /// PF1 R-5 at root epoch `epoch`: ack the bound image painted in an
+    /// earlier pass. Re-review A D2: a released scrub resumes from its
+    /// target's own paint, acked here: a binding alone (a discarded pass,
+    /// an abandoned surface) resumes nothing.
+    pub(crate) fn acknowledge_paint(&mut self, epoch: u64) {
+        let Some(ack) = self.presenter.take_ack(epoch) else {
+            return;
+        };
+        (self.playback).ack_presented(ack.stamp, ack.at, ack.painted, ack.expired);
+        if let Some((since, target)) = self.pending_resume
+            && ack.at == target
+            && ack.stamp.seq >= since.seq
+            && ack.stamp.epoch == self.playback.stamp().epoch
+        {
+            self.pending_resume = None;
+            self.playback.play(target);
+        }
+    }
+
+    /// `finalize_preview`'s eligibility inputs (the latest stamp and, while
+    /// playing, the clock), for the paint marker to read at paint time.
+    pub(crate) fn paint_clock(&self) -> crate::presenter::Now {
+        let (playback, playing) = (Arc::clone(&self.playback), self.playing);
+        Box::new(move || (playback.stamp(), playing.then(|| playback.position())))
+    }
+
+    pub(crate) fn program_picture(&self) -> Option<(egui::TextureId, egui::Vec2)> {
+        if self.presenter.using_gpu() {
+            self.native_display.as_ref().and_then(|d| d.picture)
+        } else {
+            self.texture.as_ref().map(|t| (t.id(), t.size_vec2()))
+        }
+    }
+    /// The preview texture is gone: nothing describes or marks it (R-2).
+    pub(crate) fn clear_preview(&mut self) {
+        self.texture = None;
+        if let Some(display) = &mut self.native_display {
+            display.clear();
+        }
+        self.presenter.clear();
+        self.pending_resume = None;
+    }
+
+    /// PF1 R-2: the last step of `ui`, after every transport call in the
+    /// pass, binds the newest valid candidate and writes the display cell.
+    #[allow(clippy::cast_precision_loss)]
+    fn finalize_preview(&mut self, ctx: &egui::Context) {
+        // Review A F2: the CPU image is prepared before the final stamp and
+        // clock check; the cell and the texture then bind together. The
+        // check and the binding cannot be one step against the free-running
+        // audio clock (R33): a frame that expires between them is bound, and
+        // its paint is acked expired (`PaintMarker::record`).
+        let now = self.paint_clock();
+        let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        debug_assert_eq!(ctx.viewport_id(), egui::ViewportId::ROOT);
+        if let Some(display) = &mut self.native_display
+            && let Some(frame) = display.session.reserve()
+        {
+            if display.session.can_bind(epoch) {
+                let mut renderer = display.renderer.renderer.write();
+                // Prepare only the first registration. Reuse the retained native id on rebind.
+                let prepared = display.picture.is_none().then(|| {
+                    renderer.register_native_texture(
+                        &display.renderer.device,
+                        &frame.view,
+                        eframe::wgpu::FilterMode::Linear,
+                    )
+                });
+                if self.presenter.bind_gpu(&frame, &now) {
+                    let id = if let Some((id, _)) = display.picture {
+                        renderer.update_egui_texture_from_wgpu_texture_with_sampler_options(
+                            &display.renderer.device,
+                            &frame.view,
+                            eframe::wgpu::SamplerDescriptor {
+                                min_filter: eframe::wgpu::FilterMode::Linear,
+                                mag_filter: eframe::wgpu::FilterMode::Linear,
+                                ..Default::default()
+                            },
+                            id,
+                        );
+                        id
+                    } else {
+                        prepared.expect("first native registration")
+                    };
+                    drop(renderer);
+                    display.picture = Some((
+                        id,
+                        egui::vec2(frame.dimensions.0 as f32, frame.dimensions.1 as f32),
+                    ));
+                    let at = frame.at;
+                    display.session.bind(epoch, frame);
+                    // Keep the CPU id: this pass may have laid it out before the route switch.
+                    if !self.resume_after_scrub && !self.playing {
+                        self.focused_mut().position = at;
+                    }
+                } else if let Some(prepared) = prepared {
+                    renderer.free_texture(&prepared);
+                }
+            } else {
+                display.session.defer(frame);
+            }
+        }
+        let prepare = |frame: &PreviewFrame| {
+            let texture = &frame.texture;
+            let size = [texture.width, texture.height]
+                .map(|side| usize::try_from(side).unwrap_or_default());
+            egui::ColorImage::from_rgba_unmultiplied(size, texture.rgba.as_slice())
+        };
+        if let Some((PreviewFrame { at, .. }, image)) = self.presenter.finalize(now, prepare) {
+            // Keep the native id and its Bound lease through a laid-out GPU paint.
+            // The next GPU rebind retires it under the normal root-epoch fence.
             if let Some(texture) = &mut self.texture {
                 texture.set(image, egui::TextureOptions::LINEAR);
             } else {
@@ -2813,15 +3009,17 @@ impl KinewrightApp {
                     egui::TextureOptions::LINEAR,
                 ));
             }
-            if !self.resume_after_scrub {
+            if !self.resume_after_scrub && !self.playing {
                 self.focused_mut().position = at;
             }
         }
-
-        if self.playing {
-            let position = self.playback.position();
-            self.focused_mut().position = position;
-            ctx.request_repaint_after(Duration::from_millis(10));
+        if let Some((painter, slot, image_rect)) = self.stale_caption.take()
+            && self.presenter.stale()
+        {
+            painter.set(slot, crate::preview_ui::stale_caption(&painter, image_rect));
+        }
+        if self.pending_resume.is_some() {
+            ctx.request_repaint();
         }
     }
 
@@ -2974,6 +3172,21 @@ impl KinewrightApp {
 }
 
 impl eframe::App for KinewrightApp {
+    fn on_exit(&mut self) {
+        if let Some(display) = &mut self.native_display {
+            display.terminal();
+        }
+    }
+    /// PF1 R-5 (R17): a paint mark from an earlier root epoch is acked once
+    /// per bound image.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        if let Some(display) = &mut self.native_display {
+            display.session.advance(epoch);
+        }
+        self.acknowledge_paint(epoch);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let measured_frame = self.performance.as_ref().map(|_| std::time::Instant::now());
         self.update_window_title(ui.ctx());
@@ -3026,8 +3239,10 @@ impl eframe::App for KinewrightApp {
         self.show_motion_plan_dialog(ui.ctx());
         self.show_solo_dialog(ui.ctx());
         self.screenshot.update(ui.ctx());
+        self.finalize_preview(ui.ctx());
+        let picture_present = self.program_picture().is_some();
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
-            && probe.frame(ui.ctx(), began, self.texture.is_some())
+            && probe.frame(ui.ctx(), began, picture_present)
         {
             self.allow_close = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -3689,8 +3904,9 @@ fn native_wgpu_configuration() -> eframe::WgpuConfiguration {
     let mut configuration = eframe::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
         setup.instance_descriptor.backends = eframe::wgpu::Backends::PRIMARY;
-        setup.device_descriptor = Arc::new(|_| eframe::wgpu::DeviceDescriptor {
+        setup.device_descriptor = Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
             label: Some("Kinewright shared native device"),
+            required_features: adapter.features() & eframe::wgpu::Features::TIMESTAMP_QUERY,
             required_limits: compositor_required_limits(eframe::wgpu::Limits::default()),
             ..Default::default()
         });
@@ -3732,7 +3948,17 @@ pub(crate) fn run() -> eframe::Result {
             let repaint_context = creation_context.egui_ctx.clone();
             media.set_event_wakeup(move || repaint_context.request_repaint());
             let startup = std::env::args().nth(1).map(PathBuf::from);
+            let repaint_context = creation_context.egui_ctx.clone();
+            let display = media.enable_display(kinewright_media::DisplayConfig {
+                premultiply: premultiply_table(),
+                repaint: Arc::new(move || repaint_context.request_repaint()),
+            });
             let mut app = KinewrightApp::new(media, startup);
+            app.native_display = Some(NativeDisplay {
+                session: display,
+                renderer: render_state.clone(),
+                picture: None,
+            });
             app.performance = crate::performance::PerformanceProbe::from_environment(started);
             Ok(Box::new(app))
         }),
@@ -4571,9 +4797,7 @@ mod tests {
         fn request_frame(&self, _at: super::TimeCode) {
             self.bump(&self.requested_frames, "request_frame");
         }
-        fn frames(
-            &self,
-        ) -> crossbeam_channel::Receiver<(super::TimeCode, kinewright_core::FrameTexture)> {
+        fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::bounded(0).1
         }
         fn events(&self) -> crossbeam_channel::Receiver<super::MediaEvent> {
@@ -4719,10 +4943,7 @@ mod tests {
                 self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             fn request_frame(&self, _at: super::TimeCode) {}
-            fn frames(
-                &self,
-            ) -> crossbeam_channel::Receiver<(super::TimeCode, kinewright_core::FrameTexture)>
-            {
+            fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
                 crossbeam_channel::bounded(0).1
             }
             fn events(&self) -> crossbeam_channel::Receiver<super::MediaEvent> {
@@ -5511,7 +5732,7 @@ pub(crate) mod in1_tests {
         let mut seen: Vec<String> = Vec::new();
         loop {
             while let Ok(event) = events.try_recv() {
-                if let MediaEvent::Error(error) = event {
+                if let MediaEvent::Error(error) | MediaEvent::StampedError(_, error) = event {
                     return error;
                 }
                 seen.push(format!("{event:?}"));
@@ -5528,9 +5749,16 @@ pub(crate) mod in1_tests {
     /// `Core` actor, a real engine behind the trait arcs, and default UI
     /// state everywhere else. There is deliberately no window, no model, and
     /// no audio device — the same terms §9 lays down.
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn in1_harness(document: Document) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let engine = Arc::new(FfmpegMediaEngine::new().expect("the test engine starts"));
+        in1_harness_with_engine(document, engine)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn in1_harness_with_engine(
+        document: Document,
+        engine: Arc<FfmpegMediaEngine>,
+    ) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
         let playback: Arc<dyn Playback> = engine.clone();
         let analysis: Arc<dyn Analysis> = engine.clone();
         let exporter: Arc<dyn Export> = engine.clone();
@@ -5608,9 +5836,14 @@ pub(crate) mod in1_tests {
             refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
+            ui_replies: std::sync::mpsc::channel(),
+            cache_inventory_generation: 0,
+            branch_review_generation: 0,
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            native_display: None,
+            presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
             noise_learn: NoiseLearnState::default(),
@@ -5625,6 +5858,8 @@ pub(crate) mod in1_tests {
             mixer_levels: crate::mixer_ui::MixerMeterLevels::default(),
             mixer_selection: None,
             resume_after_scrub: false,
+            pending_resume: None,
+            stale_caption: None,
             transcript_scope: TranscriptScope::default(),
             material_tab: MaterialTab::default(),
             show_material_strip: false,
@@ -5666,6 +5901,209 @@ pub(crate) mod in1_tests {
             performance: None,
         };
         (app, engine)
+    }
+
+    /// A transport double that records calls and stamps them as the engine
+    /// does (a seek or play starts an epoch).
+    #[derive(Default)]
+    struct RecordingPlayback {
+        calls: std::sync::Mutex<Vec<(&'static str, i64)>>,
+        stamp: std::sync::Mutex<kinewright_core::FrameStamp>,
+    }
+
+    impl RecordingPlayback {
+        fn record(&self, call: &'static str, at: i64, new_epoch: bool) {
+            let mut stamp = self.stamp.lock().unwrap();
+            (stamp.epoch, stamp.seq) = (stamp.epoch + u64::from(new_epoch), stamp.seq + 1);
+            self.calls.lock().unwrap().push((call, at));
+        }
+
+        fn calls(&self) -> Vec<(&'static str, i64)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Playback for RecordingPlayback {
+        fn set_document(&self, _doc: Arc<Document>) {}
+        fn request_frame(&self, at: TimeCode) {
+            self.record("request_frame", at.0, false);
+        }
+        fn frames(&self) -> crossbeam_channel::Receiver<PreviewFrame> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn events(&self) -> crossbeam_channel::Receiver<MediaEvent> {
+            crossbeam_channel::bounded(0).1
+        }
+        fn play(&self, from: TimeCode) {
+            self.record("play", from.0, true);
+        }
+        fn pause(&self) {
+            self.record("pause", 0, true);
+        }
+        fn seek(&self, to: TimeCode) {
+            self.record("seek", to.0, true);
+        }
+        fn position(&self) -> TimeCode {
+            TimeCode::ZERO
+        }
+        fn output_peaks(&self) -> [f32; 2] {
+            [0.0; 2]
+        }
+        fn stamp(&self) -> kinewright_core::FrameStamp {
+            *self.stamp.lock().unwrap()
+        }
+    }
+
+    fn preview_frame(stamp: kinewright_core::FrameStamp, at: i64) -> PreviewFrame {
+        let texture = kinewright_core::FrameTexture {
+            width: 1,
+            height: 1,
+            rgba: Arc::new(vec![0; 4]),
+        };
+        PreviewFrame {
+            at: TimeCode(at),
+            stamp,
+            texture,
+        }
+    }
+
+    /// Review A F4, re-review A D2: a scrub released at the last frame
+    /// (duration − 1) while playing resumes only from its target's own
+    /// paint, acked at a later root epoch: not from an older epoch's image,
+    /// a neighbour's paint, or a binding whose pass egui-wgpu never rendered
+    /// (a discarded pass, egui's `request_discard`, an invisible root). The
+    /// old resume played once the target was bound. Playback then runs to
+    /// EOS and nothing resumes again; another transport call while waiting
+    /// cancels the resume.
+    #[test]
+    fn a_released_scrub_resumes_only_once_its_target_is_painted() {
+        use crate::presenter::paint_support::{Painted, Pass, SIDE};
+        let (duration, last) = (30, 29);
+        let (mut app, _engine) = in1_harness(Document::default());
+        let ctx = egui::Context::default();
+        app.poll_background(&ctx); // the session's opening events
+        // Only the transport reads it: the recorder renders nothing.
+        Arc::make_mut(&mut app.focused_mut().document).duration = TimeCode(duration);
+        let recorder = Arc::new(RecordingPlayback::default());
+        app.playback = recorder.clone();
+        let (events, media_events) = crossbeam_channel::unbounded();
+        app.media_events = media_events;
+        let mut painted = Painted::new();
+        let whole = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(SIDE, SIDE));
+        let mut paint = |app: &mut KinewrightApp, pass: Pass| {
+            painted.pass(&app.presenter, &|| app.paint_clock(), whole, whole, pass);
+            app.acknowledge_paint(painted.epoch());
+        };
+        let before = recorder.stamp();
+        app.resume_after_scrub = true; // the drag paused playback
+        app.release_scrub(TimeCode(last));
+        let since = recorder.stamp();
+        assert_eq!(recorder.calls(), [("seek", last)]);
+        for early in [preview_frame(before, last), preview_frame(since, last - 1)] {
+            app.presenter.collect(early);
+            app.finalize_preview(&ctx);
+            paint(&mut app, Pass::Rendered);
+            assert_eq!(recorder.calls(), [("seek", last)], "not before the target");
+        }
+        app.presenter.collect(preview_frame(since, last));
+        app.finalize_preview(&ctx);
+        for pass in [
+            Pass::Discarded,
+            Pass::EguiDiscard { again: false },
+            Pass::Invisible,
+        ] {
+            paint(&mut app, pass);
+            assert_eq!(recorder.calls(), [("seek", last)], "bound, never painted");
+        }
+        paint(&mut app, Pass::Rendered);
+        assert_eq!(recorder.calls(), [("seek", last), ("play", last)]);
+        paint(&mut app, Pass::Rendered);
+        assert_eq!(recorder.calls().len(), 2, "resumed once");
+
+        // Terminal playback: the last frame plays, then EOS.
+        for event in [
+            MediaEvent::PlaybackStateChanged(PlaybackState::Playing),
+            MediaEvent::Position(TimeCode(last)),
+            MediaEvent::PlaybackStateChanged(PlaybackState::Paused),
+            MediaEvent::Position(TimeCode(duration)),
+        ] {
+            events.send(event).unwrap();
+        }
+        app.poll_background(&ctx);
+        assert!(!app.playing && app.pending_resume.is_none());
+        assert_eq!(app.focused().position, TimeCode(duration));
+        app.presenter.collect(preview_frame(recorder.stamp(), last));
+        app.finalize_preview(&ctx);
+        paint(&mut app, Pass::Rendered);
+        assert_eq!(recorder.calls().len(), 2, "EOS resumes nothing");
+
+        app.resume_after_scrub = true;
+        app.release_scrub(TimeCode(3));
+        app.seek_to(TimeCode(5));
+        let now = recorder.stamp();
+        app.presenter.collect(preview_frame(now, 3));
+        app.finalize_preview(&ctx);
+        paint(&mut app, Pass::Rendered);
+        assert!(
+            recorder
+                .calls()
+                .iter()
+                .all(|call| call.0 != "play" || call.1 == last)
+        );
+        in1_shutdown(&mut app);
+    }
+
+    /// Review B (UI blocking): opening the cache dialog while a render holds
+    /// the agent lane returns at once (the old synchronous read waited for
+    /// the lane, here 2 s); the inventory arrives once the lane frees.
+    #[test]
+    fn the_cache_dialog_opens_while_the_agent_lane_is_busy() {
+        let (mut app, engine) = in1_harness(Document::default());
+        let ctx = egui::Context::default();
+        let hold = engine.hold_agent_lane();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            drop(hold);
+        });
+        let began = Instant::now();
+        app.open_media_cache_dialog(&ctx);
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(app.media_cache_inventory.is_none(), "reading…");
+        let reply = app
+            .ui_replies
+            .1
+            .recv_timeout(IN1_APP_DEADLINE)
+            .expect("a reply");
+        reply(&mut app, &ctx);
+        assert!(app.media_cache_inventory.is_some());
+        release.join().unwrap();
+        in1_shutdown(&mut app);
+    }
+
+    /// Re-review B D2: an older inventory refresh completing after a newer
+    /// one was issued is discarded; the newer one's reply applies.
+    #[test]
+    fn a_superseded_cache_inventory_reply_is_discarded() {
+        let (mut app, _engine) = in1_harness(Document::default());
+        let ctx = egui::Context::default();
+        let reply = |app: &KinewrightApp| {
+            (app.ui_replies.1)
+                .recv_timeout(IN1_APP_DEADLINE)
+                .expect("a reply")
+        };
+        app.open_media_cache_dialog(&ctx);
+        let older = reply(&app);
+        app.refresh_cache_inventory(&ctx);
+        let newer = reply(&app);
+        older(&mut app, &ctx);
+        assert!(app.media_cache_inventory.is_none(), "superseded");
+        newer(&mut app, &ctx);
+        assert!(app.media_cache_inventory.is_some());
+        in1_shutdown(&mut app);
     }
 
     /// Shut down every branch server the harness started, so no test leaves
@@ -7180,7 +7618,7 @@ pub(crate) mod in1_tests {
         let expiry = Instant::now() + Duration::from_secs(2);
         while Instant::now() < expiry {
             while let Ok(event) = events.try_recv() {
-                if let MediaEvent::Error(error) = event {
+                if let MediaEvent::Error(error) | MediaEvent::StampedError(_, error) = event {
                     errors.push(error);
                 }
             }
@@ -10258,9 +10696,14 @@ mod in2b_tests {
             refuse_rename: None,
             media_cache_dialog_open: false,
             media_cache_inventory: None,
+            ui_replies: std::sync::mpsc::channel(),
+            cache_inventory_generation: 0,
+            branch_review_generation: 0,
             media_cache_clear_pending: None,
             media_cache_clear_result: None,
             texture: None,
+            native_display: None,
+            presenter: crate::presenter::Presenter::default(),
             color_scopes: crate::color_scopes_ui::ColorScopesState::default(),
             color_qc: crate::color_qc_ui::ColorQcState::default(),
             noise_learn: NoiseLearnState::default(),
@@ -10275,6 +10718,8 @@ mod in2b_tests {
             mixer_levels: crate::mixer_ui::MixerMeterLevels::default(),
             mixer_selection: None,
             resume_after_scrub: false,
+            pending_resume: None,
+            stale_caption: None,
             transcript_scope: TranscriptScope::default(),
             material_tab: MaterialTab::default(),
             show_material_strip: false,
@@ -10379,7 +10824,7 @@ mod in2b_tests {
         engine.request_frame(TimeCode(1));
         let expiry = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
-            let Ok((at, _)) = frames.recv_timeout(
+            let Ok(PreviewFrame { at, .. }) = frames.recv_timeout(
                 expiry
                     .checked_duration_since(std::time::Instant::now())
                     .unwrap_or_default(),
@@ -14668,5 +15113,209 @@ mod in2b_tests {
         app.show_motion_plan_dialog(&ctx);
         assert!(app.motion_plan_dialog.is_none());
         crate::app::in1_tests::in1_shutdown(&mut app);
+    }
+}
+
+#[cfg(test)]
+mod s3a_tests {
+    use super::*;
+    #[test]
+    fn i1b_every_premultiply_pair_matches_color32() {
+        let (app, engine, gpu, _context, _temp) = display_app();
+        let table = premultiply_table();
+        finish(app, engine, &gpu);
+        for a in 0..=255u8 {
+            for v in 0..=255u8 {
+                assert_eq!(
+                    table[usize::from(a) * 256 + usize::from(v)],
+                    egui::Color32::from_rgba_unmultiplied(v, v, v, a).r()
+                );
+            }
+        }
+    }
+    type DisplayFixture = (
+        KinewrightApp,
+        Arc<FfmpegMediaEngine>,
+        GpuContext,
+        egui::Context,
+        kinewright_media::test_support::TempDirectory,
+    );
+    #[allow(clippy::too_many_lines)]
+    fn display_app() -> DisplayFixture {
+        let mut descriptor =
+            eframe::wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        descriptor.backends = eframe::wgpu::Backends::PRIMARY;
+        let instance = eframe::wgpu::Instance::new(descriptor);
+        let render = pollster::block_on(eframe::egui_wgpu::RenderState::create(
+            &native_wgpu_configuration(),
+            &instance,
+            None,
+            eframe::egui_wgpu::RendererOptions::default(),
+        ))
+        .unwrap();
+        println!("S3A_APP adapter={:?}", render.adapter.get_info());
+        let gpu = GpuContext::new_with_adapter_info(
+            render.device.clone(),
+            render.queue.clone(),
+            render.adapter.get_info(),
+        );
+        if let Ok(expected) = std::env::var("S3A_EXPECT_ADAPTER") {
+            assert!(
+                render.adapter.get_info().name.contains(&expected),
+                "required adapter: {expected}"
+            );
+        }
+        let temp = kinewright_media::test_support::TempDirectory::new("s3a-app");
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_paced_test_audio(gpu.clone(), temp.root().into()).unwrap(),
+        );
+        let context = egui::Context::default();
+        let repaint = context.clone();
+        let session = engine.enable_display(kinewright_media::DisplayConfig {
+            premultiply: premultiply_table(),
+            repaint: Arc::new(move || repaint.request_repaint()),
+        });
+        let mut document = Document {
+            resolution: (64, 64),
+            ..Document::default()
+        };
+        for op in [
+            Operation::AddTrack {
+                track: kinewright_core::Track {
+                    id: TrackId(1),
+                    kind: kinewright_core::TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                },
+            },
+            Operation::AddSolidClip {
+                track: TrackId(1),
+                timeline_start: TimeCode::ZERO,
+                duration: TimeCode(60),
+                color: kinewright_core::SolidColor {
+                    r: 180,
+                    g: 90,
+                    b: 45,
+                },
+            },
+        ] {
+            op.apply(&mut document).unwrap();
+        }
+        document.validate().unwrap();
+        let (mut app, engine) = in1_tests::in1_harness_with_engine(document.clone(), engine);
+        app.frames = engine.frames();
+        app.media_events = engine.events();
+        app.native_display = Some(NativeDisplay {
+            session,
+            renderer: render,
+            picture: None,
+        });
+        engine.set_document(Arc::new(document));
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.program_picture().is_none() && Instant::now() < deadline {
+            while let Ok(frame) = app.frames.try_recv() {
+                app.presenter.collect(frame);
+            }
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                app.finalize_preview(ui.ctx());
+            });
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        println!(
+            "S3A_APP route={:?} readbacks={}",
+            app.native_display.as_ref().unwrap().session.status(),
+            gpu.full_frame_readbacks()
+        );
+        assert_eq!(
+            app.native_display.as_ref().unwrap().session.status(),
+            kinewright_media::DisplayStatus::Gpu,
+            "runtime GPU route required"
+        );
+        assert!(
+            app.native_display.as_ref().unwrap().picture.is_some(),
+            "a successful production GPU frame was bound"
+        );
+        println!("S3A_APP route=Gpu");
+        (app, engine, gpu, context, temp)
+    }
+    fn finish(app: KinewrightApp, engine: Arc<FfmpegMediaEngine>, gpu: &GpuContext) {
+        let display = app.native_display.as_ref().unwrap();
+        let renderer = Arc::clone(&display.renderer.renderer);
+        let id = display.picture.map(|picture| picture.0);
+        if let Some(id) = id {
+            assert!(renderer.read().texture(&id).is_some());
+        }
+        drop(engine);
+        drop(app); // receiver disconnection, without on_exit
+        assert!(
+            id.is_none_or(|id| renderer.read().texture(&id).is_none()),
+            "Drop frees the native id"
+        );
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while gpu.ledger().live_bytes() != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            gpu.ledger().live_bytes(),
+            0,
+            "app Drop returns leases and completion releases charges"
+        );
+    }
+    #[test]
+    fn i16_app_drop_frees_native_id_and_retires_every_charge() {
+        let (app, engine, gpu, _context, _temp) = display_app();
+        finish(app, engine, &gpu);
+    }
+    #[test]
+    fn app_playback_does_no_readback() {
+        let (mut app, engine, gpu, context, _temp) = display_app();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        println!(
+            "S3A_APP route={:?} readbacks={}",
+            app.native_display.as_ref().unwrap().session.status(),
+            gpu.full_frame_readbacks()
+        );
+        assert_eq!(
+            app.native_display.as_ref().unwrap().session.status(),
+            kinewright_media::DisplayStatus::Gpu,
+            "runtime GPU route required"
+        );
+        assert!(
+            app.program_picture().is_some(),
+            "a successful production GPU frame was bound"
+        );
+        let before = gpu.full_frame_readbacks();
+        engine.play(TimeCode::ZERO);
+        app.playing = true;
+        let mut frames = 0;
+        let mut last = app.presenter.bound_for_test().map(|cell| cell.frame_id);
+        while frames < 8 && Instant::now() < deadline {
+            let _ = context.run_ui(egui::RawInput::default(), |ui| {
+                let ctx = ui.ctx();
+                app.native_display
+                    .as_mut()
+                    .unwrap()
+                    .session
+                    .advance(ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT));
+                app.finalize_preview(ctx);
+            });
+            if let Some(cell) = app.presenter.bound_for_test()
+                && last != Some(cell.frame_id)
+            {
+                last = Some(cell.frame_id);
+                frames += 1;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        engine.pause();
+        assert!(
+            frames >= 8,
+            "successful production playback frames required"
+        );
+        assert_eq!(gpu.full_frame_readbacks() - before, 0, "full-frame copies");
+        finish(app, engine, &gpu);
+    }
+    mod r71 {
+        include!("display_r71_tests.rs");
     }
 }

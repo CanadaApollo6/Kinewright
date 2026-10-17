@@ -19,8 +19,53 @@ where
     /// allocation, so `byte_len` counts each buffer exactly once and reports
     /// actual cache residency instead of a multiple of it.
     residency: HashMap<usize, usize>,
+    /// PF1 K-5/K-6: the preview's demand points on this source for the frame
+    /// being rendered. The frame shown at each point is pinned: neither
+    /// capacity nor distance eviction takes it. Empty outside the preview.
+    demand: Vec<TimeCode>,
+    /// The last non-empty demand, kept across [`Self::clear_demand`] as the
+    /// reference for the travel direction.
+    last_demand: Vec<TimeCode>,
+    travel: Travel,
     #[cfg(test)]
     evictions: usize,
+}
+
+/// PF1 K-5: steps ordered smallest first, a forward step before an equal
+/// backward one (re-review D3: both where each point's nearest previous
+/// point is chosen and across points), so the order of the points never
+/// decides the direction.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn forward_first(step: &i64) -> (u64, bool) {
+    (step.unsigned_abs(), *step < 0)
+}
+
+/// PF1 K-5: the direction after demand moves from `last` to `points` (the
+/// rule [`FrameCache::set_demand`] documents): the smallest non-zero step
+/// of a point from its nearest previous point, forward on a tie; unmoved
+/// or first demand keeps `travel`.
+pub(crate) fn follow(travel: Travel, last: &[i64], points: &[i64]) -> Travel {
+    let step = points
+        .iter()
+        .filter_map(|point| {
+            last.iter()
+                .map(|last| point - last)
+                .min_by_key(forward_first)
+        })
+        .filter(|step| *step != 0)
+        .min_by_key(forward_first);
+    match step {
+        Some(step) if step > 0 => Travel::Forward,
+        Some(_) => Travel::Backward,
+        None => travel,
+    }
+}
+
+/// PF1 K-5: the direction the demand on one source travels in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Travel {
+    Forward,
+    Backward,
 }
 
 impl<T> FrameCache<T>
@@ -34,9 +79,49 @@ where
             frames: BTreeMap::new(),
             order: VecDeque::new(),
             residency: HashMap::new(),
+            demand: Vec::new(),
+            last_demand: Vec::new(),
+            travel: Travel::Forward,
             #[cfg(test)]
             evictions: 0,
         }
+    }
+
+    /// PF1 K-5: set this render's demand points, pinning the frame shown at
+    /// each, and update the travel direction.
+    ///
+    /// Travel follows the demand point that moved least: for each point, its
+    /// step from the nearest previous point; the smallest non-zero step (a
+    /// forward one on a tie) gives the direction. A discontinuous seek is a
+    /// step like any other, so the frames the jump left behind go first.
+    /// Unmoved points keep the direction, as does the first demand, which
+    /// starts Forward.
+    pub(crate) fn set_demand(&mut self, points: &[TimeCode]) {
+        let times = |points: &[TimeCode]| points.iter().map(|point| point.0).collect::<Vec<_>>();
+        self.travel = follow(self.travel, &times(&self.last_demand), &times(points));
+        self.demand.clear();
+        self.demand.extend_from_slice(points);
+        if !points.is_empty() {
+            self.last_demand.clear();
+            self.last_demand.extend_from_slice(points);
+        }
+    }
+
+    /// PF1 K-6: no demand on this source (inactive, or a render under
+    /// today's policy): nothing pinned; the travel direction is kept.
+    pub(crate) fn clear_demand(&mut self) {
+        self.demand.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn travel(&self) -> Travel {
+        self.travel
+    }
+
+    /// The frame shown at each demand point: the one at or before it.
+    fn pinned(&self) -> Vec<TimeCode> {
+        let shown = |point: &TimeCode| self.frames.range(..=*point).next_back().map(|(at, _)| *at);
+        self.demand.iter().filter_map(shown).collect()
     }
 
     /// Record one more cache entry for a frame's buffer, charging its bytes
@@ -70,8 +155,29 @@ where
             self.order.retain(|entry| *entry != at);
         }
         self.order.push_back(at);
+        if self.frames.len() <= self.capacity {
+            return;
+        }
+        // PF1 K-5 (review B F3): capacity eviction takes the oldest unpinned
+        // entry; pinned frames stay resident and charged, even over capacity.
+        let pinned = self.pinned();
         while self.frames.len() > self.capacity {
-            self.evict_oldest();
+            let Some(index) = self.order.iter().position(|at| !pinned.contains(at)) else {
+                break;
+            };
+            if let Some(oldest) = self.order.remove(index) {
+                self.remove_entry(oldest);
+            }
+        }
+    }
+
+    fn remove_entry(&mut self, at: TimeCode) {
+        if let Some(frame) = self.frames.remove(&at) {
+            self.release_bytes(&frame);
+            #[cfg(test)]
+            {
+                self.evictions = self.evictions.saturating_add(1);
+            }
         }
     }
 
@@ -126,17 +232,43 @@ where
         self.frames.len()
     }
 
+    /// PF1 K-5/K-6: evict the frame farthest from every demand point, frames
+    /// behind travel first (below the nearest point travelling forward, above
+    /// it travelling backward). The frame shown at each demand point is
+    /// pinned.
+    pub(crate) fn evict_farthest(&mut self) -> bool {
+        let pinned = self.pinned();
+        let demand = &self.demand;
+        let travel = self.travel;
+        let rank = |at: &TimeCode| {
+            let nearest = demand.iter().min_by_key(|point| at.0.abs_diff(point.0));
+            nearest.map(|point| {
+                let behind = match travel {
+                    Travel::Forward => *at < *point,
+                    Travel::Backward => *at > *point,
+                };
+                (behind, at.0.abs_diff(point.0))
+            })
+        };
+        let victim = self
+            .frames
+            .keys()
+            .filter(|at| !pinned.contains(at))
+            .max_by_key(|at| rank(at))
+            .copied();
+        let Some(victim) = victim else {
+            return false;
+        };
+        self.order.retain(|entry| *entry != victim);
+        self.remove_entry(victim);
+        true
+    }
+
     pub(crate) fn evict_oldest(&mut self) -> bool {
         let Some(oldest) = self.order.pop_front() else {
             return false;
         };
-        if let Some(frame) = self.frames.remove(&oldest) {
-            self.release_bytes(&frame);
-            #[cfg(test)]
-            {
-                self.evictions = self.evictions.saturating_add(1);
-            }
-        }
+        self.remove_entry(oldest);
         true
     }
 }
@@ -275,5 +407,136 @@ mod tests {
         // Dropping the surviving shared entry releases its 64 bytes.
         assert!(cache.evict_oldest());
         assert_eq!(cache.byte_len(), 8);
+    }
+
+    fn tiny() -> FrameTexture {
+        FrameTexture {
+            width: 1,
+            height: 1,
+            rgba: Arc::new(vec![0; 4]),
+        }
+    }
+
+    /// `frames` cached, then evicted by distance until only pins are left:
+    /// the victims in order, and what is left.
+    fn distance_victims(cache: &mut FrameCache, frames: &[i64]) -> (Vec<i64>, Vec<i64>) {
+        let (mut victims, mut left) = (Vec::new(), frames.to_vec());
+        while cache.evict_farthest() {
+            let gone = left.iter().position(|at| !cache.contains(TimeCode(*at)));
+            victims.push(left.remove(gone.expect("one frame was evicted")));
+        }
+        (victims, left)
+    }
+
+    fn cache_of(frames: &[i64]) -> FrameCache {
+        let mut cache = FrameCache::new(8);
+        for at in frames {
+            cache.insert(TimeCode(*at), tiny());
+        }
+        cache
+    }
+
+    /// PF1 K-5: behind travel first, farthest first; the shown frame stays.
+    #[test]
+    fn distance_eviction_spares_the_shown_frame_and_drops_behind_travel_first() {
+        let frames = [0, 1, 2, 4, 5, 6];
+        let mut cache = cache_of(&frames);
+        cache.set_demand(&[TimeCode(3)]);
+        assert_eq!(cache.travel(), Travel::Forward, "the first demand");
+        let expected = (vec![0, 1, 6, 5, 4], vec![2]);
+        assert_eq!(distance_victims(&mut cache, &frames), expected);
+    }
+
+    /// PF1 K-5 (review B F4): travelling backward, the frames above the
+    /// demand are behind; the shown frame still stays.
+    #[test]
+    fn backward_travel_drops_the_frames_above_the_demand_first() {
+        let frames = [0, 1, 2, 4, 5, 6];
+        let mut cache = cache_of(&frames);
+        cache.set_demand(&[TimeCode(6)]);
+        cache.set_demand(&[TimeCode(3)]);
+        assert_eq!(cache.travel(), Travel::Backward);
+        let expected = (vec![6, 5, 4, 0, 1], vec![2]);
+        assert_eq!(distance_victims(&mut cache, &frames), expected);
+    }
+
+    /// PF1 K-5 (review B F4): the direction follows each step, a reversal
+    /// included; an unmoved demand and a cleared one keep it; a
+    /// discontinuous seek travels in the jump's direction; with several
+    /// points the one that moved least decides.
+    #[test]
+    fn travel_follows_reversals_and_seeks() {
+        let mut cache = cache_of(&[]);
+        let mut step = |points: &[i64]| {
+            cache.set_demand(&points.iter().copied().map(TimeCode).collect::<Vec<_>>());
+            cache.travel()
+        };
+        assert_eq!(step(&[10]), Travel::Forward, "the first demand");
+        assert_eq!(step(&[9]), Travel::Backward, "a step back");
+        assert_eq!(step(&[9]), Travel::Backward, "unmoved");
+        assert_eq!(step(&[10]), Travel::Forward, "the reversal");
+        assert_eq!(step(&[300]), Travel::Forward, "a seek forward");
+        assert_eq!(step(&[3]), Travel::Backward, "a seek backward");
+        assert_eq!(
+            step(&[4, 100]),
+            Travel::Forward,
+            "a new point is not a step"
+        );
+        assert_eq!(step(&[3, 99]), Travel::Backward);
+        cache.clear_demand();
+        assert_eq!(cache.travel(), Travel::Backward, "clearing keeps it");
+        cache.set_demand(&[TimeCode(4)]);
+        assert_eq!(cache.travel(), Travel::Forward, "stepped from 3");
+    }
+
+    /// PF1 K-5 (re-review D3): equidistant previous points and equal
+    /// opposite moves resolve forward whatever the order of the points.
+    #[test]
+    fn travel_ties_resolve_forward_in_any_order() {
+        let travel = |previous: &[i64], now: &[i64]| {
+            let mut cache = cache_of(&[]);
+            let points = |at: &[i64]| at.iter().copied().map(TimeCode).collect::<Vec<_>>();
+            cache.set_demand(&points(&[1000]));
+            cache.set_demand(&points(&[999]));
+            assert_eq!(cache.travel(), Travel::Backward, "the start");
+            cache.set_demand(&points(previous));
+            cache.set_demand(&points(now));
+            cache.travel()
+        };
+        // 5 is 5 from both previous points, in either order.
+        assert_eq!(travel(&[10, 0], &[5]), Travel::Forward);
+        assert_eq!(travel(&[0, 10], &[5]), Travel::Forward);
+        // One point moves +1, the other -1, in either order.
+        assert_eq!(travel(&[10, 20], &[11, 19]), Travel::Forward);
+        assert_eq!(travel(&[20, 10], &[19, 11]), Travel::Forward);
+    }
+
+    /// PF1 K-5 (review B F3): capacity eviction skips pinned frames, which
+    /// stay resident and charged; with no demand it is today's LRU.
+    #[test]
+    fn capacity_eviction_keeps_the_pinned_frames() {
+        let mut pinned = FrameCache::new(2);
+        pinned.set_demand(&[TimeCode(0)]);
+        for at in 0..3 {
+            pinned.insert(TimeCode(at), tiny());
+        }
+        let resident = |cache: &FrameCache| {
+            let frames = (0..3).filter(|at| cache.contains(TimeCode(*at)));
+            frames.collect::<Vec<_>>()
+        };
+        assert_eq!(resident(&pinned), [0, 2]);
+        assert_eq!(pinned.byte_len(), 8);
+
+        // Pins over capacity are all kept.
+        pinned.set_demand(&[TimeCode(0), TimeCode(1), TimeCode(2)]);
+        pinned.insert(TimeCode(1), tiny());
+        assert_eq!(resident(&pinned), [0, 1, 2]);
+        assert_eq!(pinned.byte_len(), 12);
+
+        let mut legacy = FrameCache::new(2);
+        for at in 0..3 {
+            legacy.insert(TimeCode(at), tiny());
+        }
+        assert_eq!(resident(&legacy), [1, 2]);
     }
 }

@@ -4096,8 +4096,190 @@ fn fill_ring(
     }
 }
 
+/// PF1 V-5: the output a runtime opens. Production always uses the
+/// default device; only test builds can select the simulated one.
+pub(crate) enum OutputDevice {
+    Default,
+    #[cfg(any(test, feature = "test-util"))]
+    Simulated(simulated::SimulatedAudio),
+}
+
+/// An opened output device, before its stream exists.
+enum Sink {
+    Cpal(cpal::Device, cpal::SampleFormat, cpal::StreamConfig),
+    #[cfg(any(test, feature = "test-util"))]
+    Simulated(simulated::SimulatedAudio),
+}
+
+/// PF1 V-5: the stream that pops the ring through [`render_output`].
+enum AudioOutput {
+    Cpal(cpal::Stream),
+    #[cfg(any(test, feature = "test-util"))]
+    Simulated(simulated::SimulatedOutput),
+}
+
+/// PF1 V-4/R23: one engine's output-callback diagnostics, owned by each
+/// `AudioRuntime` it opens and shared by `Arc` with the S0 harness. They only
+/// record: samples and the clock are unchanged (R22).
+#[derive(Debug)]
+pub(crate) struct AudioDiagnostics {
+    /// Frames whose samples a callback failed to pop (an `unwrap_or(0.0)`
+    /// in [`render_output`]), counted as they happen.
+    underrun_frames: AtomicU64,
+    /// Callbacks that underran at all (R-5 `underrun_events`).
+    underrun_events: AtomicU64,
+    /// R31 (a): the same, once the callbacks have consumed the whole
+    /// programme: the callbacks that straddle or follow its end.
+    post_end_frames: AtomicU64,
+    post_end_events: AtomicU64,
+    /// R33 (re-review A D5 / B D4): the current runtime's programme end, in
+    /// the clock's samples (`frame_to_samples(duration)`), and whether the
+    /// callbacks have consumed through it. The consumed endpoint, not the
+    /// producer's last push, splits the underruns and ends stall
+    /// measurement: a pushed tail can still be queued, or be pushed while a
+    /// callback runs.
+    programme_end: AtomicU64,
+    programme_consumed: AtomicBool,
+    /// R31 (b): the clock's progress, recorded where it happens: the latest
+    /// callback that advanced it (µs since `origin`), and the longest gap
+    /// between two advancing callbacks since the latest `play`.
+    origin: std::sync::OnceLock<std::time::Instant>,
+    #[cfg(test)]
+    stall_clock_micros: AtomicU64,
+    last_advance_micros: AtomicU64,
+    max_stall_micros: AtomicU64,
+    /// The device's playback timestamp minus its callback timestamp, never
+    /// compensated (D9).
+    latency_micros: AtomicU64,
+}
+
+impl Default for AudioDiagnostics {
+    /// No programme yet: every underrun is in the programme.
+    fn default() -> Self {
+        Self {
+            underrun_frames: AtomicU64::default(),
+            underrun_events: AtomicU64::default(),
+            post_end_frames: AtomicU64::default(),
+            post_end_events: AtomicU64::default(),
+            programme_end: AtomicU64::new(u64::MAX),
+            programme_consumed: AtomicBool::default(),
+            origin: std::sync::OnceLock::default(),
+            #[cfg(test)]
+            stall_clock_micros: AtomicU64::new(u64::MAX),
+            last_advance_micros: AtomicU64::default(),
+            max_stall_micros: AtomicU64::default(),
+            latency_micros: AtomicU64::default(),
+        }
+    }
+}
+
+impl AudioDiagnostics {
+    /// `consumed` is the programme sample the callback has consumed through,
+    /// after its pops: a failed pop once it reached the programme end is the
+    /// post-end straddle; one before it is an underrun in the programme.
+    fn record_underrun(&self, failed_samples: usize, channels: usize, consumed: u64) {
+        let post_end = consumed >= self.programme_end.load(Ordering::Acquire);
+        if post_end {
+            self.programme_consumed.store(true, Ordering::Release);
+        }
+        if failed_samples > 0 {
+            let frames = failed_samples.div_ceil(channels.max(1));
+            let frames = u64::try_from(frames).unwrap_or(u64::MAX);
+            let (frames_counter, events) = if post_end {
+                (&self.post_end_frames, &self.post_end_events)
+            } else {
+                (&self.underrun_frames, &self.underrun_events)
+            };
+            frames_counter.fetch_add(frames, Ordering::Relaxed);
+            events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn micros_now(&self) -> u64 {
+        #[cfg(test)]
+        {
+            let now = self.stall_clock_micros.load(Ordering::Acquire);
+            if now != u64::MAX {
+                return now;
+            }
+        }
+        let origin = *self.origin.get_or_init(std::time::Instant::now);
+        u64::try_from(origin.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_stall_clock(&self, micros: u64) {
+        self.stall_clock_micros.store(micros, Ordering::Release);
+    }
+
+    /// A callback advanced the clock (R31 b).
+    fn record_advance(&self) {
+        let now = self.micros_now();
+        let last = self.last_advance_micros.swap(now, Ordering::AcqRel);
+        (self.max_stall_micros).fetch_max(now.saturating_sub(last), Ordering::AcqRel);
+    }
+
+    /// A runtime opened at `start` of a programme ending at `end` (clock
+    /// samples), before its stream exists: nothing of it is consumed yet,
+    /// and its clock starts now (the time paused is no stall).
+    fn begin_programme(&self, start: u64, end: u64) {
+        self.programme_end.store(end, Ordering::Release);
+        (self.programme_consumed).store(start >= end, Ordering::Release);
+        self.last_advance_micros
+            .store(self.micros_now(), Ordering::Release);
+    }
+
+    /// An explicit `play`: the longest stall restarts.
+    pub(crate) fn reset_stall(&self) {
+        self.max_stall_micros.store(0, Ordering::Release);
+    }
+
+    /// R-5 `max_clock_stall_ms`: the longest gap between advancing
+    /// callbacks, and, while `playing` a programme the callbacks have not yet
+    /// consumed (R33: its tail may be queued, all pushed), the gap since the
+    /// latest one.
+    pub(crate) fn max_stall_ms(&self, playing: bool) -> f64 {
+        let mut stall = self.max_stall_micros.load(Ordering::Acquire);
+        if playing && !self.programme_consumed.load(Ordering::Acquire) {
+            let last = self.last_advance_micros.load(Ordering::Acquire);
+            stall = stall.max(self.micros_now().saturating_sub(last));
+        }
+        u32::try_from(stall).map_or(f64::MAX, f64::from) / 1e3
+    }
+
+    fn record_latency(&self, latency: std::time::Duration) {
+        let micros = u64::try_from(latency.as_micros()).unwrap_or(u64::MAX);
+        self.latency_micros.store(micros, Ordering::Relaxed);
+    }
+
+    /// Frames any callback of this engine has failed to pop so far, before
+    /// the programme's end.
+    #[cfg(test)]
+    pub(crate) fn underrun_frames(&self) -> u64 {
+        self.underrun_frames.load(Ordering::Relaxed)
+    }
+
+    /// (Callbacks that underran, frames not popped) so far (R-5), in the
+    /// programme, then after its end (R31 a).
+    pub(crate) fn underruns(&self) -> [u64; 4] {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        [
+            load(&self.underrun_events),
+            load(&self.underrun_frames),
+            load(&self.post_end_events),
+            load(&self.post_end_frames),
+        ]
+    }
+
+    /// The latest device callback's `device_latency_ms`, in microseconds.
+    #[cfg(test)]
+    pub(crate) fn latency_micros(&self) -> u64 {
+        self.latency_micros.load(Ordering::Relaxed)
+    }
+}
+
 pub(crate) struct AudioRuntime {
-    stream: cpal::Stream,
+    output: AudioOutput,
     producer: Producer<f32>,
     mixer: AudioMixer,
     pending: Vec<f32>,
@@ -4106,10 +4288,15 @@ pub(crate) struct AudioRuntime {
     target_samples: usize,
     sample_rate: u32,
     channels: u16,
+    /// PF1 V-2: `fill_ring` has reported the mixer exhausted.
+    exhausted: bool,
     pub(crate) error_flag: Arc<AtomicBool>,
 }
 
 impl AudioRuntime {
+    /// PF1 V-5: `output` picks the device or the harness's simulated driver;
+    /// the stream records into the engine's `diagnostics` (R23).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn open(
         document: &Document,
         project_from: TimeCode,
@@ -4118,35 +4305,57 @@ impl AudioRuntime {
         meter: Arc<MeterState>,
         mix_meters: Arc<MixMeters>,
         monitor_gain_tenth_db: Arc<AtomicI32>,
+        output: &OutputDevice,
+        diagnostics: &Arc<AudioDiagnostics>,
     ) -> Result<Self, MediaError> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| MediaError::Backend("no default audio output device".to_owned()))?;
-        let supported = device.default_output_config().map_err(backend)?;
-        let sample_format = supported.sample_format();
-        let config = supported.config();
-        let sample_rate = config.sample_rate;
-        let channels = config.channels;
+        let sink = match output {
+            OutputDevice::Default => {
+                let host = cpal::default_host();
+                let device = host.default_output_device().ok_or_else(|| {
+                    MediaError::Backend("no default audio output device".to_owned())
+                })?;
+                let supported = device.default_output_config().map_err(backend)?;
+                Sink::Cpal(device, supported.sample_format(), supported.config())
+            }
+            #[cfg(any(test, feature = "test-util"))]
+            OutputDevice::Simulated(audio) => Sink::Simulated(audio.clone()),
+        };
+        let (sample_rate, channels) = match &sink {
+            Sink::Cpal(_, _, config) => (config.sample_rate, config.channels),
+            #[cfg(any(test, feature = "test-util"))]
+            Sink::Simulated(_) => (simulated::RATE, simulated::CHANNELS),
+        };
         let capacity = usize::try_from(sample_rate)
             .unwrap_or(48_000)
             .saturating_mul(usize::from(channels))
             .saturating_mul(BUFFER_SECONDS);
         let (producer, consumer) = RingBuffer::new(capacity.max(1));
         let start_sample = frame_to_samples(project_from, sample_rate, document.fps);
+        let end_sample = frame_to_samples(document.duration, sample_rate, document.fps);
+        diagnostics.begin_programme(start_sample, end_sample);
         position_samples.store(start_sample, Ordering::Release);
         sample_rate_atomic.store(sample_rate, Ordering::Release);
         let error_flag = Arc::new(AtomicBool::new(false));
-        let stream = build_stream(
-            &device,
-            &config,
-            sample_format,
-            consumer,
-            channels,
-            Arc::clone(position_samples),
-            Arc::clone(&error_flag),
-            monitor_gain_tenth_db,
-        )?;
+        let output = match sink {
+            Sink::Cpal(device, sample_format, config) => AudioOutput::Cpal(build_stream(
+                &device,
+                &config,
+                sample_format,
+                consumer,
+                channels,
+                Arc::clone(position_samples),
+                Arc::clone(&error_flag),
+                monitor_gain_tenth_db,
+                Arc::clone(diagnostics),
+            )?),
+            #[cfg(any(test, feature = "test-util"))]
+            Sink::Simulated(audio) => AudioOutput::Simulated(audio.attach(
+                consumer,
+                Arc::clone(position_samples),
+                monitor_gain_tenth_db,
+                Arc::clone(diagnostics),
+            )),
+        };
         let mut mixer =
             AudioMixer::open(document, project_from, sample_rate, channels, Some(meter))?;
         mixer.attach_mix_meters(mix_meters);
@@ -4157,7 +4366,7 @@ impl AudioRuntime {
             .saturating_div(1_000)
             .max(1);
         Ok(Self {
-            stream,
+            output,
             producer,
             mixer,
             pending: Vec::new(),
@@ -4165,8 +4374,18 @@ impl AudioRuntime {
             target_samples,
             sample_rate,
             channels,
+            exhausted: false,
             error_flag,
         })
+    }
+
+    /// PF1 V-2: the programme has played out: the mixer is exhausted, all of
+    /// it is in the ring, the ring is empty and the clock has counted it.
+    pub(crate) fn drained(&self, position_samples: u64) -> bool {
+        self.exhausted
+            && self.pending_index >= self.pending.len()
+            && self.producer.slots() == self.producer.buffer().capacity()
+            && position_samples >= self.fed_position_samples()
     }
 
     /// The device stream's rate.
@@ -4211,17 +4430,31 @@ impl AudioRuntime {
     }
 
     pub(crate) fn play(&self) -> Result<(), MediaError> {
-        self.stream.play().map_err(backend)
+        match &self.output {
+            AudioOutput::Cpal(stream) => stream.play().map_err(backend),
+            #[cfg(any(test, feature = "test-util"))]
+            AudioOutput::Simulated(output) => {
+                output.set_playing(true);
+                Ok(())
+            }
+        }
     }
 
     pub(crate) fn pause(&self) -> Result<(), MediaError> {
-        self.stream.pause().map_err(backend)
+        match &self.output {
+            AudioOutput::Cpal(stream) => stream.pause().map_err(backend),
+            #[cfg(any(test, feature = "test-util"))]
+            AudioOutput::Simulated(output) => {
+                output.set_playing(false);
+                Ok(())
+            }
+        }
     }
 
     /// AU1 §5.3: top the ring up to the live target, metering as it goes
     /// (AU3 §3.9).
     pub(crate) fn fill(&mut self, meter: &mut LiveLoudnessMeter) -> Result<(), MediaError> {
-        fill_ring(
+        self.exhausted |= !fill_ring(
             &mut self.producer,
             &mut self.pending,
             &mut self.pending_index,
@@ -4230,6 +4463,12 @@ impl AudioRuntime {
             meter,
         )?;
         Ok(())
+    }
+
+    /// The mixer is exhausted and all of it is in the ring (tests).
+    #[cfg(test)]
+    pub(crate) fn pushed_all(&self) -> bool {
+        self.exhausted && self.pending_index >= self.pending.len()
     }
 }
 
@@ -4243,6 +4482,7 @@ fn build_stream(
     position: Arc<AtomicU64>,
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
+    diagnostics: Arc<AudioDiagnostics>,
 ) -> Result<cpal::Stream, MediaError> {
     match format {
         cpal::SampleFormat::F32 => build_typed_stream::<f32>(
@@ -4253,6 +4493,7 @@ fn build_stream(
             position,
             error_flag,
             monitor_gain_tenth_db,
+            diagnostics,
         ),
         cpal::SampleFormat::I16 => build_typed_stream::<i16>(
             device,
@@ -4262,6 +4503,7 @@ fn build_stream(
             position,
             error_flag,
             monitor_gain_tenth_db,
+            diagnostics,
         ),
         cpal::SampleFormat::U16 => build_typed_stream::<u16>(
             device,
@@ -4271,6 +4513,7 @@ fn build_stream(
             position,
             error_flag,
             monitor_gain_tenth_db,
+            diagnostics,
         ),
         unsupported => Err(MediaError::Backend(format!(
             "unsupported audio device sample format {unsupported}"
@@ -4287,6 +4530,7 @@ fn build_typed_stream<T>(
     position: Arc<AtomicU64>,
     error_flag: Arc<AtomicBool>,
     monitor_gain_tenth_db: Arc<AtomicI32>,
+    diagnostics: Arc<AudioDiagnostics>,
 ) -> Result<cpal::Stream, MediaError>
 where
     T: cpal::SizedSample + cpal::Sample + cpal::FromSample<f32>,
@@ -4295,13 +4539,16 @@ where
     device
         .build_output_stream(
             *config,
-            move |output: &mut [T], _| {
+            move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
+                let stamp = info.timestamp();
+                diagnostics.record_latency(stamp.playback.duration_since(stamp.callback));
                 render_output(
                     &mut consumer,
                     output,
                     callback_channels,
                     &position,
                     monitor_gain_tenth_db.load(Ordering::Relaxed),
+                    &diagnostics,
                 );
             },
             move |_error| {
@@ -4322,25 +4569,51 @@ fn monitor_linear_gain(tenth_db: i32) -> f32 {
     }
 }
 
+/// PF1 V-5 (S0): the device-free output the harness drives.
+#[cfg(any(test, feature = "test-util"))]
+pub(crate) mod simulated;
+
+/// PF1 V-1: pops whole interleaved programme frames while the ring holds
+/// one, then writes silence, and advances the clock by the frames popped.
+/// Returns the samples not popped; their frames are counted as underruns
+/// *before* the clock's release advance (R25/D2), so a thread that observes
+/// the advanced clock also observes this callback's underruns. R33: they are
+/// in the programme or after its end by the sample this callback consumed
+/// through (`position` is written only here and before the stream exists),
+/// never by a flag the producer set: atomics only, no lock or allocation.
 fn render_output<T>(
     consumer: &mut Consumer<f32>,
     output: &mut [T],
     channels: usize,
     position: &AtomicU64,
     monitor_gain_tenth_db: i32,
-) where
+    diagnostics: &AudioDiagnostics,
+) -> usize
+where
     T: cpal::Sample + cpal::FromSample<f32>,
 {
-    let sample_frames = output.len() / channels.max(1);
+    let channels = channels.max(1);
+    let sample_frames = output.len() / channels;
     let gain = monitor_linear_gain(monitor_gain_tenth_db);
-    for destination in output {
-        let sample = consumer.pop().unwrap_or(0.0);
-        *destination = T::from_sample(sample * gain);
+    let start = position.load(Ordering::Acquire);
+    let mut popped = 0;
+    while popped < sample_frames && consumer.slots() >= channels {
+        for destination in &mut output[popped * channels..(popped + 1) * channels] {
+            *destination = T::from_sample(consumer.pop().unwrap_or(0.0) * gain);
+        }
+        popped += 1;
     }
-    position.fetch_add(
-        u64::try_from(sample_frames).unwrap_or(u64::MAX),
-        Ordering::Release,
-    );
+    for destination in &mut output[popped * channels..] {
+        *destination = T::from_sample(0.0 * gain);
+    }
+    let failed = output.len() - popped * channels;
+    let popped_frames = u64::try_from(popped).unwrap_or(u64::MAX);
+    diagnostics.record_underrun(failed, channels, start.saturating_add(popped_frames));
+    position.fetch_add(popped_frames, Ordering::Release);
+    if popped > 0 {
+        diagnostics.record_advance();
+    }
+    failed
 }
 
 pub(crate) struct AudioDecoder {
@@ -4777,11 +5050,95 @@ mod tests {
         producer.push(-0.5).unwrap();
         let position = AtomicU64::new(10);
         let mut output = [1.0_f32; 4];
+        let diagnostics = AudioDiagnostics::default();
 
-        render_output(&mut consumer, &mut output, 2, &position, 0);
+        // PF1 R22: the two failed pops are counted where they happen.
+        assert_eq!(
+            render_output(&mut consumer, &mut output, 2, &position, 0, &diagnostics),
+            2
+        );
 
         assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
-        assert_eq!(position.load(Ordering::Acquire), 12);
+        assert_eq!(position.load(Ordering::Acquire), 11);
+        assert_eq!(diagnostics.underrun_frames(), 1);
+    }
+
+    /// PF1 V-1/G9: only whole frames pop; the clock counts them and nothing
+    /// else, so an empty ring leaves it where it was.
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn the_clock_counts_whole_popped_frames_only() {
+        let (mut producer, mut consumer) = RingBuffer::new(8);
+        producer.push_entire_slice(&[0.25, -0.5, 0.75]).unwrap();
+        let position = AtomicU64::new(10);
+        let mut output = [1.0_f32; 4];
+        let diagnostics = AudioDiagnostics::default();
+        let render = |consumer: &mut Consumer<f32>, output: &mut [f32]| {
+            render_output(consumer, output, 2, &position, 0, &diagnostics)
+        };
+        assert_eq!(render(&mut consumer, &mut output), 2);
+        assert_eq!(output, [0.25, -0.5, 0.0, 0.0]);
+        assert_eq!(consumer.slots(), 1, "the odd sample stays queued");
+        assert_eq!(position.load(Ordering::Acquire), 11);
+        consumer.pop().unwrap();
+        assert_eq!(render(&mut consumer, &mut output), 4);
+        assert_eq!(output, [0.0; 4]);
+        assert_eq!(position.load(Ordering::Acquire), 11);
+        assert_eq!(diagnostics.underrun_frames(), 3);
+    }
+
+    /// PF1 R25/D2: underruns are recorded before the clock's release advance,
+    /// so an observer that acquires a clock value sees every underrun up to
+    /// it. Each callback finds half its frames queued (V-1: the clock counts
+    /// those): the count can never trail the clock.
+    #[test]
+    fn an_observed_clock_never_runs_ahead_of_its_underruns() {
+        let (mut producer, mut consumer) = RingBuffer::<f32>::new(128);
+        let position = Arc::new(AtomicU64::new(0));
+        let diagnostics = Arc::new(AudioDiagnostics::default());
+        let callbacks = 20_000_u64;
+        let observer = {
+            let (position, diagnostics) = (Arc::clone(&position), Arc::clone(&diagnostics));
+            std::thread::spawn(move || {
+                let mut observed = 0;
+                while observed < callbacks * 32 {
+                    observed = position.load(Ordering::Acquire);
+                    let underruns = diagnostics.underrun_frames();
+                    assert!(underruns >= observed, "{underruns} < {observed}");
+                }
+            })
+        };
+        let mut output = [0.0_f32; 128];
+        for _ in 0..callbacks {
+            producer.push_entire_slice(&[0.0; 64]).unwrap();
+            render_output(&mut consumer, &mut output, 2, &position, 0, &diagnostics);
+        }
+        observer.join().expect("the observer");
+    }
+
+    /// R33 (re-review A D5 / B D4): the callback classifies its failed pops
+    /// by the sample it consumed through. One that runs dry short of the
+    /// programme end underran in the programme. Then the producer pushes the
+    /// final tail while the next callback is preempted: resuming, it pops
+    /// the tail and its shortfall is the post-end straddle. The old callback
+    /// read the producer's pushed flag before popping (unset in exactly
+    /// this interleaving, as here) and counted it in the programme.
+    #[test]
+    fn a_tail_pushed_during_a_callback_underruns_after_the_end() {
+        let (mut producer, mut consumer) = RingBuffer::new(16);
+        let position = AtomicU64::new(10);
+        let diagnostics = AudioDiagnostics::default();
+        diagnostics.begin_programme(10, 14);
+        let mut output = [0.0_f32; 8];
+        producer.push_entire_slice(&[0.1; 4]).unwrap();
+        render_output(&mut consumer, &mut output, 2, &position, 0, &diagnostics);
+        assert_eq!(diagnostics.underruns(), [1, 2, 0, 0], "dry before the end");
+        assert!(!diagnostics.programme_consumed.load(Ordering::Acquire));
+        producer.push_entire_slice(&[0.1; 4]).unwrap();
+        render_output(&mut consumer, &mut output, 2, &position, 0, &diagnostics);
+        assert_eq!(position.load(Ordering::Acquire), 14);
+        assert_eq!(diagnostics.underruns(), [1, 2, 1, 2], "the straddle");
+        assert!(diagnostics.programme_consumed.load(Ordering::Acquire));
     }
 
     #[test]
@@ -4791,7 +5148,14 @@ mod tests {
         producer.push(-0.25).unwrap();
         let position = AtomicU64::new(0);
         let mut output = [0.0_f32; 2];
-        render_output(&mut consumer, &mut output, 2, &position, 60);
+        render_output(
+            &mut consumer,
+            &mut output,
+            2,
+            &position,
+            60,
+            &AudioDiagnostics::default(),
+        );
         assert_close(output[0], 0.5 * db_gain(60));
         assert_close(output[1], -0.25 * db_gain(60));
     }

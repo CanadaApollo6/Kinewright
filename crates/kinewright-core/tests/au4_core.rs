@@ -9,12 +9,11 @@ use crossbeam_channel::Receiver;
 use kinewright_core::{
     AssetId, AudioBus, AudioBusId, AudioMaster, AudioMix, AutomationCurve, BatchError, Clip,
     ClipId, ColorContext, Command, Core, Document, ENVELOPE_DISPLAY_MIN_TENTH_DB, Effect, EffectId,
-    Event, FrameTexture, Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent,
-    MediaKind, MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Query,
-    QueryResult, Rational, RelinkCandidate, TRACK_AUTOMATION_PARAMETERS, TimeCode,
-    TimelineRevision, Track, TrackId, TrackKind, TrackMix, apply_batch, clamp_project_curve,
-    envelope_coalesce_key, is_hold_only_parameter, qa_document, rebase_clip_curve,
-    track_automation_coalesce_key,
+    Event, Keyframe, KeyframeInterpolation, MediaAsset, MediaCatalog, MediaEvent, MediaKind,
+    MediaSourceFingerprint, OpError, Operation, ParamValue, Playback, Query, QueryResult, Rational,
+    RelinkCandidate, TRACK_AUTOMATION_PARAMETERS, TimeCode, TimelineRevision, Track, TrackId,
+    TrackKind, TrackMix, apply_batch, clamp_project_curve, envelope_coalesce_key,
+    is_hold_only_parameter, qa_document, rebase_clip_curve, track_automation_coalesce_key,
 };
 
 fn fps() -> Rational {
@@ -1608,7 +1607,7 @@ impl Playback for CountingPlayback {
         self.documents.fetch_add(1, Ordering::SeqCst);
     }
     fn request_frame(&self, _t: TimeCode) {}
-    fn frames(&self) -> Receiver<(TimeCode, FrameTexture)> {
+    fn frames(&self) -> Receiver<kinewright_core::PreviewFrame> {
         crossbeam_channel::unbounded().1
     }
     fn events(&self) -> Receiver<MediaEvent> {

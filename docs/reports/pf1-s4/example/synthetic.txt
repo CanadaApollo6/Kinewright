@@ -1,0 +1,1 @@
+SYNTHETIC CONTRACT FIXTURE. No real run, build, approval or PF1 acceptance.

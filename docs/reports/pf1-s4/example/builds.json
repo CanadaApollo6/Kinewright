@@ -1,0 +1,64 @@
+{
+  "s3b": {
+    "basis": "accepted-S3b",
+    "approval": {
+      "path": "docs/reports/pf1-s4/example/s3b-approval.json",
+      "sha256": "1fad3491c7ebc5645a7387ee79e2c5be362f6a2a49bb6d5c75fd932e4c0cfd1c"
+    },
+    "production": {
+      "path": "docs/reports/pf1-s4/example/source.json",
+      "sha256": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9"
+    },
+    "binary": {
+      "path": "docs/reports/pf1-s4/example/synthetic.txt",
+      "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+    },
+    "harness": {
+      "path": "docs/reports/pf1-s4/example/harness.json",
+      "sha256": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec"
+    },
+    "rustc": "example-rustc",
+    "target": "example-target",
+    "profile": "release",
+    "lockfile": {
+      "path": "docs/reports/pf1-s4/example/synthetic.txt",
+      "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+    },
+    "ffmpeg": {
+      "version": "example-8",
+      "configuration": "synthetic"
+    },
+    "test_overlays": []
+  },
+  "s4": {
+    "basis": "candidate",
+    "approval": {
+      "path": "docs/reports/pf1-s4/example/s4-approval.json",
+      "sha256": "87cd682afefa7de14cb2707a24c5225957d10fa4e19245c4cfaefdc756ee4ec3"
+    },
+    "production": {
+      "path": "docs/reports/pf1-s4/example/source.json",
+      "sha256": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9"
+    },
+    "binary": {
+      "path": "docs/reports/pf1-s4/example/synthetic.txt",
+      "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+    },
+    "harness": {
+      "path": "docs/reports/pf1-s4/example/harness.json",
+      "sha256": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec"
+    },
+    "rustc": "example-rustc",
+    "target": "example-target",
+    "profile": "release",
+    "lockfile": {
+      "path": "docs/reports/pf1-s4/example/synthetic.txt",
+      "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+    },
+    "ffmpeg": {
+      "version": "example-8",
+      "configuration": "synthetic"
+    },
+    "test_overlays": []
+  }
+}

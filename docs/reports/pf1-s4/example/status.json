@@ -1,0 +1,880 @@
+{
+  "lane": "LH",
+  "gate": "I4",
+  "runs": [
+    {
+      "workload": "typical_1080p",
+      "pair": 0,
+      "arm": "s3b",
+      "seed": 11,
+      "attempt": 0,
+      "supersedes": "",
+      "validity": "valid",
+      "exit": 0,
+      "command": [
+        "synthetic-test"
+      ],
+      "environment": {},
+      "identity": {
+        "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
+        "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
+        "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
+        "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
+      },
+      "gpu": {
+        "selected": {
+          "backend": "Vulkan",
+          "name": "synthetic-example-adapter",
+          "vendor_id": 4318,
+          "device_id": 0,
+          "driver": "example",
+          "uuid": "synthetic-uuid"
+        },
+        "stack": {
+          "runtime": "example-vulkan",
+          "mesa": "example",
+          "llvm": "example",
+          "icd_manifest_sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        },
+        "policy": {
+          "kind": "hardware",
+          "approval": {
+            "path": "docs/reports/pf1-s4/example/policy-approval.json",
+            "sha256": "4e36066397f9073c23e6a8bfb70c153cf4c771fac492f3935926912c579c6aff"
+          },
+          "requested": {
+            "graphics_mhz": [
+              100,
+              200
+            ],
+            "memory_mhz": [
+              100,
+              200
+            ],
+            "power_w": [
+              100,
+              200
+            ],
+            "pstates": [
+              "P0",
+              "P2"
+            ]
+          },
+          "observed": {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        },
+        "telemetry": [
+          {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          },
+          {
+            "timestamp_s": 1700000015.1,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        ]
+      },
+      "cpu": {
+        "utilization_pct": 999,
+        "load_average": 1000
+      },
+      "preflight": [
+        {
+          "timestamp_s": 1700000000,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000005,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000010,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        }
+      ],
+      "metrics": {
+        "mean_ms": 100
+      },
+      "logs": [
+        {
+          "path": "docs/reports/pf1-s4/example/synthetic.txt",
+          "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        }
+      ],
+      "fingerprint": "73ebb07cd86ea24298a38ee3e6304d15936a472a3d3d51cc823cdd2e6878d7de",
+      "started_s": 1700000015,
+      "ended_s": 1700000015.1
+    },
+    {
+      "workload": "typical_1080p",
+      "pair": 0,
+      "arm": "s4",
+      "seed": 11,
+      "attempt": 0,
+      "supersedes": "",
+      "validity": "valid",
+      "exit": 0,
+      "command": [
+        "synthetic-test"
+      ],
+      "environment": {},
+      "identity": {
+        "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
+        "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
+        "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
+        "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
+      },
+      "gpu": {
+        "selected": {
+          "backend": "Vulkan",
+          "name": "synthetic-example-adapter",
+          "vendor_id": 4318,
+          "device_id": 0,
+          "driver": "example",
+          "uuid": "synthetic-uuid"
+        },
+        "stack": {
+          "runtime": "example-vulkan",
+          "mesa": "example",
+          "llvm": "example",
+          "icd_manifest_sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        },
+        "policy": {
+          "kind": "hardware",
+          "approval": {
+            "path": "docs/reports/pf1-s4/example/policy-approval.json",
+            "sha256": "4e36066397f9073c23e6a8bfb70c153cf4c771fac492f3935926912c579c6aff"
+          },
+          "requested": {
+            "graphics_mhz": [
+              100,
+              200
+            ],
+            "memory_mhz": [
+              100,
+              200
+            ],
+            "power_w": [
+              100,
+              200
+            ],
+            "pstates": [
+              "P0",
+              "P2"
+            ]
+          },
+          "observed": {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        },
+        "telemetry": [
+          {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          },
+          {
+            "timestamp_s": 1700000015.1,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        ]
+      },
+      "cpu": {
+        "utilization_pct": 999,
+        "load_average": 1000
+      },
+      "preflight": [
+        {
+          "timestamp_s": 1700000000,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000005,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000010,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        }
+      ],
+      "metrics": {
+        "mean_ms": 100
+      },
+      "logs": [
+        {
+          "path": "docs/reports/pf1-s4/example/synthetic.txt",
+          "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        }
+      ],
+      "fingerprint": "a0ab66ddfdbbd1471e23449d83fc469b06a9ac6a658480f99fe77d1aa0f2774e",
+      "started_s": 1700000015,
+      "ended_s": 1700000015.1
+    },
+    {
+      "workload": "typical_1080p",
+      "pair": 1,
+      "arm": "s3b",
+      "seed": 22,
+      "attempt": 0,
+      "supersedes": "",
+      "validity": "valid",
+      "exit": 0,
+      "command": [
+        "synthetic-test"
+      ],
+      "environment": {},
+      "identity": {
+        "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
+        "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
+        "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
+        "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
+      },
+      "gpu": {
+        "selected": {
+          "backend": "Vulkan",
+          "name": "synthetic-example-adapter",
+          "vendor_id": 4318,
+          "device_id": 0,
+          "driver": "example",
+          "uuid": "synthetic-uuid"
+        },
+        "stack": {
+          "runtime": "example-vulkan",
+          "mesa": "example",
+          "llvm": "example",
+          "icd_manifest_sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        },
+        "policy": {
+          "kind": "hardware",
+          "approval": {
+            "path": "docs/reports/pf1-s4/example/policy-approval.json",
+            "sha256": "4e36066397f9073c23e6a8bfb70c153cf4c771fac492f3935926912c579c6aff"
+          },
+          "requested": {
+            "graphics_mhz": [
+              100,
+              200
+            ],
+            "memory_mhz": [
+              100,
+              200
+            ],
+            "power_w": [
+              100,
+              200
+            ],
+            "pstates": [
+              "P0",
+              "P2"
+            ]
+          },
+          "observed": {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        },
+        "telemetry": [
+          {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          },
+          {
+            "timestamp_s": 1700000015.1,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        ]
+      },
+      "cpu": {
+        "utilization_pct": 999,
+        "load_average": 1000
+      },
+      "preflight": [
+        {
+          "timestamp_s": 1700000000,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000005,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000010,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        }
+      ],
+      "metrics": {
+        "mean_ms": 100
+      },
+      "logs": [
+        {
+          "path": "docs/reports/pf1-s4/example/synthetic.txt",
+          "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        }
+      ],
+      "fingerprint": "6cfd826666faa3980e61af278c35943100c0b6572736a7f2ce4d4bf697f938a9",
+      "started_s": 1700000015,
+      "ended_s": 1700000015.1
+    },
+    {
+      "workload": "typical_1080p",
+      "pair": 1,
+      "arm": "s4",
+      "seed": 22,
+      "attempt": 0,
+      "supersedes": "",
+      "validity": "valid",
+      "exit": 0,
+      "command": [
+        "synthetic-test"
+      ],
+      "environment": {},
+      "identity": {
+        "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
+        "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
+        "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
+        "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
+      },
+      "gpu": {
+        "selected": {
+          "backend": "Vulkan",
+          "name": "synthetic-example-adapter",
+          "vendor_id": 4318,
+          "device_id": 0,
+          "driver": "example",
+          "uuid": "synthetic-uuid"
+        },
+        "stack": {
+          "runtime": "example-vulkan",
+          "mesa": "example",
+          "llvm": "example",
+          "icd_manifest_sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        },
+        "policy": {
+          "kind": "hardware",
+          "approval": {
+            "path": "docs/reports/pf1-s4/example/policy-approval.json",
+            "sha256": "4e36066397f9073c23e6a8bfb70c153cf4c771fac492f3935926912c579c6aff"
+          },
+          "requested": {
+            "graphics_mhz": [
+              100,
+              200
+            ],
+            "memory_mhz": [
+              100,
+              200
+            ],
+            "power_w": [
+              100,
+              200
+            ],
+            "pstates": [
+              "P0",
+              "P2"
+            ]
+          },
+          "observed": {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        },
+        "telemetry": [
+          {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          },
+          {
+            "timestamp_s": 1700000015.1,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        ]
+      },
+      "cpu": {
+        "utilization_pct": 999,
+        "load_average": 1000
+      },
+      "preflight": [
+        {
+          "timestamp_s": 1700000000,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000005,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000010,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        }
+      ],
+      "metrics": {
+        "mean_ms": 100
+      },
+      "logs": [
+        {
+          "path": "docs/reports/pf1-s4/example/synthetic.txt",
+          "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        }
+      ],
+      "fingerprint": "9dd8ffd8db2f8bd8ccaa3e34a35099d94a1a5333b3bdb342f28a930b334a2394",
+      "started_s": 1700000015,
+      "ended_s": 1700000015.1
+    },
+    {
+      "workload": "typical_1080p",
+      "pair": 2,
+      "arm": "s3b",
+      "seed": 33,
+      "attempt": 0,
+      "supersedes": "",
+      "validity": "valid",
+      "exit": 0,
+      "command": [
+        "synthetic-test"
+      ],
+      "environment": {},
+      "identity": {
+        "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
+        "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
+        "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
+        "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
+      },
+      "gpu": {
+        "selected": {
+          "backend": "Vulkan",
+          "name": "synthetic-example-adapter",
+          "vendor_id": 4318,
+          "device_id": 0,
+          "driver": "example",
+          "uuid": "synthetic-uuid"
+        },
+        "stack": {
+          "runtime": "example-vulkan",
+          "mesa": "example",
+          "llvm": "example",
+          "icd_manifest_sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        },
+        "policy": {
+          "kind": "hardware",
+          "approval": {
+            "path": "docs/reports/pf1-s4/example/policy-approval.json",
+            "sha256": "4e36066397f9073c23e6a8bfb70c153cf4c771fac492f3935926912c579c6aff"
+          },
+          "requested": {
+            "graphics_mhz": [
+              100,
+              200
+            ],
+            "memory_mhz": [
+              100,
+              200
+            ],
+            "power_w": [
+              100,
+              200
+            ],
+            "pstates": [
+              "P0",
+              "P2"
+            ]
+          },
+          "observed": {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        },
+        "telemetry": [
+          {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          },
+          {
+            "timestamp_s": 1700000015.1,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        ]
+      },
+      "cpu": {
+        "utilization_pct": 999,
+        "load_average": 1000
+      },
+      "preflight": [
+        {
+          "timestamp_s": 1700000000,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000005,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000010,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        }
+      ],
+      "metrics": {
+        "mean_ms": 100
+      },
+      "logs": [
+        {
+          "path": "docs/reports/pf1-s4/example/synthetic.txt",
+          "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        }
+      ],
+      "fingerprint": "721436f462d8be234d9ed6ca906c9c33eecf6f30d1a0ea3667698b3aacf51e23",
+      "started_s": 1700000015,
+      "ended_s": 1700000015.1
+    },
+    {
+      "workload": "typical_1080p",
+      "pair": 2,
+      "arm": "s4",
+      "seed": 33,
+      "attempt": 0,
+      "supersedes": "",
+      "validity": "valid",
+      "exit": 0,
+      "command": [
+        "synthetic-test"
+      ],
+      "environment": {},
+      "identity": {
+        "binary": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d",
+        "production": "230d4f7c5421ade5fc0def9a470db460bf518ef560c880b131c0698b48becad9",
+        "harness": "37b559a5d578e642b2e17962ce18001f8c0dd1ec4d90a32068273863d6d235ec",
+        "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811",
+        "host": "296e2238da9c318d481e08a07cfb1a5d53bcc731cecf70c5a7f40e067801ae91"
+      },
+      "gpu": {
+        "selected": {
+          "backend": "Vulkan",
+          "name": "synthetic-example-adapter",
+          "vendor_id": 4318,
+          "device_id": 0,
+          "driver": "example",
+          "uuid": "synthetic-uuid"
+        },
+        "stack": {
+          "runtime": "example-vulkan",
+          "mesa": "example",
+          "llvm": "example",
+          "icd_manifest_sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        },
+        "policy": {
+          "kind": "hardware",
+          "approval": {
+            "path": "docs/reports/pf1-s4/example/policy-approval.json",
+            "sha256": "4e36066397f9073c23e6a8bfb70c153cf4c771fac492f3935926912c579c6aff"
+          },
+          "requested": {
+            "graphics_mhz": [
+              100,
+              200
+            ],
+            "memory_mhz": [
+              100,
+              200
+            ],
+            "power_w": [
+              100,
+              200
+            ],
+            "pstates": [
+              "P0",
+              "P2"
+            ]
+          },
+          "observed": {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        },
+        "telemetry": [
+          {
+            "timestamp_s": 1700000015,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          },
+          {
+            "timestamp_s": 1700000015.1,
+            "graphics_mhz": 150,
+            "memory_mhz": 150,
+            "power_w": 150,
+            "pstate": "P2"
+          }
+        ]
+      },
+      "cpu": {
+        "utilization_pct": 999,
+        "load_average": 1000
+      },
+      "preflight": [
+        {
+          "timestamp_s": 1700000000,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000005,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        },
+        {
+          "timestamp_s": 1700000010,
+          "uuid": "synthetic-uuid",
+          "utilization_pct": 10,
+          "processes": [
+            {
+              "pid": 123,
+              "kind": "C+G",
+              "memory_bytes": 1024,
+              "owned": false
+            }
+          ],
+          "complete": true
+        }
+      ],
+      "metrics": {
+        "mean_ms": 100
+      },
+      "logs": [
+        {
+          "path": "docs/reports/pf1-s4/example/synthetic.txt",
+          "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+        }
+      ],
+      "fingerprint": "94edb1213daf28494a1fdd3169d187f514145fcefe321bfccc34e4da331e5cce",
+      "started_s": 1700000015,
+      "ended_s": 1700000015.1
+    }
+  ],
+  "series": {
+    "id": "synthetic-original",
+    "pins": "643c21e403387075d12fce86d6f6d65d2ff5bf88f388cbc368e9fe38b910d811"
+  }
+}

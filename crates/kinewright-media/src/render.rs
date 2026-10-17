@@ -1,7 +1,10 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use kinewright_core::{
@@ -15,8 +18,8 @@ use crate::{
     TimelineVisualLayer,
     cache::FrameCache,
     compositor::{
-        Compositor, CompositorLayer, DeliveryFrame, GpuContext, LayerMode, LayerRole,
-        MatteRenderTarget,
+        Compositor, CompositorInput, CompositorLayer, DeliveryFrame, GpuContext, LayerMode,
+        LayerRole, MatteRenderTarget, MonitorPurpose, ResidencyKey, ResidentContent,
     },
     decode::VideoDecoder,
     derived_cache::CacheStats,
@@ -26,12 +29,23 @@ use crate::{
     visual_layers_at,
 };
 
+/// MO2 R18: the compositor ignores an adjustment's frame and samples the
+/// composite below it (C-5: its pixels are never read or uploaded). Every
+/// adjustment layer shares this 0×0 frame with no pixel buffer, so a render
+/// allocates nothing for one (review B F2, R38 D4: K-1 counts only what is
+/// allocated, and nothing is left uncounted).
+static ADJUSTMENT_FRAME: LazyLock<WorkingFrame> = LazyLock::new(|| WorkingFrame {
+    width: 0,
+    height: 0,
+    pixels: Arc::new(Vec::new()),
+});
+
 /// Preview decode and compositor output are capped at 720p for 16:9 media.
 pub(crate) const PREVIEW_MAX_WIDTH: u32 = 1280;
 
 const FRAME_CACHE_CAPACITY: usize = 32;
-const PREFETCH_FRAMES: i64 = 15;
-const FRAME_CACHE_BYTE_BUDGET: usize = 224 * 1024 * 1024;
+pub(crate) const PREFETCH_FRAMES: i64 = 15;
+pub(crate) const FRAME_CACHE_BYTE_BUDGET: usize = 224 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DecodeStrategy {
@@ -67,11 +81,41 @@ impl RenderScale {
 /// slice the ordinary render composites, so a proof can never target a layer
 /// the production path would not have produced.
 struct DecodedLayer {
+    identity: Option<(ResidentContent, TimeCode)>,
     clip: ClipId,
     frame: WorkingFrame,
     effects: Vec<Effect>,
     transition: TransitionRenderParams,
     mode: LayerMode,
+}
+
+impl CompositorInput for DecodedLayer {
+    const FORMAT: wgpu::TextureFormat = WorkingFrame::FORMAT;
+    const BYTES_PER_PIXEL: u32 = WorkingFrame::BYTES_PER_PIXEL;
+    const LINEAR: bool = true;
+    fn width(&self) -> u32 {
+        self.frame.width
+    }
+    fn height(&self) -> u32 {
+        self.frame.height
+    }
+    fn upload_bytes(&self) -> Vec<u8> {
+        self.frame.upload_bytes()
+    }
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        self.frame.write_upload(mapped, pitch)
+    }
+    fn residency(&self) -> Option<(ResidencyKey, std::sync::Weak<Vec<half::f16>>)> {
+        let (content, at) = self.identity.as_ref()?;
+        Some((
+            ResidencyKey::new(content.clone(), *at, &self.frame),
+            Arc::downgrade(&self.frame.pixels),
+        ))
+    }
 }
 
 /// MO2 R10: the compositor names the offending layer; the renderer knows
@@ -103,7 +147,7 @@ pub(crate) struct MatteCoverage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct VideoSourceKey {
+pub(crate) struct VideoSourceKey {
     asset: AssetId,
     /// The path is part of the decoder identity even when two paths currently
     /// point at the same bytes. A relink is a runtime input and must not
@@ -164,6 +208,12 @@ impl From<&ColorDescription> for ColorDescriptionKey {
 }
 
 impl VideoSourceKey {
+    /// The asset this key reads (a test's witness).
+    #[cfg(test)]
+    pub(crate) const fn asset(&self) -> AssetId {
+        self.asset
+    }
+
     fn new(
         asset: AssetId,
         path: &Path,
@@ -188,16 +238,436 @@ impl VideoSourceKey {
 /// Generated content cached in working space: titles and (MO2 R3) solids,
 /// both through `WorkingFrame::from_display_frame`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Generated {
+pub(crate) enum Generated {
     Title(Title),
     Solid([u8; 3]),
 }
 
-type TitleCacheKey = (ClipId, (u32, u32), Generated);
+pub(crate) type TitleCacheKey = (ClipId, (u32, u32), Generated);
+
+/// PF1 S2b-1: the readers' frames for one render, by (source, time).
+pub(crate) type SuppliedFrames = HashMap<(VideoSourceKey, i64), Result<WorkingFrame, MediaError>>;
+
+/// Where a render's video layers come from.
+#[derive(Clone, Copy)]
+enum Video<'a> {
+    /// This renderer's own decoders (today's path, K-6).
+    Decode(DecodeStrategy),
+    /// The scheduler's readers (S2b-1).
+    Supplied(&'a SuppliedFrames),
+}
+
+fn source_key(asset: &kinewright_core::MediaAsset, scale: RenderScale) -> VideoSourceKey {
+    let description = &asset.color_description;
+    let assumption = d65_assumption(description);
+    let (fingerprint, max_width) = (&asset.source_fingerprint, scale.max_width());
+    let fps = asset.fps;
+    VideoSourceKey::new(
+        asset.id,
+        &asset.path,
+        fingerprint,
+        fps,
+        description,
+        assumption,
+        max_width,
+    )
+}
+
+fn no_frame(asset: AssetId, at: TimeCode) -> MediaError {
+    MediaError::Backend(format!("no video frame decoded for asset {asset} at {at}"))
+}
+
+/// A managed source decoder with `threads` frame threads, its errors
+/// wrapped with the asset (IN1: the wrap's one production caller).
+fn open_managed(
+    asset: AssetId,
+    path: &Path,
+    fps: Rational,
+    max_width: Option<u32>,
+    description: &ColorDescription,
+    (threads, stop): (usize, Option<&Arc<AtomicBool>>),
+) -> Result<VideoDecoder, MediaError> {
+    let assumption = d65_assumption(description);
+    let opened = VideoDecoder::open_managed_threads(
+        path,
+        fps,
+        max_width,
+        description,
+        assumption,
+        threads,
+        stop,
+    );
+    opened.map_err(|error| {
+        contextual_managed_decode_error(asset, path, description, assumption, error)
+    })
+}
+
+/// PF1 S2b-1: what a reader opens: today's managed decoder for one source.
+#[derive(Clone)]
+pub(crate) struct SourceSpec {
+    asset: AssetId,
+    path: std::path::PathBuf,
+    fps: Rational,
+    description: ColorDescription,
+    max_width: Option<u32>,
+    /// Working bytes of one frame (S1d's f).
+    pub(crate) frame_bytes: usize,
+    /// Amendment R54 (K-1): d, a decoded frame's bytes as a refill keeps it.
+    pub(crate) decoded_bytes: usize,
+}
+
+impl SourceSpec {
+    /// Open with `threads` frame threads; errors as the renderer's open.
+    /// Amendment R43 (RS-1, note 1): a reader's open. A set `stop` flag
+    /// cancels it before the file opens, interrupts its IO (and every later
+    /// seek and read), and turns whatever the open returns into
+    /// `Cancelled`, so a retired reader keeps no file it opened.
+    pub(crate) fn open(
+        &self,
+        threads: usize,
+        stop: &Arc<AtomicBool>,
+    ) -> Result<VideoDecoder, MediaError> {
+        let stopped = || stop.load(Ordering::Acquire);
+        if stopped() {
+            return Err(MediaError::Cancelled);
+        }
+        let (path, description) = (&self.path, &self.description);
+        let opened = open_managed(
+            self.asset,
+            path,
+            self.fps,
+            self.max_width,
+            description,
+            (threads, Some(stop)),
+        );
+        if stopped() {
+            return Err(MediaError::Cancelled);
+        }
+        opened
+    }
+
+    /// K-1 (review B F1): the size this source's frames convert to, read
+    /// from the decoder a reader would open (one thread) and kept in
+    /// `sizes`; an open's failure is the reader's, wrapped as it wraps.
+    fn measure(
+        &self,
+        key: &VideoSourceKey,
+        sizes: &mut FrameSizes,
+    ) -> Result<((u32, u32), usize), MediaError> {
+        if let Some(size) = sizes.get(key) {
+            return Ok(*size);
+        }
+        // The preview thread's open: no reader flag to interrupt it.
+        let (path, description) = (&self.path, &self.description);
+        let opened = open_managed(
+            self.asset,
+            path,
+            self.fps,
+            self.max_width,
+            description,
+            (1, None),
+        );
+        let opened = opened?;
+        let size = (opened.frame_size(), opened.decoded_frame_bytes());
+        sizes.insert(key.clone(), size);
+        Ok(size)
+    }
+
+    /// The frame at `at`, exactly as the renderer's Seek or Sequential
+    /// window would cache it (continuing from the decoder's cursor). PF1
+    /// S2c S-2: a `paused` job's frame continues only inside S-2's domain.
+    /// Amendment R53 [S2c]: `refill` is a paused refill's window start (`at`
+    /// is its t) and (Amendment R63, F2) the window times it keeps: only
+    /// `at` is converted and those window frames are kept;
+    /// a kept frame at `at` is converted without decoding; any other decode
+    /// drops the kept frames. Amendment R57 [S2c]: first, the kept frames
+    /// outside `discard` ([low, bound], Amendment R61) are dropped.
+    pub(crate) fn decode(
+        &self,
+        decoder: &mut VideoDecoder,
+        at: i64,
+        paused: bool,
+        (refill, discard): (Option<Refill>, Option<(i64, i64)>),
+    ) -> Result<WorkingFrame, MediaError> {
+        if let Some(keep) = discard {
+            decoder.discard_kept_outside(keep);
+        }
+        let mut window = FrameCache::new(1);
+        if let Some((start, retain)) = refill.filter(|_| paused) {
+            let window_times = (TimeCode(start), TimeCode(at));
+            decoder.decode_refill(window_times, retain, &mut window)?;
+        } else if let Some(frame) = decoder.convert_retained(at) {
+            return frame;
+        } else if paused {
+            decoder.drop_retained();
+            decoder.decode_paused(decoder.cursor(), TimeCode(at), &mut window)?;
+        } else {
+            decoder.drop_retained();
+            decoder.decode_window_sequential(TimeCode(at), TimeCode(at), &mut window)?;
+        }
+        let frame = window.frame_at_or_before(TimeCode(at));
+        frame.ok_or_else(|| no_frame(self.asset, TimeCode(at)))
+    }
+}
+
+/// Amendment R53 / R63 [S2c]: a paused refill's window start and the
+/// window times it keeps (F2: the window less the ring's times).
+pub(crate) type Refill = (i64, BTreeSet<i64>);
+
+/// PF1 S2b-1: a transport job's demand on the readers.
+#[derive(Default)]
+pub(crate) struct ReaderDemand {
+    /// Each video layer's (source, time), in z-order.
+    pub(crate) required: Vec<(VideoSourceKey, i64)>,
+    /// Per source: what opens it, and its lookahead times, nearest first.
+    pub(crate) sources: HashMap<VideoSourceKey, (SourceSpec, Vec<i64>)>,
+    /// K-1: G, the job's generated raster bytes (titles and solids).
+    pub(crate) generated: usize,
+    /// The rasters G counts (review B S2: only those not resident are
+    /// reserved).
+    generated_keys: Vec<TitleCacheKey>,
+    /// S-3 [S2c]: per required source, its clip's in-point (a backward
+    /// window's floor; a freeze clip's is its frame).
+    pub(crate) in_points: HashMap<VideoSourceKey, i64>,
+}
+
+impl ReaderDemand {
+    /// K-2 (review B S2, R38 D3): the bytes of the job's generated rasters
+    /// that `charged` does not hold. A raster that another path cached (a
+    /// thumbnail, K-3's synchronous render) but nothing charges counts as
+    /// missing: cache membership is not a charge.
+    pub(crate) fn generated_uncharged(&self, charged: &HashSet<TitleCacheKey>) -> usize {
+        (self.generated_keys.iter())
+            .filter(|key| !charged.contains(key))
+            .map(|key| working_bytes(key.1))
+            .fold(0, usize::saturating_add)
+    }
+}
+
+/// K-1 (review B F1): each source's frame size, measured once from the
+/// decoder a reader opens. Amendment R41 (U-1): kept while the source is in
+/// the document and not cleared, for at most `SOURCE_MEMORY` sources.
+/// Amendment R54: with d, a decoded frame's bytes.
+pub(crate) type FrameSizes = crate::sched::SourceMemory<VideoSourceKey, ((u32, u32), usize)>;
+
+/// Amendment R41: the reader keys of every source in `document` at `scale`.
+pub(crate) fn document_source_keys(
+    document: &Document,
+    scale: RenderScale,
+) -> HashSet<VideoSourceKey> {
+    (document.media_pool.iter())
+        .map(|asset| source_key(asset, scale))
+        .collect()
+}
+
+/// The job's required frames at `at`, then up to `horizon` frames of
+/// lookahead, each source's ring holding S1d's window
+/// clamp(⌊(C − G) / (n·f)⌋, 1, `PREFETCH_FRAMES` + 1). A document the
+/// render will refuse gives no demand (the render reports why).
+///
+/// K-1 (review B F1): f is the size the source's decoder converts to,
+/// measured into `sizes`; the asset's optional resolution is never
+/// trusted, so a missing or mismatched one charges the actual bytes. A
+/// source that cannot be opened fails the job with the open's error.
+pub(crate) fn reader_demand(
+    document: &Document,
+    at: TimeCode,
+    resolution: (u32, u32),
+    scale: RenderScale,
+    horizon: i64,
+    sizes: &mut FrameSizes,
+) -> Result<ReaderDemand, MediaError> {
+    let mut demand = ReaderDemand::default();
+    let mut generated = 0usize;
+    let mut ahead: Vec<(VideoSourceKey, i64)> = Vec::new();
+    let mut unmeasured: Vec<VideoSourceKey> = Vec::new();
+    let last = (at.0.saturating_add(horizon)).min(document.duration.0 - 1);
+    for frame in at.0..=last.max(at.0) {
+        let Ok(layers) = visual_layers_at(document, TimeCode(frame)) else {
+            break;
+        };
+        for layer in layers {
+            let video = match layer {
+                TimelineVisualLayer::Video(video) => video,
+                TimelineVisualLayer::Title(layer) if frame == at.0 => {
+                    let content = Generated::Title(layer.title);
+                    demand
+                        .generated_keys
+                        .push((layer.clip, resolution, content));
+                    generated = generated.saturating_add(working_bytes(resolution));
+                    continue;
+                }
+                TimelineVisualLayer::Solid(layer) if frame == at.0 => {
+                    let content = Generated::Solid([layer.color.r, layer.color.g, layer.color.b]);
+                    demand
+                        .generated_keys
+                        .push((layer.clip, resolution, content));
+                    generated = generated.saturating_add(working_bytes(resolution));
+                    continue;
+                }
+                _ => continue,
+            };
+            let Some(asset) = document.asset(video.source.asset) else {
+                continue;
+            };
+            let key = source_key(asset, scale);
+            let max_width = key.max_width;
+            if unmeasured.contains(&key) {
+                continue;
+            }
+            if !demand.sources.contains_key(&key) {
+                let mut spec = SourceSpec {
+                    asset: asset.id,
+                    path: asset.path.clone(),
+                    fps: asset.fps,
+                    description: asset.color_description.clone(),
+                    max_width,
+                    frame_bytes: 0,
+                    decoded_bytes: 0,
+                };
+                // R38 D1: only a required source's failure is the job's.
+                // A lookahead-only source that cannot be measured is left
+                // out of this job's plan; it is measured again when a later
+                // job requires it, and fails that job then.
+                match spec.measure(&key, sizes) {
+                    Ok((size, decoded)) => {
+                        spec.frame_bytes = working_bytes(size);
+                        spec.decoded_bytes = decoded;
+                    }
+                    Err(_) if frame != at.0 => {
+                        unmeasured.push(key);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+                demand.sources.insert(key.clone(), (spec, Vec::new()));
+            }
+            let time = video.source.source_at.0;
+            if frame == at.0 {
+                let clip = document.clip(video.source.clip);
+                let clip = clip.filter(|clip| clip.content.is_media());
+                let floor = clip.map_or(time, |clip| clip.source_range.start.0);
+                demand.in_points.insert(key.clone(), floor);
+                demand.required.push((key, time));
+            } else if !ahead.contains(&(key.clone(), time)) {
+                ahead.push((key, time));
+            }
+        }
+    }
+    let n = demand.sources.len().max(1);
+    let cap = usize::try_from(PREFETCH_FRAMES + 1).unwrap_or(1);
+    for (key, (spec, lookahead)) in &mut demand.sources {
+        let window = match spec.frame_bytes {
+            0 => 1,
+            f => (FRAME_CACHE_BYTE_BUDGET.saturating_sub(generated) / f.saturating_mul(n))
+                .clamp(1, cap),
+        };
+        let required: Vec<i64> = (demand.required.iter())
+            .filter_map(|(k, t)| (k == key).then_some(*t))
+            .collect();
+        let room = window.saturating_sub(required.len());
+        let own = ahead
+            .iter()
+            .filter(|(k, t)| k == key && !required.contains(t));
+        lookahead.extend(own.map(|(_, t)| *t).take(room));
+    }
+    demand.generated = generated;
+    Ok(demand)
+}
 
 struct VideoSource {
     decoder: VideoDecoder,
     cache: FrameCache<WorkingFrame>,
+    /// Counts this open decoder in its engine's gauge while it lives.
+    _counted: Option<DecoderHold>,
+}
+
+/// PF1 R-5 `sync_decoders` (review B F4): one engine's open decoders, over
+/// every renderer it builds (preview, proofs, export).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DecoderGauge(Arc<std::sync::atomic::AtomicU64>);
+
+thread_local! {
+    /// The gauge renderers built on this thread count their decoders in.
+    static DECODER_GAUGE: std::cell::RefCell<Option<DecoderGauge>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+impl DecoderGauge {
+    /// Decoders open now.
+    pub(crate) fn open(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Run `build` with this gauge current: the renderers it builds on this
+    /// thread count their decoders here.
+    pub(crate) fn scope<T>(&self, build: impl FnOnce() -> T) -> T {
+        struct Restore(Option<DecoderGauge>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                DECODER_GAUGE.with(|gauge| *gauge.borrow_mut() = self.0.take());
+            }
+        }
+        let previous = DECODER_GAUGE.with(|gauge| gauge.borrow_mut().replace(self.clone()));
+        let _restore = Restore(previous);
+        build()
+    }
+
+    fn hold(&self) -> DecoderHold {
+        (self.0).fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        DecoderHold(Arc::clone(&self.0))
+    }
+}
+
+/// One open decoder in a gauge, released when its source drops.
+struct DecoderHold(Arc<std::sync::atomic::AtomicU64>);
+
+impl Drop for DecoderHold {
+    fn drop(&mut self) {
+        (self.0).fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// PF1 K-6: the preview renderer's demand for the frame being rendered: its
+/// active sources with their demand points, and its generated raster bytes.
+#[derive(Default)]
+struct PreviewDemand {
+    sources: HashMap<VideoSourceKey, Vec<TimeCode>>,
+    generated: usize,
+}
+
+impl PreviewDemand {
+    /// The Sequential window clamp(⌊(C − G) / (n·f)⌋, 1, `PREFETCH_FRAMES` + 1),
+    /// as a prefetch count past the demanded frame.
+    fn prefetch(&self, budget: usize, frame_bytes: usize) -> i64 {
+        if frame_bytes == 0 {
+            return 0;
+        }
+        let per_source = frame_bytes.saturating_mul(self.sources.len().max(1));
+        let window = budget.saturating_sub(self.generated) / per_source;
+        let cap = usize::try_from(PREFETCH_FRAMES + 1).unwrap_or(1);
+        i64::try_from(window.clamp(1, cap) - 1).unwrap_or(0)
+    }
+}
+
+/// PF1 K-6 (re-review nit): the preview demand set aside for a thumbnail,
+/// restored when this drops, on return or while unwinding.
+struct PreviewAside<'a> {
+    renderer: &'a mut FrameRenderer,
+    preview: Option<PreviewDemand>,
+}
+
+impl<'a> PreviewAside<'a> {
+    fn new(renderer: &'a mut FrameRenderer) -> Self {
+        let preview = renderer.preview.take();
+        Self { renderer, preview }
+    }
+}
+
+impl Drop for PreviewAside<'_> {
+    fn drop(&mut self) {
+        self.renderer.preview = self.preview.take();
+    }
 }
 
 /// The single frame-rendering path used by both playback preview and export.
@@ -208,7 +678,16 @@ pub(crate) struct FrameRenderer {
     title_rasterizer: crate::title::TitleRasterizer,
     title_cache: HashMap<TitleCacheKey, WorkingFrame>,
     title_order: VecDeque<TitleCacheKey>,
+    /// K-1: during a scheduled render, the title rasters it used; the
+    /// cache keeps only these after it (the preview accounts for them).
+    used_titles: Option<HashSet<TitleCacheKey>>,
+    /// Generated rasters made (cache misses), for review B S2's witness.
+    #[cfg(test)]
+    pub(crate) rasterized: usize,
     cache_budget: usize,
+    /// PF1 K-6: `Some` for the preview renderer (window cap and eviction by
+    /// distance); `None` keeps today's policy for proofs, export and benches.
+    preview: Option<PreviewDemand>,
     /// CC4 2.4: the verified lattices every `technical_lut` / `creative_look`
     /// node resolves against. Bound by the caller to the asset hashes of the
     /// document it is about to render; the renderer never opens a LUT file for
@@ -223,19 +702,34 @@ pub(crate) struct FrameRenderer {
     /// a document with an active LUT node then fails the render with
     /// `missing_lut_asset` instead of quietly dropping the look.
     lut_library: Arc<LutLibrary>,
+    /// The engine gauge current when this renderer was built, if any.
+    decoders: Option<DecoderGauge>,
 }
 
 impl FrameRenderer {
     pub(crate) fn new(gpu: GpuContext) -> Self {
         Self {
+            decoders: DECODER_GAUGE.with(|gauge| gauge.borrow().clone()),
             video_sources: HashMap::new(),
             source_order: VecDeque::new(),
             compositor: Compositor::new(gpu),
             title_rasterizer: crate::title::TitleRasterizer::new(),
             title_cache: HashMap::new(),
             title_order: VecDeque::new(),
+            used_titles: None,
+            #[cfg(test)]
+            rasterized: 0,
             cache_budget: FRAME_CACHE_BYTE_BUDGET,
+            preview: None,
             lut_library: Arc::new(LutLibrary::default()),
+        }
+    }
+
+    /// PF1 K-6: the playback preview's renderer.
+    pub(crate) fn new_preview(gpu: GpuContext) -> Self {
+        Self {
+            preview: Some(PreviewDemand::default()),
+            ..Self::new(gpu)
         }
     }
 
@@ -253,8 +747,22 @@ impl FrameRenderer {
         self.lut_library = library;
     }
 
+    pub(crate) fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.compositor.set_wake(wake);
+    }
+    pub(crate) fn maintain(&self) {
+        self.compositor.maintain();
+    }
+    pub(crate) fn maintenance_deadline(&self) -> Option<std::time::Instant> {
+        self.compositor.maintenance_deadline()
+    }
+    pub(crate) fn upload_available(&self) -> bool {
+        self.compositor.upload_available()
+    }
+
     pub(crate) fn clear(&mut self) -> CacheStats {
         let stats = self.cache_stats();
+        self.compositor.clear_residency();
         self.video_sources.clear();
         self.source_order.clear();
         self.title_cache.clear();
@@ -325,8 +833,43 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<FrameTexture, MediaError> {
-        let rendered = self.render_timed(document, project_at, resolution, scale, strategy);
+        let purpose = MonitorPurpose::Proof;
+        let rendered =
+            self.render_timed(document, project_at, resolution, (scale, strategy), purpose);
         rendered.map(|(frame, _)| frame)
+    }
+
+    /// PF1 G-1: [`Self::render`] for the live preview monitor, the only
+    /// caller whose encode goes through the exact BT.709 table.
+    pub(crate) fn render_live(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        strategy: DecodeStrategy,
+    ) -> Result<FrameTexture, MediaError> {
+        let purpose = MonitorPurpose::LiveMonitor;
+        let rendered =
+            self.render_timed(document, project_at, resolution, (scale, strategy), purpose);
+        rendered.map(|(frame, _)| frame)
+    }
+
+    /// PF1 K-6 (review B F5): a thumbnail on the preview renderer keeps
+    /// today's policy: it neither rebuilds the preview's demand nor runs its
+    /// window, pins or distance eviction.
+    pub(crate) fn render_thumbnail(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+    ) -> Result<FrameTexture, MediaError> {
+        let aside = PreviewAside::new(self);
+        let strategy = DecodeStrategy::Seek;
+        aside
+            .renderer
+            .render(document, project_at, resolution, scale, strategy)
     }
 
     /// MO2 R28 (ME13): [`Self::render`] and its compositor frame time —
@@ -336,22 +879,142 @@ impl FrameRenderer {
         document: &Document,
         project_at: TimeCode,
         resolution: (u32, u32),
-        scale: RenderScale,
-        strategy: DecodeStrategy,
+        (scale, strategy): (RenderScale, DecodeStrategy),
+        purpose: MonitorPurpose,
     ) -> Result<(FrameTexture, std::time::Duration), MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        self.render_monitor_from(
+            document,
+            project_at,
+            resolution,
+            (scale, Video::Decode(strategy)),
+            purpose,
+        )
+    }
+
+    /// PF1 S2b-1: the live monitor from the readers' frames (C-5: the same
+    /// layers, compositor and encode as [`Self::render_live`]).
+    pub(crate) fn render_scheduled(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        scale: RenderScale,
+        frames: &SuppliedFrames,
+    ) -> Result<FrameTexture, MediaError> {
+        let purpose = MonitorPurpose::LiveMonitor;
+        let video = (scale, Video::Supplied(frames));
+        self.used_titles = Some(HashSet::new());
+        let rendered = self.render_monitor_from(document, project_at, resolution, video, purpose);
+        let used = self.used_titles.take().unwrap_or_default();
+        self.title_cache.retain(|key, _| used.contains(key));
+        self.title_order.retain(|key| used.contains(key));
+        rendered.map(|(frame, _)| frame)
+    }
+
+    /// Amendment R41's witness: the sources a synchronous decoder is open on.
+    #[cfg(test)]
+    pub(crate) fn source_keys(&self) -> Vec<VideoSourceKey> {
+        self.video_sources.keys().cloned().collect()
+    }
+
+    /// H-7: whether a synchronous decoder is open.
+    pub(crate) fn has_sources(&self) -> bool {
+        !self.video_sources.is_empty()
+    }
+
+    /// H-7: close the synchronous decoders and drop their frames (the
+    /// preview parks; G15).
+    pub(crate) fn release_sources(&mut self) {
+        self.video_sources.clear();
+        self.source_order.clear();
+    }
+
+    /// K-1: the bytes of the title rasters cached now.
+    pub(crate) fn title_bytes(&self) -> usize {
+        self.title_cache_bytes()
+    }
+
+    /// R38 D3: each cached generated raster and its bytes.
+    pub(crate) fn title_entries(&self) -> Vec<(TitleCacheKey, usize)> {
+        (self.title_cache.iter())
+            .map(|(key, frame)| (key.clone(), frame.byte_len()))
+            .collect()
+    }
+
+    /// R38 D3: drop these cached rasters (never called under `Sched`).
+    pub(crate) fn drop_titles(&mut self, keys: &HashSet<TitleCacheKey>) {
+        self.title_cache.retain(|key, _| !keys.contains(key));
+        self.title_order.retain(|key| !keys.contains(key));
+    }
+
+    /// K-5: drop the cached title rasters (the preview is draining).
+    pub(crate) fn clear_titles(&mut self) {
+        self.title_cache.clear();
+        self.title_order.clear();
+    }
+
+    fn render_monitor_from(
+        &mut self,
+        document: &Document,
+        project_at: TimeCode,
+        resolution: (u32, u32),
+        (scale, video): (RenderScale, Video<'_>),
+        purpose: MonitorPurpose,
+    ) -> Result<(FrameTexture, std::time::Duration), MediaError> {
+        let decoded_layers = self.decoded_layers(document, project_at, resolution, scale, video)?;
         let started = std::time::Instant::now();
         let layers = compositor_layers(&decoded_layers);
         self.compositor
-            .render_monitor_with_luts(
+            .render_monitor_for(
                 resolution,
                 &layers,
                 &document.color_context.monitoring,
                 Some(&self.lut_library),
+                purpose,
             )
             .map_err(attribute_layer(&decoded_layers, project_at))
             .map(|frame| (frame, started.elapsed()))
+    }
+
+    pub(crate) fn display_gpu(&self) -> GpuContext {
+        self.compositor.display_gpu()
+    }
+
+    pub(crate) fn render_display(
+        &mut self,
+        document: &Document,
+        at: TimeCode,
+        resolution: (u32, u32),
+        (scale, supplied, strategy): (RenderScale, Option<&SuppliedFrames>, DecodeStrategy),
+        (encoder, slot): (
+            &crate::display::DisplayEncoder,
+            &mut crate::display::DisplaySlot,
+        ),
+    ) -> Result<(), MediaError> {
+        let scheduled = supplied.is_some();
+        if scheduled {
+            self.used_titles = Some(HashSet::new());
+        }
+        let video = supplied.map_or(Video::Decode(strategy), Video::Supplied);
+        let result = self
+            .decoded_layers(document, at, resolution, scale, video)
+            .and_then(|decoded| {
+                self.compositor
+                    .render_display(
+                        resolution,
+                        &compositor_layers(&decoded),
+                        Some(&self.lut_library),
+                        encoder,
+                        slot,
+                    )
+                    .map_err(attribute_layer(&decoded, at))
+            });
+        if scheduled {
+            let used = self.used_titles.take().unwrap_or_default();
+            self.title_cache.retain(|key, _| used.contains(key));
+            self.title_order.retain(|key| used.contains(key));
+        }
+        result
     }
 
     /// MO2 R28 (ME13): hold decoded sources resident for compositor frames.
@@ -378,8 +1041,13 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<DeliveryFrame, MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let decoded_layers = self.decoded_layers(
+            document,
+            project_at,
+            resolution,
+            scale,
+            Video::Decode(strategy),
+        )?;
         let layers = compositor_layers(&decoded_layers);
         self.compositor
             .render_delivery_with_luts(
@@ -412,8 +1080,13 @@ impl FrameRenderer {
         scale: RenderScale,
         strategy: DecodeStrategy,
     ) -> Result<LinearRgbaImage, MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let decoded_layers = self.decoded_layers(
+            document,
+            project_at,
+            resolution,
+            scale,
+            Video::Decode(strategy),
+        )?;
         let layers = compositor_layers(&decoded_layers);
         self.compositor
             .render_working_with_luts(resolution, &layers, Some(&self.lut_library))
@@ -447,8 +1120,13 @@ impl FrameRenderer {
         clip: ClipId,
         effect: EffectId,
     ) -> Result<MatteCoverage, MediaError> {
-        let decoded_layers =
-            self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+        let decoded_layers = self.decoded_layers(
+            document,
+            project_at,
+            resolution,
+            scale,
+            Video::Decode(strategy),
+        )?;
         let layer_index = decoded_layers
             .iter()
             .position(|layer| layer.clip == clip)
@@ -486,7 +1164,7 @@ impl FrameRenderer {
         project_at: TimeCode,
         resolution: (u32, u32),
         scale: RenderScale,
-        strategy: DecodeStrategy,
+        video: Video<'_>,
     ) -> Result<Vec<DecodedLayer>, MediaError> {
         validate_managed_context(document)?;
         // MO2 R8 (review-1 B1): every render root refuses an invalid
@@ -495,6 +1173,9 @@ impl FrameRenderer {
             .validate()
             .map_err(|error| MediaError::InvalidDocument(Box::new(error)))?;
         let layer_specs = visual_layers_at(document, project_at)?;
+        if let Video::Decode(_) = video {
+            self.set_demand(document, &layer_specs, resolution, scale);
+        }
         let mut decoded_layers = Vec::with_capacity(layer_specs.len());
         for layer in layer_specs {
             match layer {
@@ -505,19 +1186,33 @@ impl FrameRenderer {
                             layer.source.asset
                         ))
                     })?;
-                    let frame = self.decode_video_frame(
-                        asset.id,
-                        &asset.path,
-                        asset.fps,
-                        asset.resolution,
-                        layer.source.source_at,
-                        layer.source.source_end,
-                        scale,
-                        strategy,
-                        &asset.source_fingerprint,
-                        &asset.color_description,
-                    )?;
+                    let frame = match video {
+                        Video::Decode(strategy) => self.decode_video_frame(
+                            asset.id,
+                            &asset.path,
+                            asset.fps,
+                            asset.resolution,
+                            layer.source.source_at,
+                            layer.source.source_end,
+                            scale,
+                            strategy,
+                            &asset.source_fingerprint,
+                            &asset.color_description,
+                        )?,
+                        Video::Supplied(frames) => {
+                            let at = layer.source.source_at;
+                            let key = (source_key(asset, scale), at.0);
+                            frames
+                                .get(&key)
+                                .cloned()
+                                .unwrap_or_else(|| Err(no_frame(asset.id, at)))?
+                        }
+                    };
                     decoded_layers.push(DecodedLayer {
+                        identity: Some((
+                            ResidentContent::Video(Arc::new(source_key(asset, scale))),
+                            layer.source.source_at,
+                        )),
                         clip: layer.source.clip,
                         frame,
                         effects: layer.effects,
@@ -528,6 +1223,10 @@ impl FrameRenderer {
                 TimelineVisualLayer::Title(layer) => {
                     let content = Generated::Title(layer.title);
                     decoded_layers.push(DecodedLayer {
+                        identity: Some((
+                            ResidentContent::Generated((layer.clip, resolution, content.clone())),
+                            TimeCode::ZERO,
+                        )),
                         clip: layer.clip,
                         frame: self.generated_frame(layer.clip, resolution, content)?,
                         effects: layer.effects,
@@ -538,6 +1237,10 @@ impl FrameRenderer {
                 TimelineVisualLayer::Solid(layer) => {
                     let content = Generated::Solid([layer.color.r, layer.color.g, layer.color.b]);
                     decoded_layers.push(DecodedLayer {
+                        identity: Some((
+                            ResidentContent::Generated((layer.clip, resolution, content.clone())),
+                            TimeCode::ZERO,
+                        )),
                         clip: layer.clip,
                         frame: self.generated_frame(layer.clip, resolution, content)?,
                         effects: layer.effects,
@@ -548,12 +1251,9 @@ impl FrameRenderer {
                 // MO2 R18: the compositor ignores an adjustment's frame and
                 // samples the composite below it instead.
                 TimelineVisualLayer::Adjustment(layer) => decoded_layers.push(DecodedLayer {
+                    identity: None,
                     clip: layer.clip,
-                    frame: WorkingFrame::from_display_frame(&FrameTexture {
-                        width: 1,
-                        height: 1,
-                        rgba: Arc::new(vec![0; 4]),
-                    })?,
+                    frame: ADJUSTMENT_FRAME.clone(),
                     effects: layer.effects,
                     transition: layer.transition,
                     mode: LayerMode {
@@ -575,6 +1275,9 @@ impl FrameRenderer {
         content: Generated,
     ) -> Result<WorkingFrame, MediaError> {
         let key = (clip, resolution, content);
+        if let Some(used) = &mut self.used_titles {
+            used.insert(key.clone());
+        }
         if let Some(frame) = self.title_cache.get(&key).cloned() {
             self.touch_title(key);
             return Ok(frame);
@@ -588,6 +1291,10 @@ impl FrameRenderer {
             },
         };
         let frame = WorkingFrame::from_display_frame(&display_frame)?;
+        #[cfg(test)]
+        {
+            self.rasterized += 1;
+        }
         self.cache_title_frame(key, frame.clone());
         Ok(frame)
     }
@@ -619,19 +1326,27 @@ impl FrameRenderer {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.video_sources.entry(key.clone())
         {
-            let decoder = VideoDecoder::open_scaled_managed(
+            let threads = crate::decode::default_threads();
+            let decoder = open_managed(
+                asset,
                 path,
                 fps,
                 key.max_width,
                 description,
-                assumption,
-            )
-            .map_err(|error| {
-                contextual_managed_decode_error(asset, path, description, assumption, error)
-            })?;
+                (threads, None),
+            )?;
+            let mut cache = FrameCache::new(FRAME_CACHE_CAPACITY);
+            let demand = self
+                .preview
+                .as_ref()
+                .and_then(|demand| demand.sources.get(&key));
+            if let Some(points) = demand {
+                cache.set_demand(points);
+            }
             entry.insert(VideoSource {
                 decoder,
-                cache: FrameCache::new(FRAME_CACHE_CAPACITY),
+                cache,
+                _counted: self.decoders.as_ref().map(DecoderGauge::hold),
             });
         }
 
@@ -645,7 +1360,10 @@ impl FrameRenderer {
                 .map_or(0, working_bytes);
             let prefetch = match strategy {
                 DecodeStrategy::Seek => 0,
-                DecodeStrategy::Sequential => prefetch_frames(frame_bytes),
+                DecodeStrategy::Sequential => match &self.preview {
+                    Some(demand) => demand.prefetch(self.cache_budget, frame_bytes),
+                    None => prefetch_frames(frame_bytes),
+                },
             };
             let end = TimeCode(
                 source_at
@@ -656,7 +1374,7 @@ impl FrameRenderer {
             let window_frames =
                 usize::try_from(end.0.saturating_sub(source_at.0).saturating_add(1))
                     .unwrap_or(usize::MAX);
-            self.reserve_cache_bytes(frame_bytes.saturating_mul(window_frames));
+            self.reserve_for(frame_bytes.saturating_mul(window_frames), Some(&key));
             let source = self
                 .video_sources
                 .get_mut(&key)
@@ -683,14 +1401,56 @@ impl FrameRenderer {
                     .cache
                     .frame_at_or_before_bounded(source_at, self.cache_budget)
             })
-            .ok_or_else(|| {
-                MediaError::Backend(format!(
-                    "no video frame decoded for asset {asset} at {source_at}"
-                ))
-            })?;
-        self.touch_source(key);
-        self.reserve_cache_bytes(0);
+            .ok_or_else(|| no_frame(asset, source_at))?;
+        self.touch_source(key.clone());
+        self.reserve_for(0, Some(&key));
         Ok(frame)
+    }
+
+    /// PF1 K-6: the preview's demand for this frame (its active sources with
+    /// their demand points, and its generated raster bytes), handed to the
+    /// source caches as pins; outside the preview every cache pins nothing.
+    fn set_demand(
+        &mut self,
+        document: &Document,
+        layer_specs: &[TimelineVisualLayer],
+        resolution: (u32, u32),
+        scale: RenderScale,
+    ) {
+        if let Some(demand) = &mut self.preview {
+            *demand = PreviewDemand::default();
+            for layer in layer_specs {
+                match layer {
+                    TimelineVisualLayer::Video(layer) => {
+                        let Some(asset) = document.asset(layer.source.asset) else {
+                            continue;
+                        };
+                        let key = source_key(asset, scale);
+                        let points = demand.sources.entry(key).or_default();
+                        points.push(layer.source.source_at);
+                    }
+                    TimelineVisualLayer::Title(_) | TimelineVisualLayer::Solid(_) => {
+                        demand.generated += working_bytes(resolution);
+                    }
+                    TimelineVisualLayer::Adjustment(_) => {}
+                }
+            }
+        }
+        self.pin_demand();
+    }
+
+    /// PF1 K-5/K-6: hand each source cache this render's demand points, so
+    /// the frames they show are pinned and eviction knows the travel; a
+    /// source with no demand, and every source outside the preview, pins
+    /// nothing.
+    fn pin_demand(&mut self) {
+        let demand = self.preview.as_ref().map(|demand| &demand.sources);
+        for (key, source) in &mut self.video_sources {
+            match demand.and_then(|sources| sources.get(key)) {
+                Some(points) => source.cache.set_demand(points),
+                None => source.cache.clear_demand(),
+            }
+        }
     }
 
     fn touch_source(&mut self, key: VideoSourceKey) {
@@ -739,12 +1499,49 @@ impl FrameRenderer {
     }
 
     fn reserve_cache_bytes(&mut self, incoming: usize) {
+        self.reserve_for(incoming, None);
+    }
+
+    /// Make room for `incoming` bytes that `requesting` is about to decode.
+    fn reserve_for(&mut self, incoming: usize, requesting: Option<&VideoSourceKey>) {
         while self.total_cache_bytes().saturating_add(incoming) > self.cache_budget {
-            if self.evict_oldest_video_frame() || self.evict_oldest_title_frame() {
+            if self.evict_video_frame(incoming, requesting) || self.evict_oldest_title_frame() {
                 continue;
             }
             break;
         }
+    }
+
+    /// Today's round-robin eviction, or (K-6, preview) inactive sources
+    /// first, then the sources over their share, farthest frame first.
+    fn evict_video_frame(&mut self, incoming: usize, requesting: Option<&VideoSourceKey>) -> bool {
+        let Some(demand) = &self.preview else {
+            return self.evict_oldest_video_frame();
+        };
+        let inactive = self
+            .video_sources
+            .iter_mut()
+            .find(|(key, source)| !demand.sources.contains_key(*key) && source.cache.len() > 0);
+        if let Some((_, source)) = inactive {
+            return source.cache.evict_oldest();
+        }
+        let share =
+            self.cache_budget.saturating_sub(demand.generated) / demand.sources.len().max(1);
+        let mut over = demand
+            .sources
+            .keys()
+            .filter_map(|key| {
+                let held = self.video_sources.get(key)?.cache.byte_len();
+                let bytes = held.saturating_add(if requesting == Some(key) { incoming } else { 0 });
+                (bytes > share).then_some((bytes, key))
+            })
+            .collect::<Vec<_>>();
+        over.sort_by_key(|(bytes, _)| std::cmp::Reverse(*bytes));
+        over.into_iter().any(|(_, key)| {
+            self.video_sources
+                .get_mut(key)
+                .is_some_and(|source| source.cache.evict_farthest())
+        })
     }
 
     fn evict_oldest_video_frame(&mut self) -> bool {
@@ -859,11 +1656,11 @@ fn validate_managed_context(document: &Document) -> Result<(), MediaError> {
 }
 
 /// Borrow the staged layers as compositor layers, preserving z-order.
-fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, WorkingFrame>> {
+fn compositor_layers(layers: &[DecodedLayer]) -> Vec<CompositorLayer<'_, DecodedLayer>> {
     layers
         .iter()
         .map(|layer| CompositorLayer {
-            frame: &layer.frame,
+            frame: layer,
             effects: &layer.effects,
             transition: layer.transition,
             mode: layer.mode,
@@ -931,7 +1728,7 @@ mod tests {
     use half::f16;
     use kinewright_core::{
         Analysis, AssetId, Clip, ClipContent, ColorPipelineState, ColorTransfer, EffectId,
-        LutAssetId, ParamValue, Track, TrackId, TrackKind,
+        LutAssetId, MediaAsset, ParamValue, Track, TrackId, TrackKind,
     };
 
     use super::*;
@@ -942,6 +1739,166 @@ mod tests {
         lut_store::LutStore,
         test_support::{GeneratedMedia, TempDirectory, single_clip_document},
     };
+
+    #[test]
+    fn s3b_u2_second_paused_upload_moves_zero_bytes() {
+        let mut renderer = test_renderer().expect("actual GPU required");
+        let document = title_document(vec![]);
+        let draw = |renderer: &mut FrameRenderer| {
+            renderer
+                .render_live(
+                    &document,
+                    TimeCode::ZERO,
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    DecodeStrategy::Seek,
+                )
+                .unwrap()
+        };
+        let (first, first_bytes) =
+            crate::compositor::s3b_tests::uploaded_bytes(|| draw(&mut renderer));
+        let (second, second_bytes) =
+            crate::compositor::s3b_tests::uploaded_bytes(|| draw(&mut renderer));
+        assert_eq!(*first.rgba, *second.rgba, "native working input parity");
+        assert_eq!(first_bytes, 320 * 180 * 8, "real first submitted upload");
+        assert_eq!(second_bytes, 0, "same paused CPU allocation is resident");
+    }
+
+    #[test]
+    fn s3b_u2_semantic_key_uses_the_production_source_and_title_identity() {
+        let frame = WorkingFrame {
+            width: 1,
+            height: 1,
+            pixels: Arc::new(vec![f16::from_f32(0.5); 4]),
+        };
+        let source = VideoSourceKey::new(
+            AssetId(1),
+            Path::new("old.mkv"),
+            &MediaSourceFingerprint {
+                content_sha256: Some("a".repeat(64)),
+                byte_len: Some(7),
+            },
+            Rational::new(30, 1).unwrap(),
+            &ColorDescription::unknown(),
+            None,
+            Some(640),
+        );
+        let make = |content| {
+            DecodedLayer {
+                identity: Some((content, TimeCode(3))),
+                clip: ClipId(1),
+                frame: frame.clone(),
+                effects: vec![],
+                transition: TransitionRenderParams::default(),
+                mode: LayerMode::NORMAL,
+            }
+            .residency()
+            .unwrap()
+            .0
+        };
+        let key = make(ResidentContent::Video(Arc::new(source.clone())));
+        let mut variants = vec![];
+        let mut changed = source.clone();
+        changed.asset = AssetId(2);
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.path = "relinked.mkv".into();
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.fingerprint = (&MediaSourceFingerprint {
+            content_sha256: Some("b".repeat(64)),
+            byte_len: Some(8),
+        })
+            .into();
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.description = (&ColorDescription {
+            transfer: ColorTransfer::Srgb,
+            ..ColorDescription::unknown()
+        })
+            .into();
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.assumption = Some(ColorSourceProfileAssumption::D65);
+        variants.push(changed);
+        let mut changed = source.clone();
+        changed.fps = Rational::new(24, 1).unwrap();
+        variants.push(changed);
+        let mut changed = source;
+        changed.max_width = Some(1280);
+        variants.push(changed);
+        for source in variants {
+            assert_ne!(
+                key,
+                make(ResidentContent::Video(Arc::new(source))),
+                "same allocation, changed source input"
+            );
+        }
+        let original = make(ResidentContent::Generated((
+            ClipId(1),
+            (1, 1),
+            Generated::Title(Title::default()),
+        )));
+        let changed = make(ResidentContent::Generated((
+            ClipId(1),
+            (1, 1),
+            Generated::Title(Title {
+                text: "changed".into(),
+                ..Title::default()
+            }),
+        )));
+        assert_ne!(
+            original, changed,
+            "same allocation, same clip, changed title"
+        );
+    }
+
+    #[test]
+    fn s3b_u2_document_replacement_with_reused_ids_clears_eligibility() {
+        let mut renderer = test_renderer().expect("actual GPU required");
+        let document = title_document(vec![]);
+        let first = renderer
+            .render_live(
+                &document,
+                TimeCode::ZERO,
+                document.resolution,
+                RenderScale::FullResolution,
+                DecodeStrategy::Seek,
+            )
+            .unwrap();
+        assert_eq!(
+            crate::compositor::s3b_tests::residents(&renderer.compositor).0,
+            1
+        );
+        renderer.clear();
+        assert_eq!(
+            crate::compositor::s3b_tests::residents(&renderer.compositor).0,
+            0,
+            "new document never inherits eligibility"
+        );
+        let (second, bytes) = crate::compositor::s3b_tests::uploaded_bytes(|| {
+            renderer
+                .render_live(
+                    &document,
+                    TimeCode::ZERO,
+                    document.resolution,
+                    RenderScale::FullResolution,
+                    DecodeStrategy::Seek,
+                )
+                .unwrap()
+        });
+        assert_eq!(*first.rgba, *second.rgba);
+        assert_eq!(bytes, 320 * 180 * 8, "reused IDs upload the new allocation");
+    }
+
+    impl FrameRenderer {
+        pub(crate) fn s3b_park_maps(&self) -> Vec<crate::compositor::s3b_tests::Deferred> {
+            crate::compositor::s3b_tests::parked_maps(&self.compositor)
+        }
+        pub(crate) fn s3b_residents(&self) -> (usize, u64, Vec<std::sync::Weak<Vec<f16>>>) {
+            crate::compositor::s3b_tests::residents(&self.compositor)
+        }
+    }
 
     fn test_renderer() -> Option<FrameRenderer> {
         Some(FrameRenderer::new(fixture_gpu_or_skip()?))
@@ -956,7 +1913,13 @@ mod tests {
             resolution: (u32, u32),
         ) -> Result<LinearRgbaImage, MediaError> {
             let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);
-            let decoded = self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+            let decoded = self.decoded_layers(
+                document,
+                project_at,
+                resolution,
+                scale,
+                Video::Decode(strategy),
+            )?;
             let layers = compositor_layers(&decoded);
             crate::compositor::twin::render_working(resolution, &layers, Some(&self.lut_library))
                 .map_err(attribute_layer(&decoded, project_at))
@@ -970,7 +1933,13 @@ mod tests {
             resolution: (u32, u32),
         ) -> Result<Vec<f32>, MediaError> {
             let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);
-            let decoded = self.decoded_layers(document, project_at, resolution, scale, strategy)?;
+            let decoded = self.decoded_layers(
+                document,
+                project_at,
+                resolution,
+                scale,
+                Video::Decode(strategy),
+            )?;
             let layers = compositor_layers(&decoded);
             let library = Some(&*self.lut_library);
             crate::compositor::twin::subtexel_envelope(resolution, &layers, library)
@@ -1660,6 +2629,241 @@ mod tests {
                 .all(|p| p == [0.0, 0.0, 0.0, 1.0])
         );
     }
+
+    /// Three video tracks showing one source at once, from source frames 0,
+    /// 100 and 200: one source cache, three demand points.
+    fn three_demands_on_one_source(asset: MediaAsset) -> Document {
+        let mut document = single_clip_document(asset);
+        let track = document.tracks[0].clone();
+        document.tracks.clear();
+        for (index, start) in [0_i64, 100, 200].into_iter().enumerate() {
+            let mut track = track.clone();
+            let id = u64::try_from(index).expect("small") + 1;
+            (track.id, track.clips[0].id) = (TrackId(id), ClipId(id));
+            track.clips[0].source_range = TimeCode(start)..TimeCode(start + 40);
+            document.tracks.push(track);
+        }
+        document.duration = TimeCode(40);
+        document
+    }
+
+    /// The frames of the one source cache, and its charged bytes.
+    fn resident(renderer: &FrameRenderer, frames: &[i64]) -> (Vec<i64>, usize) {
+        let [source] = renderer.video_sources.values().collect::<Vec<_>>()[..] else {
+            panic!("one source cache");
+        };
+        let held = frames.iter().copied();
+        let held = held
+            .filter(|at| source.cache.contains(TimeCode(*at)))
+            .collect();
+        (held, source.cache.byte_len())
+    }
+
+    /// PF1 K-5 (review B F3): three demand windows on one source overflow
+    /// its 32-entry ring; capacity eviction must keep every frame the render
+    /// shows resident and charged, the first window's frame 0 included.
+    #[test]
+    fn capacity_eviction_keeps_every_shown_frame_of_one_source() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_media, asset) = small_source("pf1-pins", "testsrc2", 1, 8);
+        let document = three_demands_on_one_source(asset);
+        let frame = working_bytes((64, 36));
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        renderer.set_cache_budget(64 * frame);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let strategy = DecodeStrategy::Sequential;
+        let shown = renderer.render_live(&document, TimeCode(0), (64, 36), scale, strategy);
+        shown.expect("a frame renders");
+        let (held, bytes) = resident(&renderer, &[0, 100, 200]);
+        assert_eq!(held, [0, 100, 200], "every shown frame is resident");
+        let source = renderer.video_sources.values().next().expect("one source");
+        assert!(
+            source.cache.eviction_count() > 0,
+            "the windows overflowed the ring"
+        );
+        assert_eq!(source.cache.len(), FRAME_CACHE_CAPACITY);
+        // Charged once per distinct allocation (grid frames share one), the
+        // three shown frames among them, within the budget.
+        let charged = 3 * frame..=64 * frame;
+        assert!(charged.contains(&bytes), "the shown frames are charged");
+    }
+
+    /// PF1 K-6 (review B S2): the preview's overshoot is bounded by demand
+    /// points, not sources: with a one-frame budget and three points on one
+    /// source, the three shown frames stay, live = max(C, P·f) = 3f.
+    #[test]
+    fn overshoot_is_bounded_by_the_demand_points() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_media, asset) = small_source("pf1-overshoot", "testsrc2", 1, 8);
+        let document = three_demands_on_one_source(asset);
+        let frame = working_bytes((64, 36));
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        renderer.set_cache_budget(frame);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        for at in [0, 1, 2] {
+            let strategy = DecodeStrategy::Sequential;
+            let composed = renderer.render_live(&document, TimeCode(at), (64, 36), scale, strategy);
+            composed.expect("a frame renders");
+            let shown = [at, 100 + at, 200 + at];
+            let (held, bytes) = resident(&renderer, &shown);
+            assert_eq!(held, shown, "the shown frames stay");
+            assert_eq!(renderer.total_cache_bytes(), bytes);
+            assert_eq!(bytes, 3 * frame, "live = max(C, P·f) with P = 3");
+        }
+    }
+
+    /// PF1 K-6 (re-review D4): documents S1's bound across sources, not a
+    /// fix. C = 4f; source A demands 0/100/200 (three pins), B demands 0.
+    /// Each share is 2f: A cannot evict a pin and B, at exactly its share,
+    /// is not over it, so 5f stay resident: over C and over max(C, P·f) =
+    /// 4f, and equal to the sum over sources of max(share, pinned) =
+    /// 3f + 2f. S2b-3's I12 must close this.
+    #[test]
+    fn mixed_sources_hold_their_shares_and_pins_over_the_budget() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_a, a) = small_source("pf1-mixed-a", "testsrc2", 1, 8);
+        let (_b, b) = small_source("pf1-mixed-b", "smptebars", 2, 8);
+        let mut document = three_demands_on_one_source(a);
+        let mut track = document.tracks[0].clone();
+        (track.id, track.clips[0].id, track.clips[0].asset) = (TrackId(4), ClipId(4), b.id);
+        track.clips[0].source_range = TimeCode(0)..TimeCode(40);
+        document.tracks.push(track);
+        document.media_pool.push(b);
+        let frame = working_bytes((64, 36));
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        renderer.set_cache_budget(4 * frame);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let strategy = DecodeStrategy::Sequential;
+        let shown = renderer.render_live(&document, TimeCode(0), (64, 36), scale, strategy);
+        shown.expect("a frame renders");
+        let mut held = renderer
+            .video_sources
+            .values()
+            .map(|source| source.cache.byte_len() / frame)
+            .collect::<Vec<_>>();
+        held.sort_unstable();
+        assert_eq!(held, [2, 3], "B its 2f share, A its three pins");
+        assert_eq!(renderer.total_cache_bytes(), 5 * frame);
+    }
+
+    /// A 64×36 ffv1 BT.709 source of `seconds` at 30 fps.
+    fn small_source(
+        label: &str,
+        filter: &str,
+        id: u64,
+        seconds: u32,
+    ) -> (GeneratedMedia, MediaAsset) {
+        let filter = format!("{filter}=size=64x36:rate=30:duration={seconds}");
+        let args = [
+            "-f", "lavfi", "-i", &filter, "-c:v", "ffv1", "-pix_fmt", "yuv420p",
+        ];
+        let media = GeneratedMedia::ffmpeg(label, &args, "mkv");
+        let mut asset = probe_path(media.path(), AssetId(id)).expect("source probes");
+        asset.color_description = ColorDescription {
+            primaries: ColorPrimaries::Bt709,
+            transfer: ColorTransfer::Bt709,
+            matrix: kinewright_core::ColorMatrix::Bt709,
+            range: kinewright_core::ColorRange::Limited,
+            white_point: kinewright_core::ColorWhitePoint::D65,
+            bit_depth: kinewright_core::ColorBitDepth::Eight,
+            confidence_basis_points: 10_000,
+            provenance: kinewright_core::ColorProvenance::UserOverride,
+        };
+        (media, asset)
+    }
+
+    /// PF1 K-6 (review B F5): a thumbnail on the preview renderer keeps
+    /// today's policy: the preview's demand is not rebuilt by it.
+    #[test]
+    fn a_thumbnail_leaves_the_preview_demand_alone() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_media, asset) = small_source("pf1-thumb", "testsrc2", 1, 2);
+        let document = single_clip_document(asset);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let mut renderer = FrameRenderer::new_preview(gpu);
+        let strategy = DecodeStrategy::Sequential;
+        let live = renderer.render_live(&document, TimeCode(5), (64, 36), scale, strategy);
+        live.expect("a preview frame");
+        let demand = |renderer: &FrameRenderer| {
+            let demand = renderer.preview.as_ref().expect("the preview renderer");
+            (demand.sources.clone(), demand.generated)
+        };
+        let before = demand(&renderer);
+        assert_eq!(before.0.values().collect::<Vec<_>>(), [&[TimeCode(5)]]);
+        let thumbnail = renderer.render_thumbnail(&document, TimeCode(40), (64, 36), scale);
+        thumbnail.expect("a thumbnail");
+        assert_eq!(demand(&renderer), before);
+
+        // An error return restores the demand too (re-review nit).
+        let mut missing = document.clone();
+        missing.media_pool[0].path = "/nonexistent/pf1-thumbnail.mkv".into();
+        let failed = renderer.render_thumbnail(&missing, TimeCode(40), (64, 36), scale);
+        assert!(failed.is_err(), "the source is missing");
+        assert_eq!(demand(&renderer), before, "restored after an error");
+
+        // And so does unwinding: the restoration is scoped.
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let aside = PreviewAside::new(&mut renderer);
+            assert!(aside.renderer.preview.is_none(), "set aside");
+            panic!("a thumbnail render unwinds");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(demand(&renderer), before, "restored while unwinding");
+    }
+
+    /// PF1 G5 (K-6): two continuous sources under a binding budget decode
+    /// with 0 seeks after warm-up on the preview renderer; today's policy
+    /// thrashes on the same budget (the control).
+    #[test]
+    fn preview_window_plays_two_continuous_sources_without_seeking() {
+        initialize_ffmpeg().expect("FFmpeg should initialize");
+        let Some(gpu) = fixture_gpu_or_skip() else {
+            return;
+        };
+        let (_a, lower) = small_source("pf1-g5-a", "testsrc2", 1, 2);
+        let (_b, upper) = small_source("pf1-g5-b", "smptebars", 2, 2);
+        let mut document = single_clip_document(lower);
+        let mut track = document.tracks[0].clone();
+        (track.id, track.clips[0].id, track.clips[0].asset) = (TrackId(2), ClipId(2), upper.id);
+        document.tracks.push(track);
+        document.media_pool.push(upper);
+        let scale = RenderScale::Proxy { max_width: 1280 };
+        let seeks_after_warm_up = |mut renderer: FrameRenderer| {
+            renderer.set_cache_budget(12 * working_bytes((64, 36)));
+            let mut warm = 0;
+            for at in 0..60 {
+                let strategy = DecodeStrategy::Sequential;
+                let frame = renderer.render(&document, TimeCode(at), (64, 36), scale, strategy);
+                frame.expect("frame renders");
+                warm = if at == 0 {
+                    renderer.video_seek_count()
+                } else {
+                    warm
+                };
+            }
+            renderer.video_seek_count() - warm
+        };
+        assert_eq!(
+            seeks_after_warm_up(FrameRenderer::new_preview(gpu.clone())),
+            0
+        );
+        assert!(
+            seeks_after_warm_up(FrameRenderer::new(gpu)) > 0,
+            "the control"
+        );
+    }
 }
 
 /// MO2 R28 (ME14): a resident compositor frame's phases.
@@ -1679,7 +2883,13 @@ pub(crate) mod phases {
         scale: RenderScale,
     ) -> Result<([Duration; 3], Duration), MediaError> {
         let strategy = DecodeStrategy::Sequential;
-        let decoded = renderer.decoded_layers(document, at, resolution, scale, strategy)?;
+        let decoded = renderer.decoded_layers(
+            document,
+            at,
+            resolution,
+            scale,
+            super::Video::Decode(strategy),
+        )?;
         crate::compositor::phases::monitor(
             &renderer.compositor,
             resolution,
@@ -1687,5 +2897,76 @@ pub(crate) mod phases {
             &document.color_context.monitoring,
             Some(&renderer.lut_library),
         )
+    }
+}
+
+/// K-1 (review B F2): what a render allocates against what admission
+/// reserved for it.
+#[cfg(test)]
+mod k1_allocation {
+    use kinewright_core::{BlendMode, ClipContent, SolidColor, Track, TrackId, TrackKind};
+
+    use super::*;
+    use crate::{cc1_fixtures::fallback_gpu, engine::monitor_max_width, frame::CachedFrame};
+
+    /// A solid, a title and two adjustments allocate exactly G, the
+    /// generated bytes `reader_demand` reserves; the adjustments share one
+    /// process-wide frame with no pixel buffer (R38 D4: every layer's frame
+    /// is counted, none filtered out).
+    #[test]
+    fn a_render_allocates_exactly_its_generated_reservation() {
+        let clip = |id: u64, content| {
+            crate::mo2_fixtures::clip(id, content, BlendMode::Normal, Vec::new())
+        };
+        let solid = ClipContent::Solid(SolidColor { r: 1, g: 2, b: 3 });
+        let title = ClipContent::Title(Title {
+            text: "K-1".to_owned(),
+            ..Title::default()
+        });
+        let clips = [
+            clip(1, solid),
+            clip(2, ClipContent::Adjustment),
+            clip(3, title),
+            clip(4, ClipContent::Adjustment),
+        ];
+        let document = Document {
+            resolution: (160, 88),
+            duration: TimeCode(9),
+            tracks: (1..)
+                .zip(clips)
+                .map(|(id, clip)| Track {
+                    id: TrackId(id),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![clip],
+                })
+                .collect(),
+            ..Document::default()
+        };
+        document.validate().expect("valid");
+        let scale = RenderScale::Proxy {
+            max_width: monitor_max_width(document.resolution),
+        };
+        let resolution = scale.output_resolution(document.resolution);
+        let sizes = &mut FrameSizes::default();
+        let demand = reader_demand(&document, TimeCode(0), resolution, scale, 0, sizes);
+        let demand = demand.expect("the demand");
+        let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let supplied = SuppliedFrames::new();
+        let video = Video::Supplied(&supplied);
+        let layers = (renderer.decoded_layers(&document, TimeCode(0), resolution, scale, video))
+            .expect("the layers");
+        assert_eq!(layers.len(), 4);
+        let adjustments = (layers.iter())
+            .filter(|layer| layer.mode.role == LayerRole::Adjustment)
+            .map(|layer| layer.frame.pixels.capacity());
+        assert_eq!(adjustments.collect::<Vec<_>>(), [0, 0], "no pixel buffer");
+        let mut seen = HashSet::new();
+        let allocated: usize = (layers.iter().map(|layer| &layer.frame))
+            .filter(|frame| seen.insert(frame.shared_buffer_id()))
+            .map(CachedFrame::byte_len)
+            .sum();
+        assert_eq!(allocated, demand.generated, "allocated = reserved G");
+        assert_eq!(demand.generated, 2 * working_bytes(resolution));
     }
 }

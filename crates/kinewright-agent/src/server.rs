@@ -17,6 +17,7 @@ use base64::{
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD},
 };
 use image::{ColorType, ImageEncoder as _, codecs::png::PngEncoder};
+use kinewright_core::{AgentCancel, RecordProposalError, truncate_to_serialized_bytes};
 use kinewright_core::{
     AgentEvent, Analysis, AnalysisKind, AssetId, AssetSilences, AssetTranscript, AudioBus,
     AudioBusId, AudioLoudness, AutomationCurve, BeatMontageCadenceContract, BeatMontageSelect,
@@ -44,7 +45,6 @@ use kinewright_core::{
     plan_speaker_multicam, plan_subject_reframe_basis_points_with_containment, qa_document,
     validate_beat_montage_plan_cadence,
 };
-use kinewright_core::{RecordProposalError, truncate_to_serialized_bytes};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
     model::{
@@ -11876,24 +11876,57 @@ impl ServerHandler for KinewrightMcp {
             .then(|| request.arguments.as_ref()?.get("name")?.as_str())
             .flatten()
             == Some("preview_solo");
+        // PF1 R-4 (review B F2): the client's cancellation reaches the media
+        // requests the blocking handler makes (`cancellable_blocking`).
+        let ct = context.ct.clone();
         async move {
+            let handler = move || service.call_exposed_blocking(request);
+            let joined = cancellable_blocking(ct.cancelled(), handler).await;
             // A panicked or cancelled handler becomes fixed text: its payload
             // may be unbounded or carry paths, and it still crosses ME4's
             // choke point below.
-            let reply = tokio::task::spawn_blocking(move || service.call_exposed_blocking(request))
-                .await
-                .unwrap_or_else(|_| {
-                    Err(McpError::internal_error(
-                        "tool call failed: handler panicked",
-                        None,
-                    ))
-                });
+            let reply = joined.unwrap_or_else(|_| {
+                Err(McpError::internal_error(
+                    "tool call failed: handler panicked",
+                    None,
+                ))
+            });
             let reply = if solo {
                 bound_solo_reply(context.id, reply)
             } else {
                 reply
             };
             reply.map(Into::into)
+        }
+    }
+}
+
+/// PF1 R-4 (review B F2): run a blocking tool handler with an
+/// [`AgentCancel`] token current on its thread, cancelled when `cancelled`
+/// completes (rmcp's `ct` on `notifications/cancelled`, after which rmcp
+/// keeps polling this future for the handler's reply) or when the future is
+/// dropped unfinished (abandoned). Either way the handler's waiting media
+/// requests stop and their queued jobs are discarded.
+async fn cancellable_blocking<T: Send + 'static>(
+    cancelled: impl Future<Output = ()>,
+    handler: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    struct CancelOnExit(AgentCancel);
+    impl Drop for CancelOnExit {
+        fn drop(&mut self) {
+            self.0.cancel();
+        }
+    }
+    let cancel = AgentCancel::default();
+    let _exit = CancelOnExit(cancel.clone());
+    let scoped = cancel.clone();
+    let task = tokio::task::spawn_blocking(move || scoped.scope(handler));
+    tokio::pin!(task);
+    tokio::select! {
+        joined = &mut task => joined,
+        () = cancelled => {
+            cancel.cancel();
+            task.await
         }
     }
 }
@@ -14091,6 +14124,63 @@ fn bound_solo_reply(
         }) => Ok(result),
         JsonRpcMessage::Error(JsonRpcError { error, .. }) => Err(error),
         _ => unreachable!("built above as a tool result or an error"),
+    }
+}
+
+#[cfg(test)]
+mod cancel_tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// A handler that hands out its current token, then waits (≤ 10 s) for
+    /// it to be cancelled; returns whether it was.
+    fn waiting_handler(
+        tokens: std::sync::mpsc::Sender<AgentCancel>,
+    ) -> impl FnOnce() -> bool + Send + 'static {
+        move || {
+            let token = AgentCancel::current().expect("a current token");
+            tokens.send(token.clone()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !token.is_cancelled() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            token.is_cancelled()
+        }
+    }
+
+    /// Re-review B nit: the call's future abandoned (dropped unfinished,
+    /// as when the transport drops the request) cancels the token its
+    /// blocking handler runs under.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_abandoned_call_cancels_its_handler() {
+        let (tokens, token) = std::sync::mpsc::channel();
+        let call = cancellable_blocking(std::future::pending(), waiting_handler(tokens));
+        let abandoned = tokio::time::timeout(Duration::from_millis(200), call).await;
+        assert!(abandoned.is_err(), "still waiting when dropped");
+        let token = token.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(token.is_cancelled(), "dropping the future cancelled it");
+    }
+
+    /// The client's cancellation cancels the token, and the call still
+    /// returns the handler's own reply.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_cancellation_cancels_its_handler_and_awaits_it() {
+        let (tokens, token) = std::sync::mpsc::channel();
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+        let call = cancellable_blocking(
+            async {
+                let _ = cancelled.await;
+            },
+            waiting_handler(tokens),
+        );
+        let call = tokio::spawn(call);
+        let token = tokio::task::spawn_blocking(move || token.recv().unwrap())
+            .await
+            .unwrap();
+        assert!(!token.is_cancelled());
+        cancel.send(()).unwrap();
+        assert!(call.await.unwrap().unwrap(), "the handler saw the cancel");
     }
 }
 
@@ -18174,14 +18264,13 @@ mod tests {
         AssetBeats, AssetId, AssetSceneChanges, AssetTranscript, AudioChannelClipping,
         AudioClipping, AudioQcMeasurements, AudioQcProvenance, AudioQcReport, AudioQcRequest,
         BeatMarker, Clip, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries,
-        ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, FrameTexture, Marker,
-        MarkerId, MediaAsset, MediaAvailabilityKind, MediaAvailabilityStatus,
-        MediaCacheClearResult, MediaCacheFamily, MediaCacheInventory, MediaError, MediaEvent,
-        MediaKind, MediaSourceFingerprint, MixLevelReport, MonitorProof, MonitorProofMetadata,
-        ParamValue, Rational, RgbaImage, STREAMING_PLATFORM_TARGET, SceneChange, SceneStatus,
-        SilenceSpan, SilenceStatus, TimelineSceneChange, TimelineSilenceSpan, Title, Track,
-        TrackId, TrackKind, TrackLevels, TrackMix, TranscriptWord, VisualAssetResult,
-        audio_qc_exceptions, audio_qc_technical_pass,
+        ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Marker, MarkerId, MediaAsset,
+        MediaAvailabilityKind, MediaAvailabilityStatus, MediaCacheClearResult, MediaCacheFamily,
+        MediaCacheInventory, MediaError, MediaEvent, MediaKind, MediaSourceFingerprint,
+        MixLevelReport, MonitorProof, MonitorProofMetadata, ParamValue, Rational, RgbaImage,
+        STREAMING_PLATFORM_TARGET, SceneChange, SceneStatus, SilenceSpan, SilenceStatus,
+        TimelineSceneChange, TimelineSilenceSpan, Title, Track, TrackId, TrackKind, TrackLevels,
+        TrackMix, TranscriptWord, VisualAssetResult, audio_qc_exceptions, audio_qc_technical_pass,
     };
     use kinewright_core::{
         AudioChain, ColorSourceError, IncidentEvidence, IncidentObservation, IncidentState,
@@ -18292,7 +18381,7 @@ mod tests {
 
         fn request_frame(&self, _t: TimeCode) {}
 
-        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, FrameTexture)> {
+        fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::never()
         }
 
@@ -19315,7 +19404,7 @@ mod tests {
 
         fn request_frame(&self, _t: TimeCode) {}
 
-        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, FrameTexture)> {
+        fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::never()
         }
 

@@ -1810,6 +1810,7 @@ version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea2d84b969582b4b1864a92dc5d27cd2b77b622a8d79306834f1be5ba20d84b"
 dependencies = [
+ "bytemuck",
  "cfg-if",
  "crunchy",
  "num-traits",
@@ -2293,6 +2294,7 @@ dependencies = [
  "kinewright-core",
  "kinewright-media",
  "kinewright-project",
+ "pollster",
  "proptest",
  "rfd",
  "serde",
@@ -2319,6 +2321,7 @@ name = "kinewright-media"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "bytemuck",
  "cpal",
  "crossbeam-channel",
  "ffmpeg-next",

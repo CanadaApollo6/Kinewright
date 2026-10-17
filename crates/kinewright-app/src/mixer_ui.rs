@@ -2873,7 +2873,7 @@ mod tests {
     impl Playback for FixedLoudnessPlayback {
         fn set_document(&self, _document: Arc<Document>) {}
         fn request_frame(&self, _at: TimeCode) {}
-        fn frames(&self) -> crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)> {
+        fn frames(&self) -> crossbeam_channel::Receiver<kinewright_core::PreviewFrame> {
             crossbeam_channel::bounded(0).1
         }
         fn events(&self) -> crossbeam_channel::Receiver<kinewright_core::MediaEvent> {

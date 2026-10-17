@@ -12,12 +12,12 @@ use kinewright_core::{
     AudioQcMeasurements, AudioQcProvenance, AudioQcRequest, ColorContext, ColorDescription,
     DeliveryAudioVerification, DeliveryEncodeDepth, DeliveryProfile, Document,
     EBU_R128_PROGRAMME_TARGET, Export, ExportAudioReport, ExportCancellation, ExportReport,
-    ExportSettings, FrameTexture, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LoudnessSnapshot,
-    LoudnessTarget, MediaAsset, MediaCatalog, MediaError, MediaEvent, MediaKind,
-    MediaSourceFingerprint, Operation, Playback, ProgressSink, QaSeverity, Rational, RgbaImage,
-    STREAMING_PLATFORM_TARGET, SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange,
-    TimelineSilenceSpan, TimelineTranscriptWord, Track, TrackId, TrackKind, TranscriptStatus,
-    VisualAssetResult, audio_qc_exceptions, audio_qc_technical_pass, delivery_audio_exceptions,
+    ExportSettings, LOSSY_CODEC_TRUE_PEAK_HEADROOM_HUNDREDTHS, LoudnessSnapshot, LoudnessTarget,
+    MediaAsset, MediaCatalog, MediaError, MediaEvent, MediaKind, MediaSourceFingerprint, Operation,
+    Playback, ProgressSink, QaSeverity, Rational, RgbaImage, STREAMING_PLATFORM_TARGET,
+    SceneStatus, SilenceStatus, TimeCode, TimelineSceneChange, TimelineSilenceSpan,
+    TimelineTranscriptWord, Track, TrackId, TrackKind, TranscriptStatus, VisualAssetResult,
+    audio_qc_exceptions, audio_qc_technical_pass, delivery_audio_exceptions,
     loudness_target_exceptions, qa_document,
 };
 
@@ -445,7 +445,7 @@ struct MinimalPlayback;
 impl Playback for MinimalPlayback {
     fn set_document(&self, _doc: Arc<Document>) {}
     fn request_frame(&self, _t: TimeCode) {}
-    fn frames(&self) -> Receiver<(TimeCode, FrameTexture)> {
+    fn frames(&self) -> Receiver<kinewright_core::PreviewFrame> {
         crossbeam_channel::unbounded().1
     }
     fn events(&self) -> Receiver<MediaEvent> {

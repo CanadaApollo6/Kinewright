@@ -7,6 +7,9 @@ mod cache;
 mod clock;
 pub mod color_pipeline;
 mod compositor;
+mod conversion;
+mod display;
+pub use display::{DisplayConfig, DisplayFrame, DisplaySession, DisplayStatus, DisplayTiming};
 mod decode;
 mod derived;
 mod derived_cache;
@@ -17,10 +20,15 @@ mod frame;
 mod loudness;
 mod lut;
 mod lut_store;
+mod preview;
 mod render;
 mod room_tone_store;
+#[cfg(test)]
+mod s4_d13;
+mod sched;
 mod sha256;
 mod spectrum;
+mod stats;
 mod timeline;
 mod title;
 mod transcript;
@@ -118,6 +126,24 @@ mod mo2_identity_corpus;
 /// MO2 §13 gate 10: the floors, the ledger ceilings and their controls.
 #[cfg(test)]
 mod mo2_perf_fixtures;
+/// PF1 W-0/W-1: the shared performance workloads (MO2 R28's and PF1's).
+#[cfg(test)]
+mod perf_fixtures;
+#[cfg(test)]
+mod pf1_clock;
+/// PF1 G18: the export lane.
+#[cfg(test)]
+mod pf1_export_lane;
+/// PF1 S0: the playback measurement harness (P-play, P-seek, P-rss), its
+/// V-4 consumer metrics, `process_memory()` and the Q-3 controls.
+#[cfg(test)]
+mod pf1_harness;
+/// PF1 S2c C-4: the S-2 fixtures, the seek-path oracle and the continuation
+/// witnesses (the integration point is `pf1_s2c_witness::TargetPath`).
+#[cfg(test)]
+mod pf1_s2c_fixtures;
+#[cfg(test)]
+mod pf1_s2c_witness;
 mod still_orientation;
 
 use ffmpeg_next as ffmpeg;
@@ -145,6 +171,8 @@ pub use derived::{
     DEFAULT_SILENCE_THRESHOLD_DBFS_HUNDREDTHS, DEFAULT_SILENCE_WINDOW_MILLISECONDS,
     DerivedAnalysisConfig, SceneDetectionConfig, SilenceDetectionConfig,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use engine::AgentLaneHold;
 pub use engine::FfmpegMediaEngine;
 pub use export::{NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS};
 pub use kinewright_core::{

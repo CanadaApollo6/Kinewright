@@ -1363,7 +1363,7 @@ fn timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test() {
     wait_for_state(&events, PlaybackState::Playing);
     wait_for_position(&engine, TimeCode(20));
     while let Ok(event) = events.try_recv() {
-        if let MediaEvent::Error(error) = event {
+        if let Some(error) = event.error() {
             panic!("timeline boundary playback failed: {error}");
         }
     }
@@ -1416,13 +1416,15 @@ fn full_timeline(asset: MediaAsset) -> Document {
 }
 
 fn receive_frame(
-    frames: &crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    frames: &crossbeam_channel::Receiver<kinewright_core::PreviewFrame>,
     requested: TimeCode,
 ) -> kinewright_core::FrameTexture {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let (at, frame) = frames
+        let kinewright_core::PreviewFrame {
+            at, texture: frame, ..
+        } = frames
             .recv_timeout(remaining)
             .unwrap_or_else(|error| panic!("no frame {requested} arrived: {error}"));
         if at == requested {
@@ -1432,25 +1434,30 @@ fn receive_frame(
 }
 
 fn receive_frame_checked(
-    frames: &crossbeam_channel::Receiver<(TimeCode, kinewright_core::FrameTexture)>,
+    frames: &crossbeam_channel::Receiver<kinewright_core::PreviewFrame>,
     events: &crossbeam_channel::Receiver<MediaEvent>,
     requested: TimeCode,
 ) -> kinewright_core::FrameTexture {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(MediaEvent::Error(error)) = events.try_iter().find_map(|event| match event {
-            MediaEvent::Error(error) => Some(MediaEvent::Error(error)),
+            MediaEvent::Error(error) | MediaEvent::StampedError(_, error) => {
+                Some(MediaEvent::Error(error))
+            }
             _ => None,
         }) {
             panic!("render failed before frame {requested}: {error}");
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
         let (at, frame) = match frames.recv_timeout(remaining) {
-            Ok(value) => value,
+            Ok(value) => (value.at, value.texture),
             Err(error) => {
                 if let Some(MediaEvent::Error(media_error)) =
                     events.try_iter().find_map(|event| match event {
-                        MediaEvent::Error(media_error) => Some(MediaEvent::Error(media_error)),
+                        MediaEvent::Error(media_error)
+                        | MediaEvent::StampedError(_, media_error) => {
+                            Some(MediaEvent::Error(media_error))
+                        }
                         _ => None,
                     })
                 {
@@ -1471,7 +1478,9 @@ fn wait_for_state(events: &crossbeam_channel::Receiver<MediaEvent>, expected: Pl
         let remaining = deadline.saturating_duration_since(Instant::now());
         match events.recv_timeout(remaining) {
             Ok(MediaEvent::PlaybackStateChanged(state)) if state == expected => return,
-            Ok(MediaEvent::Error(error)) => panic!("playback failed: {error}"),
+            Ok(MediaEvent::Error(error) | MediaEvent::StampedError(_, error)) => {
+                panic!("playback failed: {error}")
+            }
             Ok(_) => {}
             Err(error) => panic!("playback did not reach {expected:?}: {error}"),
         }

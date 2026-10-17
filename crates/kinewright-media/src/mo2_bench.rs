@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use kinewright_core::{Document, TimeCode};
 
 use crate::{
-    compositor::GpuContext,
+    compositor::{GpuContext, MonitorPurpose},
     render::{DecodeStrategy, FrameRenderer, PREVIEW_MAX_WIDTH, RenderScale},
 };
 
@@ -34,7 +34,10 @@ pub(crate) fn run(gpu: &GpuContext, document: &Document, delay: Duration, reside
     for frame in 0..330 {
         let started = Instant::now();
         let at = TimeCode(frame % document.duration.0);
-        let output = renderer.render_timed(document, at, dims, scale, DecodeStrategy::Sequential);
+        // The preview benchmark: the live monitor's encode (PF1 G-1).
+        let playback = (scale, DecodeStrategy::Sequential);
+        let output =
+            renderer.render_timed(document, at, dims, playback, MonitorPurpose::LiveMonitor);
         let (output, composite) = output.expect("an R28 frame renders");
         assert_eq!(output.width, dims.0);
         let timed = if resident {

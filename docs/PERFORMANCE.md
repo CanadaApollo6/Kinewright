@@ -89,3 +89,60 @@ and dropped-frame counts, mouse/keyboard-to-preview latency, repeated open/close
 cycles, long undo histories, many distinct source files, and export throughput.
 Measure Windows independently. Investigate source verification concurrency and
 thumbnail LRU updates only with a workload that exposes their actual cost.
+
+
+## PF1 S4c qualified evidence (R91/R92/R93)
+
+Fresh S4c collection is limited to desktop LL G4/G15/D13 on lavapipe, with frozen
+documents/media, source-bound release binaries and native child receipts. It is
+source-bound at `4783d5f` (1,190 counted lines): R92's single fresh G4 series
+passes all 24 valid rows with zero missed callbacks and both arms above every
+floor; G15 and D13 native contracts pass. The original invalid G4 series and
+finding are explicitly superseded, with their bytes unchanged. Full workspace
+fast plus strict Linux log verification passed on this source in round 3. E16 in
+[PF1-EVIDENCE.md](PF1-EVIDENCE.md#e16--s4c-r91-c-plus-frozen-inputs) and the main-checkout
+`target/review/pf/s4c-report.md` carry the exact outcomes, raw evidence and source
+identity. The standing report-only PERFORMANCE lanes above are deferred; these
+LL checks do not replace those measurements. G4 uses the accepted S3b shipping
+state with a common test overlay and makes no speedup claim. S0 cleanup uses
+successful process exit and parent reap; the candidate also checks its engine's
+bounded teardown. Whole-process active RSS remains report-only pending a separate
+allowance; G15's 4 MiB limit is only for settled idle.
+
+The six-row G4 fps ranges are blend 29.526–29.959 (floor 15), explainer
+29.859–29.959 (24), reel 29.826–29.926 (15), and typical 29.776–29.959 (24).
+Aggregate validation and cached figures exit 0. R92-2 diagnostics for both
+attempts are under `target/review/pf/s4/s4c/round-4/`: native nice 10 is observed;
+new media/pacer-group threads are observed at nice 10, Linux priority 30,
+SCHED_OTHER. Original per-thread priority is source-derived, not observed.
+All 360 new five-second load samples contain contamination annotations;
+one-minute load ranges from 6.22 to 20.59 and does not gate. Other projects'
+processes were untouched; no worker build or test overlapped timing.
+
+R93 changes only Python checkers/runners/tests: **1,260/1,260** retained counted lines, including the 31-line S0 overlay; no Rust, native, shipping, unsafe or lint-policy change. Fixed cached validation returns 0 for G4 round 4 (24 rows), G15 round 3 final (42 rows), and D13 round 3 final (3 rows), including successful wrapper-receipt agreement, D13 identity bounds/order and the lean frozen-media guard. No lane was re-measured. Collection used the pre-fix runner archive `8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916`; this is not evidence collected by the fixed runner. The measured runners remain at the pinned `target/review/pf/s4/work/` paths. The separate fixed runner is archived at `target/review/pf/s4/archives/d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51.tar` (SHA-256 `d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51`) and extracted under `s4/s4c/fix-r93/fixed-runners/` for PF1-LH; `target/review/pf/s4c-fix-report.md` records both archives and the initial fingerprint mismatch.
+
+The consumed-input record proves the frozen bytes at import and at the later checks. It does not prove the bytes the decoder opened. Substitution and restoration during a run, and resources referenced from inside a container, are not detected. The full decoder-bound input snapshot is carried to PF1-LH.
+
+Proposed qualified closure (pending the narrow re-check and both-OS/both-tier CI): **PF1 closes qualified on this desktop's recorded lavapipe stack: LL G4 passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks, and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks; whole-process active RSS remains unresolved/report-only, no RTX 3090 or supported-hardware playback claim is made, and every named deferral in E16 remains deferred, not passed; the consumed-input record proves frozen bytes at import and later checks, but does not prove decoder-opened bytes or detect substitution and restoration during a run or resources referenced from inside a container.**
+
+D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
+
+- AVBuffer padding beyond the plane spans is not observed;
+- FFmpeg-internal buffer-pool lifetimes are not observed;
+- identity means plane address plus a lifetime generation, and a generation is recorded at each registration so that a reused pooled address is a new identity.
+
+The historical 8,250 ms hold remains unexplained.
+
+The R91 qualified scope carries these named deferrals, each **deferred, not passed**:
+
+- I4, the LH part of I5, I8's lane-based L6, G3, G6, G7b, G8/L1–L6 and L4b, G11, G16, G17, both G18 decisions, R65 historical/intervening/cumulative, the standing PERFORMANCE reports, D6/the manual-VM WARP floor, and the RTX 4050 rerun;
+- automatic journal-only sealing (B3). Until it exists, an interrupted unsealed series blocks: preserve every byte, stop, and return for a ruling (critic §2);
+- the numerical whole-process RSS allowance, which stays unresolved;
+- the D13 witness-body refactor (R86 B-7).
+- the common LH collector and Q1(b) default-policy variant — deferred to PF1-LH, not passed;
+- LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
+
+G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
+
+
+PF1-LH entry items under R93 (these do not defer PF1 gates): the full decoder-bound input snapshot (A-1); G4 floors in the pins schema (B-3); renaming G15's legacy protocol field (B-4); and a Linux CI job restoring the runner archive and running `test_lane.py` with `PF1_RUNNERS` (B-5).

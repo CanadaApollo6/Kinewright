@@ -71,6 +71,12 @@ FFMPEG_LOG_PREFIX = re.compile(r"^(?:" + FFMPEG_LOG + r" )+")
 # outcome (Windows run 36536620605). The tail is cut only after a recognised outcome word, so a
 # fragment can never swallow the outcome itself.
 FFMPEG_LOG_SUFFIX = re.compile(FFMPEG_LOG + r"(?: .*)?$")
+# avformat's codec-parameter warning has one unprefixed continuation. Recognise only
+# that advice, immediately after its prefixed first line, while a result is pending.
+FFMPEG_PROBE_MESSAGE = re.compile(FFMPEG_LOG + r" Could not find codec parameters for stream \d+ \(.+\): .+$")
+FFMPEG_PROBE_ADVICE = re.compile(
+    r"Consider increasing the value for the 'analyzeduration' \(\d+\) and 'probesize' \(\d+\) options"
+)
 OUTCOME = re.compile(r"^(?:ok|FAILED|ignored)")
 GLUED_MESSAGE = re.compile(r"[A-Z]")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
@@ -111,14 +117,17 @@ def result_lines(log: str):
     result keeps an empty outcome and the section counts reject it.
     """
     pending = None  # (number, "test name ... ") awaiting its outcome
+    probe_advice_pending = False
     for number, raw in enumerate(log.splitlines(), 1):
+        probe_advice = probe_advice_pending and FFMPEG_PROBE_ADVICE.fullmatch(raw)
+        probe_advice_pending = bool(FFMPEG_PROBE_MESSAGE.search(raw))
         line = strip_ffmpeg_log(raw)
         if pending is not None:
             # The outcome line can carry its own FFmpeg tail, as a same-line result can.
             outcome = OUTCOME.match(line)
             if outcome:
                 line = line[: outcome.end()] + FFMPEG_LOG_SUFFIX.sub("", line[outcome.end():])
-            if re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line):
+            if probe_advice or (re.match(FFMPEG_LOG, raw) and not OUTCOME_LINE.match(line)):
                 continue
             if OUTCOME_LINE.match(line):
                 yield pending[0], pending[1] + line

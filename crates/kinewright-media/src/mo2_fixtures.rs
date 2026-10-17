@@ -76,7 +76,7 @@ pub(crate) fn clip(
     }
 }
 
-fn solid(id: u64, rgb: [u8; 3], blend_mode: BlendMode, effects: Vec<Effect>) -> Clip {
+pub(crate) fn solid(id: u64, rgb: [u8; 3], blend_mode: BlendMode, effects: Vec<Effect>) -> Clip {
     let [r, g, b] = rgb;
     let content = ClipContent::Solid(SolidColor { r, g, b });
     clip(id, content, blend_mode, effects)
@@ -139,7 +139,7 @@ fn document_sized(resolution: (u32, u32), clips: Vec<Clip>) -> Document {
     document
 }
 
-fn document(clips: Vec<Clip>) -> Document {
+pub(crate) fn document(clips: Vec<Clip>) -> Document {
     document_sized((W, H), clips)
 }
 

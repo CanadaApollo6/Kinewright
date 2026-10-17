@@ -1,0 +1,9 @@
+{
+  "identity": "synthetic-machine",
+  "class": "LH",
+  "os": "linux",
+  "version": "example",
+  "architecture": "x86_64",
+  "cpu": "example",
+  "ram_bytes": 1024
+}

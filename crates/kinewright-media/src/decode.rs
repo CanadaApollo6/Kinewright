@@ -1,16 +1,17 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeSet, path::Path, sync::Arc};
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
     AssetId, ColorBitDepth, ColorDescription, ColorMatrix, ColorPrimaries, ColorProvenance,
-    ColorRange, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint, FrameTexture,
-    MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
-    classify_source_with_assumption,
+    ColorRange, ColorSourceError, ColorSourceProfileAssumption, ColorTransfer, ColorWhitePoint,
+    FrameTexture, MediaAsset, MediaError, MediaKind, Rational, RgbaImage, TimeCode,
 };
 
 use crate::{
     cache::FrameCache,
-    frame::{CachedFrame, WorkingFrame},
+    conversion::{Conversion, TransferTable, alpha_table, select_conversion},
+    frame::{CachedFrame, WorkingFrame, managed_pixel_error},
+    sched::KeptFrames,
     sha256::source_fingerprint,
 };
 
@@ -805,6 +806,222 @@ pub(crate) fn media_input(path: &Path) -> Result<ffmpeg::format::context::Input,
     })
 }
 
+thread_local! {
+    /// Amendment R43 (RS-1): the stop flag of the reader running on this
+    /// thread, which the FFmpeg interrupt callback reads. A reader's decoder
+    /// opens, seeks and reads only on its reader's thread, and FFmpeg calls
+    /// the callback on the thread doing the IO, so the callback needs no
+    /// pointer of its own: `ffmpeg-next` leaks the callback's box, and a
+    /// zero-sized one allocates nothing (and the workspace forbids `unsafe`).
+    static READER_STOP: std::cell::RefCell<Option<ReaderStop>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct ReaderStop {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
+    path: std::path::PathBuf,
+}
+
+/// Amendment R43 (RS-1): libavformat's `AVIOInterruptCB`, called before each
+/// real read of the file (open, stream probing, seek, packet read): true
+/// ends that IO with `AVERROR_EXIT`.
+fn reader_interrupted() -> bool {
+    READER_STOP.with_borrow(|reader| {
+        reader.as_ref().is_some_and(|reader| {
+            #[cfg(test)]
+            interrupt_seam::hold(&reader.path, &reader.stop);
+            let stopped = reader.stop.load(std::sync::atomic::Ordering::Acquire);
+            #[cfg(test)]
+            interrupt_seam::interrupted(&reader.path, stopped);
+            stopped
+        })
+    })
+}
+
+/// Amendment R43 (RS-1): a reader's input, its format context carrying
+/// the interrupt callback tied to `stop` (the reader's flag).
+fn reader_input(
+    path: &Path,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<ffmpeg::format::context::Input, MediaError> {
+    crate::quiet_ffmpeg_log();
+    READER_STOP.set(Some(ReaderStop {
+        stop: Arc::clone(stop),
+        #[cfg(test)]
+        path: path.to_path_buf(),
+    }));
+    ffmpeg::format::input_with_interrupt(path, reader_interrupted).map_err(|error| {
+        #[cfg(test)]
+        interrupt_seam::exited(path, error);
+        MediaError::Backend(format!(
+            "could not open media {}: {error}; the file may be truncated or its format may be unsupported",
+            path.display()
+        ))
+    })
+}
+
+/// Amendment R43 (RS-1) test seam: hold a reader inside the interrupt
+/// callback's first call for an armed path, that is inside its open's IO
+/// with the file open. `Interruptible` returns once the reader's flag is
+/// set (libavformat then ends the IO); `Stuck` ignores the flag until released,
+/// as a read blocked in the OS would.
+#[cfg(test)]
+pub(crate) mod interrupt_seam {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            Condvar, Mutex, PoisonError,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Mode {
+        Interruptible,
+        Stuck,
+    }
+
+    struct Armed {
+        path: PathBuf,
+        mode: Mode,
+        entered: bool,
+        released: bool,
+        interrupted: u32,
+        exits: u32,
+    }
+
+    static ARMED: Mutex<Vec<Armed>> = Mutex::new(Vec::new());
+    static CHANGED: Condvar = Condvar::new();
+
+    fn armed() -> std::sync::MutexGuard<'static, Vec<Armed>> {
+        ARMED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn arm(path: &Path, mode: Mode) {
+        let path = path.to_path_buf();
+        let (entered, released, interrupted, exits) = (false, false, 0, 0);
+        armed().push(Armed {
+            path,
+            mode,
+            entered,
+            released,
+            interrupted,
+            exits,
+        });
+    }
+
+    pub(crate) fn disarm(path: &Path) {
+        armed().retain(|armed| armed.path != path);
+    }
+
+    /// A reader's flag changed: held readers look again.
+    pub(crate) fn poke() {
+        let _armed = armed();
+        CHANGED.notify_all();
+    }
+
+    pub(crate) fn release(path: &Path) {
+        let mut armed = armed();
+        for armed in armed.iter_mut().filter(|armed| armed.path == path) {
+            armed.released = true;
+        }
+        CHANGED.notify_all();
+    }
+
+    /// Wait (bounded) until a reader is held in `path`'s callback.
+    pub(crate) fn wait_entered(path: &Path, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        let mut armed = armed();
+        loop {
+            if armed
+                .iter()
+                .any(|armed| armed.path == path && armed.entered)
+            {
+                return true;
+            }
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            armed = CHANGED
+                .wait_timeout(armed, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Whether a reader was ever held in `path`'s callback.
+    pub(crate) fn entered(path: &Path) -> bool {
+        armed()
+            .iter()
+            .any(|armed| armed.path == path && armed.entered)
+    }
+
+    /// Opens, seeks and reads of `path` that failed with `AVERROR_EXIT`
+    /// (the interrupt ended them) while it was armed.
+    pub(crate) fn exits(path: &Path) -> u32 {
+        armed()
+            .iter()
+            .filter(|armed| armed.path == path)
+            .map(|armed| armed.exits)
+            .sum()
+    }
+
+    pub(super) fn exited(path: &Path, error: ffmpeg_next::Error) {
+        if matches!(error, ffmpeg_next::Error::Exit) {
+            let mut armed = armed();
+            for armed in armed.iter_mut().filter(|armed| armed.path == path) {
+                armed.exits += 1;
+            }
+        }
+    }
+
+    /// Callbacks for `path` that returned true while it was armed.
+    pub(crate) fn interrupts(path: &Path) -> u32 {
+        armed()
+            .iter()
+            .filter(|armed| armed.path == path)
+            .map(|armed| armed.interrupted)
+            .sum()
+    }
+
+    /// Runs inside the callback, where a panic aborts the process
+    /// (`ffmpeg-next`): it never indexes a list another test may change.
+    pub(super) fn hold(path: &Path, stop: &AtomicBool) {
+        let mut armed = armed();
+        let first = |armed: &Armed| armed.path == path && !armed.entered;
+        let Some(entry) = armed.iter_mut().find(|armed| first(armed)) else {
+            return;
+        };
+        entry.entered = true;
+        CHANGED.notify_all();
+        loop {
+            let Some(entry) = armed.iter().find(|armed| armed.path == path) else {
+                return; // disarmed
+            };
+            let done = match entry.mode {
+                Mode::Interruptible => stop.load(Ordering::Acquire),
+                Mode::Stuck => entry.released,
+            };
+            if done {
+                return;
+            }
+            armed = CHANGED.wait(armed).unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    pub(super) fn interrupted(path: &Path, stopped: bool) {
+        if stopped {
+            let mut armed = armed();
+            for armed in armed.iter_mut().filter(|armed| armed.path == path) {
+                armed.interrupted += 1;
+            }
+            CHANGED.notify_all();
+        }
+    }
+}
+
 pub(crate) fn media_error(path: &Path, action: &str, error: impl std::fmt::Display) -> MediaError {
     MediaError::Backend(format!(
         "{action} for {}: {error}; the file may be truncated",
@@ -904,14 +1121,446 @@ fn rotation_from_degrees(degrees: i32) -> Result<VideoRotation, MediaError> {
     }
 }
 
+/// PF1 S2c C-4: the first video packet after a seek, as S-2 rule 1 defines the
+/// anchor: (`pos`, DTS, key flag).
+pub(crate) type Anchor = (isize, Option<i64>, bool);
+
+/// PF1 S2c S-2: what forward continuation knows about the decoder's run
+/// since its last seek (§8 S-2's four rules).
+#[derive(Default)]
+#[allow(clippy::struct_excessive_bools, reason = "one flag per S-2 rule")]
+struct Continuation {
+    /// Rule 4: the demuxer/codec pair is witnessed (`mov`/H.264, not
+    /// fragmented: `unfragmented_mov`).
+    pair: bool,
+    /// Rule 1: today's seek selects the decoder's video stream
+    /// (`av_find_default_stream_index` can pick no other).
+    stream: bool,
+    /// Rule 1: the demux-only shadow context, opened on first use (with the
+    /// reader's interrupt, as the real one is).
+    shadow: Option<ffmpeg::format::context::Input>,
+    /// The shadow could not be opened: the anchor is unknown for good.
+    shadow_failed: bool,
+    /// The run's anchor A(t0), from the shadow at the run's seek.
+    run: Option<Anchor>,
+    /// Rule 2: a seek's real first packet disagreed with A(t0), so
+    /// continuation is off until the decoder resets.
+    disabled: bool,
+    /// The real context's first video packet since the seek.
+    first: Option<Anchor>,
+    /// Video packets read since the seek.
+    packets: u64,
+    /// Rule 3: a frame since the seek had no timestamp, or not a larger one.
+    stamps_broken: bool,
+    /// S2c-5: the grid frame of the first frame decoded since the seek.
+    first_frame: Option<i64>,
+    /// S2c-5 (R39 item 4 (b)): the run's seek landed on an open-GOP key past
+    /// its start and was retried before that key, so the run has no anchor
+    /// (rule 2 cannot hold) and its first packet is no shadow's A(t).
+    retried: bool,
+    last_stamp: Option<i64>,
+    /// A continuation is running: a rule it breaks ends it (`abandoned`).
+    continuing: bool,
+    abandoned: bool,
+    /// S-2: cancellation is checked between produced frames (the paused
+    /// entry point; playback keeps today's check between packets).
+    frame_checks: bool,
+    #[cfg(test)]
+    fault: Option<ShadowFault>,
+    #[cfg(test)]
+    mismatch_once: bool,
+}
+
+impl Continuation {
+    /// A seek: the run starts again.
+    fn seeked(&mut self) {
+        (self.run, self.first, self.packets, self.last_stamp) = (None, None, 0, None);
+        (self.stamps_broken, self.first_frame, self.retried) = (false, None, false);
+    }
+
+    /// A video packet read: the first is the run's real anchor (rule 2).
+    /// Amendment R51: a later key packet, read-ahead included, ends nothing;
+    /// rule 2 is the anchor test alone (`may_continue`).
+    fn on_packet(&mut self, packet: &ffmpeg::Packet) {
+        self.packets += 1;
+        if self.packets == 1 {
+            self.first = Some((packet.position(), packet.dts(), packet.is_key()));
+        }
+    }
+
+    /// A frame received with `stamp`; true if it ends a running
+    /// continuation (rule 3).
+    fn on_frame(&mut self, stamp: Option<i64>) -> bool {
+        let increasing = stamp.is_some_and(|ts| self.last_stamp.is_none_or(|last| ts > last));
+        self.last_stamp = stamp.or(self.last_stamp);
+        if increasing {
+            return false;
+        }
+        self.stamps_broken = true;
+        self.abandon()
+    }
+
+    fn abandon(&mut self) -> bool {
+        self.abandoned |= self.continuing;
+        self.continuing
+    }
+
+    /// The injected fault applied to a shadow anchor (test builds only).
+    #[cfg(test)]
+    fn faulted(&mut self, anchor: Anchor, at_seek: bool) -> Anchor {
+        let moved = (anchor.0 + 1, anchor.1, anchor.2);
+        let once = at_seek && std::mem::take(&mut self.mismatch_once);
+        match self.fault {
+            Some(ShadowFault::Mismatch) => moved,
+            Some(ShadowFault::Drifts) if !at_seek => moved,
+            _ if once => moved,
+            _ => anchor,
+        }
+    }
+}
+
+/// PF1 S2c C-4: an injected shadow fault (test builds only).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShadowFault {
+    /// The shadow fails: every anchor is unknown.
+    Fails,
+    /// The shadow's anchor never matches the real seek's.
+    Mismatch,
+    /// Today's seek would select another stream: every anchor is unknown.
+    StreamMismatch,
+    /// A(t) for a later target differs from the run's (not at the seek).
+    Drifts,
+}
+
+/// PF1 S2c S-2 rule 1: can today's seek (`av_find_default_stream_index`)
+/// select a stream other than the decoder's `index`? Video scores 25, +50
+/// with dimensions, -400 as an attached picture; audio at most 50; every
+/// stream +12 once probed and +200 unless discarded. The decoder's stream
+/// (dimensions checked at open) therefore wins whenever it is neither an
+/// attached picture nor discarded and no other stream is a video stream
+/// that is not an attached picture.
+fn selects_stream(input: &ffmpeg::format::context::Input, index: usize) -> bool {
+    use ffmpeg::format::stream::Disposition;
+    input.streams().all(|stream| {
+        let attached = stream.disposition().contains(Disposition::ATTACHED_PIC);
+        if stream.index() == index {
+            !attached && stream.discard() != ffmpeg::Discard::All
+        } else {
+            attached || stream.parameters().medium() != ffmpeg::media::Type::Video
+        }
+    })
+}
+
+/// PF1 S2c S-2 rule 4 (lead ruling after R51/R52): the `mov` pair excludes
+/// fragmented MP4, whose `moof` path C-4 never witnessed. A fragmented file
+/// declares its fragments with an `mvex` box in `moov` (ISO/IEC 14496-12
+/// §8.8.1), so the top-level boxes are walked to `moov` and its children
+/// read. True only for a `moov` read without `mvex`; anything unreadable,
+/// odd or past 64 top-level boxes counts as fragmented (no continuation).
+fn unfragmented_mov(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    /// The box at `at` below `end`: (its size, its type, its header size).
+    fn header(file: &mut std::fs::File, at: u64, end: u64) -> Option<(u64, [u8; 4], u64)> {
+        let mut head = [0u8; 16];
+        file.seek(SeekFrom::Start(at)).ok()?;
+        file.read_exact(&mut head[..8]).ok()?;
+        let kind: [u8; 4] = head[4..8].try_into().ok()?;
+        let (size, header) = match u32::from_be_bytes(head[..4].try_into().ok()?) {
+            0 => (end - at, 8),
+            1 => {
+                file.read_exact(&mut head[8..]).ok()?;
+                (u64::from_be_bytes(head[8..].try_into().ok()?), 16)
+            }
+            size => (u64::from(size), 8),
+        };
+        (size >= header && size <= end - at).then_some((size, kind, header))
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let Ok(end) = file.metadata().map(|metadata| metadata.len()) else {
+        return false;
+    };
+    let mut at = 0;
+    for _ in 0..64 {
+        let Some((size, kind, head)) = header(&mut file, at, end) else {
+            return false;
+        };
+        if &kind == b"moov" {
+            let (mut child, moov_end) = (at + head, at + size);
+            while child < moov_end {
+                let Some((size, kind, _)) = header(&mut file, child, moov_end) else {
+                    return false;
+                };
+                if &kind == b"mvex" {
+                    return false;
+                }
+                child += size;
+            }
+            return true;
+        }
+        at += size;
+    }
+    false
+}
+
+/// PF1 S2c C-4: a held frame: its grid position, `best_effort_timestamp` and a
+/// hash of its decoded planes (so retained pixels are compared, not counted).
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Retained {
+    pub(crate) grid: i64,
+    pub(crate) pts: Option<i64>,
+    pub(crate) hash: u64,
+}
+
+/// PF1 S2c C-4: the S-2 state the witnesses compare, plus the run's anchor.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DecoderState {
+    pub(crate) pending: Option<Retained>,
+    pub(crate) lookahead: Option<Retained>,
+    pub(crate) continuation_at: Option<i64>,
+    pub(crate) eof_sent: bool,
+    pub(crate) fallback_index: i64,
+    /// The first video packet the real context read after the run's seek.
+    pub(crate) first_packet: Option<Anchor>,
+}
+
+/// PF1 S2c C-4: a test-injected timestamp fault, keyed by the frame's true
+/// `best_effort_timestamp` so a fresh decoder and a continuing one meet the
+/// same fault at the same frame.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tamper {
+    /// The frame with this timestamp has none (S-2 rule 3: falls back to the index).
+    Missing(i64),
+    /// The frame with this timestamp repeats its predecessor's timestamp.
+    Repeat(i64),
+}
+
+/// PF1 S2c C-4: one received frame: `packets` read in the run when it arrived,
+/// its grid position and the timestamp the decoder acted on (after any tamper).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameLog {
+    pub(crate) packets: u64,
+    pub(crate) grid: i64,
+    pub(crate) ts: Option<i64>,
+}
+
+/// PF1 S2c C-4: counters the witnesses read (test builds only). Whatever
+/// implements S-2 continuation must keep feeding them: `on_packet` for every
+/// video packet read, `on_frame` for every frame received (with the
+/// timestamp selection acted on, after `tampered`), and it must leave
+/// `first_packet` alone (it is the run's anchor).
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct DecoderProbe {
+    pub(crate) first_packet: Option<Anchor>,
+    awaiting_first: bool,
+    /// Frames received over the decoder's lifetime (a seek does not reset it).
+    pub(crate) received: u64,
+    /// Video packets read since the run's seek (the anchor packet is 1).
+    pub(crate) packets: u64,
+    /// The frames received since the run's seek, in arrival order.
+    pub(crate) frames: Vec<FrameLog>,
+    cancel_at_received: Option<u64>,
+    /// Model S-2's "cancellation is checked between produced frames": after
+    /// a received frame raises the stop flag, the run ends with `Cancelled`
+    /// before any further frame is accepted. Off, the decoder is today's:
+    /// it checks between packets, so frames already decoded and waiting
+    /// (frame threads, the end-of-stream flush) are still drained. A test
+    /// seam standing in for the check S2c-2 puts in `receive_frames`. Private:
+    /// only `arm_between_frames` sets it, and that needs the positive
+    /// control's `ControlToken`.
+    check_between_frames: bool,
+    /// How many times the seam has been set or cleared over the decoder's
+    /// lifetime (monotonic; there is no way to reset it), so arming and
+    /// clearing again inside one call still shows.
+    seam_arms: u64,
+    pub(crate) tampers: Vec<Tamper>,
+    last_ts: Option<i64>,
+    /// Colour conversions run over the decoder's lifetime.
+    pub(crate) conversions: u64,
+    /// Amendment R53's witnesses: frames converted over the decoder's
+    /// lifetime, by either converter (`conversions` counts the managed one).
+    pub(crate) converted: u64,
+    /// The timestamp of the frame being converted.
+    converting_pts: Option<i64>,
+    /// Amendment R55 (Rec): the conversion running is a kept window frame's.
+    window_conversion: bool,
+    /// The latest conversion's RGBA64 bytes (the input to the working frame).
+    pub(crate) last_conversion: Option<Converted>,
+    /// Amendment R62's witness: the kept frame's conversion of this time
+    /// fails (after the converter ran, as a failed conversion leaves the
+    /// kept frames).
+    fail_conversion: Option<i64>,
+}
+
+/// PF1 S2c C-4: what the shared conversion path handed to the working-frame
+/// stage: the source frame's own timestamp and the tightly packed RGBA64LE.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct Converted {
+    pub(crate) pts: Option<i64>,
+    pub(crate) rgba: Arc<Vec<u8>>,
+}
+
+/// PF1 S2c C-4: a deliberate fault in the shared output path (the mutation
+/// that a continuation-versus-Seek comparison cannot see, since both share
+/// the path). Per thread, so parallel tests do not meet each other's fault.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OutputFault {
+    /// The colour conversion (graph or scaler) returns wrong RGBA64.
+    Conversion,
+    /// The working-frame stage receives wrong RGBA64 (the conversion was right).
+    WorkingFrame,
+    /// The working frame comes out with one sample replaced by NaN.
+    Nan,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static OUTPUT_FAULT: std::cell::Cell<Option<OutputFault>> =
+        const { std::cell::Cell::new(None) };
+    /// PF1 S2c C-4 (lead ruling after R51/R52): the conversion tap copies
+    /// its RGBA64 only while a C-4 witness holds the tap on this thread
+    /// (`pf1_s2c_witness::Tap`; a count, so holders nest). Counting and
+    /// `OUTPUT_FAULT` always apply; other test binaries' runs (the timing
+    /// harness) no longer pay a frame-sized copy per conversion.
+    pub(crate) static CONVERSION_TAP: std::cell::Cell<u32> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+impl DecoderProbe {
+    /// Set the between-frames cancel seam. Only the positive control holds a
+    /// `ControlToken` (its constructor is private to `pf1_s2c_witness::reference`),
+    /// so any other path calling this does not compile.
+    pub(crate) fn arm_between_frames(
+        &mut self,
+        on: bool,
+        _control: &crate::pf1_s2c_witness::ControlToken,
+    ) {
+        self.check_between_frames = on;
+        self.seam_arms += 1;
+    }
+
+    /// Times the seam was set or cleared over the decoder's lifetime.
+    pub(crate) fn seam_arms(&self) -> u64 {
+        self.seam_arms
+    }
+
+    pub(crate) fn on_seek(&mut self) {
+        self.first_packet = None;
+        (self.awaiting_first, self.packets, self.last_ts) = (true, 0, None);
+        self.frames.clear();
+    }
+
+    pub(crate) fn on_packet(&mut self, packet: &ffmpeg::Packet) {
+        self.packets += 1;
+        if std::mem::take(&mut self.awaiting_first) {
+            self.first_packet = Some((packet.position(), packet.dts(), packet.is_key()));
+        }
+    }
+
+    /// The timestamp the decoder acts on for a frame whose true one is `ts`.
+    pub(crate) fn tampered(&mut self, ts: Option<i64>) -> Option<i64> {
+        let out = match ts {
+            Some(true_ts) => self.tampers.iter().find_map(|t| match *t {
+                Tamper::Missing(at) if at == true_ts => Some(None),
+                Tamper::Repeat(at) if at == true_ts => Some(self.last_ts),
+                _ => None,
+            }),
+            None => None,
+        };
+        let out = out.unwrap_or(ts);
+        self.last_ts = out.or(self.last_ts);
+        out
+    }
+
+    /// Record a conversion's RGBA64 (`rgba` is the graph or scaler output),
+    /// applying the thread's `OUTPUT_FAULT`, if any, on its side of the tap.
+    /// The copy is made only under `CONVERSION_TAP`; without it no
+    /// conversion is recorded, so the output oracle fails on a returned
+    /// frame rather than reading a stale one.
+    pub(crate) fn tap_conversion(
+        &mut self,
+        pts: Option<i64>,
+        rgba: &mut ffmpeg::frame::Video,
+        (width, height): (u32, u32),
+    ) {
+        let fault = OUTPUT_FAULT.with(std::cell::Cell::get);
+        let flip = |rgba: &mut ffmpeg::frame::Video| rgba.data_mut(0)[1] ^= 0x10;
+        if fault == Some(OutputFault::Conversion) {
+            flip(rgba);
+        }
+        self.conversions += 1;
+        self.last_conversion = None;
+        if CONVERSION_TAP.with(std::cell::Cell::get) > 0 {
+            let (row, stride) = (usize::try_from(width).unwrap() * 8, rgba.stride(0));
+            let bytes = (0..usize::try_from(height).unwrap())
+                .flat_map(|y| rgba.data(0)[y * stride..y * stride + row].iter().copied())
+                .collect();
+            self.last_conversion = Some(Converted {
+                pts,
+                rgba: Arc::new(bytes),
+            });
+        }
+        if fault == Some(OutputFault::WorkingFrame) {
+            flip(rgba);
+        }
+    }
+
+    /// Count a received frame; a cancel armed for it raises the stop flag.
+    pub(crate) fn on_frame(
+        &mut self,
+        grid: i64,
+        ts: Option<i64>,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) {
+        self.received += 1;
+        self.frames.push(FrameLog {
+            packets: self.packets,
+            grid,
+            ts,
+        });
+        if self.cancel_at_received.is_some_and(|n| self.received >= n)
+            && let Some(stop) = stop
+        {
+            stop.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 struct PendingVideoFrame {
     first_grid_frame: i64,
     decoded: Option<ffmpeg::frame::Video>,
+    #[cfg(test)]
+    s4: Option<crate::s4_d13::Registration>,
 }
 
 pub(crate) struct ManagedSource {
     description: ColorDescription,
     assumption: Option<ColorSourceProfileAssumption>,
+    conversion: Conversion,
+}
+
+impl ManagedSource {
+    /// PF1 X-2: the production dispatch; a refusal is today's classify error.
+    pub(crate) fn with_conversion(
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+    ) -> Result<Self, ColorSourceError> {
+        Ok(Self {
+            conversion: select_conversion(description, assumption)?,
+            description: description.clone(),
+            assumption,
+        })
+    }
 }
 
 enum VideoConverter {
@@ -1044,6 +1693,11 @@ pub(crate) trait DecoderFrame: CachedFrame {
         flip_horizontal: bool,
         managed_source: Option<&ManagedSource>,
     ) -> Result<Self, MediaError>;
+
+    /// PF1 S2c C-4: replace one sample with NaN (the test-only shared-path
+    /// fault `OutputFault::Nan`); frames without float samples ignore it.
+    #[cfg(test)]
+    fn poison_sample(&mut self) {}
 }
 
 impl DecoderFrame for FrameTexture {
@@ -1087,6 +1741,17 @@ impl DecoderFrame for WorkingFrame {
                 "managed RGBA64 decoder output is missing source colour metadata".to_owned(),
             )
         })?;
+        if let Conversion::Separable(table) = &source.conversion {
+            let plane = (rgba.data(0), rgba.stride(0));
+            return fill_managed_plane(
+                plane,
+                (width, height),
+                rotation,
+                flip_horizontal,
+                table,
+                source,
+            );
+        }
         let pixels = read_plane(rgba, width, height, 8)?;
         // MO1 R7: EXIF's mirrored orientations flip in stored-pixel space
         // before the right-angle rotation.
@@ -1099,6 +1764,38 @@ impl DecoderFrame for WorkingFrame {
             &source.description,
             source.assumption,
         )
+    }
+
+    #[cfg(test)]
+    fn poison_sample(&mut self) {
+        Arc::make_mut(&mut self.pixels)[2] = half::f16::NAN; // pixel 0, blue
+    }
+}
+
+/// H-5: a synchronous decoder's frame threads, min(P, 16).
+pub(crate) fn default_threads() -> usize {
+    // Replace only the CPU-count input in tests; share the cap below.
+    #[cfg(test)]
+    use s4_cpu as std;
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(16)
+}
+
+#[cfg(test)]
+thread_local! {
+    static S4_PARALLELISM: std::cell::Cell<Option<std::num::NonZeroUsize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+mod s4_cpu {
+    pub use std::num;
+    pub mod thread {
+        pub fn available_parallelism() -> std::io::Result<std::num::NonZeroUsize> {
+            super::super::S4_PARALLELISM
+                .with(std::cell::Cell::get)
+                .map_or_else(std::thread::available_parallelism, Ok)
+        }
     }
 }
 
@@ -1124,6 +1821,42 @@ pub(crate) struct VideoDecoder {
     continuation_at: Option<TimeCode>,
     eof_sent: bool,
     seek_count: u64,
+    /// PF1 H-2: a reader's decode stops at the next packet boundary once
+    /// set; Amendment R43 (RS-1): and its IO (seek, packet read) at the next
+    /// read of the file, through `input`'s interrupt callback.
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// The decoder was opened with a reader's interrupt (the shadow is too).
+    interruptible: bool,
+    /// PF1 S2c S-2: the run since the last seek, for forward continuation.
+    s2: Continuation,
+    /// Amendment R53 [S2c]: a refill's window [start, t) being decoded: its
+    /// frames are kept unconverted (`retained`) rather than converted.
+    /// Amendment R54: only frames t's own decode produces are kept.
+    retaining: Option<(i64, i64)>,
+    /// Amendment R63 [S2c] (F2): the window times the refill keeps (the
+    /// scheduler's: the window less the times the ring already holds).
+    retain: BTreeSet<i64>,
+    /// Amendment R53 [S2c]: the refill window's decoded frames, not yet
+    /// converted: (first grid frame, last grid frame, timestamp, frame).
+    /// Amendment R54: each the decoder's own reference-counted output (no
+    /// copy), unless the frame also shows at t.
+    retained: KeptFrames<KeptFrame>,
+    #[cfg(test)]
+    probe: DecoderProbe,
+    #[cfg(test)]
+    s4_window: u64,
+    #[cfg(test)]
+    s4_owner: Option<crate::s4_d13::Owner>,
+}
+
+/// Amendment R53 [S2c]: a refill window's decoded frame, kept unconverted
+/// (`KeptFrames` holds the grid times it owes).
+struct KeptFrame {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pts: Option<i64>,
+    decoded: ffmpeg::frame::Video,
+    #[cfg(test)]
+    _s4: Option<crate::s4_d13::Registration>,
 }
 
 impl VideoDecoder {
@@ -1137,9 +1870,10 @@ impl VideoDecoder {
         fps: Rational,
         max_width: Option<u32>,
     ) -> Result<Self, MediaError> {
-        Self::open_scaled_internal(path, fps, max_width, None)
+        Self::open_scaled_internal(path, fps, max_width, None, default_threads(), None)
     }
 
+    #[cfg(test)]
     pub(crate) fn open_scaled_managed(
         path: &Path,
         fps: Rational,
@@ -1147,14 +1881,37 @@ impl VideoDecoder {
         description: &ColorDescription,
         assumption: Option<ColorSourceProfileAssumption>,
     ) -> Result<Self, MediaError> {
+        Self::open_managed_threads(
+            path,
+            fps,
+            max_width,
+            description,
+            assumption,
+            default_threads(),
+            None,
+        )
+    }
+
+    /// PF1 S2b H-5: a managed open with `threads` frame threads (a reader's
+    /// share; synchronous decoders keep min(P, 16)). Amendment R43 (RS-1):
+    /// a reader passes its `stop` flag, which interrupts the open's IO and
+    /// every later seek and read.
+    pub(crate) fn open_managed_threads(
+        path: &Path,
+        fps: Rational,
+        max_width: Option<u32>,
+        description: &ColorDescription,
+        assumption: Option<ColorSourceProfileAssumption>,
+        threads: usize,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<Self, MediaError> {
         // IN1 §4.2 rule 8: the typed refusal leaves the decoder intact. The
         // contextual sentence this site used to build by hand is rebuilt by
         // `SourceColorRefusal`'s `#[error(...)]` template once
         // `contextual_managed_decode_error` has added the asset and the path,
         // so no caller sees a different string.
-        let source = classify_source_with_assumption(description, assumption)
+        let source = ManagedSource::with_conversion(description, assumption)
             .map_err(MediaError::SourceColor)?;
-        let _ = source;
         let _declared_depth = declared_integer_depth(description).map_err(|error| {
             unsupported_decoder_format(
                 path,
@@ -1164,15 +1921,8 @@ impl VideoDecoder {
                 format!("managed source depth rejected: {error}"),
             )
         })?;
-        Self::open_scaled_internal(
-            path,
-            fps,
-            max_width,
-            Some(ManagedSource {
-                description: description.clone(),
-                assumption,
-            }),
-        )
+        let managed = Some(source);
+        Self::open_scaled_internal(path, fps, max_width, managed, threads.max(1), stop)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1181,8 +1931,13 @@ impl VideoDecoder {
         fps: Rational,
         max_width: Option<u32>,
         managed_source: Option<ManagedSource>,
+        threads: usize,
+        stop: Option<&Arc<std::sync::atomic::AtomicBool>>,
     ) -> Result<Self, MediaError> {
-        let input = media_input(path)?;
+        let input = match stop {
+            Some(stop) => reader_input(path, stop)?,
+            None => media_input(path)?,
+        };
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Video)
@@ -1203,9 +1958,7 @@ impl VideoDecoder {
             .map_err(|error| media_error(path, "could not read video codec parameters", error))?;
         context.set_threading(ffmpeg::codec::threading::Config {
             kind: ffmpeg::codec::threading::Type::Frame,
-            count: std::thread::available_parallelism()
-                .map_or(1, std::num::NonZeroUsize::get)
-                .min(16),
+            count: threads,
         });
         let decoder = context
             .decoder()
@@ -1221,6 +1974,14 @@ impl VideoDecoder {
         // reaches `still_file_orientation` costs at most the 8-byte
         // signature when the container is not a still at all.
         let no_audio = input.streams().best(ffmpeg::media::Type::Audio).is_none();
+        // PF1 S2c S-2 rules 1 and 4, fixed by the file.
+        let s2 = Continuation {
+            pair: input.format().name().split(',').any(|name| name == "mov")
+                && decoder.id() == ffmpeg::codec::Id::H264
+                && unfragmented_mov(path),
+            stream: selects_stream(&input, stream_index),
+            ..Continuation::default()
+        };
         let flip_horizontal = if is_still_image_codec(decoder.id()) && no_audio {
             if let Some(orientation) = crate::still_orientation::still_file_orientation(path) {
                 rotation = orientation.rotation;
@@ -1303,6 +2064,18 @@ impl VideoDecoder {
             continuation_at: None,
             eof_sent: false,
             seek_count: 0,
+            stop: stop.cloned(),
+            interruptible: stop.is_some(),
+            s2,
+            retaining: None,
+            retain: BTreeSet::new(),
+            retained: KeptFrames::default(),
+            #[cfg(test)]
+            probe: DecoderProbe::default(),
+            #[cfg(test)]
+            s4_window: 0,
+            #[cfg(test)]
+            s4_owner: crate::s4_d13::Owner::new(),
         })
     }
 
@@ -1315,9 +2088,42 @@ impl VideoDecoder {
         let timestamp = frame_to_global_timestamp(start, self.fps).saturating_add(
             stream_timestamp_to_global(self.stream_start, self.stream_time_base),
         );
-        self.input
-            .seek(timestamp, ..timestamp)
-            .map_err(|error| media_error(&self.path, "video seek failed", error))?;
+        self.seek_to(timestamp, start)?;
+        self.decode_from_cursor(start, end, cache)?;
+        // PF1 S2c-5 (R39 item 4 (b), lead rulings of 2026-10-06): on the S-2
+        // pair, a seek that landed on a key past the stream start whose first
+        // frame presents after `start` (an open-GOP key: its leading frames
+        // reference the GOP before) holds no frame for `start`. One seek to
+        // just before that key's DTS decodes them from the earlier key; the
+        // run then has no anchor (`retried`). Other demuxers keep one seek.
+        let past = self.s2.first_frame.is_some_and(|grid| grid > start.0);
+        let key = (self.s2.first)
+            .filter(|(_, dts, key)| *key && dts.is_some_and(|dts| dts > self.stream_start));
+        if let (true, true, Some((_, Some(dts), _))) = (self.s2.pair, past, key) {
+            let earlier = stream_timestamp_to_global(dts.saturating_sub(1), self.stream_time_base);
+            // Amendment R54: a refill keeps what the retried run decodes.
+            self.retained.clear();
+            self.seek_to(earlier, start)?;
+            self.s2.retried = true;
+            self.decode_from_cursor(start, end, cache)?;
+        }
+        Ok(())
+    }
+
+    /// Seek to the global `timestamp` for a window from `start`, and reset
+    /// the decode state (a failed seek resets the decoder).
+    fn seek_to(&mut self, timestamp: i64, start: TimeCode) -> Result<(), MediaError> {
+        if let Err(error) = self.input.seek(timestamp, ..timestamp) {
+            // Amendment R43 (RS-1): the reader's interrupt ended the seek.
+            #[cfg(test)]
+            interrupt_seam::exited(&self.path, error);
+            self.continuation_at = None;
+            if self.stopped() {
+                return Err(MediaError::Cancelled);
+            }
+            self.reset_continuation();
+            return Err(media_error(&self.path, "video seek failed", error));
+        }
         self.decoder.flush();
         self.fallback_index = start.0;
         self.pending = None;
@@ -1325,8 +2131,10 @@ impl VideoDecoder {
         self.continuation_at = None;
         self.eof_sent = false;
         self.seek_count = self.seek_count.saturating_add(1);
-
-        self.decode_from_cursor(start, end, cache)
+        self.s2.seeked();
+        #[cfg(test)]
+        self.probe.on_seek();
+        Ok(())
     }
 
     /// Continue directly from the prior window when it ended immediately
@@ -1344,12 +2152,412 @@ impl VideoDecoder {
         self.decode_from_cursor(start, end, cache)
     }
 
-    #[cfg(test)]
+    /// PF1 H-2: a reader asked this decoder to stop.
+    fn stopped(&self) -> bool {
+        let stop = self.stop.as_ref();
+        stop.is_some_and(|stop| stop.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// PF1 K-1 (review B F1): the (display) size every frame this decoder
+    /// converts has, its orientation and proxy bound applied.
+    pub(crate) fn frame_size(&self) -> (u32, u32) {
+        (self.rotation).display_dimensions(self.scaled_width, self.scaled_height)
+    }
+
+    /// The seeks this decoder made (S2c-1: P-seek's `drag_seeks`).
     pub(crate) fn seek_count(&self) -> u64 {
         self.seek_count
     }
 
+    /// PF1 S2c C-4: the witnesses' stop signal on a decoder opened without
+    /// one (checked at packet and frame boundaries; R43's IO interrupt reads
+    /// only the flag given to `open`).
+    #[cfg(test)]
+    pub(crate) fn set_stop(&mut self, stop: Arc<std::sync::atomic::AtomicBool>) {
+        self.stop = Some(stop);
+    }
+
+    /// PF1 S2c C-4: the fields §8 S-2 names, for the witnesses to compare.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> DecoderState {
+        let frame = |f: &PendingVideoFrame| Retained {
+            grid: f.first_grid_frame,
+            pts: f.decoded.as_ref().and_then(|d| d.timestamp()),
+            hash: f.decoded.as_ref().map_or(0, plane_hash),
+        };
+        DecoderState {
+            pending: self.pending.as_ref().map(frame),
+            lookahead: self.lookahead.as_ref().map(frame),
+            continuation_at: self.continuation_at.map(|t| t.0),
+            eof_sent: self.eof_sent,
+            fallback_index: self.fallback_index,
+            first_packet: self.probe.first_packet,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe(&self) -> &DecoderProbe {
+        &self.probe
+    }
+
+    #[cfg(test)]
+    pub(crate) fn probe_mut(&mut self) -> &mut DecoderProbe {
+        &mut self.probe
+    }
+
+    /// Raise the stop flag once `frames` more frames have been received.
+    #[cfg(test)]
+    pub(crate) fn arm_cancel_after(&mut self, frames: Option<u64>) {
+        self.probe.cancel_at_received = frames.map(|n| self.probe.received + n);
+    }
+
+    /// Flip one bit of the held lookahead frame's luma (a corrupted retained frame).
+    #[cfg(test)]
+    pub(crate) fn corrupt_lookahead(&mut self) {
+        if let Some(frame) = self.lookahead.as_mut().and_then(|f| f.decoded.as_mut()) {
+            frame.data_mut(0)[0] ^= 1;
+        }
+    }
+
+    /// The tightly packed decoded planes of the held frames, exactly the bytes
+    /// `ffmpeg -f framehash` hashes (8-bit planar), for the independent oracle.
+    #[cfg(test)]
+    pub(crate) fn retained_planes(&self) -> [Option<Vec<u8>>; 2] {
+        [&self.pending, &self.lookahead]
+            .map(|f| f.as_ref().and_then(|f| f.decoded.as_ref()).map(plane_bytes))
+    }
+
+    /// The anchor of a raw `avformat_seek_file` target on the real context
+    /// (the test-only seam for S-2's tick boundaries). Use on a scratch
+    /// decoder: it moves the demuxer.
+    #[cfg(test)]
+    pub(crate) fn probe_anchor_at(&mut self, timestamp: i64) -> Option<Anchor> {
+        self.input.seek(timestamp, ..timestamp).ok()?;
+        let index = self.stream_index;
+        let (_, packet) = self.input.packets().find(|(s, _)| s.index() == index)?;
+        Some((packet.position(), packet.dts(), packet.is_key()))
+    }
+
+    /// Amendment R43 (RS-1): a failed or stopped window leaves no cursor, so
+    /// the next window seeks (and flushes) rather than continuing from a
+    /// read the interrupt may have cut short.
     fn decode_from_cursor<T: DecoderFrame>(
+        &mut self,
+        start: TimeCode,
+        end: TimeCode,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        let result = self.decode_cursor(start, end, cache);
+        match &result {
+            Ok(()) => {}
+            // S-2: a stopped run leaves no cursor; an error resets the decoder.
+            Err(MediaError::Cancelled) => self.continuation_at = None,
+            Err(_) => self.reset_continuation(),
+        }
+        result
+    }
+
+    /// PF1 S2c S-2: a paused target `t`, the reader's last produced frame
+    /// being `from`. The decoder continues forward from `from` only inside
+    /// S-2's domain (`may_continue`), and seeks as `decode_window` does
+    /// otherwise or once a rule breaks mid-run (the frames are a fresh
+    /// seek's either way). Cancellation is checked between produced frames.
+    pub(crate) fn decode_paused<T: DecoderFrame>(
+        &mut self,
+        from: Option<i64>,
+        t: TimeCode,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        self.s2.frame_checks = true;
+        let result = self.paused(from, t, cache);
+        self.s2.frame_checks = false;
+        result
+    }
+
+    /// Amendment R53 [S2c]: a paused backward refill of the window
+    /// [start, t]: only t is converted (into `cache`), and the decoded
+    /// frames of [start, t) are kept for `convert_retained`. Amendment R54:
+    /// the refill seeks and decodes exactly as a fresh paused seek to t
+    /// (the same anchor, S2c-5's retry on its pair); the window keeps only
+    /// the frames that decode produces in [start, t) (`kept_from`), never
+    /// seeking earlier to fill it. A failure keeps none. Amendment R63
+    /// [S2c] (F2): it keeps only the times in `retain`; the decode is the
+    /// same, the other window frames drop as it passes them.
+    pub(crate) fn decode_refill<T: DecoderFrame>(
+        &mut self,
+        (start, t): (TimeCode, TimeCode),
+        retain: BTreeSet<i64>,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        #[cfg(test)]
+        {
+            self.s4_window += 1;
+        }
+        self.retained.clear();
+        (self.retaining, self.retain) = (Some((start.0, t.0)), retain);
+        let result = self.decode_paused(None, t, cache);
+        self.retaining = None;
+        self.retain.clear();
+        if result.is_err() {
+            self.retained.clear();
+        }
+        #[cfg(test)]
+        if result.is_ok() {
+            use crate::pf1_clock::{KEPT_BYTES, REFILLS, WINDOWS_FULL, add};
+            add(REFILLS, 1);
+            add(KEPT_BYTES, self.kept_bytes() as u64);
+            if self.retained.is_empty() {
+                add(WINDOWS_FULL, 1);
+            }
+        }
+        result
+    }
+
+    /// Amendment R54 [S2c]: the first window time the last refill kept
+    /// (`None`: it kept nothing).
+    pub(crate) fn kept_from(&self) -> Option<i64> {
+        self.retained.kept_from()
+    }
+
+    /// Amendment R54 (K-1): d, an upper bound on one decoded frame's
+    /// bytes as the decoder keeps it: its pixel format's planes at the
+    /// decoder's default buffer geometry (every plane's stride a multiple
+    /// of 64 bytes, so the width is padded to 64 chroma samples; the height
+    /// padded to 32 past H.264's two extra rows), or 8 bytes a pixel if the
+    /// format is not known yet.
+    pub(crate) fn decoded_frame_bytes(&self) -> usize {
+        let padded = |n: u32, to: u32| n.div_ceil(to).saturating_mul(to);
+        let (width, height) = (self.decoder.width(), self.decoder.height());
+        if width == 0 || height == 0 {
+            return 0;
+        }
+        let format = self.decoder.format();
+        let shift = format
+            .descriptor()
+            .map_or(0, ffmpeg::format::pixel::Descriptor::log2_chroma_w);
+        let width = padded(width, 64 << shift);
+        let height = padded(height.saturating_add(2), 32);
+        let planes = if format == ffmpeg::format::Pixel::None {
+            0
+        } else {
+            let frame = ffmpeg::frame::Video::new(format, width, height);
+            (0..frame.planes()).map(|i| frame.data(i).len()).sum()
+        };
+        match planes {
+            0 => usize::try_from(u64::from(width) * u64::from(height) * 8).unwrap_or(usize::MAX),
+            bytes => bytes,
+        }
+    }
+
+    /// Amendment R53 [S2c]: the kept refill frame at `at`, converted, if
+    /// the decoder keeps one (no decode, no seek; the cursor stays).
+    /// Amendment R61: `at` leaves the frame's times. The managed converter
+    /// takes the frame it is given (its buffers move into the graph), so a
+    /// frame still kept for another time converts a copy, and its last time
+    /// converts the frame itself, which releases it.
+    pub(crate) fn convert_retained<T: DecoderFrame>(
+        &mut self,
+        at: i64,
+    ) -> Option<Result<T, MediaError>> {
+        let kept = self.retained.take(at)?;
+        #[cfg(test)]
+        {
+            self.probe.converting_pts = kept.value.pts;
+            self.probe.window_conversion = true;
+        }
+        let frame = if kept.times.is_empty() {
+            self.convert::<T>(&kept.value.decoded)
+        } else {
+            let copy = kept.value.decoded.clone();
+            self.convert::<T>(&copy)
+        };
+        #[cfg(test)]
+        {
+            self.probe.window_conversion = false;
+        }
+        self.retained.put_back(kept); // its grid frames not yet converted
+        #[cfg(test)]
+        let frame = match self.probe.fail_conversion.take_if(|time| *time == at) {
+            Some(_) => Err(MediaError::Backend(format!(
+                "injected: the conversion of kept {at} fails (Amendment R62)"
+            ))),
+            None => frame,
+        };
+        #[cfg(test)]
+        if self.retained.is_empty() {
+            crate::pf1_clock::add(crate::pf1_clock::WINDOWS_FULL, 1);
+        }
+        Some(frame)
+    }
+
+    /// Amendment R54 (K-1) test support: the bytes of the decoded frames
+    /// the decoder keeps (every plane's rows).
+    #[cfg(test)]
+    pub(crate) fn kept_bytes(&self) -> usize {
+        (self.retained.values())
+            .map(|kept| {
+                let frame = &kept.decoded;
+                (0..frame.planes())
+                    .map(|i| frame.data(i).len())
+                    .sum::<usize>()
+            })
+            .sum()
+    }
+
+    /// Amendment R62's witness: the kept frame's conversion of `at` fails.
+    #[cfg(test)]
+    pub(crate) fn fail_conversion_at(&mut self, at: i64) {
+        self.probe.fail_conversion = Some(at);
+    }
+
+    /// Exact grid coverage for successful-refill accounting (R75 D14), ascending.
+    pub(crate) fn kept_times(&self) -> Vec<i64> {
+        self.retained.times()
+    }
+
+    /// Amendment R57 [S2c]: the kept refill frames above `bound` go (a
+    /// newer post's t′ is below them: they are never converted). Amendment
+    /// R61: so do those below `low` (a continuation cut to fit K-3).
+    pub(crate) fn discard_kept_outside(&mut self, keep: (i64, i64)) {
+        self.retained.discard_outside(keep);
+    }
+
+    /// Amendment R53 [S2c]: the decoder decodes something else; its kept
+    /// refill frames go.
+    pub(crate) fn drop_retained(&mut self) {
+        self.retained.clear();
+    }
+
+    /// Amendment R62 [S2c]: a reader's result came back (`ok`: it did not
+    /// fail); a failure leaves nothing kept ([`KeptFrames::settle`]).
+    pub(crate) fn settle_kept(&mut self, ok: bool) {
+        self.retained.settle(ok);
+    }
+
+    fn paused<T: DecoderFrame>(
+        &mut self,
+        from: Option<i64>,
+        t: TimeCode,
+        cache: &mut FrameCache<T>,
+    ) -> Result<(), MediaError> {
+        if from.is_some_and(|c| self.may_continue(c, t.0)) {
+            self.s2.continuing = true;
+            let result = self.decode_from_cursor(t, t, cache);
+            self.s2.continuing = false;
+            if !std::mem::take(&mut self.s2.abandoned) {
+                return result;
+            }
+            self.continuation_at = None;
+        }
+        self.decode_window(t, t, cache)?;
+        if self.s2.retried {
+            // S2c-5: a retried run has no anchor (rule 2 is not judged on
+            // it, so no latch); the next paused frame seeks.
+            return Ok(());
+        }
+        // Rule 2: the run's anchor, and the real seek's first packet must be it.
+        let shadow = self.shadow_anchor(t, true);
+        if shadow.is_some() && self.s2.first.is_some() && self.s2.first != shadow {
+            self.s2.disabled = true;
+        }
+        self.s2.run = shadow;
+        Ok(())
+    }
+
+    /// The frame the decoder last produced (its cursor), if it has one.
+    pub(crate) fn cursor(&self) -> Option<i64> {
+        self.continuation_at.map(|next| next.0.saturating_sub(1))
+    }
+
+    /// PF1 S2c S-2: does every rule hold for continuing from `c` to `t`?
+    fn may_continue(&mut self, c: i64, t: i64) -> bool {
+        let s2 = &self.s2;
+        let held = !s2.disabled
+            && s2.pair
+            && s2.stream
+            && self.continuation_at == Some(TimeCode(c.saturating_add(1)))
+            && c < t
+            && t <= c.saturating_add(12)
+            && !s2.stamps_broken
+            && s2.run.is_some()
+            && s2.first == s2.run;
+        held && self.shadow_anchor(TimeCode(t), false) == self.s2.run
+    }
+
+    /// PF1 S2c S-2 rule 1: A(t), the first packet of the selected stream
+    /// after today's seek to `t` on the shadow context (`None`: unknown).
+    fn shadow_anchor(&mut self, t: TimeCode, at_seek: bool) -> Option<Anchor> {
+        #[cfg(test)]
+        if matches!(
+            self.s2.fault,
+            Some(ShadowFault::Fails | ShadowFault::StreamMismatch)
+        ) {
+            return None;
+        }
+        if !(self.s2.pair && self.s2.stream) || self.s2.shadow_failed {
+            return None;
+        }
+        if self.s2.shadow.is_none() {
+            let opened = match (&self.stop, self.interruptible) {
+                (Some(stop), true) => reader_input(&self.path, stop),
+                _ => media_input(&self.path),
+            };
+            match opened {
+                Ok(input) => self.s2.shadow = Some(input),
+                // An interrupted open may succeed later; any other is final.
+                Err(_) if self.stopped() => return None,
+                Err(_) => {
+                    self.s2.shadow_failed = true;
+                    return None;
+                }
+            }
+        }
+        let timestamp = frame_to_global_timestamp(t, self.fps).saturating_add(
+            stream_timestamp_to_global(self.stream_start, self.stream_time_base),
+        );
+        let shadow = self.s2.shadow.as_mut()?;
+        shadow.seek(timestamp, ..timestamp).ok()?;
+        // One read per turn (Amendment R43): an error ends the lookup.
+        let anchor = loop {
+            let mut packet = ffmpeg::Packet::empty();
+            packet.read(shadow).ok()?;
+            if packet.stream() == self.stream_index {
+                break (packet.position(), packet.dts(), packet.is_key());
+            }
+        };
+        #[cfg(test)]
+        let anchor = self.s2.faulted(anchor, at_seek);
+        #[cfg(not(test))]
+        let _ = at_seek;
+        Some(anchor)
+    }
+
+    /// PF1 S2c S-2: the decoder resets (an error): no cursor, no run, and
+    /// continuation is allowed again after the next seek.
+    pub(crate) fn reset_continuation(&mut self) {
+        self.continuation_at = None;
+        (self.s2.run, self.s2.disabled) = (None, false);
+    }
+
+    /// PF1 S2c C-4: inject a shadow fault from now on.
+    #[cfg(test)]
+    pub(crate) fn fault_shadow(&mut self, fault: ShadowFault) {
+        self.s2.fault = Some(fault);
+    }
+
+    /// PF1 S2c C-4: at the next seek, once, the shadow's anchor disagrees.
+    #[cfg(test)]
+    pub(crate) fn mismatch_once(&mut self) {
+        self.s2.mismatch_once = true;
+    }
+
+    /// PF1 S2c C-4: the decoder meets this timestamp fault from now on.
+    #[cfg(test)]
+    pub(crate) fn tamper(&mut self, tamper: Tamper) {
+        self.probe.tampers.push(tamper);
+    }
+
+    fn decode_cursor<T: DecoderFrame>(
         &mut self,
         start: TimeCode,
         end: TimeCode,
@@ -1366,6 +2574,11 @@ impl VideoDecoder {
         }
 
         loop {
+            // Amendment R43 (RS-1): checked first, so no frame is taken
+            // after a read the reader's interrupt ended.
+            if self.stopped() {
+                return Err(MediaError::Cancelled);
+            }
             if self.receive_frames(start, end, cache)? {
                 self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
                 return Ok(());
@@ -1375,21 +2588,41 @@ impl VideoDecoder {
                 self.continuation_at = Some(TimeCode(end.0.saturating_add(1)));
                 return Ok(());
             }
-            let next = self
-                .input
-                .packets()
-                .next()
-                .map(|(stream, packet)| (stream.index(), packet));
-            let Some((stream_index, packet)) = next else {
-                self.decoder.send_eof().map_err(|error| {
-                    media_error(&self.path, "video decoder flush failed", error)
-                })?;
-                self.eof_sent = true;
-                continue;
-            };
-            if stream_index != self.stream_index {
+            // PF1 S2c C-4: and before each read, so a stop raised while
+            // decoded frames drained reads no further packet.
+            if self.stopped() {
+                return Err(MediaError::Cancelled);
+            }
+            // Amendment R43 (RS-1): one read per turn, not `packets()`,
+            // whose iterator retries a failed read forever: an interrupted
+            // read fails with `AVERROR_EXIT` until the flag clears, so the
+            // flag's check above ends it. Other failures retry, as before.
+            // A demuxer may report the interrupted read as the end: while
+            // stopped, that is no end.
+            let mut packet = ffmpeg::Packet::empty();
+            match packet.read(&mut self.input) {
+                Ok(()) => {}
+                Err(ffmpeg::Error::Eof) if !self.stopped() => {
+                    self.decoder.send_eof().map_err(|error| {
+                        media_error(&self.path, "video decoder flush failed", error)
+                    })?;
+                    self.eof_sent = true;
+                    continue;
+                }
+                #[cfg_attr(not(test), allow(unused_variables))]
+                Err(error) => {
+                    #[cfg(test)]
+                    interrupt_seam::exited(&self.path, error);
+                    continue;
+                }
+            }
+            if packet.stream() != self.stream_index {
                 continue;
             }
+            #[cfg(test)]
+            self.probe.on_packet(&packet);
+            // S-2 rule 2: the run's real first packet (its anchor).
+            self.s2.on_packet(&packet);
             self.decoder
                 .send_packet(&packet)
                 .map_err(|error| media_error(&self.path, "video decode failed", error))?;
@@ -1419,7 +2652,14 @@ impl VideoDecoder {
             if self.decoder.receive_frame(&mut decoded).is_err() {
                 break;
             }
-            let first_grid_frame = decoded.timestamp().map_or_else(
+            #[cfg(test)]
+            crate::pf1_clock::add(crate::pf1_clock::DECODED, 1);
+            // PF1 S2c C-4: test builds may inject a timestamp fault (`Tamper`).
+            #[cfg(test)]
+            let timestamp = self.probe.tampered(decoded.timestamp());
+            #[cfg(not(test))]
+            let timestamp = decoded.timestamp();
+            let first_grid_frame = timestamp.map_or_else(
                 || {
                     let index = self.fallback_index;
                     self.fallback_index = self.fallback_index.saturating_add(1);
@@ -1433,7 +2673,32 @@ impl VideoDecoder {
                     )
                 },
             );
+            self.s2.first_frame.get_or_insert(first_grid_frame);
+            #[cfg(test)]
+            self.probe
+                .on_frame(first_grid_frame, timestamp, self.stop.as_ref());
+            #[cfg(test)]
+            if self.probe.check_between_frames
+                && (self.stop.as_ref())
+                    .is_some_and(|s| s.load(std::sync::atomic::Ordering::Acquire))
+            {
+                self.continuation_at = None;
+                return Err(MediaError::Cancelled);
+            }
+            // PF1 S2c S-2: cancellation is checked between produced frames,
+            // so frames already decoded and waiting are not drained.
+            if self.s2.frame_checks && self.stopped() {
+                self.continuation_at = None;
+                return Err(MediaError::Cancelled);
+            }
+            // S-2 rule 3: a missing or repeated timestamp ends a running
+            // continuation.
+            if self.s2.on_frame(timestamp) {
+                return Ok(true);
+            }
             let next = PendingVideoFrame {
+                #[cfg(test)]
+                s4: self.s4_owner.as_ref().map(|o| o.register(&decoded, 0)),
                 first_grid_frame,
                 decoded: Some(decoded),
             };
@@ -1470,17 +2735,75 @@ impl VideoDecoder {
         end: TimeCode,
         cache: &mut FrameCache<T>,
     ) -> Result<(), MediaError> {
-        let Some(pending) = self.pending.as_ref() else {
+        let Some(pending) = self.pending.as_mut() else {
             return Ok(());
         };
+        let raw_last = next_grid_frame.saturating_sub(1);
+        // Amendment R53 [S2c]: the part of the frame inside a refill's
+        // window is kept, not converted (`convert_retained` converts it
+        // later). Amendment R54: t's own decode runs from t's anchor, so
+        // the window is what lands in [from, to); a frame shown only below
+        // t is kept as the decoder's reference (moved, not copied: the
+        // pending frame is replaced next), one also shown at t is copied.
+        // Amendment R63 [S2c] (F2): only the times in `retain` (the window
+        // less the ring's); a frame owing none is not kept.
+        if let Some((from, to)) = self.retaining {
+            let first = pending.first_grid_frame.max(from);
+            let last = raw_last.min(to.saturating_sub(1));
+            if first <= last {
+                self.retained.cover(first);
+            }
+            let times: BTreeSet<i64> = (first..=last)
+                .filter(|at| self.retain.contains(at))
+                .collect();
+            if !times.is_empty() {
+                let pts = pending.decoded.as_ref().and_then(|d| d.timestamp());
+                let below = raw_last < to;
+                let decoded = if below {
+                    pending.decoded.take()
+                } else {
+                    pending.decoded.clone()
+                };
+                let decoded = decoded.ok_or_else(|| {
+                    MediaError::Backend("pending video frame has no pixels".to_owned())
+                })?;
+                #[cfg(test)]
+                let s4 = self
+                    .s4_owner
+                    .as_ref()
+                    .map(|o| o.register(&decoded, self.s4_window));
+                #[cfg(test)]
+                if below {
+                    pending.s4.take();
+                }
+                self.retained.push(
+                    times,
+                    KeptFrame {
+                        pts,
+                        decoded,
+                        #[cfg(test)]
+                        _s4: s4,
+                    },
+                );
+            }
+            if first <= last && raw_last < to {
+                return Ok(());
+            }
+        }
+        let pending = self.pending.as_ref().expect("the pending frame");
         let first = pending.first_grid_frame.max(start.0);
-        let last = next_grid_frame.saturating_sub(1).min(end.0);
+        let last = raw_last.min(end.0);
         if first <= last {
             let decoded = pending
                 .decoded
                 .as_ref()
                 .ok_or_else(|| MediaError::Backend("pending video frame has no pixels".to_owned()))?
                 .clone();
+            // The clone drops the timestamp; the tap records the frame's own.
+            #[cfg(test)]
+            {
+                self.probe.converting_pts = pending.decoded.as_ref().and_then(|d| d.timestamp());
+            }
             let texture = self.convert::<T>(&decoded)?;
             for index in first..=last {
                 cache.insert(TimeCode(index), texture.clone());
@@ -1494,6 +2817,12 @@ impl VideoDecoder {
         decoded: &ffmpeg::frame::Video,
     ) -> Result<T, MediaError> {
         let mut rgba = ffmpeg::frame::Video::empty();
+        #[cfg(test)]
+        {
+            self.probe.converted += 1;
+        }
+        #[cfg(test)]
+        let clock = (std::time::Instant::now(), crate::pf1_clock::thread_cpu_ns());
         match &mut self.converter {
             VideoConverter::Legacy(scaler) => scaler
                 .run(decoded, &mut rgba)
@@ -1529,15 +2858,70 @@ impl VideoDecoder {
                 })?;
             }
         }
-        T::from_rgba_frame(
+        #[cfg(test)]
+        let clock = (
+            clock.0,
+            std::time::Instant::now(),
+            crate::pf1_clock::thread_cpu_ns().saturating_sub(clock.1),
+        );
+        #[cfg(test)]
+        if matches!(self.converter, VideoConverter::Managed(_)) {
+            self.probe.tap_conversion(
+                self.probe.converting_pts,
+                &mut rgba,
+                (self.scaled_width, self.scaled_height),
+            );
+        }
+        let frame = T::from_rgba_frame(
             &rgba,
             self.scaled_width,
             self.scaled_height,
             self.rotation,
             self.flip_horizontal,
             self.managed_source.as_ref(),
-        )
+        )?;
+        #[cfg(test)]
+        crate::pf1_clock::converted(
+            self.probe.window_conversion,
+            clock.1 - clock.0,
+            clock.1.elapsed(),
+            clock.2,
+        );
+        #[cfg(test)]
+        let frame = {
+            let mut frame = frame;
+            if OUTPUT_FAULT.with(std::cell::Cell::get) == Some(OutputFault::Nan) {
+                frame.poison_sample();
+            }
+            frame
+        };
+        Ok(frame)
     }
+}
+
+/// PF1 S2c C-4: a decoded frame's visible plane bytes, tightly packed
+/// (8-bit planar formats, as the witness fixtures are).
+#[cfg(test)]
+fn plane_bytes(frame: &ffmpeg::frame::Video) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for plane in 0..frame.planes() {
+        let (width, height) = (frame.plane_width(plane), frame.plane_height(plane));
+        let stride = frame.stride(plane);
+        let data = frame.data(plane);
+        for row in 0..height as usize {
+            bytes.extend_from_slice(&data[row * stride..row * stride + width as usize]);
+        }
+    }
+    bytes
+}
+
+#[cfg(test)]
+fn plane_hash(frame: &ffmpeg::frame::Video) -> u64 {
+    plane_bytes(frame)
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+        })
 }
 
 fn read_plane(
@@ -1563,6 +2947,140 @@ fn read_plane(
         pixels.extend_from_slice(source);
     }
     Ok(pixels)
+}
+
+/// PF1 X-3: `read_plane` + flip + rotate + table lookup in one pass, raising
+/// the error the unfused path would raise first.
+fn fill_managed_plane(
+    (plane, stride): (&[u8], usize),
+    (width, height): (u32, u32),
+    rotation: VideoRotation,
+    flip_horizontal: bool,
+    table: &TransferTable,
+    source: &ManagedSource,
+) -> Result<WorkingFrame, MediaError> {
+    let (w, h) = (
+        usize::try_from(width).unwrap_or_default(),
+        usize::try_from(height).unwrap_or_default(),
+    );
+    let row_bytes = w
+        .checked_mul(8)
+        .ok_or_else(|| MediaError::Backend("decoded frame row is too large".to_owned()))?;
+    for row in 0..h {
+        let start = row.saturating_mul(stride);
+        if plane.get(start..start.saturating_add(row_bytes)).is_none() {
+            return Err(MediaError::Backend(
+                "decoded RGBA frame has an invalid stride".to_owned(),
+            ));
+        }
+    }
+    let too_large = match (flip_horizontal, rotation) {
+        (true, _) => "flipped frame is too large",
+        (false, VideoRotation::None) => "managed source frame is too large",
+        (false, _) => "rotated frame is too large",
+    };
+    let bytes = row_bytes
+        .checked_mul(h)
+        .ok_or_else(|| MediaError::Backend(too_large.to_owned()))?;
+    let rgb = match table.entries() {
+        Ok(rgb) => rgb,
+        Err(_) if bytes == 0 => &[],
+        Err((stage, error)) => {
+            return Err(managed_pixel_error(
+                *stage,
+                &source.description,
+                source.assumption,
+                error,
+            ));
+        }
+    };
+    let alpha = alpha_table();
+    let (out_width, out_height) = rotation.display_dimensions(width, height);
+    let (out_w, out_h) = (
+        usize::try_from(out_width).unwrap_or_default(),
+        usize::try_from(out_height).unwrap_or_default(),
+    );
+    // Amendment R57 [S2c]: an unrotated, unflipped frame fills row-wise.
+    let pixels = if rotation == VideoRotation::None && !flip_horizontal {
+        fill_rows((plane, stride), (w, h), (rgb, alpha))
+    } else {
+        fill_fused(
+            (plane, stride),
+            (w, h),
+            (out_w, out_h),
+            (rotation, flip_horizontal),
+            (rgb, alpha),
+        )
+    };
+    Ok(WorkingFrame {
+        width: out_width,
+        height: out_height,
+        pixels: Arc::new(pixels),
+    })
+}
+
+/// PF1 X-3's fused loop: each output pixel's source pixel through the
+/// rotation and flip, then the tables. `plane` holds `h` rows of `w`
+/// pixels at `stride` (checked by the caller).
+fn fill_fused(
+    (plane, stride): (&[u8], usize),
+    (w, h): (usize, usize),
+    (out_w, out_h): (usize, usize),
+    (rotation, flip_horizontal): (VideoRotation, bool),
+    (rgb, alpha): (&[half::f16], &[half::f16]),
+) -> Vec<half::f16> {
+    let mut pixels = Vec::with_capacity(out_w.saturating_mul(out_h).saturating_mul(4));
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let (x, y) = match rotation {
+                VideoRotation::None => (ox, oy),
+                VideoRotation::Clockwise90 => (oy, h - 1 - ox),
+                VideoRotation::HalfTurn => (w - 1 - ox, h - 1 - oy),
+                VideoRotation::Clockwise270 => (w - 1 - oy, ox),
+            };
+            let x = if flip_horizontal { w - 1 - x } else { x };
+            let at = y * stride + x * 8;
+            let code =
+                |i: usize| usize::from(u16::from_le_bytes([plane[at + i], plane[at + i + 1]]));
+            pixels.extend([rgb[code(0)], rgb[code(2)], rgb[code(4)], alpha[code(6)]]);
+        }
+    }
+    pixels
+}
+
+/// Amendment R57 [S2c]: the fused loop's output for an unrotated, unflipped
+/// plane, row by row: the output allocated once, each row sliced once, each
+/// pixel's codes read from its 8 bytes. `plane` holds `h` rows of `w` pixels
+/// at `stride` (checked by the caller); the tables have 65,536 entries
+/// whenever there is a pixel.
+fn fill_rows(
+    (plane, stride): (&[u8], usize),
+    (w, h): (usize, usize),
+    (rgb, alpha): (&[half::f16], &[half::f16]),
+) -> Vec<half::f16> {
+    type Table<'a> = &'a [half::f16; 65_536];
+    let mut pixels = vec![half::f16::ZERO; w.saturating_mul(h).saturating_mul(4)];
+    let (Ok(rgb), Ok(alpha)) = (Table::try_from(rgb), Table::try_from(alpha)) else {
+        return pixels; // no pixel: a failed table is only taken for an empty frame
+    };
+    if w == 0 {
+        return pixels;
+    }
+    let row_bytes = w * 8;
+    for (y, out) in pixels.chunks_exact_mut(w * 4).enumerate() {
+        let start = y * stride;
+        let row = &plane[start..start + row_bytes];
+        for (px, out) in row
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .zip(out.as_chunks_mut::<4>().0)
+        {
+            let code = |i: usize| usize::from(u16::from_le_bytes([px[i], px[i + 1]]));
+            *out = [rgb[code(0)], rgb[code(2)], rgb[code(4)], alpha[code(6)]];
+        }
+    }
+    pixels
 }
 
 fn rotate_bytes(
@@ -1697,6 +3215,37 @@ pub(crate) fn backend(error: impl std::fmt::Display) -> MediaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kinewright_core::classify_source_with_assumption;
+    use std::time::Duration;
+
+    #[test]
+    fn s4_transient_third_decoder_must_latch() {
+        let workload = crate::perf_fixtures::cuts((64, 64), 60, 1, 60, 1);
+        let ledger = crate::s4_d13::Ledger::new(1);
+        crate::s4_d13::START.with_borrow_mut(|slot| *slot = Some(Arc::clone(&ledger)));
+        let decoders: Vec<_> = (0..3)
+            .map(|_| VideoDecoder::open(workload.1[0].0.path(), workload.0.fps).unwrap())
+            .collect();
+        crate::s4_d13::START.with_borrow_mut(|slot| *slot = None);
+        drop(decoders);
+        assert!(ledger.closed());
+        assert!(std::panic::catch_unwind(|| ledger.snapshot()).is_err());
+    }
+
+    #[test]
+    fn s4_sync_decoder_thread_cap() {
+        let workload = crate::perf_fixtures::cuts((64, 64), 60, 1, 60, 1);
+        for p in [1, 2, 3, 20] {
+            S4_PARALLELISM.set(std::num::NonZeroUsize::new(p));
+            let decoder = VideoDecoder::open(workload.1[0].0.path(), workload.0.fps).unwrap();
+            assert_eq!(decoder.decoder.threading().count, p.min(16), "P={p}");
+            assert!(
+                decoder.stop.is_none(),
+                "synchronous open, outside the reader pool"
+            );
+        }
+        S4_PARALLELISM.set(None);
+    }
 
     #[test]
     fn ffmpeg_color_enums_map_known_and_unspecified_values() {
@@ -2348,6 +3897,155 @@ mod tests {
         );
     }
 
+    /// Amendment R43 (RS-1): a reader's decoder carries its interrupt into
+    /// every packet read. Held inside a read's IO (the seam) and its flag
+    /// then set, the read fails with `AVERROR_EXIT` and the decode ends
+    /// `Cancelled`; `packets()` retried that read forever. The source is
+    /// noisy, so reads past the open do real IO (the seam must be entered).
+    #[test]
+    fn an_interrupt_ends_a_readers_packet_read() {
+        use interrupt_seam::{Mode, arm, disarm, exits, poke, wait_entered};
+        let media = crate::test_support::GeneratedMedia::ffmpeg(
+            "r43-read",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=640x360:rate=30",
+                "-frames:v",
+                "60",
+                "-vf",
+                "noise=alls=40:allf=t",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "60",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+            "mp4",
+        );
+        let path = media.path().to_path_buf();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (opened, open) = crossbeam_channel::bounded::<()>(0);
+        let (go, went) = crossbeam_channel::bounded::<()>(0);
+        let (done, result) = crossbeam_channel::bounded(1);
+        let (reader_path, reader_stop) = (path.clone(), Arc::clone(&stop));
+        // The reader's thread: the callback reads its thread's flag.
+        std::thread::spawn(move || {
+            let fps = Rational::new(30, 1).expect("fps");
+            let flag = Some(&reader_stop);
+            let decoder =
+                VideoDecoder::open_scaled_internal(&reader_path, fps, None, None, 1, flag);
+            let mut decoder = decoder.expect("the source opens");
+            opened.send(()).expect("opened");
+            went.recv().expect("go");
+            let mut cache: FrameCache<FrameTexture> = FrameCache::new(2);
+            let window = decoder.decode_window(TimeCode(59), TimeCode(59), &mut cache);
+            let _ = done.send(window);
+        });
+        open.recv().expect("the reader opened");
+        arm(&path, Mode::Interruptible);
+        go.send(()).expect("go");
+        let held = wait_entered(&path, Duration::from_secs(60));
+        assert!(held, "not vacuous: a packet read did IO past the open");
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        poke();
+        let decoded = result.recv_timeout(Duration::from_secs(60));
+        let decoded = decoded.expect("the interrupted read ended");
+        assert!(matches!(decoded, Err(MediaError::Cancelled)), "{decoded:?}");
+        assert!(exits(&path) >= 1, "the read failed with AVERROR_EXIT");
+        disarm(&path);
+    }
+
+    /// PF1 S2c S-2 rules 1 and 4, as the decoder reads them at open: the
+    /// witnessed pair (`mov`/H.264, not fragmented) and the stream today's seek selects
+    /// (an audio stream or a cover picture beside the video cannot win; a
+    /// second video stream might). Outside either, every paused frame
+    /// seeks, c + 1 included; inside both, c + 1 continues.
+    #[test]
+    fn continuation_needs_the_witnessed_pair_and_the_seek_stream() {
+        let video = "-f lavfi -t 0.4 -i testsrc2=size=64x36:rate=30";
+        let cases = [
+            ("s2-plain", "", "-c:v libx264 -g 12", "mp4", (true, true)),
+            (
+                "s2-audio",
+                "-f lavfi -t 0.4 -i sine",
+                "-c:v libx264 -g 12 -c:a aac",
+                "mp4",
+                (true, true),
+            ),
+            (
+                "s2-cover",
+                "-f lavfi -t 0.04 -i color=red:size=32x32:rate=25",
+                "-map 0 -map 1 -c:v:0 libx264 -g 12 -c:v:1 png -disposition:v:1 attached_pic",
+                "mp4",
+                (true, true),
+            ),
+            (
+                "s2-two-videos",
+                "-f lavfi -t 0.4 -i testsrc=size=64x36:rate=30",
+                "-map 0 -map 1 -c:v libx264 -g 12",
+                "mp4",
+                (true, false),
+            ),
+            ("s2-mpeg4", "", "-c:v mpeg4 -g 12", "mp4", (false, true)),
+            // Fragmented MP4 is outside the witnessed pair (`mvex` in
+            // `moov`, with or without an empty `moov`); `moov` first is not.
+            (
+                "s2-fragmented",
+                "",
+                "-c:v libx264 -g 12 -movflags frag_keyframe+empty_moov",
+                "mp4",
+                (false, true),
+            ),
+            (
+                "s2-fragmented-moov",
+                "",
+                "-c:v libx264 -g 12 -movflags frag_keyframe",
+                "mp4",
+                (false, true),
+            ),
+            (
+                "s2-faststart",
+                "",
+                "-c:v libx264 -g 12 -movflags +faststart",
+                "mp4",
+                (true, true),
+            ),
+            (
+                "s2-matroska",
+                "",
+                "-c:v libx264 -g 12",
+                "mkv",
+                (false, true),
+            ),
+        ];
+        let fps = Rational::new(30, 1).expect("fps");
+        for (label, input, output, ext, known) in cases {
+            let args = format!("{video} {input} -pix_fmt yuv420p {output}");
+            let args: Vec<&str> = args.split_whitespace().collect();
+            let media = crate::test_support::GeneratedMedia::ffmpeg(label, &args, ext);
+            let decoder =
+                VideoDecoder::open_scaled_internal(media.path(), fps, None, None, 1, None);
+            let mut decoder = decoder.expect("the source opens");
+            assert_eq!((decoder.s2.pair, decoder.s2.stream), known, "{label}");
+            let mut cache: FrameCache<FrameTexture> = FrameCache::new(1);
+            decoder
+                .decode_paused(None, TimeCode(3), &mut cache)
+                .expect("3");
+            let seeks = decoder.seek_count();
+            let from = decoder.cursor();
+            decoder
+                .decode_paused(from, TimeCode(4), &mut cache)
+                .expect("4");
+            let continued = decoder.seek_count() == seeks;
+            assert_eq!(continued, known == (true, true), "{label}: c + 1");
+        }
+    }
+
     /// Decode one still frame through the legacy path (RGBA8) for content
     /// pins without managed-colour conversion in the way.
     fn decode_still_legacy(path: &std::path::Path) -> FrameTexture {
@@ -2365,6 +4063,38 @@ mod tests {
     fn still_pixel(frame: &FrameTexture, x: u32, y: u32) -> &[u8] {
         let index = usize::try_from((y * frame.width + x) * 4).unwrap();
         &frame.rgba[index..index + 4]
+    }
+
+    /// PF1 K-1 (review B F1): `frame_size` is the size the decoder's frames
+    /// convert to, orientation and proxy bound included (what admission
+    /// charges), for a plain and an EXIF-rotated still at three widths.
+    #[test]
+    fn frame_size_is_what_the_decoder_converts() {
+        crate::initialize_ffmpeg().expect("FFmpeg should initialize for generated media");
+        let directory = crate::test_support::TempDirectory::new("frame-size");
+        let source = "color=c=black:size=64x36:rate=1:duration=1";
+        let plain = still_fixture(&directory, "plain.png", source, "png");
+        let rotated = still_fixture(&directory, "rotated.png", source, "png");
+        insert_png_chunk_after_ihdr(&rotated, &png_chunk(*b"eXIf", &tiff_orientation(6)));
+        let cases = [
+            (&plain, None, (64, 36)),
+            (&plain, Some(20), (20, 11)),
+            (&rotated, None, (36, 64)),
+            (&rotated, Some(20), (20, 35)),
+            (&rotated, Some(99), (36, 64)),
+        ];
+        for (path, max_width, expected) in cases {
+            let mut decoder = VideoDecoder::open_scaled(path, Rational::default(), max_width)
+                .expect("the still opens");
+            let size = decoder.frame_size();
+            assert_eq!(size, expected, "{} at {max_width:?}", path.display());
+            let mut cache: FrameCache<FrameTexture> = FrameCache::new(2);
+            decoder
+                .decode_window(TimeCode::ZERO, TimeCode::ZERO, &mut cache)
+                .expect("the frame decodes");
+            let frame = cache.frame_at_or_before(TimeCode::ZERO).expect("cached");
+            assert_eq!((frame.width, frame.height), size, "the decoded frame");
+        }
     }
 
     /// MO1 R7: EXIF orientation applies at decode. The fixture's vertical
@@ -2611,5 +4341,235 @@ mod tests {
         };
         assert_eq!(declared_bit_depth, Some(8));
         assert_eq!(decoder_bit_depth, Some(16));
+    }
+
+    /// A stride-padded RGBA64LE frame whose four channels carry distinct codes.
+    fn rgba64_frame(width: u32, height: u32) -> ffmpeg::frame::Video {
+        let mut frame = ffmpeg::frame::Video::new(ffmpeg::format::Pixel::RGBA64LE, width, height);
+        let (stride, w) = (frame.stride(0), usize::try_from(width).expect("width"));
+        let plane = frame.data_mut(0);
+        for (index, code) in (0..=u16::MAX).cycle().take(w * height as usize).enumerate() {
+            let at = index / w * stride + index % w * 8;
+            let rgba = [code, code ^ 0x5A5A, !code, code.rotate_left(7)];
+            for (channel, value) in rgba.into_iter().enumerate() {
+                plane[at + channel * 2..at + channel * 2 + 2].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        frame
+    }
+
+    fn per_pixel(source: &ManagedSource) -> ManagedSource {
+        ManagedSource {
+            description: source.description.clone(),
+            assumption: source.assumption,
+            conversion: Conversion::PerPixel,
+        }
+    }
+
+    fn decode_bits(
+        frame: &ffmpeg::frame::Video,
+        (width, height): (u32, u32),
+        rotation: VideoRotation,
+        flip: bool,
+        source: &ManagedSource,
+    ) -> Result<(u32, u32, Vec<u16>), String> {
+        WorkingFrame::from_rgba_frame(frame, width, height, rotation, flip, Some(source))
+            .map(|f| {
+                (
+                    f.width,
+                    f.height,
+                    f.pixels.iter().map(|v| v.to_bits()).collect(),
+                )
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    fn described(
+        primaries: ColorPrimaries,
+        white_point: ColorWhitePoint,
+        matrix: ColorMatrix,
+        range: ColorRange,
+        bit_depth: ColorBitDepth,
+        transfer: ColorTransfer,
+    ) -> ColorDescription {
+        ColorDescription {
+            primaries,
+            transfer,
+            matrix,
+            range,
+            white_point,
+            bit_depth,
+            confidence_basis_points: 10_000,
+            provenance: ColorProvenance::UserOverride,
+        }
+    }
+
+    /// PF1 X-3: the fused fill equals `read_plane` → flip → rotate → per-pixel.
+    #[test]
+    fn fused_table_fill_matches_the_unfused_path_for_every_orientation() {
+        let frame = rgba64_frame(5, 3);
+        let description = described(
+            ColorPrimaries::Bt709,
+            ColorWhitePoint::D65,
+            ColorMatrix::Rgb,
+            ColorRange::Limited,
+            ColorBitDepth::Ten,
+            ColorTransfer::Bt709,
+        );
+        let tables = ManagedSource::with_conversion(&description, None).expect("accepted");
+        assert!(matches!(tables.conversion, Conversion::Separable(_)));
+        let reference = per_pixel(&tables);
+        for rotation in [
+            VideoRotation::None,
+            VideoRotation::Clockwise90,
+            VideoRotation::HalfTurn,
+            VideoRotation::Clockwise270,
+        ] {
+            for flip in [false, true] {
+                let fused = decode_bits(&frame, (5, 3), rotation, flip, &tables);
+                let unfused = decode_bits(&frame, (5, 3), rotation, flip, &reference);
+                assert!(fused.is_ok(), "{rotation:?} {flip}");
+                assert_eq!(fused, unfused, "{rotation:?} flip={flip}");
+                // A plane shorter than the claimed height fails identically.
+                let fused = decode_bits(&frame, (5, 4), rotation, flip, &tables);
+                assert_eq!(
+                    fused,
+                    decode_bits(&frame, (5, 4), rotation, flip, &reference)
+                );
+                assert!(fused.is_err());
+            }
+        }
+    }
+
+    /// Amendment R57 [S2c]: the row-wise fill equals the fused loop for an
+    /// unrotated, unflipped plane: every separable description the fixtures
+    /// use, odd widths, pixel counts that are not a multiple of 8 and strides
+    /// wider than a row (by whole and part pixels); every orientation still
+    /// fills as the fused loop does.
+    #[test]
+    fn the_row_wise_fill_matches_the_fused_loop() {
+        use {ColorBitDepth as D, ColorMatrix as M, ColorRange as R, ColorTransfer as T};
+        let descriptions = [
+            (M::Bt709, R::Limited, D::Eight, T::Bt709), // perf fixtures (BT.709, tv)
+            (M::Bt709, R::Full, D::Eight, T::Bt709),
+            (M::Rgb, R::Limited, D::Ten, T::Bt709), // the X-3 fixture
+            (M::Bt709, R::Limited, D::Integer(12), T::Bt1886),
+            (M::Identity, R::Full, D::Sixteen, T::Srgb),
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        for (matrix, range, depth, transfer) in descriptions {
+            let description = described(
+                ColorPrimaries::Bt709,
+                ColorWhitePoint::D65,
+                matrix,
+                range,
+                depth,
+                transfer,
+            );
+            let source = ManagedSource::with_conversion(&description, None).expect("accepted");
+            let Conversion::Separable(table) = &source.conversion else {
+                panic!("{description:?} is separable");
+            };
+            let tables = (table.entries().expect("a table"), alpha_table());
+            for (w, h) in [(1, 1), (5, 3), (7, 5), (33, 7), (64, 4)] {
+                for pad in [0, 3, 8, 24] {
+                    let stride = w * 8 + pad;
+                    let plane: Vec<u8> = (0..stride * h)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            state.to_le_bytes()[3]
+                        })
+                        .collect();
+                    let fused = fill_fused(
+                        (&plane, stride),
+                        (w, h),
+                        (w, h),
+                        (VideoRotation::None, false),
+                        tables,
+                    );
+                    let rows = fill_rows((&plane, stride), (w, h), tables);
+                    assert_eq!(rows, fused, "{description:?} {w}x{h} stride {stride}");
+                    let size = (u32::try_from(w).expect("w"), u32::try_from(h).expect("h"));
+                    for rotation in [
+                        VideoRotation::None,
+                        VideoRotation::Clockwise90,
+                        VideoRotation::HalfTurn,
+                        VideoRotation::Clockwise270,
+                    ] {
+                        for flip in [false, true] {
+                            let out = rotation.display_dimensions(size.0, size.1);
+                            let out = (out.0 as usize, out.1 as usize);
+                            let filled = fill_managed_plane(
+                                (&plane, stride),
+                                size,
+                                rotation,
+                                flip,
+                                table,
+                                &source,
+                            );
+                            let filled = filled.expect("fills");
+                            let fused =
+                                fill_fused((&plane, stride), (w, h), out, (rotation, flip), tables);
+                            assert_eq!(*filled.pixels, fused, "{rotation:?} flip={flip}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// PF1 X-2 (I1): every descriptor tuple through the production dispatch.
+    /// Accepted tuples decode all 65,536 codes on every channel exactly as
+    /// today's per-pixel path; rejected tuples return today's classify error.
+    #[rustfmt::skip]
+    #[test]
+    fn input_tables_match_every_accepted_descriptor() {
+        use {ColorBitDepth as D, ColorMatrix as M, ColorPrimaries as P, ColorRange as R};
+        use {ColorTransfer as T, ColorWhitePoint as W};
+        let o = || "x".to_owned();
+        let primaries = [P::Unknown, P::Srgb, P::Bt709, P::Bt2020, P::DisplayP3, P::DciP3,
+            P::Smpte170M, P::Smpte240M, P::Bt470M, P::Bt470Bg, P::Film, P::Other(o())];
+        let white_points = [W::Unknown, W::D50, W::D55, W::D60, W::D65, W::Dci, W::Other(o())];
+        let matrices = [M::Unknown, M::Identity, M::Rgb, M::Bt709, M::Bt2020Ncl, M::Bt2020Cl,
+            M::Smpte170M, M::Smpte240M, M::Ycgco, M::ChromaDerivedNcl, M::ChromaDerivedCl,
+            M::Ictcp, M::Other(o())];
+        let ranges = [R::Unknown, R::Full, R::Limited, R::Other(o())];
+        let mut depths = vec![D::Unknown, D::Eight, D::Ten, D::Twelve, D::Sixteen, D::Float16,
+            D::Float32, D::Other(o())];
+        depths.extend([0, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 256].map(D::Integer));
+        let transfers = [T::Unknown, T::Srgb, T::Bt709, T::Bt1886, T::Linear, T::Gamma22,
+            T::Gamma28, T::Smpte170M, T::Smpte2084, T::AribStdB67, T::Log, T::LogC, T::Log3G10,
+            T::Other(o())];
+        let frame = rgba64_frame(256, 256);
+        let decode = |source: &ManagedSource| {
+            decode_bits(&frame, (256, 256), VideoRotation::None, false, source)
+        };
+        let (mut separable, mut rejected) = (0_usize, 0_usize);
+        for pr in &primaries { for wp in &white_points { for mx in &matrices { for rg in &ranges {
+        for bd in &depths { for tf in &transfers {
+        for a in [None, Some(ColorSourceProfileAssumption::D65)] {
+            let (pr, wp, mx, rg) = (pr.clone(), wp.clone(), mx.clone(), rg.clone());
+            let desc = described(pr, wp, mx, rg, bd.clone(), tf.clone());
+            let expected = classify_source_with_assumption(&desc, a);
+            let source = match ManagedSource::with_conversion(&desc, a) {
+                Err(error) => {
+                    assert_eq!(Err(error), expected, "{desc:?}");
+                    rejected += 1;
+                    continue;
+                }
+                Ok(source) => source,
+            };
+            assert!(expected.is_ok(), "{desc:?}");
+            separable += usize::from(matches!(source.conversion, Conversion::Separable(_)));
+            // Review A F2: each accepted tuple gets its own reference decode,
+            // never one shared through the production key.
+            let actual = decode(&source);
+            assert!(actual.is_ok(), "{desc:?}");
+            assert_eq!(actual, decode(&per_pixel(&source)), "{desc:?} {a:?}");
+        }
+        } } } } } }
+        assert!(separable > 0 && rejected > 0, "{separable} {rejected}");
     }
 }

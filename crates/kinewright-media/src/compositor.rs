@@ -14,9 +14,9 @@ use std::{
 use half::f16;
 use kinewright_core::{
     BlendMode, COLOR_NODE_LIMIT_PER_LAYER, ClipId, ColorContext, ColorCurveChannel,
-    ColorDescription, ColorNodeKind, ColorWheelChannel, ColorWheelsParams, CurvePoints, Effect,
-    EffectId, EffectParameterDescriptor, EffectUniform, FrameTexture, LinearRgbaImage,
-    LutNodeParams, MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError,
+    ColorDescription, ColorNodeKind, ColorTransfer, ColorWheelChannel, ColorWheelsParams,
+    CurvePoints, Effect, EffectId, EffectParameterDescriptor, EffectUniform, FrameTexture,
+    LinearRgbaImage, LutNodeParams, MATTE_WINDOW_LIMIT, MatteParams, MatteProofError, MediaError,
     MonitorProofMetadata, MonitorProofRenderKind, ParamValue, ResolvedCurves, TransitionAxis,
     classify_color_node, color_node_inactive_reason, effect_descriptor, managed_color_node_count,
 };
@@ -25,6 +25,7 @@ use crate::{
     color_pipeline::{
         PrimaryCorrection, encode_delivery_for_description, encode_monitor_rgba8_for_description,
     },
+    conversion::monitor_rgba8,
     frame::WorkingFrame,
     lut::{CubeLut, parse_cube_lut},
     lut_store::LutLibrary,
@@ -178,6 +179,8 @@ pub fn compositor_required_limits(mut limits: wgpu::Limits) -> wgpu::Limits {
 
 #[derive(Clone)]
 pub struct GpuContext {
+    full_frame_readbacks: Arc<AtomicU64>,
+    lost: Arc<AtomicBool>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     provenance: GpuProvenance,
@@ -256,6 +259,8 @@ impl<T> Drop for Ledgered<T> {
 
 #[derive(Clone)]
 struct GpuProvenance {
+    #[cfg(test)]
+    selected: Option<wgpu::AdapterInfo>,
     backend: String,
     adapter: String,
     software_fallback: bool,
@@ -265,16 +270,21 @@ struct GpuProvenance {
 impl GpuContext {
     #[must_use]
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let lost = Self::watch_loss(&device);
         Self {
             device,
             queue,
+            lost,
             provenance: GpuProvenance {
+                #[cfg(test)]
+                selected: None,
                 backend: "unknown".to_owned(),
                 adapter: "unknown".to_owned(),
                 software_fallback: false,
                 gpu_claim: false,
             },
             ledger: Arc::default(),
+            full_frame_readbacks: Arc::default(),
         }
     }
 
@@ -292,23 +302,65 @@ impl GpuContext {
         info: wgpu::AdapterInfo,
     ) -> Self {
         let software_fallback = info.device_type == wgpu::DeviceType::Cpu;
+        let lost = Self::watch_loss(&device);
         Self {
             device,
             queue,
+            lost,
             provenance: GpuProvenance {
+                #[cfg(test)]
+                selected: Some(info.clone()),
                 backend: info.backend.to_string(),
                 adapter: info.name,
                 software_fallback,
                 gpu_claim: !software_fallback,
             },
             ledger: Arc::default(),
+            full_frame_readbacks: Arc::default(),
         }
+    }
+
+    fn watch_loss(device: &wgpu::Device) -> Arc<AtomicBool> {
+        let lost = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&lost);
+        device.set_device_lost_callback(move |_, _| flag.store(true, Ordering::Release));
+        lost
+    }
+    pub(crate) fn device_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn poll_device_loss(&self) -> bool {
+        // Destroy reports loss once queued work is drained; preserve normal panics otherwise.
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        self.device_lost()
+    }
+
+    /// Actual full-frame monitor/proof copies, excluding display flags and self-check.
+    #[must_use]
+    pub fn full_frame_readbacks(&self) -> u64 {
+        self.full_frame_readbacks.load(Ordering::Relaxed)
     }
 
     /// MO2 R28: the GPU bytes every compositor on this context holds.
     #[must_use]
     pub fn ledger(&self) -> &GpuLedger {
         &self.ledger
+    }
+
+    /// The ledger alone, to read after the context is dropped (re-review B
+    /// D6: the harness samples RSS with no GPU context held).
+    #[cfg(test)]
+    pub(crate) fn shared_ledger(&self) -> Arc<GpuLedger> {
+        Arc::clone(&self.ledger)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_adapter(&self) -> &wgpu::AdapterInfo {
+        self.provenance.selected.as_ref().expect("selected adapter")
     }
 
     /// A texture charged at its bytes (uncompressed formats, one mip).
@@ -343,6 +395,7 @@ impl GpuContext {
         let info = adapter.get_info();
         let descriptor = wgpu::DeviceDescriptor {
             label: Some("Kinewright compositor device"),
+            required_features: adapter.features() & wgpu::Features::TIMESTAMP_QUERY,
             required_limits: compositor_required_limits(wgpu::Limits::default()),
             ..Default::default()
         };
@@ -557,6 +610,48 @@ pub trait CompositorInput {
     fn width(&self) -> u32;
     fn height(&self) -> u32;
     fn upload_bytes(&self) -> Vec<u8>;
+    fn residency(&self) -> Option<(ResidencyKey, std::sync::Weak<Vec<f16>>)> {
+        None
+    }
+
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        let bytes = self.upload_bytes();
+        #[cfg(test)]
+        s3b_tests::intermediate(bytes.len());
+        write_upload_rows(
+            &bytes,
+            mapped,
+            pitch,
+            self.width(),
+            self.height(),
+            Self::BYTES_PER_PIXEL,
+        )
+    }
+}
+
+fn write_upload_rows(
+    bytes: &[u8],
+    mapped: &mut wgpu::BufferViewMut,
+    pitch: usize,
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<(), MediaError> {
+    let row = width as usize * stride as usize;
+    if row == 0 || bytes.len() != row * height as usize {
+        return Err(MediaError::Backend(
+            "invalid compositor input frame".to_owned(),
+        ));
+    }
+    for (index, source) in bytes.chunks_exact(row).enumerate() {
+        let start = index * pitch;
+        mapped.slice(start..start + row).copy_from_slice(source);
+    }
+    Ok(())
 }
 
 impl CompositorInput for FrameTexture {
@@ -574,6 +669,14 @@ impl CompositorInput for FrameTexture {
 
     fn upload_bytes(&self) -> Vec<u8> {
         (*self.rgba).clone()
+    }
+
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        write_upload_rows(&self.rgba, mapped, pitch, self.width, self.height, 4)
     }
 }
 
@@ -593,6 +696,65 @@ impl CompositorInput for WorkingFrame {
     fn upload_bytes(&self) -> Vec<u8> {
         self.upload_bytes()
     }
+
+    fn write_upload(
+        &self,
+        mapped: &mut wgpu::BufferViewMut,
+        pitch: usize,
+    ) -> Result<(), MediaError> {
+        #[cfg(target_endian = "little")]
+        return write_upload_rows(
+            bytemuck::cast_slice(&self.pixels),
+            mapped,
+            pitch,
+            self.width,
+            self.height,
+            8,
+        );
+        #[cfg(target_endian = "big")]
+        {
+            if self.width == 0
+                || self.pixels.len() != self.width as usize * self.height as usize * 4
+            {
+                return Err(MediaError::Backend(
+                    "invalid compositor input frame".to_owned(),
+                ));
+            }
+            for (index, row) in self
+                .pixels
+                .chunks_exact(self.width as usize * 4)
+                .enumerate()
+            {
+                for (column, value) in row.iter().enumerate() {
+                    let start = index * pitch + column * 2;
+                    mapped
+                        .slice(start..start + 2)
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// PF1 G-1/K-6: who a monitor frame is for. Only the live preview monitor
+/// encodes through the exact BT.709 table; proofs, thumbnails and every other
+/// caller keep the f32 encode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MonitorPurpose {
+    Proof,
+    LiveMonitor,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_TABLE_FRAMES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Frames this thread has encoded through the G-1 table (routing tests).
+#[cfg(test)]
+pub(crate) fn live_table_frames() -> usize {
+    LIVE_TABLE_FRAMES.with(std::cell::Cell::get)
 }
 
 pub struct Compositor {
@@ -631,6 +793,33 @@ pub struct Compositor {
     /// and unfinished frames, atlas staging — charged until a poll marks the
     /// submission done.
     retired: Mutex<Vec<(Arc<AtomicBool>, FrameResources)>>,
+    upload_ring: Mutex<upload_ring::UploadRing>,
+}
+
+#[path = "upload_ring.rs"]
+mod upload_ring;
+
+impl Drop for Compositor {
+    fn drop(&mut self) {
+        crate::display::complete(&self.gpu, self.gpu.queue.submit([]));
+        loop {
+            // A retired failed frame owns its Writing lease until swept.
+            self.sweep_retired();
+            #[cfg(test)]
+            s3b_tests::swept();
+            let mut ring = self
+                .upload_ring
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            ring.advance();
+            if !ring.pending() {
+                break;
+            }
+            drop(ring);
+            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+            std::thread::yield_now();
+        }
+    }
 }
 
 /// MO2 R28 (ME15): the longest a failed frame waits for its queued writes.
@@ -638,7 +827,7 @@ const FAILED_FRAME_WAIT: Duration = Duration::from_millis(100);
 
 /// MO2 R28 (ME16): every frame-path wait polls through here, so the tests can
 /// observe and override it (`ledger_probes::hook`).
-fn frame_poll(
+pub(crate) fn frame_poll(
     device: &wgpu::Device,
     wait: wgpu::PollType,
 ) -> Result<wgpu::PollStatus, wgpu::PollError> {
@@ -692,6 +881,9 @@ struct TexturePool {
     /// Every retained shape, least recently used first.
     recency: Vec<TexturePoolKey>,
     bytes: u64,
+    residents: HashMap<ResidencyKey, Resident>,
+    retiring: Vec<Resident>,
+    resident_bytes: u64,
 }
 
 impl TexturePool {
@@ -762,16 +954,163 @@ impl TexturePool {
     }
 }
 
+const RESIDENT_MAX_BYTES: u64 = 64 * 1024 * 1024;
+const RESIDENT_MAX_ENTRIES: usize = 128;
+const RESIDENT_EXPIRY: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum ResidentContent {
+    Video(Arc<crate::render::VideoSourceKey>),
+    Generated(crate::render::TitleCacheKey),
+}
+
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ResidencyKey {
+    content: ResidentContent,
+    at: kinewright_core::TimeCode,
+    allocation: usize,
+    shape: (u32, u32),
+}
+
+impl ResidencyKey {
+    pub(crate) fn new(
+        content: ResidentContent,
+        at: kinewright_core::TimeCode,
+        frame: &WorkingFrame,
+    ) -> Self {
+        Self {
+            content,
+            at,
+            allocation: Arc::as_ptr(&frame.pixels) as usize,
+            shape: (frame.width, frame.height),
+        }
+    }
+}
+
+struct Resident {
+    pixels: std::sync::Weak<Vec<f16>>,
+    texture: Arc<HeldTexture>,
+    shape: TexturePoolKey,
+    used: std::time::Instant,
+    done: Arc<AtomicBool>,
+}
+
+impl TexturePool {
+    fn resident(&mut self, key: &ResidencyKey) -> Option<Arc<HeldTexture>> {
+        let entry = self.residents.get(key)?;
+        entry.pixels.upgrade()?;
+        Some(entry.texture.clone())
+    }
+
+    fn publish(&mut self, frame: &FrameResources, done: &Arc<AtomicBool>) {
+        for layer in &frame.layers {
+            let (Some((key, pixels)), Some((shape, texture))) = (&layer.residency, &layer.source)
+            else {
+                continue;
+            };
+            if let Some(entry) = self
+                .residents
+                .get_mut(key)
+                .filter(|entry| Arc::ptr_eq(&entry.texture, texture))
+            {
+                entry.done = done.clone();
+                entry.used = std::time::Instant::now();
+            } else if let Some(entry) = self
+                .retiring
+                .iter_mut()
+                .find(|e| Arc::ptr_eq(&e.texture, texture))
+            {
+                entry.done = done.clone();
+            } else if layer.upload.is_some()
+                && !self.residents.contains_key(key)
+                && texture_pool_bytes(*shape) <= RESIDENT_MAX_BYTES
+            {
+                self.make_room(texture_pool_bytes(*shape));
+                if self.resident_bytes + texture_pool_bytes(*shape) > RESIDENT_MAX_BYTES
+                    || self.residents.len() + self.retiring.len() >= RESIDENT_MAX_ENTRIES
+                {
+                    continue;
+                }
+                self.resident_bytes += texture_pool_bytes(*shape);
+                self.residents.insert(
+                    key.clone(),
+                    Resident {
+                        pixels: pixels.clone(),
+                        texture: texture.clone(),
+                        shape: *shape,
+                        used: std::time::Instant::now(),
+                        done: done.clone(),
+                    },
+                );
+            }
+        }
+    }
+
+    fn make_room(&mut self, bytes: u64) {
+        while self.resident_bytes + bytes > RESIDENT_MAX_BYTES
+            || self.residents.len() + self.retiring.len() >= RESIDENT_MAX_ENTRIES
+        {
+            let Some(key) = self
+                .residents
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.retiring
+                .push(self.residents.remove(&key).expect("selected resident"));
+            self.maintain(false);
+        }
+    }
+
+    fn maintain(&mut self, clear: bool) {
+        let now = std::time::Instant::now();
+        let expired: Vec<_> = self
+            .residents
+            .iter()
+            .filter(|(_, e)| clear || now.duration_since(e.used) >= RESIDENT_EXPIRY)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in expired {
+            self.retiring
+                .push(self.residents.remove(&key).expect("selected resident"));
+        }
+        let mut index = 0;
+        while index < self.retiring.len() {
+            let entry = &self.retiring[index];
+            if entry.done.load(Ordering::Acquire) && Arc::strong_count(&entry.texture) == 1 {
+                let entry = self.retiring.swap_remove(index);
+                self.resident_bytes -= texture_pool_bytes(entry.shape);
+                self.store(
+                    entry.shape,
+                    Arc::try_unwrap(entry.texture)
+                        .unwrap_or_else(|_| unreachable!("sole pool owner")),
+                );
+            } else {
+                index += 1;
+            }
+        }
+        self.evict(&[]);
+    }
+}
+
 /// MO2 R28 (ME15): a staged source — pool key, texture, staging + row bytes.
-type LayerUpload = (TexturePoolKey, HeldTexture, (Ledgered<wgpu::Buffer>, u32));
+type LayerUpload = (
+    TexturePoolKey,
+    HeldTexture,
+    (Arc<Ledgered<wgpu::Buffer>>, u32),
+);
 
 struct LayerResources {
     /// The uploaded source texture; `None` for an adjustment or a backdrop,
     /// which sample an accumulator snapshot instead.
-    source: Option<(TexturePoolKey, HeldTexture)>,
+    source: Option<(TexturePoolKey, Arc<HeldTexture>)>,
     /// MO2 R28 (ME15): the source's staging buffer and its padded row bytes,
     /// copied into `source` at the head of the frame's commands.
-    upload: Option<(Ledgered<wgpu::Buffer>, u32)>,
+    upload: Option<(Arc<Ledgered<wgpu::Buffer>>, u32)>,
+    residency: Option<(ResidencyKey, std::sync::Weak<Vec<f16>>)>,
     /// The atlas this layer's bind group reads; held so the texture outlives
     /// the queue submission even if the cache evicts it meanwhile.
     _lut_atlas: Arc<LutAtlas>,
@@ -786,6 +1125,7 @@ struct LayerResources {
 /// submitted, then recycled.
 #[derive(Default)]
 struct FrameResources {
+    upload_batch: Option<upload_ring::UploadLease>,
     layers: Vec<LayerResources>,
     /// MO2 R13: pooled accumulator snapshots A (and B).
     snapshots: Vec<(TexturePoolKey, HeldTexture)>,
@@ -1149,6 +1489,7 @@ impl Compositor {
             identity_lut: Arc::new(CubeLut::identity()),
             lut_atlas_cache: Mutex::new(Vec::new()),
             texture_pool: Mutex::new(TexturePool::default()),
+            upload_ring: Mutex::default(),
             dummy_accumulator,
             dummy_validity,
             validity_stride,
@@ -1211,11 +1552,102 @@ impl Compositor {
         monitoring: &ColorDescription,
         library: Option<&LutLibrary>,
     ) -> Result<FrameTexture, MediaError> {
+        let purpose = MonitorPurpose::Proof;
+        self.render_monitor_for(resolution, layers, monitoring, library, purpose)
+    }
+
+    /// [`Self::render_monitor_with_luts`] for a stated [`MonitorPurpose`].
+    pub(crate) fn render_monitor_for<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        monitoring: &ColorDescription,
+        library: Option<&LutLibrary>,
+        purpose: MonitorPurpose,
+    ) -> Result<FrameTexture, MediaError> {
         let (width, height) = resolution;
         let (output, mut frame, encoder) = self.composite(width, height, layers, library, None)?;
-        let readback = self.readback_for(width, height, &output, encoder, &mut frame, monitoring);
+        let readback = self.readback_for(
+            width, height, &output, encoder, &mut frame, monitoring, purpose,
+        );
         self.finish_frame(output, frame);
         readback
+    }
+
+    pub(crate) fn display_gpu(&self) -> GpuContext {
+        self.gpu.clone()
+    }
+    #[cfg(test)]
+    pub(crate) fn full_frame_readbacks(&self) -> u64 {
+        self.gpu.full_frame_readbacks()
+    }
+
+    pub(crate) fn render_display<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        library: Option<&LutLibrary>,
+        display: &crate::display::DisplayEncoder,
+        slot: &mut crate::display::DisplaySlot,
+    ) -> Result<(), MediaError> {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.render_display_inner(resolution, layers, library, display, slot)
+        }));
+        match result {
+            Ok(result) => result,
+            Err(_) if self.gpu.poll_device_loss() => {
+                crate::display::complete(&self.gpu, self.gpu.queue.submit([]));
+                Err(MediaError::Backend(
+                    "display: device lost during encode".to_owned(),
+                ))
+            }
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+    fn render_display_inner<F: CompositorInput>(
+        &self,
+        resolution: (u32, u32),
+        layers: &[CompositorLayer<'_, F>],
+        library: Option<&LutLibrary>,
+        display: &crate::display::DisplayEncoder,
+        slot: &mut crate::display::DisplaySlot,
+    ) -> Result<(), MediaError> {
+        if self.gpu.device_lost() {
+            return Err(MediaError::Backend(
+                "display: device lost before encode".to_owned(),
+            ));
+        }
+        let (w, h) = resolution;
+        let (output, mut frame, mut encoder) = self.composite(w, h, layers, library, None)?;
+        display.encode(&mut encoder, &output, &slot.texture);
+        let flags = frame.validity.as_ref().or(frame.pooled_flags.as_ref());
+        let bytes = flags.map_or(4, |b| b.size());
+        slot.flags(&self.gpu, bytes);
+        if let Some(flags) = flags {
+            encoder.copy_buffer_to_buffer(flags, 0, &slot.flags, 0, bytes);
+        } else {
+            encoder.clear_buffer(&slot.flags, 0, None);
+        }
+        let submitted = std::time::Instant::now();
+        let (index, done) = self.submit_frame(encoder.finish(), &frame);
+        let result = crate::display::mapped_bytes(&self.gpu, &slot.flags, index.clone());
+        display.record_timing(index, submitted.elapsed());
+        let result = result.and_then(|bytes| {
+            let stride = usize::try_from(self.validity_stride).expect("validity stride fits usize");
+            match bytes.chunks(stride).position(|b| b[..4] != [0; 4]) {
+                Some(layer) => Err(MediaError::NonFiniteRender {
+                    layer,
+                    clip: None,
+                    at: None,
+                }),
+                None => Ok(()),
+            }
+        });
+        if !done.load(Ordering::Acquire) {
+            frame.pending = Some(done);
+        }
+        self.finish_frame(output, frame);
+        result
     }
 
     /// Composite the supplied bottom-to-top layers and encode the result with
@@ -1387,7 +1819,9 @@ impl Compositor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: OUTPUT_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let output = self.gpu.charge_texture(output);
@@ -1474,6 +1908,7 @@ impl Compositor {
     /// the full-raster backdrop from it; a special entering layer then
     /// re-snapshots the shifted backdrop (into B for an adjustment, whose
     /// source stays `D0` in A).
+    #[allow(clippy::too_many_lines)]
     fn stage_layers<F: CompositorInput>(
         &self,
         width: u32,
@@ -1483,6 +1918,7 @@ impl Compositor {
         matte_debug: Option<MatteDebugSelection>,
         frame: &mut FrameResources,
     ) -> Result<Vec<Step>, MediaError> {
+        self.maintain();
         let splits = |layer: &CompositorLayer<'_, F>| {
             layer.mode.is_special() || layer.transition.backdrop.is_some()
         };
@@ -1562,9 +1998,15 @@ impl Compositor {
             let debug_node = matte_debug
                 .filter(|selection| selection.layer_index == index)
                 .map(|selection| selection.active_node);
-            frame
-                .layers
-                .push(self.layer_resources(layer, width, height, library, debug_node, &bindings)?);
+            frame.layers.push(self.layer_resources(
+                layer,
+                width,
+                height,
+                library,
+                debug_node,
+                &bindings,
+                &mut frame.upload_batch,
+            )?);
             schedule(Step::Draw(frame.layers.len() - 1));
         }
         frame.validity = validity;
@@ -1658,7 +2100,13 @@ impl Compositor {
             return;
         };
         let mut hot = Vec::new();
-        let sources = frame.layers.into_iter().filter_map(|layer| layer.source);
+        let sources = frame
+            .layers
+            .into_iter()
+            .filter_map(|layer| layer.source)
+            .filter_map(|(key, texture)| {
+                Arc::try_unwrap(texture).ok().map(|texture| (key, texture))
+            });
         for (key, texture) in sources.chain(frame.snapshots) {
             if !hot.contains(&key) {
                 hot.push(key);
@@ -1730,6 +2178,7 @@ impl Compositor {
             && params.rotation == 0.0
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn layer_resources<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
@@ -1738,6 +2187,7 @@ impl Compositor {
         library: Option<&LutLibrary>,
         matte_debug_node: Option<usize>,
         bindings: &LayerBindings<'_>,
+        batch: &mut Option<upload_ring::UploadLease>,
     ) -> Result<LayerResources, MediaError> {
         let binding = self.lut_binding(layer.effects, library)?;
         let cube_lut = &binding.legacy_lut;
@@ -1781,12 +2231,39 @@ impl Compositor {
         } else {
             &self.sampler
         };
+        let residency = bindings
+            .source
+            .is_none()
+            .then(|| layer.frame.residency())
+            .flatten();
         let (source, view, upload) = if let Some(snapshot) = bindings.source {
             (None, snapshot.clone(), None)
-        } else {
-            let (key, texture, upload) = self.upload_layer(layer)?;
+        } else if let Some(texture) = residency.as_ref().and_then(|(key, _)| {
+            self.texture_pool
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .resident(key)
+        }) {
+            let key = TexturePoolKey {
+                width: layer.frame.width(),
+                height: layer.frame.height(),
+                format: F::FORMAT,
+            };
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            (Some((key, texture)), view, Some(upload))
+            (Some((key, texture)), view, None)
+        } else {
+            if batch.is_none() {
+                *batch = Some(
+                    self.upload_ring
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .acquire()?,
+                );
+            }
+            let (key, texture, upload) =
+                self.upload_layer(layer, batch.as_ref().expect("acquired batch"))?;
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (Some((key, Arc::new(texture))), view, Some(upload))
         };
         let mut resources = self.bind_layer(
             source,
@@ -1798,6 +2275,7 @@ impl Compositor {
             bindings,
         );
         resources.upload = upload;
+        resources.residency = residency;
         Ok(resources)
     }
 
@@ -1807,13 +2285,9 @@ impl Compositor {
     fn upload_layer<F: CompositorInput>(
         &self,
         layer: &CompositorLayer<'_, F>,
+        batch: &upload_ring::UploadLease,
     ) -> Result<LayerUpload, MediaError> {
-        let expected_len = usize::try_from(layer.frame.width())
-            .unwrap_or_default()
-            .saturating_mul(usize::try_from(layer.frame.height()).unwrap_or_default())
-            .saturating_mul(usize::try_from(F::BYTES_PER_PIXEL).unwrap_or_default());
-        let upload_bytes = layer.frame.upload_bytes();
-        if upload_bytes.len() != expected_len || expected_len == 0 {
+        if layer.frame.width() == 0 || layer.frame.height() == 0 {
             return Err(MediaError::Backend(
                 "invalid compositor input frame".to_owned(),
             ));
@@ -1824,13 +2298,16 @@ impl Compositor {
             format: F::FORMAT,
         };
         let row = layer.frame.width().saturating_mul(F::BYTES_PER_PIXEL);
-        let rows = upload_bytes.chunks_exact(row as usize);
-        let upload = self.staging_rows(
-            "Kinewright layer upload staging",
-            (row, pool_key.height),
-            rows,
-        );
+        let pitch = row.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let buffer = batch.buffer(&self.gpu, u64::from(pitch) * u64::from(pool_key.height));
+        layer
+            .frame
+            .write_upload(&mut buffer.get_mapped_range_mut(..), pitch as usize)?;
+        batch.unmap_current();
+        let upload = (buffer, pitch);
         let texture = self.acquire_layer_texture(pool_key);
+        #[cfg(test)]
+        s3b_tests::upload(&upload.0);
         Ok((pool_key, texture, upload))
     }
 
@@ -1854,6 +2331,87 @@ impl Compositor {
             self.retain(done, frame);
         }
         self.sweep_retired();
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .advance();
+    }
+
+    pub(crate) fn set_wake(&self, wake: Arc<dyn Fn() + Send + Sync>) {
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .set_wake(wake);
+    }
+    pub(crate) fn upload_available(&self) -> bool {
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .available()
+    }
+    pub(crate) fn maintain(&self) {
+        for _ in 0..2 {
+            let _ = frame_poll(&self.gpu.device, wgpu::PollType::Poll);
+            self.upload_ring
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .advance();
+        }
+        self.sweep_retired();
+        self.texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .maintain(false);
+    }
+    pub(crate) fn maintenance_deadline(&self) -> Option<std::time::Instant> {
+        let pool = self
+            .texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let expiry = pool
+            .residents
+            .values()
+            .map(|e| e.used + RESIDENT_EXPIRY)
+            .min();
+        let pending = !pool.retiring.is_empty()
+            || !self
+                .retired
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty()
+            || self
+                .upload_ring
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pending();
+        let settle_at = pending.then(|| std::time::Instant::now() + Duration::from_millis(1));
+        expiry.into_iter().chain(settle_at).min()
+    }
+
+    fn submit_frame(
+        &self,
+        command: wgpu::CommandBuffer,
+        frame: &FrameResources,
+    ) -> (wgpu::SubmissionIndex, Arc<AtomicBool>) {
+        let mut pool = self
+            .texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let submitted = self.submit_tracked([command]);
+        if let Some(batch) = &frame.upload_batch {
+            batch.submitted(submitted.1.clone());
+        }
+        #[cfg(test)]
+        s3b_tests::submitted_uploads(frame);
+        pool.publish(frame, &submitted.1);
+        submitted
+    }
+
+    pub(crate) fn clear_residency(&self) {
+        self.texture_pool
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .maintain(true);
     }
 
     /// MO2 R28 (ME16): submit, with a flag set once that work completes.
@@ -1864,9 +2422,20 @@ impl Compositor {
         let done = Arc::new(AtomicBool::new(false));
         let index = self.gpu.queue.submit(commands);
         let flag = Arc::clone(&done);
-        self.gpu
-            .queue
-            .on_submitted_work_done(move || flag.store(true, Ordering::Release));
+        let wake = self
+            .upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .wake();
+        let callback = move || {
+            flag.store(true, Ordering::Release);
+            if let Some(wake) = wake {
+                wake();
+            }
+        };
+        #[cfg(test)]
+        let callback = s3b_tests::complete_callback(callback);
+        self.gpu.queue.on_submitted_work_done(callback);
         (index, done)
     }
 
@@ -1886,6 +2455,10 @@ impl Compositor {
             self.release_layer_textures(frame);
         }
         self.sweep_retired();
+        self.upload_ring
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .advance();
     }
 
     /// MO2 R28 (ME15): a charged, mapped-at-creation `MAP_WRITE | COPY_SRC`
@@ -1927,7 +2500,7 @@ impl Compositor {
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn bind_layer(
         &self,
-        source: Option<(TexturePoolKey, HeldTexture)>,
+        source: Option<(TexturePoolKey, Arc<HeldTexture>)>,
         view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         params: &LayerParams,
@@ -2001,6 +2574,7 @@ impl Compositor {
         LayerResources {
             source,
             upload: None,
+            residency: None,
             _lut_atlas: atlas,
             _uniform: uniform,
             _grade: grade,
@@ -2249,10 +2823,30 @@ impl Compositor {
         width: u32,
         height: u32,
         output: &wgpu::Texture,
-        mut encoder: wgpu::CommandEncoder,
+        encoder: wgpu::CommandEncoder,
         frame: &mut FrameResources,
         mut visit: impl FnMut([f32; 4]) -> Result<(), MediaError>,
     ) -> Result<(), MediaError> {
+        self.for_each_pixel_bits(width, height, output, encoder, frame, |bits| {
+            visit(bits.map(|channel| f16::from_bits(channel).to_f32()))
+        })
+    }
+
+    /// The readback behind [`Self::for_each_linear_pixel`], visiting each
+    /// pixel's raw f16 bits (PF1 G-1 indexes its monitor table by them).
+    #[allow(clippy::too_many_lines)]
+    fn for_each_pixel_bits(
+        &self,
+        width: u32,
+        height: u32,
+        output: &wgpu::Texture,
+        mut encoder: wgpu::CommandEncoder,
+        frame: &mut FrameResources,
+        mut visit: impl FnMut([u16; 4]) -> Result<(), MediaError>,
+    ) -> Result<(), MediaError> {
+        self.gpu
+            .full_frame_readbacks
+            .fetch_add(1, Ordering::Relaxed);
         let row_bytes = width.saturating_mul(8);
         let padded_row_bytes = row_bytes.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
             * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -2291,7 +2885,7 @@ impl Compositor {
         if let Some(flags) = flags {
             encoder.copy_buffer_to_buffer(flags, 0, &buffer, pixel_bytes, flag_bytes);
         }
-        let (index, done) = self.submit_tracked([encoder.finish()]);
+        let (index, done) = self.submit_frame(encoder.finish(), frame);
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let callback = move |result| {
             let _ = sender.send(result);
@@ -2342,13 +2936,13 @@ impl Compositor {
             let start = row.saturating_mul(usize::try_from(padded_row_bytes).unwrap_or_default());
             let end = start.saturating_add(usize::try_from(row_bytes).unwrap_or_default());
             for pixel in mapped[start..end].as_chunks::<8>().0 {
-                let linear = [
-                    f16::from_le_bytes([pixel[0], pixel[1]]).to_f32(),
-                    f16::from_le_bytes([pixel[2], pixel[3]]).to_f32(),
-                    f16::from_le_bytes([pixel[4], pixel[5]]).to_f32(),
-                    f16::from_le_bytes([pixel[6], pixel[7]]).to_f32(),
+                let bits = [
+                    u16::from_le_bytes([pixel[0], pixel[1]]),
+                    u16::from_le_bytes([pixel[2], pixel[3]]),
+                    u16::from_le_bytes([pixel[4], pixel[5]]),
+                    u16::from_le_bytes([pixel[6], pixel[7]]),
                 ];
-                if let Err(error) = visit(linear) {
+                if let Err(error) = visit(bits) {
                     outcome = Err(error);
                     break 'rows;
                 }
@@ -2365,10 +2959,12 @@ impl Compositor {
     /// The BT.709 OETF is applied in f32 and RGB is clamped and quantized
     /// exactly once, here, at the display boundary.
     ///
-    /// Deliberately no `powf` lookup table: a 4096-entry LUT was rejected
-    /// because interpolation error near black, where the OETF slope is 4.5,
-    /// does not provably stay inside the CC1 6.2 monitor gate (max <= 2,
-    /// P99 <= 1, mean <= 0.5) against the CPU reference. The exact math stays.
+    /// A 4096-entry *interpolated* LUT was rejected because interpolation
+    /// error near black, where the OETF slope is 4.5, does not provably stay
+    /// inside the CC1 6.2 monitor gate. PF1 G-1's BT.709 table is different:
+    /// one entry per f16 bit pattern, each computed by that exact f32 math, no
+    /// interpolation, and exhaustively equal to `encode_monitor_rgba8`.
+    #[allow(clippy::too_many_arguments)]
     fn readback_for(
         &self,
         width: u32,
@@ -2377,6 +2973,7 @@ impl Compositor {
         encoder: wgpu::CommandEncoder,
         frame: &mut FrameResources,
         monitoring: &ColorDescription,
+        purpose: MonitorPurpose,
     ) -> Result<FrameTexture, MediaError> {
         let mut rgba = Vec::with_capacity(
             usize::try_from(width)
@@ -2384,6 +2981,19 @@ impl Compositor {
                 .saturating_mul(usize::try_from(height).unwrap_or_default())
                 .saturating_mul(4),
         );
+        if purpose == MonitorPurpose::LiveMonitor && monitoring.transfer == ColorTransfer::Bt709 {
+            #[cfg(test)]
+            LIVE_TABLE_FRAMES.with(|frames| frames.set(frames.get() + 1));
+            self.for_each_pixel_bits(width, height, output, encoder, frame, |bits| {
+                rgba.extend_from_slice(&monitor_rgba8(bits));
+                Ok(())
+            })?;
+            return Ok(FrameTexture {
+                width,
+                height,
+                rgba: Arc::new(rgba),
+            });
+        }
         self.for_each_linear_pixel(width, height, output, encoder, frame, |linear| {
             let monitor_code =
                 encode_monitor_rgba8_for_description(linear, monitoring).map_err(|error| {
@@ -7808,7 +8418,11 @@ mod tests {
 /// The final verification's ledger probes, retained (final-mo2-1 B1/B2/S1).
 #[cfg(test)]
 #[path = "mo2_ledger_probes.rs"]
-mod ledger_probes;
+pub(crate) mod ledger_probes;
+
+#[cfg(test)]
+#[path = "s3b_tests.rs"]
+pub(crate) mod s3b_tests;
 
 /// MO2 R28 (ME14): one monitor frame split into its phases, for the perf
 /// lanes' printed breakdown.
@@ -7821,10 +8435,10 @@ pub(crate) mod phases {
     /// [`Compositor::render_monitor_with_luts`], timed: staging + upload
     /// recording, GPU passes + readback (submit to mapped), monitor encode,
     /// and the whole frame they partition.
-    pub(crate) fn monitor(
+    pub(crate) fn monitor<F: CompositorInput>(
         compositor: &Compositor,
         (width, height): (u32, u32),
-        layers: &[CompositorLayer<'_, WorkingFrame>],
+        layers: &[CompositorLayer<'_, F>],
         monitoring: &ColorDescription,
         library: Option<&LutLibrary>,
     ) -> Result<([Duration; 3], Duration), MediaError> {
@@ -7836,20 +8450,25 @@ pub(crate) mod phases {
             None,
             Vec::with_capacity(width as usize * height as usize * 4),
         );
-        let result = compositor.for_each_linear_pixel(
-            width,
-            height,
-            &output,
-            encoder,
-            &mut frame,
-            |linear| {
+        // PF1 R28: time the live monitor's encode as `readback_for` runs it,
+        // through the G-1 table when monitoring is BT.709.
+        let result = if monitoring.transfer == ColorTransfer::Bt709 {
+            let (target, frame) = (&output, &mut frame);
+            compositor.for_each_pixel_bits(width, height, target, encoder, frame, |bits| {
+                mapped.get_or_insert_with(Instant::now);
+                rgba.extend_from_slice(&monitor_rgba8(bits));
+                Ok(())
+            })
+        } else {
+            let (target, frame) = (&output, &mut frame);
+            compositor.for_each_linear_pixel(width, height, target, encoder, frame, |linear| {
                 mapped.get_or_insert_with(Instant::now);
                 let code = encode_monitor_rgba8_for_description(linear, monitoring)
                     .map_err(|error| MediaError::Backend(format!("{error}")))?;
                 rgba.extend_from_slice(&code);
                 Ok(())
-            },
-        );
+            })
+        };
         std::hint::black_box(rgba);
         compositor.finish_frame(output, frame);
         result?;

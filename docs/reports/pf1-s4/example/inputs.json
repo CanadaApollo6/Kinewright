@@ -1,0 +1,56 @@
+{
+  "s3b": {
+    "typical_1080p": {
+      "workload": {
+        "path": "docs/reports/pf1-s4/example/synthetic.txt",
+        "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+      },
+      "media": {
+        "path": "docs/reports/pf1-s4/example/synthetic.txt",
+        "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+      },
+      "document": {
+        "path": "docs/reports/pf1-s4/example/synthetic.txt",
+        "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+      },
+      "seeds": [
+        11,
+        22,
+        33
+      ],
+      "width_px": 1280,
+      "height_px": 720,
+      "fps_num": 30,
+      "fps_den": 1,
+      "source_route": "GPU",
+      "output_route": "native"
+    }
+  },
+  "s4": {
+    "typical_1080p": {
+      "workload": {
+        "path": "docs/reports/pf1-s4/example/synthetic.txt",
+        "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+      },
+      "media": {
+        "path": "docs/reports/pf1-s4/example/synthetic.txt",
+        "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+      },
+      "document": {
+        "path": "docs/reports/pf1-s4/example/synthetic.txt",
+        "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+      },
+      "seeds": [
+        11,
+        22,
+        33
+      ],
+      "width_px": 1280,
+      "height_px": 720,
+      "fps_num": 30,
+      "fps_den": 1,
+      "source_route": "GPU",
+      "output_route": "native"
+    }
+  }
+}

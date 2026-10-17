@@ -4,3 +4,5 @@
 # AW1 F8: the ledger script must stay LF (bash), and the errata doc with it.
 *.sh text eol=lf
 *.md text eol=lf
+docs/PF1-PINS*.json text eol=lf
+docs/reports/pf1-s4/example/** text eol=lf

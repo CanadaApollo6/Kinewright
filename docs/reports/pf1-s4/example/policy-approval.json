@@ -1,0 +1,26 @@
+{
+  "authority": "Riel",
+  "issued_s": 1700000000,
+  "requested": {
+    "graphics_mhz": [
+      100,
+      200
+    ],
+    "memory_mhz": [
+      100,
+      200
+    ],
+    "power_w": [
+      100,
+      200
+    ],
+    "pstates": [
+      "P0",
+      "P2"
+    ]
+  },
+  "record": {
+    "path": "docs/reports/pf1-s4/example/synthetic.txt",
+    "sha256": "8feb47f6bb1e0a183f43870e6aa3ab5ce0f7e1bfab50b9cf151ab8b0df810a6d"
+  }
+}

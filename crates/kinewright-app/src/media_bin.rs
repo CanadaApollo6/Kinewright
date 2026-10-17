@@ -225,7 +225,7 @@ impl KinewrightApp {
                     .on_hover_text("Inspect preview and derived-media caches")
                     .clicked()
                 {
-                    self.open_media_cache_dialog();
+                    self.open_media_cache_dialog(ui.ctx());
                 }
                 let button =
                     egui::Button::image_and_text(Icon::Import.image(size::ICON_MD), "Import")
