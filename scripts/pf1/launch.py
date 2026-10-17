@@ -77,6 +77,48 @@ def native_check(record):
     v.require(all(type(value) is int for value in [record['native_children'], record['publisher_pid'], cleanup['pid'], cleanup['exit']]) and cleanup['pid'] > 0, 'malformed native receipt numbers')
     v.require(record['native_children'] == 1 and cleanup['reaped'] is True and cleanup['exit'] == 0 and cleanup['pid'] == record['publisher_pid'], 'native child count/cleanup mismatch')
 
+def lh_probe(read, environment):
+    icd = environment.get('VK_DRIVER_FILES') or environment.get('VK_ICD_FILENAMES', '')
+    v.require(icd and os.pathsep not in icd, 'one explicit LH ICD required')
+    uuid = environment['PF1_GPU_UUID']
+    return dict(inventory=read(['nvidia-smi', '--query-gpu=index,uuid,name,pci.device_id,driver_version', '--format=csv,noheader,nounits']),
+                readback=read(['nvidia-smi', '-i', uuid, '--query-gpu=uuid,clocks.gr,clocks.mem,pstate,power.limit,power.draw', '--format=csv,noheader,nounits']),
+                icd=Path(icd).read_text())
+
+def lh_identity(record, probe):
+    selected = record['selected']
+    v.require(record['software'] is False and selected['backend'] == 'Vulkan' and selected['vendor_id'] == 0x10de and selected['driver'] == 'NVIDIA', 'LH requires actual proprietary NVIDIA session')
+    inventory = probe['inventory']
+    v.require(inventory['exit'] == 0, 'failed LH inventory')
+    rows = [line.split(', ') for line in inventory['output'].strip().splitlines()]
+    v.require(rows and all(len(row) == 5 for row in rows), 'malformed LH inventory')
+    for index, uuid, name, pci, driver in rows:
+        v.require(re.fullmatch(r'\d+', index) and re.fullmatch(r'GPU-[0-9a-f-]{36}', uuid) and re.fullmatch(r'0x[0-9A-Fa-f]{8}', pci) and re.fullmatch(r'\d+\.\d+\.\d+', driver), 'malformed LH identity fields')
+    v.require(len({row[1] for row in rows}) == len(rows), 'duplicate inventory UUID')
+    matches = [row for row in rows if int(row[3], 16) == selected['device_id'] << 16 | selected['vendor_id']]
+    v.require(len(matches) == 1, 'ambiguous/missing actual-session PCI identity')
+    _, uuid, name, _, driver = matches[0]
+    v.require(name == selected['name'] == 'NVIDIA GeForce RTX 3090' and driver in record['driver_info'] and selected.get('uuid', uuid) == uuid, 'LH session driver/name/UUID mismatch')
+    manifest = v.json.loads(probe['icd'], object_pairs_hook=v.pairs)
+    v.require(Path(manifest['ICD']['library_path']).name == 'libGLX_nvidia.so.0', 'LH requires proprietary NVIDIA ICD')
+    unavailable = dict(status='unavailable', reason='proprietary NVIDIA stack; Mesa/LLVM not used')
+    stack = dict(runtime=record['driver_info'] + '; nvidia-smi driver=' + driver, mesa=unavailable, llvm=unavailable, icd_manifest_sha256=v.hashlib.sha256(probe['icd'].encode()).hexdigest())
+    return dict(selected, uuid=uuid), stack
+
+def lh_observation(probe, timestamp, uuid):
+    query = probe['readback']
+    v.require(query['exit'] == 0, 'failed LH readback')
+    fields = query['output'].strip().split(', ')
+    v.require(len(fields) == 6 and fields[0] == uuid, 'malformed/uncorrelated LH readback')
+    result = dict(timestamp_s=timestamp, uuid=uuid)
+    for key, value in zip(['graphics_mhz', 'memory_mhz', 'pstate', 'power_limit_w', 'power_draw_w'], fields[1:]):
+        if value in ['[N/A]', '[Not Supported]', 'N/A']:
+            result[key] = dict(status='unavailable', reason='nvidia-smi returned ' + value)
+        else:
+            result[key] = value if key == 'pstate' else float(value)
+    v.schema(result, v.SCHEMA['$defs']['default_observation'])
+    return result
+
 def input_binding(pins, root, ordinal):
     entry = pins['protocol']['order'][ordinal]
     value = v.artifact(root, pins['inputs'], 'inputs')[entry['arm']][entry['workload']]

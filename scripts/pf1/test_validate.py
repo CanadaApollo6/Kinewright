@@ -16,6 +16,8 @@ import validate as v
 import series as runner
 
 MUTATIONS = {
+    'lh_identity': ("len(matches) == 1", "len(matches) >= 1"),
+    'lh_readback': ("fields[0] == uuid", "True"),
     'media_guard': ("not path.is_symlink() and path.is_file() and path.suffix.lower() in ['.mp4', '.wav']", 'path.is_file()'),
     'media_format': ("header[4:8] == b'ftyp' if path.suffix.lower() == '.mp4' else header[:4] == b'RIFF' and header[8:12] == b'WAVE'", 'True'),
     'receipt_exit': ("receipt['exit'] == row['exit'] == 0", 'True'),
@@ -75,11 +77,55 @@ MUTATIONS = {
 if '--mutation' in sys.argv:
     index = sys.argv.index('--mutation'); name = sys.argv[index+1]; del sys.argv[index:index+2]
     old, new = MUTATIONS[name]
-    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline', 'native_count', 'native_types'] else v
+    target = runner if name in ['resume', 'role', 'runner_exit', 'launch_error'] else launch if name in ['lh_identity', 'lh_readback', 'owned_cleanup', 'gpu_table', 'live', 'host_shape', 'host_ram', 'deadline', 'native_count', 'native_types'] else v
     source = Path(target.__file__).read_text(); assert old in source
     exec(compile(source.replace(old, new), target.__file__, 'exec'), target.__dict__)
 
 class Pins(unittest.TestCase):
+    def lh_fixture(self):
+        uuid = 'GPU-b57f8cd6-b638-69a4-e9af-54ad6b8fc7f5'
+        record = dict(selected=dict(backend='Vulkan', name='NVIDIA GeForce RTX 3090', vendor_id=0x10de, device_id=0x2204, driver='NVIDIA'), software=False, driver_info='615.78.08')
+        probe = dict(inventory=dict(exit=0, output=f'0, {uuid}, NVIDIA GeForce RTX 3090, 0x220410DE, 615.78.08'), readback=dict(exit=0, output=f'{uuid}, 210, 405, P8, 350.00, 27.00'), icd=json.dumps(dict(ICD=dict(library_path='libGLX_nvidia.so.0'))))
+        return record, probe, uuid
+
+    def test_lh_identity(self):
+        record, probe, uuid = self.lh_fixture()
+        selected, stack = launch.lh_identity(record, probe)
+        self.assertEqual(selected, dict(record['selected'], uuid=uuid))
+        self.assertEqual(stack['mesa']['status'], 'unavailable')
+        self.assertIn('615.78.08', stack['runtime'])
+        changes = [
+            ('ambiguous', lambda r,p: p['inventory'].update(output=p['inventory']['output']+'\n'+p['inventory']['output'].replace('GPU-b57f8cd6', 'GPU-a57f8cd6'))),
+            ('name-only', lambda r,p: r['selected'].update(device_id=1)),
+            ('vendor', lambda r,p: r['selected'].update(vendor_id=1)),
+            ('software', lambda r,p: r.update(software=True)),
+            ('driver', lambda r,p: r.update(driver_info='other version')),
+            ('inventory', lambda r,p: p['inventory'].update(exit=1)),
+            ('truncated', lambda r,p: p['inventory'].update(output='0, '+uuid)),
+            ('UUID', lambda r,p: r['selected'].update(uuid='GPU-wrong')),
+            ('ICD', lambda r,p: p.update(icd=json.dumps(dict(ICD=dict(library_path='libvulkan_lvp.so'))))),
+        ]
+        for name, change in changes:
+            with self.subTest(name=name):
+                changed, other = copy.deepcopy(record), copy.deepcopy(probe)
+                change(changed, other)
+                with self.assertRaises(ValueError): launch.lh_identity(changed, other)
+
+    def test_lh_readback(self):
+        _, probe, uuid = self.lh_fixture()
+        observed = launch.lh_observation(probe, 100, uuid)
+        self.assertEqual((observed['graphics_mhz'], observed['power_limit_w'], observed['power_draw_w']), (210,350,27))
+        for text in [probe['readback']['output'].replace(uuid, 'GPU-other'), f'{uuid}, 210, 405, P8, 350', f'{uuid}, nan, 405, P8, 350, 27', f'{uuid}, 210, 405, BAD, 350, 27']:
+            changed = copy.deepcopy(probe); changed['readback']['output'] = text
+            with self.subTest(text=text), self.assertRaises(ValueError): launch.lh_observation(changed, 100, uuid)
+        probe['readback']['output'] = f'{uuid}, 0, 10000, P0, [Not Supported], [N/A]'
+        observed = launch.lh_observation(probe, 100, uuid)
+        self.assertEqual(observed['graphics_mhz'], 0)
+        self.assertIn('reason', observed['power_limit_w'])
+        self.assertIn('reason', observed['power_draw_w'])
+        probe['readback']['exit'] = 1
+        with self.assertRaises(ValueError): launch.lh_observation(probe, 100, uuid)
+
     @unittest.skipUnless(sys.platform == 'linux', 'Linux invocation watchdog')
     def test_deadline(self):
         cleanup = {}

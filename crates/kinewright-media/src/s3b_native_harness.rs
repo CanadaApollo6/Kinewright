@@ -2,7 +2,7 @@ include!("pf1_s4_publish.rs");
 
 #[test]
 fn s4_selected_device_readback() {
-    let gpu = GpuContext::headless(true).expect("software correctness adapter");
+    let gpu = GpuContext::headless(!lane().0).expect("requested correctness adapter");
     let record = s4_device(&gpu);
     let info = gpu.selected_adapter();
     assert_eq!(record["selected"]["name"], info.name);
@@ -11,6 +11,7 @@ fn s4_selected_device_readback() {
     assert_eq!(record["selected"]["driver"], info.driver);
     assert_eq!(record["selected"]["vendor_id"], info.vendor);
     assert_eq!(record["driver_info"], info.driver_info);
+    println!("S4_DEVICE {record}");
     assert_eq!(
         record["software"],
         info.device_type == wgpu::DeviceType::Cpu
