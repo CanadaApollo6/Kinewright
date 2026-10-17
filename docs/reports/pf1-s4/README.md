@@ -351,3 +351,33 @@ release binaries, prepared inputs, host, software adapter and calibration before
 launch. `frozen-series.json` indexes the three plans. The G4 reference rebuild uses
 the accepted S3b shipping state with the common current test overlay; the candidate
 has the same shipping implementation, so these pairs establish no speedup.
+
+
+## PF1-LH R94 reproduction checkpoint
+
+Source `a229df060a784431a0c76fb5c6d6ce238e483077` implements PF1-LH at 767/950 counted lines. The fixed baseline is the preserved archive `d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51`; the new complete runner archive is `b552f159b4976eefa2c48984c6f79b58b6850cbadaa6503b76f2b8aa652ddc9f.tar` under `target/review/pf/s4/archives/` (SHA-256 equals the basename). The CI bundle contains the same three active runners, SHA-256 `ff4af87c82759664301458fa35d28d5fcf7a82aade6718286852d31262cccb36`; archive copies do not add source charges. Its original parent provenance remains in the complete seven-member archive.
+
+Run the exact CI entrypoint locally from this branch, with a fresh restore destination:
+
+```bash
+nice -n 19 python3 ci/pf1/restore.py target/pflh-restored-runners
+PYTHONDONTWRITEBYTECODE=1 PF1_RUNNERS="$PWD/target/pflh-restored-runners" nice -n 19 python3 scripts/pf1/test_lane.py
+```
+
+The job is `Linux PF1 wrapper witnesses` in `ci.yml`. It uses checked-in bytes, verifies both the archive and each member, and needs neither a GPU nor FFmpeg. The corruption witness is `Wrapper.test_archive --mutation archive`; restored source passes. Hosted execution is not claimed.
+
+Main-checkout evidence root is `target/review/pf/s4/pflh/`. `frozen-series.json` SHA-256 is `20cdfb6fb727f038725abd707e3d7a000a190b49ce473928116b10b31261f739`. It indexes all five pins/plans, source and harness manifests, binary hashes, host, UUID-correlated adapter readback, preparation policy and the 70-entry `invocations.json`. Every entry records the exact `setsid nohup timeout --kill-after=1 599` command, environment overrides and output paths; the reused wrapper has its 590-second alarm and 570-second native timeout. Binaries were built serially after sourcing FFmpeg, with `CARGO_BUILD_JOBS=4 nice -n 10`. Reference compilation used its own target directory and a byte-identical common crate overlay. Exact commands and raw summaries are in `builds/*.json` and `builds/*.log`.
+
+The only invocation attempt was G1 ordinal 0. R74a returned `pending_gpu_busy`/75 (99/98/98% utilization, foreign compute and an allocation over 2 GiB), and no playback child launched. The existing collector sealed that completed failure; no journal-only recovery was implemented. Repeat its cached decision without launching a child:
+
+```bash
+pflh_evidence=/path/to/main-checkout/target/review/pf/s4/pflh
+PYTHONDONTWRITEBYTECODE=1 nice -n 19 python3 "$pflh_evidence/provenance/collector-repo/scripts/pf1/validate.py" --root "$pflh_evidence" --pins "$pflh_evidence/programs/pins-G1.json" --run "$pflh_evidence/runs/G1/status-0.json"
+# Expected: pending_or_report_only; exit 75.
+```
+
+This is availability pending, not an R50 timing miss or any LH pass. Preserve this attempt and obtain the lead's availability/resumption disposition before creating a fresh series; never overwrite its paths or reuse it as valid timing. The original order is G1, G2, G14, Q3 slowdown, Q3 freeze, with reference/candidate, candidate/reference, reference/candidate pair order. Each actual invocation needs its own R74a and observed load/readback, with no GPU setter, clock-warming load or CPU-load selection. Stop on Q2-invalid evidence, a candidate-specific miss or a failed required control. Aggregate saved complete rows through the existing `series.collect` owner, with zero new launches: seal Q3 results before evaluating the normal G1/G14 control dependencies.
+
+Any eventual pass is only for the named workload/protocol on this RTX 3090 under recorded defaults. Five-second state samples prove neither residency nor cause; no speedup or supported-hardware real-time claim follows. The consumed-input assurance covers bytes at import and later checks, not decoder-opened bytes, substitution/restoration or container-internal resources. The stopped attempt has no LH native import receipt. A-1/B-3/B-4 belong to unscheduled PF1-H; the established R89/R91 deferrals, unresolved G3/LH L4a, report-only active RSS and unexplained 8,250 ms hold remain. See `target/review/pf/pflh-report.md` and E16 for the complete disposition and raw checks.
+
+Full workspace fast tier passed (3622 passed, 0 failed, 100 expected ignores, 36 summaries), and strict Linux `verify-fast --os linux` exited 0. Raw logs and summary hashes are under `target/review/pf/s4/pflh/final/fast.json` and `s4/pflh/logs/`.
