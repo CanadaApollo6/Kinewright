@@ -256,6 +256,8 @@ does not: see Amendment R41. Each such merge is counted in
 synchronous fallback. *G14 margin:* the probe's held maximum was 91.1 ms
 against 100 ms; S4's pinned run is the verdict.
 
+**Held-age qualification (PF1-LH, 2026-10-17):** the held maxima in this probe were computed by the pre-PF1-LH sampled calculation, which resets its origin at each new presentation before charging the completed interval and can under-report a hold spanning a consumer poll gap (deterministic witness: a completed 150 ms hold reported as 95 ms). They are sampled maxima of that calculation, not upper bounds on held age; the corrected value for any of these runs is at least the recorded value. The claimed 8.9 ms margin from 91.1 ms to 100 ms is not revalidated and must not be cited as G14 margin or upper-bound evidence pending remeasurement with the corrected metric. Recorded G14 misses are unaffected. The witness does not show that any historical run contained such a gap.
+
 **Amendment R41 (proposed) [S2b] Fallback regions rewind across jobs
 (re-review BF3-2).** A *merged* region puts two or more of one source's regions
 on one reader: the reader limit's last-resort merge (`regions_merged`) or H-1's
@@ -1458,7 +1460,7 @@ The R91 qualified scope carries these named deferrals, each **deferred, not pass
 G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
 
 
-PF1-LH entry items under R93 (these do not defer PF1 gates): the full decoder-bound input snapshot (A-1); G4 floors in the pins schema (B-3); renaming G15's legacy protocol field (B-4); and a Linux CI job restoring the runner archive and running `test_lane.py` with `PF1_RUNNERS` (B-5).
+**Superseded by R94:** PF1-LH entry items under R93 (these do not defer PF1 gates): the full decoder-bound input snapshot (A-1); G4 floors in the pins schema (B-3); renaming G15's legacy protocol field (B-4); and a Linux CI job restoring the runner archive and running `test_lane.py` with `PF1_RUNNERS` (B-5).
 
 
 ## PF1-LH R94 checkpoint (2026-10-17)
@@ -1469,10 +1471,17 @@ Implementation is committed at `a229df0`, **767/950 retained counted lines**, ze
 
 Any eventual LH pass is limited to the named workload and protocol **on this RTX 3090 under the recorded default driver policy**. Five-second readbacks are sampled state, not proof of residency or cause. No speedup or supported-hardware real-time claim is made. The consumed-input record proves frozen bytes at import and later checks, not bytes opened by the decoder; substitution and restoration during a run and resources referenced inside a container are not detected. No LH native import occurred in this stopped attempt.
 
-The complete failure receipt is sealed by the existing `series.collect` owner; cached validation still exits 75, without launching a child. Evidence is under main-checkout `target/review/pf/s4/pflh/`, especially `frozen-series.json`, `runs/G1/status-0.json`, `runs/G1/0-0-receipt.json`, `runs/G1/0-0-preflight-raw.jsonl` and `failed-attempt-sealing.json`. The report is `target/review/pf/pflh-report.md`. Hardware availability/resumption needs lead disposition; no failed result is converted to an accepted deferral or pass.
+The complete failure receipt is sealed by the existing `series.collect` owner; cached validation still exits 75, without launching a child. Evidence is under main-checkout `target/review/pf/s4/pflh/`, especially `frozen-series.json`, `runs/G1/status-0.json`, `runs/G1/0-0-receipt.json`, `runs/G1/0-0-preflight-raw.jsonl` and `failed-attempt-sealing.json`. The report is `target/review/pf/pflh-report.md`. R95-1 supplies the availability disposition; resumption remains ordered after the R96 fixes, narrow re-check and CI. No failed result is converted to an accepted deferral or pass.
 
 R94 assigns A-1's full decoder-bound snapshot, B-3's G4 floors in pins, and B-4's G15 field rename to **PF1-H**, not yet scheduled. The existing G4/G15 glosses and sealed evidence stay intact. B-5 is implemented: Linux CI restores the checked-in, hash-verified runner archive and runs the wrapper suite without workstation paths, GPU or FFmpeg. Hosted CI, both-OS/both-tier confirmation and R94's reviews remain outstanding; nothing was pushed. The former R91 items assigned specifically to PF1-LH are now in-scope implementation/pending evidence; all other R89/R91 deferrals remain deferred, not passed. G3/LH L4a remain unresolved, active whole-process RSS remains report-only, and the 8,250 ms hold remains unexplained.
 
-Proposed current closure qualification, pending review/CI and the LH availability disposition:
+Proposed current closure qualification, pending the R96 re-check, CI and R95-1 availability:
 
-> PF1 remains qualified to its recorded LL G4/G15/D13 evidence; PF1-LH implements and locally verifies the collector and contracts, while RTX 3090 G1/G2/G14 and Q3 evidence remains pending after an R74a busy/75 preflight with no playback child, every unchanged named deferral remains deferred, not passed, and consumed-input assurance remains limited to import/later checks rather than decoder-opened bytes.
+> PF1 remains qualified to its recorded LL G4/G15/D13 evidence; PF1-LH implements the collector and contracts and verifies them on synthetic fixtures and a metadata-only hardware session, while RTX 3090 G1/G2/G14 and Q3 evidence remains pending after an R74a busy/75 preflight with no playback child, every unchanged named deferral remains deferred, not passed, and consumed-input assurance remains limited to import/later checks rather than decoder-opened bytes.
+
+
+### PF1-LH R96 fix checkpoint (2026-10-17)
+
+Code commit `701177eab05bdf581fd48c8b20141193b1674ed7` fixes the LH loader guard, UTC-anchored preflight spacing, the single-run native collection assertion, Q3 exit classification, and B-5 hosted priority/timeout. The retained total is **785/950**, forecast **785**, zero shipping lines. The fixed CI bundle is SHA-256 `2511139e716da7025cabbc8a619ebed06e529021244715a8eadfa2a3b6b01ea2`; the complete runner archive is `9d0e95601c73eea597f503db0a2b2b1a9f367cee251d4c138e6add6f753a76d6`. Synthetic loader, delayed-query spacing, and Q3 witnesses have runtime reds and restored greens under `target/review/pf/s4/pflh/fix/`. They establish no RTX 3090 playback or hardware-control result.
+
+The separate fresh-series plan is prepared and unrun. R96 requires the narrow Astra re-check and both-OS/both-tier CI, including B-5, before R95-1 availability polling or GPU collection. The sealed busy attempt and old pins/archives remain unchanged. Any future LH pass is scoped to the named workload/protocol on this RTX 3090 under recorded default policy; input assurance covers frozen bytes at import/later checks, not decoder-opened bytes. G3/LH L4a, active RSS and the unexplained 8,250 ms hold retain their standing dispositions. The implementation report and reproduction README carry hashes, supersession, resumption and gate details.

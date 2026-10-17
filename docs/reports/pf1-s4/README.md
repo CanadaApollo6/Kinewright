@@ -376,8 +376,36 @@ PYTHONDONTWRITEBYTECODE=1 nice -n 19 python3 "$pflh_evidence/provenance/collecto
 # Expected: pending_or_report_only; exit 75.
 ```
 
-This is availability pending, not an R50 timing miss or any LH pass. Preserve this attempt and obtain the lead's availability/resumption disposition before creating a fresh series; never overwrite its paths or reuse it as valid timing. The original order is G1, G2, G14, Q3 slowdown, Q3 freeze, with reference/candidate, candidate/reference, reference/candidate pair order. Each actual invocation needs its own R74a and observed load/readback, with no GPU setter, clock-warming load or CPU-load selection. Stop on Q2-invalid evidence, a candidate-specific miss or a failed required control. Aggregate saved complete rows through the existing `series.collect` owner, with zero new launches: seal Q3 results before evaluating the normal G1/G14 control dependencies.
+This is availability pending, not an R50 timing miss or any LH pass. **The pre-R95 resumption instruction is superseded:** R95-1 authorizes a fresh series after the R96 fix/re-check and CI sequence below. Preserve this attempt; never overwrite its paths or reuse it as valid timing. The original order is G1, G2, G14, Q3 slowdown, Q3 freeze, with reference/candidate, candidate/reference, reference/candidate pair order. Each actual invocation needs its own R74a and observed load/readback, with no GPU setter, clock-warming load or CPU-load selection. Stop on Q2-invalid evidence, a candidate-specific miss or a failed required control. Aggregate saved complete rows through the existing `series.collect` owner, with zero new launches: seal Q3 results before evaluating the normal G1/G14 control dependencies.
 
 Any eventual pass is only for the named workload/protocol on this RTX 3090 under recorded defaults. Five-second state samples prove neither residency nor cause; no speedup or supported-hardware real-time claim follows. The consumed-input assurance covers bytes at import and later checks, not decoder-opened bytes, substitution/restoration or container-internal resources. The stopped attempt has no LH native import receipt. A-1/B-3/B-4 belong to unscheduled PF1-H; the established R89/R91 deferrals, unresolved G3/LH L4a, report-only active RSS and unexplained 8,250 ms hold remain. See `target/review/pf/pflh-report.md` and E16 for the complete disposition and raw checks.
 
 Full workspace fast tier passed (3622 passed, 0 failed, 100 expected ignores, 36 summaries), and strict Linux `verify-fast --os linux` exited 0. Raw logs and summary hashes are under `target/review/pf/s4/pflh/final/fast.json` and `s4/pflh/logs/`.
+
+
+### R96 fresh-series resumption (prepared, unrun)
+
+R96 fixes are frozen separately under main-checkout `target/review/pf/s4/pflh/fix/fresh/`. Its `frozen-series.json` indexes the new binaries, runner archive, pins, plans and all 70 invocations. `fix/cross-pins-supersession.json` names the sealed busy G1 attempt and both pin sets under s4-plan line 191. The old pins, runners, archives and busy attempt remain byte-for-byte; do not invent same-pins ancestry across this change.
+
+Resume only after the narrow Astra re-check and both-OS/both-tier CI, including the B-5 wrapper job, pass. R95-1 then permits GPU-only availability checks about every 20 minutes, without launching a native child. A passing R74a starts the prepared fresh series. Each invocation still needs its own preflight; a later busy/75 stops the invocation pending, and a later availability window needs a fresh continuation and explicit supersession. CPU load never selects the window. This fix round runs no GPU lane or availability poll.
+
+From the main checkout, **first source the FFmpeg environment**:
+
+```bash
+cd /home/riels/Projects/Personal/Kinewright
+source scripts/setup-ffmpeg.sh
+```
+
+Every fresh invocation records the resulting `LD_LIBRARY_PATH`; the LH loader guard rejects a missing variable or an unresolved NEEDED library before GPU preflight. Launch the exact saved `setsid nohup timeout --kill-after=1 599 python3 ...` command from an inherited **nice-0** supervisor, applying all recorded environment overrides. Do not wrap that supervisor in `nice -n 19`: the native prefix makes the disposable/real child nice 10 and the sampler lowers itself to 19 only after spawn. `fix/priority.json` records the CPU-only effective-priority check. Python validation and workstation verification remain nice 19; hosted B-5 steps use normal priority and a 15-minute job timeout.
+
+**Monitoring cost:** each five-second monitor tick rehashes frozen input media as part of the reused import/later-check assurance: 601 MB for talk, about 29 GB per talk invocation. Both arms pay the same checks. This activity is not an established performance cause. The post-lane Astra evidence check must verify actual sample gaps and monitor CPU from retained load samples, including the talk workload; the synthetic preflight-spacing witness is not evidence about timed-run gaps.
+
+Fresh-series freeze: SHA-256 `8507ab3b33e26117188744287a02fbb168eaa29b5b47ae4a6bf31942b1e22e10`. Candidate binary `f1bfc6a96850d577e31444d094e99a8a081ae7d4f646955ad347c14aa34bf11f`; accepted-S3b/common-overlay binary `ef38fc19a5c812a4e8d17b89c7cbc4e1e4ebddab12f754ec0dd0eba7ef27e6bc`. Both were rebuilt serially at nice 10, after sourcing FFmpeg; reference compilation used a fresh separate target directory. The cross-pins record SHA-256 is `d4819585771b5fe3523ca525993772cfbe7f790258ed8dc418d3079e6a8162a4`.
+
+| Fresh program | Pins SHA-256 |
+|---|---|
+| G1 | `601a8fd9ec57613872766ceff0fb351ba0e70906bf8c4e3e82d8dff30552d20e` |
+| G2 | `5984d0980702105bc9335aa014ce4e22b06b784d659190ab670276b5d6814aea` |
+| G14 | `d1b3b853509bcf8963d1839394bad0822d6b3d50157849a89441a8debdae77b2` |
+| Q3-G1 | `bd73c8e41b0bf01fedad6ea21df031b00fc9c9ec47393862d9f48714bb6342cf` |
+| Q3-G14 | `bceacf77742c33ec12770ad2195da5c2801880c36846e19d2479ed6648a25d57` |
