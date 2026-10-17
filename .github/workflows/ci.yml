@@ -30,9 +30,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      PF1_RUNNERS: ${{ runner.temp }}/pf1-runners
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
+      # The runner context is unavailable in job-level env, so derive the path in a step.
+      - name: Set PF1 runner path
+        run: echo "PF1_RUNNERS=$RUNNER_TEMP/pf1-runners" >> "$GITHUB_ENV"
       - name: Check out repository
         uses: actions/checkout@v4
       - name: Install Python
