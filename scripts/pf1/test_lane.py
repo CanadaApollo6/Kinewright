@@ -36,6 +36,15 @@ def publish():
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(record))
     temporary.replace(path)
+if case == 'startup':
+    marker = path.with_name(path.name.replace('-collector.json', '-owned-pids.json'))
+    deadline = time.monotonic() + 30
+    while not marker.exists() and time.monotonic() < deadline: time.sleep(.01)
+    record.pop('consumed')
+    publish()
+    load = path.parent/'logs'/path.name.replace('-collector.json', '-load.jsonl')
+    while len(load.read_text().splitlines()) < 3 and time.monotonic() < deadline: time.sleep(.01)
+    sys.exit(101)
 if case == 'missing-live':
     sys.exit(0)
 if case == 'invalid':
@@ -54,6 +63,8 @@ if case != 'no-final':
 '''
 
 MUTATIONS = {
+    'startup_epoch': ('lane.py', '  started=time.time()\n  if lane', '  pass\n  if lane'),
+    'startup_readiness': ('launch.py', "'metrics' in record or 'valid' in record", 'True'),
     'priority': ('lane.py', 'os.setpriority(os.PRIO_PROCESS,0,19)', 'pass'),
     'consumption': ('launch.py', "record.get('consumed') == expected", 'True'),
     'publication': ('lane.py', "pins.require(collected is not None,'missing final collector record')", "collected = collected or (json.loads(Path(env['PF1_FIXTURE']).read_text()) | dict(valid=True,metrics=dict(fps=30)),spec['gpu'])"),
@@ -81,6 +92,11 @@ import test_validate as fixtures
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux wrapper integration')
 class Wrapper(unittest.TestCase):
+    def test_startup(self):
+        lane = self.runners/'lane.py'
+        lane.write_text(lane.read_text().replace('def sample():', 'def sample():\n global started\n if process is None: started-=11'))
+        self.pipeline('startup', 101)
+
     def test_priority(self):
         self.pipeline('priority', 0)
         expected = min(19, os.getpriority(os.PRIO_PROCESS, 0) + 10)

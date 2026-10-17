@@ -51,7 +51,8 @@ def live_record(path, token, started, now, pins, host, root, environment):
         return None
     record = v.read(path)
     expected = input_binding(pins, root, int(environment['PF1_ROW']))
-    v.require(record.get('consumed') == expected, 'frozen inputs omitted/substituted/unconsumed')
+    if 'metrics' in record or 'valid' in record:
+        v.require(record.get('consumed') == expected, 'frozen inputs omitted/substituted/unconsumed')
     if pins['gate'] in ['G15', 'D13'] and record.get('valid') is True:
         native_check(record)
         if pins['gate'] == 'D13': v.d13_check(record, pins)

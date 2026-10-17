@@ -4,30 +4,38 @@
 fn pf1_rss_baseline() {
     assert_release();
     let lane = lane().1;
-    let mut all = play_workloads();
-    if wanted("title_only") {
-        all.push((
-            "title_only",
-            s4_input("title_only").unwrap_or_else(perf_fixtures::title_only),
-        ));
-    }
-    all.retain(|(key, _)| wanted(key));
     let collecting = std::env::var_os("PF1_RECORD").is_some();
+    let mut all = if collecting {
+        vec![(
+            std::env::var("PF1_ONLY").expect("one frozen workload"),
+            None,
+        )]
+    } else {
+        let mut all = play_workloads();
+        if wanted("title_only") {
+            all.push(("title_only", perf_fixtures::title_only()));
+        }
+        all.into_iter()
+            .map(|(key, workload)| (key.to_owned(), Some(workload)))
+            .collect()
+    };
+    all.retain(|(key, _)| wanted(key));
     let repeats = if collecting { 1 } else { 3 };
     if collecting {
         assert_eq!(all.len(), 1, "one frozen G15 workload per wrapper row");
     }
     let mut children = 0;
-    for (key, Workload(document, _media)) in
-        all.iter().flat_map(|w| std::iter::repeat_n(w, repeats))
-    {
+    for (key, workload) in all.iter().flat_map(|w| std::iter::repeat_n(w, repeats)) {
         let temp = TempDirectory::new("pf1-rss");
         let path = temp.path("document.json");
         let record = std::env::var_os("PF1_RECORD")
             .map_or_else(|| temp.path("record.json"), std::path::PathBuf::from);
         let receipt = temp.path("receipt.json");
         let token = std::env::var("PF1_TOKEN").unwrap_or_else(|_| "g15-development".into());
-        std::fs::write(&path, serde_json::to_vec(document).expect("serialises")).expect("writes");
+        if let Some(Workload(document, _)) = workload {
+            std::fs::write(&path, serde_json::to_vec(document).expect("serialises"))
+                .expect("writes");
+        }
         let child = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .args([
                 "--exact",
@@ -78,11 +86,8 @@ fn pf1_rss_child() {
         return;
     };
     assert_release();
-    let document: Document = s4_input(&std::env::var("PF1_ONLY").unwrap_or_default()).map_or_else(
-        || serde_json::from_slice(&std::fs::read(path).expect("reads")).expect("a document"),
-        |w| w.0,
-    );
     if let Ok(frozen) = std::env::var("PF1_D13_CALIBRATION") {
+        let document = s4_rss_document(&path);
         let calibration: serde_json::Value =
             serde_json::from_str(&frozen).expect("D13 calibration");
         assert_eq!(
@@ -109,6 +114,7 @@ fn pf1_rss_child() {
     let session = Session::new(Some(SimulatedAudio::paced()), Arc::default(), lane().0);
     let protocol = serde_json::json!({"name": "P-rss", "poll_ms": 5, "children": 3});
     s4_publish_metrics(&session.gpu, protocol.clone(), None);
+    let document = s4_rss_document(&path);
     thread::sleep(Duration::from_millis(500));
     let constructed = memory();
     session.load(&document);
@@ -148,4 +154,11 @@ fn pf1_rss_child() {
         if peak_reset { "" } else { "(lifetime)" },
         played / 1e3,
     );
+}
+
+fn s4_rss_document(path: &std::ffi::OsStr) -> Document {
+    s4_input(&std::env::var("PF1_ONLY").unwrap_or_default()).map_or_else(
+        || serde_json::from_slice(&std::fs::read(path).expect("reads")).expect("a document"),
+        |workload| workload.0,
+    )
 }
