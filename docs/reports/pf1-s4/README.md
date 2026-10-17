@@ -383,9 +383,9 @@ Any eventual pass is only for the named workload/protocol on this RTX 3090 under
 Full workspace fast tier passed (3622 passed, 0 failed, 100 expected ignores, 36 summaries), and strict Linux `verify-fast --os linux` exited 0. Raw logs and summary hashes are under `target/review/pf/s4/pflh/final/fast.json` and `s4/pflh/logs/`.
 
 
-### R96 fresh-series resumption (prepared, unrun)
+### R96-6a fresh-series resumption (prepared, unrun)
 
-R96 fixes are frozen separately under main-checkout `target/review/pf/s4/pflh/fix/fresh/`. Its `frozen-series.json` indexes the new binaries, runner archive, pins, plans and all 70 invocations. `fix/cross-pins-supersession.json` names the sealed busy G1 attempt and both pin sets under s4-plan line 191. The old pins, runners, archives and busy attempt remain byte-for-byte; do not invent same-pins ancestry across this change.
+The current prepared series is the R96-6a successor, frozen under main-checkout `target/review/pf/s4/pflh/fix2/fresh/`; it supersedes the R96 series under `fix/fresh/`, whose validator still mapped every nonzero Q3 control result to 1. **Launch only the `fix2/fresh/invocations.json` commands; never the `fix/fresh/` ones.** Its `frozen-series.json` indexes the new binaries, runner archive, pins, plans and all 70 invocations. `fix2/cross-pins-supersession.json` names the sealed busy G1 attempt, both preceding pin sets and indexes, the prior `fix/cross-pins-supersession.json` record and the new pin sets under s4-plan line 191. The old pins, runners, archives and busy attempt remain byte-for-byte; do not invent same-pins ancestry across this change.
 
 Resume only after the narrow Astra re-check and both-OS/both-tier CI, including the B-5 wrapper job, pass. R95-1 then permits GPU-only availability checks about every 20 minutes, without launching a native child. A passing R74a starts the prepared fresh series. Each invocation still needs its own preflight; a later busy/75 stops the invocation pending, and a later availability window needs a fresh continuation and explicit supersession. CPU load never selects the window. This fix round runs no GPU lane or availability poll.
 
@@ -400,12 +400,12 @@ Every fresh invocation records the resulting `LD_LIBRARY_PATH`; the LH loader gu
 
 **Monitoring cost:** each five-second monitor tick rehashes frozen input media as part of the reused import/later-check assurance: 601 MB for talk, about 29 GB per talk invocation. Both arms pay the same checks. This activity is not an established performance cause. The post-lane Astra evidence check must verify actual sample gaps and monitor CPU from retained load samples, including the talk workload; the synthetic preflight-spacing witness is not evidence about timed-run gaps.
 
-Fresh-series freeze: SHA-256 `8507ab3b33e26117188744287a02fbb168eaa29b5b47ae4a6bf31942b1e22e10`. Candidate binary `f1bfc6a96850d577e31444d094e99a8a081ae7d4f646955ad347c14aa34bf11f`; accepted-S3b/common-overlay binary `ef38fc19a5c812a4e8d17b89c7cbc4e1e4ebddab12f754ec0dd0eba7ef27e6bc`. Both were rebuilt serially at nice 10, after sourcing FFmpeg; reference compilation used a fresh separate target directory. The cross-pins record SHA-256 is `d4819585771b5fe3523ca525993772cfbe7f790258ed8dc418d3079e6a8162a4`.
+Fresh-series freeze (R96-6a successor): SHA-256 `12094e64504be65b2b1f450038f053537cd67443e3a8d1f1cb186438dc8f818c`. Its plan reuses the R96 runners and native binaries under `fix/fresh/` unchanged (candidate `f1bfc6a96850d577e31444d094e99a8a081ae7d4f646955ad347c14aa34bf11f`; accepted-S3b/common-overlay `ef38fc19a5c812a4e8d17b89c7cbc4e1e4ebddab12f754ec0dd0eba7ef27e6bc`, both rebuilt serially at nice 10 after sourcing FFmpeg, reference in a fresh separate target directory); only the collector repo, harness, builds and pins changed. The successor cross-pins record SHA-256 is `d477586daa4116bb61458c65516c8a9528609dc1cfe7374b88670afda6c98783`. The superseded R96 freeze `8507ab3b33e26117188744287a02fbb168eaa29b5b47ae4a6bf31942b1e22e10` and its record `d4819585771b5fe3523ca525993772cfbe7f790258ed8dc418d3079e6a8162a4` are kept byte-for-byte as history.
 
-| Fresh program | Pins SHA-256 |
+| Fresh program (fix2) | Pins SHA-256 |
 |---|---|
-| G1 | `601a8fd9ec57613872766ceff0fb351ba0e70906bf8c4e3e82d8dff30552d20e` |
-| G2 | `5984d0980702105bc9335aa014ce4e22b06b784d659190ab670276b5d6814aea` |
-| G14 | `d1b3b853509bcf8963d1839394bad0822d6b3d50157849a89441a8debdae77b2` |
-| Q3-G1 | `bd73c8e41b0bf01fedad6ea21df031b00fc9c9ec47393862d9f48714bb6342cf` |
-| Q3-G14 | `bceacf77742c33ec12770ad2195da5c2801880c36846e19d2479ed6648a25d57` |
+| G1 | `0f29096703988d366070acff9d03c26cf04bf6cdef347ee28054ca13603f9127` |
+| G2 | `ad4455ebc3e573dcbf1810ec58b52573c55ee722e06faae3aa33e8af9652eed9` |
+| G14 | `31ff40e1a497d673008d80fce6ebb0cca5250e2e61e3e587fe615b9614c6a8bd` |
+| Q3-G1 | `2403adff3ef259d7e756e552a649e73cda5e64d30f980739c1f35f24fafd2f15` |
+| Q3-G14 | `a47253e27151af0a61e4aab8ba31d88599f59d9ddcb13deb38ff312b24fddc62` |
