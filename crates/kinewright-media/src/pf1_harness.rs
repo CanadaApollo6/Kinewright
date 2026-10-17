@@ -265,14 +265,18 @@ impl Trace {
         }
         let mut intervals: Vec<f64> = shown.windows(2).map(|w| w[1].0 - w[0].0).collect();
         m.present = [0.5, 0.95, 1.0].map(|p| percentile(&mut intervals, p));
-        // Held age: time since the latest presentation of a newer frame.
-        let (mut since, mut shown) = (0.0, shown.iter().peekable());
+        // Completed holds count even when the consumer skipped a poll.
+        let mut since = 0.0;
+        for &(presented, _) in &shown {
+            m.held_max = m.held_max.max(presented - since);
+            since = presented;
+        }
+        let boundary = self
+            .end
+            .unwrap_or_else(|| samples.last().map_or(0.0, |s| s.0));
+        m.held_max = m.held_max.max(boundary - since);
         let (mut value, mut changed) = (i64::MIN, 0.0);
         for &&(t, position) in &samples {
-            while let Some(&(presented, _)) = shown.next_if(|s| s.0 <= t) {
-                since = presented;
-            }
-            m.held_max = m.held_max.max(t - since);
             m.clock_stall_max = m.clock_stall_max.max(t - changed);
             if position != value {
                 (value, changed) = (position, t);
@@ -1307,6 +1311,35 @@ fn synthetic(n: i64, delay: f64, clock_gap: (f64, f64), mute: (f64, f64)) -> Tra
         }
     }
     trace
+}
+
+#[test]
+fn pf1_held_age_accounts_for_consumer_gaps_and_window_boundaries() {
+    for (samples, arrivals, end) in [
+        (
+            vec![(0.0, 0), (95.0, 1), (150.0, 2)],
+            vec![(0.0, 0, 0), (150.0, 2, 2)],
+            150.0,
+        ),
+        (vec![(95.0, 1), (150.0, 2)], vec![(150.0, 2, 2)], 150.0),
+        (
+            vec![(0.0, 0), (95.0, 1)],
+            vec![(0.0, 0, 0), (151.0, 2, 2)],
+            150.0,
+        ),
+    ] {
+        let trace = Trace {
+            samples,
+            arrivals,
+            end: Some(end),
+        };
+        let metrics = trace.metrics(3, 50.0);
+        assert!(
+            (metrics.held_max - 150.0).abs() < f64::EPSILON,
+            "{metrics:?}"
+        );
+        assert!(!metrics.g14_metric(), "a 150 ms hold must fail G14");
+    }
 }
 
 #[test]
