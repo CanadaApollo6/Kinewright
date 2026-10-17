@@ -195,6 +195,7 @@ def spec(pins_path, root):
             require(len(seeds) == len(set(seeds)) == 3 and all(r['pair'] == i // 3 and r['seed'] == seeds[(i // 3) % 3] for i, r in enumerate(orders)), 'six three-seed rotation schedule required')
             require(all({tuple(r['arm'] for r in orders[i:i+3]) for i in range(seed*3, len(orders), 9)} == set(itertools.permutations(builds)) for seed in range(3)), 'unbalanced counter rotations')
     if gate == 'D13':
+        require(protocol['sample_ms'] == 100, 'D13 requires 100 ms RSS samples')
         artifact(root, protocol['calibration'])
         calibration = read(root/protocol['calibration']['path'])
         media = read(root/inputs[pins['arms']['candidate']]['seek_gop60']['media']['path'])['files']

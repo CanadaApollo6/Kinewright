@@ -16,6 +16,7 @@ import validate as v
 import series as runner
 
 MUTATIONS = {
+    'd13_period': ("protocol['sample_ms'] == 100", 'True'),
     'collector_final': ("raw['valid'] is True and raw['metrics'] == row['metrics'] and raw['selected'] == row['gpu']['selected']", 'True'),
     'd13_coverage': ("[(r['cycle'], r['target']) for r in rows] == [(cycle, target) for cycle in range(30) for target in [180, 1200]]", 'True'),
     'd13_spacing': ("times[0] >= ack+100000 and times[1] >= ack+200000 and times[1]-times[0] >= 100000", 'True'),
@@ -251,6 +252,8 @@ class Pins(unittest.TestCase):
 
     def test_d13(self):
         self.configure('D13'); self.run_record(0)
+        self.pins['protocol']['sample_ms']=99; self.run_record(2)
+        self.pins['protocol']['sample_ms']=100
         raw = dict(self.d13_record(), metrics=self.status['runs'][0]['metrics'])
         v.d13_check(raw,self.pins)
         for change in ['interval','incomplete','spacing','calibration']:
