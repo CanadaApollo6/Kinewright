@@ -18,6 +18,9 @@ import series as runner
 MUTATIONS = {
     'lh_identity': ("len(matches) == 1", "len(matches) >= 1"),
     'lh_readback': ("fields[0] == uuid", "True"),
+    'default_scope': ("pins['gate'] in ['G1', 'G2', 'G14', 'Q3-G1', 'Q3-G14']", "True"),
+    'default_uuid': ("observation['uuid'] == gpu['selected']['uuid']", "True"),
+    'default_coverage': ("any(row['started_s'] < x['timestamp_s'] < row['ended_s'] for x in telemetry)", "True"),
     'media_guard': ("not path.is_symlink() and path.is_file() and path.suffix.lower() in ['.mp4', '.wav']", 'path.is_file()'),
     'media_format': ("header[4:8] == b'ftyp' if path.suffix.lower() == '.mp4' else header[:4] == b'RIFF' and header[8:12] == b'WAVE'", 'True'),
     'receipt_exit': ("receipt['exit'] == row['exit'] == 0", 'True'),
@@ -125,6 +128,45 @@ class Pins(unittest.TestCase):
         self.assertIn('reason', observed['power_draw_w'])
         probe['readback']['exit'] = 1
         with self.assertRaises(ValueError): launch.lh_observation(probe, 100, uuid)
+
+    def default_policy(self):
+        self.configure('G1')
+        record, probe, uuid = self.lh_fixture()
+        ruling = self.root/'r89.txt'; ruling.write_text('## R89-2:\n- Change no GPU setting.\n')
+        policy = dict(kind='recorded-default', ruling=dict(path=ruling.name, sha256=v.digest(ruling)))
+        for row in self.status['runs']:
+            times = [row['started_s']-.01, (row['started_s']+row['ended_s'])/2, row['ended_s']+.01]
+            row['gpu'] = launch.lh_gpu(record, [dict(utc=t, lh=probe) for t in times], policy)
+            for sample in row['preflight']: sample['uuid'] = uuid
+        self.pins['gpu'] = copy.deepcopy(self.status['runs'][0]['gpu'])
+        self.pins['protocol']['sample_ms'] = 5000
+
+    def test_recorded_default_policy(self):
+        self.default_policy()
+        for row in self.status['runs']:
+            for observation in row['gpu']['telemetry']:
+                observation.update(graphics_mhz=0, memory_mhz=100000, power_limit_w=1, power_draw_w=10000, pstate='P8')
+        self.run_record(0)
+        policy = self.pins['gpu']['policy']
+        with self.assertRaises(ValueError): v.schema(dict(policy, requested={}), v.SCHEMA['$defs']['policy'])
+        self.pins['gate'] = 'G3'
+        with self.assertRaises(ValueError): v.gpu_check(self.pins['gpu'], self.pins, dict(os='linux'), self.root)
+        self.pins['gate'] = 'G1'
+        self.pins['gpu']['telemetry'][0]['uuid'] = 'GPU-other'
+        with self.assertRaises(ValueError): v.gpu_check(self.pins['gpu'], self.pins, dict(os='linux'), self.root)
+
+    def test_default_policy_coverage(self):
+        self.default_policy()
+        row = self.status['runs'][0]; original = copy.deepcopy(row['gpu']['telemetry'])
+        for times in [[row['started_s']+.01, row['ended_s']-.01, row['ended_s']+.01], [row['started_s']-.02, row['started_s']-.01, row['ended_s']+.01], [row['started_s']-.01, row['ended_s']-.02, row['ended_s']-.01], [row['started_s']-.01, row['started_s']+.01, row['ended_s']+10]]:
+            row['gpu']['telemetry'] = [dict(x,timestamp_s=t) for x,t in zip(original,times)]
+            with self.subTest(times=times): self.run_record(2)
+
+    def test_lh_identity_cannot_change_between_samples(self):
+        record, probe, _ = self.lh_fixture()
+        other = copy.deepcopy(probe); other['icd'] += '\n'
+        with self.assertRaisesRegex(ValueError, 'changed during invocation'):
+            launch.lh_gpu(record, [dict(utc=10,lh=probe),dict(utc=15,lh=other)], dict(kind='recorded-default'))
 
     @unittest.skipUnless(sys.platform == 'linux', 'Linux invocation watchdog')
     def test_deadline(self):

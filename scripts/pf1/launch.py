@@ -61,13 +61,16 @@ def live_record(path, token, started, now, pins, host, root, environment):
     required = dict(name=pins['protocol']['name'], poll_ms=5, **v.CONTRACTS[pins['gate']][3])
     if pins['gate'] == 'D13': required['d_bytes'] = pins['protocol']['d_bytes']
     v.require(record['protocol'] == required, 'collector protocol mismatch')
-    v.require(pins['lane'] == 'LL' and record['software'] is True and record['selected']['backend'] == 'Vulkan', 'unsupported collector route')
-    driver = record['driver_info']
-    mesa = re.search(r'\bMesa (\S+)', driver)
-    llvm = re.search(r'\bLLVM ([\d.]+)', record['selected']['name'] + ' ' + driver)
-    icd = environment.get('VK_DRIVER_FILES') or environment.get('VK_ICD_FILENAMES', '')
-    v.require(mesa and llvm and icd and os.pathsep not in icd, 'missing LL driver/ICD readback')
-    gpu = dict(selected=record['selected'], stack=dict(runtime=driver, mesa=mesa[1], llvm=llvm[1], icd_manifest_sha256=v.digest(Path(icd))), policy=dict(kind='software'), telemetry=dict(status='unavailable', reason='software adapter has no hardware clocks'))
+    if pins['lane'] == 'LH':
+        gpu = lh_gpu(record, lh_samples(environment), pins['gpu']['policy'])
+    else:
+        v.require(pins['lane'] == 'LL' and record['software'] is True and record['selected']['backend'] == 'Vulkan', 'unsupported collector route')
+        driver = record['driver_info']
+        mesa = re.search(r'\bMesa (\S+)', driver)
+        llvm = re.search(r'\bLLVM ([\d.]+)', record['selected']['name'] + ' ' + driver)
+        icd = environment.get('VK_DRIVER_FILES') or environment.get('VK_ICD_FILENAMES', '')
+        v.require(mesa and llvm and icd and os.pathsep not in icd, 'missing LL driver/ICD readback')
+        gpu = dict(selected=record['selected'], stack=dict(runtime=driver, mesa=mesa[1], llvm=llvm[1], icd_manifest_sha256=v.digest(Path(icd))), policy=dict(kind='software'), telemetry=dict(status='unavailable', reason='software adapter has no hardware clocks'))
     v.schema(gpu, v.SCHEMA['$defs']['gpu'])
     v.gpu_check(gpu, pins, host, root)
     return record, gpu
@@ -118,6 +121,18 @@ def lh_observation(probe, timestamp, uuid):
             result[key] = value if key == 'pstate' else float(value)
     v.schema(result, v.SCHEMA['$defs']['default_observation'])
     return result
+
+def lh_samples(environment):
+    rows = Path(environment['PF1_LH_SAMPLES']).read_text().splitlines()
+    v.require(0 < len(rows) <= 128, 'missing/overflowed LH samples')
+    return [v.json.loads(row, object_pairs_hook=v.pairs) for row in rows]
+
+def lh_gpu(record, snapshots, policy):
+    identities = [lh_identity(record, snapshot['lh']) for snapshot in snapshots]
+    v.require(identities and all(identity == identities[0] for identity in identities), 'LH identity/driver/ICD changed during invocation')
+    selected, stack = identities[0]
+    telemetry = [lh_observation(snapshot['lh'], snapshot['utc'], selected['uuid']) for snapshot in snapshots]
+    return dict(selected=selected, stack=stack, policy=policy, telemetry=telemetry)
 
 def input_binding(pins, root, ordinal):
     entry = pins['protocol']['order'][ordinal]

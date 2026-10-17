@@ -50,6 +50,8 @@ if case == 'missing-live':
 if case == 'invalid':
     record['selected']['vendor_id'] += 1
 publish()
+if os.environ.get('PF1_LH_FIXTURE'):
+    time.sleep(.5)
 if case == 'invalid':
     time.sleep(60)
     sys.exit(0)
@@ -58,7 +60,7 @@ if case == 'assertion':
     sys.exit(101)
 if case != 'no-final':
     fps = 10 if case == 'shared' or case == 'candidate' and os.environ['S3B_SIDE'] == 'candidate' else 30
-    record.update(timestamp_s=time.time(), valid=case != 'invalid-final', metrics=dict(fps=fps))
+    record.update(timestamp_s=time.time(), valid=case != 'invalid-final', metrics=record.get('metrics',dict(fps=fps)))
     publish()
 '''
 
@@ -93,6 +95,40 @@ import test_validate as fixtures
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux wrapper integration')
 class Wrapper(unittest.TestCase):
+    def test_lh(self):
+        self.fixture.default_policy()
+        self.fixture.freeze_inputs()
+        shutil.copytree(self.fixture.root, self.root, dirs_exist_ok=True)
+        self.pins = self.fixture.pins
+        host = self.root/self.pins['host']['path']
+        host.write_text(json.dumps(v.read(host) | launch.host_readback()))
+        self.pins['host']['sha256'] = v.digest(host)
+        path = self.root/self.pins['builds']['path']; builds = v.read(path)
+        for build in builds.values(): build['binary'] = dict(path='publisher',sha256=v.digest(self.child))
+        path.write_text(json.dumps(builds)); self.pins['builds']['sha256'] = v.digest(path)
+        raw, probe, uuid = self.fixture.lh_fixture()
+        raw.update(protocol=dict(name='P-play',poll_ms=5,warmup_ms=2000,duration_s=60),metrics=dict(miss_pct=0,present_p95_ms=10))
+        (self.root/'icd.json').write_text(probe['icd'])
+        (self.root/'fixture.json').write_text(json.dumps(raw))
+        (self.root/'pins.json').write_text(json.dumps(self.pins))
+        probe['uuid'] = uuid
+        probe['table'] = (self.root/'docs/reports/pf1-s4/example/nvidia-processes.txt').read_text()
+        path = self.root/'lh-probe.json'; path.write_text(json.dumps(probe))
+        self.env.update(PF1_LH_FIXTURE=str(path),PF1_FIXTURE_INPUTS=str(self.root/self.pins['inputs']['path']))
+        nvidia = self.root/'bin/nvidia-smi'
+        nvidia.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+p = json.loads(Path(os.environ['PF1_LH_FIXTURE']).read_text())
+query = next((x for x in sys.argv if x.startswith('--query-gpu=')), '')
+if 'pci.device_id' in query: print(p['inventory']['output'])
+elif 'index,uuid,utilization' in query: print('0, ' + p['uuid'] + ', 0')
+elif query.startswith('--query-gpu=uuid,'): print(p['readback']['output'])
+elif query: print('0, 0, P8, 210, 405')
+else: print(p['table'])
+''')
+        self.pipeline('lh', 0)
+
     def test_final_alarm(self):
         lane = self.runners/'lane.py'
         lane.write_text(lane.read_text().replace('\nexcept (ValueError,', "\n if env['PF1_ROW']=='23': os.kill(os.getpid(),signal.SIGALRM)\nexcept (ValueError,"))
@@ -175,7 +211,7 @@ class Wrapper(unittest.TestCase):
 
     def pipeline(self, case, expected, failed_ordinal=0):
         self.env['PF1_FIXTURE_CASE'] = case
-        plan = dict(id=case, gates=[dict(pins=dict(path='pins.json', sha256=v.digest(self.root / 'pins.json')), test=launch.TESTS['G4'], series={})])
+        plan = dict(id=case, gates=[dict(pins=dict(path='pins.json', sha256=v.digest(self.root / 'pins.json')), test=launch.TESTS[self.pins['gate']], series={})])
         plan_path = self.root / (case + '-plan.json')
         plan_path.write_text(json.dumps(plan))
         work = self.runners / ('series-' + case)
@@ -188,7 +224,7 @@ class Wrapper(unittest.TestCase):
             for ref in status['artifacts']:
                 v.artifact(self.root, ref)
             journal = (work / 'attempts-0.jsonl').read_text().splitlines()
-            self.assertEqual(len(journal), failed_ordinal+1 if expected in [2, 101] else 24)
+            self.assertEqual(len(journal), failed_ordinal+1 if expected in [2, 101] else len(self.pins['protocol']['order']))
             for index, line in enumerate(journal):
                 row = json.loads(line)['row']
                 failed = expected in [2, 101] and index == failed_ordinal
@@ -233,8 +269,8 @@ class Wrapper(unittest.TestCase):
                     self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             if expected == 0:
                 row = status['runs'][0]
-                self.assertEqual(row['metrics'], dict(fps=30))
-                self.assertEqual(len(status['runs']), 24)
+                self.assertEqual(row['metrics'], dict(miss_pct=0,present_p95_ms=10) if case=='lh' else dict(fps=30))
+                self.assertEqual(len(status['runs']), len(self.pins['protocol']['order']))
                 log = self.root / row['logs'][0]['path']
                 shutil.copyfile(log, log.with_name(log.name + '.original'))
                 log.write_text(log.read_text() + 'changed bytes')

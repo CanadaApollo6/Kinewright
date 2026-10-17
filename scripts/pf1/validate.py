@@ -99,12 +99,24 @@ def artifact(root, ref, kind=None):
 
 def gpu_check(gpu, pins, host, root):
     require(gpu['selected'] == pins['gpu']['selected'] and gpu['stack'] == pins['gpu']['stack'], 'selected adapter/stack mismatch')
-    if host['os'] == 'linux' and gpu['selected']['backend'] == 'Vulkan':
+    default = gpu['policy']['kind'] == 'recorded-default'
+    if host['os'] == 'linux' and gpu['selected']['backend'] == 'Vulkan' and not default:
         require(all(isinstance(gpu['stack'][k], str) for k in ['mesa', 'llvm', 'icd_manifest_sha256']), 'Linux Vulkan stack unavailable')
     if pins['lane'] == 'LH':
-        require(bool(gpu['selected'].get('uuid')) and gpu['policy']['kind'] == 'hardware', 'LH selected UUID/hardware required')
+        require(bool(gpu['selected'].get('uuid')) and gpu['policy']['kind'] in ['hardware', 'recorded-default'], 'LH selected UUID/hardware required')
     policy = gpu['policy']
     require({k: v for k, v in policy.items() if k != 'observed'} == {k: v for k, v in pins['gpu']['policy'].items() if k != 'observed'}, 'policy mismatch')
+    if default:
+        require(pins['lane'] == 'LH' and pins['gate'] in ['G1', 'G2', 'G14', 'Q3-G1', 'Q3-G14'], 'gate not covered by Q1(b)')
+        artifact(root, policy['ruling'])
+        ruling = (root/policy['ruling']['path']).read_text()
+        require('## R89-2:' in ruling and '- Change no GPU setting.' in ruling, 'missing recorded-default ruling')
+        require(gpu['selected']['vendor_id'] == 0x10de and gpu['selected']['driver'] == 'NVIDIA' and isinstance(gpu['stack']['icd_manifest_sha256'], str), 'missing proprietary LH stack')
+        require(all(isinstance(gpu['stack'][k], dict) and gpu['stack'][k]['status'] == 'unavailable' for k in ['mesa', 'llvm']), 'Mesa/LLVM must be marked inapplicable')
+        require(isinstance(gpu['telemetry'], list), 'recorded-default observations required')
+        for observation in gpu['telemetry']:
+            schema(observation, SCHEMA['$defs']['default_observation'])
+            require(observation['uuid'] == gpu['selected']['uuid'], 'uncorrelated default-policy observation')
     if policy['kind'] == 'hardware':
         approval = artifact(root, policy['approval'], 'policy_approval')
         require(approval['requested'] == policy['requested'] and isinstance(gpu['telemetry'], list), 'approval/telemetry missing')
@@ -303,6 +315,9 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
         require(row['started_s'] < row['ended_s'], 'invalid run interval')
         if row['gpu']['policy']['kind'] == 'hardware':
             require(isinstance(telemetry, list) and telemetry[0]['timestamp_s'] <= row['started_s'] and telemetry[-1]['timestamp_s'] >= row['ended_s'] and all(0 < b['timestamp_s']-a['timestamp_s'] <= pins['protocol']['sample_ms']/1000+.002 for a,b in zip(telemetry,telemetry[1:])), 'policy sampling coverage missing')
+        if row['gpu']['policy']['kind'] == 'recorded-default':
+            require(pins['protocol']['sample_ms'] == 5000 and len(telemetry) >= 3 and telemetry[0]['timestamp_s'] <= row['started_s'] and telemetry[-1]['timestamp_s'] >= row['ended_s'] and any(row['started_s'] < x['timestamp_s'] < row['ended_s'] for x in telemetry), 'default-policy before/during/after coverage missing')
+            require(all(0 < b['timestamp_s']-a['timestamp_s'] <= 6 for a,b in zip(telemetry,telemetry[1:])), 'default-policy sampling gap')
         require(host['os'] == 'windows' or isinstance(row['cpu']['load_average'], (int, float)), 'load average unavailable outside Windows')
         busy |= preflight(row['preflight'], pins['gpu']['selected']['uuid'], row['started_s']) if pins['lane'] == 'LH' else False
         require(row['validity'] != 'invalid_evidence', 'invalid attempt')
