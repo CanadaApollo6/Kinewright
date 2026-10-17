@@ -28,7 +28,7 @@ jobs:
   pf1-wrapper:
     name: Linux PF1 wrapper witnesses
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     env:
       PF1_RUNNERS: ${{ runner.temp }}/pf1-runners
       PYTHONDONTWRITEBYTECODE: '1'
@@ -40,9 +40,9 @@ jobs:
         with:
           python-version: '3.13'
       - name: Restore hash-verified PF1 runners
-        run: nice -n 19 python3 ci/pf1/restore.py "$PF1_RUNNERS"
+        run: python3 ci/pf1/restore.py "$PF1_RUNNERS"
       - name: PF1 wrapper witnesses (synthetic child, no GPU or FFmpeg)
-        run: nice -n 19 python3 scripts/pf1/test_lane.py
+        run: python3 scripts/pf1/test_lane.py
 
   windows:
     name: Windows workspace

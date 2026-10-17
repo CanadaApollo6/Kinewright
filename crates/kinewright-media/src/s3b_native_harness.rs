@@ -254,6 +254,9 @@ fn s3b_native_play_lane() {
     );
     let reference = std::env::var("S3B_SIDE").ok().as_deref() == Some("reference");
     let collecting = std::env::var_os("PF1_RECORD").is_some();
+    if collecting {
+        assert_eq!(runs, 1, "one native run per collecting invocation");
+    }
     let mut ready = s4_ready("native-display");
     let workloads = play_workloads();
     assert_eq!(workloads.len(), 1, "one workload per bounded lane");

@@ -18,7 +18,7 @@ import series as runner
 MUTATIONS = {
     'lh_cached': ("lh_gpu(raw, lh_samples(row['environment']), pins['gpu']['policy']) == row['gpu']", "True"),
     'control_source': ("other['builds'] == pins['builds']", "True"),
-    'control_required': ("evaluate(control_pins, control_status, root) == 0", "True"),
+    'control_required': ("evaluate(control_pins, control_status, root) != 0", "False"),
     'control_sensitivity': ("return 0 if all(any(row['metrics'][key] > rule['limit'] for key,rule in pins['metrics'].items()) for row in rows) else 1", "return 0"),
     'lh_identity': ("len(matches) == 1", "len(matches) >= 1"),
     'lh_readback': ("fields[0] == uuid", "True"),
@@ -212,10 +212,16 @@ class Pins(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'cached LH readback mismatch'):v.evaluate(self.p,status,self.root)
 
     def test_g14_control_requirement(self):
-        self.configure('G14');self.run_record(0)
-        binding=v.read(self.root/self.pins['protocol']['control']['path'])
-        (self.root/binding['status']).unlink()
-        with self.assertRaises((ValueError,OSError)):v.evaluate(self.p,self.root/'status.json',self.root)
+        for gate in ['G1','G14']:
+            self.setUp();self.configure(gate);self.run_record(0)
+            binding=v.read(self.root/self.pins['protocol']['control']['path']);path=self.root/binding['status'];status=v.read(path)
+            saved=self.pins,self.status,self.p;self.p=self.root/binding['pins']['path'];self.pins=v.read(self.p);self.status=status
+            for row in status['runs']:row['metrics']={key:0 for key in row['metrics']}
+            self.run_record(1);self.pins,self.status,self.p=saved;self.run_record(1)
+            for content in ['{',None]:
+                if content is None:path.unlink()
+                else:path.write_text(content)
+                self.run_record(2)
 
     def test_control_source(self):
         self.configure('G14')

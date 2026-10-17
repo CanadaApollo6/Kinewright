@@ -112,6 +112,8 @@ class Wrapper(unittest.TestCase):
         self.assertFalse(rejected.exists())
 
     def test_lh(self):
+        self.env['LD_LIBRARY_PATH'] = 'synthetic-fixture'
+        (self.root/'bin/ldd').write_text('#!/bin/sh\nexit 0\n'); (self.root/'bin/ldd').chmod(0o755)
         self.fixture.root = self.root
         self.fixture.p = self.root/'pins.json'
         self.fixture.pins = v.read(self.fixture.p)

@@ -385,7 +385,8 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
         return 0 if all(any(row['metrics'][key] > rule['limit'] for key,rule in pins['metrics'].items()) for row in rows) else 1
     if pins['gate'] in ['G1', 'G14'] and not any(code in [1,75] for code in verdicts):
         control_pins, control_status = control_binding(pins, root, artifact(root, pins['inputs'], 'inputs'))
-        require(evaluate(control_pins, control_status, root) == 0, 'source-bound Q3 sensitivity control did not pass')
+        if evaluate(control_pins, control_status, root) != 0:
+            return 1
     return 1 if 1 in verdicts else 75 if 75 in verdicts or pins['gate'] in ['PERFORMANCE', 'R65-cumulative'] or any(r['validity'] == 'environment_limited_at_load' for r in rows) else 0
 
 if __name__ == '__main__':
