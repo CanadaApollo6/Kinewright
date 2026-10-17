@@ -126,6 +126,11 @@ def frozen_input(root, key, value):
         artifact(root, value[kind])
     require(read(root/value['workload']['path']) == dict(key=key, document=value['document'], media=value['media']), 'substituted input manifest')
     for ref in read(root/value['media']['path'])['files']:
+        path = root/ref['path']
+        require(not path.is_symlink() and path.is_file() and path.suffix.lower() in ['.mp4', '.wav'], 'frozen media must be a regular allowlisted file')
+        with path.open('rb') as stream:
+            header = stream.read(12)
+        require(header[4:8] == b'ftyp' if path.suffix.lower() == '.mp4' else header[:4] == b'RIFF' and header[8:12] == b'WAVE', 'indirect/unsupported frozen media format')
         artifact(root, ref)
     return {kind: value[kind]['sha256'] for kind in ['workload', 'media', 'document']}
 
@@ -136,11 +141,13 @@ def d13_check(record, pins):
     rows = record['d13_intervals']
     require([(r['cycle'], r['target']) for r in rows] == [(cycle, target) for cycle in range(30) for target in [180, 1200]], 'D13 missing/duplicate cancellation')
     require(len({r['version'] for r in rows}) == 60 and all(type(r['version']) is int and r['version'] > 0 for r in rows), 'D13 repeated/invalid applied plan')
+    require(all(b['ack_us'] > a['ack_us'] and b['version'] > a['version'] for a, b in zip(rows, rows[1:])), 'D13 ack/version order')
+    require(all(set(a['identities']) == set(b['identities']) for a, b in zip(rows[::2], rows[1::2])), 'D13 changed cycle identities')
     for row in rows:
         times, ids, ack = row['sample_us'], row['identities'], row['ack_us']
         require(len(times) == 2 and all(type(t) is int and t > 0 for t in times) and type(ack) is int and ack >= 0, 'D13 timestamp shape')
         require(times[0] >= ack+100000 and times[1] >= ack+200000 and times[1]-times[0] >= 100000, 'D13 missing two-sample live interval')
-        require(ids and len(ids) == len(set(ids)) and all(type(i) is int and i > 0 for i in ids), 'D13 retained identities missing')
+        require(ids and len(ids) <= protocol['reader_cap']*(protocol['B']-1) and len(ids) == len(set(ids)) and all(type(i) is int and i > 0 for i in ids), 'D13 retained identities missing/over cap')
 
 
 def spec(pins_path, root):
@@ -266,6 +273,12 @@ def evaluate(pins_path, run_path, root, seen=frozenset(), ancestry_checked=False
         for ref in row['logs']:
             artifact(root, ref)
         if pins['gate'] in ['G4', 'G15', 'D13']:
+            from launch import TESTS, host_check
+            receipt = read(root/row['logs'][-1]['path'])
+            host_check(host, receipt['host'])
+            command = ['timeout', '--kill-after=1', '570', 'nice', '-n', '10', str(root/build['binary']['path']), '--exact', TESTS[pins['gate']], '--ignored', '--nocapture', '--test-threads=1']
+            require(receipt['exit'] == row['exit'] == 0 and receipt['cleanup']['reaped'] is True and receipt['cleanup']['returncode'] == 0 and receipt['command'] == row['command'] == command and receipt['pins'] == digest(pins_path) and receipt['token'] == row['environment']['PF1_TOKEN'], 'pass receipt/command mismatch')
+            require(all(receipt[k] == value for k, value in expected.items()) and row['environment']['PF1_SEED'] == str(expected['seed']), 'pass receipt seed/order mismatch')
             path = Path(row['environment']['PF1_RECORD'])
             require(path.resolve().is_relative_to(root.resolve()), 'collector outside evidence root')
             matches = [ref for ref in row['logs'] if root/ref['path'] == path]

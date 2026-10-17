@@ -1,5 +1,37 @@
 # PF1 S4 reproduction checkpoints
 
+## R93 Python fix and cached re-validation
+
+R93 changes only Python checkers/runners/tests: **1,260/1,260** retained counted lines, including the 31-line S0 overlay; no Rust, native, shipping, unsafe or lint-policy change. Fixed cached validation returns 0 for G4 round 4 (24 rows), G15 round 3 final (42 rows), and D13 round 3 final (3 rows), including successful wrapper-receipt agreement, D13 identity bounds/order and the lean frozen-media guard. No lane was re-measured. Collection used the pre-fix runner archive `8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916`; this is not evidence collected by the fixed runner.
+
+The first G4 cached check exited 2 (`changed artifact work/lane.py`) because the A-2 edit changed a pinned runner. The lead ruled this a local fingerprint mismatch, outside R93-2's evidence stop case, and authorized restoration and repetition. The exact measured archive was restored, all 20 pinned runner references were hash-verified before validation, and the fixed validator then returned `gate_pass` for all three final sets. Receipts agree for all 69 rows. The original exit 2 and the repeated results are retained in `target/review/pf/s4/s4c/fix-r93/`; no sealed evidence, inputs, pins, seeds or thresholds changed.
+
+Keep measured runners at `target/review/pf/s4/work/`, restored from:
+`target/review/pf/s4/archives/8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916.tar`, SHA-256 `8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916`.
+The separate fixed runner for PF1-LH is:
+`target/review/pf/s4/archives/d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51.tar`, SHA-256 `d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51`,
+also extracted at `target/review/pf/s4/s4c/fix-r93/fixed-runners/`.
+`fix-r93/runner-archive.json` binds all seven fixed archive members. Use this commit's Python modules with the fixed runner for its 14-test wrapper suite; use the measured runner at the pinned paths with the fixed validator for cached evidence.
+
+```bash
+PF1_RUNNERS=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4/s4c/fix-r93/fixed-runners PYTHONDONTWRITEBYTECODE=1 nice -n 19 python3 scripts/pf1/test_lane.py
+pf1_root=/home/riels/Projects/Personal/Kinewright/target/review/pf/s4
+nice -n 19 python3 scripts/pf1/validate.py --pins "$pf1_root/s4c/round-4/pins-G4.json" --run "$pf1_root/work/series-s4c-r4-G4/status-0.json" --root "$pf1_root"
+nice -n 19 python3 scripts/pf1/validate.py --pins "$pf1_root/s4c/round-3/startup-final/pins-G15.json" --run "$pf1_root/work/series-s4c-r3-final-G15/status-0.json" --root "$pf1_root"
+nice -n 19 python3 scripts/pf1/validate.py --pins "$pf1_root/s4c/round-3/startup-final/pins-D13.json" --run "$pf1_root/work/series-s4c-r3-final-D13/status-0.json" --root "$pf1_root"
+```
+
+The consumed-input record proves the frozen bytes at import and at the later checks. It does not prove the bytes the decoder opened. Substitution and restoration during a run, and resources referenced from inside a container, are not detected. The full decoder-bound input snapshot is carried to PF1-LH.
+The lean Python guard rejects symlinks, non-files, extensions outside `.mp4`/`.wav`, and headers inconsistent with direct MP4/WAVE, including disguised concat/playlist text. It does not inspect container-internal resources.
+
+G4 floors live in `scripts/pf1/validate.py` and `s3b_native_harness.rs` (24 fps typical/explainer, 15 fps blend/reel), while the sealed pins retain `metrics.fps.limit: 0`. G15 protocol `children: 3` is the legacy pair-count field; each row's `native_children: 1` is authoritative.
+
+PF1-LH entry items under R93 (these do not defer PF1 gates): the full decoder-bound input snapshot (A-1); G4 floors in the pins schema (B-3); renaming G15's legacy protocol field (B-4); and a Linux CI job restoring the runner archive and running `test_lane.py` with `PF1_RUNNERS` (B-5).
+
+Proposed qualified closure (pending the narrow re-check and both-OS/both-tier CI): **PF1 closes qualified on this desktop's recorded lavapipe stack: LL G4 passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks, and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks; whole-process active RSS remains unresolved/report-only, no RTX 3090 or supported-hardware playback claim is made, and every named deferral in E16 remains deferred, not passed; the consumed-input record proves frozen bytes at import and later checks, but does not prove decoder-opened bytes or detect substitution and restoration during a run or resources referenced from inside a container.**
+
+The current report is `target/review/pf/s4c-fix-report.md`; the round-1–4 sections below remain historical collection/check records.
+
 ## R92 round-4 G4 acceptance and supersession
 
 **G4 PASS:** one complete fresh series on frozen candidate source `4783d5f`,
@@ -20,7 +52,7 @@ The accepted-S3b reference retains binary
 and its exact 9efb932 test-overlay source. Only unused G15 Rust code differs
 from final source; G4 and the paced driver are unchanged. These pairs establish
 no speedup. The actual frozen Python root remains
-`s4c/round-3/startup-final/frozen-repo`; the runner archive remains `8dab58af...`
+`s4c/round-3/startup-final/frozen-repo`; the runner archive remains `8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916`
 as fully identified below.
 
 `supersession.json` links the original series, `G4-finding.json`, row 0-2 and

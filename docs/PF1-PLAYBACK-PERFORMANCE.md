@@ -1407,7 +1407,7 @@ Opus. *CI on push*, Windows included.
 | D15 | The exhaustive reader-model test's fast-tier time | Amendment R65: `sched::tests::the_reader_model_holds_for_every_short_sequence` (S2b, `72246d3`) takes about 120 s in the fast tier. It predates S2c and stays as it is until S3 | S3 | the S3 backlog: move it to the slow tier, or shrink it |
 
 
-## S4c qualified scope and closure (R91/R92)
+## S4c qualified scope and closure (R91/R92/R93)
 
 R91 limits fresh acceptance to LL G4/G15/D13 on the identified desktop lavapipe
 stack, with shared frozen-input preparation/consumption. The source checkpoint is
@@ -1423,13 +1423,11 @@ the common test overlay; this comparison does not establish a speedup. S0 cleanu
 is successful process exit plus parent reap, while the candidate also observes
 its bounded engine teardown.
 
-Proposed qualified closure: on this desktop's recorded lavapipe stack, LL G4
-passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks,
-and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks;
-whole-process active RSS remains unresolved/report-only, and every named
-deferral below remains deferred, not passed. Reviews A/B, the fix round, a narrow
-Astra re-check and both-OS/both-tier CI still precede PF1 closure. No RTX 3090
-playback or supported-hardware-wide claim is made. Round 4 adds zero counted lines.
+R93 changes only Python checkers/runners/tests: **1,260/1,260** retained counted lines, including the 31-line S0 overlay; no Rust, native, shipping, unsafe or lint-policy change. Fixed cached validation returns 0 for G4 round 4 (24 rows), G15 round 3 final (42 rows), and D13 round 3 final (3 rows), including successful wrapper-receipt agreement, D13 identity bounds/order and the lean frozen-media guard. No lane was re-measured. Collection used the pre-fix runner archive `8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916`; this is not evidence collected by the fixed runner. The measured runners remain at the pinned `target/review/pf/s4/work/` paths. The separate fixed runner is archived at `target/review/pf/s4/archives/d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51.tar` (SHA-256 `d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51`) and extracted under `s4/s4c/fix-r93/fixed-runners/` for PF1-LH; `target/review/pf/s4c-fix-report.md` records both archives and the initial fingerprint mismatch.
+
+The consumed-input record proves the frozen bytes at import and at the later checks. It does not prove the bytes the decoder opened. Substitution and restoration during a run, and resources referenced from inside a container, are not detected. The full decoder-bound input snapshot is carried to PF1-LH.
+
+Proposed qualified closure (pending the narrow re-check and both-OS/both-tier CI): **PF1 closes qualified on this desktop's recorded lavapipe stack: LL G4 passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks, and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks; whole-process active RSS remains unresolved/report-only, no RTX 3090 or supported-hardware playback claim is made, and every named deferral in E16 remains deferred, not passed; the consumed-input record proves frozen bytes at import and later checks, but does not prove decoder-opened bytes or detect substitution and restoration during a run or resources referenced from inside a container.**
 
 R92-2 process/thread priority and five-second load diagnostics for both attempts
 are under `target/review/pf/s4/s4c/round-4/`. All 360 new load samples have
@@ -1460,3 +1458,6 @@ The R91 qualified scope carries these named deferrals, each **deferred, not pass
 - LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
 
 G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
+
+
+PF1-LH entry items under R93 (these do not defer PF1 gates): the full decoder-bound input snapshot (A-1); G4 floors in the pins schema (B-3); renaming G15's legacy protocol field (B-4); and a Linux CI job restoring the runner archive and running `test_lane.py` with `PF1_RUNNERS` (B-5).

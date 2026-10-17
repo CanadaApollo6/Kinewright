@@ -16,6 +16,13 @@ import validate as v
 import series as runner
 
 MUTATIONS = {
+    'media_guard': ("not path.is_symlink() and path.is_file() and path.suffix.lower() in ['.mp4', '.wav']", 'path.is_file()'),
+    'media_format': ("header[4:8] == b'ftyp' if path.suffix.lower() == '.mp4' else header[:4] == b'RIFF' and header[8:12] == b'WAVE'", 'True'),
+    'receipt_exit': ("receipt['exit'] == row['exit'] == 0", 'True'),
+    'receipt_order': ("all(receipt[k] == value for k, value in expected.items())", 'True'),
+    'd13_cap': ("len(ids) <= protocol['reader_cap']*(protocol['B']-1)", 'True'),
+    'd13_sets': ("all(set(a['identities']) == set(b['identities']) for a, b in zip(rows[::2], rows[1::2]))", 'True'),
+    'd13_order': ("all(b['ack_us'] > a['ack_us'] and b['version'] > a['version'] for a, b in zip(rows, rows[1:]))", 'True'),
     'd13_period': ("protocol['sample_ms'] == 100", 'True'),
     'collector_final': ("raw['valid'] is True and raw['metrics'] == row['metrics'] and raw['selected'] == row['gpu']['selected']", 'True'),
     'd13_coverage': ("[(r['cycle'], r['target']) for r in rows] == [(cycle, target) for cycle in range(30) for target in [180, 1200]]", 'True'),
@@ -79,7 +86,7 @@ class Pins(unittest.TestCase):
         previous = launch.signal.getsignal(launch.signal.SIGALRM)
         try:
             with self.assertRaisesRegex(TimeoutError, 'complete invocation deadline'):
-                with launch.owned_child([sys.executable, '-c', 'import time; time.sleep(2)'], cleanup=cleanup) as process:
+                with launch.owned_child([sys.executable, '-c', 'import time; time.sleep(30)'], cleanup=cleanup) as process:
                     launch.arm_deadline(.05)
                     process.wait(timeout=4)
             self.assertTrue(cleanup['reaped'])
@@ -126,6 +133,11 @@ class Pins(unittest.TestCase):
                 if self.pins['gate'] == 'D13' and 'calibration' in self.pins['protocol']: raw.update(self.d13_record())
                 path.write_text(json.dumps(raw))
                 row['logs'] = [ref for ref in row['logs'] if ref['path'] != path.name] + [dict(path=path.name,sha256=v.digest(path))]
+                row['command'] = ['timeout', '--kill-after=1', '570', 'nice', '-n', '10', str(self.root/v.read(self.root/self.pins['builds']['path'])[row['arm']]['binary']['path']), '--exact', launch.TESTS[self.pins['gate']], '--ignored', '--nocapture', '--test-threads=1']
+                row['environment']['PF1_SEED'] = str(row['seed'])
+                receipt = self.root/f'receipt-{index}.json'
+                receipt.write_text(json.dumps(dict({k:row[k] for k in ['arm','workload','pair','seed','exit','command']}, host={k:v.read(self.root/self.pins['host']['path'])[k] for k in ['os','version','architecture','cpu','ram_bytes']}, pins=v.digest(self.p), token='portable-synthetic', cleanup=dict(reaped=True,returncode=0))))
+                row['logs'] = [ref for ref in row['logs'] if ref['path'] != receipt.name] + [dict(path=receipt.name,sha256=v.digest(receipt))]
         for row in self.status['runs']:
             row['identity']['pins'] = v.digest(self.p)
             if resign: row['fingerprint'] = v.fingerprint(row)
@@ -209,19 +221,29 @@ class Pins(unittest.TestCase):
         if gate == 'D13':
             inputs = v.read(self.root/self.pins['inputs']['path'])
             media = self.root/next(iter(inputs.values()))['seek_gop60']['media']['path']
-            media.write_text(json.dumps(dict(files=[dict(template['document'])])))
+            payload = self.root/'seek.mp4'; payload.write_bytes(b'\0\0\0\x18ftypisom')
+            media.write_text(json.dumps(dict(files=[dict(path=payload.name,sha256=v.digest(payload))])))
             for workloads in inputs.values(): workloads['seek_gop60']['media']['sha256'] = v.digest(media)
             for workloads in inputs.values():
                 value = workloads['seek_gop60']; path = self.root/value['workload']['path']
                 path.write_text(json.dumps(dict(key='seek_gop60',document=value['document'],media=value['media'])))
                 value['workload']['sha256'] = v.digest(path)
             self.pins['inputs'] = put('inputs.json', inputs)
-            calibration = dict(media_sha256=template['document']['sha256'], method='safe measured plane span union', B=16,reader_cap=2,d_bytes=100,frames=1800,shape=dict(width=1920,height=1080))
+            calibration = dict(media_sha256=v.digest(payload), method='safe measured plane span union', B=16,reader_cap=2,d_bytes=100,frames=1800,shape=dict(width=1920,height=1080))
             self.pins['protocol'].update(d_bytes=100,calibration=put('calibration.json',calibration))
             for row in self.status['runs']: row['metrics'].update(idle_bytes=100,peak_bytes=150,peak_minus_idle_bytes=50,u_bytes=3000)
 
     def d13_record(self):
-        return dict(calibration_sha256=self.pins['protocol']['calibration']['sha256'],d13_intervals=[dict(cycle=c,target=t,version=2*c+i+1,ack_us=100000,identities=[1],sample_us=[200000,300000]) for c in range(30) for i,t in enumerate([180,1200])])
+        return dict(calibration_sha256=self.pins['protocol']['calibration']['sha256'],d13_intervals=[dict(cycle=c,target=t,version=2*c+i+1,ack_us=100000+1000000*(2*c+i),identities=[1],sample_us=[200000+1000000*(2*c+i),300000+1000000*(2*c+i)]) for c in range(30) for i,t in enumerate([180,1200])])
+
+    def test_pass_receipts(self):
+        self.configure('G4'); self.run_record(0)
+        row = self.status['runs'][0]; path = self.root/row['logs'][-1]['path']; original = v.read(path)
+        for key, value in [('exit',2), ('host',dict(original['host'],cpu='wrong')), ('command',['wrong']), ('seed',-1), ('pair',999)]:
+            path.write_text(json.dumps(dict(original, **{key:value})))
+            row['logs'][-1]['sha256'] = v.digest(path); row['fingerprint'] = v.fingerprint(row)
+            status = self.root/'status.json'; status.write_text(json.dumps(self.status))
+            with self.subTest(key=key), self.assertRaises(ValueError): v.evaluate(self.p,status,self.root)
 
     def test_native_cached_final(self):
         self.configure('G15'); self.run_record(0)
@@ -237,18 +259,38 @@ class Pins(unittest.TestCase):
 
     def test_frozen_nested_media(self):
         self.configure('G4')
-        value = next(iter(v.read(self.root/self.pins['inputs']['path']).values()))['typical_1080p']
-        path = self.root/'nested-media'
-        path.write_bytes(b'frozen media')
+        inputs_path = self.root/self.pins['inputs']['path']
+        inputs = v.read(inputs_path)
+        entry = self.pins['protocol']['order'][0]
+        key = entry['workload']; value = inputs[entry['arm']][key]
+        path = self.root/'nested-media.mp4'
+        path.write_bytes(b'\0\0\0\x18ftypisom')
         media = self.root/value['media']['path']
-        media.write_text(json.dumps(dict(files=[dict(path=path.name,sha256=v.digest(path))])))
-        value['media']['sha256']=v.digest(media)
         manifest = self.root/value['workload']['path']
-        manifest.write_text(json.dumps(dict(key='typical_1080p',document=value['document'],media=value['media'])))
-        value['workload']['sha256']=v.digest(manifest)
-        v.frozen_input(self.root,'typical_1080p',value)
+        def bind(ref):
+            media.write_text(json.dumps(dict(files=[ref])))
+            value['media']['sha256']=v.digest(media)
+            manifest.write_text(json.dumps(dict(key=key,document=value['document'],media=value['media'])))
+            value['workload']['sha256']=v.digest(manifest)
+            inputs_path.write_text(json.dumps(inputs))
+            self.pins['inputs']['sha256']=v.digest(inputs_path)
+        bind(dict(path=path.name,sha256=v.digest(path)))
+        v.frozen_input(self.root,key,value)
+        for name, content in [('link.mp4',None), ('directory.mp4',None), ('media.bin',b'RIFF\0\0\0\0WAVE'), ('concat.mp4',b"ffconcat version 1.0\nfile 'payload.mp4'\n"), ('playlist.wav',b'#EXTM3U\npayload.mp4\n')]:
+            bad = self.root/name
+            if name == 'link.mp4':
+                try: bad.symlink_to(path)
+                except OSError:
+                    if os.name == 'nt': continue
+                    raise
+            elif name == 'directory.mp4': bad.mkdir()
+            else: bad.write_bytes(content)
+            bind(dict(path=name,sha256=v.digest(path) if content is None else v.digest(bad)))
+            for check in [lambda: launch.input_environment(self.pins,self.root,0), lambda: v.frozen_input(self.root,key,value)]:
+                with self.subTest(name=name), self.assertRaises(ValueError): check()
+        bind(dict(path=path.name,sha256=v.digest(path)))
         path.write_bytes(b'changed media')
-        with self.assertRaises(ValueError): v.frozen_input(self.root,'typical_1080p',value)
+        with self.assertRaises(ValueError): v.frozen_input(self.root,key,value)
 
     def test_d13(self):
         self.configure('D13'); self.run_record(0)
@@ -256,12 +298,17 @@ class Pins(unittest.TestCase):
         self.pins['protocol']['sample_ms']=100
         raw = dict(self.d13_record(), metrics=self.status['runs'][0]['metrics'])
         v.d13_check(raw,self.pins)
-        for change in ['interval','incomplete','spacing','calibration']:
+        for change in ['interval','incomplete','spacing','calibration','cap','sets','ack','version']:
             altered = copy.deepcopy(raw)
             if change == 'interval': altered['d13_intervals'][0]['target']=999
             elif change == 'incomplete': altered['d13_intervals'].pop()
             elif change == 'spacing': altered['d13_intervals'][0]['sample_us']=[200000,299999]
-            else: altered['calibration_sha256']='f'*64
+            elif change == 'calibration': altered['calibration_sha256']='f'*64
+            elif change == 'cap':
+                for row in altered['d13_intervals']: row['identities']=list(range(1,32))
+            elif change == 'sets': altered['d13_intervals'][1]['identities']=[2]
+            elif change == 'ack': altered['d13_intervals'][1]['ack_us']=99999
+            else: altered['d13_intervals'][1]['version']=61
             with self.subTest(change=change), self.assertRaises(ValueError): v.d13_check(altered,self.pins)
         self.pins['protocol'].pop('calibration'); self.run_record(2)
 

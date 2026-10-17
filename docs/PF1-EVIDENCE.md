@@ -7398,7 +7398,7 @@ and the laptop cleanup remain owed under R73.
 
 **S4c reconciliation (R91/R92).** E15 is the historical S3b record, closed at
 `7408c84`; its earlier timings are not new S4 acceptance. E16 records the bounded
-C-plus-frozen-input continuation, its exact source/collector identities and actual
+C + frozen-input continuation, its exact source/collector identities and actual
 LL outcomes. The final accepted S3b shipping state is rebuilt with the common
 test overlay for G4; R92's final-source series passes all 24 fresh rows and
 supersedes the original Q2-invalid attempt without changing its bytes. That
@@ -7767,11 +7767,13 @@ The RTX 4050 rerun owed under R73 since S3a is still owed.
 
 ## E16 — S4c, R91 C plus frozen inputs
 
-**LL native acceptance complete; qualified closure awaits reviews and CI.** Source is committed at
+**Recorded LL gate results pass; qualified closure remains proposed.** At collection, source was committed at
 `4783d5f`, **1,190/1,200** retained counted lines (including 31 S0 overlay lines),
-zero shipping changes, zero unsafe additions and zero lint changes. Workspace
+zero shipping changes, zero unsafe additions and zero lint changes. At that checkpoint, workspace
 build, all-target Clippy, formatting, slow-test lint, 53 portable tests, 13 wrapper
 tests and the affected native witnesses pass. Full workspace fast tier passed (3,618 passed, 0 failed, 100 expected ignores, 36 summaries), and strict Linux `verify-fast` exited 0; no new hosted CI or Windows execution is claimed.
+
+### Passed gates
 
 | Scope | Recorded result |
 |---|---|
@@ -7781,7 +7783,7 @@ tests and the affected native witnesses pass. Full workspace fast tier passed (3
 
 Evidence root: main-checkout `target/review/pf/s4/s4c/round-3/`. The original
 `frozen-series.json` and first statuses remain intact; restoring runner archive
-`421745d3...` revalidated G4=2, G15=2 and D13=0. The final-source context is
+`421745d3d7d983eb9b9fef14abcde62b035c70fbcb43bfee971f5cedc746c29f` revalidated G4=2, G15=2 and D13=0. The final-source context is
 `startup-final/frozen-series.json`, with separate binary/source/harness hashes,
 unchanged prepared inputs, fixed thresholds and the previous-context link.
 No old row is reused. The complete report is `target/review/pf/s4c-report.md`.
@@ -7796,6 +7798,8 @@ unused G15 Rust code differs between its 9efb932 overlay and final source.
 The G4 path, paced driver, inputs, seeds, order, polling and floors are unchanged.
 Each row was checked before the next launch; no row was rerun. The unchanged
 collection code then read the saved rows to seal the aggregate, launching no child.
+
+### R50 shared misses: none
 
 R92-2 diagnostics retain all 360 new five-second load samples (all contaminated;
 one-minute load range 6.22–20.59), plus start/end process and GPU readbacks.
@@ -7825,15 +7829,14 @@ Mesa 26.2.4-arch1.1 / LLVM 23.1.1. Native jobs use nice 10, the sampler nice 19,
 and load/contamination are recorded every five seconds as R50 annotations.
 No GPU setting changed. Memory-start checks are recorded separately.
 
-Proposed qualified closure: **On this desktop's recorded lavapipe stack, LL G4
-passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks,
-and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks;
-whole-process active RSS remains unresolved/report-only, and every named
-deferral below remains deferred, not passed.** This makes no RTX 3090 playback
-or supported-hardware-wide claim. PF1 closure still requires reviews A/B,
-the fix round, a narrow Astra re-check and both-OS/both-tier CI. Round 4 adds zero
-counted lines; the total remains 1,190/1,200. Earlier source checks and fast-tier
-results above are round-3 evidence; no new build or workspace test is claimed.
+R93 changes only Python checkers/runners/tests: **1,260/1,260** retained counted lines, including the 31-line S0 overlay; no Rust, native, shipping, unsafe or lint-policy change. Fixed cached validation returns 0 for G4 round 4 (24 rows), G15 round 3 final (42 rows), and D13 round 3 final (3 rows), including successful wrapper-receipt agreement, D13 identity bounds/order and the lean frozen-media guard. No lane was re-measured. Collection used the pre-fix runner archive `8dab58af55029abcfea54e2c5188c3fbcd9f1037cbf737ad2bd2b34289115916`; this is not evidence collected by the fixed runner. The measured runners remain at the pinned `target/review/pf/s4/work/` paths. The separate fixed runner is archived at `target/review/pf/s4/archives/d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51.tar` (SHA-256 `d3f9851547ee46439f670791a3a71f709d71950c6f8f6caf7284e83457da2c51`) and extracted under `s4/s4c/fix-r93/fixed-runners/` for PF1-LH; `target/review/pf/s4c-fix-report.md` records both archives and the initial fingerprint mismatch.
+
+The consumed-input record proves the frozen bytes at import and at the later checks. It does not prove the bytes the decoder opened. Substitution and restoration during a run, and resources referenced from inside a container, are not detected. The full decoder-bound input snapshot is carried to PF1-LH.
+
+G4 floors live in `scripts/pf1/validate.py` and `s3b_native_harness.rs` (24 fps typical/explainer, 15 fps blend/reel), while the sealed pins retain `metrics.fps.limit: 0`. G15 protocol `children: 3` is the legacy pair-count field; each row's `native_children: 1` is authoritative.
+
+Proposed qualified closure (pending the narrow re-check and both-OS/both-tier CI): **PF1 closes qualified on this desktop's recorded lavapipe stack: LL G4 passes all 24 fresh valid rows, G15 passes all 42 fresh-child settled-idle checks, and D13 passes its three-child/30-cycle retained-plane oracle and cleanup checks; whole-process active RSS remains unresolved/report-only, no RTX 3090 or supported-hardware playback claim is made, and every named deferral in E16 remains deferred, not passed; the consumed-input record proves frozen bytes at import and later checks, but does not prove decoder-opened bytes or detect substitution and restoration during a run or resources referenced from inside a container.**
+
 
 D13 cleanup failure can emit one late `D13 sample` line within the same already-failed test binary (RR-2, R88).
 
@@ -7841,7 +7844,19 @@ D13 cleanup failure can emit one late `D13 sample` line within the same already-
 - FFmpeg-internal buffer-pool lifetimes are not observed;
 - identity means plane address plus a lifetime generation, and a generation is recorded at each registration so that a reused pooled address is a new identity.
 
+### Unresolved G3/LH L-4a
+
+G3 and LH L4a remain unresolved under driver defaults; G3 also appears in the accepted deferrals below.
+
+### Unexplained holds
+
 The historical 8,250 ms hold remains unexplained.
+
+### pending invalid/incomplete: none (G4 original superseded under R92; first G15 attempt sealed)
+
+The preserved G4 attempt is superseded by the round-4 series; the first G15 attempt is sealed through `startup-final/previous-context.json`. Neither supplies passing rows.
+
+### Accepted deferrals
 
 The R91 qualified scope carries these named deferrals, each **deferred, not passed**:
 
@@ -7853,3 +7868,6 @@ The R91 qualified scope carries these named deferrals, each **deferred, not pass
 - LH G1, G2 (including the 240 s talk) and G14 — deferred to the scheduled PF1-LH follow-up slice, not passed.
 
 G3 and LH L4a remain unresolved under driver defaults. A failed in-scope LL gate remains a finding for lead disposition.
+
+
+PF1-LH entry items under R93 (these do not defer PF1 gates): the full decoder-bound input snapshot (A-1); G4 floors in the pins schema (B-3); renaming G15's legacy protocol field (B-4); and a Linux CI job restoring the runner archive and running `test_lane.py` with `PF1_RUNNERS` (B-5).

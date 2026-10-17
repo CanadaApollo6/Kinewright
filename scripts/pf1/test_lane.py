@@ -51,7 +51,7 @@ if case == 'invalid':
     record['selected']['vendor_id'] += 1
 publish()
 if case == 'invalid':
-    time.sleep(8)
+    time.sleep(60)
     sys.exit(0)
 if case == 'assertion':
     print('synthetic assertion failed', flush=True)
@@ -63,6 +63,7 @@ if case != 'no-final':
 '''
 
 MUTATIONS = {
+    'late_alarm': ('lane.py', ' row=None\n', ''),
     'startup_epoch': ('lane.py', '  started=time.time()\n  if lane', '  pass\n  if lane'),
     'startup_readiness': ('launch.py', "'metrics' in record or 'valid' in record", 'True'),
     'priority': ('lane.py', 'os.setpriority(os.PRIO_PROCESS,0,19)', 'pass'),
@@ -92,6 +93,14 @@ import test_validate as fixtures
 
 @unittest.skipUnless(sys.platform == 'linux', 'Linux wrapper integration')
 class Wrapper(unittest.TestCase):
+    def test_final_alarm(self):
+        lane = self.runners/'lane.py'
+        lane.write_text(lane.read_text().replace('\nexcept (ValueError,', "\n if env['PF1_ROW']=='23': os.kill(os.getpid(),signal.SIGALRM)\nexcept (ValueError,"))
+        self.pipeline('alarm', 2, 23)
+        status = v.read(self.runners/'series-alarm/status-0.json')
+        self.assertEqual(len(status['runs']), 23)
+        self.assertEqual(v.read(self.root/status['failure']['receipt']['path'])['reason'], 'complete invocation deadline')
+
     def test_startup(self):
         lane = self.runners/'lane.py'
         lane.write_text(lane.read_text().replace('def sample():', 'def sample():\n global started\n if process is None: started-=11'))
@@ -164,7 +173,7 @@ class Wrapper(unittest.TestCase):
         nvidia.chmod(0o755)
         self.env = dict(os.environ, PF1_REPO=str(self.root / 'repo'), PF1_ROOT=str(self.root), PF1_FIXTURE=str(self.root / 'fixture.json'), PF1_FIXTURE_INPUTS=str(self.root / self.pins['inputs']['path']), VK_DRIVER_FILES=str(icd), PATH=str(tools) + os.pathsep + os.environ['PATH'])
 
-    def pipeline(self, case, expected):
+    def pipeline(self, case, expected, failed_ordinal=0):
         self.env['PF1_FIXTURE_CASE'] = case
         plan = dict(id=case, gates=[dict(pins=dict(path='pins.json', sha256=v.digest(self.root / 'pins.json')), test=launch.TESTS['G4'], series={})])
         plan_path = self.root / (case + '-plan.json')
@@ -179,10 +188,12 @@ class Wrapper(unittest.TestCase):
             for ref in status['artifacts']:
                 v.artifact(self.root, ref)
             journal = (work / 'attempts-0.jsonl').read_text().splitlines()
-            self.assertEqual(len(journal), 1 if expected in [2, 101] else 24)
-            for line in journal:
+            self.assertEqual(len(journal), failed_ordinal+1 if expected in [2, 101] else 24)
+            for index, line in enumerate(journal):
                 row = json.loads(line)['row']
-                if expected in [2, 101]:
+                failed = expected in [2, 101] and index == failed_ordinal
+                if failed:
+                    self.assertIn('receipt', row)
                     receipt_ref = row['receipt']
                     v.artifact(self.root, receipt_ref)
                 else:
@@ -193,7 +204,7 @@ class Wrapper(unittest.TestCase):
                 receipt = v.read(self.root / receipt_ref['path'])
                 self.assertEqual(receipt['pins'], plan['gates'][0]['pins']['sha256'])
                 self.assertTrue(receipt['cleanup']['reaped'])
-                self.assertEqual(receipt['exit'], expected if expected in [2, 101] else 0)
+                self.assertEqual(receipt['exit'], expected if failed else 0)
                 with self.assertRaises(ProcessLookupError):
                     os.kill(receipt['cleanup']['pid'], 0)
                 for ref in receipt['logs']:
