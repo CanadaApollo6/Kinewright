@@ -67,15 +67,19 @@ impl ModelChoice {
 /// The `claude` CLI has no on-disk model catalog to read the way Codex does,
 /// so this list is curated from the models the installed CLI accepts; ids are
 /// full names (`claude-opus-5`) rather than tier aliases so users can pin a
-/// version, e.g. Opus 4.8 versus Opus 5.
+/// version, e.g. Opus 5 versus Opus 5.5.
 #[must_use]
 pub fn claude_models() -> Vec<ModelChoice> {
     vec![
+        ModelChoice::new("claude-fable-5-1", "Fable 5.1", &CLAUDE_EFFORTS_FULL),
         ModelChoice::new("claude-fable-5", "Fable 5", &CLAUDE_EFFORTS_FULL),
+        ModelChoice::new("claude-opus-5-5", "Opus 5.5", &CLAUDE_EFFORTS_FULL),
         ModelChoice::new("claude-opus-5", "Opus 5", &CLAUDE_EFFORTS_FULL),
         ModelChoice::new("claude-opus-4-8", "Opus 4.8", &CLAUDE_EFFORTS_FULL),
+        ModelChoice::new("claude-sonnet-5-5", "Sonnet 5.5", &CLAUDE_EFFORTS_FULL),
         ModelChoice::new("claude-sonnet-5", "Sonnet 5", &CLAUDE_EFFORTS_FULL),
         ModelChoice::new("claude-sonnet-4-6", "Sonnet 4.6", &CLAUDE_EFFORTS_NO_XHIGH),
+        ModelChoice::new("claude-haiku-5-5", "Haiku 5.5", &CLAUDE_EFFORTS_FULL),
         ModelChoice::new("claude-haiku-4-5", "Haiku 4.5", &CLAUDE_EFFORTS_BASE),
     ]
 }
@@ -231,11 +235,15 @@ mod tests {
         assert_eq!(
             ids,
             [
+                "claude-fable-5-1",
                 "claude-fable-5",
+                "claude-opus-5-5",
                 "claude-opus-5",
                 "claude-opus-4-8",
+                "claude-sonnet-5-5",
                 "claude-sonnet-5",
                 "claude-sonnet-4-6",
+                "claude-haiku-5-5",
                 "claude-haiku-4-5",
             ]
         );
@@ -247,6 +255,10 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(efforts_of("claude-fable-5"), CLAUDE_EFFORTS_FULL);
+        assert_eq!(efforts_of("claude-fable-5-1"), CLAUDE_EFFORTS_FULL);
+        assert_eq!(efforts_of("claude-opus-5-5"), CLAUDE_EFFORTS_FULL);
+        assert_eq!(efforts_of("claude-sonnet-5-5"), CLAUDE_EFFORTS_FULL);
+        assert_eq!(efforts_of("claude-haiku-5-5"), CLAUDE_EFFORTS_FULL);
         assert_eq!(efforts_of("claude-opus-4-8"), CLAUDE_EFFORTS_FULL);
         assert_eq!(efforts_of("claude-sonnet-4-6"), CLAUDE_EFFORTS_NO_XHIGH);
         assert_eq!(efforts_of("claude-haiku-4-5"), CLAUDE_EFFORTS_BASE);
