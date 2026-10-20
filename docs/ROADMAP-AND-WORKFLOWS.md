@@ -1250,6 +1250,8 @@ ownership boundary, and definition of done stable.
 
 - [Product brief, October 2026](PRODUCT-BRIEF-2026-10.md) — first user, done bar,
   job order, and process (2026-10-20).
+- [JA-1: Studio and orchestration](JA1-STUDIO-ORCHESTRATION.md) — job A single window,
+  versions, pointing, Opus-led specialists and the durable run host; design accepted 2026-10-20.
 - [JA-2: person separation](JA2-PERSON-SEPARATION.md) — job A background blur or
   replacement and face-aware look; design accepted 2026-10-20.
 - [Model-first editor](MODEL-FIRST-EDITOR.md) — architectural product thesis.

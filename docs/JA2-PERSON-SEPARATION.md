@@ -5,8 +5,8 @@ fixture, runtime and performance gate is NOT RUN. Numerical limits are proposed 
 Stage A measurements replace them.
 
 Part of job A (talking head) in the [product brief](PRODUCT-BRIEF-2026-10.md#programme-mapping).
-It consumes the JA-1 Studio host's single project writer and store ownership; JA-1 is still in
-design review, so the seam in §§4–6 follows JA-1 as accepted.
+It consumes the [JA-1 Studio host](JA1-STUDIO-ORCHESTRATION.md)'s single project writer and
+store ownership (seam in §§4–6).
 
 Review trail, under `target/review/ja/`:
 - Astra critic: `ja2-person-separation-critic.md` (revise; 1 Blocker, 5 Major, 1 Minor).
