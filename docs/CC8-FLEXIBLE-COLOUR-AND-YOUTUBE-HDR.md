@@ -7,9 +7,8 @@ Conventions: prose cites symbols, never `file:line`. Rules **R1–R36** are
 numbered, testable, and each names its owning stage. Gates **G1–G10** are named
 behaviours that fail today, tagged **[new]** (new behaviour), **[regression]**
 (must-not-move evidence), or **[invariant]** (standing property re-asserted).
-Production budgets count new-or-changed nonblank production lines incl.
-production comments (replacements once, pure moves zero); tests, fixtures, docs
-counted separately; every rule owns at least one test. Base: main `6c2bdec` +
+Stages are sized by rules and gates, not line counts (line budgets withdrawn,
+Riel, 2026-10-20, §15); every rule owns at least one test. Base: main `6c2bdec` +
 AW1 serialisation (§15). **The numerical contract is approved at promotion
 (completeness check: promote-with-edits; P1–P8 incorporated) — S0 and S1 may
 start.**
@@ -814,25 +813,27 @@ software-only CI never implies hardware coverage. **R35 [S1].** PB1–PB4 +
 non-finite refusal as above hold at every storage boundary, near-black,
 saturated conversion, white extreme (100/400), and repeated-node chain.
 
-## 15. Staging by crate (S9 re-estimate; tests separate)
+## 15. Staging by crate
 
-Honest re-estimate retained (Edit 8): ceilings sum to 7,300; **+1,200
-contingency (≈16%) → ceiling 8,500**. **S0 and S1 may start** (numerical
+Line-count ceilings and contingency are withdrawn (Riel, 2026-10-20). Over-engineering is
+guarded by rule/gate traceability and review; performance and memory by the measured
+budgets in §14 and the §17 evidence plan. Seek a lead ruling before a stage adds scope this design does not
+name, or when a measured budget fails. **S0 and S1 may start** (numerical
 contract approved at promotion, §0.3). **S2's persisted
 fields + format policy land after AW1 S1 merges** (one GUI/headless
 implementation); AW1 pins intact, CC8 format cases added separately; re-pins
 after AW1 lifecycle (R25).
 
-| Stage | Crate / ceiling | Rules → discriminating tests |
+| Stage | Crate | Rules → discriminating tests |
 |---|---|---|
-| S0 contract + SDR baseline | docs/test infra / **100** | R1, R3, R11 — unchanged SDR corpus captured pre-change (base = main + accepted AW1 cutover, stated); baseline detects an intentional pixel change |
-| S1 numeric kernel | core / **1,000** | R13–R15, R28, R30, R35 — App. N anchors (EETF 88.243641, U bounds, s_white, γ table) vs independent vectors; forward∘inverse identity; saturated primaries, seams, near-black, 10k peak, white extremes; wrong-transform controls fail; PB1–PB4; non-finite refusal |
-| S2 model, incidents, format | core + project / **1,400** | R2, R4–R5, R8, R17, R23, R29 — structs/precedence/atomicity/locks; save/reopen, undo/redo, journal replay, wire round trip, older-reader overwrite refusal (actual old reader), SDR saves byte-identical, family+code mapping |
-| S3 input, render, preview | media / **1,800** | R6–R7, R9–R10, R12, R22, R28, R32, R36 — untouched-probe imports, insertion equality + both intents, full matrix, images/freezes/titles/disabled, legacy branch, transform-aware caches + warm renderer, wrapper tests, preview parity + unreachability from delivery |
-| S4 delivery | media + core delivery / **1,000** | R18–R19, R34 — lane table, refusal matrix, exact tags + native planes (**explicit legality assertions**, not warning-only `range_exceptions`, S9), real encode/decode, AU behaviour, SDR pre/post equality |
-| S5 QC, measurement, agent | core + agent / **1,200** | R16, R20–R21, R24–R25, R31, R33 — Edit-8 fixture 400/203/67.8, programme-vs-estimate, binding invalidation, report/cache-only storage, dual-triangle, 257-bin scopes + predicate, selector equations + nits units, exact eval outcomes + preserved old outcomes, served quad, re-pins |
-| S6 human workflow | app / **600** | R26 — import-to-export, undoable settings, labels, nits units, node wording, post-export verification |
-| S7 evidence + closure | agent/eval/CI / **200** | R27, G-gates — lavapipe/3090/Windows measurements, YouTube artefact, manifest, roadmap status |
+| S0 contract + SDR baseline | docs/test infra | R1, R3, R11 — unchanged SDR corpus captured pre-change (base = main + accepted AW1 cutover, stated); baseline detects an intentional pixel change |
+| S1 numeric kernel | core | R13–R15, R28, R30, R35 — App. N anchors (EETF 88.243641, U bounds, s_white, γ table) vs independent vectors; forward∘inverse identity; saturated primaries, seams, near-black, 10k peak, white extremes; wrong-transform controls fail; PB1–PB4; non-finite refusal |
+| S2 model, incidents, format | core + project | R2, R4–R5, R8, R17, R23, R29 — structs/precedence/atomicity/locks; save/reopen, undo/redo, journal replay, wire round trip, older-reader overwrite refusal (actual old reader), SDR saves byte-identical, family+code mapping |
+| S3 input, render, preview | media | R6–R7, R9–R10, R12, R22, R28, R32, R36 — untouched-probe imports, insertion equality + both intents, full matrix, images/freezes/titles/disabled, legacy branch, transform-aware caches + warm renderer, wrapper tests, preview parity + unreachability from delivery |
+| S4 delivery | media + core delivery | R18–R19, R34 — lane table, refusal matrix, exact tags + native planes (**explicit legality assertions**, not warning-only `range_exceptions`, S9), real encode/decode, AU behaviour, SDR pre/post equality |
+| S5 QC, measurement, agent | core + agent | R16, R20–R21, R24–R25, R31, R33 — Edit-8 fixture 400/203/67.8, programme-vs-estimate, binding invalidation, report/cache-only storage, dual-triangle, 257-bin scopes + predicate, selector equations + nits units, exact eval outcomes + preserved old outcomes, served quad, re-pins |
+| S6 human workflow | app | R26 — import-to-export, undoable settings, labels, nits units, node wording, post-export verification |
+| S7 evidence + closure | agent/eval/CI | R27, G-gates — lavapipe/3090/Windows measurements, YouTube artefact, manifest, roadmap status |
 
 Scoped checks in development, dependent-crate checks per boundary, full gate per
 stage. Final: workspace tests, fmt, clippy `-D warnings`, Windows/Linux media,

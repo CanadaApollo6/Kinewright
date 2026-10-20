@@ -7,7 +7,6 @@ Review trail, under `target/review/aw/`:
 - Narrow re-check of rev3: `aw2-design-verify-r2.md`, "promote".
 
 Open for Riel (§13):
-- approve the 10,600-line forecast and the stage caps;
 - approve the final fixtures, performance ceilings and Win11 VM configuration;
 - accept the person-provisioned immutable-image setup burden (R24).
 
@@ -18,7 +17,7 @@ Binding sources are `target/review/PITFALLS.md`, AW0 Amendment A1 and §§5/7/8/
 production order, the Astra critic, and the lead's round-2 rulings.
 - Existing-code claims carry file:line or section citations.
 - Rules R1-R31 are implementation contracts.
-- Performance figures and the 10,600-line production forecast are provisional; they are a forecast, not a cap.
+- Performance figures are provisional. Line counts are not a budget, cap, forecast or stop rule (Riel, 2026-10-20; §11).
 - Accepted AW1/PF1 limits take precedence when stricter.
 
 ## 0. Part 0: AW2-OBL-1 opens the slice
@@ -1052,49 +1051,36 @@ Raw logs, literal fixture JSON, native raster bytes, manifests, OS process ident
 count ledgers belong under `target/review/aw/aw2/` during implementation. Follow the existing CI slow-test manifest
 policy. A gate summary must distinguish passed, failed and partial per OS/backend; a missing native lane is partial.
 
-## 11. Ordered stages and costed production estimate
+## 11. Ordered stages
 
-The old 6,400-line figure and rev2's 9,000-line estimate are provisional history, not approved caps. Rev3 forecasts
-10,600 new-or-changed nonblank production lines, tests/evidence separate, moves alone zero. Count Rust, bridge
-JavaScript, platform helpers, dependency patches, manifests, packaging and production instrumentation. Use AW1's ledger method
-(`docs/AW1-HEADLESS-KINEWRIGHT.md:260-275`). This is a requested rebudget, not authorization to implement or consume it.
-Stop at each approved stage cap and seek a lead ruling before growth; never remove refusal/guardian/accounting gates to
-fit an earlier estimate.
+Line counts are not a budget, cap, forecast or stop rule (Riel, 2026-10-20). The 6,400-, 9,000- and 10,600-line figures in
+earlier revisions and reviews are history only. Over-engineering is guarded by scope and review instead: every
+production mechanism traces to a rule (R1-R31) or a gate; reviewers ask whether a simpler design holds the same gates;
+each shared mechanism has one owner. Performance and memory are guarded by measurement: §9's ceilings, the accepted
+AW1/PF1 limits, Kinewright RSS and per-frame cost. Stop and seek a lead ruling before a stage adds a mechanism,
+dependency, process, persisted field or person setup step this design does not name, or when a measured ceiling fails.
+Never remove refusal/guardian/accounting gates to make a stage smaller.
 
-| Stage, in order | Costed production work | Lines | Exit / dependency |
-| --- | --- | --- | --- |
-| P0 | Envelope/version/correlation/refusal guard 700; rmcp and HTTP-parser/logging patches 500; connection/header/body admission 250; shared bounded stdio seam 250 | 1,700 | G0a-G0e and G10, including ordered multi-fault admission and documented client compatibility limitation; independent landing before new kinds |
-| P1a | Core descriptors/params/curve owners 350; immutable code/font store, durable pins and copy-first Save As 650; v3/load/replay validation 400 | 1,400 | G2/G3/G11 model/store controls; no exposed unrenderable kind |
-| P1b-s | Independent Linux service/cgroup guardian 650; Windows Job guardian 350; lifetime-pipe handshake/reaping/recovery/accounting retention 450; native resource policy 250 | 1,700 | Real supervisor G7 native fixtures, separate forced-app/guardian-death, startup failure, ledger retention and unavailable containment; precedes helper execution |
-| P1b-r | SVG profile/bindings 300; raster helper and pixel conversion 350; PF1 ownership/admission/GPU integration 300; native IPC/launch integration 150 | 1,100 | P1b-s accepted first; G1/G3/G4/G9 native, retained-identity controls |
-| P1c | Registry mutations/inspectors 250; person parameter/curve workflow 250 | 500 | Part 1 release: G0-G4/G9-G11 relevant halves and independent review |
-| P2a, non-executing | External model/constant props 250; finite edit mapping/validation 250; offline PNG manifests/store/pins 400 | 900 | Data-only G2 tuple/G3/G11 controls with prebuilt frame manifests. Numbered pixel G2 and renderer-free G6 wait for P2c's reader. No bridge import, version probe, Node, Zod evaluation or real-render G5 exit |
-| P2b | Person grant/revoke and roots/identity checks 200; dedupe/queue/state/cleanup integration 250 | 450 | P1b-s accepted; G8 positive/negative controls through real supervisor with native executable marker. Still no executing schema/Remotion bridge gate |
-| P2c, executing integration | Bridge/describe/render protocol 350; definition-derived Zod and exact tuple certification 350; bounded source-manifest/image handoff 250; Linux source/runtime namespace and executable leases 400; Windows source/runtime/backing/executable leases 400; PNG reader/conversion/PF1 integration 300; ready/stale publication 100 | 2,150 | P2a and P2b complete. Certify source and runtime images, executable identities and grant checks before import/probe. R24 replacement/change-then-restore G5 controls, then G6/G7/G8/G9; all execution supervised |
-| P2d | GUI status/cancel/permission presentation 250; packaging/manual source-image/runtime setup/help 300; production ledger/docs/integration instrumentation 150 | 700 | All gates on both OSes, person workflow checklist including image refresh, independent review |
-| Total | Transport 1,700 + Part 1 model/render/workflow 3,000 + shared guardian 1,700 + Part 2 4,200 | 10,600 | 1,600 above rev2 and 4,200 above rev1; tests and measured acceptance separate |
+| Stage, in order | Production work | Exit / dependency |
+| --- | --- | --- |
+| P0 | Envelope/version/correlation/refusal guard; rmcp and HTTP-parser/logging patches; connection/header/body admission; shared bounded stdio seam | G0a-G0e and G10, including ordered multi-fault admission and documented client compatibility limitation; independent landing before new kinds |
+| P1a | Core descriptors/params/curve owners; immutable code/font store, durable pins and copy-first Save As; v3/load/replay validation | G2/G3/G11 model/store controls; no exposed unrenderable kind |
+| P1b-s | Independent Linux service/cgroup guardian; Windows Job guardian; lifetime-pipe handshake/reaping/recovery/accounting retention; native resource policy | Real supervisor G7 native fixtures, separate forced-app/guardian-death, startup failure, ledger retention and unavailable containment; precedes helper execution |
+| P1b-r | SVG profile/bindings; raster helper and pixel conversion; PF1 ownership/admission/GPU integration; native IPC/launch integration | P1b-s accepted first; G1/G3/G4/G9 native, retained-identity controls |
+| P1c | Registry mutations/inspectors; person parameter/curve workflow | Part 1 release: G0-G4/G9-G11 relevant halves and independent review |
+| P2a, non-executing | External model/constant props; finite edit mapping/validation; offline PNG manifests/store/pins | Data-only G2 tuple/G3/G11 controls with prebuilt frame manifests. Numbered pixel G2 and renderer-free G6 wait for P2c's reader. No bridge import, version probe, Node, Zod evaluation or real-render G5 exit |
+| P2b | Person grant/revoke and roots/identity checks; dedupe/queue/state/cleanup integration | P1b-s accepted; G8 positive/negative controls through real supervisor with native executable marker. Still no executing schema/Remotion bridge gate |
+| P2c, executing integration | Bridge/describe/render protocol; definition-derived Zod and exact tuple certification; bounded source-manifest/image handoff; Linux source/runtime namespace and executable leases; Windows source/runtime/backing/executable leases; PNG reader/conversion/PF1 integration; ready/stale publication | P2a and P2b complete. Certify source and runtime images, executable identities and grant checks before import/probe. R24 replacement/change-then-restore G5 controls, then G6/G7/G8/G9; all execution supervised |
+| P2d | GUI status/cancel/permission presentation; packaging/manual source-image/runtime setup/help; production ledger/docs/integration instrumentation | All gates on both OSes, person workflow checklist including image refresh, independent review |
 
-Count shared production mechanisms once. P1a owns the generic immutable blob store, durable pins and transactional
-Save As; P2a's 400 lines add External frame-manifest/index/pin integration rather than another store. P1b-s owns both OS
+Build shared production mechanisms once. P1a owns the generic immutable blob store, durable pins and transactional
+Save As; P2a adds External frame-manifest/index/pin integration rather than another store. P1b-s owns both OS
 guardians, lifetime handshakes, death fallback and cleanup/accounting recovery for SVG and External, including probes.
-P2b reuses that owner. P2c's 1,050 stability lines, formerly 350, add one source-image handoff and two OS lease backends;
-each backend covers source, dependencies, Node and browser across probe/describe/bundle/render. It does not build four
-independent snapshot systems or a second guardian. Reuse accepted PF1 ledgers/retirement and AW1 auth/consent/IO seams.
-Tests/mutations, person-installed runtimes/image utilities and evidence collection are not hidden production-line costs.
-
-| Part boundary | Rev2 increment / cumulative | Rev3 increment / cumulative | Numbers moved and reason |
-| --- | --- | --- | --- |
-| P0 independently usable transport | 1,500 / 1,500 | 1,700 / 1,700 | +200, split guard +100 and dependency/parser patches +100; retain room for exact precedence and client compatibility handling |
-| Usable SVG Part 1, P1a/P1b-s/P1b-r/P1c | 4,100 / 5,600 | 4,700 / 6,400 | +600: model/store +300, shared guardian +300. Part 1 excluding guardian is now 3,000 versus 2,700; renderer/workflow estimates unchanged |
-| Optional External Part 2, P2a-P2d | 3,400 / 9,000 | 4,200 / 10,600 | +800: P2c +700 for concrete stability mechanisms, P2d +100 for manual provisioning/refresh. P2a/P2b unchanged |
-
-This remains a conditional forecast, not a credible fixed cap established by design inspection. At P0 exit, record its
-actual counted production lines and reforecast the 4,700-line usable-SVG increment plus optional 4,200-line External
-increment. At usable Part 1 exit, count the accepted guardian once and reforecast Part 2 from its actual shared seams
-and certified image-profile findings. At Part 2 exit, reconcile the complete production ledger with the approved
-part/stage caps. Seek a ruling at a boundary before exceeding its approved cap; do not borrow from a later optional
-part or weaken a gate. If image provisioning needs an in-app builder/installer, it exceeds this design and requires a
-new forecast. None of these figures approves implementation, purchases, person setup or runtime acceptance ceilings.
+P2b reuses that owner. P2c adds one source-image handoff and two OS lease backends; each backend covers source,
+dependencies, Node and browser across probe/describe/bundle/render. It does not build four independent snapshot systems
+or a second guardian. Reuse accepted PF1 ledgers/retirement and AW1 auth/consent/IO seams. If image provisioning needs
+an in-app builder/installer, it exceeds this design and needs a new design ruling. This section does not approve
+purchases, person setup or runtime acceptance ceilings.
 
 Accepted PF1 is an explicit implementation predecessor, not merely a branch to reread. Require the lead's PF1 acceptance
 and merge, then reconcile K-1/K-2/K-6 and CPU/GPU ownership against its actual merged hash. The inspected pf1/impl hash
@@ -1157,8 +1143,8 @@ The lead adopted the critic's recommended answers 1-6. They are decisions in thi
 
 The verifier retained these three questions. They are open inputs, not requests to repeat adopted decisions.
 
-1. Approve or resize §11's 10,600-line production forecast and part/stage caps before implementation. Rev3 adds 1,600
-   to rev2, with an independent 1,700-line P0, a 4,700-line usable-SVG increment and an optional 4,200-line Part 2.
+1. Withdrawn (Riel, 2026-10-20): line-count forecasts and caps no longer apply; §11 states the scope and
+   measurement rules that replace them.
 2. Approve final fixture bytes/hashes, §9's provisional ceilings and the Windows 11 VM configuration/resources/backend.
    The machine classes are already chosen; measurements and final artifacts do not yet exist. Preserve stronger
    accepted AW1/PF1 ceilings.

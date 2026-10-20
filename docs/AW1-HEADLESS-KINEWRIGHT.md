@@ -10,9 +10,8 @@ no bundled runtimes; peak-RSS and startup-time budgets for headless
 
 Conventions: prose cites symbols, never `file:line`. Numbers measured on
 main unless marked (est). Rules R1–R40 are numbered and testable; gates
-G1–G10 are named behaviours that fail today. Production line budgets
-count new-or-changed production lines only; tests are counted separately
-and every rule owns at least one test.
+G1–G10 are named behaviours that fail today. Line counts are not a budget
+or stop rule (Riel, 2026-10-20, §15); every rule owns at least one test.
 
 ## 0. Changes in revision 2 (finding → section)
 
@@ -779,35 +778,38 @@ carries no secret.
   releases, re-proxies; zero lost commits; second `mcp` process
   proxies to the owner throughout.
 
-## 15. Staging by crate (production budget; tests separate)
+## 15. Staging by crate
 
-Total: ≤ 4,000 new-or-changed production lines. Moved lines count 0.
+Line-count budgets and the `scripts/aw1-line-ledger.sh` method are withdrawn
+(Riel, 2026-10-20); the S0–S1 ceiling history in AF7 is record only. Seek a lead
+ruling before a stage adds scope this design does not name, or when a §11
+measured budget fails.
 
 - S0 workspace: `transport-io` + `elicitation` on the `rmcp` pin,
-  pinned `getrandom` =0.3.4 and `fs2`. Budget ≤ 30. Gates: build.
+  pinned `getrandom` =0.3.4 and `fs2`. Gates: build.
 - S1 `kinewright-project` (new) + APP CUTOVER (S13 — no drift): the §2
   moves incl. `SidecarSession` + lockfile module; the app deletes its
   copies and calls through in the same stage. New: lockfile
   create/hold/reclaim, `SidecarSession` extraction delta, headless save
-  orchestration. Budget ≤ 800 new. Rules R1–R6, R19, R40. IN2B green.
+  orchestration. Rules R1–R6, R19, R40. IN2B green.
 - S2 `kinewright-agent` transport+auth: `build_handler` split,
   `serve_stdio`, Bearer [REDACTED], `auth_token` plumbing through
-  in-process clients, `drivers.rs`/harness token-via-env. Budget ≤ 800.
+  in-process clients, `drivers.rs`/harness token-via-env.
   Rules R8, R13–R16, R22.
 - S3 `kinewright-agent` capabilities: proxy client (roots forwarding),
   five lifecycle ops, `ConsentPolicy` + `Peer` elicitation bridge +
-  snapshots, handler roots guard, denylist extension. Budget ≤ 900.
+  snapshots, handler roots guard, denylist extension.
   Rules R18, R20, R23–R28, R34–R37. LANDS AFTER MO1 MERGES (registry
   re-pin serialised; Part C in flight) — count +5 in registry only.
 - S4 `kinewright-cli` (new): twelve verbs + `mcp` main + lazy engine +
-  `--gpu` + fd-1 discipline + budget harness. Budget ≤ 700. Rules
+  `--gpu` + fd-1 discipline + budget harness. Rules
   R7–R12, R29–R32, R38–R39 halves.
 - S5 `kinewright-app` live server (B1, R17 moves here): per-project
   live-core server at project open, confirmation pump + panel,
   attribution ledger, lockfile publish/release, handover receive,
-  `.plan.json` branch import. Budget ≤ 700. Rules R17, R21, R26, R33.
+  `.plan.json` branch import. Rules R17, R21, R26, R33.
 - S6 skill v1 + MCPB + docs (`docs/BUILDING.md` CLI section, Desktop
-  snippet, `allow_destructive` user_config). Budget ≤ 70. No code
+  snippet, `allow_destructive` user_config). No code
   gates; Riel's checklist §16.
 
 Land order S0→S1→S2→S3→S4→S5→S6 with S3 held for the MO1 merge; S1's
