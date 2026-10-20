@@ -1,11 +1,19 @@
 # Roadmap and development workflows
 
-Status: active operating plan, September 2026. This is the forward-looking companion
-to the numbered milestone documents. Those documents preserve what was attempted
+Status: active operating plan, September 2026; order revised 2026-10-20. **The
+[product brief](PRODUCT-BRIEF-2026-10.md) sets who Kinewright is for, what done
+means, and the job order; where they conflict, the brief wins.** This is the
+forward-looking companion to the numbered milestone documents. Those documents preserve what was attempted
 and verified; this document defines what Kinewright works on next and how a
 capability becomes part of the editor.
 
 ## The outcome
+
+**First user (2026-10-20).** Kinewright is built first for a person who does not
+edit: they bring the script, voice, and face, and the agent does the editing,
+design, and polish. The Premiere-class goal below stays the long-term bar for
+professional editors, and it holds because everything the agent makes is an
+ordinary editable edit. See the [product brief](PRODUCT-BRIEF-2026-10.md).
 
 Kinewright should give an editor a strong, editable starting point quickly **and**
 support the technical work required to finish it. Editorial taste is an important
@@ -25,7 +33,7 @@ editing: an editor a working picture editor can adopt for the whole job, in whic
 every capability is equally available to the person and to the agent. That is why
 each programme (editing, colour, audio, and the ones still to come) is built as a
 series of deep vertical slices, each with a written contract, measured exit gates,
-and two review passes, rather than as a wide layer of shallow controls. Depth per
+and independent review, rather than as a wide layer of shallow controls. Depth per
 slice is the strategy, not overhead: a slice that stops at "preview only" or
 "agent only" leaves a gap a Premiere user would hit on day one, and gaps like that
 are what the competitive audit scored against.
@@ -881,18 +889,22 @@ evidence in `docs/PF1-EVIDENCE.md`; Riel confirmed PF1 ahead of AW2).
 Each slice writes its design doc (≤ ~600 lines) before implementation
 and records deferrals explicitly, as the colour and audio slices did.
 
-**Production-driven order (Riel 2026-09-25).** The one hands-on session
-is a real production of two videos: a presenter-led explainer on AI
-models in the style of the "Get to know Cloud Firestore" series
-(presenter, animated diagram cutaways, callouts, title cards, music and
-effects; 16:9) and an animated motion-graphics piece for MockingBoard's
-Instagram (9:16 Reel, with a 4:5 feed cut). The near-term order follows
-what those need: AW1 and CC8 in flight; then MO2; then AW2 code clips
-(ahead of AW3); then MO6 with Bezier handles; then MO3 and MO5. A 4:5
-`portrait_feed` delivery profile (1080x1350, alongside M34's
-`vertical_short` and `square_social`) lands before the session. MO4 and
-the evaluation slices follow it. An agent-driven dry run of both videos
-precedes the session.
+**Job-driven order (Riel 2026-10-20) supersedes the production-driven order
+of 2026-09-25.** Work follows five jobs, each finished when Riel makes and
+publishes a real video with it:
+
+1. talking head;
+2. video essay;
+3. MockingBoard football reels;
+4. screen demos;
+5. launch videos.
+
+MO3, MO4 and MO5 are not dropped. They land with the jobs that need them (B, C
+and E respectively). CC8 HDR and PF1-H run as a background lane; PF1-H item H-T
+(talk-playback holds) comes forward into job A. Interchange, multicam and
+Premiere-breadth work are parked. A lead dry run on a practice take replaces the
+planned hands-on verification session. The mapping is in the
+[product brief](PRODUCT-BRIEF-2026-10.md#programme-mapping).
 
 Deferred but intended, each with an owner: optical-flow retiming (a
 future retiming-depth slice); Bezier handles (moved into MO6 by Riel
@@ -1214,6 +1226,8 @@ for the nineteenth consecutive measurement.** The hands-on checklist
 The roadmap is healthy when all of these improve, not merely the taste score of one
 montage:
 
+- Videos Riel makes and publishes per job, with Riel's own minutes per video
+  (target 30–60) and invented facts reaching a render (target zero).
 - Time from import to a credible first watchable cut.
 - Time and number of interventions from first cut to accepted delivery.
 - Number of valuable workflows completed end to end by both person and agent.
@@ -1234,6 +1248,8 @@ ownership boundary, and definition of done stable.
 
 ## Related documents
 
+- [Product brief, October 2026](PRODUCT-BRIEF-2026-10.md) — first user, done bar,
+  job order, and process (2026-10-20).
 - [Model-first editor](MODEL-FIRST-EDITOR.md) — architectural product thesis.
 - [Current product position](PRODUCT-POSITION-M35-2026-08.md) — positioning and
   competitive boundary at M35.
