@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
-    baseline::Baseline,
     protocol::{self, Action, CONTROL_BYTES, Call, LoadedFixture},
     report::{Report, os_start_identity},
+    revised::Adapter,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -86,13 +86,28 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn(exe: &Path, fixture: &Path, root: &Path, name: &str) -> Result<Self, String> {
+    fn spawn(
+        exe: &Path,
+        fixture: &Path,
+        root: &Path,
+        name: &str,
+        mode: protocol::Mode,
+    ) -> Result<Self, String> {
         let mut child = Command::new(exe)
             .args(["--role", "worker", "--fixture"])
             .arg(fixture)
             .arg("--root")
             .arg(root)
-            .args(["--participant", name])
+            .args([
+                "--participant",
+                name,
+                "--mode",
+                if mode == protocol::Mode::Revised {
+                    "revised"
+                } else {
+                    "baseline"
+                },
+            ])
             .env_remove("REV2_HOOK")
             .env_remove("REV2_SIGNALS")
             .env_remove("REV2_EXIT")
@@ -516,6 +531,7 @@ impl Controller {
                 &fixture.canonicalize().map_err(|e| e.to_string())?,
                 &root,
                 name,
+                report.mode,
             )?;
             let ready = worker.receive(0, loaded.fixture.limits.setup_timeout_ms)?;
             if ready["pid"] != worker.child.id()
@@ -731,12 +747,13 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
         {}
         return Ok(0);
     }
-    if args.len() != 8
+    if args.len() != 10
         || args[0] != "--role"
         || args[1] != "worker"
         || args[2] != "--fixture"
         || args[4] != "--root"
         || args[6] != "--participant"
+        || args[8] != "--mode"
     {
         return Err("invalid fixed worker arguments".into());
     }
@@ -746,7 +763,12 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
     if !matches!(participant.as_str(), "A" | "B") {
         return Err("invalid worker identity".into());
     }
-    let mut baseline = Baseline::new(root)?;
+    let mode = match args[9].as_str() {
+        "baseline" => protocol::Mode::Baseline,
+        "revised" => protocol::Mode::Revised,
+        _ => return Err("invalid worker mode".into()),
+    };
+    let mut baseline = Adapter::new(root, mode)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout().lock();
     write_line(
@@ -847,7 +869,14 @@ pub(super) fn witness_worker_teardown_window() {
     fs::write(&executable, b"#!/bin/sh\ncat >/dev/null\nexec sleep 3\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let mut report = Report::create(&temp.path("report"), protocol::Mode::Baseline).unwrap();
-    let mut worker = Worker::spawn(&executable, Path::new("unused"), &report.root, "A").unwrap();
+    let mut worker = Worker::spawn(
+        &executable,
+        Path::new("unused"),
+        &report.root,
+        "A",
+        protocol::Mode::Baseline,
+    )
+    .unwrap();
     let started = Instant::now();
     let result = worker.finish(false, &mut report);
     assert!(

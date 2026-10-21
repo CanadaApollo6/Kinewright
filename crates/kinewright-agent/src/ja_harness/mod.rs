@@ -6,6 +6,7 @@ pub mod media_observer;
 pub mod protocol;
 pub mod recording;
 pub mod report;
+pub mod revised;
 mod supervision;
 
 use std::{collections::BTreeMap, path::Path, time::Instant};
@@ -25,8 +26,7 @@ fn cleanup_timeout_ms(fixture: &protocol::Fixture) -> u64 {
     (workers + 1) * MEDIA_TEARDOWN_MS + workers * WORKER_REAP_MS + fixture.limits.setup_timeout_ms
 }
 
-/// Run a fixture unchanged in either mode. Revised currently uses the same
-/// production adapter; it does not invent successor behavior.
+/// Run a fixture unchanged through the selected production adapter.
 pub fn run(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
     run_with_observer(fixture_path, output, mode, &mut |_, _, _| Ok(None))
 }
@@ -97,7 +97,7 @@ fn execute(
 ) -> Result<(), String> {
     supervision::heartbeat(0, "setup", loaded.fixture.limits.setup_timeout_ms)?;
     prerequisites(&loaded.fixture)?;
-    let mut adapter = baseline::Baseline::new(&report.root.join("work"))?;
+    let mut adapter = revised::Adapter::new(&report.root.join("work"), report.mode)?;
     let mut controller = controller::Controller::new(loaded, report)?;
     let mut observed = BTreeMap::new();
     let mut media = media_observer::MediaObserver::default();
@@ -139,7 +139,7 @@ fn execute(
                         break;
                     } else {
                         media
-                            .execute(action, &mut adapter, report)?
+                            .execute(action, &mut adapter.baseline, report)?
                             .map(|value| (value, true))
                     };
                     let (observation, delivered) = match dispatched {
@@ -809,6 +809,8 @@ mod tests {
             "project_reopen",
             "inspect_files",
             "legacy_rename_refusal",
+            "strict_save",
+            "strict_rename_refusal",
             "lock_acquire",
             "headless_save",
             "media_export",
@@ -818,6 +820,9 @@ mod tests {
                 let temp = TempDirectory::new("ja-path-admission");
                 let mut fixture = source.clone();
                 let mut args = json!({"path":path});
+                if name.starts_with("strict_") {
+                    args["input"] = json!("unused");
+                }
                 if name == "media_decode" {
                     args["at"] = json!(0);
                 }

@@ -560,6 +560,21 @@ impl Operation {
 ///
 /// Returns the failing operation index and error, leaving `doc` unchanged.
 pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), BatchError> {
+    apply_batch_inner(doc, operations, false).map(|_| ())
+}
+
+pub(crate) fn apply_batch_observed(
+    doc: &mut Document,
+    operations: &[Operation],
+) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
+    apply_batch_inner(doc, operations, true)
+}
+
+fn apply_batch_inner(
+    doc: &mut Document,
+    operations: &[Operation],
+    capture_identities: bool,
+) -> Result<Vec<crate::OperationIdentityEffect>, BatchError> {
     if operations.is_empty() {
         return Err(BatchError::Empty);
     }
@@ -568,7 +583,19 @@ pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), B
         op_number: 1,
         error,
     })?;
+    let mut effects = if capture_identities {
+        Vec::with_capacity(operations.len())
+    } else {
+        Vec::new()
+    };
     for (index, operation) in operations.iter().enumerate() {
+        let before = capture_identities.then(|| clip_identities(&candidate));
+        let split_parent =
+            if let (true, Operation::SplitClip { clip, .. }) = (capture_identities, operation) {
+                candidate.clip(*clip).cloned()
+            } else {
+                None
+            };
         // The batch already owns an unpublished candidate. Reuse it instead
         // of cloning the entire document inside Operation::apply for each
         // step. Validate every intermediate result so a later operation can
@@ -581,9 +608,43 @@ pub fn apply_batch(doc: &mut Document, operations: &[Operation]) -> Result<(), B
             op_number: index + 1,
             error,
         })?;
+        if let Some(before) = before {
+            effects.push(identity_effect(&before, &candidate, split_parent));
+        }
     }
     *doc = candidate;
-    Ok(())
+    Ok(effects)
+}
+
+fn clip_identities(doc: &Document) -> std::collections::BTreeSet<ClipId> {
+    doc.tracks
+        .iter()
+        .flat_map(|t| t.clips.iter().map(|c| c.id))
+        .collect()
+}
+
+fn identity_effect(
+    before: &std::collections::BTreeSet<ClipId>,
+    after: &Document,
+    split_parent: Option<Clip>,
+) -> crate::OperationIdentityEffect {
+    let split_results = split_parent.as_ref().map_or_else(Vec::new, |parent| {
+        after
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .filter(|clip| clip.id == parent.id || !before.contains(&clip.id))
+            .cloned()
+            .collect()
+    });
+    let after = clip_identities(after);
+    crate::OperationIdentityEffect {
+        created: after.difference(before).copied().collect(),
+        deleted: before.difference(&after).copied().collect(),
+        retained: before.intersection(&after).copied().collect(),
+        split_parent,
+        split_results,
+    }
 }
 
 impl ApplyOp for Operation {

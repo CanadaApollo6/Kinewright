@@ -622,6 +622,69 @@
       "expected_baseline_process_exit": 2,
       "inputs": {},
       "oracles": {}
+    },
+    {
+      "relative_file": "s1-paired-io.json",
+      "sha256": "221a6fd7c5156cf1aec42baa4d2d1cc9869c8d0192129ee3e520c3a8f058e9c2",
+      "byte_length": 4551,
+      "fixture_id": "s1-paired-io",
+      "expected_baseline_process_exit": 1,
+      "inputs": {
+        "normal": {
+          "relative_file": "s1-normal-root.bin",
+          "sha256": "f0e09e8a76e3535a39e970da05d05ad04275b8dfbc34f67e4e34871410b9cf91",
+          "byte_length": 27,
+          "kind": "independent-root-bytes"
+        },
+        "attempt": {
+          "relative_file": "s1-attempted-root.bin",
+          "sha256": "0918aec71e050d4f60123ceed075d0dd58eea981db9f195b267f9ea79fb56d08",
+          "byte_length": 52,
+          "kind": "independent-root-bytes"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        },
+        "temp": {
+          "relative_file": "oracle-temp-write.json",
+          "sha256": "7fcb9fa4636cba075c1f4cfa0a857b9c0b1a23e2da890ab704d09b415f92425c",
+          "byte_length": 27,
+          "kind": "independent-scalar-oracle"
+        },
+        "false": {
+          "relative_file": "oracle-false.json",
+          "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+          "byte_length": 6,
+          "kind": "independent-scalar-oracle"
+        },
+        "directory-sync-trace": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "IO-trace vocabulary: S1 must emit directory_sync from the exact parent-directory sync call site; not a syscall oracle"
+        }
+      }
+    },
+    {
+      "relative_file": "s1-routing.json",
+      "sha256": "f0202b90784c5c366c2579ca7d53b7806eb09d3352d3777cffba6266f65ad5e5",
+      "byte_length": 1514,
+      "fixture_id": "s1-routing",
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "model": {
+          "relative_file": "s1-oracle-model.json",
+          "sha256": "e90264254cdc1301968b31d5c3d638d50d8a211bb1d38a268f65694df33785fc",
+          "byte_length": 17,
+          "kind": "independent-routing-backend-oracle"
+        }
+      }
     }
   ]
 }

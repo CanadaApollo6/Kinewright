@@ -5,7 +5,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{BatchError, Clip, ClipId, Document, JournalCommand, OpError, Operation, apply_batch};
+use crate::{BatchError, Clip, ClipId, Document, JournalCommand, OpError, Operation};
+use crate::{
+    GestureBoundary, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
+    OperationIdentityEffect,
+};
 
 /// Monotonic identity for one authoritative runtime timeline state.
 ///
@@ -151,6 +155,8 @@ enum CoreMessage {
     Command(Command),
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
+    ExportHistory(Sender<Result<HistorySnapshot, HistoryError>>),
+    RestoreHistory(Box<HistorySnapshot>, Sender<Result<(), HistoryError>>),
     #[cfg(any(test, feature = "test-util"))]
     ObserveHistory(Sender<HistoryObservation>),
 }
@@ -183,6 +189,30 @@ pub struct Core {
 }
 
 impl Core {
+    /// Atomically capture the accepted stream and exact undo/redo/gesture state.
+    /// # Errors
+    /// Returns capacity or actor-disconnection errors.
+    pub fn export_history(&self) -> Result<HistorySnapshot, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ExportHistory(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Validate by replay in a private state, then atomically install it.
+    /// Runtime revisions are freshly assigned and never restored from disk.
+    /// # Errors
+    /// Refuses corrupt, excessive or disconnected histories without changing this Core.
+    pub fn restore_history(&self, history: HistorySnapshot) -> Result<(), HistoryError> {
+        history.encoded_bytes()?;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(Box::new(history), reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
     /// Observe private history on the actor thread without changing it.
     /// # Errors
     /// Returns an error if the actor has stopped.
@@ -297,6 +327,9 @@ struct HistoryEntry {
 }
 
 struct CoreState {
+    baseline: Arc<Document>,
+    batches: Vec<HistoryBatch>,
+    identity_effects: Vec<OperationIdentityEffect>,
     document: Arc<Document>,
     revision: TimelineRevision,
     undo: Vec<HistoryEntry>,
@@ -306,8 +339,12 @@ struct CoreState {
 
 impl CoreState {
     fn new(document: Document, revision: TimelineRevision) -> Self {
+        let document = Arc::new(document);
         Self {
-            document: Arc::new(document),
+            baseline: Arc::clone(&document),
+            batches: Vec::new(),
+            identity_effects: Vec::new(),
+            document,
             revision,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -318,7 +355,13 @@ impl CoreState {
     fn do_operation(&mut self, operation: Operation) -> Result<Arc<Document>, OpError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        operation.apply(&mut after)?;
+        let effects =
+            crate::operation::apply_batch_observed(&mut after, std::slice::from_ref(&operation))
+                .map_err(|error| match error {
+                    BatchError::OperationFailed { error, .. } => error,
+                    BatchError::Empty => unreachable!(),
+                })?;
+        self.identity_effects = effects;
         self.undo.push(HistoryEntry {
             document: before,
             operations: vec![operation.clone()],
@@ -334,7 +377,7 @@ impl CoreState {
     fn do_batch(&mut self, operations: Vec<Operation>) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        apply_batch(&mut after, &operations)?;
+        self.identity_effects = crate::operation::apply_batch_observed(&mut after, &operations)?;
         self.undo.push(HistoryEntry {
             document: before,
             operations: operations.clone(),
@@ -360,7 +403,7 @@ impl CoreState {
     ) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        apply_batch(&mut after, &operations)?;
+        self.identity_effects = crate::operation::apply_batch_observed(&mut after, &operations)?;
         match self.undo.last_mut() {
             Some(entry) if entry.coalesce_key.as_deref() == Some(coalesce_key) => {
                 entry.operations.extend(operations.iter().cloned());
@@ -426,6 +469,44 @@ impl CoreState {
         }
     }
 
+    fn history(&self) -> HistorySnapshot {
+        let entry = |e: &HistoryEntry| GestureBoundary {
+            document: Arc::clone(&e.document),
+            operations: e.operations.clone(),
+            coalesce_key: e.coalesce_key.clone(),
+        };
+        HistorySnapshot {
+            baseline: Arc::clone(&self.baseline),
+            document: Arc::clone(&self.document),
+            batches: self.batches.clone(),
+            cursor: HistoryCursor {
+                undo: self.undo.iter().map(entry).collect(),
+                redo: self.redo.iter().map(entry).collect(),
+            },
+        }
+    }
+
+    fn restore(snapshot: &HistorySnapshot) -> Result<Self, HistoryError> {
+        snapshot.encoded_bytes()?;
+        snapshot
+            .baseline
+            .validate()
+            .map_err(|_| HistoryError::Corrupt)?;
+        let mut candidate = Self::new((*snapshot.baseline).clone(), TimelineRevision(0));
+        for batch in &snapshot.batches {
+            if !matches!(
+                execute_command(&mut candidate, batch.command.clone().into()),
+                Event::DocumentChanged { .. }
+            ) {
+                return Err(HistoryError::Corrupt);
+            }
+        }
+        if candidate.history() != *snapshot {
+            return Err(HistoryError::Corrupt);
+        }
+        Ok(candidate)
+    }
+
     fn increment_revision(&mut self) {
         self.revision = TimelineRevision(
             self.revision
@@ -440,6 +521,34 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
+            CoreMessage::ExportHistory(reply) => {
+                let history = state.history();
+                let _ = reply.send(history.encoded_bytes().map(|_| history));
+            }
+            CoreMessage::RestoreHistory(history, reply) => {
+                let result = CoreState::restore(&history).and_then(|mut candidate| {
+                    candidate.revision = TimelineRevision(
+                        state
+                            .revision
+                            .0
+                            .checked_add(1)
+                            .ok_or(HistoryError::Capacity)?,
+                    );
+                    state = candidate;
+                    broadcast(
+                        &mut subscribers,
+                        &Event::DocumentChanged {
+                            doc: Arc::clone(&state.document),
+                            revision: state.revision,
+                            last_op: None,
+                            journal_command: None,
+                            token: None,
+                        },
+                    );
+                    Ok(())
+                });
+                let _ = reply.send(result);
+            }
             #[cfg(any(test, feature = "test-util"))]
             CoreMessage::ObserveHistory(reply) => {
                 let observe = |entry: &HistoryEntry| HistoryEntryObservation {
@@ -483,6 +592,25 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
 }
 
 fn execute_command(state: &mut CoreState, command: Command) -> Event {
+    state.identity_effects.clear();
+    let event = execute_command_inner(state, command);
+    if let Event::DocumentChanged {
+        journal_command: Some(command),
+        ..
+    } = &event
+    {
+        state.batches.push(HistoryBatch {
+            order: state.batches.len() as u64,
+            command: command.clone(),
+            identity_effects: std::mem::take(&mut state.identity_effects),
+            undo_entries: state.undo.len(),
+            redo_entries: state.redo.len(),
+        });
+    }
+    event
+}
+
+fn execute_command_inner(state: &mut CoreState, command: Command) -> Event {
     match command {
         Command::Do(operation) => execute_operation(state, operation, None),
         Command::DoBatch(operations) => execute_batch(state, operations),
@@ -608,6 +736,7 @@ fn broadcast(subscribers: &mut Vec<Sender<Event>>, event: &Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apply_batch;
     use crate::{
         AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorDescription, ColorMatrix,
         ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Effect,

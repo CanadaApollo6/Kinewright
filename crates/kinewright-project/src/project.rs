@@ -451,7 +451,10 @@ pub fn observe_refused_rename(path: &Path, contents: &[u8]) -> std::io::Result<(
     write_file_atomic_with_rename(
         path,
         contents,
-        Some(&|_, _| {
+        Some(&|temp, target| {
+            let attempted = fs::read(temp)?;
+            crate::io_observer::note_bytes("rename_refusal_hook", target, Some(&attempted));
+            crate::io_observer::note("rename_refusal_injected", target);
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "S0 injected rename refusal",

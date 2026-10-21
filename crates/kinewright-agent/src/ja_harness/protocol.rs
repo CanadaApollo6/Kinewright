@@ -108,6 +108,9 @@ pub struct Action {
     deny_unknown_fields
 )]
 pub enum Call {
+    AdapterStatus(Empty),
+    StrictSave(IoProbeArgs),
+    StrictRenameRefusal(IoProbeArgs),
     CoreStart(Empty),
     CoreSend(CommandArgs),
     CoreQuery(QueryArgs),
@@ -161,6 +164,13 @@ impl Call {
                 | Self::MediaStats(_)
         )
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IoProbeArgs {
+    pub path: PathBuf,
+    pub input: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -475,6 +485,12 @@ fn validate(f: &Fixture) -> Result<(), String> {
             | Call::HeadlessSave(a)
             | Call::MediaExport(a) => relative_path(&a.path)?,
             Call::MediaDecode(a) => relative_path(&a.path)?,
+            Call::StrictSave(a) | Call::StrictRenameRefusal(a) => {
+                relative_path(&a.path)?;
+                if !f.inputs.contains_key(&a.input) {
+                    return Err("missing IO probe input".into());
+                }
+            }
             Call::CoreSend(a) => {
                 if !f.inputs.contains_key(&a.input) {
                     return Err("missing command input".into());

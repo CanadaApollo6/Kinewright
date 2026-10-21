@@ -1,0 +1,72 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s1-routing",
+  "gate_ids": [
+    "JA1.G2"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {},
+  "initial": {
+    "revision": 0,
+    "participants": [
+      "A"
+    ]
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "adapter_status",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "A",
+      "action": "adapter_status",
+      "args": {}
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "routing-control-1",
+        "observation": 1,
+        "pointer": "/backend",
+        "oracle": "model",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "routing-control-2",
+        "observation": 2,
+        "pointer": "/backend",
+        "oracle": "model",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "model": {
+      "relative_file": "s1-oracle-model.json",
+      "sha256": "e90264254cdc1301968b31d5c3d638d50d8a211bb1d38a268f65694df33785fc",
+      "byte_length": 17,
+      "kind": "independent-routing-backend-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

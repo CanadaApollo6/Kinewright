@@ -19,12 +19,12 @@ ab_glyph.workspace = true
 crossbeam-channel.workspace = true
 schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 half.workspace = true
 proptest.workspace = true
-serde_json.workspace = true
 # core's own `tests/cc7_core.rs` and `tests/au6_core.rs` read the scenario
 # authorities, so the crate enables its own gate when testing itself.
 kinewright-core = { path = ".", features = ["test-util"] }

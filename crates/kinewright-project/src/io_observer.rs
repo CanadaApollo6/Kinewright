@@ -8,6 +8,10 @@ use serde::Serialize;
 pub struct IoObservation {
     pub operation: &'static str,
     pub path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempted_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempted_length: Option<usize>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -21,6 +25,10 @@ thread_local! {
 }
 
 pub(crate) fn note(operation: &'static str, path: &std::path::Path) {
+    note_bytes(operation, path, None);
+}
+
+pub(crate) fn note_bytes(operation: &'static str, path: &std::path::Path, bytes: Option<&[u8]>) {
     TRACE.with_borrow_mut(|trace| {
         if let Some(trace) = trace {
             if trace.events.len() == 128 {
@@ -29,6 +37,8 @@ pub(crate) fn note(operation: &'static str, path: &std::path::Path) {
                 trace.events.push(IoObservation {
                     operation,
                     path: path.to_path_buf(),
+                    attempted_sha256: bytes.map(kinewright_media::sha256_bytes),
+                    attempted_length: bytes.map(<[u8]>::len),
                 });
             }
         }
