@@ -1256,6 +1256,8 @@ ownership boundary, and definition of done stable.
   replacement and face-aware look; design accepted 2026-10-20.
 - [JA-4: take choice](JA4-TAKE-CHOICE.md) — job A script alignment, retake choice, mic/camera
   sync and durable take pins; design accepted 2026-10-20.
+- [Job A S0 contracts](JA-S0-CONTRACTS.md) — the one v3 format change, owned inputs, editorial
+  handoffs and the baseline harness shared by JA-1/JA-2/JA-4/AW2; accepted 2026-10-20.
 - [Model-first editor](MODEL-FIRST-EDITOR.md) — architectural product thesis.
 - [Current product position](PRODUCT-POSITION-M35-2026-08.md) — positioning and
   competitive boundary at M35.
