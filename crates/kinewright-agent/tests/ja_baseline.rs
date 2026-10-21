@@ -503,7 +503,14 @@ fn native_source_identity_is_repository_wide_from_root_and_crate_cwd() {
             &std::fs::read(out.join("artifacts/source-manifest.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(identity["repo_root"], repo.to_str().unwrap());
+        // `git rev-parse --show-toplevel` prints `/` separators on Windows;
+        // compare the resolved directories, not the spellings.
+        assert_eq!(
+            Path::new(identity["repo_root"].as_str().unwrap())
+                .canonicalize()
+                .unwrap(),
+            repo.canonicalize().unwrap()
+        );
         assert!(identity["head"].as_str().is_some_and(|s| s.len() == 40));
         assert_eq!(
             identity["dirty_diff_sha256"],
