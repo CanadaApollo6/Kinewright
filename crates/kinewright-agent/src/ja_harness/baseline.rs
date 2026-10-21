@@ -56,6 +56,20 @@ impl Baseline {
         self.media.clone().ok_or_else(|| "media missing".into())
     }
 
+    pub fn require_generated_media_control(&self) -> Result<(), String> {
+        let (_, document) = self.snapshot()?;
+        if !document.media_pool.is_empty() || !document.lut_assets.is_empty() {
+            return Err("S0 media control needs self-contained generated clips; supplied-media/snapshot fixture adapter pending".into());
+        }
+        if document.resolution.0 > 2048 || document.resolution.1 > 2048 || document.duration.0 > 300
+        {
+            return Err(
+                "S0 generated control exceeds raster/frame admission bound; NOT RUN".into(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn snapshot(&self) -> Result<(TimelineRevision, Arc<Document>), String> {
         let Event::QueryResult(QueryResult::Snapshot { revision, document }) = self
             .core()?
@@ -103,6 +117,7 @@ impl Baseline {
             }
             Call::HeadlessSave(args) => self.headless_save(&args.path),
             Call::ServerStart(_) => {
+                self.require_generated_media_control()?;
                 if self.server.is_some() {
                     return Err("server already started".into());
                 }
@@ -120,12 +135,18 @@ impl Baseline {
                 self.server.as_ref().ok_or("server not started")?,
                 input(fixture, &args.input)?,
             ),
-            Call::PreparedCommit(args) => super::recording::prepared_commit(
-                self.server.as_ref().ok_or("server not started")?,
-                args,
-                input(fixture, &args.input)?,
-            ),
+            Call::PreparedCommit(args) => {
+                self.require_generated_media_control()?;
+                super::recording::prepared_commit(
+                    self.server.as_ref().ok_or("server not started")?,
+                    args,
+                    input(fixture, &args.input)?,
+                )
+            }
             Call::CoreStart(_) => {
+                if self.server.is_some() {
+                    return Err("stop the current server before replacing its Core; adapter lifecycle prerequisite".into());
+                }
                 let document = match &fixture.fixture.initial.document {
                     None => Document::default(),
                     Some(role) => parse_project(fixture, role)?.document,
@@ -387,6 +408,12 @@ impl Baseline {
     }
 
     fn reopen(&mut self, path: &Path) -> Result<Value, String> {
+        if self.server.is_some() {
+            return Err(
+                "stop the current server before reopening its Core; adapter lifecycle prerequisite"
+                    .into(),
+            );
+        }
         let before = self.core.as_ref().map(|_| self.snapshot()).transpose()?;
         let raw = fs::read(path).map_err(|e| e.to_string())?;
         match load_document(path) {

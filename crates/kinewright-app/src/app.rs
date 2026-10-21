@@ -3540,8 +3540,8 @@ pub(crate) fn ja_observe_current(
             "bound_matches_returned":bound.is_some_and(|c| c.stamp == returned && c.at == at),
             "paint_callback_observed":mark.is_some(),"paint_mark":mark.map(|m| json!({"stamp":stamp(m.cell.stamp),"at":m.cell.at,"frame_id":m.cell.frame_id,"epoch":m.epoch,"expired":m.expired,"elapsed_ns":m.painted.duration_since(started).as_nanos().to_string()})),
             "discarded_has_no_mark":discarded_has_no_mark,"ack_consumed_once":ack_consumed_once,
-            "raw_frame":raw,"center_rgba":landmark,"gui_journal":journal,"journal_bytes":journal_artifact,
-            "evidence_class":"actual_headless_paint_callback","physical_display_verified":false,
+            "raw_frame":raw,"center_rgba":landmark,"letterbox_landmark":crate::matte_overlay_ui::ja_letterbox_observation(),"gui_journal":journal,"journal_bytes":journal_artifact,
+            "evidence_class":"actual_headless_paint_callback","physical_display_verified":false,"preview_adapter":engine.observed_adapter(),"paint_adapter":painted.observed_adapter(),
             "durable_version_id":null,"owned_input_association":null,"requested_version_id":null}),
         )
     })();

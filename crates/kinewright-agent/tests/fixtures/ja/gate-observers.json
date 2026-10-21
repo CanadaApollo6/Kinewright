@@ -1,0 +1,997 @@
+{
+  "catalog_version": 1,
+  "gates": [
+    {
+      "gate_id": "JA1.G1",
+      "fixture_slot": "baseline-slot-JA1-G1",
+      "status": "pending_baseline_witness",
+      "owner": "project/JA-1 owner",
+      "stage": "S1",
+      "observer": "Real changed-Document save/reopen, byte inventory and test-only persistence-call trace/rename-refusal seam",
+      "pending": "Trace absence/fallback can yield a runtime assertion after control. Full graph, dropped-unflushed-write model and certified native Windows storage-crash lane remain pending S1; SIGKILL proves only process death.",
+      "control_fixtures": [
+        "legacy-io",
+        "format-corpus"
+      ],
+      "observed_baseline_assertions": [
+        "strict-parent-directory-sync",
+        "strict-write-no-in-place-fallback"
+      ],
+      "expected": {
+        "E": "adapter around `serialize_project_document`, `write_project_bytes`, `load_document`, with an injected persistence-operation\nrecorder/crash filesystem.",
+        "P": "save a real changed Document and independently reopen/compare exact bytes and a valid graph.",
+        "B": "current writer lacks required\nobject/ancestor/backup barriers and may truncate on rename refusal.",
+        "M": "skip each B1/B2/B3/B4/B5 barrier separately; enable in-place fallback. Cut after each\nbarrier, assert acknowledged edit/comment/voice/history/proof names and bytes survive, and unacknowledged commits are wholly old or new. Keep SIGKILL\nprocess-crash results separate from modeled dropped-unflushed-write results. **G1-W** additionally uses native Windows replacement/sharing faults and a\ndisposable VM/storage-crash lane, never this workstation's power. Native process-kill alone does not discharge storage durability. An unsupported-profile\nfixture must refuse with zero migration/store mutations. S1 uses opaque comment/voice/proof object fixtures through the store API; capture/transcription/render\nproduction flows are S3/S5 integration repeats. G1/G1-R do not depend on those later stages or on the scheduler."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G1-W",
+      "fixture_slot": "baseline-slot-JA1-G1-W",
+      "status": "pending_baseline_witness",
+      "owner": "project/JA-1 Windows durability owner",
+      "stage": "S1",
+      "observer": "Real changed-Document save/reopen, byte inventory and test-only persistence-call trace/rename-refusal seam",
+      "pending": "Trace absence/fallback can yield a runtime assertion after control. Full graph, dropped-unflushed-write model and certified native Windows storage-crash lane remain pending S1; SIGKILL proves only process death.",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "adapter around `serialize_project_document`, `write_project_bytes`, `load_document`, with an injected persistence-operation\nrecorder/crash filesystem.",
+        "P": "save a real changed Document and independently reopen/compare exact bytes and a valid graph.",
+        "B": "current writer lacks required\nobject/ancestor/backup barriers and may truncate on rename refusal.",
+        "M": "skip each B1/B2/B3/B4/B5 barrier separately; enable in-place fallback. Cut after each\nbarrier, assert acknowledged edit/comment/voice/history/proof names and bytes survive, and unacknowledged commits are wholly old or new. Keep SIGKILL\nprocess-crash results separate from modeled dropped-unflushed-write results. **G1-W** additionally uses native Windows replacement/sharing faults and a\ndisposable VM/storage-crash lane, never this workstation's power. Native process-kill alone does not discharge storage durability. An unsupported-profile\nfixture must refuse with zero migration/store mutations. S1 uses opaque comment/voice/proof object fixtures through the store API; capture/transcription/render\nproduction flows are S3/S5 integration repeats. G1/G1-R do not depend on those later stages or on the scheduler."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G1-R",
+      "fixture_slot": "baseline-slot-JA1-G1-R",
+      "status": "pending_baseline_witness",
+      "owner": "project/JA-1 receipt owner",
+      "stage": "S1/S2",
+      "observer": "Accepted edit, suppressed result, retry; count exact undo/history effects and saved bytes",
+      "pending": "Edit missing-dedup property is reachable once observed. Durable comment receipt and branch-switch cases need actual comment/S1/S2 seams; no synthetic receipt service.",
+      "control_fixtures": [
+        "reply-retry"
+      ],
+      "observed_baseline_assertions": [
+        "retry-must-not-add-second-undo"
+      ],
+      "expected": {
+        "E": "same edit/save adapter, reply-drop hook and host command fixture protocol; baseline observer counts real undo\nentries/comment bytes.",
+        "P": "one edit and saved feedback with reply retained.",
+        "B": "current Core/save path has no command-digest durable lookup; repeating an accepted\nedit can produce a second undo entry. Comment receipt baseline needs the minimal comment observer.",
+        "M": "check stale head before receipt, omit digest, evict\nunresolved issuer or reapply retired IDs. Drop edit/comment replies, restart/change epoch/expire issuer, retry identical and changed payloads, retire details;\nassert exact text, one batch, correct identities and no false acknowledgment/reapplication. S2 extends the same reply-drop/reconciliation observer to branch\nswitch receipts: lose the reply after B5 and retry the original adoption before/after GUI restore or host restart. Require the original old/new branch/checkpoint\nidentities and switch generation, exactly one adopted branch, and no lease grant from receipt lookup; fresh attachment uses the current committed pointer."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G2",
+      "fixture_slot": "baseline-slot-JA1-G2",
+      "status": "pending_baseline_witness",
+      "owner": "project/JA-1 history owner",
+      "stage": "S1/S2",
+      "observer": "Current branch/undo/redo/coalesced edit, private read-only history trace, save/reopen at changed runtime revision",
+      "pending": "Demonstrate document-only history loss. Durable HeadId/base/floor and shared recovery-close semantics await S1/S2.",
+      "control_fixtures": [
+        "history-loss",
+        "edit-undo-redo",
+        "branches-current",
+        "app-coalesced-paint"
+      ],
+      "observed_baseline_assertions": [
+        "history-survives-reopen"
+      ],
+      "expected": {
+        "E": "real Core commands/queries, `TimelineBranch` and project save/reopen adapter.",
+        "P": "uninterrupted nonzero-revision branch\nedit\u2192undo\u2192redo\u2192merge.",
+        "B": "saving only current Document loses cursor/batches/base relationship.",
+        "M": "restore old numeric base, bind merely equal hashes/counters,\nsave append-only operations or drop redo. Replay with different runtime counters; exact durable base still merges once; equal counter/different head and equal\nbytes/new HeadId conflict. Compare merged bytes, undo/redo order, batch boundaries and applied-op digest; corrupt history quarantines without rewrite. Lost\nmerge reply is reconciled through G1-R, not another undo entry. Extend the Core/history adapter with drag A\u2192B\u2192C under one key, then Undo/Redo: checkpoint after B,\nrestore/replay C and the pending history moves with the original baseline A, and compare uninterrupted bytes, one original gesture entry, undo target and redo\norder. M: close the gesture before suffix replay or restore a floor on only one side. S1 tests export/restore equivalence; S2's G5-L adds real host death and\nshared checkpoint/floor handshakes, without making S1 depend on a later host."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G3",
+      "fixture_slot": "baseline-slot-JA1-G3",
+      "status": "pending_baseline_witness",
+      "owner": "project/JA-1 store and handoff owner",
+      "stage": "S1 / AW2 P1a",
+      "observer": "Legacy writer corpus, copy order/fault trace, two participant destination contention and exact asset inventories",
+      "pending": "Studio graph migration/backup/unknown-kind publication and \u00a78.3's `first_save_failure_undo_live_reader` remain pending JA-1 S1/AW2 P1a. Existing legacy LUT behavior is observed, not fixed in S0; new bundle writes include LUTs in copy-before-root.",
+      "control_fixtures": [
+        "format-corpus",
+        "participants-lock"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "existing load/serialize/save plus destination lock/store adapter and copy barrier hooks.",
+        "P": "legacy v1/v2 byte-preserving save\nand unowned new destination copy.",
+        "B": "current document-only save cannot preserve a Studio bundle, and `write_project_bytes` publishes project before LUT copy\n(`project.rs:520\u2013549`).",
+        "M": "acquire destination lock after copying, skip graph preservation or allow generic downgrade. During an active destination owner\nattempt Save As; assert exact source/destination roots AND every referenced asset. Fail copies, swap alias after verify, test same-project alias, opposing Save\nAs, future format, migration twice, collision/traversal/quota and corrupt backup; no partial overwrite."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G4",
+      "fixture_slot": "baseline-slot-JA1-G4",
+      "status": "pending_baseline_witness",
+      "owner": "project/JA-1 writer and App journal owner",
+      "stage": "S2",
+      "observer": "Real alias lock/save participants, existing hook barriers, App-owned journal trace/control",
+      "pending": "Post-verify pinned-root use and real GUI post-scan journal exclusion need minimal observers before claimed red; full S4/S5 obligations remain S2.",
+      "control_fixtures": [
+        "participants-lock",
+        "app-coalesced-paint"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "two real lock/save processes, existing `REV2_HOOK` seam in project lib, plus real GUI journal observer.",
+        "P": "known\nalias lock contention (R-lock) and one successful locked save.",
+        "B": "current verify-then-path-use can follow a repointed alias; GUI journal exclusion remains\nS5-OBL.",
+        "M": "re-resolve caller path, omit GUI journal lock, skip lock-fd identity on release or ignore suffixed journals. Barrier-swap aliases after verify before\nroot/sidecar/object use; race post-scan journal creation and replaced-lock release. Assert both project/asset graphs exact, one writer, successor discovery\nretained and pending recovery refused. No missing-discovery takeover of a held lock."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G5-L",
+      "fixture_slot": "baseline-slot-JA1-G5-L",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 manual-history bridge / App owner",
+      "stage": "S2",
+      "observer": "Existing coalesced App\u2192Core/presentation and two diverging branches/history controls",
+      "pending": "No lease/history bridge, shared floor/recovery barrier or adoption seam today; baseline witnesses pending those minimal observable boundaries. No host emulation.",
+      "control_fixtures": [
+        "app-coalesced-paint"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "existing coalesced App/Core path plus history-bridge adapter, two GUI clients and host restart hooks.",
+        "P": "live slider\nchanges pixels every frame while collapsing one gesture to one undo entry.",
+        "B": "no fenced local-Core-to-durable-history bridge today.",
+        "M": "accept old lease/skip\nsequence, drop an intermediate coalesced batch, ack before durability or wait for disk before preview. Transfer/disconnect/crash with pending edit, undo/redo\nand host failure; verify exact durable prefix, local pending state, one editor and fresh restore. Add a durable first drag batch A\u2192B, an absent second B\u2192C\nunder the same key and pending Undo/Redo. Crash the host and require uninterrupted final bytes, one original gesture entry, undo target A and identical redo\norder. Repeat with C committed but its reply lost; never replay it twice. Advance the floor with an accepted pending suffix, including Undo/Redo; drain/reconcile\nthe cut and install the same ordered checkpoint on both sides, retaining the same earliest undo point. Lose the floor checkpoint reply and restart. Mutations:\nclose before suffix reconciliation, skip any producer freeze, or change/install a floor on only one side. Assert no new input until full history equivalence and\nshared recovery closure. R-PF1 alone cannot pass this gate. This is the named ownership-choice gate in \u00a71; inability to implement it needs an evidenced lead ruling."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G5-A",
+      "fixture_slot": "baseline-slot-JA1-G5-A",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 adoption owner",
+      "stage": "S2",
+      "observer": "Existing coalesced App\u2192Core/presentation and two diverging branches/history controls",
+      "pending": "No lease/history bridge, shared floor/recovery barrier or adoption seam today; baseline witnesses pending those minimal observable boundaries. No host emulation.",
+      "control_fixtures": [
+        "branches-current"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "two ordinary Core branches through the host adapter; stored snapshot fixtures need no scheduler or delivery.",
+        "P": "manual and\ncandidate diverge independently.",
+        "B": "no durable switch-and-retain branch adoption.",
+        "M": "assign a snapshot over live history or ignore expected head/lease. Race\npending manual edit with adoption; either refuse or drain/checkpoint and create a fresh branch, preserving exact old branch/history. No claim of one undoable\nreplacement. Extend with reply loss after B5, GUI/host death immediately before/after restore, original-envelope retries and delayed old-lease commands. Require\nexactly one adopted branch, one active writer, exact flattened/active-branch document, unchanged retained history, restored resource context, successful first\nedit/Undo on the adopted branch, and exact undo/redo on switching back. Fresh acquisition must use the committed switch/checkpoint identity. Additional M:\nomit fencing, grant before restore, trust GUI selection, revive a receipt's old lease or recreate a branch on retry; each must fail its respective assertion."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G6",
+      "fixture_slot": "baseline-slot-JA1-G6",
+      "status": "pending_baseline_witness",
+      "owner": "shared guardian / JA-1 execution owner",
+      "stage": "S4 / AW2 P1b-s",
+      "observer": "Record current session ownership/direct-child lifecycle; native fixture child/grandchild positive control",
+      "pending": "Actual production guardian pre-exec/host-death/guardian-death/cleanup/no-overlap/resume witnesses pending S4 integration and OS prerequisites.",
+      "control_fixtures": [
+        "participants-lock",
+        "recording-loopback"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "production guardian launcher with a native fixture CLI speaking recorded connector protocol, creating a real\ngrandchild (Linux also setsid), plus real installed-connector integration lane.",
+        "P": "close every GUI, same session/attempt completes durably and reattach starts\nno new process.",
+        "B": "GUI-owned sessions/direct Child kill do not supply host-independent whole-tree cleanup.",
+        "M": "inherit lifetime writer, execute before\nCONTAINED/COMMIT, duplicate Job handle, treat EOF as emptiness or release slot early. Kill host, lose startup ACK at each handshake barrier, kill guardian, lose\ncleanup observation; independently prove live descendants existed, then empty/reaped identities before retry. Assert no overlapping attempts, preserved\nusage/heads/undo, expired old plans and lost-reply reconciliation. Provider unavailability is NOT RUN for the live lane; it cannot stand in for\ndescendant-cleanup failure."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G7-S",
+      "fixture_slot": "baseline-slot-JA1-G7-S",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 versions and owned-input owner",
+      "stage": "S3",
+      "observer": "Save/load/select two distinguishable ordinary Documents/owned-source control refs; record missing immutable index",
+      "pending": "Full frozen-input snapshot selection awaits real lease/index seam; Delivered seal refusal needs S5 coverage/claims/host.",
+      "control_fixtures": [
+        "media-shared-control"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "real save/load/PF1 adapter selecting immutable unreviewed fixture snapshots.",
+        "P": "two different documents/owned\nsources display distinguishable landmarks.",
+        "B": "current project roundtrip lacks the Studio snapshot index/frozen selection context.",
+        "M": "bind mutable path/latest\nhead, strip index or allow background head to replace selection. Reopen/edit copy, undo/redo and switch; original hashes unchanged. Tampered owned input marks\ndamaged. This gate does not create Delivered. **G7-D (S5)** uses those snapshots plus G16/G17 receipts; a clean reviewed cut seals once;\nmissing/changed/unsupported required coverage refuses. M: bypass any conjunct of \u00a710.3 independently."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G7-D",
+      "fixture_slot": "baseline-slot-JA1-G7-D",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 delivery seal owner",
+      "stage": "S5",
+      "observer": "Save/load/select two distinguishable ordinary Documents/owned-source control refs; record missing immutable index",
+      "pending": "Full frozen-input snapshot selection awaits real lease/index seam; Delivered seal refusal needs S5 coverage/claims/host.",
+      "control_fixtures": [
+        "media-shared-control"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "real save/load/PF1 adapter selecting immutable unreviewed fixture snapshots.",
+        "P": "two different documents/owned\nsources display distinguishable landmarks.",
+        "B": "current project roundtrip lacks the Studio snapshot index/frozen selection context.",
+        "M": "bind mutable path/latest\nhead, strip index or allow background head to replace selection. Reopen/edit copy, undo/redo and switch; original hashes unchanged. Tampered owned input marks\ndamaged. This gate does not create Delivered. **G7-D (S5)** uses those snapshots plus G16/G17 receipts; a clean reviewed cut seals once;\nmissing/changed/unsupported required coverage refuses. M: bypass any conjunct of \u00a710.3 independently."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G8",
+      "fixture_slot": "baseline-slot-JA1-G8",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 versions / App presenter owner",
+      "stage": "S3",
+      "observer": "Existing finalization/paint-marker and delayed-frame tests, one-player observations",
+      "pending": "Durable version/input/LUT association observer pending S3. Never label requested identity as displayed identity.",
+      "control_fixtures": [
+        "app-coalesced-paint"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "existing presenter finalization/PF1 path with delayed completions and version binding observer.",
+        "P": "current-frame R-PF1\ncontrol and two clearly different snapshots.",
+        "B": "DisplayCell has no durable version binding today.",
+        "M": "label issued identity as applied, reuse wrong LUT context\nor permit second audio owner. Switch/seek A/B with out-of-order frames and changed timings; assert actual displayed frame/input/version, original still identity\nand one audio owner. Measure presentation, not receipt/GPU submission; latency result is recorded in G20."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G9",
+      "fixture_slot": "baseline-slot-JA1-G9",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 feedback / App geometry owner",
+      "stage": "S3",
+      "observer": "Current displayed stamp and independent letterbox landmark control",
+      "pending": "Version-bound comment store/capture/ack baseline seam pending; no fake comment persistence.",
+      "control_fixtures": [
+        "app-coalesced-paint"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "minimal App input/presenter/comment-store harness around displayed stamp and geometry.",
+        "P": "independent landmark through\nletterboxing yields correct normalized rectangle.",
+        "B": "current UI lacks persisted version-bound comment batches.",
+        "M": "anchor selected request instead of displayed\ncell or omit letterbox offset. Capture during delayed seek, reopen and submit a mixed-version batch; assert exact proof/frame/version/text, retained draft and\nsaved acknowledgment."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G10",
+      "fixture_slot": "baseline-slot-JA1-G10",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 occurrence and feedback owner",
+      "stage": "S1/S3",
+      "observer": "Core delete/recreate/split/undo and allocator ID-reuse demonstration",
+      "pending": "Occurrence-safe resolution/temporal-spatial status observer pending S1/S3 records.",
+      "control_fixtures": [
+        "clip-id-reuse"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Core operation fixtures plus head-scoped lineage/resolution observer; baseline demonstrates ID reuse through current\nallocator before asserting occurrence-safe mapping.",
+        "P": "unique move/trim maps exact source moment.",
+        "B": "local ID/content alone aliases delete/recreate and sibling\nbranches.",
+        "M": "map by Core ID, retain undone split ancestry or transfer region on temporal match only. Test same-ID/same-source recreation, sibling collision,\nsplit undo/redo, repeated chart, take replacement/removal, animated transform/crop and vertical reframe. Assert temporal and spatial statuses independently and\noriginal drawing bytes unchanged, with no routine recovery question."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G11",
+      "fixture_slot": "baseline-slot-JA1-G11",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 voice / media transcription owner",
+      "stage": "S3",
+      "observer": "Existing Whisper/source transcription control, model-installed lane only",
+      "pending": "Anchored note capture/cancel/publication observer pending S3; missing model is NOT RUN.",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "existing Whisper path plus microphone fixture and note-ID publication adapter.",
+        "P": "a real short spoken note yields editable\ntranscript attached to its pinned frame.",
+        "B": "no version-bound voice-note workflow today.",
+        "M": "accept late cancelled result by newest selection or auto-accept\nsilence ASR. Cancel during inference, change version, inject late result; no wrong attachment. Missing model retains audio/honest state; that case alone is not\nthe baseline red."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G12",
+      "fixture_slot": "baseline-slot-JA1-G12",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 task policy / connector owner",
+      "stage": "S4",
+      "observer": "Real server/ScriptedDriver allowed edit and forbidden-attempt traces; preserve confirmation/investigator controls",
+      "pending": "Role-bound footprint policy and certified real connector ambient-tool restrictions pending S4. Existing investigator denial alone is not G12.",
+      "control_fixtures": [
+        "recording-loopback"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "current seven-tool server/ScriptedDriver plus bound task-policy adapter.",
+        "P": "one permitted audio batch actually changes the\nintended samples/settings.",
+        "B": "investigator denylist is not per-role footprint authority.",
+        "M": "skip planner/indirect/commit/merge checks separately. Attempt video\nedit, shared bus/sidechain, ripple/sync collateral, global colour, relink/import-root escape, export cancel, direct capability and reviewer mutation; refuse\nentire batch with exact pre-state. Late expired capability refuses. Existing destructive confirmation remains a separate regression pin."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G13",
+      "fixture_slot": "baseline-slot-JA1-G13",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 durable base / task merge owner",
+      "stage": "S1/S4",
+      "observer": "Current TimelineBranch compare/merge and applied-op traces",
+      "pending": "Durable base and actual freeze/drain/task-completion race observer pending S1/S4.",
+      "control_fixtures": [
+        "branches-current"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "`TimelineBranch::compare/merge_into` through durable owner freeze/drain adapter.",
+        "P": "editor then audio tasks from\nconsecutive durable candidate heads; each merge one undo entry, manual branch exact.",
+        "B": "current branches lack durable-base binding/task-quiescence ownership.",
+        "M": "snapshot before drain, substitute numeric revision, include undone operations or repeat merge after lost reply. Barrier-race in-flight commit with completion,\nrestart at nonzero original revision with changed replay counts and equal-counter/different-head case; assert atomic proposal, undo/redo and exactly-once merge.\nBasic M31 stale rejection alone is R-M31, not this new gate."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G14",
+      "fixture_slot": "baseline-slot-JA1-G14",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 scheduler / usage owner",
+      "stage": "S4",
+      "observer": "ScriptedCost/pump two-session events, missing categories and replay input traces",
+      "pending": "Persistent multi-attempt run accounting/limits/rate-wait/no-fallback witness pending S4; recorded events do not implement it.",
+      "control_fixtures": [
+        "recording-loopback"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "existing ScriptedDriver/pump with recorded cumulative/partial costs and provider-limit events.",
+        "P": "known categories sum exactly\nonce over two attempts.",
+        "B": "no durable multi-attempt scheduler accounting survives restart.",
+        "M": "add cumulative totals, count reasoning twice, reset allowance,\nsilently switch provider or treat missing cost as zero. Disconnect/replay, rate/time/turn exhaustion and restart; assert exact normalized totals, unavailable\nfields, bounded repair rounds and no paid fallback. Actual numeric provider limits remain unknown, not fabricated acceptance targets."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G15",
+      "fixture_slot": "baseline-slot-JA1-G15",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 project store / execution owner",
+      "stage": "S1/S4",
+      "observer": "Current queue ingress, file/byte inventory, lifecycle and existing PF1 counters where exposed",
+      "pending": "Graph/receipt/pending-history/recovery inventory, host execution claim, exact slot/pin retirement and decoder-open integrity observer pending owning production seam S1/S4.",
+      "control_fixtures": [
+        "participants-lock",
+        "media-shared-control"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "existing IO/session paths with bounded allocator/queue/lease counters at real ingress, then host/guardian\nadapter.",
+        "P": "valid work fills/retires a slot once.",
+        "B": "driver `unbounded()` and no Studio graph/pending-history accounting.",
+        "M": "bound only downstream, omit\ntransient bytes/pins or retire on EOF. Exhaust each \u00a712 cap, receipt issuer retention and disk reserve; assert typed backpressure, no accepted data loss, intact\nreachable objects, no premature cleanup-slot reuse and exact charge retirement after cancel/failure/teardown. Repeat metadata commits and floor advances:\nretain only the bounded automatic recovery inventory, reclaim otherwise-unpinned old floors, and keep independently pinned versions/branches/unresolved evidence.\nCrash during inventory retirement; never lose the required verified predecessors. Record byte-verification calls: new/unverified bytes are checked, sealed media\nis not wholly rehashed per comment, and open/recovery fully validates the graph. Tamper an owned input and require refusal at integrity/access checks. M:\nretain every recovery predecessor, recursively pin old inventories, evict a live pin, skip full recovery validation or weaken decoder-bound opens. Attempt a\nsecond active project/run while the execution owner lives or cleanup is unresolved; require refusal and no extra provider process, then allow a run after\nverified retirement. M: admit without the owner/cleanup check. Assert at most one manual validation shadow, without clones for parked branches."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G16",
+      "fixture_slot": "baseline-slot-JA1-G16",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 output checker / certified reviewer owner",
+      "stage": "S5",
+      "observer": "Real clean export\u2192decode, current structural QA and existing loudness report",
+      "pending": "New whole-output seeded-defect checkers, certified reviewer modalities and seal observer pending S5. A successfully rendered defect is only input evidence until checker runs.",
+      "control_fixtures": [
+        "media-shared-control"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "real shared export\u2192decode\u2192checker path and evidence capability through the selected actual reviewer connector.",
+        "P": "clean\nchart/caption/speech artifact with independently verified imagery/PCM and passed matrix.",
+        "B": "structural QA alone misses seeded output-only defects and lacks\nrequired coverage sealing.",
+        "M": "skip each required row, replace output evidence with source frames, permit self-review/stale keys or mark not_run as pass. Seed\nflash outside normal samples, click, dropout, silence gap, hidden caption and altered output label separately. Require each relevant checker red/clean control\ngreen, certified model visual receipt and changed-candidate seal refusal. No model listening requirement."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G17",
+      "fixture_slot": "baseline-slot-JA1-G17",
+      "status": "pending_baseline_witness",
+      "owner": "JA-3 consumers / JA-1 claim admission owner",
+      "stage": "S5 / JA-4 S5",
+      "observer": "Opaque Songbird/expected-slot fixtures and real ordinary title/solid render-start control",
+      "pending": "Versioned adapter, AW2/MO6 actual-slot validator and pre-render spy seam pending consumer implementation; unsupported Code load alone is not red.",
+      "control_fixtures": [
+        "format-corpus",
+        "app-coalesced-paint"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "minimal JSON-export/typed-binding/output-field adapter around real AW2/MO6 consumers plus render-spy\ncounter; every fixture goes through the declared `mockingboard.songbird-answer` v1 adapter.",
+        "P": "rendered labels AND data/geometry derive from dataset-qualified\ncells/allowed derivations with units/rounding and explicit scope.",
+        "B": "source hashes and typed output fields alone do not validate dataset identity/completeness.\nUse intentionally different answer rows and chartData rows: the plot must consume chartData rows and an exported reference line. Include duplicate section\ntitles addressed by index, complete answer/incomplete section and the reverse, and `chartData=null`. A truncated row set's subtotal must differ from a known\ncomplete fixture; a whole-result claim requiring missing rows yields **zero affected render starts**, while a present-cell claim and visibly labelled subset\nremain positive controls. Complete-but-SQL-limited results cannot certify a broader population claim; chartData has resolved-plot scope, no borrowed flag.\nKeep the export correctly hashed while altering visible SVG/title/caption values or addressed geometry; also omit a field, change units/rounding, remove a\nsubset qualifier or supply an unsupported script claim.",
+        "M": "substitute SQL rows for chartData, borrow answer/section completeness, invent chartData completeness,\ntrust the export hash, omit actual-field comparison or defer the guard until seal. Each affected invalid case must start zero renders. Restore binding and\nverify exact dataset, output and validation-key/receipt identity; changing selector, scope, completeness, chartSpec interpretation or derivation invalidates it."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G18",
+      "fixture_slot": "baseline-slot-JA1-G18",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 completion / native notification owner",
+      "stage": "S6",
+      "observer": "Existing export/artifact identity control and native notification prerequisite inventory",
+      "pending": "Durable completion\u2192notification\u2192exact-version activation, derivative readiness and headless execution pending S6.",
+      "control_fixtures": [
+        "media-shared-control"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "native notification adapter/activation harness on each OS plus headless scheduler.",
+        "P": "saved reviewed cut notifies and\nopens at exact version once.",
+        "B": "no durable completion-event-to-version integration.",
+        "M": "notify before root durability, activate newest head or replay task on\nnotification retry. Remove notification service, repeat/crash activation and export optional reels; saved cut survives, activation idempotent, derivatives have\ntheir own checks and no upload occurs. Missing Windows identity/session is NOT RUN, not a passing or failing behavioral witness."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G19",
+      "fixture_slot": "baseline-slot-JA1-G19",
+      "status": "pending_baseline_witness",
+      "owner": "lead practice run / Riel",
+      "stage": "S7",
+      "observer": "Hash slots and qualified workflow/evidence checklist only",
+      "pending": "Actual supplied material, prior technical/model review and Riel's one watch pending S7. No invented practice content or human red.",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "lead's complete Studio workflow with actual practice take/retakes, script, supplied Songbird export, AW2 chart,\ncards/captions, JA-2/look/audio and old-version feedback.",
+        "P": "required technical/model review passes before the single finished-video watch.",
+        "B": "that complete\nworkflow is not established today.",
+        "M": "deterministic omission of required evidence must fail G7-D; do not manufacture a mutation of Riel's taste. Record actual\nminutes and unanswered blockers. Riel alone judges publishable-without-timeline; automated quality does not discharge this gate."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA1.G20",
+      "fixture_slot": "baseline-slot-JA1-G20",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 performance / native parity owner",
+      "stage": "S6",
+      "observer": "Direct coalesced input\u2192Core\u2192actual paint timing boundaries/process identity sampler",
+      "pending": "End-to-end host/children/version/switch/resource and native parity measurements pending S6. No claim that current baseline already misses latency.",
+      "control_fixtures": [
+        "app-coalesced-paint",
+        "participants-lock"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "current App/presenter/PF1 instrumentation plus input timestamps/process sampler and real host/children, using practice\nproject and controlled camera/chart landmarks.",
+        "P": "existing direct coalesced gesture and warm seek measurement establishes the same presentation boundary.",
+        "B": "no\nend-to-end narrow-host manual/history/version measurement exists, not an asserted existing latency miss.",
+        "M": "introduce controlled durable-write delay/on-UI IO or\nhidden second pipeline; witness must expose latency/residency increase. Measure \u00a712 targets, transient copies, steady/peak RSS, VRAM and repeated\nclose/open/lease transfer on Linux/3090; Windows replacement/lock/notification lanes are independent. Retain exact source/binary identities and raw summaries.\nAny unrun/unsupported lane stays named and open."
+      },
+      "source": "docs/JA1-STUDIO-ORCHESTRATION.md \u00a713.3 / JA-S0-CONTRACTS \u00a78.1"
+    },
+    {
+      "gate_id": "JA4.E1",
+      "fixture_slot": "baseline-slot-JA4.E1",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S4 / named JA-1 storage or consumer seam",
+      "stage": "S4",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**E1. Choose once, override once, S4.** Real frozen-word/transcription registration \u2192 aligner \u2192 existing assembly \u2192 JA-1 save/reopen. One recording has flub, clean\nrepeat, wrong statistic, later alternative, out-of-order line, and bracket cue. Baseline full-envelope assembly retains repeated speech; supplied correct envelopes\nare the positive control. Assert one correct delivery per LineId, exact retained WordIds/source bounds, script order, and no cue speech. Pin alternate and\nreopen/unrelated-edit; preserve it and change only its closure. Wrong-statistic/flub pin refuses without losing the valid pin. Mutate wording guard, pin precedence,\nor map persistence. Synthetic text facts are test labels, never supplied football truth.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "choose-once-override-once"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G1",
+      "fixture_slot": "baseline-slot-JA4.G1",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1 / named JA-1 storage or consumer seam",
+      "stage": "S1",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G1. Lossless cues, S1.** Real ingest/record adapter with soft wraps, links, pause/chart cues, `a[0]`, quoted brackets, unknown/nested brackets, and code block.\nPositive resolves literal speech and round-trips bytes. Baseline parser seam is pending. Mutate broad bracket stripping or cue-as-speech. Assert exact spans, token\ninventory, ambiguity, and affected-line blocking rather than counts alone.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-lossless-cues"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G2",
+      "fixture_slot": "baseline-slot-JA4.G2",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1 / named JA-1 storage or consumer seam",
+      "stage": "S1",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G2. Unique correspondence, S1.** Real revision records with `A, X\u2081, X\u2082, B`. Delete first versus second X using indistinguishable raw revisions; both must retain\nthe original pin/context as unresolved. Insert X before a pinned X, change cue/beat context, ambiguously move duplicates, and split/join. Positive controls are a\nunique unchanged moved/rewrapped line and a structured edit naming the exact survivor. Assert exact LineIds/BeatIds, ancestry, original candidate/WordIds, and pin\ndisposition. Repeat after reopen, undo/redo, and adoption with G6. Baseline identity seam pending. Mutate order-based duplicate choice or text-hash IDs.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-unique-move-rewrap",
+        "text-duplicate-delete-first",
+        "text-duplicate-delete-second",
+        "text-duplicate-insert-move-context"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G3",
+      "fixture_slot": "baseline-slot-JA4.G3",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S2 / named JA-1 storage or consumer seam",
+      "stage": "S2",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G3. Complete out-of-order discovery, S2.** Frozen-word input through the real matcher. Include C, A-flub, B, A-clean, C-repeat, and a long complete line. Add\ncritic counterexample 1: each selected multiword anchor is broken by isolated fillers in the valid take, while the exact anchors occur in a distant wrong/partial\ntake. Add counterexample 2: 96 required tokens plus 35 isolated fillers at source interval `[126,257)` across old `[0,256)` / `[128,384)` windows. An independent\nexhaustive small-fixture enumerator labels all legal WordId paths. Assert exact equality of discovered sets under varying chunk boundaries/slice resumes. Positive\nis unchanged exact speech and supplied-envelope assembly. Baseline lacks matching, pending seam. Mutate anchor-only search, fixed-window resets, path pruning, or\ncross-take joins. Every valid path survives.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-out-of-order-retakes",
+        "text-anchor-fillers",
+        "text-window-crossing-long-line",
+        "text-resume-frontier"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G4",
+      "fixture_slot": "baseline-slot-JA4.G4",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S2 / named JA-1 storage or consumer seam",
+      "stage": "S2",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G4. Full-token guard and late valid take, S2.** Use values, units, names, negations, and comparisons with shared wording. Wrong/partial-only input yields no\neligible path after complete coverage; exact equivalent written/spoken value/unit is positive. Add more early rejected shared phrases than the diagnostic registry\ncan hold, followed by a late valid take. It must be discovered with original WordIds despite diagnostic saturation. Interrupt a search slice: coverage is\nincomplete, never missing/pass. Mutate critical equality, substantive-insertion rejection, shared diagnostic/exact quota, or completion-at-slice logic.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-critical-values-units",
+        "text-critical-names-negations-comparisons",
+        "text-authored-filler",
+        "text-late-valid-after-diagnostic-saturation"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G5",
+      "fixture_slot": "baseline-slot-JA4.G5",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S2 / named JA-1 storage or consumer seam",
+      "stage": "S2",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G5. Boundaries, pauses and perception, S2.** Real bounded PCM decoder/validator with clean speech, clipped samples, truncated consonant, real restart/intervening\nspeech, silence-ASR, and unknown/even timing. Add the three pause fixtures: exact speech with safely removable 2.2 s silence and no cue, a true partial/restart with\nintervening speech, and the same exact speech/pause protected by a cue. The first stays complete; the second cannot splice; the third retains its hold. Ambiguous\ncontext returns delivery review. Repeat through G9 cleanup. Assert retained original WordIds and independent decoded cut landmarks, not duration alone. Baseline\nvalidation seam pending. Mutate silence-splitting, timing upgrade, clipping/boundary checks, or landmark-to-gaze inference. No fabricated listening receipt may\npass.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-long-gap-unprompted",
+        "text-true-restart",
+        "text-long-gap-authored-pause",
+        "pcm-clipping-consonant-boundaries"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G6",
+      "fixture_slot": "baseline-slot-JA4.G6",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S3/S4 / named JA-1 storage or consumer seam",
+      "stage": "S3/S4",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G6. Pin/history/occurrence identity, S3/S4.** Real plan/host commit \u2192 undo/redo \u2192 merge/adoption \u2192 feedback. Positive alternate replaces only its closure, shifts\ndownstream once, and preserves unaffected identities. Repeat every G2 duplicate deletion/insertion/context case after reopen, undo/redo, and adoption. Ambiguity\nkeeps the exact original pin unresolved; uniquely evidenced survivor/provenance keeps the correct pin. Commit the lead's addressed resolution, lose reply, and\nreconcile once. Assert head/history/TakeMapRevision correspondence and independent temporal/spatial outcomes. Baseline map seam pending. Mutate local-ID identity,\nguessed duplicate transfer, map restore, receipt precedence, or automatic unresolved-pin clearing.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-unique-move-rewrap",
+        "text-duplicate-delete-first",
+        "text-duplicate-delete-second",
+        "text-duplicate-insert-move-context",
+        "text-word-identity-successor"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G7",
+      "fixture_slot": "baseline-slot-JA4.G7",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1/S3 / named JA-1 storage or consumer seam",
+      "stage": "S1/S3",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G7. Durable bundle, S1/S3.** JA-1 real writer/recovery/Save As observer. Positive reopen after cache deletion retains words, alternatives, original unresolved pin\ncontext, pauses, counters, and sources. Crash/drop reply around publication and retry. Assert wholly old/new graphs and one committed choice/ripple. Mutate\nsidecar-only storage, early acknowledgment, missing reachability, or duplicate command replay. Baseline document save is a control; new record seam pending. JA-1\nowns storage-crash/native Windows proof; SIGKILL alone is insufficient.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-unique-move-rewrap",
+        "text-duplicate-delete-first",
+        "text-duplicate-delete-second",
+        "text-duplicate-insert-move-context",
+        "text-word-identity-successor"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G8",
+      "fixture_slot": "baseline-slot-JA4.G8",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S4 / named JA-1 storage or consumer seam",
+      "stage": "S4",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G8. Clock conversion and continuous sync, S4.** Actual selected-stream decoder/correlator \u2192 real paired planner \u2192 decoded output, with independent landmarks and\npre-commit operation/receipt counters. Clock fixtures are correctly muxed unequal start PTS with audio 200 ms after video, equal-origin control, and a real\nflash/clap or independently observed mouth/audio landmark with a separately bound capture offset. Assert the positive origin-conversion sign and final audio/video\nerror \u2264one project frame, not just PCM lag. Continuity negatives are an interior lag excursion returning at both endpoint windows, an internal PTS gap compacted or\npadded by decode, and a rejected/inconsistent interior anchor. Each refuses before commit, even if global inliers/endpoints pass. Positive controls are a clean\ncontinuous pair and a smooth nonzero-drift segment whose offset-only bound fits. Test every error-bound component and maximum unchecked span. Also refuse unknown\norigins/capture offset, missing/ambiguous scratch, two peaks, out-of-search offset, unsupported timing, and a long independent-clock span with only one slate.\nBaseline same-asset routing is a regression control, not sync evidence; new observation/admission seam pending. Mutate omitted origin, wrong sign, zero-for-unknown,\nPCM-length continuity, endpoint-only checks, discarded interior anchor, unchecked-span/drift term, or rounding. Negative cases leave exact pre-state and zero paired\ncommits.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "selected-stream-origins-coverage-interior-gaps",
+        "independent-decoded-flash-clap-mouth-landmarks"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G9",
+      "fixture_slot": "baseline-slot-JA4.G9",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S4 / named JA-1 storage or consumer seam",
+      "stage": "S4",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G9. Shared cleanup and one paired edit, S4.** Existing assembly typed result \u2192 compound adapter \u2192 real Core and decoder. Positive no-protection inputs preserve\ntoday's ordered `selections`/`kept_source_ranges`, including repeated assets. Run all three G5 pause fixtures: unprotected hesitation can shorten safely, protected\nhold remains, true restart stays ineligible. Assert exact required WordIds, actual decoded cut boundaries, linked camera/mic ranges, and unrouted scratch audio. Use\nunequal durations, awkward fps, many cumulative boundaries, and nonempty downstream sync-locked tracks. One undo/redo restores exact clips/map/links and one\ndownstream shift. Conflicts/sync failures make zero half-pair writes. Baseline already returns kept ranges; new protection/word/paired seam pending. Mutate pause\nprotection after merging, required-word protection, cumulative rounding, paired routing, or two-insert implementation.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-long-gap-unprompted",
+        "text-true-restart",
+        "text-long-gap-authored-pause"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G10",
+      "fixture_slot": "baseline-slot-JA4.G10",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S5 / named JA-1 storage or consumer seam",
+      "stage": "S5",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G10. Script, ASR, sound, data and captions, S5.** JA-3 consumers + JA-1 claim/render-start observer. Supply correct script/chart but wrong ASR value, and\nseparately wrong recorded audio while script and ASR agree. An independent source-bound spoken-value observation must expose the latter mismatch. If no independent\nchecker is available, that lane is unavailable/NOT RUN and critical speech stays unresolved. Positive uses a correct take with supported fact/spoken evidence.\nAssert zero affected render starts for unresolved critical speech, exact caption text/timing from retained words, and invalidated review keys after override. Mutate\ncaption laundering, JSON-as-speech proof, cue inclusion, or stale review reuse. Studio old-version \"take 1\" must address the original candidate. JA-1 G16 remains\nfinal output review.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-critical-values-units",
+        "text-critical-names-negations-comparisons",
+        "text-authored-filler",
+        "text-late-valid-after-diagnostic-saturation"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA4.G11",
+      "fixture_slot": "baseline-slot-JA4.G11",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S2/S5 / named JA-1 storage or consumer seam",
+      "stage": "S2/S5",
+      "observer": "Independent fixture/hash slots; current Core/assembly controls are not matcher or acoustic acceptance",
+      "pending": "**G11. Full search, reuse and resources, S2/S5.** Real matcher/transcription/decode counting, allocation/queue observers, and UI timing. Run all four \u00a712 full\nworkloads cold/warm with out-of-order retakes, both G3 counterexamples, diagnostic saturation, late valid take, and unchanged exact controls. Independently label\ncoverage/path sets. Report measured cumulative matcher/DP cells, peak bytes, complete coverage, and full latency, not a slice or forecast. Cache reuse is a\nregression control: rewrap/choice/reopen/unrelated edit causes zero new inference. Mutate per-line transcription, whole-PCM sync allocation, lost frontier, counter\nreset, page leak, or cancelled publication. Verify typed overflow and retained pins. Measure real Whisper peak separately. Resource/native/provider/human lanes\nremain distinct and unrun until exercised.",
+      "control_fixtures": [],
+      "independent_slots": [
+        "text-out-of-order-retakes",
+        "text-anchor-fillers",
+        "text-window-crossing-long-line",
+        "text-critical-values-units",
+        "text-critical-names-negations-comparisons",
+        "text-authored-filler",
+        "text-late-valid-after-diagnostic-saturation",
+        "text-resume-frontier"
+      ],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Real owning adapter described in source witness",
+        "P": "Independent valid control described in source witness",
+        "B": "Pending compatible production seam; no S0 behavioral red claimed",
+        "M": "Targeted later mutation described in source witness"
+      },
+      "source": "docs/JA4-TAKE-CHOICE.md \u00a714"
+    },
+    {
+      "gate_id": "JA2.A",
+      "fixture_slot": "baseline-slot-JA2.A",
+      "status": "pending_baseline_witness",
+      "owner": "JA-2 Stage A model/native owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "Model, precision, foreground, capacity and platform trials NOT RUN; no model hashes chosen",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "JA2.B",
+      "fixture_slot": "baseline-slot-JA2.B",
+      "status": "pending_baseline_witness",
+      "owner": "JA-2 Stage B / common JA-1 store",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "Matte producer, flat manifests, actual decoder-input snapshot and owned lifecycle pending",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "JA2.C",
+      "fixture_slot": "baseline-slot-JA2.C",
+      "status": "pending_baseline_witness",
+      "owner": "JA-2 Stage C render owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "PersonMatte/effect/gradient resources and renderer pending; no new clip kind exposed",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "JA2.D",
+      "fixture_slot": "baseline-slot-JA2.D",
+      "status": "pending_baseline_witness",
+      "owner": "JA-2 Stage D / JA-3 geometry consumer",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "Source-bound face geometry and mapped consumer layout pending",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "AW2.G0",
+      "fixture_slot": "baseline-slot-AW2.G0",
+      "status": "pending_baseline_witness",
+      "owner": "AW2 P0 transport owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "G0a-G0e real transport and evidence refusal certification remain independent and NOT RUN",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "AW2.Code",
+      "fixture_slot": "baseline-slot-AW2.Code",
+      "status": "pending_baseline_witness",
+      "owner": "AW2 P1a/P1b/P1c owners",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "Code admission/store/render capability absent; unsupported parse earns no JA-1 behavioral-red credit",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "AW2.External",
+      "fixture_slot": "baseline-slot-AW2.External",
+      "status": "pending_baseline_witness",
+      "owner": "AW2 P2 owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "External source/runtime image, executable certification and render pipeline deferred for first video",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "AW2.G11/JA1.G3",
+      "fixture_slot": "baseline-slot-AW2.G11-JA1.G3",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 S1 handoff / AW2 P1a admission owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "first_save_failure_undo_live_reader pending real session store, Code/font/LUT closure and live reader",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "JA4.G7/G10",
+      "fixture_slot": "baseline-slot-JA4.G7-G10",
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S2/S3/S5 / JA-1 graph owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "critical_word_evidence_cache_delete_reopen pending independently source-bound speech evidence and exact retention edges",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "PF1.H-T/G14",
+      "fixture_slot": "baseline-slot-PF1.H-T-G14",
+      "status": "pending_baseline_witness",
+      "owner": "PF1 native retained-hold lane owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "Retained held-age chronology and acceptance remain independent; no Job A pass",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "PF1.A-1",
+      "fixture_slot": "baseline-slot-PF1.A-1",
+      "status": "pending_baseline_witness",
+      "owner": "JA-1/media decoder snapshot owner",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "Actual decoder-bound byte stability through use remains pending",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    },
+    {
+      "gate_id": "CI",
+      "fixture_slot": "baseline-slot-CI",
+      "status": "pending_baseline_witness",
+      "owner": "lead",
+      "stage": "owning stage",
+      "observer": "Catalog only; no missing production mechanism built",
+      "pending": "No push or CI/slow-tier dispatch authorized; both remain NOT RUN",
+      "control_fixtures": [],
+      "observed_baseline_assertions": [],
+      "expected": {
+        "E": "Owning production/native adapter",
+        "P": "Successful independent valid control",
+        "B": "Pending / NOT RUN; no S0 behavioral-red claim",
+        "M": "Owning gate targeted mutation and restored control"
+      },
+      "source": "docs/JA-S0-CONTRACTS.md \u00a7\u00a78-9,12-13"
+    }
+  ]
+}

@@ -146,6 +146,23 @@ pub enum Call {
     AppFixture(InputArgs),
 }
 
+impl Call {
+    pub(crate) fn main_adapter_only(&self) -> bool {
+        matches!(
+            self,
+            Self::ServerStart(_)
+                | Self::ScriptedSession(_)
+                | Self::PreparedCommit(_)
+                | Self::AppFixture(_)
+                | Self::MediaSeek(_)
+                | Self::MediaProof(_)
+                | Self::MediaExport(_)
+                | Self::MediaDecode(_)
+                | Self::MediaStats(_)
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Empty {}
@@ -269,6 +286,12 @@ pub struct LoadedFixture {
 }
 
 pub fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    if !std::fs::metadata(path)
+        .map_err(|e| e.to_string())?
+        .is_file()
+    {
+        return Err("fixture input must be a regular file".into());
+    }
     let mut bytes = Vec::new();
     File::open(path)
         .map_err(|e| e.to_string())?
@@ -330,6 +353,17 @@ pub fn load(path: &Path) -> Result<LoadedFixture, String> {
         }
     }
     for action in &fixture.actions {
+        match &action.call {
+            Call::ScriptedSession(args) => super::recording::validate_script_fixture(
+                files.get(&args.input).ok_or("missing script input")?,
+            )?,
+            Call::PreparedCommit(args) => super::recording::validate_plan_fixture(
+                files
+                    .get(&args.input)
+                    .ok_or("missing prepared-plan input")?,
+            )?,
+            _ => {}
+        }
         if let Call::CoreSend(args) = &action.call {
             let command: kinewright_core::JournalCommand = serde_json::from_value(unique_json(
                 files.get(&args.input).ok_or("missing command input")?,
@@ -355,9 +389,30 @@ pub fn load(path: &Path) -> Result<LoadedFixture, String> {
     })
 }
 
+/// Fixture admission only: S0's generated-media controls cannot introduce
+/// external media or LUT locators. This is not production task-scope authority.
+pub fn validate_local_control_operations(
+    operations: &[kinewright_core::Operation],
+) -> Result<(), String> {
+    if operations.iter().any(|op| {
+        matches!(
+            op,
+            kinewright_core::Operation::AddAsset { .. }
+                | kinewright_core::Operation::RelinkAsset { .. }
+                | kinewright_core::Operation::AddLutAsset { .. }
+        )
+    }) {
+        return Err("external media/LUT fixture adapter pending; NOT RUN".into());
+    }
+    Ok(())
+}
+
 fn validate(f: &Fixture) -> Result<(), String> {
     if f.protocol != PROTOCOL || f.protocol_version != 1 {
         return Err("wrong protocol/version".into());
+    }
+    if f.inputs.keys().any(|role| role.starts_with("oracle:")) {
+        return Err("input role uses reserved oracle namespace".into());
     }
     if f.fixture_id.is_empty()
         || f.fixture_id.len() > 128
@@ -374,14 +429,35 @@ fn validate(f: &Fixture) -> Result<(), String> {
         || f.barriers.len() > 64
         || f.limits.input_bytes > INDEX_BYTES
         || f.limits.output_bytes > INDEX_BYTES
-        || f.limits.output_bytes == 0
+        || f.limits.output_bytes < u64::try_from(2 * CONTROL_BYTES).map_err(|e| e.to_string())?
         || !(1..=600_000).contains(&f.limits.action_timeout_ms)
         || !(1..=600_000).contains(&f.limits.setup_timeout_ms)
     {
         return Err("fixture exceeds harness ceilings".into());
     }
     let mut previous = 0;
+    for (role, reference) in f.inputs.iter().chain(&f.oracles) {
+        if role.is_empty()
+            || role.len() > 128
+            || reference.kind.len() > 128
+            || reference.sha256.len() != 64
+            || !reference
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("invalid bounded input/oracle identity".into());
+        }
+    }
+    if f.gate_ids.iter().any(|g| g.is_empty() || g.len() > 128) {
+        return Err("invalid gate label".into());
+    }
     for action in &f.actions {
+        if action.call.main_adapter_only() && action.participant != "main" {
+            return Err(
+                "adapter requires main participant; participant adapter unavailable".into(),
+            );
+        }
         if action.id <= previous
             || action.after.is_some_and(|id| id >= action.id)
             || action.participant.len() > 128
@@ -401,7 +477,10 @@ fn validate(f: &Fixture) -> Result<(), String> {
                 }
             }
             Call::AssertObserved(a)
-                if a.observation >= action.id || !f.oracles.contains_key(&a.oracle) =>
+                if a.observation >= action.id
+                    || !f.oracles.contains_key(&a.oracle)
+                    || a.id.is_empty()
+                    || a.id.len() > 128 =>
             {
                 return Err("invalid assertion observation/oracle".into());
             }

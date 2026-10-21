@@ -38,6 +38,12 @@ fn observe(
     } else {
         kinewright_core::Document::default()
     };
+    if !document.media_pool.is_empty() || !document.lut_assets.is_empty() {
+        return Err("App supplied-media fixture adapter pending; NOT RUN".into());
+    }
+    for batch in &control.batches {
+        ja_harness::protocol::validate_local_control_operations(batch)?;
+    }
     crate::app::ja_observe_current(document, control.batches, TimeCode(control.at), report)
         .map(Some)
 }
@@ -71,9 +77,17 @@ mod tests {
         let temp = TempDirectory::new("ja-app");
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../kinewright-agent/tests/fixtures/ja/app-coalesced-paint.json");
-        assert_eq!(run(&fixture, &temp.path("out"), Mode::Baseline).unwrap(), 0);
+        let output = std::env::var_os("JA_HARNESS_RETAIN_OUTPUT").map_or_else(
+            || temp.path("out"),
+            |root| {
+                let root = std::path::PathBuf::from(root);
+                std::fs::create_dir_all(&root).unwrap();
+                root.join("app")
+            },
+        );
+        assert_eq!(run(&fixture, &output, Mode::Baseline).unwrap(), 0);
         let observation: Value = serde_json::from_slice(
-            &std::fs::read(temp.path("out/artifacts/observation-1.json")).unwrap(),
+            &std::fs::read(output.join("artifacts/observation-1.json")).unwrap(),
         )
         .unwrap();
         assert_eq!(

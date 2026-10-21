@@ -681,6 +681,12 @@ impl FfmpegMediaEngine {
         self.finished.clone()
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn observed_adapter(&self) -> (String, String, bool) {
+        self.gpu.observed_adapter()
+    }
+
     /// Opt in to SDR display; initialization and self-check run on the preview.
     pub fn enable_display(&self, config: crate::DisplayConfig) -> crate::DisplaySession {
         let (session, shared) = crate::display::DisplayPool::session(&config);

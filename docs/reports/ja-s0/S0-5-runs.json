@@ -1,0 +1,1690 @@
+[
+  {
+    "fixture_id": "edit-undo-redo",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2316213-1792549882642017272",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "ee7deb23a0ff0d5ab61aba7e51e396ed7f6819fdca101f4ec3bb0872dcdd0f30",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "bc480494957020a45a5281145333a5e79c270d81ba014e904b55cc112b865c9c",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 301,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "68851fa38894f76c2e9dd74895318bde660859953b0cb1e0cf5495f99394dd5b"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "edit-accepted",
+        "observation": 2,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/event/accepted",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 301,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "eb6b0bf12f9bad8b1ea0f514c7278496fbf80c89e6b096ed641e9ddba021ea08"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "undo-accepted",
+        "observation": 4,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/event/accepted",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 301,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "09017cdc599679907987713212877f9cf8f658380e9bd3f20ce3f6564cfd3777"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "redo-accepted",
+        "observation": 6,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/event/accepted",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 309,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "1f2988583b994ce6d66f496027e162a81387a9868130f0677e68ff679eecf99d"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "saved-exact-bytes",
+        "observation": 8,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/writer_bytes_equal",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 311,
+          "relative_file": "artifacts/assertion-4.json",
+          "sha256": "7bb3b72af4e2ae5e6921bc8482b6fa72bf1939452756081f38f953872db1f33a"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "reopened-exact-document",
+        "observation": 10,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/same_document",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G2",
+        "gate": "JA1.G2",
+        "observer": "Current branch/undo/redo/coalesced edit, private read-only history trace, save/reopen at changed runtime revision",
+        "owner": "project/JA-1 history owner",
+        "reason": "Demonstrate document-only history loss. Durable HeadId/base/floor and shared recovery-close semantics await S1/S2.",
+        "stage": "S1/S2"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "format-corpus",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2316255-1792549887522533636",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "f53ae88d6d9e75606b46614b6ebe522578fbddebb35fe1152a091ef39feadb02",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "1993c49e25eb97c99524790141b35874af6d170c3feb805a79bf5d6395ba4285",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 2655,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "61fc14f650aac4208b644175358b7804ab5569ebd25fe0e4537532eb96186499"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "v1-empty-full-bytes",
+        "observation": 2,
+        "oracle": "v1-empty",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/serialized",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 4653,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "e548cea8a8b1c76429cdadcf625e4fea62b4c99f76f50bf3bebfcff11a9877e7"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "v1-legacy-full-bytes",
+        "observation": 5,
+        "oracle": "v1-legacy",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/serialized",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 3492,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "e586470a317f81d300c5a927a8adee2ab87d562dc50b002cc07559e95c85519c"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "v2-full-bytes",
+        "observation": 10,
+        "oracle": "v2",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/serialized",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 313,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "f7e0783d4fe2b627e331ee907f8ccb8de338a8ad60d4c39332d7f6457ed52a95"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "v2-reopen-bytes",
+        "observation": 13,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/writer_round_trip_equal",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 305,
+          "relative_file": "artifacts/assertion-4.json",
+          "sha256": "df213261154ad9b563b14b5dc83db5521637d1e1701ff947dcbefa5f27d8e1c9"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "v3-studio-loads-advisory",
+        "observation": 15,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/loaded",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 329,
+          "relative_file": "artifacts/assertion-5.json",
+          "sha256": "4f098067633331a71780f013e3d6126a51065b57ce8970c5dfe597542b545276"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "v3-studio-overwrite-refused-by-ceiling",
+        "observation": 15,
+        "oracle": "false",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/can_overwrite",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 333,
+          "relative_file": "artifacts/assertion-6.json",
+          "sha256": "5e2532d1013b89e316be4b2c421f9a3306e94b9320d96566015a295a3d34eb25"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "v3-studio-original-bytes-preserved",
+        "observation": 15,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/original_bytes_unchanged",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 314,
+          "relative_file": "artifacts/assertion-7.json",
+          "sha256": "500c4ea1f8e824e29060e9768aaa53ce7e5538ead635a15a2a3fcfe9accf8e2f"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "unsupported-code-parse-refused",
+        "observation": 19,
+        "oracle": "false",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/loaded",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 334,
+          "relative_file": "artifacts/assertion-8.json",
+          "sha256": "e9a69827a62bd24bf5d2c4368324e97f3666fc07a10284ca21e12ed1daaee777"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "unsupported-code-original-preserved",
+        "observation": 19,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/original_bytes_unchanged",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G3",
+        "gate": "JA1.G3",
+        "observer": "Legacy writer corpus, copy order/fault trace, two participant destination contention and exact asset inventories",
+        "owner": "project/JA-1 store and handoff owner",
+        "reason": "Studio graph migration/backup/unknown-kind publication and \u00a78.3's `first_save_failure_undo_live_reader` remain pending JA-1 S1/AW2 P1a. Existing legacy LUT behavior is observed, not fixed in S0; new bundle writes include LUTs in copy-before-root.",
+        "stage": "S1 / AW2 P1a"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "branches-current",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2316661-1792549892402666740",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "3575d6613042364fa6e76f3f62c3cf43147aeacd6bbdd651e59e09a9daee404b",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "91ad0b07471f0f129f1bcd347cbfbfe955a31675cc3ec330d3e5d7d4ffc1aa82",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 308,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "f9381e33757e23fb69e45141d8a06764e9efd51076108ef620341dcd69b5dbd0"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "branch-edit-accepted",
+        "observation": 3,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/event/accepted",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 300,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "4cf1894e2303a360416491c3346488f48413329a51ea70ee8331397297236ca9"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "merge-one-entry",
+        "observation": 6,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/history/undo_count",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 306,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "aa1a5b65be18f6b1be83034ba98e807dbc633ed7a2910c97e07850a21553a000"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "cherry-pick-one-entry",
+        "observation": 9,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/history/undo_count",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 311,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "aaa265664c438bb8a5e624353385daad90e62d6afd962e9071de33d38139d29a"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "stale-edit-rejected",
+        "observation": 11,
+        "oracle": "false",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/event/accepted",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G2",
+        "gate": "JA1.G2",
+        "observer": "Current branch/undo/redo/coalesced edit, private read-only history trace, save/reopen at changed runtime revision",
+        "owner": "project/JA-1 history owner",
+        "reason": "Demonstrate document-only history loss. Durable HeadId/base/floor and shared recovery-close semantics await S1/S2.",
+        "stage": "S1/S2"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G13",
+        "gate": "JA1.G13",
+        "observer": "Current TimelineBranch compare/merge and applied-op traces",
+        "owner": "JA-1 durable base / task merge owner",
+        "reason": "Durable base and actual freeze/drain/task-completion race observer pending S1/S4.",
+        "stage": "S1/S4"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "clip-id-reuse",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2317008-1792549897266757952",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "c8422932423c0f30b48e8342dd93ce6d49064a2c139b21a77cfe24dd34e2993c",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "b5ab836f3f43281b9fa18e5a9ebe45ca5008aec806ef3bf23507a5a2e940b5a0",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 318,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "c5cae59b3e341b56d2d33244a93b715e8afc32ab0a1917eff4f284fddae035fd"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "original-local-id",
+        "observation": 1,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/trace/document/tracks/0/clips/0/id",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 329,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "ac4d88686ce3453c2c76ffb49553c8109d1895a509e491f8647c1ab1d9e6f983"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "recreated-local-id-is-reused",
+        "observation": 4,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/event/document/tracks/0/clips/0/id",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 324,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "f378d94916368504799224f56d97085ca5b6e6229fd48d5fd6edc0f3636a0872"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "redo-keeps-recreated-id",
+        "observation": 7,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/event/document/tracks/0/clips/0/id",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G10",
+        "gate": "JA1.G10",
+        "observer": "Core delete/recreate/split/undo and allocator ID-reuse demonstration",
+        "owner": "JA-1 occurrence and feedback owner",
+        "reason": "Occurrence-safe resolution/temporal-spatial status observer pending S1/S3 records.",
+        "stage": "S1/S3"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "history-loss",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2317074-1792549902183169382",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "04a27d0104a44e3d246c73cb899e9fa9fbde8b9763981d2c525cdf3a590b7b81",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 1,
+    "summary_sha256": "6b915bda41e70aa997633bbdcbb98220814b7e2541b4fac18d37884d36e7a4e1",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 305,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "fad9287beae93d1c6ee95289a9e70e7ed682d000a20bb911b80a8832d5bf0ce8"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "edit-history-present",
+        "observation": 2,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/history/undo_count",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 314,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "08d69cf9137500d66b5699e8a78c36b7c927dbd26eaf5e44884dd2ff3c98abb3"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "save-full-writer-bytes",
+        "observation": 4,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/writer_bytes_equal",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 310,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "662bef2a3e7655ab1f58bd16b96c15f0ff8160b30b96fb6f722e31a49e60bd62"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "reopened-document-equal",
+        "observation": 6,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/same_document",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 340,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "8a288dccd66ecab590977fa120da8856187a4ebd2b44bc6a1fb60b2b37caa20e"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "baseline_red",
+        "evidence_class": "baseline_property",
+        "id": "history-survives-reopen",
+        "observation": 6,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": false,
+        "pointer": "/history/undo_count",
+        "positive_control": "reopened-document-equal"
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G2",
+        "gate": "JA1.G2",
+        "observer": "Current branch/undo/redo/coalesced edit, private read-only history trace, save/reopen at changed runtime revision",
+        "owner": "project/JA-1 history owner",
+        "reason": "Demonstrate document-only history loss. Durable HeadId/base/floor and shared recovery-close semantics await S1/S2.",
+        "stage": "S1/S2"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "legacy-io",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2317457-1792549907064367716",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "fae1e4c3da3054e3f0d6e390dc88b5d9d7aaac09ce64cbd5cbcf3719eb34fac7",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 1,
+    "summary_sha256": "8f7477b14fd82bf97a93bcc7a340f0def66478668c5d1f308a3714b2d8ee080b",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 314,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "8a1b9b6c40d296a157889b0da8cf5c961e173b2b67bbb68f13129b9350bca14f"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "save-full-writer-bytes",
+        "observation": 2,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/writer_bytes_equal",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 364,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "e2f42dbd650cd4aa972ea40db32e7e5cf4970ca15efebafbfbeb20f91d0e624f"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-temp-sync-observed",
+        "observation": 2,
+        "oracle": "temp",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/io/events/0/operation",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 314,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "4d7d8dc77cc145cd385136fc202930b68f6de85845ffe47d83857cc8b3e94738"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "reopen-full-bytes",
+        "observation": 5,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/writer_round_trip_equal",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 311,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "91190daf682be59a5b7665b202c6e06bd8425d2d390da3cd929ff523f9bfba7d"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "fallback-full-bytes",
+        "observation": 7,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/writer_bytes_equal",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 317,
+          "relative_file": "artifacts/assertion-4.json",
+          "sha256": "10dbbdbc7ff57d0102e779663c96c22882e8ed768bea38af4c947d9ed4aa31dd"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "fallback-observed",
+        "observation": 7,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/in_place_fallback_observed",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 352,
+          "relative_file": "artifacts/assertion-5.json",
+          "sha256": "4e849bc4304bcba2b44a7fbca496d3454353fc2cbcc1817c02606f0fb749e124"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "baseline_red",
+        "evidence_class": "baseline_property",
+        "id": "strict-parent-directory-sync",
+        "observation": 2,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": false,
+        "pointer": "/directory_sync_observed",
+        "positive_control": "reopen-full-bytes"
+      },
+      {
+        "artifact": {
+          "byte_length": 363,
+          "relative_file": "artifacts/assertion-6.json",
+          "sha256": "9ba89ca0a251b6f93fe533c773ece48a1f71ba6cf15a1fd9f7ea303e8747544e"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "baseline_red",
+        "evidence_class": "baseline_property",
+        "id": "strict-write-no-in-place-fallback",
+        "observation": 7,
+        "oracle": "false",
+        "oracle_pointer": "",
+        "passed": false,
+        "pointer": "/in_place_fallback_observed",
+        "positive_control": "fallback-full-bytes"
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G1",
+        "gate": "JA1.G1",
+        "observer": "Real changed-Document save/reopen, byte inventory and test-only persistence-call trace/rename-refusal seam",
+        "owner": "project/JA-1 owner",
+        "reason": "Trace absence/fallback can yield a runtime assertion after control. Full graph, dropped-unflushed-write model and certified native Windows storage-crash lane remain pending S1; SIGKILL proves only process death.",
+        "stage": "S1"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "participants-lock",
+    "mode": "baseline",
+    "lane": "linux-native",
+    "run_id": "2317831-1792549911938293577",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "1450ee38cb55f8170296ae3a90b0dceace391e3f5ed4d8aa59680ba3188106f3",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "012f423a9d36145cc2b91f3b51d19f79800576552159c6bd0a2c923119e6b746",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 303,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "3b2cf669dc3654e13e5d52568603f21a47995fbe67b3883f193eac5f08de32dc"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-owner-acquired",
+        "observation": 2,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/acquired",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 308,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "db598634b0f423e1141bacde284d2bc7f900ea78ecf50990bf84f6fca00572c8"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "second-process-excluded",
+        "observation": 5,
+        "oracle": "false",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/acquired",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 295,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "00bf0fed27eef8d2094b8b127baac0bfce672536f7b6af5c79800c0b73b7cac5"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "held-owner-saves",
+        "observation": 8,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/saved",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 304,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "53c7704e638f705379bb7c55126413562d8ff9b543c4a64715722b5f5f2d80dc"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-no-descendants",
+        "observation": 10,
+        "oracle": "empty",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/os_children",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 293,
+          "relative_file": "artifacts/assertion-4.json",
+          "sha256": "1df06d0ede3edb9cc361881d5812841e93b9cc0436ece9c74f638e2673d0d1bd"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "owner-reaped",
+        "observation": 12,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/reaped",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 312,
+          "relative_file": "artifacts/assertion-5.json",
+          "sha256": "90c5385bf8fe2c065dde0ccec834a39b329f0d06b188f2cf2ecf5c240e11e1a9"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "successor-acquires-after-reap",
+        "observation": 14,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/acquired",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 298,
+          "relative_file": "artifacts/assertion-6.json",
+          "sha256": "2134bb2a7d65c7177a66b92338e9cac182cbfdaafa973b1a6858a0214b7a9bd5"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "grandchild-reaped",
+        "observation": 19,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/reaped",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 325,
+          "relative_file": "artifacts/assertion-7.json",
+          "sha256": "a004ff04e4bdfae9f39c17f5d6b25a3648c4ca0e5a9b83de55a08b5823f92ea5"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "recorded-empty-participant-killed-and-reaped",
+        "observation": 22,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/reaped",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G4",
+        "gate": "JA1.G4",
+        "observer": "Real alias lock/save participants, existing hook barriers, App-owned journal trace/control",
+        "owner": "project/JA-1 writer and App journal owner",
+        "reason": "Post-verify pinned-root use and real GUI post-scan journal exclusion need minimal observers before claimed red; full S4/S5 obligations remain S2.",
+        "stage": "S2"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G6",
+        "gate": "JA1.G6",
+        "observer": "Record current session ownership/direct-child lifecycle; native fixture child/grandchild positive control",
+        "owner": "shared guardian / JA-1 execution owner",
+        "reason": "Actual production guardian pre-exec/host-death/guardian-death/cleanup/no-overlap/resume witnesses pending S4 integration and OS prerequisites.",
+        "stage": "S4 / AW2 P1b-s"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "reply-retry",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2318883-1792549928902329613",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "13dedb1ed3fc7a467cff88e865eef6cae4ab9dfe1229c92d60ea6720df837831",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 1,
+    "summary_sha256": "f8452bf075f580ee179072e92027e992da30f8ce123f74f1cdab577f73e2b81b",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 308,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "9cdd616ae035e5b1ee86e8c9ddeaa33c9de0395e92419cf0350d1d07168c307c"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "ordinary-edit-one-entry",
+        "observation": 2,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/history/undo_count",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 306,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "06e1b9fbe0a7b3898f9373eaebf6824118d8fef10232036909ca2eacc1c78449"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "accepted-lost-reply-one-entry",
+        "observation": 7,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/undo_count",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 346,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "19ff79d00a264df3e31a9a63e5c00b4469c2276cb799f95096acbe0da34dc96a"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "baseline_red",
+        "evidence_class": "baseline_property",
+        "id": "retry-must-not-add-second-undo",
+        "observation": 10,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": false,
+        "pointer": "/undo_count",
+        "positive_control": "accepted-lost-reply-one-entry"
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G1-R",
+        "gate": "JA1.G1-R",
+        "observer": "Accepted edit, suppressed result, retry; count exact undo/history effects and saved bytes",
+        "owner": "project/JA-1 receipt owner",
+        "reason": "Edit missing-dedup property is reachable once observed. Durable comment receipt and branch-switch cases need actual comment/S1/S2 seams; no synthetic receipt service.",
+        "stage": "S1/S2"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "recording-loopback",
+    "mode": "baseline",
+    "lane": "media",
+    "run_id": "2319160-1792549941804823541",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "b71d7fc859ef44dd84794f81f413c4d4bda027c972de608b7d65b8adf725128e",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "1c0e7968fc38c622c2204a1d6e8ffd5c9841b8d342623fb59a52da27a62ffb6a",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 341,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "a4bd3f16a97505cbd63f3a7cfe7f645977668ca6d82fd87317c4cff0436b6dd8"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "first-session-forwarded-unchanged",
+        "observation": 3,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/sessions/0/forwarded_equals_pumped",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 342,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "ff224cebba8d62149a7d6518c073a89656473d93974c11394c537149e3d14613"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "second-session-forwarded-unchanged",
+        "observation": 3,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/sessions/1/forwarded_equals_pumped",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 326,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "e7c70bed3466788fc0406d97750ed2121f3debbca7eeb2bf6e484ef9a496573a"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "ordinary-prepared-plan-commits",
+        "observation": 6,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/trace/commit_succeeded",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 330,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "a1bdd1b07d14e31a5113fd69ca889d26f86acda2b5d06e678eefedece42eb360"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "destructive-confirmed-plan-commits",
+        "observation": 8,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/trace/commit_succeeded",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 336,
+          "relative_file": "artifacts/assertion-4.json",
+          "sha256": "5e859408bf539fae759b4af90747b5d8c702dad5cf4e0b341b7ef7d29e5ce81c"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "refused-confirmation-does-not-commit",
+        "observation": 11,
+        "oracle": "false",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/trace/commit_succeeded",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G12",
+        "gate": "JA1.G12",
+        "observer": "Real server/ScriptedDriver allowed edit and forbidden-attempt traces; preserve confirmation/investigator controls",
+        "owner": "JA-1 task policy / connector owner",
+        "reason": "Role-bound footprint policy and certified real connector ambient-tool restrictions pending S4. Existing investigator denial alone is not G12.",
+        "stage": "S4"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G14",
+        "gate": "JA1.G14",
+        "observer": "ScriptedCost/pump two-session events, missing categories and replay input traces",
+        "owner": "JA-1 scheduler / usage owner",
+        "reason": "Persistent multi-attempt run accounting/limits/rate-wait/no-fallback witness pending S4; recorded events do not implement it.",
+        "stage": "S4"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "media-shared-control",
+    "mode": "baseline",
+    "lane": "media",
+    "run_id": "2319916-1792549947117064704",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "95034b017381fb030fe43f679940404cd36b4293d875b54e49fead21e8189720",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "c929b62ff11a6e10b6d82f44044abf9609eedd2e1d8b78c6e43d698580fa8181",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 334,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "ead7f8e842a6a6e6fb3aee875a87fe1806a05aea4567a48c84bc3a79b0e6e212"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "preview-independent-red-landmark",
+        "observation": 2,
+        "oracle": "red",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/center_rgba",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 330,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "cec0d639257042efe4fee90348b4516db798227317e9b1fde841f7c4b983245b"
+        },
+        "assertion": "actual <= independent tolerance",
+        "comparison": "at_most",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "shared-preview-export-pixel-bound",
+        "observation": 6,
+        "oracle": "tolerance",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/max_channel_delta_from_preview",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 318,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "580a9a1e0c2b568233abe633f914528aa8df7505be97a57917cdc3489216d825"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "decode-worker-retired",
+        "observation": 6,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/decoder_worker_finished",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G7-S",
+        "gate": "JA1.G7-S",
+        "observer": "Save/load/select two distinguishable ordinary Documents/owned-source control refs; record missing immutable index",
+        "owner": "JA-1 versions and owned-input owner",
+        "reason": "Full frozen-input snapshot selection awaits real lease/index seam; Delivered seal refusal needs S5 coverage/claims/host.",
+        "stage": "S3"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G16",
+        "gate": "JA1.G16",
+        "observer": "Real clean export\u2192decode, current structural QA and existing loudness report",
+        "owner": "JA-1 output checker / certified reviewer owner",
+        "reason": "New whole-output seeded-defect checkers, certified reviewer modalities and seal observer pending S5. A successfully rendered defect is only input evidence until checker runs.",
+        "stage": "S5"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "media-repeated-control",
+    "mode": "baseline",
+    "lane": "media",
+    "run_id": "2320063-1792549952296215969",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "8c9912bb62a5887a767fb6dda181cab0b89690fe92641fce4ed5f4c0c24eda00",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "cc75710af415a7aec56f08b99fb4641a03489efdb79172f03320e5ecc64be5cf",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 334,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "ead7f8e842a6a6e6fb3aee875a87fe1806a05aea4567a48c84bc3a79b0e6e212"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "preview-independent-red-landmark",
+        "observation": 2,
+        "oracle": "red",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/center_rgba",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 330,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "cec0d639257042efe4fee90348b4516db798227317e9b1fde841f7c4b983245b"
+        },
+        "assertion": "actual <= independent tolerance",
+        "comparison": "at_most",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "shared-preview-export-pixel-bound",
+        "observation": 6,
+        "oracle": "tolerance",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/max_channel_delta_from_preview",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 318,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "580a9a1e0c2b568233abe633f914528aa8df7505be97a57917cdc3489216d825"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "decode-worker-retired",
+        "observation": 6,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/decoder_worker_finished",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G7-S",
+        "gate": "JA1.G7-S",
+        "observer": "Save/load/select two distinguishable ordinary Documents/owned-source control refs; record missing immutable index",
+        "owner": "JA-1 versions and owned-input owner",
+        "reason": "Full frozen-input snapshot selection awaits real lease/index seam; Delivered seal refusal needs S5 coverage/claims/host.",
+        "stage": "S3"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G16",
+        "gate": "JA1.G16",
+        "observer": "Real clean export\u2192decode, current structural QA and existing loudness report",
+        "owner": "JA-1 output checker / certified reviewer owner",
+        "reason": "New whole-output seeded-defect checkers, certified reviewer modalities and seal observer pending S5. A successfully rendered defect is only input evidence until checker runs.",
+        "stage": "S5"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "app-coalesced-paint",
+    "mode": "baseline",
+    "lane": "app-paint",
+    "run_id": "2320483-1792549957646581713",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "2ca84e79eb66ab3815766f25de3ffc3c2cee9849d9d9d5e748692df9bbd0631f",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "9533c2d07a8aa90be1eabb80270de9f0a2cecd6ee0dcc06b5257ff9833daaffd",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 316,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "281fb0bf4276ed1da63307c2f634758762f8ae64b98a0dd447b82e60c99126af"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "coalesced-gesture-one-undo",
+        "observation": 1,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/core_history/undo_count",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 332,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "4748c8c76e6a147318560ac67f9820a86c486a37c47d975ef5658cd4c4fc5e8a"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "exact-gesture-key",
+        "observation": 1,
+        "oracle": "key",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/core_history/trace/undo/0/coalesce_key",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 323,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "eaceb09e4a37fd702258e16e41b2da8fe54f51a644f210ec2836e62854265812"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-returned-frame-binds",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/bound_matches_returned",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 323,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "6ab2ed5df2d659d6a952edddc7498651e2d3aaa23870abb9dc18d0aac4e29530"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "discarded-pass-no-paint-mark",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/discarded_has_no_mark",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 325,
+          "relative_file": "artifacts/assertion-4.json",
+          "sha256": "50a987dc89c5be7d2a00cb8eda6acd7e94af8fd34d49d635a42e0e1efeb2afb4"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-headless-callback-ran",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/paint_callback_observed",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 308,
+          "relative_file": "artifacts/assertion-5.json",
+          "sha256": "8ac98faaa2ef8114141a9465f6439169731d96e481dfa48d2031ea25a155b2b9"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "ack-consumed-once",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/ack_consumed_once",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 339,
+          "relative_file": "artifacts/assertion-6.json",
+          "sha256": "5db4f5e14f5c5e7b58539a5d8b44031772ac0c48339d16425b231e29a4193da5"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "changed-red-landmark-not-initial-blue",
+        "observation": 1,
+        "oracle": "red",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/center_rgba",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 318,
+          "relative_file": "artifacts/assertion-7.json",
+          "sha256": "bc7da62c16262c1d2546e722bec957f66842b38887ca0a0af3e3459fb828f1c4"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-worker-teardown",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/engine_worker_finished",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 397,
+          "relative_file": "artifacts/assertion-8.json",
+          "sha256": "1d99b456a1ba4a3fdadc69da0c2c60e44f73d450be0fa541fd91ecccaa8f4f6e"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "independent-letterbox-landmark",
+        "observation": 1,
+        "oracle": "letterbox",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/letterbox_landmark",
+        "positive_control": null
+      }
+    ],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G5-L",
+        "gate": "JA1.G5-L",
+        "observer": "Existing coalesced App\u2192Core/presentation and two diverging branches/history controls",
+        "owner": "JA-1 manual-history bridge / App owner",
+        "reason": "No lease/history bridge, shared floor/recovery barrier or adoption seam today; baseline witnesses pending those minimal observable boundaries. No host emulation.",
+        "stage": "S2"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G8",
+        "gate": "JA1.G8",
+        "observer": "Existing finalization/paint-marker and delayed-frame tests, one-player observations",
+        "owner": "JA-1 versions / App presenter owner",
+        "reason": "Durable version/input/LUT association observer pending S3. Never label requested identity as displayed identity.",
+        "stage": "S3"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G9",
+        "gate": "JA1.G9",
+        "observer": "Current displayed stamp and independent letterbox landmark control",
+        "owner": "JA-1 feedback / App geometry owner",
+        "reason": "Version-bound comment store/capture/ack baseline seam pending; no fake comment persistence.",
+        "stage": "S3"
+      },
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G20",
+        "gate": "JA1.G20",
+        "observer": "Direct coalesced input\u2192Core\u2192actual paint timing boundaries/process identity sampler",
+        "owner": "JA-1 performance / native parity owner",
+        "reason": "End-to-end host/children/version/switch/resource and native parity measurements pending S6. No claim that current baseline already misses latency.",
+        "stage": "S6"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "aw2-capability-gap",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2321457-1792549975486630861",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "c59fed0bd89f60bc9ddd6ec6ed3828f873de910c9318391bff578788e87aec81",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 0,
+    "summary_sha256": "7e2e0350ed7657bbd4000c72f7f2daa7aab4edbf731717ebcf790619180eaba3",
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 2658,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "40a644a0bb0f4da8302aa1b154ffbe79887a771eaabfcb3da7fe5a0d16742820"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "current-writer-full-bytes",
+        "observation": 2,
+        "oracle": "empty",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/serialized",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 313,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "51c1e89f8106810106c316c9b3587765a6e45178da744e397ee0f6f0b51e0bd1"
+        },
+        "assertion": "actual == independently frozen expected",
+        "comparison": "equal",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "unsupported-code-refuses-parse",
+        "observation": 4,
+        "oracle": "false",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/loaded",
+        "positive_control": null
+      }
+    ],
+    "pending": [
+      {
+        "baseline_witness": "pending_baseline_witness",
+        "disposition": "surface_absent",
+        "owner": "AW2 P1a/P1b/P1c",
+        "positive_control": "current-writer-full-bytes",
+        "surface": "AW2 Code admission/render"
+      }
+    ],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-AW2.Code",
+        "gate": "AW2.Code",
+        "observer": "Catalog only; no missing production mechanism built",
+        "owner": "AW2 P1a/P1b/P1c owners",
+        "reason": "Code admission/store/render capability absent; unsupported parse earns no JA-1 behavioral-red credit",
+        "stage": "owning stage"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "pending-only",
+    "mode": "baseline",
+    "lane": "portable",
+    "run_id": "2321980-1792549980361322736",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "e26ac453a2ab02ef8b7d85ba2ec96c6f70307ba04488a9013b0499a7a2d95030",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 3,
+    "summary_sha256": "d6251c1cf3abf30e1df20c2b25ce87fd8fee03dbba27f6709c6270b74a4c5cc0",
+    "assertions": [],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G7-D",
+        "gate": "JA1.G7-D",
+        "observer": "Save/load/select two distinguishable ordinary Documents/owned-source control refs; record missing immutable index",
+        "owner": "JA-1 delivery seal owner",
+        "reason": "Full frozen-input snapshot selection awaits real lease/index seam; Delivered seal refusal needs S5 coverage/claims/host.",
+        "stage": "S5"
+      }
+    ],
+    "missing_requirements": null
+  },
+  {
+    "fixture_id": "provider-not-run",
+    "mode": "baseline",
+    "lane": "provider",
+    "run_id": "2322341-1792549985210669318",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "765afd7161245b1c5b671e142fb758d5095a835a2e74bf9293e14d07a588cdb6",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 2,
+    "summary_sha256": "04bf0470feab54ec25d6cfe9eb1f8be7a1c1f87313648f512fe3db6598344382",
+    "assertions": [],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G16",
+        "gate": "JA1.G16",
+        "observer": "Real clean export\u2192decode, current structural QA and existing loudness report",
+        "owner": "JA-1 output checker / certified reviewer owner",
+        "reason": "New whole-output seeded-defect checkers, certified reviewer modalities and seal observer pending S5. A successfully rendered defect is only input evidence until checker runs.",
+        "stage": "S5"
+      }
+    ],
+    "missing_requirements": "configured connector/modalities are not certified; provider lane NOT RUN"
+  },
+  {
+    "fixture_id": "practice-not-run",
+    "mode": "baseline",
+    "lane": "practice",
+    "run_id": "2322421-1792549990118734138",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "ad8dfc97a0177811ab245b7ea47a861dd885e5d36d3bc88c716763607aa42903",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 2,
+    "summary_sha256": "a148af995a7ef398949d39ce08088c94405da36900b7bff46789cb975f789c34",
+    "assertions": [],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G19",
+        "gate": "JA1.G19",
+        "observer": "Hash slots and qualified workflow/evidence checklist only",
+        "owner": "lead practice run / Riel",
+        "reason": "Actual supplied material, prior technical/model review and Riel's one watch pending S7. No invented practice content or human red.",
+        "stage": "S7"
+      }
+    ],
+    "missing_requirements": "private practice material/oracle hash slots pending; NOT RUN"
+  },
+  {
+    "fixture_id": "windows-not-run",
+    "mode": "baseline",
+    "lane": "windows-native",
+    "run_id": "2322466-1792549994767203217",
+    "source_head": "0e9b91bafb050d8a780feb56c4c62db86a127da9",
+    "fixture_sha256": "ecab7676c61856fa357b139d5741a4495eb8f3600c451550f43beb3de565f864",
+    "binary_sha256": "0fea35ce6c272ce0883367f485ed68ae822ab8e41444f9cbc39cdaf89956cb01",
+    "process_exit": 2,
+    "summary_sha256": "0521229e14b7ecd9b696477fc8d129a531e7ccfd7b588298829a871463849a2c",
+    "assertions": [],
+    "pending": [],
+    "gates": [
+      {
+        "disposition": "pending_baseline_witness",
+        "fixture_slot": "baseline-slot-JA1-G1-W",
+        "gate": "JA1.G1-W",
+        "observer": "Real changed-Document save/reopen, byte inventory and test-only persistence-call trace/rename-refusal seam",
+        "owner": "project/JA-1 Windows durability owner",
+        "reason": "Trace absence/fallback can yield a runtime assertion after control. Full graph, dropped-unflushed-write model and certified native Windows storage-crash lane remain pending S1; SIGKILL proves only process death.",
+        "stage": "S1"
+      }
+    ],
+    "missing_requirements": "missing windows-native prerequisite"
+  }
+]

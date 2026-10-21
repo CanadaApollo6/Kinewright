@@ -201,6 +201,25 @@ impl MatteFrame {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn ja_letterbox_observation() -> serde_json::Value {
+    let frame = MatteFrame::new(
+        16.0 / 9.0,
+        Rect::from_min_size(pos2(20.0, 30.0), vec2(160.0, 90.0)),
+        LayerTransform::IDENTITY,
+    );
+    let window = MatteWindowParams {
+        center_x_bp: 2_500,
+        center_y_bp: 7_500,
+        ..MatteWindowParams::NEUTRAL
+    };
+    let geometry = WindowGeometry::new(&window, frame);
+    let screen = geometry.point((0.0, 0.0));
+    // The inverse receives the independent landmark, not the forward result.
+    let uv = geometry.uv(pos2(60.0, 97.5));
+    serde_json::json!({"screen":[screen.x, screen.y],"uv":[uv.0, uv.1]})
+}
+
 /// One window's transform between its normalized field and screen pixels.
 #[derive(Debug, Clone, Copy)]
 struct WindowGeometry {

@@ -268,6 +268,16 @@ struct GpuProvenance {
 }
 
 impl GpuContext {
+    /// Exact selected renderer identity for eval observations; no render claim.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn observed_adapter(&self) -> (String, String, bool) {
+        (
+            self.provenance.backend.clone(),
+            self.provenance.adapter.clone(),
+            self.provenance.software_fallback,
+        )
+    }
     #[must_use]
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
         let lost = Self::watch_loss(&device);

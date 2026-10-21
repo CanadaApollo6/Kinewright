@@ -1,0 +1,144 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "clip-id-reuse",
+  "gate_ids": [
+    "JA1.G10"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {
+    "initial": {
+      "relative_file": "synthetic-blue-project.kinewright",
+      "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
+      "byte_length": 1491,
+      "kind": "synthetic-control"
+    },
+    "delete": {
+      "relative_file": "command-delete-clip.json",
+      "sha256": "80e828698d1d3236d85ab349ce79a32fec0258bf3593331208c350d2dcbe095e",
+      "byte_length": 60,
+      "kind": "input"
+    },
+    "recreate": {
+      "relative_file": "command-recreate-clip.json",
+      "sha256": "f69f56884628782f9d2fe23c60c616bbd5ff705abb840e5e1272bff41a74dffc",
+      "byte_length": 187,
+      "kind": "input"
+    },
+    "undo": {
+      "relative_file": "command-undo.json",
+      "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
+      "byte_length": 7,
+      "kind": "input"
+    },
+    "redo": {
+      "relative_file": "command-redo.json",
+      "sha256": "0b1a52518bc6d5e77daa6fd7f3ca404c11cd3a719e1f41e6d27f4f1b2ac98c0c",
+      "byte_length": 7,
+      "kind": "input"
+    }
+  },
+  "initial": {
+    "revision": 37,
+    "participants": [],
+    "document": "initial"
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "original-local-id",
+        "observation": 1,
+        "pointer": "/trace/document/tracks/0/clips/0/id",
+        "oracle": "one",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "delete"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "recreate"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "recreated-local-id-is-reused",
+        "observation": 4,
+        "pointer": "/event/document/tracks/0/clips/0/id",
+        "oracle": "one",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "undo"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "redo"
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "redo-keeps-recreated-id",
+        "observation": 7,
+        "pointer": "/event/document/tracks/0/clips/0/id",
+        "oracle": "one",
+        "evidence_class": "control"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    },
+    "one": {
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "byte_length": 2,
+      "kind": "independent-scalar-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

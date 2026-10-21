@@ -6,6 +6,7 @@ pub mod media_observer;
 pub mod protocol;
 pub mod recording;
 pub mod report;
+mod supervision;
 
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
@@ -30,11 +31,41 @@ pub fn run_with_observer(
     mode: Mode,
     observer: &mut Observer<'_>,
 ) -> Result<i32, String> {
-    let mut report = Report::create(output, mode)?;
+    let report = Report::create(output, mode)?;
+    run_report(fixture_path, observer, report)
+}
+
+fn run_report(
+    fixture_path: &Path,
+    observer: &mut Observer<'_>,
+    mut report: Report,
+) -> Result<i32, String> {
+    if std::env::var_os("JA_HARNESS_DEADLINE_FILE").is_some() {
+        supervision::validate_reserved(&report.root)?;
+    }
+    if let Ok(bytes) = protocol::read_bounded(fixture_path, protocol::INDEX_BYTES)
+        && let Ok(value) = protocol::unique_json(&bytes)
+        && let Some(ms) = value["limits"]["setup_timeout_ms"]
+            .as_u64()
+            .filter(|n| (1..=600_000).contains(n))
+    {
+        supervision::heartbeat(0, "setup", ms)?;
+    }
     let loaded = match protocol::load(fixture_path) {
         Ok(loaded) => loaded,
         Err(error) => {
             report.header(None)?;
+            if let Ok(bytes) = protocol::read_bounded(fixture_path, protocol::INDEX_BYTES) {
+                let identity = json!({"sha256":kinewright_media::sha256_bytes(&bytes),"byte_length":bytes.len()});
+                if let Err(reason) = report.artifact("invalid-fixture.json", &bytes) {
+                    report.event(
+                        0,
+                        "controller",
+                        "invalid_fixture_not_retained",
+                        json!({"identity":identity,"reason":reason}),
+                    )?;
+                }
+            }
             return report.finish(None, Some(&error));
         }
     };
@@ -54,6 +85,7 @@ fn execute(
     report: &mut Report,
     extension: &mut Observer<'_>,
 ) -> Result<(), String> {
+    supervision::heartbeat(0, "setup", loaded.fixture.limits.setup_timeout_ms)?;
     prerequisites(&loaded.fixture)?;
     let mut adapter = baseline::Baseline::new(&report.root.join("work"))?;
     let mut controller = controller::Controller::new(loaded, report)?;
@@ -66,6 +98,7 @@ fn execute(
                 return Err("action prerequisite was not observed".into());
             }
             let started = Instant::now();
+            supervision::heartbeat(action.id, "action", loaded.fixture.limits.action_timeout_ms)?;
             match &action.call {
                 Call::AssertObserved(assertion) => {
                     assert_observed(assertion, loaded, &observed, report)?;
@@ -85,20 +118,23 @@ fn execute(
                     report.event(action.id, &action.participant, "pending", pending)?;
                 }
                 call => {
-                    let custom = extension(action, loaded, report)?;
-                    let dispatched = if let Some(value) = custom {
+                    let routed = controller.dispatch(action, loaded, &observed, report)?;
+                    let dispatched = if routed.is_some() {
+                        routed
+                    } else if let Some(value) = extension(action, loaded, report)? {
                         Some((value, true))
                     } else if matches!(action.call, Call::AppFixture(_)) {
                         Some((controller::app_fixture(action, loaded, report)?, true))
-                    } else if let Some(value) = media.execute(&action.call, &mut adapter, report)? {
-                        Some((value, true))
                     } else {
-                        controller.dispatch(action, loaded, &observed, report)?
+                        media
+                            .execute(action, &mut adapter, report)?
+                            .map(|value| (value, true))
                     };
                     let (observation, delivered) = match dispatched {
                         Some(result) => result,
                         None => (adapter.execute(call, loaded)?, true),
                     };
+                    let delivered = delivered && controller.deliver_reply(action.id);
                     let adapter_ns = started.elapsed().as_nanos().to_string();
                     let observer_started = Instant::now();
                     let bytes = serde_json::to_vec(&observation).map_err(|e| e.to_string())?;
@@ -126,8 +162,10 @@ fn execute(
             }
             completed.insert(action.id);
         }
+        controller.sample(report)?;
         Ok(())
     })();
+    supervision::heartbeat(u32::MAX, "cleanup", 30_000)?;
     let cleanup = controller.cleanup(report).and_then(|()| {
         let observation = adapter.finish()?;
         report.event(0, "main", "adapter_cleanup", observation)
@@ -226,7 +264,7 @@ fn assert_observed(
         }
     };
     let detail = json!({"id":a.id,"evidence_class":a.evidence_class,"passed":passed,
-        "assertion":"actual == independently frozen expected", "actual":actual,"expected":expected,
+        "assertion":match a.comparison { protocol::Comparison::Equal => "actual == independently frozen expected", protocol::Comparison::AtMost => "actual <= independent tolerance" }, "comparison":a.comparison,"actual":actual,"expected":expected,
         "observation":a.observation,"pointer":a.pointer,"oracle":a.oracle,"oracle_pointer":a.oracle_pointer,
         "positive_control":a.positive_control,"disposition":if passed {"pass_control"} else if a.evidence_class == EvidenceClass::BaselineProperty {"baseline_red"} else {"control_failed"}});
     let artifact = report.artifact(
@@ -250,7 +288,11 @@ fn assert_observed(
 
 /// Fixed CLI arguments only; stdout contains one protocol summary record.
 pub fn cli() -> Result<i32, String> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let inner = args.starts_with(&["--role".into(), "fixture".into()]);
+    if inner {
+        args.drain(..2);
+    }
     if args.first().is_some_and(|a| a == "--role") {
         return controller::worker_cli(&args);
     }
@@ -262,7 +304,13 @@ pub fn cli() -> Result<i32, String> {
         "revised" => Mode::Revised,
         _ => return Err("unknown mode".into()),
     };
-    let exit = run(Path::new(&args[3]), Path::new(&args[5]), mode)?;
+    if inner {
+        let root = Path::new(&args[5]);
+        supervision::validate_reserved(root)?;
+        let report = Report::create_reserved(root, mode)?;
+        return run_report(Path::new(&args[3]), &mut |_, _, _| Ok(None), report);
+    }
+    let exit = supervision::run(Path::new(&args[3]), Path::new(&args[5]), mode)?;
     println!(
         "{}",
         json!({"protocol":protocol::PROTOCOL,"protocol_version":1,"exit_code":exit,"output":args[5]})
@@ -279,10 +327,20 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja")
     }
 
+    fn output(temp: &TempDirectory, label: &str) -> std::path::PathBuf {
+        if let Some(root) = std::env::var_os("JA_HARNESS_RETAIN_OUTPUT") {
+            let root = std::path::PathBuf::from(root);
+            std::fs::create_dir_all(&root).unwrap();
+            root.join(label)
+        } else {
+            temp.path(label)
+        }
+    }
+
     #[test]
     fn edit_save_reopen_has_literal_history_loss_after_successful_control() {
         let temp = TempDirectory::new("ja-history");
-        let out = temp.path("out");
+        let out = output(&temp, "history");
         assert_eq!(
             run(&fixtures().join("history-loss.json"), &out, Mode::Baseline).unwrap(),
             1
@@ -303,17 +361,13 @@ mod tests {
     #[test]
     fn current_io_control_precedes_missing_directory_sync_assertion() {
         let temp = TempDirectory::new("ja-io");
+        let out = output(&temp, "io");
         assert_eq!(
-            run(
-                &fixtures().join("legacy-io.json"),
-                &temp.path("out"),
-                Mode::Baseline
-            )
-            .unwrap(),
+            run(&fixtures().join("legacy-io.json"), &out, Mode::Baseline).unwrap(),
             1
         );
         let summary: Value =
-            serde_json::from_slice(&std::fs::read(temp.path("out/summary.json")).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
         assert!(
             summary["positive_controls"]
                 .as_array()
@@ -329,7 +383,12 @@ mod tests {
 
     #[test]
     fn existing_edit_undo_redo_and_format_corpus_controls_pass() {
-        for name in ["edit-undo-redo", "format-corpus", "branches-current"] {
+        for name in [
+            "edit-undo-redo",
+            "format-corpus",
+            "branches-current",
+            "clip-id-reuse",
+        ] {
             let temp = TempDirectory::new("ja-controls");
             assert_eq!(
                 run(
@@ -346,7 +405,7 @@ mod tests {
     #[test]
     fn recording_forwards_real_loopback_sessions_and_confirmation() {
         let temp = TempDirectory::new("ja-recording");
-        let out = temp.path("out");
+        let out = output(&temp, "recording");
         assert_eq!(
             run(
                 &fixtures().join("recording-loopback.json"),
@@ -409,6 +468,232 @@ mod tests {
     }
 
     #[test]
+    fn pending_and_unavailable_lanes_never_become_behavioral_reds_or_gate_passes() {
+        for (name, expected) in [
+            ("pending-only", 3),
+            ("aw2-capability-gap", 0),
+            ("provider-not-run", 2),
+            ("practice-not-run", 2),
+            ("windows-not-run", 2),
+        ] {
+            let temp = TempDirectory::new("ja-disposition");
+            let out = temp.path("out");
+            assert_eq!(
+                run(
+                    &fixtures().join(format!("{name}.json")),
+                    &out,
+                    Mode::Baseline
+                )
+                .unwrap(),
+                expected
+            );
+            let summary: Value =
+                serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+            assert!(
+                summary["assertions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|a| a["disposition"] != "baseline_red")
+            );
+            assert!(
+                summary["gates"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|g| g["disposition"] == "pending_baseline_witness"
+                        && g["owner"].is_string())
+            );
+            if name == "aw2-capability-gap" {
+                assert_eq!(summary["pending"][0]["disposition"], "surface_absent");
+            }
+        }
+    }
+
+    #[test]
+    fn loopback_fixture_admission_cannot_write_to_an_external_path() {
+        let temp = TempDirectory::new("ja-loopback-path");
+        copy_fixtures(temp.root());
+        let mut fixture: Value = serde_json::from_slice(
+            &std::fs::read(fixtures().join("recording-loopback.json")).unwrap(),
+        )
+        .unwrap();
+        let script = json!({"sessions":[{"prompts":["fixture data"],"turns":[{"calls":[{"tool":"invoke_capability","arguments":{"name":"export_current_cut","arguments":{"output":"/not-owned"}}}],"message":"data","cost":null}]}]});
+        let bytes = serde_json::to_vec(&script).unwrap();
+        std::fs::write(temp.path("unsafe-script.json"), &bytes).unwrap();
+        fixture["inputs"]["script"] = json!({"relative_file":"unsafe-script.json","sha256":kinewright_media::sha256_bytes(&bytes),"byte_length":bytes.len(),"kind":"script"});
+        let path = temp.path("fixture.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let out = temp.path("out");
+        assert_eq!(run(&path, &out, Mode::Baseline).unwrap(), 2);
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+        assert!(
+            summary["observations"].as_array().unwrap().is_empty(),
+            "refuse fixture before starting Core or server"
+        );
+        assert!(
+            summary["missing_requirements"]
+                .as_str()
+                .unwrap()
+                .contains("external IO adapter pending")
+        );
+    }
+
+    #[test]
+    fn input_roles_cannot_alias_the_oracle_namespace() {
+        let temp = TempDirectory::new("ja-role-collision");
+        copy_fixtures(temp.root());
+        let mut fixture: Value =
+            serde_json::from_slice(&std::fs::read(fixtures().join("history-loss.json")).unwrap())
+                .unwrap();
+        fixture["inputs"]["oracle:edit"] = fixture["inputs"]["edit"].clone();
+        let undo = std::fs::read(fixtures().join("command-undo.json")).unwrap();
+        fixture["oracles"]["edit"] = json!({"relative_file":"command-undo.json","sha256":kinewright_media::sha256_bytes(&undo),"byte_length":undo.len(),"kind":"control"});
+        fixture["actions"][1]["args"]["input"] = json!("oracle:edit");
+        let path = temp.path("collision.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let out = output(&temp, "role-collision");
+        assert_eq!(run(&path, &out, Mode::Baseline).unwrap(), 2);
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+        assert!(summary["observations"].as_array().unwrap().is_empty());
+        assert!(
+            summary["missing_requirements"]
+                .as_str()
+                .unwrap()
+                .contains("reserved oracle namespace")
+        );
+    }
+
+    #[test]
+    fn media_adapter_refuses_a_non_main_participant_before_execution() {
+        let temp = TempDirectory::new("ja-media-participant");
+        copy_fixtures(temp.root());
+        let mut fixture: Value = serde_json::from_slice(
+            &std::fs::read(fixtures().join("media-shared-control.json")).unwrap(),
+        )
+        .unwrap();
+        fixture["actions"][1]["participant"] = json!("A");
+        let path = temp.path("participant.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let out = output(&temp, "participant-routing");
+        assert_eq!(run(&path, &out, Mode::Baseline).unwrap(), 2);
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+        assert!(summary["observations"].as_array().unwrap().is_empty());
+        assert!(
+            summary["missing_requirements"]
+                .as_str()
+                .unwrap()
+                .contains("requires main participant")
+        );
+    }
+
+    #[test]
+    fn main_adapter_uses_shared_reply_drop_and_retry_validation() {
+        let temp = TempDirectory::new("ja-main-dispatch");
+        copy_fixtures(temp.root());
+        let mut fixture: Value =
+            serde_json::from_slice(&std::fs::read(fixtures().join("reply-retry.json")).unwrap())
+                .unwrap();
+        fixture["initial"]["participants"] = json!([]);
+        fixture["actions"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|a| a["action"] != "participant_exit");
+        for action in fixture["actions"].as_array_mut().unwrap() {
+            if action["participant"] == "A" {
+                action["participant"] = json!("main");
+            }
+        }
+        let path = temp.path("main-retry.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let out = output(&temp, "main-retry");
+        assert_eq!(run(&path, &out, Mode::Baseline).unwrap(), 1);
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+        assert!(
+            summary["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["action_id"] == 6 && a["reply_delivered"] == false)
+        );
+        assert!(
+            summary["positive_controls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["passed"] == true)
+        );
+
+        let mut fixture: Value = serde_json::from_slice(
+            &std::fs::read(fixtures().join("media-shared-control.json")).unwrap(),
+        )
+        .unwrap();
+        fixture["actions"].as_array_mut().unwrap().push(
+            json!({"id":10,"participant":"main","retry_of":2,"action":"media_stats","args":{}}),
+        );
+        let path = temp.path("changed-retry.json");
+        std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let out = output(&temp, "changed-retry");
+        assert_eq!(run(&path, &out, Mode::Baseline).unwrap(), 2);
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+        assert!(
+            summary["missing_requirements"]
+                .as_str()
+                .unwrap()
+                .contains("retry changed original action bytes/participant")
+        );
+    }
+
+    #[test]
+    fn repeated_media_actions_retain_distinct_complete_artifacts() {
+        let temp = TempDirectory::new("ja-media-repeat");
+        let out = output(&temp, "repeated-media");
+        assert_eq!(
+            run(
+                &fixtures().join("media-repeated-control.json"),
+                &out,
+                Mode::Baseline
+            )
+            .unwrap(),
+            0
+        );
+        let mut paths = std::collections::BTreeSet::new();
+        for (id, field) in [
+            (2, "raw_rgba"),
+            (4, "raw_rgba"),
+            (5, "output"),
+            (6, "raw_rgba"),
+            (10, "raw_rgba"),
+            (11, "raw_rgba"),
+            (12, "output"),
+            (13, "raw_rgba"),
+        ] {
+            let value: Value = serde_json::from_slice(
+                &std::fs::read(out.join(format!("artifacts/observation-{id}.json"))).unwrap(),
+            )
+            .unwrap();
+            let reference = &value[field];
+            let name = reference["relative_file"].as_str().unwrap();
+            assert!(
+                paths.insert(name.to_owned()),
+                "each action retains its own evidence"
+            );
+            let bytes = std::fs::read(out.join(name)).unwrap();
+            assert_eq!(
+                bytes.len() as u64,
+                reference["byte_length"].as_u64().unwrap()
+            );
+            assert_eq!(kinewright_media::sha256_bytes(&bytes), reference["sha256"]);
+        }
+        assert_eq!(paths.len(), 8);
+    }
+
+    #[test]
     fn malformed_protocol_and_prerequisites_are_setup_not_red() {
         for (index, change) in [
             ("version", json!({"protocol_version":2})),
@@ -430,6 +715,14 @@ mod tests {
             for (key, value) in change.as_object().unwrap() {
                 fixture[key] = value.clone();
             }
+            if index == "escape" {
+                fixture["inputs"] = serde_json::from_slice::<Value>(
+                    &std::fs::read(fixtures().join("history-loss.json")).unwrap(),
+                )
+                .unwrap()["inputs"]
+                    .clone();
+                fixture["inputs"]["edit"]["relative_file"] = json!("../escape");
+            }
             let fixture_root = temp.path("fixtures");
             std::fs::create_dir(&fixture_root).unwrap();
             copy_fixtures(&fixture_root);
@@ -438,6 +731,17 @@ mod tests {
             let result = run(&path, &temp.path("out"), Mode::Baseline);
             std::fs::remove_file(&path).unwrap();
             assert_eq!(result.unwrap(), 2, "{index}");
+            if index == "escape" {
+                let summary: Value =
+                    serde_json::from_slice(&std::fs::read(temp.path("out/summary.json")).unwrap())
+                        .unwrap();
+                assert!(
+                    summary["missing_requirements"]
+                        .as_str()
+                        .unwrap()
+                        .contains("path escape")
+                );
+            }
         }
         assert!(protocol::unique_json(br#"{"a":{"b":1,"b":2}}"#).is_err());
         assert!(protocol::unique_json(br#"{"a":1} {}"#).is_err());
@@ -480,7 +784,7 @@ mod tests {
         {
             let path = temp.path(&format!("bad-{i}.json"));
             std::fs::write(&path, bytes).unwrap();
-            let out = temp.path(&format!("out-{i}"));
+            let out = output(&temp, &format!("protocol-{i}"));
             assert_eq!(run(&path, &out, Mode::Baseline).unwrap(), 2);
             let summary: Value =
                 serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();

@@ -215,20 +215,45 @@ struct WireUsage {
     cost_usd: Option<f64>,
 }
 
-pub fn scripted_session(server: &McpServer, bytes: &[u8]) -> Result<Value, String> {
+fn parse_script(bytes: &[u8]) -> Result<Script, String> {
     let spec: Script = serde_json::from_value(unique_json(bytes)?).map_err(|e| e.to_string())?;
     if spec.sessions.is_empty() || spec.sessions.len() > 8 {
         return Err("script session quota".into());
     }
-    let mut results = Vec::new();
-    let before = server.ja_request_counts();
-    for session in spec.sessions {
+    for session in &spec.sessions {
         if session.turns.len() > 8
             || session.prompts.len() != session.turns.len()
             || session.turns.iter().any(|t| t.calls.len() > 64)
         {
             return Err("script turn/call quota".into());
         }
+        if session.turns.iter().flat_map(|t| &t.calls).any(|c| {
+            !matches!(
+                c.tool.as_str(),
+                "get_timeline_state" | "get_capability" | "search_capabilities" | "add_track"
+            )
+        }) {
+            return Err("S0 recording fixture supports timeline/schema reads and the explicit internal-tool denial only; external IO adapter pending".into());
+        }
+    }
+    Ok(spec)
+}
+
+pub(crate) fn validate_script_fixture(bytes: &[u8]) -> Result<(), String> {
+    parse_script(bytes).map(|_| ())
+}
+
+pub(crate) fn validate_plan_fixture(bytes: &[u8]) -> Result<(), String> {
+    let ops: Vec<Value> = serde_json::from_value(unique_json(bytes)?).map_err(|e| e.to_string())?;
+    let ops = crate::runtime::decode_plan_operations(ops).map_err(|e| e.to_string())?;
+    super::protocol::validate_local_control_operations(&ops)
+}
+
+pub fn scripted_session(server: &McpServer, bytes: &[u8]) -> Result<Value, String> {
+    let spec = parse_script(bytes)?;
+    let mut results = Vec::new();
+    let before = server.ja_request_counts();
+    for session in spec.sessions {
         let turns = session
             .turns
             .into_iter()

@@ -1,0 +1,14 @@
+{
+  "Do": {
+    "AddSolidClip": {
+      "track": 71,
+      "timeline_start": 0,
+      "duration": 6,
+      "color": {
+        "r": 255,
+        "g": 0,
+        "b": 0
+      }
+    }
+  }
+}

@@ -333,6 +333,9 @@ pub(crate) mod paint_support {
     pub(crate) const SIDE: f32 = 64.0;
 
     impl Painted {
+        pub(crate) fn observed_adapter(&self) -> (String, String, bool) {
+            self.gpu.observed_adapter()
+        }
         pub(crate) fn new() -> Self {
             use egui_wgpu::wgpu;
             let gpu = kinewright_media::GpuContext::headless(true).expect("a headless device");

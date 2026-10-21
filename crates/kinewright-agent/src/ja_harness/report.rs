@@ -39,6 +39,10 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
 impl Report {
     pub fn create(root: &Path, mode: Mode) -> Result<Self, String> {
         fs::create_dir(root).map_err(|e| format!("private output directory: {e}"))?;
+        Self::create_reserved(root, mode)
+    }
+
+    pub(super) fn create_reserved(root: &Path, mode: Mode) -> Result<Self, String> {
         fs::create_dir(root.join("artifacts")).map_err(|e| e.to_string())?;
         let events = fs::File::create(root.join("events.jsonl")).map_err(|e| e.to_string())?;
         let run_id = format!(
@@ -66,6 +70,11 @@ impl Report {
     }
 
     pub fn set_quota(&mut self, quota: u64) -> Result<(), String> {
+        if quota < u64::try_from(2 * CONTROL_BYTES).map_err(|e| e.to_string())?
+            || quota > INDEX_BYTES
+        {
+            return Err("output quota below bounded terminal reserve".into());
+        }
         self.quota = quota;
         if self.used > quota {
             return Err("output quota exceeded".into());
@@ -74,13 +83,18 @@ impl Report {
     }
 
     fn charge(&mut self, bytes: usize) -> Result<(), String> {
-        self.used = self
+        let next = self
             .used
             .checked_add(u64::try_from(bytes).map_err(|e| e.to_string())?)
             .ok_or("report size overflow")?;
-        if self.used > self.quota {
+        if next
+            > self
+                .quota
+                .saturating_sub(u64::try_from(CONTROL_BYTES).map_err(|e| e.to_string())?)
+        {
             return Err("output quota exceeded; incomplete evidence".into());
         }
+        self.used = next;
         Ok(())
     }
 
@@ -244,7 +258,7 @@ impl Report {
             "controller_pid":std::process::id(),"controller_os_start_identity":os_start_identity(std::process::id()),
             "command_line":std::env::args().take(16).collect::<Vec<_>>(),
             "time_unix_ms":SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_millis().to_string(),
-            "rss_bytes":null,"vram_bytes":null,"unobserved_counters":null});
+            "rss_bytes":rss_bytes(std::process::id()),"vram_bytes":null,"unobserved_counters":null});
         self.json_file("run.json", &identity)?;
         if let Some(f) = fixture {
             self.artifact("fixture.json", &f.bytes)?;
@@ -271,7 +285,7 @@ impl Report {
             2
         } else if failed {
             1
-        } else if self.assertions.is_empty() && !self.pending.is_empty() {
+        } else if self.assertions.is_empty() {
             3
         } else {
             0
@@ -280,15 +294,77 @@ impl Report {
             "fixture_id":fixture.map(|f| &f.fixture_id),"mode":self.mode,"lane":fixture.map(|f| f.lane),"exit_code":exit,
             "positive_controls":self.assertions.iter().filter(|a| a["evidence_class"] == "control").collect::<Vec<_>>(),
             "assertions":self.assertions,"pending":self.pending,"observations":self.observations,"artifacts":self.artifacts,
-            "gates":fixture.map(|f| f.gate_ids.iter().map(|gate| json!({"gate":gate,"disposition":"pending_baseline_witness","reason":"S0 observations do not implement the owning production gate; see JA-S0-CONTRACTS §8","owner":"owning JA-1/JA-4/JA-2/AW2 stage"})).collect::<Vec<_>>()),
-            "disposition":if error.is_some() {"not_run"} else {"observed"},"missing_requirements":error,
+            "gates":fixture.map(|f| f.gate_ids.iter().map(|gate| gate_allocation(gate)).collect::<Vec<_>>()),
+            "disposition":if error.is_some() {"not_run"} else if exit == 3 {"pending_baseline_witness"} else {"observed"},"missing_requirements":error,
             "elapsed_ns":self.started.elapsed().as_nanos().to_string()});
-        // Reserve a bounded terminal setup result even when the selected quota
-        // was exhausted. The normal report must never become a truncated pass.
-        self.quota = INDEX_BYTES;
-        self.used = 0;
-        self.json_file("summary.json", &summary)?;
+        let bytes = serde_json::to_vec_pretty(&summary).map_err(|e| e.to_string())?;
+        let (bytes, exit) = if u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+            <= self.quota.saturating_sub(self.used)
+        {
+            (bytes, exit)
+        } else {
+            // The terminal reserve is charged at admission. An incomplete
+            // index gets a bounded NOT RUN receipt, never a truncated pass.
+            let reason = error
+                .unwrap_or("terminal index exceeds output quota")
+                .chars()
+                .take(4096)
+                .collect::<String>();
+            let incomplete = json!({"protocol":PROTOCOL,"protocol_version":1,"run_id":self.run_id,
+                "fixture_id":fixture.map(|f| &f.fixture_id),"mode":self.mode,"lane":fixture.map(|f| f.lane),
+                "exit_code":2,"disposition":"not_run","missing_requirements":reason,
+                "incomplete_artifact_index":true,"gates":fixture.map(|f| &f.gate_ids),"assertions":[]});
+            (
+                serde_json::to_vec_pretty(&incomplete).map_err(|e| e.to_string())?,
+                2,
+            )
+        };
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > self.quota.saturating_sub(self.used) {
+            return Err("terminal reserve unavailable; NOT RUN".into());
+        }
+        fs::write(self.root.join("summary.json"), &bytes).map_err(|e| e.to_string())?;
         Ok(exit)
+    }
+}
+
+/// Return the frozen owner and pending observer allocation.
+/// # Panics
+/// Panics only if the compiled catalog fails its checked schema.
+#[must_use]
+pub fn gate_allocation(gate: &str) -> Value {
+    let catalog: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/ja/gate-observers.json"))
+            .expect("checked gate catalog");
+    if let Some(row) = catalog["gates"]
+        .as_array()
+        .expect("gate list")
+        .iter()
+        .find(|row| row["gate_id"] == gate)
+    {
+        json!({"gate":gate,"disposition":"pending_baseline_witness","owner":row["owner"],"stage":row["stage"],"observer":row["observer"],"reason":row["pending"],"fixture_slot":row["fixture_slot"]})
+    } else {
+        json!({"gate":gate,"disposition":"pending_baseline_witness","owner":"lead: observer allocation required","reason":"gate absent from frozen allocation; no acceptance claim"})
+    }
+}
+
+#[must_use]
+pub fn rss_bytes(pid: u32) -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let value = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))?;
+        let mut fields = value.split_whitespace();
+        let kib: u64 = fields.next()?.parse().ok()?;
+        (fields.next()? == "kB")
+            .then(|| kib.checked_mul(1024))
+            .flatten()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
     }
 }
 
@@ -309,5 +385,34 @@ pub fn os_start_identity(pid: u32) -> Option<String> {
     {
         let _ = pid;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exhausted_output_keeps_a_bounded_not_run_receipt() {
+        let temp = kinewright_media::test_support::TempDirectory::new("ja-quota");
+        let mut report = Report::create(&temp.path("out"), Mode::Baseline).unwrap();
+        report
+            .set_quota(u64::try_from(CONTROL_BYTES * 2).unwrap())
+            .unwrap();
+        report
+            .artifact("admitted.bin", &vec![0; CONTROL_BYTES - 1024])
+            .unwrap();
+        assert!(report.artifact("refused.bin", &[0; 2048]).is_err());
+        assert_eq!(
+            report.finish(None, Some("output quota exceeded")).unwrap(),
+            2
+        );
+        let total: u64 = fs::metadata(temp.path("out/artifacts/admitted.bin"))
+            .unwrap()
+            .len()
+            + fs::metadata(temp.path("out/summary.json")).unwrap().len();
+        assert!(total <= u64::try_from(CONTROL_BYTES * 2).unwrap());
+        let summary: Value =
+            serde_json::from_slice(&fs::read(temp.path("out/summary.json")).unwrap()).unwrap();
+        assert_eq!(summary["disposition"], "not_run");
     }
 }

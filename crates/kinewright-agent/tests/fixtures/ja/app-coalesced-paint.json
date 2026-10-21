@@ -141,6 +141,19 @@
         "evidence_class": "control",
         "comparison": "equal"
       }
+    },
+    {
+      "id": 10,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "independent-letterbox-landmark",
+        "observation": 1,
+        "pointer": "/letterbox_landmark",
+        "oracle": "letterbox",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
     }
   ],
   "barriers": [],
@@ -168,6 +181,12 @@
       "sha256": "17049e474ae190b9bb9708ab6c43eba3e1f1e421d1aefb49236cc733010ce9b4",
       "byte_length": 7,
       "kind": "independent-identity"
+    },
+    "letterbox": {
+      "relative_file": "oracle-letterbox.json",
+      "sha256": "e636e77340bc6192b8ebb43af038cf2288677282b7aeb3d22201ab860487f0ac",
+      "byte_length": 40,
+      "kind": "independent-landmark"
     }
   },
   "limits": {

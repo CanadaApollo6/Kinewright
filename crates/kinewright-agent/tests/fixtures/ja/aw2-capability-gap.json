@@ -1,0 +1,98 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "aw2-capability-gap",
+  "gate_ids": [
+    "AW2.Code"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {
+    "unsupported": {
+      "relative_file": "unsupported-v3-code.kinewright",
+      "sha256": "e6496b3ef8304e6c3dfb53574e36b4ad9f65fe2482df7eb959e6ddc1ddbb5c32",
+      "byte_length": 1385,
+      "kind": "opaque-future-project"
+    }
+  },
+  "initial": {
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "project_serialize",
+      "args": {}
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "current-writer-full-bytes",
+        "observation": 2,
+        "pointer": "/serialized",
+        "oracle": "empty",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "project_load",
+      "args": {
+        "input": "unsupported"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "unsupported-code-refuses-parse",
+        "observation": 4,
+        "pointer": "/loaded",
+        "oracle": "false",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "surface_absent",
+      "args": {
+        "surface": "AW2 Code admission/render",
+        "owner": "AW2 P1a/P1b/P1c",
+        "positive_control": "current-writer-full-bytes"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "empty": {
+      "relative_file": "writer-v1-empty.kinewright",
+      "sha256": "59611abbbf40aed579dda09a9f7d4900904dc06af7badd96cd475df200062326",
+      "byte_length": 1017,
+      "kind": "writer-bytes"
+    },
+    "false": {
+      "relative_file": "oracle-false.json",
+      "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+      "byte_length": 6,
+      "kind": "input"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

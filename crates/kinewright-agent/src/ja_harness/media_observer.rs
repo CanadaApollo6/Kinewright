@@ -10,7 +10,11 @@ use kinewright_core::{
 };
 use serde_json::{Value, json};
 
-use super::{baseline::Baseline, protocol::Call, report::Report};
+use super::{
+    baseline::Baseline,
+    protocol::{Action, Call},
+    report::Report,
+};
 
 #[must_use]
 pub fn stamp_value(stamp: kinewright_core::FrameStamp) -> Value {
@@ -57,10 +61,22 @@ impl MediaObserver {
     #[allow(clippy::too_many_lines)]
     pub fn execute(
         &mut self,
-        call: &Call,
+        action: &Action,
         baseline: &mut Baseline,
         report: &mut Report,
     ) -> Result<Option<Value>, String> {
+        let call = &action.call;
+        let prefix = format!("media-{}-{}", action.participant, action.id);
+        if matches!(
+            call,
+            Call::MediaSeek(_)
+                | Call::MediaProof(_)
+                | Call::MediaExport(_)
+                | Call::MediaDecode(_)
+                | Call::MediaStats(_)
+        ) {
+            baseline.require_generated_media_control()?;
+        }
         let value = match call {
             Call::MediaSeek(args) => {
                 let engine = baseline.media()?;
@@ -69,16 +85,17 @@ impl MediaObserver {
                 engine.seek(TimeCode(args.at));
                 let frame = receive(&engine, args.at)?;
                 self.preview = Some(frame.texture.rgba.as_slice().to_vec());
-                let mut value = frame_value(&frame, report, "preview.rgba")?;
+                let mut value = frame_value(&frame, report, &format!("{prefix}-preview.rgba"))?;
                 value["requested_stamp"] = stamp_value(engine.stamp());
                 value
             }
             Call::MediaProof(args) => {
                 let engine = baseline.media()?;
+                engine.set_document(baseline.snapshot()?.1);
                 let proof = engine
                     .thumbnail_at(TimeCode(args.at), args.max_width)
                     .map_err(|e| e.to_string())?;
-                let artifact = report.artifact("proof.rgba", &proof.pixels)?;
+                let artifact = report.artifact(&format!("{prefix}-proof.rgba"), &proof.pixels)?;
                 json!({"at":args.at,"width":proof.width,"height":proof.height,"raw_rgba":artifact})
             }
             Call::MediaExport(args) => {
@@ -100,13 +117,13 @@ impl MediaObserver {
                 let result = engine
                     .export_document_reporting(document, &path, settings, sender)
                     .map_err(|e| e.to_string())?;
-                let artifact = report.artifact_file("export.mp4", &path)?;
+                let artifact = report.artifact_file(&format!("{prefix}-export.mp4"), &path)?;
                 json!({"output":artifact,"export_report":format!("{result:?}"),"progress":progress.try_iter().map(|p| format!("{p:?}")).collect::<Vec<_>>(),"normalization_requested":false,"whole_output_qa":null})
             }
             Call::MediaDecode(args) => {
                 let path = baseline.output_path(&args.path)?;
                 let decoder = kinewright_media::FfmpegMediaEngine::new_with_data_dir(
-                    baseline.root.join("decode-cache"),
+                    baseline.root.join(format!("decode-cache-{}", action.id)),
                 )
                 .map_err(|e| format!("decode prerequisite NOT RUN: {e}"))?;
                 let finished = decoder.teardown_observer();
@@ -132,7 +149,7 @@ impl MediaObserver {
                         .map(|(a, b)| a.abs_diff(*b))
                         .max()
                         .ok_or("empty decoded image")?;
-                    let mut value = frame_value(&frame, report, "decoded.rgba")?;
+                    let mut value = frame_value(&frame, report, &format!("{prefix}-decoded.rgba"))?;
                     value["max_channel_delta_from_preview"] = json!(maximum);
                     value["source"] = source;
                     Ok::<_, String>(value)
@@ -150,7 +167,7 @@ impl MediaObserver {
             Call::MediaStats(_) => {
                 let engine = baseline.media()?;
                 let stats = engine.stats();
-                json!({"sync_decoders":stats.sync_decoders,"live_table_bytes":stats.live_table_bytes,"shutdown_detached_readers":stats.shutdown_detached_readers,
+                json!({"render_adapter":engine.observed_adapter(),"sync_decoders":stats.sync_decoders,"live_table_bytes":stats.live_table_bytes,"shutdown_detached_readers":stats.shutdown_detached_readers,
                     "raw_playback_stats":format!("{stats:?}"),"rss_bytes":null,"vram_bytes":null,"pin_charge_counters":null})
             }
             _ => return Ok(None),

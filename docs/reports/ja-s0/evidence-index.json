@@ -1,0 +1,105 @@
+{
+  "scope": "Successor S0 evidence seal after review corrections; historical measured bytes retained; no final-HEAD rerun claim",
+  "files": [
+    {
+      "file": "RAW-TEST-RESULTS.md",
+      "byte_length": 13779,
+      "sha256": "8887b527e2339bcc31836803dbda6d2172e84e416db2dc422b0f8afd273b98d8"
+    },
+    {
+      "file": "README.md",
+      "byte_length": 8629,
+      "sha256": "3e56c71bbabc192dd5288611f56228a9d58bbc51c806af21102f051196130c13"
+    },
+    {
+      "file": "REVIEW-RESPONSES.md",
+      "byte_length": 4058,
+      "sha256": "b0e92964fd64374d47fae98fe03918b427d0d177de6a2872c4f09f073c3800d6"
+    },
+    {
+      "file": "S0-1-gates.json",
+      "byte_length": 5891,
+      "sha256": "a33fe43123db34f8c96a1df4ae1f4a814da15889ffd23e069f763200ea1684ed"
+    },
+    {
+      "file": "S0-2-evidence.tar.gz",
+      "byte_length": 155345,
+      "sha256": "b8affaea12c2f025ba9a7e8a083a8c9fc25522feb5ff96e3c6287d2228ccf8d8"
+    },
+    {
+      "file": "S0-2-gates.json",
+      "byte_length": 10296,
+      "sha256": "3023385b784fe7ef4c1d14a6d5c0bea2e16e8bd92608496591b6a494bc2dff5e"
+    },
+    {
+      "file": "S0-2-runs.json",
+      "byte_length": 15126,
+      "sha256": "55c7155df3e40ded280352355f45b2b2e9537f262c329111b995a350c03c7b63"
+    },
+    {
+      "file": "S0-3-evidence.tar.gz",
+      "byte_length": 235406,
+      "sha256": "7cdf7ee65abb5594cbe9e760abb8bc55ffd86246ff1bc792b6391a8d766bbb98"
+    },
+    {
+      "file": "S0-3-gates.json",
+      "byte_length": 16406,
+      "sha256": "5136e00dffb60c2cc268cb506a65db2c079929ec370e849352be6077637d5016"
+    },
+    {
+      "file": "S0-3-runs.json",
+      "byte_length": 12191,
+      "sha256": "5f9205a0bd6fd06229481625a19409051ad271d47eebd309ead7d5d82cff5c10"
+    },
+    {
+      "file": "S0-4-evidence.tar.gz",
+      "byte_length": 189389,
+      "sha256": "4ca9e88a2f50d0a759bde9d0d1e4793a08145ef2e31c1f70107357c8edce509d"
+    },
+    {
+      "file": "S0-4-gates.json",
+      "byte_length": 15868,
+      "sha256": "587ed1e74023ace09bee5ae82f0891951c35fd78a6a74580a9934817662a0225"
+    },
+    {
+      "file": "S0-4-runs.json",
+      "byte_length": 6757,
+      "sha256": "299d1b2de2ec76dc67bb9cdd80fb1abbb152bc4a161047523cb549657697d0bc"
+    },
+    {
+      "file": "S0-5-artifact-audit.json",
+      "byte_length": 213,
+      "sha256": "eb0cc1d723133c507a465a9e43c85c8a4b034829e4be54b282554c0c6be6a8af"
+    },
+    {
+      "file": "S0-5-evidence.tar.gz",
+      "byte_length": 7260773,
+      "sha256": "dfccd5e058102bade43ab5e0b0f76043ca4569616694703232c72c62111b85a2"
+    },
+    {
+      "file": "S0-5-gates.json",
+      "byte_length": 29811,
+      "sha256": "58008ea78e94e9a02f73f3883c755c8730a8b1cd05a8283dd18619fbb132adce"
+    },
+    {
+      "file": "S0-5-mutations.json",
+      "byte_length": 33716,
+      "sha256": "0bf96239e8909cc2ba96d851adaa3913169654991cf6c41fbb75bf8046cb7c5f"
+    },
+    {
+      "file": "S0-5-runs.json",
+      "byte_length": 63335,
+      "sha256": "8017242b0d8f6e93b95a8d8119fc5fefb79aa54910cf7d34115b91e4ccd425f2"
+    },
+    {
+      "file": "SEALING-NOTES.md",
+      "byte_length": 950,
+      "sha256": "b6cb8906b45b117f151ab2710ea6c5fd532fe259d5ae7cce776a6dada74fcfc9"
+    },
+    {
+      "file": "verification-logs.tar.gz",
+      "byte_length": 104704,
+      "sha256": "4208829065e67d3bb36efa764030ebd5e311d36ab463f2800f2d3f6840521389"
+    }
+  ]
+}

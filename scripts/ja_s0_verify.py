@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "crates/kinewright-agent/tests/fixtures/ja"
@@ -25,6 +26,17 @@ def catalog_check():
         assert slot["input_sha256"] is None and slot["oracle_sha256"] is None
         assert slot["status"] == "pending_baseline_witness" and slot["owner"]
     rows = json.loads((FIXTURES / "regressions.json").read_text())["tests"]
+    if (FIXTURES / "gate-observers.json").exists():
+        gates = json.loads((FIXTURES / "gate-observers.json").read_text())["gates"]
+        assert len({g["gate_id"] for g in gates}) == len(gates)
+        for gate in gates:
+            assert gate["status"] == "pending_baseline_witness" and gate["owner"] and gate["fixture_slot"]
+            assert all(gate["expected"][key] for key in ["E", "P", "B", "M"])
+        editorial = json.loads((FIXTURES / "editorial-slots.json").read_text())["slots"]
+        assert {s["fixture_id"] for s in editorial if s["fixture_id"].startswith("text-")} == {s["fixture_id"] for s in slots if s["fixture_id"].startswith("text-")}
+        assert all(s["input_sha256"] is None and s["oracle_sha256"] is None for s in editorial)
+        for item in json.loads((FIXTURES / "writer-corpus-pins.json").read_text())["files"]:
+            assert hashlib.sha256((FIXTURES / item["path"]).read_bytes()).hexdigest() == item["sha256"]
     for row in rows:
         source = (ROOT / row["source"]).read_text()
         name = row["test"].split("::")[-1]
@@ -44,6 +56,9 @@ def main():
     out = ROOT / f"target/ja-s0/S0-{args.stage}"
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CARGO_BUILD_JOBS="4", RUST_TEST_THREADS="4")
+    temporary = out / "tmp"
+    temporary.mkdir(exist_ok=True)
+    env["TMPDIR"] = str(temporary)
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     diff = subprocess.check_output(["git", "diff", "HEAD"], cwd=ROOT)
     paths = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).split(b"\0")
@@ -56,8 +71,9 @@ def main():
     records = []
 
     def run(label, command):
-        if int(Path("/proc/meminfo").read_text().split("MemAvailable:")[1].split()[0]) < 6 * 1024**2:
-            raise RuntimeError("less than 6 GiB available: retry gate later")
+        while int(Path("/proc/meminfo").read_text().split("MemAvailable:")[1].split()[0]) < 6 * 1024**2:
+            print(f"{label}: waiting for the required 6 GiB available memory", flush=True)
+            time.sleep(10)
         path = out / f"{len(records):02}-{label}.log"
         with path.open("w") as log:
             log.write(f"source_head={head}\nsource_tree_sha256={source_tree_sha256}\ndirty_diff_sha256={hashlib.sha256(diff).hexdigest()}\n")

@@ -182,3 +182,62 @@ fn controller_failure_still_reaps_both_recorded_participants() {
     assert_eq!(exits.len(), 2);
     assert!(exits.iter().all(|e| e["data"]["reaped"] == true));
 }
+
+#[test]
+#[cfg(unix)]
+fn native_deadline_interrupts_pending_confirmation_and_reaps_fixture() {
+    let temp = TempDirectory::new("ja-native-deadline");
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja");
+    for entry in std::fs::read_dir(&fixtures).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            std::fs::copy(&path, temp.root().join(path.file_name().unwrap())).unwrap();
+        }
+    }
+    let mut value: Value =
+        serde_json::from_slice(&std::fs::read(fixtures.join("recording-loopback.json")).unwrap())
+            .unwrap();
+    value["limits"]["action_timeout_ms"] = serde_json::json!(5000);
+    value["actions"][10]["args"]["confirmation"] = Value::Null;
+    let fixture = temp.path("deadline.json");
+    std::fs::write(&fixture, serde_json::to_vec(&value).unwrap()).unwrap();
+    let out = if let Some(root) = std::env::var_os("JA_HARNESS_RETAIN_OUTPUT") {
+        let root = std::path::PathBuf::from(root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.join("deadline")
+    } else {
+        temp.path("out")
+    };
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "baseline", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+    assert_eq!(summary["disposition"], "not_run");
+    assert!(
+        summary["missing_requirements"]
+            .as_str()
+            .unwrap()
+            .contains("action 11")
+    );
+    let receipt: Value =
+        serde_json::from_slice(&std::fs::read(out.join("supervisor-process.json")).unwrap())
+            .unwrap();
+    assert_eq!(receipt["reaped"], true);
+    assert_eq!(receipt["timed_out"], true);
+    assert!(
+        receipt["phase_elapsed_ms"].as_u64().unwrap() < 10_000,
+        "interrupt the real broker wait at the fixture deadline"
+    );
+    // This exact ordinary approved commit completed before the later omitted
+    // confirmation blocked. A missing server is not the deadline witness.
+    let approved: Value =
+        serde_json::from_slice(&std::fs::read(out.join("artifacts/observation-8.json")).unwrap())
+            .unwrap();
+    assert_eq!(approved["trace"]["commit_succeeded"], true);
+}

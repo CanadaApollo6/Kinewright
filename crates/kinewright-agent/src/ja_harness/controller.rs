@@ -96,6 +96,7 @@ impl Worker {
             .env_remove("REV2_HOOK")
             .env_remove("REV2_SIGNALS")
             .env_remove("REV2_EXIT")
+            .env_remove("JA_HARNESS_DEADLINE_FILE")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -300,6 +301,7 @@ pub fn app_fixture(
         &report.root.join(format!("app-input-{}", action.id)),
     )?;
     let out = report.root.join(format!("app-{}", action.id));
+    let executable_sha256 = kinewright_media::sha256_file(&binary).map_err(|e| e.to_string())?;
     let child = Command::new(&binary)
         .args([
             "--exact",
@@ -310,6 +312,7 @@ pub fn app_fixture(
         ])
         .env("JA_HARNESS_FIXTURE", &fixture)
         .env("JA_HARNESS_OUTPUT", &out)
+        .env_remove("JA_HARNESS_DEADLINE_FILE")
         .env(
             "JA_HARNESS_MODE",
             if report.mode == protocol::Mode::Baseline {
@@ -324,6 +327,7 @@ pub fn app_fixture(
         .spawn()
         .map_err(|e| e.to_string())?;
     let mut child = OwnedChild(child);
+    report.event(action.id,"app-test","process_spawn",json!({"pid":child.0.id(),"os_start_identity":os_start_identity(child.0.id()),"executable_sha256":executable_sha256}))?;
     let stdout = child.0.stdout.take().ok_or("App stdout missing")?;
     let stderr = child.0.stderr.take().ok_or("App stderr missing")?;
     let capture = |mut stream: Box<dyn Read + Send>| {
@@ -343,12 +347,15 @@ pub fn app_fixture(
     let stdout = capture(Box::new(stdout));
     let stderr = capture(Box::new(stderr));
     let deadline = Instant::now() + Duration::from_millis(loaded.fixture.limits.action_timeout_ms);
+    let mut timed_out = false;
     let status = loop {
         if let Some(status) = child.0.try_wait().map_err(|e| e.to_string())? {
             break status;
         }
         if Instant::now() >= deadline {
-            return Err("App adapter deadline; NOT RUN".into());
+            timed_out = true;
+            child.0.kill().map_err(|e| e.to_string())?;
+            break child.0.wait().map_err(|e| e.to_string())?;
         }
         thread::sleep(Duration::from_millis(2));
     };
@@ -356,8 +363,11 @@ pub fn app_fixture(
     let stderr = stderr.join().map_err(|_| "App stderr capture panic")??;
     report.artifact(&format!("app-{}-stdout.txt", action.id), &stdout)?;
     report.artifact(&format!("app-{}-stderr.txt", action.id), &stderr)?;
-    report.event(action.id, "app-test", "process_exit", json!({"pid":child.0.id(),"reaped":true,"status":status.to_string(),"executable_sha256":kinewright_media::sha256_file(&binary).map_err(|e| e.to_string())?}))?;
-    if !status.success() {
+    report.event(action.id, "app-test", "process_exit", json!({"pid":child.0.id(),"reaped":true,"status":status.to_string(),"executable_sha256":executable_sha256,"timed_out":timed_out}))?;
+    if out.exists() {
+        report.admit_adapter_tree(&out)?;
+    }
+    if !status.success() || timed_out {
         return Err(format!(
             "App test adapter exited {status}; NOT RUN, inspect common inner report"
         ));
@@ -366,7 +376,6 @@ pub fn app_fixture(
         &out.join("summary.json"),
         protocol::INDEX_BYTES,
     )?)?;
-    report.admit_adapter_tree(&out)?;
     if summary["exit_code"] != 0 {
         return Err("App adapter did not pass selected controls".into());
     }
@@ -400,26 +409,7 @@ impl Controller {
         if exe.file_stem().and_then(|s| s.to_str()) != Some("kinewright-ja-baseline") {
             return Err("native baseline worker binary prerequisite missing".into());
         }
-        let frozen = report.root.join("frozen");
-        fs::create_dir(&frozen).map_err(|e| e.to_string())?;
-        for (prefix, refs) in [
-            ("", &loaded.fixture.inputs),
-            ("oracle:", &loaded.fixture.oracles),
-        ] {
-            for (role, reference) in refs {
-                let path = frozen.join(&reference.relative_file);
-                if let Some(parent) = path.parent() {
-                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                fs::write(
-                    path,
-                    super::baseline::input(loaded, &format!("{prefix}{role}"))?,
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
-        let fixture = frozen.join("fixture.json");
-        fs::write(&fixture, &loaded.bytes).map_err(|e| e.to_string())?;
+        let fixture = freeze_fixture(loaded, &report.root.join("frozen"))?;
         let root = report
             .root
             .join("work")
@@ -436,10 +426,27 @@ impl Controller {
                 name,
             )?;
             let ready = worker.receive(0, loaded.fixture.limits.setup_timeout_ms)?;
+            if ready["pid"] != worker.child.id()
+                || ready["os_start_identity"] != json!(os_start_identity(worker.child.id()))
+            {
+                return Err("worker birth identity differs from owned process".into());
+            }
             report.event(0, name, "process_spawn", ready)?;
             controller.workers.insert(name.clone(), worker);
         }
+        controller.sample(report)?;
         Ok(controller)
+    }
+
+    pub fn sample(&self, report: &mut Report) -> Result<(), String> {
+        let started = Instant::now();
+        let mut pids = vec![std::process::id()];
+        pids.extend(self.workers.values().map(|w| w.child.id()));
+        let processes = pids.into_iter().map(|pid| json!({"pid":pid,"os_start_identity":os_start_identity(pid),"rss_bytes":super::report::rss_bytes(pid),"vram_bytes":null})).collect::<Vec<_>>();
+        let aggregate = processes
+            .iter()
+            .try_fold(0_u64, |sum, p| sum.checked_add(p["rss_bytes"].as_u64()?));
+        report.event(0,"controller","process_resource_sample",json!({"scope":"controller_and_direct_participants; not a descendant or whole-job allowance","processes":processes,"sampled_concurrent_rss_bytes":aggregate,"capture_span_ns":started.elapsed().as_nanos().to_string(),"peak_claim":false}))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -550,6 +557,10 @@ impl Controller {
             }
             _ => Ok(None),
         }
+    }
+
+    pub fn deliver_reply(&mut self, action: u32) -> bool {
+        !self.dropped.remove(&action)
     }
 
     pub fn cleanup(&mut self, report: &mut Report) -> Result<(), String> {

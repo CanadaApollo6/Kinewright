@@ -1,0 +1,25 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "provider-not-run",
+  "gate_ids": [
+    "JA1.G16"
+  ],
+  "lane": "provider",
+  "requirements": [
+    "connector:uncertified"
+  ],
+  "inputs": {},
+  "initial": {
+    "participants": []
+  },
+  "actions": [],
+  "barriers": [],
+  "oracles": {},
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}
