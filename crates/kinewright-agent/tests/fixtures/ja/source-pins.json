@@ -1,0 +1,67 @@
+{
+  "source_head": "208d5c852e187f5fc073fd9f061a2c316e4ce567",
+  "accepted_design_head": "6cbbda2d2e7707d8a3a1076e49576c9741c3ef28",
+  "format_ceiling": 2,
+  "conflict_resolutions": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "files": [
+    {
+      "path": "docs/JA-S0-CONTRACTS.md",
+      "sha256": "6f79c60f64e3c5e0595db4a0cd1dbfd886365ee86b8a2ae032b9b480fa614d7b",
+      "byte_length": 104857
+    },
+    {
+      "path": "docs/JA1-STUDIO-ORCHESTRATION.md",
+      "sha256": "f75f6263a0aa2a02d499e4ed9df239a7defdd794a7c459d023086598f091a97f",
+      "byte_length": 113487
+    },
+    {
+      "path": "docs/JA4-TAKE-CHOICE.md",
+      "sha256": "6302214c1a9ec2c9d3130f1fc82485ba3f5add7f40cf5517d425eb6cf2dbff33",
+      "byte_length": 63169
+    },
+    {
+      "path": "docs/JA2-PERSON-SEPARATION.md",
+      "sha256": "90f8ba150abc983d84c4b75fdda9e9749e3f6a10909a934f2db129e847cd00e7",
+      "byte_length": 83931
+    },
+    {
+      "path": "docs/AW2-CODE-GENERATED-CLIPS.md",
+      "sha256": "94cf6f6687b61aac2bb82c4a6448ecb13092c9d255be9e2ac1f05f875632ebbf",
+      "byte_length": 133017
+    },
+    {
+      "path": "crates/kinewright-project/src/project.rs",
+      "sha256": "e8877ab4a7fc58066ecbba6269fe97cc7ec8db06daa33e3df78a12590cde5844",
+      "byte_length": 49719
+    },
+    {
+      "path": "crates/kinewright-core/src/model.rs",
+      "sha256": "ea00f5c0ee472ed120deb20ae329fe785dabc2554459454cadc5f1256cedafdc",
+      "byte_length": 84632
+    },
+    {
+      "path": "crates/kinewright-core/tests/fixtures/pre_m13_project.json",
+      "sha256": "480be4dc59cbfec90acbfd1830fb204c3875bc2b45f5f8c4848a937ef0935de9",
+      "byte_length": 634
+    }
+  ],
+  "songbird_schema_head": "aef7c95f1829754c5bc5b8f3bdbea91e175eeb39",
+  "external_schema_files": [
+    {
+      "path": "packages/stats/src/lib/ask/export.ts",
+      "sha256": "5cda1346ac9ec38597cba85a95d0c03b8551e341d6c5db4a1f862475bcfa2ce1",
+      "byte_length": 2639
+    },
+    {
+      "path": "packages/stats/src/lib/chart-spec/resolve.ts",
+      "sha256": "255b46d064bb0dcf6fc856bb227ef207f305b6b9572331a678fe16852d3ec433",
+      "byte_length": 3493
+    }
+  ]
+}

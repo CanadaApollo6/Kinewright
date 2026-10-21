@@ -1,0 +1,243 @@
+{
+  "source_head": "208d5c852e187f5fc073fd9f061a2c316e4ce567",
+  "source_tree_sha256": "389eb05b39f5a96e455b199df6db8ea1ea67ac6f02d5785a039baea941c56a49",
+  "dirty_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "gates": [
+    {
+      "label": "workspace-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "--workspace"
+      ],
+      "exit": 0,
+      "sha256": "155ea04661e621db606df6b8bdc10467d803327804d6bcc8fbbd1bebf5be279a",
+      "summaries": []
+    },
+    {
+      "label": "harness-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--bin",
+        "kinewright-eval"
+      ],
+      "exit": 0,
+      "sha256": "1bb4fad1391870211028097d96aedd838b099a307f0aeec780125eeeba7bf998",
+      "summaries": []
+    },
+    {
+      "label": "shipping-app-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "-p",
+        "kinewright-app"
+      ],
+      "exit": 0,
+      "sha256": "bd1b6c5fc7fbc87d3cd416f1036d62da97d01cfa07aac9e9f96b4d3ed4bd1f38",
+      "summaries": []
+    },
+    {
+      "label": "workspace-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "sha256": "8cd5ed5e9cd184e00e39c890b5000d05bb1eeeebacd0ac62a0c8d5add051b42f",
+      "summaries": []
+    },
+    {
+      "label": "harness-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "clippy",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--bin",
+        "kinewright-eval",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "sha256": "53000ef6c8151f1728970971fea48b866e4ef91c23cd4a140731882f486db982",
+      "summaries": []
+    },
+    {
+      "label": "pin-36",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "e88b77557265e479445dd6cd90da61f6845c2b229c041bcf4758cdd3dfcc0ede",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-37",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::v2_stamps_only_when_used",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "b3938d9ac59a8841ca9397a1bdac1ae643520d16616c4fc8c51686e1bf569539",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-38",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::mo2_inactive_features_still_stamp_v2",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "965389b5a05f18f04580b15a1f427bda84fe873d3c3ba6a90ce33cbda2a7d9c6",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.01s"
+      ]
+    },
+    {
+      "label": "pin-39",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "4b939b69e736199e03069dd0aedbe3f8a00f4acb049ff055e25f39411f9cb487",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-40",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::project_atomic_write_falls_back_when_rename_is_refused",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "85c513d479c6039febd4250427300bf901fcbfac76c5605098786e8b5b52bbb3",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-41",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "project::tests::can_overwrite_save_gates_on_the_read_version",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "960abbc366745e8adbdbd47bfb20d770c70987b986f5bab673b36bddc585c166",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 798 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "classification",
+      "command": [
+        "nice",
+        "-n",
+        "19",
+        "python3",
+        "-I",
+        "scripts/slow_tests.py",
+        "lint"
+      ],
+      "exit": 0,
+      "sha256": "988281fe5afe3748bfd96b3bc4f1bbfeff94e7cda2adc57c1cc69e6c2b24f11b",
+      "summaries": []
+    }
+  ]
+}

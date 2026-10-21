@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""Serialized S0 gates. Run with nice -n 19 python3 -I after setup-ffmpeg.sh."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+FIXTURES = ROOT / "crates/kinewright-agent/tests/fixtures/ja"
+
+
+def catalog_check():
+    pins = json.loads((FIXTURES / "source-pins.json").read_text())
+    assert pins["conflict_resolutions"] == [1, 2, 3, 4, 5]
+    assert "PROJECT_FORMAT_VERSION: u32 = 2" in (
+        ROOT / "crates/kinewright-core/src/model.rs").read_text()
+    slots = json.loads((FIXTURES / "hash-slots.json").read_text())["slots"]
+    assert len({s["fixture_id"] for s in slots}) == len(slots)
+    assert sum(s["fixture_id"].startswith("text-") for s in slots) == 17
+    for slot in slots:
+        assert slot["input_sha256"] is None and slot["oracle_sha256"] is None
+        assert slot["status"] == "pending_baseline_witness" and slot["owner"]
+    rows = json.loads((FIXTURES / "regressions.json").read_text())["tests"]
+    for row in rows:
+        source = (ROOT / row["source"]).read_text()
+        name = row["test"].split("::")[-1]
+        assert name in source, row
+    print(f"catalog: {len(rows)} exact regression pins; {len(slots)} pending slots; ceiling 2")
+    return rows
+
+
+def main():
+    parser = argparse.ArgumentParser(__doc__)
+    parser.add_argument("stage", type=int, choices=range(1, 6))
+    parser.add_argument("--catalog-only", action="store_true")
+    args = parser.parse_args()
+    rows = catalog_check()
+    if args.catalog_only:
+        return
+    out = ROOT / f"target/ja-s0/S0-{args.stage}"
+    out.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, CARGO_BUILD_JOBS="4", RUST_TEST_THREADS="4")
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    diff = subprocess.check_output(["git", "diff", "HEAD"], cwd=ROOT)
+    paths = subprocess.check_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT).split(b"\0")
+    source_tree = hashlib.sha256()
+    for name in sorted(set(paths) - {b""}):
+        path = ROOT / os.fsdecode(name)
+        if path.is_file():
+            source_tree.update(name + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    source_tree_sha256 = source_tree.hexdigest()
+    records = []
+
+    def run(label, command):
+        if int(Path("/proc/meminfo").read_text().split("MemAvailable:")[1].split()[0]) < 6 * 1024**2:
+            raise RuntimeError("less than 6 GiB available: retry gate later")
+        path = out / f"{len(records):02}-{label}.log"
+        with path.open("w") as log:
+            log.write(f"source_head={head}\nsource_tree_sha256={source_tree_sha256}\ndirty_diff_sha256={hashlib.sha256(diff).hexdigest()}\n")
+            log.write(json.dumps(command) + "\n")
+            log.flush()
+            result = subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        raw = path.read_text()
+        summaries = re.findall(r"^test result:.*$", raw, re.M)
+        record = dict(label=label, command=command, exit=result.returncode,
+                      sha256=hashlib.sha256(path.read_bytes()).hexdigest(), summaries=summaries)
+        records.append(record)
+        (out / "gates.json").write_text(json.dumps(dict(source_head=head, source_tree_sha256=source_tree_sha256,
+            dirty_diff_sha256=hashlib.sha256(diff).hexdigest(), gates=records), indent=2) + "\n")
+        print(f"{label}: exit {result.returncode}", flush=True)
+        for summary in summaries:
+            print(summary, flush=True)
+        if result.returncode:
+            print(raw[-10000:])
+            sys.exit(result.returncode)
+        if label.startswith("pin-"):
+            assert len(summaries) == 1 and "1 passed; 0 failed" in summaries[0], summaries
+
+    cargo = ["nice", "-n", "10", "cargo"]
+    harness = "kinewright-eval" if args.stage == 1 else "kinewright-ja-baseline"
+    run("workspace-build", cargo + ["build", "--workspace"])
+    run("harness-build", cargo + ["build", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness])
+    run("shipping-app-build", cargo + ["build", "-p", "kinewright-app"])
+    run("workspace-clippy", cargo + ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])
+    run("harness-clippy", cargo + ["clippy", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness, "--", "-D", "warnings"])
+    touched = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=ROOT, text=True).splitlines()
+    touched += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=ROOT, text=True).splitlines()
+    rust = sorted({p for p in touched if p.endswith(".rs")})
+    if rust:
+        run("rustfmt", ["rustfmt", "--edition", "2024", "--config", "skip_children=true", "--check"] + rust)
+    if args.stage >= 2:
+        run("harness-tests", cargo + ["test", "-p", "kinewright-agent", "--lib", "ja_harness::", "--", "--test-threads=1"])
+    for i, row in enumerate(rows):
+        if row["stage"] != args.stage and args.stage != 5:
+            continue
+        target = row["target"].split(":")
+        flag = ["--lib"] if target == ["lib"] else ["--" + target[0], target[1]]
+        run(f"pin-{i:02}", cargo + ["test", "-p", row["package"]] + flag + [row["test"], "--", "--exact", "--test-threads=1"])
+    run("classification", ["nice", "-n", "19", "python3", "-I", "scripts/slow_tests.py", "lint"])
+
+
+if __name__ == "__main__":
+    main()

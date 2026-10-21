@@ -1,0 +1,342 @@
+{
+  "manifest_version": 1,
+  "contract": "docs/JA-S0-CONTRACTS.md \u00a78.2",
+  "tests": [
+    {
+      "stage": 3,
+      "package": "kinewright-agent",
+      "target": "lib",
+      "test": "branch::tests::sibling_branches_diverge_without_touching_live_state",
+      "source": "crates/kinewright-agent/src/branch.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-agent",
+      "target": "lib",
+      "test": "branch::tests::merge_is_atomic_and_rejects_a_stale_base",
+      "source": "crates/kinewright-agent/src/branch.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-agent",
+      "target": "lib",
+      "test": "branch::tests::cherry_pick_preserves_branch_order_and_validates_indices_first",
+      "source": "crates/kinewright-agent/src/branch.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-core",
+      "target": "lib",
+      "test": "actor::tests::applied_operations_follow_undo_and_redo_instead_of_the_append_only_log",
+      "source": "crates/kinewright-core/src/actor.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-core",
+      "target": "lib",
+      "test": "actor::tests::batch_broadcasts_once_appends_each_op_and_undoes_as_one_snapshot",
+      "source": "crates/kinewright-core/src/actor.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-core",
+      "target": "lib",
+      "test": "actor::tests::coalesced_batches_under_one_key_form_a_single_undo_entry",
+      "source": "crates/kinewright-core/src/actor.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-core",
+      "target": "lib",
+      "test": "actor::tests::coalesced_history_replays_faithfully_through_applied_operations",
+      "source": "crates/kinewright-core/src/actor.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::i8_media_0",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::i8_media_1",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::i8_media_2",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::i8_media_3",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::i8_media_real_audio",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::only_a_current_stamped_failure_stops_playback",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::a_request_issued_before_a_new_document_is_superseded_not_relabelled",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::an_idle_engine_holds_no_preview_reader_or_decoder",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::dropping_the_engine_stops_the_preview_thread",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "lib",
+      "test": "engine::tests::sync_decoders_counts_open_decoders_until_teardown",
+      "source": "crates/kinewright-media/src/engine.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-app",
+      "target": "bin:kinewright-app",
+      "test": "presenter::tests::the_marker_marks_what_is_bound_when_it_paints",
+      "source": "crates/kinewright-app/src/presenter.rs",
+      "lane": "app-paint"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-app",
+      "target": "bin:kinewright-app",
+      "test": "presenter::tests::a_marker_that_never_paints_is_never_acked",
+      "source": "crates/kinewright-app/src/presenter.rs",
+      "lane": "app-paint"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-app",
+      "target": "bin:kinewright-app",
+      "test": "presenter::tests::the_real_paint_callback_acks_only_painted_images",
+      "source": "crates/kinewright-app/src/presenter.rs",
+      "lane": "app-paint"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-app",
+      "target": "bin:kinewright-app",
+      "test": "presenter::tests::seeded_interleavings_bind_and_ack_only_current_frames",
+      "source": "crates/kinewright-app/src/presenter.rs",
+      "lane": "app-paint"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "test:generated_media",
+      "test": "two_track_effect_export_matches_preview_after_h264_redecode",
+      "source": "crates/kinewright-media/tests/generated_media.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "test:generated_media",
+      "test": "title_export_pixels_match_preview_after_h264_redecode",
+      "source": "crates/kinewright-media/tests/generated_media.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-media",
+      "target": "test:generated_media",
+      "test": "cancelled_export_writes_no_output",
+      "source": "crates/kinewright-media/tests/generated_media.rs",
+      "lane": "media"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::tests::r19_second_acquire_refuses_while_held",
+      "source": "crates/kinewright-project/src/lockfile.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::tests::r19_release_frees_the_lock_for_a_clean_reacquire",
+      "source": "crates/kinewright-project/src/lockfile.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::tests::f4_symlink_alias_shares_one_lock",
+      "source": "crates/kinewright-project/src/lockfile.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::tests::g9_fd_check_detects_a_swapped_object",
+      "source": "crates/kinewright-project/src/lockfile.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::race_tests::guard_missing_discovery_with_held_lock",
+      "source": "crates/kinewright-project/src/aw1_race_tests.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::race_tests::guard_alias_spellings_race_one_owner",
+      "source": "crates/kinewright-project/src/aw1_race_tests.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::race_tests::h7_stale_same_endpoint_release_spares_the_successor",
+      "source": "crates/kinewright-project/src/aw1_race_tests.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "lockfile::race_tests::j3_link_retargeted_after_acquire_refuses_the_next_save",
+      "source": "crates/kinewright-project/src/aw1_race_tests.rs",
+      "lane": "linux-native"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "headless::tests::headless_save_preserves_an_unreplayed_journal",
+      "source": "crates/kinewright-project/src/headless.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "headless::tests::g3_headless_occupied_save_as_preserves_and_pairs",
+      "source": "crates/kinewright-project/src/headless.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 3,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "headless::tests::f6_failed_project_write_restores_the_prior_sidecar",
+      "source": "crates/kinewright-project/src/headless.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 4,
+      "package": "kinewright-app",
+      "target": "bin:kinewright-app",
+      "test": "recovery::tests::journal_round_trip_preserves_agent_ops_and_undo_redo_history",
+      "source": "crates/kinewright-app/src/recovery.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 1,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover",
+      "source": "crates/kinewright-project/src/project.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 1,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "project::tests::v2_stamps_only_when_used",
+      "source": "crates/kinewright-project/src/project.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 1,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "project::tests::mo2_inactive_features_still_stamp_v2",
+      "source": "crates/kinewright-project/src/project.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 1,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite",
+      "source": "crates/kinewright-project/src/project.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 1,
+      "package": "kinewright-project",
+      "target": "lib",
+      "test": "project::tests::project_atomic_write_falls_back_when_rename_is_refused",
+      "source": "crates/kinewright-project/src/project.rs",
+      "lane": "portable"
+    },
+    {
+      "stage": 1,
+      "package": "kinewright-app",
+      "target": "bin:kinewright-app",
+      "test": "project::tests::can_overwrite_save_gates_on_the_read_version",
+      "source": "crates/kinewright-app/src/project.rs",
+      "lane": "portable"
+    }
+  ]
+}

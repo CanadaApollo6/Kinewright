@@ -1,0 +1,190 @@
+{
+  "catalog_version": 1,
+  "slots": [
+    {
+      "fixture_id": "text-lossless-cues",
+      "distinction": "Soft wraps, hard breaks/beat cues, links, literal `a[0]`, quoted brackets, code role and unknown/nested/unbalanced brackets; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-unique-move-rewrap",
+      "distinction": "Unique surviving line/beat and structured identity edit positive controls; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-duplicate-delete-first",
+      "distinction": "Original duplicate pin/context with first deletion history; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-duplicate-delete-second",
+      "distinction": "Indistinguishable raw revision, different survivor history; automatic transfer stays unresolved; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-duplicate-insert-move-context",
+      "distinction": "Insert before pinned duplicate, ambiguous moves/splits/joins and cue/beat-context changes; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-out-of-order-retakes",
+      "distinction": "Flub/clean/later repeat, script order differing from recording order; all full paths and stable labels; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-anchor-fillers",
+      "distinction": "All selected anchors broken by legal isolated fillers in valid path, exact anchors in distant wrong/partial path; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-window-crossing-long-line",
+      "distinction": "Accepted JA-4 96-required-token/35-isolated-filler counterexample across prior window boundaries; exact original associations; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-critical-values-units",
+      "distinction": "Correct written/spoken equivalence versus wrong value/sign/decimal/unit; synthetic labels only; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-critical-names-negations-comparisons",
+      "distinction": "Shared wording with a changed required name, negation or comparison; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-authored-filler",
+      "distinction": "Authored filler required versus permitted isolated insertion; consecutive/edge/substantive insertion negatives; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-late-valid-after-diagnostic-saturation",
+      "distinction": "Many early near-misses cannot consume exact registry capacity or hide late valid path; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-resume-frontier",
+      "distinction": "Same exhaustive path set across varied chunk/slice/cancel/resume boundaries, no false coverage completion; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-long-gap-unprompted",
+      "distinction": "Complete lexical delivery across a labelled 2.2 s gap remains complete, pacing review separate; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-true-restart",
+      "distinction": "Substantive intervening speech/restart cannot splice prefix and suffix; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-long-gap-authored-pause",
+      "distinction": "Same lexical/gap case with prior-authored protected cue; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "text-word-identity-successor",
+      "distinction": "Equal text with different snapshot/ordinals, corrected snapshot successors and unresolved pin retention; `pending` / `pending`.",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S1-S5 independent label owner"
+    },
+    {
+      "fixture_id": "tight-ends-script",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "Riel"
+    },
+    {
+      "fixture_id": "songbird-exports",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "Riel / Songbird"
+    },
+    {
+      "fixture_id": "c920-takes",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "Riel"
+    },
+    {
+      "fixture_id": "quadcast-takes",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "Riel"
+    },
+    {
+      "fixture_id": "capture-pair-calibration",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S4 / Riel"
+    },
+    {
+      "fixture_id": "critical_word_evidence_cache_delete_reopen",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-4 S2/S3/S5"
+    },
+    {
+      "fixture_id": "first_save_failure_undo_live_reader",
+      "input_sha256": null,
+      "oracle_sha256": null,
+      "status": "pending_baseline_witness",
+      "owner": "JA-1 S1 / AW2 P1a"
+    }
+  ]
+}
