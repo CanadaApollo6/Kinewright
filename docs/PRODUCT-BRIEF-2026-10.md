@@ -201,9 +201,18 @@ blocks with C and E, and lands with them.
 
 ## The first video
 
-A statistical deep dive into how the NFL mis-values tight ends in the draft:
-script-driven, with Songbird data on screen and 2–3 reels cut from it. Riel's
-practice take for the job A dry run comes from the same script.
+A short, polished Twitter/X video (Riel, 2026-10-21): Riel on camera covering the
+latest cybersecurity news about PHP, Node, PingCAP, eMudhra and LiteLLM, with
+graphics and animations. It is job A (talking head) plus generated graphics. Every
+claim on screen (CVE IDs, affected versions, dates, fixes) binds to a cited source,
+such as the vendor advisory or the CVE record; nothing is invented. Logos and other
+brand marks are supplied by Riel as reference assets, never generated. The news
+goes stale, so this video is made with whatever the pipeline can do when Riel
+records it. It does not wait for every Job A stage.
+
+Next after it: a statistical deep dive into how the NFL mis-values tight ends in
+the draft. It is script-driven, with Songbird data on screen and 2–3 reels cut from
+it.
 
 Later candidates:
 
