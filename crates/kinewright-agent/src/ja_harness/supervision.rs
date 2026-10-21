@@ -9,13 +9,14 @@ use std::{
     fs,
     io::Read,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 const DEADLINE_ENV: &str = "JA_HARNESS_DEADLINE_FILE";
 const CAPTURE: u64 = 64 * 1024;
+const MAX_PHASE_MS: u64 = 600_000 + 3 * super::MEDIA_TEARDOWN_MS + 2 * super::WORKER_REAP_MS;
 
 pub(super) fn heartbeat(action: u32, phase: &str, timeout_ms: u64) -> Result<(), String> {
     if let Some(path) = std::env::var_os(DEADLINE_ENV) {
@@ -38,59 +39,182 @@ pub(super) fn validate_reserved(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-struct OwnedFixture(Child);
+struct OwnedFixture {
+    child: Child,
+    released: bool,
+}
+
+#[cfg(unix)]
+fn termination_result(result: rustix::io::Result<()>) -> Result<(), String> {
+    match result {
+        Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),
+        Err(error) => Err(format!("fixture group termination: {error}")),
+    }
+}
+
 impl OwnedFixture {
+    fn exited(&mut self) -> Result<bool, String> {
+        #[cfg(unix)]
+        {
+            use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+            let pid = Pid::from_raw(i32::try_from(self.child.id()).map_err(|e| e.to_string())?)
+                .ok_or("invalid fixture PID")?;
+            // Do not reap: the waitable leader reserves its PID/group identity
+            // until the last owned descendant has been terminated and recorded.
+            waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+            )
+            .map(|status| status.is_some())
+            .map_err(|e| e.to_string())
+        }
+        #[cfg(not(unix))]
+        self.child
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(|e| e.to_string())
+    }
+
     fn stop(&mut self) -> Result<(), String> {
         #[cfg(unix)]
         {
-            // process_group(0) made this owned child's PID its group ID. Every
-            // descendant is a fixed fixture role; no arbitrary programs run.
-            let status = Command::new("/bin/kill")
-                .args(["-KILL", "--", &format!("-{}", self.0.id())])
-                .status()
-                .map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err("fixture group termination failed".into());
-            }
+            use rustix::process::{Pid, Signal, kill_process_group};
+            let pid = Pid::from_raw(i32::try_from(self.child.id()).map_err(|e| e.to_string())?)
+                .ok_or("invalid fixture PID")?;
+            termination_result(kill_process_group(pid, Signal::KILL))?;
         }
         #[cfg(windows)]
-        {
+        if !self.exited()? {
             let status = Command::new("taskkill")
-                .args(["/PID", &self.0.id().to_string(), "/T", "/F"])
+                .args(["/PID", &self.child.id().to_string(), "/T", "/F"])
                 .status()
                 .map_err(|e| e.to_string())?;
-            if !status.success() {
+            if !status.success() && !self.exited()? {
                 return Err("Windows fixture tree termination unavailable; NOT RUN".into());
             }
         }
         #[cfg(not(any(unix, windows)))]
-        self.0.kill().map_err(|e| e.to_string())?;
+        if !self.exited()? {
+            self.child.kill().map_err(|e| e.to_string())?;
+        }
         Ok(())
     }
+
+    fn finish(&mut self) -> (Option<ExitStatus>, Value, Option<String>) {
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(super::WORKER_REAP_MS);
+        let mut error = self.stop().err();
+        #[cfg(target_os = "linux")]
+        let mut reaped = Vec::<u32>::new();
+        #[cfg(not(target_os = "linux"))]
+        let reaped = Vec::<u32>::new();
+        let status = loop {
+            #[cfg(target_os = "linux")]
+            let descendants_done = match reap_group_descendants(self.child.id(), &mut reaped) {
+                Ok(done) => done,
+                Err(reason) => {
+                    error.get_or_insert(reason);
+                    false
+                }
+            };
+            #[cfg(not(target_os = "linux"))]
+            let descendants_done = true;
+            if descendants_done && self.exited().unwrap_or(false) {
+                match self.child.wait() {
+                    Ok(status) => {
+                        self.released = true;
+                        break Some(status);
+                    }
+                    Err(reason) => {
+                        error.get_or_insert(reason.to_string());
+                        break None;
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                error.get_or_insert(
+                    "fixture cleanup_blocked: owned group missed reap deadline".into(),
+                );
+                break None;
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        let receipt = json!({"termination_requested":true,"leader_identity_held_through_cleanup":cfg!(unix),
+            "descendants_reaped":reaped,"completed":self.released,"elapsed_ms":started.elapsed().as_millis(),
+            "deadline_ms":super::WORKER_REAP_MS,"error":error});
+        (status, receipt, error)
+    }
 }
+
+// The native CLI is a Linux subreaper only for its fixed fixture roles. Reap
+// adopted group members individually, leaving the leader waitable until last.
+#[cfg(target_os = "linux")]
+fn reap_group_descendants(group: u32, reaped: &mut Vec<u32>) -> Result<bool, String> {
+    use rustix::process::{Pid, WaitOptions, waitpid};
+    let mut remaining = false;
+    for entry in fs::read_dir("/proc").map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if pid == group {
+            continue;
+        }
+        let Ok(stat) = fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(fields) = stat
+            .rsplit_once(')')
+            .map(|(_, tail)| tail.split_whitespace().collect::<Vec<_>>())
+        else {
+            continue;
+        };
+        if fields.get(2).and_then(|p| p.parse::<u32>().ok()) != Some(group) {
+            continue;
+        }
+        let identity = Pid::from_raw(i32::try_from(pid).map_err(|e| e.to_string())?)
+            .ok_or("invalid descendant PID")?;
+        match waitpid(Some(identity), WaitOptions::NOHANG) {
+            Ok(Some(_)) => reaped.push(pid),
+            Ok(None) | Err(rustix::io::Errno::CHILD) => remaining = true,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(!remaining)
+}
+
 impl Drop for OwnedFixture {
     fn drop(&mut self) {
-        if self.0.try_wait().ok().flatten().is_none() {
-            let _ = self.stop();
-            let _ = self.0.kill();
-            let _ = self.0.wait();
+        if !self.released {
+            let _ = self.finish();
         }
     }
 }
 
-fn capture(mut stream: impl Read + Send + 'static) -> thread::JoinHandle<Result<Vec<u8>, String>> {
+fn capture(
+    mut stream: impl Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<Result<Vec<u8>, String>> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stream
-            .by_ref()
-            .take(CAPTURE + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > CAPTURE {
-            return Err("fixture process output quota; NOT RUN".into());
-        }
-        Ok(bytes)
-    })
+        let result = (|| {
+            let mut bytes = Vec::new();
+            stream
+                .by_ref()
+                .take(CAPTURE + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() as u64 > CAPTURE {
+                return Err("fixture process output quota; NOT RUN".into());
+            }
+            Ok(bytes)
+        })();
+        let _ = sender.send(result);
+    });
+    receiver
 }
 
 #[allow(clippy::too_many_lines)]
@@ -124,11 +248,17 @@ pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, Stri
         use std::os::unix::process::CommandExt as _;
         command.process_group(0);
     }
-    let mut child = OwnedFixture(command.spawn().map_err(|e| e.to_string())?);
-    let pid = child.0.id();
+    #[cfg(target_os = "linux")]
+    rustix::process::set_child_subreaper(Some(rustix::process::Pid::INIT))
+        .map_err(|e| format!("fixed-role subreaper prerequisite: {e}"))?;
+    let mut child = OwnedFixture {
+        child: command.spawn().map_err(|e| e.to_string())?,
+        released: false,
+    };
+    let pid = child.child.id();
     let identity = os_start_identity(pid);
-    let stdout = capture(child.0.stdout.take().ok_or("fixture stdout")?);
-    let stderr = capture(child.0.stderr.take().ok_or("fixture stderr")?);
+    let stdout = capture(child.child.stdout.take().ok_or("fixture stdout")?);
+    let stderr = capture(child.child.stderr.take().ok_or("fixture stderr")?);
     let birth = json!({"pid":pid,"os_start_identity":identity,"owned_process_group":cfg!(unix),"production_guardian_certified":false});
     fs::write(
         root.join("supervisor-process.json"),
@@ -140,16 +270,18 @@ pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, Stri
     let mut deadline = born + Duration::from_secs(30);
     let mut phase_started = born;
     let mut timed_out = false;
-    let status = loop {
-        if let Some(status) = child.0.try_wait().map_err(|e| e.to_string())? {
-            break status;
+    let supervision_error = loop {
+        match child.exited() {
+            Ok(true) => break None,
+            Ok(false) => {}
+            Err(error) => break Some(error),
         }
         if let Ok(bytes) = protocol::read_bounded(&control, protocol::CONTROL_BYTES as u64)
             && let Ok(value) = protocol::unique_json(&bytes)
             && value != phase
             && let Some(ms) = value["timeout_ms"]
                 .as_u64()
-                .filter(|n| (1..=600_000).contains(n))
+                .filter(|n| (1..=MAX_PHASE_MS).contains(n))
         {
             phase = value;
             phase_started = Instant::now();
@@ -161,17 +293,20 @@ pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, Stri
         }
         if Instant::now() >= deadline {
             timed_out = true;
-            child.stop()?;
-            break child.0.wait().map_err(|e| e.to_string())?;
+            break None;
         }
         thread::sleep(Duration::from_millis(2));
     };
+    let (status, cleanup, cleanup_error) = child.finish();
     let mut capture_error = None;
     for (name, handle) in [
         ("supervisor-stdout.txt", stdout),
         ("supervisor-stderr.txt", stderr),
     ] {
-        let bytes = match handle.join().map_err(|_| "fixture capture panicked")? {
+        let bytes = match handle
+            .recv_timeout(Duration::from_millis(super::WORKER_REAP_MS))
+            .unwrap_or_else(|e| Err(format!("fixture capture incomplete: {e}")))
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 capture_error = Some(error);
@@ -180,7 +315,7 @@ pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, Stri
         };
         fs::write(root.join(name), bytes).map_err(|e| e.to_string())?;
     }
-    let receipt = json!({"pid":pid,"os_start_identity":identity,"reaped":true,"status":status.to_string(),"timed_out":timed_out,"phase":phase,"phase_elapsed_ms":phase_started.elapsed().as_millis(),"fixture_group_termination_requested":timed_out && cfg!(unix),"production_guardian_certified":false});
+    let receipt = json!({"pid":pid,"os_start_identity":identity,"reaped":status.is_some(),"status":status.map(|s| s.to_string()),"timed_out":timed_out,"phase":phase,"phase_elapsed_ms":phase_started.elapsed().as_millis(),"fixture_group_termination_requested":cfg!(unix),"cleanup":cleanup,"production_guardian_certified":false});
     fs::write(
         root.join("supervisor-process.json"),
         serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?,
@@ -192,14 +327,16 @@ pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, Stri
             phase["phase"], phase["action_id"]
         ))
     } else {
-        capture_error
+        supervision_error.or(cleanup_error).or(capture_error)
     };
     let path = root.join("summary.json");
     let mut summary = fs::read(&path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
     if error.is_some()
-        || summary.as_ref().and_then(|v| v["exit_code"].as_i64()) != status.code().map(i64::from)
+        || status.and_then(|s| s.code()).is_none()
+        || summary.as_ref().and_then(|v| v["exit_code"].as_i64())
+            != status.and_then(|s| s.code()).map(i64::from)
     {
         let raw =
             protocol::read_bounded(&root.join("artifacts/fixture.json"), protocol::INDEX_BYTES)
@@ -287,4 +424,18 @@ fn retained_bytes(root: &Path) -> Result<u64, String> {
         }
     }
     Ok(total)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_exit_race_accepts_esrch_and_preserves_permission_errors() {
+        // Deterministically inject the kernel's "group already gone" result.
+        // A wall-clock race would not reliably exercise this branch.
+        assert!(termination_result(Err(rustix::io::Errno::SRCH)).is_ok());
+        assert!(termination_result(Ok(())).is_ok());
+        assert!(termination_result(Err(rustix::io::Errno::PERM)).is_err());
+    }
 }

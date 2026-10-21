@@ -269,6 +269,8 @@ impl Baseline {
                 }
                 let bytes = fs::read(&path).map_err(|e| e.to_string())?;
                 let expected = serialize_project_document(&document).map_err(|e| e.to_string())?;
+                // R2 follows IO observer vocabulary. S1 must emit directory_sync
+                // beside the exact parent-directory sync call, never as a synthetic note.
                 Ok(
                     json!({"writer_bytes_equal":bytes == expected.as_bytes(),"file":file_value(&path)?,
                     "directory_sync_observed":trace.events.iter().any(|e| e.operation == "directory_sync"),"io":trace}),
@@ -367,7 +369,7 @@ impl Baseline {
         let media = if let Some(media) = self.media.take() {
             let finished = media.teardown_observer();
             drop(media);
-            if finished.recv_timeout(std::time::Duration::from_secs(30))
+            if finished.recv_timeout(std::time::Duration::from_millis(super::MEDIA_TEARDOWN_MS))
                 != Err(crossbeam_channel::RecvTimeoutError::Disconnected)
             {
                 return Err("media worker teardown not observed; NOT RUN".into());

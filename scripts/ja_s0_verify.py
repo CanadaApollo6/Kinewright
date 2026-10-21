@@ -49,11 +49,13 @@ def main():
     parser = argparse.ArgumentParser(__doc__)
     parser.add_argument("stage", type=int, choices=range(1, 6))
     parser.add_argument("--catalog-only", action="store_true")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--tests-only", action="store_true", help="final-HEAD harness, native, App and exact-pin rerun")
     args = parser.parse_args()
     rows = catalog_check()
     if args.catalog_only:
         return
-    out = ROOT / f"target/ja-s0/S0-{args.stage}"
+    out = args.output.resolve() if args.output else ROOT / f"target/ja-s0/S0-{args.stage}"
     out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CARGO_BUILD_JOBS="4", RUST_TEST_THREADS="4")
     temporary = out / "tmp"
@@ -98,9 +100,10 @@ def main():
 
     cargo = ["nice", "-n", "10", "cargo"]
     harness = "kinewright-eval" if args.stage == 1 else "kinewright-ja-baseline"
-    run("workspace-build", cargo + ["build", "--workspace"])
-    run("harness-build", cargo + ["build", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness])
-    run("shipping-app-build", cargo + ["build", "-p", "kinewright-app"])
+    if not args.tests_only:
+        run("workspace-build", cargo + ["build", "--workspace"])
+        run("harness-build", cargo + ["build", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness])
+        run("shipping-app-build", cargo + ["build", "-p", "kinewright-app"])
     if args.stage >= 4:
         run("app-adapter-build", cargo + ["test", "-p", "kinewright-app", "--bin", "kinewright-app", "--no-run", "--message-format=json"])
         artifacts = []
@@ -112,17 +115,19 @@ def main():
         assert len(artifacts) == 1, artifacts
         env["JA_HARNESS_APP_TEST_BINARY"] = artifacts[0]
         (out / "app-test-binary.txt").write_text(artifacts[0] + "\n")
-    run("workspace-clippy", cargo + ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])
-    run("harness-clippy", cargo + ["clippy", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness, "--", "-D", "warnings"])
-    touched = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=ROOT, text=True).splitlines()
-    touched += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=ROOT, text=True).splitlines()
-    rust = sorted({p for p in touched if p.endswith(".rs")})
-    if rust:
-        run("rustfmt", ["rustfmt", "--edition", "2024", "--config", "skip_children=true", "--check"] + rust)
+    if not args.tests_only:
+        run("workspace-clippy", cargo + ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])
+        run("harness-clippy", cargo + ["clippy", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness, "--", "-D", "warnings"])
+        touched = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=ROOT, text=True).splitlines()
+        touched += subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard"], cwd=ROOT, text=True).splitlines()
+        rust = sorted({p for p in touched if p.endswith(".rs")})
+        if rust:
+            run("rustfmt", ["rustfmt", "--edition", "2024", "--config", "skip_children=true", "--check"] + rust)
     if args.stage >= 2:
         run("harness-tests", cargo + ["test", "-p", "kinewright-agent", "--lib", "ja_harness::", "--", "--test-threads=1"])
-        run("native-harness-tests", cargo + ["test", "-p", "kinewright-agent", "--features", "eval-harness", "--test", "ja_baseline", "--", "--test-threads=1"])
+        run("native-harness-tests", cargo + ["test", "-p", "kinewright-agent", "--features", "eval-harness", "--test", "ja_baseline", "--", "--include-ignored", "--test-threads=1"])
     if args.stage >= 4:
+        run("teardown-wrapper-test", cargo + ["test", "-p", "kinewright-media", "--test", "generated_media", "teardown_observation_failure_panics_only_in_explicit_finish", "--", "--exact", "--test-threads=1"])
         run("app-observer-test", cargo + ["test", "-p", "kinewright-app", "--bin", "kinewright-app", "ja_harness::tests::coalesced_app_input_reaches_actual_headless_paint", "--", "--exact", "--test-threads=1"])
     for i, row in enumerate(rows):
         affected_s0_2 = args.stage == 2 and (row["stage"] == 1 or row["package"] == "kinewright-core")

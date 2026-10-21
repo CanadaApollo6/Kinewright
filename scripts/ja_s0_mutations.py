@@ -10,10 +10,43 @@ from pathlib import Path
 import re
 import signal
 import subprocess
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 HISTORY = "ja_harness::tests::edit_save_reopen_has_literal_history_loss_after_successful_control"
 CASES = {
+    "unexpected-controller-exit": ("crates/kinewright-agent/src/ja_harness/supervision.rs",
+        "let mut error = self.stop().err();", "let mut error = None;",
+        "native", "unexpected_controller_exit_reaps_a_recorded_stopped_worker_before_return"),
+    "app-bridge-classification": ("crates/kinewright-agent/src/ja_harness/controller.rs",
+        "if timed_out || status.code().is_none() {", "if !status.success() || timed_out || status.code().is_none() {",
+        "native", "native_app_bridge_retains_exercised_control_and_property_failures"),
+    "app-bridge-setup": ("crates/kinewright-agent/src/ja_harness/controller.rs",
+        "if timed_out || status.code().is_none() {", "if !status.success() || timed_out || status.code().is_none() {",
+        "native", "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two"),
+    "deadline-exit-race": ("crates/kinewright-agent/src/ja_harness/supervision.rs",
+        "Ok(()) | Err(rustix::io::Errno::SRCH) => Ok(()),", "Ok(()) => Ok(()),",
+        "agent", "ja_harness::supervision::tests::deadline_exit_race_accepts_esrch_and_preserves_permission_errors"),
+    "cleanup-budget": ("crates/kinewright-agent/src/ja_harness/mod.rs",
+        "(workers + 1) * MEDIA_TEARDOWN_MS", "0 * (workers + 1) * MEDIA_TEARDOWN_MS",
+        "agent", "ja_harness::tests::cleanup_deadline_outlives_all_fixed_role_teardown_allowances"),
+    "control-summary": ("crates/kinewright-agent/src/ja_harness/report.rs",
+        'else if control_failed {"control_failed"}', 'else if control_failed {"observed"}',
+        "agent", "ja_harness::tests::failed_positive_control_has_control_failed_summary_and_exit_one"),
+    "source-root": ("crates/kinewright-agent/src/ja_harness/report.rs",
+        'let bytes = git_output(None, &["rev-parse", "--show-toplevel"])?;',
+        'let bytes = std::env::current_dir().map_err(|e| e.to_string())?.to_string_lossy().as_bytes().to_vec();',
+        "native", "native_source_identity_is_repository_wide_from_root_and_crate_cwd"),
+    "participant-error-exit": ("crates/kinewright-agent/src/ja_harness/controller.rs",
+        "let cleanup = worker.finish(false, report);", "let cleanup: Result<Value, String> = Ok(Value::Null);",
+        "native", "refused_participant_kill_records_the_graceful_exit_and_reap"),
+    "path-admission": ("crates/kinewright-agent/src/ja_harness/protocol.rs",
+        "| Call::LockAcquire(a)", "",
+        "agent", "ja_harness::tests::every_path_argument_is_refused_at_admission_before_any_action"),
+    "teardown-drop": ("crates/kinewright-media/tests/generated_media.rs",
+        "if self.engine.take().is_some() {",
+        'if { self.engine.take(); assert_eq!(self.finished.recv_timeout(Duration::from_secs(30)), Err(crossbeam_channel::RecvTimeoutError::Disconnected)); true } {',
+        "media", "teardown_observation_failure_panics_only_in_explicit_finish"),
     "main-adapter-dispatch": ("crates/kinewright-agent/src/ja_harness/mod.rs",
         'let routed = controller.dispatch(action, loaded, &observed, report)?;',
         'let routed = if action.call.main_adapter_only() { None } else { controller.dispatch(action, loaded, &observed, report)? };',
@@ -31,8 +64,8 @@ CASES = {
         'let prefix = format!("media-{}", action.participant);',
         "agent", "ja_harness::tests::repeated_media_actions_retain_distinct_complete_artifacts"),
     "native-deadline": ("crates/kinewright-agent/src/ja_harness/supervision.rs",
-        'if Instant::now() >= deadline {',
-        'if Instant::now() >= deadline + Duration::from_secs(6) {',
+        'if Instant::now() >= deadline {\n            timed_out = true;',
+        'if Instant::now() >= deadline + Duration::from_secs(6) {\n            timed_out = true;',
         "native", "native_deadline_interrupts_pending_confirmation_and_reaps_fixture"),
     "history-trace": ("crates/kinewright-core/src/actor.rs",
         "undo: state.undo.iter().map(observe).collect(),", "undo: Vec::new(),", "agent", HISTORY),
@@ -63,6 +96,9 @@ def digest(path):
 
 
 def run(case, phase, package, test, out):
+    while int(Path("/proc/meminfo").read_text().split("MemAvailable:")[1].split()[0]) < 6 * 1024**2:
+        print("mutation: waiting for the required 6 GiB available memory", flush=True)
+        time.sleep(10)
     folder = out / phase
     folder.mkdir()
     env = dict(os.environ, CARGO_BUILD_JOBS="4", RUST_TEST_THREADS="4",
@@ -70,9 +106,9 @@ def run(case, phase, package, test, out):
     temporary = folder / "tmp"
     temporary.mkdir()
     env["TMPDIR"] = str(temporary)
-    target = ["--lib"] if package == "agent" else (["--features", "eval-harness", "--test", "ja_baseline"] if package == "native" else ["--bin", "kinewright-app"])
+    target = ["--lib"] if package == "agent" else (["--features", "eval-harness", "--test", "ja_baseline"] if package == "native" else (["--test", "generated_media"] if package == "media" else ["--bin", "kinewright-app"]))
     crate = "agent" if package == "native" else package
-    command = ["nice", "-n", "10", "cargo", "test", "-p", "kinewright-" + crate] + target + [test, "--", "--exact", "--nocapture", "--test-threads=1"]
+    command = ["nice", "-n", "10", "cargo", "test", "-p", "kinewright-" + crate] + target + [test, "--", "--exact", "--include-ignored", "--nocapture", "--test-threads=1"]
     path = folder / "test.log"
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     with path.open("w") as log:

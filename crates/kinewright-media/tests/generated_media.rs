@@ -50,6 +50,15 @@ impl TeardownObservedEngine {
             finished,
         }
     }
+
+    fn finish(mut self) {
+        drop(self.engine.take());
+        assert_eq!(
+            self.finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "native pin process must await media teardown"
+        );
+    }
 }
 
 impl std::ops::Deref for TeardownObservedEngine {
@@ -61,13 +70,31 @@ impl std::ops::Deref for TeardownObservedEngine {
 
 impl Drop for TeardownObservedEngine {
     fn drop(&mut self) {
-        drop(self.engine.take());
-        assert_eq!(
-            self.finished.recv_timeout(Duration::from_secs(30)),
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
-            "native pin process must await media teardown"
-        );
+        if self.engine.take().is_some() {
+            // Teardown still completes on unwind, without masking the first panic.
+            let _ = self.finished.recv_timeout(Duration::from_secs(30));
+        }
     }
+}
+
+#[test]
+fn teardown_observation_failure_panics_only_in_explicit_finish() {
+    let failed_observer = || {
+        let (sender, finished) = crossbeam_channel::bounded(1);
+        sender.send(()).unwrap();
+        TeardownObservedEngine {
+            engine: None,
+            finished,
+        }
+    };
+    assert!(
+        std::panic::catch_unwind(|| drop(failed_observer())).is_ok(),
+        "Drop must preserve an earlier assertion failure"
+    );
+    assert!(
+        std::panic::catch_unwind(|| failed_observer().finish()).is_err(),
+        "explicit finish must assert an unsuccessful teardown observation"
+    );
 }
 
 impl Drop for TemporaryFile {
@@ -655,6 +682,8 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
     assert_frame_sample_close(&fade_preview_start, &fade_decoded_start, 28);
     assert_frame_sample_close(&fade_preview_middle, &fade_decoded_middle, 28);
     remove_fixture_assets(&document);
+    decode_engine.finish();
+    engine.finish();
 }
 
 #[test]
@@ -750,6 +779,8 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
     decode_engine.request_frame(TimeCode(5));
     let decoded = receive_frame(&exported_frames, TimeCode(5));
     assert_title_frame_close(&preview, &decoded);
+    decode_engine.finish();
+    engine.finish();
 }
 
 #[test]
@@ -926,6 +957,7 @@ fn cancelled_export_writes_no_output() {
     assert_eq!(result, Err(MediaError::Cancelled));
     assert!(!output.0.exists());
     remove_fixture_assets(&document);
+    engine.finish();
 }
 
 fn assert_frame_sample_close(

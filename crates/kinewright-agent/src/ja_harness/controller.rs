@@ -195,7 +195,7 @@ impl Worker {
         if kill {
             self.child.kill().map_err(|e| e.to_string())?;
         }
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_millis(super::WORKER_REAP_MS);
         let status = loop {
             if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
                 break status;
@@ -232,7 +232,7 @@ impl Drop for Worker {
         drop(self.child.stdin.take());
         if self.child.try_wait().ok().flatten().is_none() {
             // EOF gives the fixture worker a chance to reap its own child.
-            let deadline = Instant::now() + Duration::from_secs(2);
+            let deadline = Instant::now() + Duration::from_millis(super::WORKER_REAP_MS);
             while self.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(2));
             }
@@ -283,7 +283,7 @@ pub fn app_fixture(
     action: &Action,
     loaded: &LoadedFixture,
     report: &mut Report,
-) -> Result<Value, String> {
+) -> Result<(), String> {
     let binary = std::env::var_os("JA_HARNESS_APP_TEST_BINARY")
         .ok_or("App test binary prerequisite missing; NOT RUN")?;
     let binary = PathBuf::from(binary)
@@ -367,32 +367,105 @@ pub fn app_fixture(
     if out.exists() {
         report.admit_adapter_tree(&out)?;
     }
-    if !status.success() || timed_out {
+    if timed_out || status.code().is_none() {
         return Err(format!(
-            "App test adapter exited {status}; NOT RUN, inspect common inner report"
+            "App test adapter crashed or timed out: {status}; NOT RUN"
         ));
     }
-    let summary = protocol::unique_json(&protocol::read_bounded(
+    let mut summary = protocol::unique_json(&protocol::read_bounded(
         &out.join("summary.json"),
         protocol::INDEX_BYTES,
     )?)?;
-    if summary["exit_code"] != 0 {
-        return Err("App adapter did not pass selected controls".into());
-    }
-    let reference = summary["observations"]
-        .as_array()
-        .ok_or("App observations absent")?
-        .iter()
-        .find(|v| v["action_id"] == action.id)
-        .ok_or("App action not observed")?;
-    let path = reference["artifact"]["relative_file"]
-        .as_str()
-        .ok_or("App observation file missing")?;
-    protocol::relative_path(Path::new(path))?;
-    protocol::unique_json(&protocol::read_bounded(
-        &out.join(path),
+    let run = protocol::unique_json(&protocol::read_bounded(
+        &out.join("run.json"),
         protocol::INDEX_BYTES,
-    )?)
+    )?)?;
+    let assertions = summary["assertions"]
+        .as_array()
+        .ok_or("App assertions absent")?;
+    let failed = assertions.iter().any(|a| a["passed"] == false);
+    let control_failed = assertions
+        .iter()
+        .any(|a| a["evidence_class"] == "control" && a["passed"] == false);
+    let exit = summary["exit_code"].as_i64().ok_or("App exit absent")?;
+    let expected_exit = if summary["disposition"] == "not_run" {
+        2
+    } else if failed {
+        1
+    } else if assertions.is_empty() {
+        3
+    } else {
+        0
+    };
+    if summary["protocol"] != protocol::PROTOCOL
+        || summary["protocol_version"] != 1
+        || summary["fixture_id"] != loaded.fixture.fixture_id
+        || summary["mode"] != serde_json::to_value(report.mode).map_err(|e| e.to_string())?
+        || summary["run_id"] != run["run_id"]
+        || !run["run_id"].is_string()
+        || run["fixture_sha256"] != kinewright_media::sha256_bytes(&loaded.bytes)
+        || run["binary_sha256"] != executable_sha256
+        || exit != expected_exit
+        || summary["incomplete_artifact_index"] == true
+        || (control_failed && exit != 2 && summary["disposition"] != "control_failed")
+        || (exit == 2 && !summary["missing_requirements"].is_string())
+    {
+        return Err("App common report identity/classification incomplete; NOT RUN".into());
+    }
+    // Validate every evidence reference against the retained inner files, then
+    // rebase it into the native report. libtest's 101 does not erase exit 1.
+    rebase_app_evidence(&mut summary, &out, Path::new(&format!("app-{}", action.id)))?;
+    for (key, destination) in [
+        ("assertions", &mut report.assertions),
+        ("observations", &mut report.observations),
+        ("pending", &mut report.pending),
+    ] {
+        destination.extend(
+            summary[key]
+                .as_array()
+                .ok_or("App common report array absent")?
+                .iter()
+                .cloned(),
+        );
+    }
+    report.event(action.id, "app-test", "common_report_imported",
+        json!({"exit_code":exit,"libtest_status":status.to_string(),"summary":format!("app-{}/summary.json", action.id)}))?;
+    if exit == 2 {
+        return Err(summary["missing_requirements"]
+            .as_str()
+            .unwrap_or("App setup incomplete")
+            .into());
+    }
+    Ok(())
+}
+
+fn rebase_app_evidence(value: &mut Value, root: &Path, prefix: &Path) -> Result<(), String> {
+    match value {
+        Value::Object(fields) => {
+            if let Some(relative) = fields.get("relative_file").and_then(Value::as_str) {
+                let path = Path::new(relative);
+                protocol::relative_path(path)?;
+                let bytes = protocol::read_bounded(&root.join(path), protocol::INDEX_BYTES)?;
+                if fields.get("byte_length").and_then(Value::as_u64) != Some(bytes.len() as u64)
+                    || fields.get("sha256").and_then(Value::as_str)
+                        != Some(kinewright_media::sha256_bytes(&bytes).as_str())
+                {
+                    return Err("App evidence identity mismatch; NOT RUN".into());
+                }
+                fields.insert("relative_file".into(), json!(prefix.join(path)));
+            }
+            for child in fields.values_mut() {
+                rebase_app_evidence(child, root, prefix)?;
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                rebase_app_evidence(child, root, prefix)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 impl Controller {
@@ -522,25 +595,36 @@ impl Controller {
                     .remove(&action.participant)
                     .ok_or("unknown/live participant")?;
                 let kill = matches!(action.call, Call::ParticipantKill(_));
-                if kill {
-                    // Never manufacture guardian behavior: forceful death with
-                    // descendants remains pending. Only a verified empty worker
-                    // may be killed by this fixture control.
-                    let inventory = Action {
-                        call: Call::ParticipantInventory(protocol::Empty {}),
-                        ..action.clone()
-                    };
-                    let inventory =
-                        worker.request(&inventory, loaded.fixture.limits.action_timeout_ms)?;
-                    if inventory["owned_child"].is_object()
-                        || os_children(worker.child.id()).is_some_and(|v| !v.is_empty())
-                    {
-                        return Err(
-                            "forceful descendant cleanup needs production guardian; pending".into(),
-                        );
+                let admission = (|| {
+                    if kill {
+                        // Never manufacture guardian behavior: forceful death with
+                        // descendants remains pending. Only a verified empty worker
+                        // may be killed by this fixture control.
+                        let inventory = Action {
+                            call: Call::ParticipantInventory(protocol::Empty {}),
+                            ..action.clone()
+                        };
+                        let inventory =
+                            worker.request(&inventory, loaded.fixture.limits.action_timeout_ms)?;
+                        if inventory["owned_child"].is_object()
+                            || os_children(worker.child.id()).is_some_and(|v| !v.is_empty())
+                        {
+                            return Err(
+                                "forceful descendant cleanup needs production guardian; pending"
+                                    .into(),
+                            );
+                        }
+                    } else {
+                        worker.request(action, loaded.fixture.limits.action_timeout_ms)?;
                     }
-                } else {
-                    worker.request(action, loaded.fixture.limits.action_timeout_ms)?;
+                    Ok(())
+                })();
+                if let Err(error) = admission {
+                    let cleanup = worker.finish(false, report);
+                    return Err(match cleanup {
+                        Ok(_) => error,
+                        Err(cleanup) => format!("{error}; participant cleanup: {cleanup}"),
+                    });
                 }
                 Ok(Some((worker.finish(kill, report)?, true)))
             }

@@ -155,7 +155,7 @@ impl MediaObserver {
                     Ok::<_, String>(value)
                 })();
                 drop(decoder);
-                if finished.recv_timeout(Duration::from_secs(30))
+                if finished.recv_timeout(Duration::from_millis(super::MEDIA_TEARDOWN_MS))
                     != Err(crossbeam_channel::RecvTimeoutError::Disconnected)
                 {
                     return Err("decode worker teardown not observed".into());

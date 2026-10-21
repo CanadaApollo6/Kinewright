@@ -15,12 +15,15 @@ and first-save witnesses. No slot contains invented source material.
 
 Run `source scripts/setup-ffmpeg.sh` and then
 `nice -n 19 python3 -I scripts/ja_s0_verify.py N` for each stage N. The script
-serializes the workspace, explicit harness and shipping App builds, clippy,
+serializes the workspace, explicit harness and isolated App package builds, clippy,
 touched-file rustfmt, exact selected regressions and classification lint. Cargo
 requests four build/test threads at nice 10, as the implementation brief specifies;
 the nice-19 Python supervisor also confers its lower scheduling priority on
 children. Media tests run serially. Stage 1 explicitly builds the existing eval harness;
-stages 2–5 explicitly build the new baseline binary. Raw results and source/diff
+stages 2–5 explicitly build the new baseline binary. Only `cargo build --package kinewright-app --release` is the shipping
+configuration (release CI also uses `--locked`). A workspace-built App binary
+is feature-unified with the eval harness and is not that configuration.
+Raw results and source/diff
 identities are written to this worktree's ignored `target/ja-s0/`.
 The runner waits at the required 6 GiB available-memory guard before each gate;
 resource deferral is not a compiler/test result and launches no heavy work.
@@ -72,6 +75,10 @@ the in-place fallback; retrying an accepted edit after suppressing its reply add
 a second undo entry. Each has a successful changed-document/full-byte or accepted
 edit control and its actual/expected values in a separate assertion artifact.
 These are observations of existing behaviour, not Studio acceptance results.
+R2 follows the IO observer vocabulary, rather than observing syscalls. When S1
+adds parent-directory sync, it must emit `io_observer::note("directory_sync", ...)`
+from that exact sync call site. Its fixture names this coupling in the
+`directory-sync-trace` oracle kind; the scalar oracle and baseline red are unchanged.
 
 `scripts/ja_s0_mutations.py CASE --output NEW_DIRECTORY` temporarily removes one
 observer/assertion behaviour, runs only its exact witness, restores the original
@@ -130,3 +137,29 @@ process receipt was not retained. No evidence claim relies on that attempt.
 Production teardown behaviour
 was not changed. The G9 geometry observation was completed in S0-5 while sealing
 the ledger; it is cfg(test) and introduces no comment semantics.
+
+The final-head review fixes land in one follow-up commit. The native bridge
+validates the completed App common report independently of libtest's exit 101,
+retains its exercised assertions and rebases its evidence references. Native
+exit 1 (including a failed control) remains distinct from setup NOT RUN/exit 2.
+The two on-demand App bridge tests are explicitly included by the S0 gate after
+building the actual App libtest executable.
+
+The Unix supervisor observes exit with `waitid(WNOWAIT)`, retaining the leader
+identity until fixed-role group cleanup finishes. Linux adopts/reaps only its
+fixture group's descendants; the two-second cleanup receipt does not certify a
+production guardian. This uses the already locked rustix 1.1.4 package as an
+optional eval-only direct dependency. ESRCH is tested deterministically at the
+termination-result boundary; a scheduler-timed reproduction is unreliable and
+the waitable leader removes that original PID/group-reuse window.
+Cleanup's phase deadline derives from each fixed role's media/worker teardown
+allowance plus report-sealing headroom. The gate runner's separate package build
+checks the feature graph in dev; it does not claim a rebuilt shipping release.
+
+Follow-up logs, mutation receipts and final-HEAD reruns are sealed separately
+in `target/review/ja/s0-evidence/S0-fix-r1-evidence.tar.gz` in the main checkout.
+That directory's `evidence-index.json` and `SHA256SUMS` bind the successor archive;
+this report's existing index continues to bind the historical S0 archives.
+Use `scripts/ja_s0_verify.py 5 --output NEW_DIRECTORY` for the full gate, and add
+`--tests-only` for the final-HEAD harness/App/42-pin rerun. Historical evidence is
+not relabelled as a final-HEAD measurement.

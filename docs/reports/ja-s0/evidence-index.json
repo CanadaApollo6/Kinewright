@@ -8,8 +8,8 @@
     },
     {
       "file": "README.md",
-      "byte_length": 8629,
-      "sha256": "3e56c71bbabc192dd5288611f56228a9d58bbc51c806af21102f051196130c13"
+      "byte_length": 10918,
+      "sha256": "1734e67c2e317509a7c7cbd636e9ccad7c260f4836feb07cd192fad51a3bfea1"
     },
     {
       "file": "REVIEW-RESPONSES.md",
@@ -100,6 +100,16 @@
       "file": "verification-logs.tar.gz",
       "byte_length": 104704,
       "sha256": "4208829065e67d3bb36efa764030ebd5e311d36ab463f2800f2d3f6840521389"
+    },
+    {
+      "file": "FIX-R1.md",
+      "byte_length": 6207,
+      "sha256": "cd3d710984a25a497830ec1f729c1f8a0c140afda99221d76ff53f492111c27a"
     }
-  ]
+  ],
+  "successor_evidence": {
+    "archive": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s0-evidence/S0-fix-r1-evidence.tar.gz",
+    "integrity_index": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s0-evidence/evidence-index.json",
+    "scope": "Final-head review fixes: successor seal generated after the follow-up commit and its final-HEAD reruns. Historical archives remain byte-identical."
+  }
 }

@@ -15,6 +15,16 @@ use serde_json::{Value, json};
 use protocol::{Call, EvidenceClass, Lane, LoadedFixture, Mode};
 use report::Report;
 
+pub const MEDIA_TEARDOWN_MS: u64 = 30_000;
+pub const WORKER_REAP_MS: u64 = 2_000;
+
+fn cleanup_timeout_ms(fixture: &protocol::Fixture) -> u64 {
+    // Every fixed participant can finish its adapter before its reap allowance.
+    // The main adapter follows them; reserve setup's allowance for report sealing.
+    let workers = u64::try_from(fixture.initial.participants.len()).unwrap_or(2);
+    (workers + 1) * MEDIA_TEARDOWN_MS + workers * WORKER_REAP_MS + fixture.limits.setup_timeout_ms
+}
+
 /// Run a fixture unchanged in either mode. Revised currently uses the same
 /// production adapter; it does not invent successor behavior.
 pub fn run(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
@@ -124,7 +134,9 @@ fn execute(
                     } else if let Some(value) = extension(action, loaded, report)? {
                         Some((value, true))
                     } else if matches!(action.call, Call::AppFixture(_)) {
-                        Some((controller::app_fixture(action, loaded, report)?, true))
+                        controller::app_fixture(action, loaded, report)?;
+                        // The exact App entry supplied the whole fixture report.
+                        break;
                     } else {
                         media
                             .execute(action, &mut adapter, report)?
@@ -165,7 +177,7 @@ fn execute(
         controller.sample(report)?;
         Ok(())
     })();
-    supervision::heartbeat(u32::MAX, "cleanup", 30_000)?;
+    supervision::heartbeat(u32::MAX, "cleanup", cleanup_timeout_ms(&loaded.fixture))?;
     let cleanup = controller.cleanup(report).and_then(|()| {
         let observation = adapter.finish()?;
         report.event(0, "main", "adapter_cleanup", observation)
@@ -749,6 +761,96 @@ mod tests {
             protocol::unique_json(br#"{"frame":-9223372036854775808,"num":30000,"den":1001}"#)
                 .unwrap();
         assert_eq!(exact["frame"].as_i64(), Some(i64::MIN));
+    }
+
+    #[test]
+    fn failed_positive_control_has_control_failed_summary_and_exit_one() {
+        let temp = TempDirectory::new("ja-control-failed");
+        let directory = temp.path("fixtures");
+        std::fs::create_dir(&directory).unwrap();
+        copy_fixtures(&directory);
+        let path = directory.join("history-loss.json");
+        let mut fixture: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        fixture["actions"][2]["args"]["oracle"] = json!("true");
+        fixture["oracles"]["true"] = serde_json::from_slice::<Value>(
+            &std::fs::read(directory.join("legacy-io.json")).unwrap(),
+        )
+        .unwrap()["oracles"]["true"]
+            .clone();
+        std::fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let out = temp.path("out");
+        assert_eq!(run(&path, &out, Mode::Baseline).unwrap(), 1);
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
+        assert_eq!(summary["disposition"], "control_failed");
+        assert!(
+            summary["assertions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["disposition"] == "control_failed")
+        );
+        assert!(
+            !summary["assertions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["disposition"] == "baseline_red")
+        );
+    }
+
+    #[test]
+    fn every_path_argument_is_refused_at_admission_before_any_action() {
+        let source: Value =
+            serde_json::from_slice(&std::fs::read(fixtures().join("pending-only.json")).unwrap())
+                .unwrap();
+        for name in [
+            "project_save",
+            "project_reopen",
+            "inspect_files",
+            "legacy_rename_refusal",
+            "lock_acquire",
+            "headless_save",
+            "media_export",
+            "media_decode",
+        ] {
+            for path in ["../escape", "/absolute"] {
+                let temp = TempDirectory::new("ja-path-admission");
+                let mut fixture = source.clone();
+                let mut args = json!({"path":path});
+                if name == "media_decode" {
+                    args["at"] = json!(0);
+                }
+                fixture["actions"] = json!([
+                    {"id":1,"participant":"main","action":"core_start","args":{}},
+                    {"id":2,"participant":"main","action":name,"args":args}]);
+                let file = temp.path("fixture.json");
+                std::fs::write(&file, serde_json::to_vec(&fixture).unwrap()).unwrap();
+                let loaded = protocol::load(&file);
+                assert!(
+                    loaded
+                        .as_ref()
+                        .err()
+                        .is_some_and(|e| e.contains("path escape")),
+                    "{name} {path}: {:?}",
+                    loaded.err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_deadline_outlives_all_fixed_role_teardown_allowances() {
+        let mut fixture = protocol::load(&fixtures().join("participants-lock.json"))
+            .unwrap()
+            .fixture;
+        let teardown = 3 * MEDIA_TEARDOWN_MS + 2 * WORKER_REAP_MS;
+        assert!(cleanup_timeout_ms(&fixture) > teardown);
+        fixture.limits.setup_timeout_ms += 1234;
+        assert_eq!(
+            cleanup_timeout_ms(&fixture),
+            teardown + fixture.limits.setup_timeout_ms
+        );
     }
 
     fn copy_fixtures(destination: &Path) {

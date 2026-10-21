@@ -470,7 +470,11 @@ fn validate(f: &Fixture) -> Result<(), String> {
             Call::ProjectSave(a)
             | Call::ProjectReopen(a)
             | Call::InspectFiles(a)
-            | Call::LegacyRenameRefusal(a) => relative_path(&a.path)?,
+            | Call::LegacyRenameRefusal(a)
+            | Call::LockAcquire(a)
+            | Call::HeadlessSave(a)
+            | Call::MediaExport(a) => relative_path(&a.path)?,
+            Call::MediaDecode(a) => relative_path(&a.path)?,
             Call::CoreSend(a) => {
                 if !f.inputs.contains_key(&a.input) {
                     return Err("missing command input".into());

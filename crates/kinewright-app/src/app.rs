@@ -3548,8 +3548,9 @@ pub(crate) fn ja_observe_current(
     in1_tests::in2_cleanup(&mut app);
     drop(app);
     drop(engine);
-    if finished.recv_timeout(Duration::from_secs(30))
-        != Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+    if finished.recv_timeout(Duration::from_millis(
+        kinewright_agent::ja_harness::MEDIA_TEARDOWN_MS,
+    )) != Err(crossbeam_channel::RecvTimeoutError::Disconnected)
     {
         return Err("App media worker teardown not observed; NOT RUN".into());
     }

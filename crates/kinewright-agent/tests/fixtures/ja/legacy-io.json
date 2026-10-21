@@ -116,7 +116,7 @@
         "id": "strict-parent-directory-sync",
         "observation": 2,
         "pointer": "/directory_sync_observed",
-        "oracle": "true",
+        "oracle": "directory-sync-trace",
         "evidence_class": "baseline_property",
         "positive_control": "reopen-full-bytes"
       }
@@ -154,6 +154,12 @@
       "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
       "byte_length": 6,
       "kind": "independent-scalar-oracle"
+    },
+    "directory-sync-trace": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "IO-trace vocabulary: S1 must emit directory_sync from the exact parent-directory sync call site; not a syscall oracle"
     }
   },
   "limits": {

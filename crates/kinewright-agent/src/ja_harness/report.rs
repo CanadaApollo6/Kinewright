@@ -5,6 +5,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -34,6 +35,38 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_output(root: Option<&Path>, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut command = Command::new("git");
+    command.args(args);
+    if let Some(root) = root {
+        command.current_dir(root);
+    }
+    let output = command.output().map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err(format!("source identity git {args:?}: {}", output.status));
+    }
+    Ok(output.stdout)
+}
+
+fn source_identity() -> Result<(PathBuf, String, Vec<u8>), String> {
+    static ROOT: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    let root = ROOT
+        .get_or_init(|| {
+            let bytes = git_output(None, &["rev-parse", "--show-toplevel"])?;
+            Ok(PathBuf::from(
+                String::from_utf8(bytes).map_err(|e| e.to_string())?.trim(),
+            ))
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let head = String::from_utf8(git_output(Some(root), &["rev-parse", "HEAD"])?)
+        .map_err(|e| e.to_string())?
+        .trim()
+        .to_owned();
+    let diff = git_output(Some(root), &["diff", "--binary", "HEAD"])?;
+    Ok((root.clone(), head, diff))
 }
 
 impl Report {
@@ -207,47 +240,21 @@ impl Report {
         fixture: Option<&super::protocol::LoadedFixture>,
     ) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
-        let diff = Command::new("git")
-            .args(["diff", "--binary", "HEAD"])
-            .output()
-            .map_err(|e| e.to_string())?;
-        let diff_ref = self.artifact("source.diff", &diff.stdout)?;
-        let listing = Command::new("git")
-            .args([
-                "ls-files",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-                "-z",
-            ])
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !listing.status.success() || listing.stdout.len() > CONTROL_BYTES {
-            return Err("source inventory unavailable/oversize".into());
-        }
-        let names = listing
-            .stdout
-            .split(|b| *b == 0)
-            .filter(|p| !p.is_empty())
-            .collect::<std::collections::BTreeSet<_>>();
-        let mut sources = Vec::new();
-        for name in names {
-            let name = std::str::from_utf8(name).map_err(|e| e.to_string())?;
-            let path = Path::new(name);
-            if path.is_file() {
-                sources.push(json!({"path":name,"sha256":kinewright_media::sha256_file(path).map_err(|e| e.to_string())?}));
-            }
-        }
+        let (repo_root, head, diff) = source_identity()?;
+        let diff_ref = self.artifact("source.diff", &diff)?;
         let source_manifest = self.artifact(
             "source-manifest.json",
-            &serde_json::to_vec(&sources).map_err(|e| e.to_string())?,
+            &serde_json::to_vec(&json!({"repo_root":repo_root,"head":head,
+                "dirty_diff_sha256":kinewright_media::sha256_bytes(&diff),
+                "scope":"tracked HEAD plus binary diff; inputs and executable bound separately"}))
+            .map_err(|e| e.to_string())?,
         )?;
         let identity = json!({"protocol":PROTOCOL,"protocol_version":1,"run_id":self.run_id,
             "mode":self.mode,"fixture_id":fixture.map(|f| &f.fixture.fixture_id),
             "fixture_sha256":fixture.map(|f| kinewright_media::sha256_bytes(&f.bytes)),
             "lane":fixture.map(|f| f.fixture.lane),"requirements":fixture.map(|f| &f.fixture.requirements),
             "inputs":fixture.map(|f| &f.fixture.inputs),"oracles":fixture.map(|f| &f.fixture.oracles),
-            "source_head":command_output("git", &["rev-parse","HEAD"]),"dirty_diff":diff_ref,"source_manifest":source_manifest,
+            "source_head":head,"dirty_diff":diff_ref,"source_manifest":source_manifest,
             "binary_sha256":kinewright_media::sha256_file(&executable).map_err(|e| e.to_string())?,
             "binary":executable,"compiler":command_output("rustc", &["-vV"]),
             "profile":if cfg!(debug_assertions) {"debug/test"} else {"release"},
@@ -281,6 +288,10 @@ impl Report {
         error: Option<&str>,
     ) -> Result<i32, String> {
         let failed = self.assertions.iter().any(|a| a["passed"] == false);
+        let control_failed = self
+            .assertions
+            .iter()
+            .any(|a| a["evidence_class"] == "control" && a["passed"] == false);
         let exit = if error.is_some() {
             2
         } else if failed {
@@ -295,7 +306,7 @@ impl Report {
             "positive_controls":self.assertions.iter().filter(|a| a["evidence_class"] == "control").collect::<Vec<_>>(),
             "assertions":self.assertions,"pending":self.pending,"observations":self.observations,"artifacts":self.artifacts,
             "gates":fixture.map(|f| f.gate_ids.iter().map(|gate| gate_allocation(gate)).collect::<Vec<_>>()),
-            "disposition":if error.is_some() {"not_run"} else if exit == 3 {"pending_baseline_witness"} else {"observed"},"missing_requirements":error,
+            "disposition":if error.is_some() {"not_run"} else if control_failed {"control_failed"} else if exit == 3 {"pending_baseline_witness"} else {"observed"},"missing_requirements":error,
             "elapsed_ns":self.started.elapsed().as_nanos().to_string()});
         let bytes = serde_json::to_vec_pretty(&summary).map_err(|e| e.to_string())?;
         let (bytes, exit) = if u64::try_from(bytes.len()).unwrap_or(u64::MAX)
@@ -332,9 +343,11 @@ impl Report {
 /// Panics only if the compiled catalog fails its checked schema.
 #[must_use]
 pub fn gate_allocation(gate: &str) -> Value {
-    let catalog: Value =
+    static CATALOG: OnceLock<Value> = OnceLock::new();
+    let catalog = CATALOG.get_or_init(|| {
         serde_json::from_str(include_str!("../../tests/fixtures/ja/gate-observers.json"))
-            .expect("checked gate catalog");
+            .expect("checked gate catalog")
+    });
     if let Some(row) = catalog["gates"]
         .as_array()
         .expect("gate list")
