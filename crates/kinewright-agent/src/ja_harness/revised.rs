@@ -208,6 +208,22 @@ impl Adapter {
                 )
             }
 
+            Call::BundleCopyProbe(args) => {
+                #[cfg(target_os = "linux")]
+                {
+                    if self.mode != Mode::Revised {
+                        return Err(
+                            "complete first-save copy unavailable in baseline mode; NOT RUN".into(),
+                        );
+                    }
+                    self.copy_probe(args, fixture)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = args;
+                    Err("Linux copy prerequisite unavailable; NOT RUN".into())
+                }
+            }
             Call::OwnedInputProbe(args) => {
                 #[cfg(target_os = "linux")]
                 {

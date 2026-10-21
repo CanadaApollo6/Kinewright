@@ -31,7 +31,7 @@ pub(crate) fn note(operation: &'static str, path: &std::path::Path) {
 pub(crate) fn note_bytes(operation: &'static str, path: &std::path::Path, bytes: Option<&[u8]>) {
     TRACE.with_borrow_mut(|trace| {
         if let Some(trace) = trace {
-            if trace.events.len() == 128 {
+            if trace.events.len() == 4096 {
                 trace.overflowed = true;
             } else {
                 trace.events.push(IoObservation {
@@ -53,7 +53,7 @@ pub(crate) fn note_digest(
 ) {
     TRACE.with_borrow_mut(|trace| {
         if let Some(trace) = trace {
-            if trace.events.len() == 128 {
+            if trace.events.len() == 4096 {
                 trace.overflowed = true;
             } else {
                 trace.events.push(IoObservation {

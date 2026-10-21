@@ -14,6 +14,238 @@ const DIR: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
+fn asset_name(namespace: &ProjectNamespace) -> Result<std::ffi::OsString, BundleError> {
+    let mut name = namespace
+        .identity
+        .resolved_root
+        .file_stem()
+        .ok_or_else(|| BundleError::Identity("missing root stem".into()))?
+        .to_os_string();
+    name.push(".kinewright-assets");
+    Ok(name)
+}
+pub(super) fn has_asset_store(namespace: &ProjectNamespace) -> Result<bool, BundleError> {
+    verify_parent(namespace)?;
+    match fs::statat(
+        &namespace.parent,
+        asset_name(namespace)?,
+        AtFlags::SYMLINK_NOFOLLOW,
+    ) {
+        Ok(_) => Ok(true),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+pub(super) fn probe_copy_contention(namespace: &ProjectNamespace) -> Result<(), BundleError> {
+    verify_parent(namespace)?;
+    let path = crate::lockfile_path_for_project(Some(&namespace.identity.resolved_root))
+        .ok_or_else(|| BundleError::Identity("destination lock path".into()))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| BundleError::Identity("destination lock filename".into()))?;
+    let file = match fs::openat(
+        &namespace.parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let stat = fs::fstat(&file)?;
+    if stat.st_nlink != 1 || fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::RegularFile
+    {
+        return Err(BundleError::Identity(
+            "ambiguous destination lock object".into(),
+        ));
+    }
+    fs2::FileExt::try_lock_exclusive(&file).map_err(|e| BundleError::Contention(e.to_string()))?;
+    fs2::FileExt::unlock(&file)?;
+    verify_parent(namespace)
+}
+fn reject_case_collision(directory: &File, name: &std::ffi::OsStr) -> Result<(), BundleError> {
+    use std::os::fd::AsRawFd;
+    let expected = name
+        .to_str()
+        .ok_or_else(|| BundleError::Identity("non-UTF8 destination name".into()))?;
+    let folded = expected.to_lowercase();
+    for entry in std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))? {
+        let actual = entry?.file_name();
+        if actual != name && actual.to_str().is_some_and(|n| n.to_lowercase() == folded) {
+            return Err(BundleError::Identity("destination case collision".into()));
+        }
+    }
+    Ok(())
+}
+#[allow(
+    clippy::too_many_lines,
+    reason = "one no-follow ancestor claim through pinned destination-parent creation"
+)]
+pub(super) fn prepare_destination(path: &Path) -> Result<super::PreparedDestination, BundleError> {
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                PortablePath::new(Path::new(name))?;
+            }
+            Component::RootDir => {}
+            _ => {
+                return Err(BundleError::Identity(
+                    "destination traversal or prefix".into(),
+                ));
+            }
+        }
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let resolved = crate::canonical_project_identity(&absolute)
+        .map_err(|e| BundleError::Identity(e.to_string()))?;
+    let name = resolved
+        .file_name()
+        .ok_or_else(|| BundleError::Identity("destination filename".into()))?
+        .to_os_string();
+    PortablePath::new(Path::new(&name))?;
+    let mut ancestor = resolved
+        .parent()
+        .ok_or_else(|| BundleError::Identity("destination parent".into()))?
+        .to_path_buf();
+    let mut missing = vec![];
+    while !ancestor.exists() {
+        missing.push(
+            ancestor
+                .file_name()
+                .ok_or_else(|| BundleError::Identity("missing destination ancestor".into()))?
+                .to_os_string(),
+        );
+        ancestor = ancestor
+            .parent()
+            .ok_or_else(|| BundleError::Identity("missing destination ancestor".into()))?
+            .to_path_buf();
+    }
+    let mut actual = ancestor.canonicalize()?;
+    let mut parent = pin_directory(&actual)?;
+    check_profile(&parent)?;
+    let claim = if missing.is_empty() {
+        None
+    } else {
+        let digest = kinewright_media::sha256_bytes(resolved.as_os_str().as_encoded_bytes());
+        let claim = acquire(&actual.join(format!(".ja-s1-copy-parent-{digest}.kinewright")))?;
+        let held = fs::fstat(&parent)?;
+        if held.st_dev != claim.identity.parent_device || held.st_ino != claim.identity.parent_inode
+        {
+            return Err(BundleError::Identity("ancestor claim moved".into()));
+        }
+        Some(claim)
+    };
+    let mut prepared = super::PreparedDestination {
+        path: resolved,
+        parent: parent.try_clone()?,
+        claim,
+    };
+    for component in missing.into_iter().rev() {
+        let owner = prepared
+            .claim
+            .as_ref()
+            .ok_or_else(|| BundleError::Identity("missing ancestor claim".into()))?;
+        owner.verify()?;
+        reject_case_collision(&parent, &component)?;
+        actual.push(&component);
+        match fs::mkdirat(&parent, &component, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+            Ok(()) => note("mkdir", &actual),
+            Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
+        }
+        let next = File::from(fs::openat(&parent, &component, DIR, Mode::empty())?);
+        check_profile(&next)?;
+        sync_directory(&next, &actual)?;
+        sync_directory(
+            &parent,
+            actual
+                .parent()
+                .ok_or_else(|| BundleError::Identity("ancestor path".into()))?,
+        )?;
+        parent = next;
+    }
+    reject_case_collision(&parent, &name)?;
+    let path = actual.join(&name);
+    let mut assets = path
+        .file_stem()
+        .ok_or_else(|| BundleError::Identity("destination stem".into()))?
+        .to_os_string();
+    assets.push(".kinewright-assets");
+    reject_case_collision(&parent, &assets)?;
+    let lock = crate::lockfile_path_for_project(Some(&path))
+        .ok_or_else(|| BundleError::Identity("destination lock filename".into()))?;
+    reject_case_collision(
+        &parent,
+        lock.file_name()
+            .ok_or_else(|| BundleError::Identity("destination lock filename".into()))?,
+    )?;
+    prepared.path = path;
+    prepared.parent = parent;
+    Ok(prepared)
+}
+pub(super) fn matches_destination(
+    namespace: &ProjectNamespace,
+    prepared: &super::PreparedDestination,
+) -> Result<(), BundleError> {
+    let expected = fs::fstat(&prepared.parent)?;
+    if namespace.identity.resolved_root != prepared.path
+        || namespace.identity.parent_device != expected.st_dev
+        || namespace.identity.parent_inode != expected.st_ino
+    {
+        return Err(BundleError::Identity(
+            "prepared destination was retargeted".into(),
+        ));
+    }
+    let lock = crate::lockfile_path_for_project(Some(&namespace.identity.resolved_root))
+        .ok_or_else(|| BundleError::Identity("destination lock filename".into()))?;
+    reject_case_collision(
+        &namespace.parent,
+        lock.file_name()
+            .ok_or_else(|| BundleError::Identity("destination lock filename".into()))?,
+    )?;
+    verify_parent(namespace)
+}
+pub(super) fn cleanup_empty_copy_store(
+    namespace: &mut ProjectNamespace,
+) -> Result<(), BundleError> {
+    namespace.verify()?;
+    verify_directories(namespace)?;
+    let directories = namespace.directories.get_mut();
+    let mut paths: Vec<_> = directories.keys().cloned().collect();
+    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for path in paths {
+        let parent = if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            directories
+                .get(parent)
+                .ok_or_else(|| BundleError::Identity("copy cleanup parent".into()))?
+                .try_clone()?
+        } else {
+            namespace.parent.try_clone()?
+        };
+        fs::unlinkat(
+            &parent,
+            path.file_name()
+                .ok_or_else(|| BundleError::Identity("copy cleanup name".into()))?,
+            AtFlags::REMOVEDIR,
+        )?;
+        sync_directory(
+            &parent,
+            namespace
+                .identity
+                .resolved_root
+                .parent()
+                .ok_or_else(|| BundleError::Identity("copy cleanup root parent".into()))?,
+        )?;
+        directories.remove(&path);
+    }
+    Ok(())
+}
+
 pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
     let resolved = crate::canonical_project_identity(path)
         .map_err(|e| BundleError::Identity(e.to_string()))?;
@@ -665,10 +897,16 @@ pub(super) fn reconcile(
     namespace: &mut ProjectNamespace,
     expected: &[u8],
 ) -> Result<(), BundleError> {
+    reconcile_copy_root(namespace, Some(expected))
+}
+pub(super) fn reconcile_copy_root(
+    namespace: &mut ProjectNamespace,
+    expected: Option<&[u8]>,
+) -> Result<(), BundleError> {
     namespace.uncertain = false;
     let result = (|| {
         namespace.verify()?;
-        if namespace.read_root()?.as_deref() != Some(expected) {
+        if namespace.read_root()?.as_deref() != expected {
             return Err(BundleError::Corrupt("reconciliation root changed".into()));
         }
         sync_directory(

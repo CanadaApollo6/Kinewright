@@ -1,10 +1,407 @@
 //! Unsaved edits use exactly the named store's object, budget and pin owner.
 #![allow(clippy::missing_errors_doc)]
 use crate::{
-    bundle::BundleError, bundle_records::SessionId, namespace::ProjectNamespace,
-    storage_budget::StorageLimits, store::ProjectStore,
+    bundle::{BundleError, BundleSaveReport, BundleWriteAdmission, ProjectBundle},
+    bundle_records::{HeadId, ObjectRef, ProjectId, SessionId},
+    namespace::{PreparedDestination, ProjectNamespace},
+    owned_inputs::{OwnedInputManifest, OwnedInputRef},
+    storage_budget::StorageLimits,
+    store::{ProjectStore, SourceCopyHold},
 };
-use std::path::Path;
+use kinewright_core::HistorySnapshot;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+};
+
+#[derive(Debug, Clone)]
+pub enum CopyStatus {
+    Committed(BundleSaveReport),
+    DurabilityUnknown,
+    DefinitelyUnpublished,
+}
+pub enum SaveAsOutcome {
+    SameProject(BundleSaveReport),
+    Copied(Box<BundleCopy>),
+}
+struct DestinationBefore {
+    root: Option<Vec<u8>>,
+    inventory: Option<Vec<u8>>,
+    had_assets: bool,
+    projects: Vec<ProjectId>,
+    sessions: Vec<SessionId>,
+}
+/// Pending copies retain both namespace owners and the complete frozen source closure.
+#[must_use]
+pub struct BundleCopy {
+    destination: Option<ProjectBundle>,
+    source: SourceCopyHold,
+    _prepared: PreparedDestination,
+    before: DestinationBefore,
+    status: CopyStatus,
+    input_rebindings: BTreeMap<ObjectRef, ObjectRef>,
+}
+impl BundleCopy {
+    #[must_use]
+    pub const fn status(&self) -> &CopyStatus {
+        &self.status
+    }
+    pub fn rebound_input(&self, source: &OwnedInputRef) -> Result<OwnedInputRef, BundleError> {
+        let manifest_ref = self
+            .input_rebindings
+            .get(&source.manifest_ref)
+            .ok_or_else(|| BundleError::Identity("input was not in the frozen copy".into()))?
+            .clone();
+        let destination = self
+            .destination
+            .as_ref()
+            .ok_or_else(|| BundleError::Corrupt("copy owner missing".into()))?;
+        let manifest = destination.store.read_input_manifest(&manifest_ref)?;
+        if !manifest.entries.contains(&source.entry) {
+            return Err(BundleError::Identity(
+                "input entry differs from copied manifest".into(),
+            ));
+        }
+        Ok(OwnedInputRef {
+            manifest_ref,
+            entry: source.entry.clone(),
+        })
+    }
+    /// No destination writer can escape an unresolved publication.
+    pub fn into_destination(mut self) -> Result<ProjectBundle, Box<Self>> {
+        if matches!(self.status, CopyStatus::Committed(_))
+            && let Some(destination) = self.destination.take()
+        {
+            return Ok(destination);
+        }
+        Err(Box::new(self))
+    }
+    pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        match &self.status {
+            CopyStatus::Committed(report) => return Ok(Some(report.clone())),
+            CopyStatus::DefinitelyUnpublished => return Ok(None),
+            CopyStatus::DurabilityUnknown => {}
+        }
+        let destination = self
+            .destination
+            .as_mut()
+            .ok_or_else(|| BundleError::Corrupt("copy owner missing".into()))?;
+        let actual = destination.store.with_namespace(|n| n.read_root())?;
+        if actual == self.before.root {
+            destination.store.rollback_copy(
+                self.before.root.as_deref(),
+                self.before.inventory.as_deref(),
+                self.before.had_assets,
+            )?;
+            self.source.reconciled();
+            self.status = CopyStatus::DefinitelyUnpublished;
+            return Ok(None);
+        }
+        let report = destination
+            .reconcile()?
+            .ok_or_else(|| BundleError::Corrupt("copy did not publish a Studio root".into()))?;
+        self.source.reconciled();
+        self.status = CopyStatus::Committed(report.clone());
+        Ok(Some(report))
+    }
+}
+
+fn destination(
+    path: &Path,
+    limits: StorageLimits,
+) -> Result<(ProjectBundle, DestinationBefore, PreparedDestination), BundleError> {
+    limits.validate()?;
+    let prepared = ProjectNamespace::prepare_destination(path)?;
+    let namespace = ProjectNamespace::inspect(&prepared.path)?;
+    namespace.matches_destination(&prepared)?;
+    let root = namespace.read_root()?;
+    let admission = if let Some(bytes) = &root {
+        BundleWriteAdmission::from_bytes(Some(prepared.path.clone()), bytes.clone())?
+    } else {
+        BundleWriteAdmission::new_document()
+    };
+    admission.require_supported()?;
+    let had_assets = namespace.has_asset_store()?;
+    if had_assets && !admission.is_studio() {
+        return Err(BundleError::Identity(
+            "unbound foreign destination store".into(),
+        ));
+    }
+    namespace.probe_copy_contention()?;
+    let inventory = namespace.read(
+        &crate::bundle_recovery::inventory_path()?,
+        limits.control_bytes,
+    )?;
+    let mut projects = vec![];
+    let mut sessions = vec![];
+    if let Some(root) = admission.data.file.as_ref().and_then(|f| f.studio.as_ref()) {
+        projects.push(root.project_id.clone());
+        projects.extend(root.origin_project_ids.clone());
+        sessions.extend(root.origin_session_ids.clone());
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    crate::test_hook("copy_destination_pinned");
+    let mut target = ProjectBundle::activate_copy(&prepared.path, admission, &prepared)?;
+    if had_assets
+        && target.store.with_namespace(|n| {
+            n.read(
+                &crate::bundle_recovery::inventory_path()?,
+                limits.control_bytes,
+            )
+        })? != inventory
+    {
+        return Err(BundleError::Identity(
+            "destination inventory changed during claim".into(),
+        ));
+    }
+    target.store.begin_publication()?;
+    drop(target.durable.take());
+    target.store.restrict_copy_limits(limits)?;
+    let project_id = ProjectId::fresh()?;
+    target
+        .store
+        .rebind_unshared_copy_owner(project_id.clone())?;
+    target.project_id = project_id;
+    Ok((
+        target,
+        DestinationBefore {
+            root,
+            inventory,
+            had_assets,
+            projects,
+            sessions,
+        },
+        prepared,
+    ))
+}
+fn origins(
+    target: &mut ProjectBundle,
+    before: &DestinationBefore,
+    projects: impl IntoIterator<Item = ProjectId>,
+    sessions: impl IntoIterator<Item = SessionId>,
+) -> Result<(), BundleError> {
+    target.origin_project_ids = before
+        .projects
+        .iter()
+        .cloned()
+        .chain(projects)
+        .filter(|id| *id != target.project_id)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    target.origin_session_ids = before
+        .sessions
+        .iter()
+        .cloned()
+        .chain(sessions)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if (target.origin_project_ids.len() + target.origin_session_ids.len()) as u64
+        > target.store.limits().versions
+    {
+        return Err(BundleError::Capacity("project origins"));
+    }
+    Ok(())
+}
+fn rewrite_inputs(
+    target: &mut ProjectBundle,
+    reference: &ObjectRef,
+    map: &mut BTreeMap<ObjectRef, ObjectRef>,
+) -> Result<ObjectRef, BundleError> {
+    if let Some(rebound) = map.get(reference) {
+        return Ok(rebound.clone());
+    }
+    let original = target.store.read_input_manifest(reference)?;
+    let rebound = OwnedInputManifest {
+        project_id: Some(target.project_id.clone()),
+        session_id: None,
+        owner_epoch: target.store.owner_epoch(),
+        entries: original.entries.clone(),
+    };
+    let sealed = target.store.admit_record(&rebound)?;
+    let result = sealed.reference.clone();
+    map.insert(reference.clone(), result.clone());
+    drop(sealed);
+    Ok(result)
+}
+fn result(
+    mut target: ProjectBundle,
+    before: DestinationBefore,
+    prepared: PreparedDestination,
+    mut source: SourceCopyHold,
+    rebindings: BTreeMap<ObjectRef, ObjectRef>,
+    publication: Result<BundleSaveReport, BundleError>,
+) -> Result<BundleCopy, BundleError> {
+    let status = match publication {
+        Ok(report) => CopyStatus::Committed(report),
+        Err(error) => {
+            let uncertain = target.unsettled
+                || target.store.with_namespace(|n| Ok(n.is_uncertain()))?
+                || target.store.has_unsettled_objects()?;
+            if !uncertain
+                && target
+                    .store
+                    .rollback_copy(
+                        before.root.as_deref(),
+                        before.inventory.as_deref(),
+                        before.had_assets,
+                    )
+                    .is_ok()
+            {
+                return Err(error);
+            }
+            source.mark_uncertain()?;
+            CopyStatus::DurabilityUnknown
+        }
+    };
+    Ok(BundleCopy {
+        destination: Some(target),
+        source,
+        _prepared: prepared,
+        before,
+        status,
+        input_rebindings: rebindings,
+    })
+}
+fn frozen_size(store: &ProjectStore, roots: &[ObjectRef], extra: u64) -> Result<u64, BundleError> {
+    store.closure(roots)?.iter().try_fold(extra, |sum, r| {
+        sum.checked_add(r.byte_length)
+            .ok_or(BundleError::Capacity("copy size overflow"))
+    })
+}
+impl ProjectBundle {
+    pub fn save_as(&mut self, path: &Path) -> Result<SaveAsOutcome, BundleError> {
+        self.save_as_with_limits(path, StorageLimits::default())
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one frozen graph copied under the same two namespace owners"
+    )]
+    pub fn save_as_with_limits(
+        &mut self,
+        path: &Path,
+        limits: StorageLimits,
+    ) -> Result<SaveAsOutcome, BundleError> {
+        if self.unsettled || self.pending_command.is_some() {
+            return Err(BundleError::Unsettled);
+        }
+        self.store.with_namespace(|n| n.verify())?;
+        {
+            let _source_root =
+                self.store
+                    .reserve(0, self.admission.raw_bytes().len() as u64, 0, false)?;
+            self.store
+                .with_namespace(|n| n.verify_admitted_root(self.admission.raw_bytes()))?;
+        }
+        let resolved = crate::canonical_project_identity(path)
+            .map_err(|e| BundleError::Identity(e.to_string()))?;
+        if resolved == self.store.resolved_root()? {
+            let root = self
+                .root
+                .as_ref()
+                .ok_or_else(|| BundleError::Corrupt("no acknowledged copy source".into()))?;
+            return Ok(SaveAsOutcome::SameProject(BundleSaveReport {
+                path: resolved,
+                project_id: self.project_id.clone(),
+                generation: root.generation,
+                head_id: self
+                    .manual_head()
+                    .cloned()
+                    .ok_or_else(|| BundleError::Corrupt("no manual head".into()))?,
+                root_sha256: kinewright_media::sha256_bytes(self.admission.raw_bytes()),
+                byte_length: self.admission.raw_bytes().len() as u64,
+            }));
+        }
+        let roots = self.root_references()?;
+        let source = self.store.begin_copy(
+            &roots,
+            frozen_size(&self.store, &roots, self.admission.raw_bytes().len() as u64)?,
+        )?;
+        let (mut target, before, prepared) = destination(path, limits)?;
+        let mut map = BTreeMap::new();
+        let publication = (|| {
+            origins(
+                &mut target,
+                &before,
+                std::iter::once(self.project_id.clone()).chain(self.origin_project_ids.clone()),
+                self.origin_session_ids.clone(),
+            )?;
+            target.store.copy_graph_from(&self.store, &roots)?;
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::check_failure("copy_backup", &prepared.path)?;
+            let snapshot = target.admit_root_checkpoint(self.admission.raw_bytes(), &roots)?;
+            target.recovery.predecessors = std::iter::once(snapshot.reference.clone())
+                .chain(self.recovery.predecessors.iter().cloned())
+                .take(2)
+                .collect();
+            drop(snapshot);
+            target.recovery.activation_project_id = Some(target.project_id.clone());
+            target.recovery.manual_branch_id = Some(self.manual_branch_id.clone());
+            target.recovery.namespace_root_file_name = prepared
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_owned);
+            target.generation = target.generation.max(self.generation);
+            let generation = target
+                .generation
+                .checked_add(1)
+                .ok_or(BundleError::Capacity("copy generation"))?;
+            target.manual_branch_id = self.manual_branch_id.clone();
+            target.evidence.clone_from(&self.evidence);
+            target.receipts = self.receipts.clone();
+            target.issuers = self.issuers.clone();
+            for state in target.issuers.values_mut() {
+                state.retired = true;
+            }
+            let mut branches = BTreeMap::new();
+            let mut index = BTreeMap::new();
+            for (id, original) in &self.branches {
+                let mut checkpoint = original.clone();
+                checkpoint.input_manifest_ref =
+                    rewrite_inputs(&mut target, &original.input_manifest_ref, &mut map)?;
+                checkpoint.history_input_manifest_refs = original
+                    .history_input_manifest_refs
+                    .iter()
+                    .map(|r| rewrite_inputs(&mut target, r, &mut map))
+                    .collect::<Result<_, _>>()?;
+                checkpoint.head_id = HeadId::fresh()?;
+                checkpoint.predecessor = Some(original.head_id.clone());
+                checkpoint.checkpoint_generation = generation;
+                let sealed = target.store.admit_record(&checkpoint)?;
+                index.insert(id.clone(), sealed.reference.clone());
+                branches.insert(id.clone(), checkpoint);
+                drop(sealed);
+            }
+            let index = target.store.admit_record(&index)?;
+            let mut root = self
+                .root
+                .as_ref()
+                .ok_or_else(|| BundleError::Corrupt("copy source root".into()))?
+                .clone();
+            root.branch_index_ref = index.reference.clone();
+            drop(index);
+            root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();
+            target.root = Some(root);
+            target.branches = branches;
+            #[cfg(any(test, feature = "test-util"))]
+            crate::test_hook("copy_before_publish");
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::check_failure("copy_verify", &prepared.path)?;
+            for reference in target.store.closure(&roots)? {
+                target.store.verify(&reference)?;
+            }
+            let history = self.branch_history(&self.manual_branch_id)?;
+            let inputs = target.branches[&target.manual_branch_id]
+                .input_manifest_ref
+                .clone();
+            target.save(&history, &inputs)
+        })();
+        result(target, before, prepared, source, map, publication)
+            .map(|copy| SaveAsOutcome::Copied(Box::new(copy)))
+    }
+}
 pub struct SessionStore {
     store: ProjectStore,
     session_id: SessionId,
@@ -28,9 +425,69 @@ impl SessionStore {
     pub fn store_mut(&mut self) -> &mut ProjectStore {
         &mut self.store
     }
-    pub fn first_save(&mut self, _destination: &Path) -> Result<(), BundleError> {
-        Err(BundleError::Unsupported(
-            "named handoff requires complete bundle-copy publication".into(),
-        ))
+    pub fn admit_inputs(
+        &mut self,
+        manifest: &OwnedInputManifest,
+    ) -> Result<crate::store::SealedObject, BundleError> {
+        if manifest.session_id.as_ref() != Some(&self.session_id)
+            || manifest.project_id.is_some()
+            || manifest.owner_epoch != self.store.owner_epoch()
+        {
+            return Err(BundleError::Identity("session input owner".into()));
+        }
+        self.store.admit_record(manifest)
+    }
+    pub fn first_save(
+        &mut self,
+        destination: &Path,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+    ) -> Result<BundleCopy, BundleError> {
+        self.first_save_with_limits(destination, history, inputs, StorageLimits::default())
+    }
+    pub fn first_save_with_limits(
+        &mut self,
+        path: &Path,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+        limits: StorageLimits,
+    ) -> Result<BundleCopy, BundleError> {
+        history
+            .encoded_bytes()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let roots = [inputs.clone()];
+        let source = self.store.begin_copy(
+            &roots,
+            frozen_size(
+                &self.store,
+                &roots,
+                history
+                    .encoded_bytes()
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+            )?,
+        )?;
+        let (mut target, before, prepared) = destination(path, limits)?;
+        let mut map = BTreeMap::new();
+        let publication = (|| {
+            origins(
+                &mut target,
+                &before,
+                std::iter::empty(),
+                [self.session_id.clone()],
+            )?;
+            target.store.copy_graph_from(&self.store, &roots)?;
+            let rebound = rewrite_inputs(&mut target, inputs, &mut map)?;
+            // Preserve the exact capture owner as archival origin evidence, never as a new lease.
+            target.evidence.push(inputs.clone());
+            #[cfg(any(test, feature = "test-util"))]
+            crate::test_hook("copy_before_publish");
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::check_failure("copy_verify", &prepared.path)?;
+            for reference in target.store.closure(&roots)? {
+                target.store.verify(&reference)?;
+            }
+            target.save(history, &rebound)
+        })();
+        result(target, before, prepared, source, map, publication)
     }
 }

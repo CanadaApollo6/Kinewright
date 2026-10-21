@@ -59,6 +59,7 @@ struct Ledger {
     metadata_sizes: BTreeMap<String, u64>,
     pending: Vec<StorageReservation>,
     pending_controls: Vec<StorageReservation>,
+    copy_holds: u64,
 }
 
 struct StoreInner {
@@ -133,6 +134,7 @@ impl ProjectStore {
                     metadata_sizes: BTreeMap::new(),
                     pending: vec![],
                     pending_controls: vec![],
+                    copy_holds: 0,
                 }),
                 usage: Arc::new(Mutex::new(StorageUsage {
                     physical_bytes: control_bytes,
@@ -248,7 +250,10 @@ impl ProjectStore {
         let mut dependencies = dependencies.to_vec();
         dependencies.sort();
         dependencies.dedup();
-        self.closure(&dependencies)?;
+        self.closure_with_inventory(
+            &dependencies,
+            reference.record_kind != RecordKind::RootCheckpoint,
+        )?;
         let existing = {
             let ledger = self
                 .inner
@@ -456,6 +461,13 @@ impl ProjectStore {
         })
     }
     pub fn closure(&self, roots: &[ObjectRef]) -> Result<Vec<ObjectRef>, BundleError> {
+        self.closure_with_inventory(roots, true)
+    }
+    fn closure_with_inventory(
+        &self,
+        roots: &[ObjectRef],
+        include_inventory: bool,
+    ) -> Result<Vec<ObjectRef>, BundleError> {
         let ledger = self
             .inner
             .ledger
@@ -472,7 +484,7 @@ impl ProjectStore {
                 &mut found,
                 &mut active,
                 &mut visited,
-                true,
+                include_inventory,
                 0,
             )?;
         }
@@ -503,7 +515,8 @@ impl ProjectStore {
         self.open_verified(reference).map(drop)
     }
     pub(crate) fn open_verified(&self, reference: &ObjectRef) -> Result<File, BundleError> {
-        self.closure(std::slice::from_ref(reference))?;
+        // Opening archived bytes does not promote their automatic inventory into live roots.
+        self.closure_with_inventory(std::slice::from_ref(reference), false)?;
         let _working = self.reserve(0, 1 << 20, 0, false)?;
         let path = Self::object_path(reference)?;
         let mut file = self
@@ -633,10 +646,9 @@ fn walk(
     if !visited.insert((reference.sha256.clone(), include_inventory)) {
         return Ok(());
     }
-    let (known, dependencies) = ledger
-        .objects
-        .get(&reference.sha256)
-        .ok_or_else(|| BundleError::Corrupt("missing dependency declaration".into()))?;
+    let (known, dependencies) = ledger.objects.get(&reference.sha256).ok_or_else(|| {
+        BundleError::Corrupt(format!("missing dependency declaration: {reference:?}"))
+    })?;
     if known != reference || !ledger.verified.contains(&reference.sha256) {
         return Err(BundleError::Corrupt(
             "unverified dependency identity".into(),
@@ -823,20 +835,26 @@ impl Drop for StoreInner {
                     usage.unsettled = true;
                 }
             }
-            if temporary {
+            if temporary && ledger.copy_holds == 0 {
                 ledger.can_collect = true;
                 ledger.committed.clear();
             }
-            collectable = ledger.can_collect;
+            collectable = ledger.can_collect && ledger.copy_holds == 0;
         }
         // No StorePin exists once this final Arc is dropped. Named committed roots persist.
+        if temporary
+            && !collectable
+            && let Ok(mut usage) = self.usage.lock()
+        {
+            usage.unsettled = true;
+        }
         let retired = if collectable { collect(self) } else { Ok(0) };
         let closed = self
             .namespace
             .get_mut()
             .map_err(|_| BundleError::Capacity("namespace poisoned"))
             .and_then(|namespace| {
-                if temporary {
+                if temporary && collectable {
                     namespace.cleanup_session()
                 } else {
                     namespace.release()
@@ -1034,6 +1052,11 @@ impl BundleRecord for StoreManifest {
     }
     fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
         self.recovery.validate()?;
+        if !self.mirrors.is_empty() {
+            return Err(BundleError::Unsupported(
+                "inactive physical mirror producer".into(),
+            ));
+        }
         if self.objects.len() as u64 >= limits.objects {
             return Err(BundleError::Capacity("manifest object count"));
         }
@@ -1823,5 +1846,202 @@ impl ProjectStore {
             .map_err(|_| BundleError::Capacity("ledger poisoned"))?
             .pending
             .is_empty())
+    }
+}
+
+/// One frozen source closure and its distinct destination-overlap reservation.
+pub(crate) struct SourceCopyHold {
+    pin: StorePin,
+    overlap: Option<StorageReservation>,
+    uncertain: bool,
+    previous_collection: bool,
+}
+impl ProjectStore {
+    pub(crate) fn begin_copy(
+        &self,
+        roots: &[ObjectRef],
+        bytes: u64,
+    ) -> Result<SourceCopyHold, BundleError> {
+        self.with_namespace(|n| n.verify())?;
+        let overlap = self.reserve_copy(bytes)?;
+        let pin = self.pin(roots)?;
+        let mut ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        let previous_collection = ledger.can_collect;
+        ledger.copy_holds = ledger
+            .copy_holds
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("copy holds"))?;
+        Ok(SourceCopyHold {
+            pin,
+            overlap: Some(overlap),
+            uncertain: false,
+            previous_collection,
+        })
+    }
+    pub(crate) fn rebind_unshared_copy_owner(&mut self, id: ProjectId) -> Result<(), BundleError> {
+        let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+            BundleError::Identity("destination store already has live readers".into())
+        })?;
+        let mut bytes = [0; 8];
+        getrandom::fill(&mut bytes).map_err(|e| BundleError::Identity(e.to_string()))?;
+        inner.project_id = Some(id);
+        inner.session_id = None;
+        inner.owner_epoch = u64::from_le_bytes(bytes).max(1);
+        Ok(())
+    }
+    pub(crate) fn copy_graph_from(
+        &mut self,
+        source: &ProjectStore,
+        roots: &[ObjectRef],
+    ) -> Result<(), BundleError> {
+        let _working = source.reserve(0, source.usage()?.metadata_bytes, 0, false)?;
+        let selected = source.closure(roots)?;
+        let manifest = source.manifest()?;
+        let mut remaining: BTreeMap<_, _> = selected
+            .into_iter()
+            .map(|r| (r.sha256.clone(), r))
+            .collect();
+        let mut copied = BTreeSet::new();
+        while !remaining.is_empty() {
+            let ready: Vec<_> = remaining
+                .iter()
+                .filter(|(hash, _)| {
+                    manifest.dependencies[*hash]
+                        .iter()
+                        .all(|r| copied.contains(&r.sha256))
+                })
+                .map(|(h, _)| h.clone())
+                .collect();
+            if ready.is_empty() {
+                return Err(BundleError::Corrupt(
+                    "copy graph is not topologically closed".into(),
+                ));
+            }
+            for hash in ready {
+                let reference = remaining
+                    .remove(&hash)
+                    .ok_or_else(|| BundleError::Corrupt("copy selection disappeared".into()))?;
+                let dependencies = &manifest.dependencies[&hash];
+                let mut file = source.open_verified(&reference)?;
+                #[cfg(any(test, feature = "test-util"))]
+                crate::io_observer::check_failure(
+                    "copy_object",
+                    Self::object_path(&reference)?.as_path(),
+                )?;
+                let object = self.admit_recovered(&mut file, &reference, dependencies)?;
+                if let Some(inventory) = manifest.inventory_dependencies.get(&hash) {
+                    self.inner
+                        .ledger
+                        .lock()
+                        .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                        .inventory_dependencies
+                        .insert(hash.clone(), inventory.clone());
+                }
+                copied.insert(hash);
+                drop(object);
+            }
+        }
+        Ok(())
+    }
+}
+impl SourceCopyHold {
+    pub(crate) fn mark_uncertain(&mut self) -> Result<(), BundleError> {
+        self.uncertain = true;
+        self.pin
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .can_collect = false;
+        self.pin
+            .inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?
+            .unsettled = true;
+        Ok(())
+    }
+    pub(crate) fn reconciled(&mut self) {
+        self.uncertain = false;
+    }
+}
+impl Drop for SourceCopyHold {
+    fn drop(&mut self) {
+        if self.uncertain {
+            if let Some(reservation) = self.overlap.take() {
+                reservation.retain_charge();
+            }
+            return;
+        }
+        if let Ok(mut ledger) = self.pin.inner.ledger.lock() {
+            if let Some(next) = ledger.copy_holds.checked_sub(1) {
+                ledger.copy_holds = next;
+                if next == 0 {
+                    ledger.can_collect = self.previous_collection;
+                    if ledger.pending.is_empty()
+                        && ledger.pending_controls.is_empty()
+                        && let Ok(mut usage) = self.pin.inner.usage.lock()
+                    {
+                        usage.unsettled = false;
+                    }
+                }
+            } else if let Ok(mut usage) = self.pin.inner.usage.lock() {
+                usage.damaged_accounting = true;
+            }
+        }
+    }
+}
+
+impl ProjectStore {
+    pub(crate) fn restrict_copy_limits(
+        &mut self,
+        limits: StorageLimits,
+    ) -> Result<(), BundleError> {
+        limits.validate()?;
+        let usage = self.usage()?;
+        if usage.objects > limits.objects
+            || usage.owned_bytes > limits.owned_bytes
+            || usage
+                .metadata_bytes
+                .checked_add(usage.decoded_bytes)
+                .is_none_or(|n| n > limits.metadata_bytes)
+            || usage.live_history_bytes > limits.live_history_bytes
+        {
+            return Err(BundleError::Capacity("destination quota"));
+        }
+        Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| BundleError::Identity("destination already shared".into()))?
+            .limits = limits;
+        Ok(())
+    }
+    pub(crate) fn rollback_copy(
+        &mut self,
+        root: Option<&[u8]>,
+        inventory: Option<&[u8]>,
+        had_assets: bool,
+    ) -> Result<(), BundleError> {
+        if self.has_unsettled_objects()? {
+            return Err(BundleError::Unsettled);
+        }
+        self.with_namespace(|n| n.reconcile_copy_root(root))?;
+        let path = crate::bundle_recovery::inventory_path()?;
+        self.with_namespace(|n| {
+            if let Some(bytes) = inventory {
+                n.replace_relative(&path, bytes)
+            } else {
+                n.unlink_owned(&path)
+            }
+        })?;
+        self.settle_controls()?;
+        self.allow_collection()?;
+        self.collect_unpublished()?;
+        if !had_assets {
+            self.with_namespace(ProjectNamespace::cleanup_empty_copy_store)?;
+        }
+        Ok(())
     }
 }

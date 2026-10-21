@@ -67,6 +67,10 @@ pub struct SupportInventory {
 #[serde(deny_unknown_fields)]
 pub struct StudioRoot {
     pub project_id: crate::bundle_records::ProjectId,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_project_ids: Vec<crate::bundle_records::ProjectId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub origin_session_ids: Vec<crate::bundle_records::SessionId>,
     pub generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub creation_brief_ref: Option<ObjectRef>,
@@ -92,6 +96,24 @@ pub struct StudioRoot {
 }
 impl StudioRoot {
     pub(crate) fn admit(&self) -> Result<(), BundleError> {
+        if (self.origin_project_ids.len() + self.origin_session_ids.len()) as u64
+            > StorageLimits::default().versions
+            || self
+                .origin_session_ids
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.origin_session_ids.len()
+            || self.origin_project_ids.contains(&self.project_id)
+            || self
+                .origin_project_ids
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != self.origin_project_ids.len()
+        {
+            return Err(BundleError::Capacity("project origins"));
+        }
         if self.generation == 0 || self.manual_switch_generation != 0 {
             return Err(BundleError::Unsupported(
                 "unsupported Studio generation/switch state".into(),
@@ -516,6 +538,8 @@ impl LoadedBundle {
         let mut bundle = ProjectBundle {
             store,
             project_id: root.project_id.clone(),
+            origin_project_ids: root.origin_project_ids.clone(),
+            origin_session_ids: root.origin_session_ids.clone(),
             manual_branch_id: root.manual_branch_id.clone(),
             generation: root.generation,
             branches,
@@ -547,6 +571,8 @@ impl LoadedBundle {
 pub struct ProjectBundle {
     pub(crate) store: ProjectStore,
     pub(crate) project_id: ProjectId,
+    pub(crate) origin_project_ids: Vec<ProjectId>,
+    pub(crate) origin_session_ids: Vec<crate::bundle_records::SessionId>,
     pub(crate) manual_branch_id: BranchId,
     pub(crate) generation: u64,
     pub(crate) branches: BTreeMap<BranchId, BranchCheckpoint>,
@@ -570,11 +596,34 @@ impl ProjectBundle {
         reason = "activation validates and protects the original under one authority"
     )]
     pub fn activate(path: &Path, admission: BundleWriteAdmission) -> Result<Self, BundleError> {
+        Self::activate_checked(path, admission, None)
+    }
+    pub(crate) fn activate_copy(
+        path: &Path,
+        admission: BundleWriteAdmission,
+        prepared: &crate::namespace::PreparedDestination,
+    ) -> Result<Self, BundleError> {
+        Self::activate_checked(path, admission, Some(prepared))
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "activation binds support, namespace identity and exact migration backup before publication"
+    )]
+    fn activate_checked(
+        path: &Path,
+        admission: BundleWriteAdmission,
+        prepared: Option<&crate::namespace::PreparedDestination>,
+    ) -> Result<Self, BundleError> {
         admission.require_supported()?;
         if admission.is_studio() {
-            let loaded = LoadedBundle::read(path)?;
+            let mut loaded = LoadedBundle::read(path)?;
             if loaded.admission.raw_bytes() != admission.raw_bytes() {
                 return Err(BundleError::Identity("activation source changed".into()));
+            }
+            if let Some(prepared) = prepared {
+                loaded.namespace.matches_destination(prepared)?;
+                loaded.namespace.claim()?;
+                loaded.namespace.matches_destination(prepared)?;
             }
             return loaded.into_writer();
         }
@@ -586,6 +635,14 @@ impl ProjectBundle {
         #[cfg(target_os = "linux")]
         {
             let mut namespace = ProjectNamespace::inspect(path)?;
+            if let Some(prepared) = prepared {
+                namespace.matches_destination(prepared)?;
+                if namespace.has_asset_store()? {
+                    return Err(BundleError::Identity(
+                        "unbound foreign destination store".into(),
+                    ));
+                }
+            }
             let original = namespace.read_root()?;
             if original.as_deref() != admission.source().map(|_| admission.raw_bytes()) {
                 return Err(BundleError::Identity(
@@ -593,6 +650,14 @@ impl ProjectBundle {
                 ));
             }
             namespace.claim()?;
+            if let Some(prepared) = prepared {
+                namespace.matches_destination(prepared)?;
+                if namespace.has_asset_store()? {
+                    return Err(BundleError::Identity(
+                        "destination store appeared during claim".into(),
+                    ));
+                }
+            }
             if namespace.read_root()? != original {
                 return Err(BundleError::Identity(
                     "activation changed during claim".into(),
@@ -665,6 +730,8 @@ impl ProjectBundle {
             Ok(Self {
                 store,
                 project_id,
+                origin_project_ids: vec![],
+                origin_session_ids: vec![],
                 manual_branch_id,
                 generation: 0,
                 branches: BTreeMap::new(),
@@ -816,6 +883,8 @@ impl ProjectBundle {
             .iter()
             .map(|(id, b)| (id.clone(), (*b.0).clone()))
             .collect();
+        self.origin_project_ids.clone_from(&root.origin_project_ids);
+        self.origin_session_ids.clone_from(&root.origin_session_ids);
         self.generation = root.generation;
         self.recovery = loaded.manifest.recovery.clone();
         self.inventory = loaded.inventory;

@@ -278,6 +278,10 @@ impl BundleCommit {
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         drop(core);
         let manifest = bundle.store.read_input_manifest(inputs)?;
+        if manifest.project_id.as_ref() != Some(&bundle.project_id) || manifest.session_id.is_some()
+        {
+            return Err(BundleError::Identity("current input manifest owner".into()));
+        }
         validate_inputs(&checked, &manifest)?;
         let prior = bundle.branches.get(branch_id).cloned();
         let old_history = prior
@@ -488,11 +492,13 @@ impl BundleCommit {
         barrier(bundle, CommitBarrier::B2)?;
         let mut recovery = bundle.recovery.clone();
         if !bundle.admission.raw_bytes().is_empty() {
-            let deps = if bundle.root.is_some() {
-                bundle.root_references()?
-            } else {
-                vec![]
-            };
+            let deps = bundle
+                .admission
+                .data
+                .file
+                .as_ref()
+                .and_then(|f| f.studio.as_ref())
+                .map_or_else(Vec::new, super::bundle::StudioRoot::references);
             let previous = bundle
                 .admit_root_checkpoint(bundle.admission.raw_bytes().to_vec().as_slice(), &deps)?;
             let reference = previous.reference.clone();
@@ -574,6 +580,8 @@ impl BundleCommit {
         let store_manifest_ref = seal!(&store_manifest);
         let root = StudioRoot {
             project_id: bundle.project_id.clone(),
+            origin_project_ids: bundle.origin_project_ids.clone(),
+            origin_session_ids: bundle.origin_session_ids.clone(),
             generation,
             creation_brief_ref: None,
             manual_branch_id: bundle.manual_branch_id.clone(),
@@ -615,6 +623,8 @@ impl BundleCommit {
         )?;
         next_admission.require_supported()?;
         bundle.store.closure(&root.references())?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("root_before_publish", &bundle.store.resolved_root()?)?;
         if let Err(error) = bundle.store.publish_root(next_admission.raw_bytes()) {
             if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {
                 bundle.unsettled = true;

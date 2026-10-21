@@ -2,6 +2,8 @@
 #![allow(clippy::missing_errors_doc)]
 pub mod baseline;
 pub mod controller;
+#[cfg(target_os = "linux")]
+mod copy_observer;
 pub mod media_observer;
 pub mod protocol;
 #[cfg(target_os = "linux")]

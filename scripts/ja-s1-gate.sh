@@ -89,7 +89,7 @@ done
 if [[ "$stage" -eq 1 || "$stage" -ge 4 ]]; then
     run_selected H cargo test -p kinewright-core --lib -- --exact actor::tests::applied_operations_follow_undo_and_redo_instead_of_the_append_only_log actor::tests::batch_broadcasts_once_appends_each_op_and_undoes_as_one_snapshot actor::tests::coalesced_batches_under_one_key_form_a_single_undo_entry actor::tests::coalesced_history_replays_faithfully_through_applied_operations
 fi
-if [[ "$stage" -eq 1 || "$stage" -eq 6 || "$stage" -eq 8 ]]; then
+if [[ "$stage" -eq 1 || "$stage" -ge 6 ]]; then
     run_selected M cargo test -p kinewright-agent --lib -- --exact branch::tests::sibling_branches_diverge_without_touching_live_state branch::tests::merge_is_atomic_and_rejects_a_stale_base branch::tests::cherry_pick_preserves_branch_order_and_validates_indices_first
 fi
 if [[ "$stage" -ge 2 ]]; then

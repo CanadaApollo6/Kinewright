@@ -939,6 +939,29 @@
           "kind": "input"
         }
       }
+    },
+    {
+      "fixture_id": "s1-copy-handoff",
+      "relative_file": "s1-copy-handoff.json",
+      "sha256": "ca6d69239af710e69a8400f33ebb1f1ea6cca70cebb08ef32d2fdb13e06a0152",
+      "byte_length": 3928,
+      "expected_baseline_process_exit": 2,
+      "inputs": {
+        "lut": {
+          "relative_file": "s1-copy-lut.cube",
+          "sha256": "7d37bfe015b3ffc749b8d7b6c5d7487f4fc67770eaf3fd63bc2fee1fb5d519e5",
+          "byte_length": 80,
+          "kind": "independent-owned-lut-bytes"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

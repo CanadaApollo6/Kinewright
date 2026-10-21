@@ -52,8 +52,54 @@ Storage limits remain provisional until L6's workload measurements.
    tests, four durable branch tests, six receipt tests and all affected harness/format
    selections passed. Eleven targeted mutation pairs failed and passed after restoration.
    Exact raw summaries are in `commit-6.json`.
-7. Save As and first save: not committed.
+7. Save As and first save: Linux gate passed (`c7-gate1`), including all six
+   new copy witnesses and twelve revised fixtures. Ten targeted mutation pairs
+   failed at runtime and passed after restoration. Exact raw summaries are in
+   `commit-7.json`.
 8. Recovery retention and measured evidence: not committed.
+
+### Resume, commit 7
+
+Save As copies the acknowledged bundle through its existing store owner. First save
+uses the same engine with an explicit frozen history and session input context; S2
+still owns live GUI producer fencing and writer attachment. The source closure and
+physical overlap remain reserved through reconciliation and handoff. Active copied
+inputs receive the new project/epoch; original project/session identities remain
+read-only provenance for exact archived receipts and checkpoints. Copied issuers
+retire rather than granting new command authority.
+
+The native copy fixture exercises production first-save failures, exact embedded
+font and LUT bytes, retained undo/redo, the old live reader and last-reader charge
+retirement. Its unavailable predecessor copy endpoint is NOT RUN, never a baseline
+runtime red. Media bytes in the project copy test are a storage control, without
+decoder-open certification. Ten targeted mutation pairs exercise graph omissions,
+claim ordering, foreign stores, alias binding, final verification, uncertain handoff,
+source pins and inventory rollback. A first mutation driver attempt encountered
+nested native-child summaries; the driver now validates the final parent summary.
+A mutation that disrupted participant setup was rejected and rerun against the
+direct contention witness; neither setup failure nor timeout is credited as a red.
+
+Implementation adjustments and evidence:
+
+- `crates/kinewright-project/src/bundle_copy.rs:109` creates missing destination
+  parents under a pinned ancestor claim, then binds the actual target claim before
+  copying. Both authorities are retained, without a second store or cleanup owner.
+- `crates/kinewright-project/src/store.rs:1896` copies the selected closure in
+  dependency order and drops each temporary seal after admission. The source pin
+  and frozen destination GC provide lifetime ownership without quadratic pin sets.
+- `crates/kinewright-project/src/store.rs:466` distinguishes automatic recovery
+  inventory traversal from content traversal. Opening/copying an archived manifest
+  does not promote its retired inventory to new roots. The stronger native test
+  found this defect with comments, specialist bases and several predecessor saves.
+- `crates/kinewright-project/src/io_observer.rs:34` increases the test observation
+  ceiling from 128 to 4096 events so the complete real copy trace fits. This changes
+  no production quota or frozen S0 fixture/oracle.
+- Nonempty `StoreManifest.mirrors` is refused as an inactive producer. No S1 API
+  produces or verifies those alternate files; declaring them charged would be a
+  false physical-storage guarantee. Current manifests and frozen fixtures use none.
+
+Windows full cfg checks still require the unavailable native MSVC prerequisites;
+native Windows, full CI and L4 decoder certification remain NOT RUN.
 
 ## Plan deviations
 

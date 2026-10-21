@@ -120,7 +120,77 @@ pub struct ProjectNamespace {
     uncertain: bool,
     read_only: bool,
 }
+
+/// Pins the destination parent, including an ancestor claim when creating parents.
+pub(crate) struct PreparedDestination {
+    pub(crate) path: PathBuf,
+    #[cfg(target_os = "linux")]
+    parent: File,
+    claim: Option<ProjectNamespace>,
+}
+impl Drop for PreparedDestination {
+    fn drop(&mut self) {
+        if let Some(claim) = &mut self.claim {
+            let _ = claim.release();
+        }
+    }
+}
 impl ProjectNamespace {
+    pub(crate) fn prepare_destination(path: &Path) -> Result<PreparedDestination, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::prepare_destination(path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = path;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn matches_destination(
+        &self,
+        prepared: &PreparedDestination,
+    ) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::matches_destination(self, prepared)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = prepared;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn has_asset_store(&self) -> Result<bool, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::has_asset_store(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn probe_copy_contention(&self) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::probe_copy_contention(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn cleanup_empty_copy_store(&mut self) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::cleanup_empty_copy_store(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub(crate) fn create_session(
         parent: &Path,
         session_id: &crate::bundle_records::SessionId,
@@ -247,6 +317,25 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
+    pub(crate) fn verify_admitted_root(&self, expected: &[u8]) -> Result<(), BundleError> {
+        self.verify()?;
+        #[cfg(target_os = "linux")]
+        {
+            if linux::read_at(&self.parent, &self.root_name, expected.len() as u64)?.as_deref()
+                != Some(expected)
+            {
+                return Err(BundleError::Identity(
+                    "source root changed after admission".into(),
+                ));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = expected;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub(crate) fn seal_existing(&mut self, path: &PortablePath) -> Result<(), BundleError> {
         #[cfg(target_os = "linux")]
         {
@@ -270,6 +359,20 @@ impl ProjectNamespace {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (path, bytes);
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn reconcile_copy_root(
+        &mut self,
+        expected: Option<&[u8]>,
+    ) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::reconcile_copy_root(self, expected)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = expected;
             Err(BundleError::DurabilityUnsupported)
         }
     }

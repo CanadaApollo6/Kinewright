@@ -359,7 +359,8 @@ impl ProjectBundle {
             )?;
             prior.require_supported()?;
             if let Some(root) = prior.data.file.as_ref().and_then(|f| f.studio.as_ref())
-                && root.project_id == self.project_id
+                && (root.project_id == self.project_id
+                    || self.origin_project_ids.contains(&root.project_id))
                 && let Some(index) = &root.receipt_index_ref
             {
                 let ledger = self.store.read_record::<ReceiptLedger>(index)?;

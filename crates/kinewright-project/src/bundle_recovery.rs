@@ -380,6 +380,7 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
     let mut lineages = BTreeMap::new();
     let mut documents = BTreeMap::new();
     let mut indexes = BTreeMap::new();
+    let mut input_manifests = BTreeMap::new();
     for reference in &manifest.objects {
         macro_rules! admit {
             ($ty:ty) => {{
@@ -423,7 +424,7 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                 let _value = admit!(crate::bundle_records::RecoveryCloseCheckpoint);
             }
             RecordKind::InputManifest => {
-                let _value = admit!(OwnedInputManifest);
+                input_manifests.insert(reference.sha256.clone(), admit!(OwnedInputManifest));
             }
             RecordKind::ReceiptIndex => {
                 let _value = admit!(crate::receipts::ReceiptLedger);
@@ -514,6 +515,16 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                 "branch history/checkpoint mismatch".into(),
             ));
         }
+        for reference in std::iter::once(&checkpoint.input_manifest_ref)
+            .chain(&checkpoint.history_input_manifest_refs)
+        {
+            let input = input_manifests.get(&reference.sha256).ok_or_else(|| {
+                BundleError::Corrupt("active branch input manifest missing".into())
+            })?;
+            if input.project_id.as_ref() != Some(&root.project_id) || input.session_id.is_some() {
+                return Err(BundleError::Corrupt("active branch input owner".into()));
+            }
+        }
         // Private candidate replay; no live Core is changed on a damaged branch.
         let core = kinewright_core::Core::spawn((*history.baseline).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -584,7 +595,8 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
         .transpose()?;
     if let Some(ledger) = &receipts {
         for receipt in ledger.detailed.iter().chain(&ledger.retired) {
-            if receipt.project_id != root.project_id
+            if (receipt.project_id != root.project_id
+                && !root.origin_project_ids.contains(&receipt.project_id))
                 || receipt.generation > root.generation
                 || !issuers
                     .as_ref()
