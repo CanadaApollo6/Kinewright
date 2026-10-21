@@ -66,10 +66,13 @@ mod tests {
             Ok("revised") => Mode::Revised,
             _ => Mode::Baseline,
         };
-        assert_eq!(
-            run(Path::new(&fixture), Path::new(&output), mode).unwrap(),
-            0
-        );
+        let exit = run(Path::new(&fixture), Path::new(&output), mode).unwrap();
+        // On-demand native bridge fault injection after the common report is
+        // complete, before libtest can supply its normal 0/101 process outcome.
+        if std::env::var_os("JA_HARNESS_TEST_ABNORMAL_APP_EXIT").is_some() {
+            std::process::exit(86);
+        }
+        assert_eq!(exit, 0);
     }
 
     #[test]

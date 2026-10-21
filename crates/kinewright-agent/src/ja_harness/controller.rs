@@ -6,7 +6,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -195,7 +195,12 @@ impl Worker {
         if kill {
             self.child.kill().map_err(|e| e.to_string())?;
         }
-        let deadline = Instant::now() + Duration::from_millis(super::WORKER_REAP_MS);
+        let allowance = if kill {
+            super::WORKER_REAP_MS
+        } else {
+            super::MEDIA_TEARDOWN_MS + super::WORKER_REAP_MS
+        };
+        let deadline = Instant::now() + Duration::from_millis(allowance);
         let status = loop {
             if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
                 break status;
@@ -232,7 +237,8 @@ impl Drop for Worker {
         drop(self.child.stdin.take());
         if self.child.try_wait().ok().flatten().is_none() {
             // EOF gives the fixture worker a chance to reap its own child.
-            let deadline = Instant::now() + Duration::from_millis(super::WORKER_REAP_MS);
+            let deadline = Instant::now()
+                + Duration::from_millis(super::MEDIA_TEARDOWN_MS + super::WORKER_REAP_MS);
             while self.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(2));
             }
@@ -388,6 +394,11 @@ pub fn app_fixture(
         .iter()
         .any(|a| a["evidence_class"] == "control" && a["passed"] == false);
     let exit = summary["exit_code"].as_i64().ok_or("App exit absent")?;
+    if !app_exit_matches_report(status, timed_out, Some(exit)) {
+        return Err(format!(
+            "App test adapter abnormal exit/report combination: {status}, inner exit {exit}; NOT RUN"
+        ));
+    }
     let expected_exit = if summary["disposition"] == "not_run" {
         2
     } else if failed {
@@ -437,6 +448,14 @@ pub fn app_fixture(
             .into());
     }
     Ok(())
+}
+
+fn app_exit_matches_report(status: ExitStatus, timed_out: bool, exit: Option<i64>) -> bool {
+    !timed_out
+        && matches!(
+            (status.code(), exit),
+            (Some(0), Some(0)) | (Some(101), Some(1..=3))
+        )
 }
 
 fn rebase_app_evidence(value: &mut Value, root: &Path, prefix: &Path) -> Result<(), String> {
@@ -817,6 +836,32 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
     Ok(0)
 }
 
+#[cfg(all(test, unix))]
+pub(super) fn witness_worker_teardown_window() {
+    use kinewright_media::test_support::TempDirectory;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = TempDirectory::new("ja-worker-teardown");
+    let executable = temp.path("worker");
+    // Fixed test worker: acknowledge EOF, then perform teardown beyond the old
+    // reap window. No GPU timing or unavailable-device fallback controls this.
+    fs::write(&executable, b"#!/bin/sh\ncat >/dev/null\nexec sleep 3\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut report = Report::create(&temp.path("report"), protocol::Mode::Baseline).unwrap();
+    let mut worker = Worker::spawn(&executable, Path::new("unused"), &report.root, "A").unwrap();
+    let started = Instant::now();
+    let result = worker.finish(false, &mut report);
+    assert!(
+        result.is_ok(),
+        "worker-owned teardown must precede the reap deadline: {result:?}"
+    );
+    let receipt = result.unwrap();
+    assert!(started.elapsed() > Duration::from_millis(super::WORKER_REAP_MS));
+    assert_eq!(receipt["reaped"], true);
+    assert_eq!(receipt["killed"], false);
+    let events = fs::read_to_string(report.root.join("events.jsonl")).unwrap();
+    assert_eq!(events.lines().count(), 1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,5 +871,40 @@ mod tests {
         assert!(line(&mut BufReader::new(&vec![b'x'; CONTROL_BYTES + 1][..])).is_err());
         let raw = b"{\"frame\":-9223372036854775808}\n";
         assert_eq!(line(&mut BufReader::new(&raw[..])).unwrap().unwrap(), raw);
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn app_exit_classifier_rejects_abnormal_numeric_status_despite_completed_report() {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        #[cfg(windows)]
+        let status = ExitStatus::from_raw;
+        #[cfg(unix)]
+        let status = |code| ExitStatus::from_raw(code << 8);
+        #[cfg(windows)]
+        let abnormal = ExitStatus::from_raw(0xC000_0005);
+        #[cfg(unix)]
+        let abnormal = status(86);
+        assert!(app_exit_matches_report(status(0), false, Some(0)));
+        for exit in 1..=3 {
+            assert!(app_exit_matches_report(status(101), false, Some(exit)));
+        }
+        for exit in 0..=3 {
+            assert!(!app_exit_matches_report(abnormal, false, Some(exit)));
+            assert!(!app_exit_matches_report(status(0), true, Some(exit)));
+        }
+        assert!(!app_exit_matches_report(status(0), false, Some(1)));
+        assert!(!app_exit_matches_report(status(101), false, Some(0)));
+        assert!(!app_exit_matches_report(status(101), false, None));
+        assert!(!app_exit_matches_report(status(0), false, None));
+        #[cfg(unix)]
+        assert!(!app_exit_matches_report(
+            ExitStatus::from_raw(9),
+            false,
+            Some(0)
+        ));
     }
 }

@@ -407,6 +407,81 @@ fn native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two() {
 }
 
 #[test]
+#[ignore = "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"]
+fn native_app_bridge_rejects_abnormal_exit_after_completed_report() {
+    assert!(std::env::var_os("JA_HARNESS_APP_TEST_BINARY").is_some());
+    for inner_exit in [0, 1] {
+        let temp = TempDirectory::new("ja-native-app-abnormal");
+        let root = copied_fixtures(&temp);
+        let file = root.join("app-coalesced-paint.json");
+        if inner_exit == 1 {
+            let mut fixture: Value =
+                serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            fixture["oracles"]["false"] = serde_json::from_slice::<Value>(
+                &std::fs::read(root.join("legacy-io.json")).unwrap(),
+            )
+            .unwrap()["oracles"]["false"]
+                .clone();
+            let failure = fixture["actions"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|a| a["args"]["id"] == "actual-headless-callback-ran")
+                .unwrap();
+            failure["args"]["oracle"] = "false".into();
+            failure["args"]["evidence_class"] = "baseline_property".into();
+            failure["args"]["positive_control"] = "coalesced-gesture-one-undo".into();
+            std::fs::write(&file, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        }
+        let output = retained_output(&temp, &format!("native-app-abnormal-{inner_exit}"));
+        let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+            .args(["--mode", "baseline", "--fixture"])
+            .arg(&file)
+            .arg("--output")
+            .arg(&output)
+            .env("JA_HARNESS_TEST_ABNORMAL_APP_EXIT", "1")
+            .output()
+            .unwrap();
+        let inner: Value =
+            serde_json::from_slice(&std::fs::read(output.join("app-1/summary.json")).unwrap())
+                .unwrap();
+        assert_eq!(inner["exit_code"], inner_exit);
+        assert!(!inner["assertions"].as_array().unwrap().is_empty());
+        assert!(
+            inner["positive_controls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["passed"] == true)
+        );
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "a completed report cannot override abnormal termination"
+        );
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+        assert_eq!(summary["disposition"], "not_run");
+        assert!(summary["assertions"].as_array().unwrap().is_empty());
+        assert!(
+            summary["missing_requirements"]
+                .as_str()
+                .unwrap()
+                .contains("abnormal exit/report combination")
+        );
+        let events = std::fs::read_to_string(output.join("events.jsonl")).unwrap();
+        let events = events
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .collect::<Vec<_>>();
+        assert!(events.iter().any(|e| e["kind"] == "process_exit"
+            && e["participant"] == "app-test"
+            && e["data"]["status"].as_str().unwrap().contains("86")));
+        assert!(!events.iter().any(|e| e["kind"] == "common_report_imported"));
+    }
+}
+
+#[test]
 fn native_source_identity_is_repository_wide_from_root_and_crate_cwd() {
     let temp = TempDirectory::new("ja-native-source");
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));

@@ -145,6 +145,14 @@ exit 1 (including a failed control) remains distinct from setup NOT RUN/exit 2.
 The two on-demand App bridge tests are explicitly included by the S0 gate after
 building the actual App libtest executable.
 
+Round 2 additionally admits only process exit 0 with inner exit 0, or libtest
+exit 101 with a completed nonzero common report. Every other numeric exit,
+signal, timeout or missing/incomplete report is NOT RUN. A cfg-gated classifier
+witness constructs Windows access violation `0xC0000005`; Linux exercises an
+abnormal numeric exit instead. The third on-demand native bridge test forces
+exit 86 after completed passing and failing reports and requires NOT RUN with
+no imported assertions. This is Linux bridge evidence, not a Windows run.
+
 The Unix supervisor observes exit with `waitid(WNOWAIT)`, retaining the leader
 identity until fixed-role group cleanup finishes. Linux adopts/reaps only its
 fixture group's descendants; the two-second cleanup receipt does not certify a
@@ -156,6 +164,21 @@ Cleanup's phase deadline derives from each fixed role's media/worker teardown
 allowance plus report-sealing headroom. The gate runner's separate package build
 checks the feature graph in dev; it does not claim a rebuilt shipping release.
 
+A timed-out supervisor finish is attempted once; Drop cannot send another
+group kill or reap after the terminal receipt. The timeout witness injects a
+blocked descendant-reap result while using a real group kill and deadline.
+Graceful workers receive the media teardown allowance plus their reap window.
+The derived-deadline witness now calls the actual Worker finish path with a
+fixed worker whose EOF teardown takes three seconds; it does not claim measured
+worst-case media teardown.
+
+**Windows harness limitation — NOT RUN.** Abnormal-exit tree cleanup still uses
+PID-based `taskkill` after the Windows exit poll may have reaped the leader;
+blocked descendants can survive. S0 does not implement Windows Job Objects or
+equivalent handle-based containment. Owner: **JA-1 guardian/native-parity owner
+(S4/S6)**, including the stopped-worker/native Windows witness. This limitation
+is also retained in the JA1.G6 pending ledger. Windows lanes stay NOT RUN.
+
 Follow-up logs, mutation receipts and final-HEAD reruns are sealed separately
 in `target/review/ja/s0-evidence/S0-fix-r1-evidence.tar.gz` in the main checkout.
 That directory's `evidence-index.json` and `SHA256SUMS` bind the successor archive;
@@ -163,3 +186,8 @@ this report's existing index continues to bind the historical S0 archives.
 Use `scripts/ja_s0_verify.py 5 --output NEW_DIRECTORY` for the full gate, and add
 `--tests-only` for the final-HEAD harness/App/42-pin rerun. Historical evidence is
 not relabelled as a final-HEAD measurement.
+
+Round-2 successor evidence is sealed in
+`target/review/ja/s0-evidence/S0-fix-r2-evidence.tar.gz`; the same external index
+and SHA256SUMS bind its final-HEAD results. See `FIX-R2.md` for the item/witness
+mapping. Historical archive bytes remain unchanged.

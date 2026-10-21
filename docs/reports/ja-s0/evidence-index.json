@@ -7,11 +7,6 @@
       "sha256": "8887b527e2339bcc31836803dbda6d2172e84e416db2dc422b0f8afd273b98d8"
     },
     {
-      "file": "README.md",
-      "byte_length": 10918,
-      "sha256": "1734e67c2e317509a7c7cbd636e9ccad7c260f4836feb07cd192fad51a3bfea1"
-    },
-    {
       "file": "REVIEW-RESPONSES.md",
       "byte_length": 4058,
       "sha256": "b0e92964fd64374d47fae98fe03918b427d0d177de6a2872c4f09f073c3800d6"
@@ -105,11 +100,26 @@
       "file": "FIX-R1.md",
       "byte_length": 6207,
       "sha256": "cd3d710984a25a497830ec1f729c1f8a0c140afda99221d76ff53f492111c27a"
+    },
+    {
+      "file": "README.md",
+      "byte_length": 12675,
+      "sha256": "e3aa7a375f9baa182deef0086883b632e6dbff84c12044a9d8bc02cfdded5d1b"
+    },
+    {
+      "file": "FIX-R2.md",
+      "byte_length": 3083,
+      "sha256": "d8eb607314c406c585a2534d1ccf355fcbdbcc0688022d610304ed6e870f5c04"
     }
   ],
   "successor_evidence": {
     "archive": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s0-evidence/S0-fix-r1-evidence.tar.gz",
     "integrity_index": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s0-evidence/evidence-index.json",
     "scope": "Final-head review fixes: successor seal generated after the follow-up commit and its final-HEAD reruns. Historical archives remain byte-identical."
+  },
+  "round_2_successor_evidence": {
+    "archive": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s0-evidence/S0-fix-r2-evidence.tar.gz",
+    "integrity_index": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s0-evidence/evidence-index.json",
+    "scope": "Round-2 final-HEAD successor seal; historical archive bytes retained."
   }
 }

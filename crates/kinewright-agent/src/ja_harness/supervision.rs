@@ -42,6 +42,7 @@ pub(super) fn validate_reserved(root: &Path) -> Result<(), String> {
 struct OwnedFixture {
     child: Child,
     released: bool,
+    finish_attempted: bool,
 }
 
 #[cfg(unix)]
@@ -101,24 +102,26 @@ impl OwnedFixture {
     }
 
     fn finish(&mut self) -> (Option<ExitStatus>, Value, Option<String>) {
+        self.finish_with_reaper(reap_group_descendants)
+    }
+
+    fn finish_with_reaper(
+        &mut self,
+        mut reap: impl FnMut(u32, &mut Vec<u32>) -> Result<bool, String>,
+    ) -> (Option<ExitStatus>, Value, Option<String>) {
+        self.finish_attempted = true;
         let started = Instant::now();
         let deadline = started + Duration::from_millis(super::WORKER_REAP_MS);
         let mut error = self.stop().err();
-        #[cfg(target_os = "linux")]
         let mut reaped = Vec::<u32>::new();
-        #[cfg(not(target_os = "linux"))]
-        let reaped = Vec::<u32>::new();
         let status = loop {
-            #[cfg(target_os = "linux")]
-            let descendants_done = match reap_group_descendants(self.child.id(), &mut reaped) {
+            let descendants_done = match reap(self.child.id(), &mut reaped) {
                 Ok(done) => done,
                 Err(reason) => {
                     error.get_or_insert(reason);
                     false
                 }
             };
-            #[cfg(not(target_os = "linux"))]
-            let descendants_done = true;
             if descendants_done && self.exited().unwrap_or(false) {
                 match self.child.wait() {
                     Ok(status) => {
@@ -144,6 +147,12 @@ impl OwnedFixture {
             "deadline_ms":super::WORKER_REAP_MS,"error":error});
         (status, receipt, error)
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::unnecessary_wraps)] // Match the fallible Linux reaper seam.
+fn reap_group_descendants(_group: u32, _reaped: &mut Vec<u32>) -> Result<bool, String> {
+    Ok(true)
 }
 
 // The native CLI is a Linux subreaper only for its fixed fixture roles. Reap
@@ -189,7 +198,7 @@ fn reap_group_descendants(group: u32, reaped: &mut Vec<u32>) -> Result<bool, Str
 
 impl Drop for OwnedFixture {
     fn drop(&mut self) {
-        if !self.released {
+        if !self.finish_attempted {
             let _ = self.finish();
         }
     }
@@ -254,6 +263,7 @@ pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, Stri
     let mut child = OwnedFixture {
         child: command.spawn().map_err(|e| e.to_string())?,
         released: false,
+        finish_attempted: false,
     };
     let pid = child.child.id();
     let identity = os_start_identity(pid);
@@ -437,5 +447,33 @@ mod tests {
         assert!(termination_result(Err(rustix::io::Errno::SRCH)).is_ok());
         assert!(termination_result(Ok(())).is_ok());
         assert!(termination_result(Err(rustix::io::Errno::PERM)).is_err());
+    }
+
+    #[test]
+    fn timed_out_finish_is_not_retried_by_drop_after_its_receipt() {
+        use rustix::process::{Pid, WaitOptions, waitpid};
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("sleep");
+        command.arg("60").process_group(0);
+        let mut fixture = OwnedFixture {
+            child: command.spawn().unwrap(),
+            released: false,
+            finish_attempted: false,
+        };
+        let pid = Pid::from_raw(i32::try_from(fixture.child.id()).unwrap()).unwrap();
+        // Inject a descendant that cannot be reaped. The real group kill runs,
+        // and the real deadline expires while the leader remains waitable.
+        let (status, receipt, error) = fixture.finish_with_reaper(|_, _| Ok(false));
+        assert!(status.is_none());
+        assert!(error.unwrap().contains("missed reap deadline"));
+        assert_eq!(receipt["completed"], false);
+        drop(fixture);
+        // Reap explicitly even on a failing mutation, so the witness leaks none.
+        let wait = waitpid(Some(pid), WaitOptions::empty());
+        assert!(
+            wait.is_ok(),
+            "Drop retried receipted cleanup and reaped the leader: {wait:?}"
+        );
+        assert!(wait.unwrap().is_some());
     }
 }

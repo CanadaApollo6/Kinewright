@@ -841,6 +841,8 @@ mod tests {
 
     #[test]
     fn cleanup_deadline_outlives_all_fixed_role_teardown_allowances() {
+        #[cfg(unix)]
+        controller::witness_worker_teardown_window();
         let mut fixture = protocol::load(&fixtures().join("participants-lock.json"))
             .unwrap()
             .fixture;

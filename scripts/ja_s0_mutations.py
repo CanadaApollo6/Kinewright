@@ -15,6 +15,20 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 HISTORY = "ja_harness::tests::edit_save_reopen_has_literal_history_loss_after_successful_control"
 CASES = {
+    "app-abnormal-classifier": ("crates/kinewright-agent/src/ja_harness/controller.rs",
+        "(Some(0), Some(0)) | (Some(101), Some(1..=3))", "(Some(_), Some(0..=3))",
+        "agent", "ja_harness::controller::tests::app_exit_classifier_rejects_abnormal_numeric_status_despite_completed_report"),
+    "app-abnormal-native": ("crates/kinewright-agent/src/ja_harness/controller.rs",
+        "if !app_exit_matches_report(status, timed_out, Some(exit)) {",
+        "if false && !app_exit_matches_report(status, timed_out, Some(exit)) {",
+        "native", "native_app_bridge_rejects_abnormal_exit_after_completed_report"),
+    "single-finish": ("crates/kinewright-agent/src/ja_harness/supervision.rs",
+        "if !self.finish_attempted {", "if !self.released {",
+        "agent", "ja_harness::supervision::tests::timed_out_finish_is_not_retried_by_drop_after_its_receipt"),
+    "worker-teardown-window": ("crates/kinewright-agent/src/ja_harness/controller.rs",
+        "} else {\n            super::MEDIA_TEARDOWN_MS + super::WORKER_REAP_MS\n        };",
+        "} else {\n            super::WORKER_REAP_MS\n        };",
+        "agent", "ja_harness::tests::cleanup_deadline_outlives_all_fixed_role_teardown_allowances"),
     "unexpected-controller-exit": ("crates/kinewright-agent/src/ja_harness/supervision.rs",
         "let mut error = self.stop().err();", "let mut error = None;",
         "native", "unexpected_controller_exit_reaps_a_recorded_stopped_worker_before_return"),

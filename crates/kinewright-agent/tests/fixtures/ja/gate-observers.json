@@ -179,7 +179,7 @@
       "owner": "shared guardian / JA-1 execution owner",
       "stage": "S4 / AW2 P1b-s",
       "observer": "Record current session ownership/direct-child lifecycle; native fixture child/grandchild positive control",
-      "pending": "Actual production guardian pre-exec/host-death/guardian-death/cleanup/no-overlap/resume witnesses pending S4 integration and OS prerequisites.",
+      "pending": "Actual production guardian pre-exec/host-death/guardian-death/cleanup/no-overlap/resume witnesses pending S4 integration and OS prerequisites. Windows harness limitation: abnormal-exit polling may reap the root before PID-based taskkill can contain blocked descendants. Windows lanes remain NOT RUN; handle-based containment and the stopped-worker witness belong to the JA-1 guardian/native-parity owner (S4/S6).",
       "control_fixtures": [
         "participants-lock",
         "recording-loopback"
