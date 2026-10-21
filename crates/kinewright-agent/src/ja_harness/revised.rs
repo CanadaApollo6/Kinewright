@@ -224,6 +224,20 @@ impl Adapter {
                     Err("Linux copy prerequisite unavailable; NOT RUN".into())
                 }
             }
+            Call::BundleBudgetProbe(args) => {
+                #[cfg(target_os = "linux")]
+                {
+                    if self.mode != Mode::Revised {
+                        return Err("bounded store unavailable in baseline mode; NOT RUN".into());
+                    }
+                    self.budget_probe(args, fixture)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = args;
+                    Err("Linux storage budget prerequisite unavailable; NOT RUN".into())
+                }
+            }
             Call::OwnedInputProbe(args) => {
                 #[cfg(target_os = "linux")]
                 {

@@ -510,3 +510,49 @@ fn copy_fixture_revised_preserves_owned_graph_and_live_reader() {
             .any(|event| event["kind"] == "process_spawn" && event["participant"] == "A")
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn budget_fixture_revised_backpressures_and_retires_actual_bytes() {
+    let temp = TempDirectory::new("ja-s1-native-budget");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-storage-budget.json");
+    let output = temp.path("out");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "revised", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    let assertions = summary["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 6);
+    assert!(
+        assertions.iter().all(|a| a["passed"] == true),
+        "{summary:#}"
+    );
+    let observed: Value = serde_json::from_slice(
+        &std::fs::read(output.join("artifacts/observation-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(observed["backend"], "linux-local-storage-budget");
+    assert_eq!(observed["boundary_owned_bytes"], 80);
+    assert!(observed["held_physical_bytes"].as_u64().unwrap() > 80);
+    assert_eq!(observed["retired_physical_bytes"], 0);
+    let events = std::fs::read_to_string(output.join("events.jsonl")).unwrap();
+    assert!(
+        events
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .any(|e| e["kind"] == "process_spawn" && e["participant"] == "A")
+    );
+}

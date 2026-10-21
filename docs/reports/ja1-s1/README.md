@@ -5,7 +5,8 @@ Baseline: `076a96c922b2f05984df4bb839ad7cf0900e6183`.
 Authority: accepted `target/review/ja/ja1-s1-plan-rev2.md` and implementation brief.
 No push or independent review is authorized by this task.
 
-The implementation is in progress. No S1 acceptance is claimed by this file.
+The eight implementation steps are complete. No release or native Windows acceptance
+is claimed by this file.
 The eight commits retain the accepted order. Each commit requires the build,
 clippy, touched-file formatting and exact affected-test gate before publication.
 `scripts/ja-s1-gate.sh` is the rerunnable Linux gate; raw logs live outside Git
@@ -56,7 +57,74 @@ Storage limits remain provisional until L6's workload measurements.
    new copy witnesses and twelve revised fixtures. Ten targeted mutation pairs
    failed at runtime and passed after restoration. Exact raw summaries are in
    `commit-7.json`.
-8. Recovery retention and measured evidence: not committed.
+8. Recovery retention and measured evidence: Linux gate passed (`c8-gate3`);
+   44 commands, 31 raw summaries, 267 selected passes including overlaps.
+   Exact raw summaries are in `commit-8.json`. All five required new
+   storage tests and thirteen revised fixtures passed. Twelve targeted mutation
+   red/restored-green pairs and a real combined-cap baseline red are preserved.
+
+### Resume, commit 8
+
+The five required tests remain in the `ja_s1_storage` integration target; their
+implementation is factored into `tests/support/ja_s1_retention.rs`. The fresh Linux
+production trace now models inventory replacement and actual `object_unlink` calls
+at every dropped-write crash cut. At B5 it requires the durable journal to equal
+the acknowledged manifest's recovery inventory. The portable frozen first-publication
+trace remains unchanged. Process death and the crash model are separate evidence;
+neither is native Windows storage certification.
+
+Implementation adjustments and final source evidence:
+
+- `crates/kinewright-project/src/store.rs:2149` scans and charges files absent from
+  the selected manifest on writer reopen. Previously a crash could leave physical
+  files outside the restored ledger. Unknown immutable bytes remain conservatively
+  charged against both owned and metadata quotas, with one physical charge. A typed
+  expected admission verifies incoming and stored bytes before reclassification.
+  The owner refuses unprovable names/types and retains uncertain reachability.
+- `crates/kinewright-project/src/namespace/linux.rs:368` gives new temporary names
+  an exact root-specific prefix, so the existing namespace owner can account for
+  and retire its own root temporary without scanning/deleting another project's
+  stages. Managed files are enumerated through pinned directories at `:954`.
+- `crates/kinewright-project/src/store.rs:265` checks the incoming object's graph
+  depth before publication. Treating only its dependencies as depth-zero roots
+  allowed a one-beyond object to be written before its pin failed. GC at `:816`
+  removes the retired inventory-edge row and retires owned temporary charges.
+- `crates/kinewright-project/tests/ja_s1_storage.rs:931` extends the existing crash
+  model rather than creating a second filesystem oracle. Inventory and unlink
+  fault seams exercise temporary namespaces, never physical device/power faults.
+- `crates/kinewright-project/src/io_observer.rs:13` times actual Linux sync calls
+  only under test instrumentation. The release example at
+  `crates/kinewright-project/examples/ja_s1_storage_budget.rs:134` uses a pinned,
+  dev-only DHAT allocator feature for separate actual-allocation runs. Default
+  production binaries keep the system allocator. No unsafe code or Windows
+  namespace dependency was added. Project no-default builds/checks and the heap
+  example have explicit gates.
+
+Twelve discriminating mutation pairs cover recursive inventory retention, all old
+floors, live-pin eviction, full recovery hashing, copy overlap, double retirement,
+reopen physical accounting, exact temporary deletion, prospective depth, configured
+control limits and the inventory namespace barrier and combined metadata/decode admission. An initial temporary-retirement
+mutation exposed a weak test: total unknown bytes could fall through adoption while
+the exact root temporary survived. The test now checks the actual staged path.
+Removing only the redundant publication-size guard remained protected by the root
+serializer; that green mutation was rejected and replaced by ignoring the configured
+control limit at its shared ingress. Neither attempt is credited as a red. The final
+twelve pairs bind the strengthened source/tests and preserve red/restored-green logs.
+
+`JA-S1-STORAGE-EVIDENCE.md` and `storage-measurements.json` distinguish actual Rust
+allocator peaks, kernel RSS, physical file bytes, verification work and conservative
+reservation counters. The initial five pairs were repeated after the final Linux
+cfg guard so the published measurements bind the final implementation source. The
+provisional comment target is reported honestly and no storage cap was increased.
+Lowered-ceiling boundaries exercise actual S1 ingress. Voice-specific capture/storage
+and later unsupported producers remain NOT RUN/refused under their owning stages;
+the default 20 GiB and 10,000-object allowances were not physically filled.
+
+The actual project Kani codegen boundary passed in 49.810 s at a sampled 1,823,285,248
+byte process-tree peak. Zero proof harnesses ran. The two optional proof candidates
+remain NOT RUN as proofs; no alternate arithmetic implementation or unproved CI
+harness was added. Windows native/full MSVC dependency checks, full fast/slow CI,
+L4 decoder certification and full G15/G20 remain separately NOT RUN.
 
 ### Resume, commit 7
 
@@ -286,3 +354,11 @@ only). Explicit no-default agent and app target checks were attempted separately
 FFmpeg, Whisper and aws-lc native MSVC build prerequisites are unavailable. Those
 full cfg lanes and all native Windows execution remain NOT RUN. No toolchains were
 installed, no native storage-durability success is inferred, and no full CI ran.
+
+The combined metadata/decode boundary at
+`crates/kinewright-project/tests/support/ja_s1_retention.rs:646` reproduced a real
+one-byte over-admission: the object index was charged while the caller decode and
+streaming scratch remained live. `store.rs:329` now includes live decoded bytes in
+the checked metadata sum before object publication. The exact-boundary control and
+one-beyond refusal have a preserved baseline red and restored green; the twelfth
+mutation removes that guard. This repairs the existing cap rather than raising it.

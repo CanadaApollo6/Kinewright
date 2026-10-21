@@ -45,6 +45,11 @@ if [[ "$stage" -ge 6 ]]; then
     run agent-no-default-check cargo check -p kinewright-agent --lib --no-default-features
     run app-no-default-check cargo check -p kinewright-app --bin kinewright-app --no-default-features
 fi
+if [[ "$stage" -eq 8 ]]; then
+    run project-no-default cargo build -p kinewright-project --no-default-features
+    run project-no-default-check cargo check -p kinewright-project --no-default-features
+    run heap-example-check cargo check -p kinewright-project --features test-util,storage-heap-profile --example ja_s1_storage_budget
+fi
 run clippy cargo clippy --workspace --all-targets -- -D warnings
 if [[ "${JA_S1_FINAL_HEAD:-0}" == 1 ]]; then
     mapfile -t touched < <(git diff --name-only 076a96c HEAD -- '*.rs')

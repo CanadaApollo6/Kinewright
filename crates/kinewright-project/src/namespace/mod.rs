@@ -121,6 +121,13 @@ pub struct ProjectNamespace {
     read_only: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PhysicalFile {
+    pub(crate) relative: PathBuf,
+    pub(crate) root_parent: bool,
+    pub(crate) length: u64,
+}
+
 /// Pins the destination parent, including an ancestor claim when creating parents.
 pub(crate) struct PreparedDestination {
     pub(crate) path: PathBuf,
@@ -136,6 +143,28 @@ impl Drop for PreparedDestination {
     }
 }
 impl ProjectNamespace {
+    pub(crate) fn physical_files(&self, limit: u64) -> Result<Vec<PhysicalFile>, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::physical_files(self, limit)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = limit;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn retire_temporary(&mut self, file: &PhysicalFile) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::retire_temporary(self, file)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = file;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub(crate) fn prepare_destination(path: &Path) -> Result<PreparedDestination, BundleError> {
         #[cfg(target_os = "linux")]
         {

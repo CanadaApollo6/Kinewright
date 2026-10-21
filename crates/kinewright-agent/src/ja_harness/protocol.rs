@@ -111,6 +111,7 @@ pub enum Call {
     AdapterStatus(Empty),
     OwnedInputProbe(InputArgs),
     BundleCopyProbe(InputArgs),
+    BundleBudgetProbe(InputArgs),
     BundleFixtureProbe(InputArgs),
     CommentSubmit(CommentArgs),
     CommentInspect(CommentArgs),
@@ -521,7 +522,10 @@ fn validate(f: &Fixture) -> Result<(), String> {
                     return Err("missing IO probe input".into());
                 }
             }
-            Call::OwnedInputProbe(a) | Call::BundleCopyProbe(a) | Call::BundleFixtureProbe(a) => {
+            Call::OwnedInputProbe(a)
+            | Call::BundleCopyProbe(a)
+            | Call::BundleBudgetProbe(a)
+            | Call::BundleFixtureProbe(a) => {
                 if !f.inputs.contains_key(&a.input) {
                     return Err("missing owned-input probe input".into());
                 }

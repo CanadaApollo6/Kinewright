@@ -96,7 +96,11 @@ pub struct StudioRoot {
 }
 impl StudioRoot {
     pub(crate) fn admit(&self) -> Result<(), BundleError> {
-        if (self.origin_project_ids.len() + self.origin_session_ids.len()) as u64
+        if self
+            .origin_project_ids
+            .len()
+            .checked_add(self.origin_session_ids.len())
+            .ok_or(BundleError::Capacity("project origins overflow"))? as u64
             > StorageLimits::default().versions
             || self
                 .origin_session_ids
@@ -704,6 +708,7 @@ impl ProjectBundle {
             recovery.namespace_root_file_name = Some(root_name);
             let mut store = ProjectStore::new(namespace, Some(project_id.clone()), None, limits)?;
             store.adopt_usage(Arc::clone(&admission.data.usage))?;
+            store.account_residuals()?;
             let mut durable = None;
             if let Some(original) = original {
                 let reference = ObjectRef {
@@ -753,6 +758,14 @@ impl ProjectBundle {
     #[must_use]
     pub fn project_id(&self) -> &ProjectId {
         &self.project_id
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn restrict_limits_probe(&mut self, limits: StorageLimits) -> Result<(), BundleError> {
+        self.store_mut()?;
+        drop(self.durable.take());
+        let result = self.store.restrict_copy_limits(limits);
+        self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
+        result
     }
     #[must_use]
     pub fn manual_branch_id(&self) -> &BranchId {

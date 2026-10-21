@@ -91,6 +91,7 @@ pub struct StorageUsage {
     pub live_history_bytes: u64,
     pub objects: u64,
     pub edges: u64,
+    pub unclassified_bytes: u64,
     pub verified_calls: u64,
     pub verified_bytes: u64,
     pub peak_physical_bytes: u64,

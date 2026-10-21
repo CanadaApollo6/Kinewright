@@ -833,6 +833,9 @@ mod durable_bundle {
                     self.volatile_names
                         .insert(self.root.clone(), *self.staged.get(staged).unwrap());
                 }
+                "object_unlink" => {
+                    self.volatile_names.remove(&path);
+                }
                 "directory_sync" => {
                     self.durable_names
                         .retain(|name, _| name.parent() != Some(path.as_path()));
@@ -919,6 +922,158 @@ mod durable_bundle {
             }
             Ok(kinewright_media::sha256_bytes(root))
         }
+    }
+    #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fresh production inventory/GC trace replayed at every dropped-write crash cut"
+    )]
+    pub(super) fn model_inventory_retirement_cuts() {
+        use kinewright_project::{
+            bundle_records::{ObjectRef, RecordKind},
+            store::RecoveryInventory,
+        };
+        let temp = TempDirectory::new("ja-s1-retirement-model");
+        let path = temp.path("edit.kinewright");
+        let (core, mut bundle) = initial_bundle(&path);
+        let original = fs::read(&path).unwrap();
+        let mut model = CrashFs::new(&path, &original);
+        let mut bytes = std::collections::BTreeMap::new();
+        for (relative, value) in inventory(temp.root()) {
+            let absolute = temp.path(relative.to_str().unwrap());
+            if !absolute.is_file() {
+                continue;
+            }
+            let node = model.next;
+            model.next += 1;
+            model
+                .data
+                .insert(node, (kinewright_media::sha256_bytes(&value), value.len()));
+            model.durable_data.insert(node);
+            model.volatile_names.insert(absolute.clone(), node);
+            model.durable_names.insert(absolute.clone(), node);
+            bytes.insert(kinewright_media::sha256_bytes(&value), value);
+            let mut parent = absolute.parent();
+            while let Some(directory) = parent {
+                model.volatile_dirs.insert(directory.to_path_buf());
+                model.durable_dirs.insert(directory.to_path_buf());
+                if directory == path.parent().unwrap() {
+                    break;
+                }
+                parent = directory.parent();
+            }
+        }
+        let mut events = vec![];
+        let mut roots =
+            std::collections::BTreeSet::from([kinewright_media::sha256_bytes(&original)]);
+        let inputs = bundle.root().unwrap().input_manifest_ref.clone();
+        for iteration in 0..6 {
+            let old = fs::read(&path).unwrap();
+            let journal = path
+                .with_extension("kinewright-assets")
+                .join("studio/recovery/inventory");
+            let mut staged: RecoveryInventory =
+                serde_json::from_slice(&fs::read(journal).unwrap()).unwrap();
+            staged.staging = Some(ObjectRef {
+                sha256: kinewright_media::sha256_bytes(&old),
+                byte_length: old.len() as u64,
+                record_kind: RecordKind::RootCheckpoint,
+            });
+            let encoded = serde_json::to_vec(&staged).unwrap();
+            bytes.insert(kinewright_media::sha256_bytes(&encoded), encoded);
+            core.send(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(71),
+                locked: iteration % 2 == 0,
+            }))
+            .unwrap();
+            let (_, trace) = io_observer::observe(|| {
+                bundle
+                    .save(&core.export_history().unwrap(), &inputs)
+                    .unwrap()
+            });
+            assert!(!trace.overflowed);
+            events.extend(trace.events);
+            roots.insert(kinewright_media::sha256_file(&path).unwrap());
+            for (relative, value) in inventory(temp.root()) {
+                if temp.path(relative.to_str().unwrap()).is_file() {
+                    bytes.insert(kinewright_media::sha256_bytes(&value), value);
+                }
+            }
+        }
+        assert!(events.iter().any(|e| e.operation == "object_unlink"));
+        assert!(
+            events
+                .iter()
+                .filter(|e| e.operation == "inventory_rename")
+                .count()
+                >= 12
+        );
+        let mut acknowledged = kinewright_media::sha256_bytes(&original);
+        let mut cuts = 0;
+        for event in &events {
+            model.apply(event);
+            let selected = model
+                .graph(&bytes)
+                .unwrap_or_else(|e| panic!("retirement cut after {}: {e}", event.operation));
+            assert!(roots.contains(&selected));
+            if event.operation == "bundle_B5" {
+                acknowledged.clone_from(&selected);
+            }
+            if event.operation == "object_unlink" {
+                assert_eq!(
+                    selected, acknowledged,
+                    "GC preceded durable root acknowledgment"
+                );
+            }
+            let journal = model.assets.join("studio/recovery/inventory");
+            let encoded = model.read(&journal, &bytes).unwrap();
+            let inventory: RecoveryInventory = serde_json::from_slice(encoded).unwrap();
+            if event.operation == "bundle_B5" {
+                let root: serde_json::Value =
+                    serde_json::from_slice(model.read(&model.root, &bytes).unwrap()).unwrap();
+                let manifest_hash = root["studio"]["store_manifest_ref"]["sha256"]
+                    .as_str()
+                    .unwrap();
+                let manifest: serde_json::Value = serde_json::from_slice(
+                    model
+                        .read(
+                            &model.assets.join("studio/objects").join(manifest_hash),
+                            &bytes,
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&inventory).unwrap(),
+                    manifest["recovery"],
+                    "acknowledged inventory was not durably replaced"
+                );
+            }
+            for reference in inventory
+                .predecessors
+                .iter()
+                .chain(inventory.staging.iter())
+                .chain(inventory.pre_migration.iter())
+            {
+                let actual = model
+                    .read(
+                        &model.assets.join("studio/objects").join(&reference.sha256),
+                        &bytes,
+                    )
+                    .unwrap();
+                assert_eq!(actual.len() as u64, reference.byte_length);
+                assert_eq!(kinewright_media::sha256_bytes(actual), reference.sha256);
+            }
+            cuts += 1;
+        }
+        assert!(
+            cuts > 100,
+            "the production retirement trace was not exercised"
+        );
+        assert_eq!(
+            model.graph(&bytes).unwrap(),
+            kinewright_media::sha256_file(&path).unwrap()
+        );
     }
     #[allow(clippy::type_complexity, clippy::too_many_lines)]
     #[cfg(target_os = "linux")]
@@ -1464,3 +1619,7 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s1_retention.rs"]
+mod retention;

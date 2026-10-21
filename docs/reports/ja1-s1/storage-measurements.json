@@ -1,0 +1,1470 @@
+{
+  "schema": 1,
+  "identity": {
+    "source_head": "0b960f2a98e98bcbbde488e715d3fa978d0633ea",
+    "source_diff_sha256": "5686bb7a676172bba55aae03d1960e667142938e0cbde241b209ff2139d6450f",
+    "binary_sha256": {
+      "ordinary": "c711cd179ec0e0593bf6ada2217166b8def6737d15888f602fa445efacfa1c31",
+      "profiled": "dead4d58a472739fd285b7bdee03b819e039ca2ca13b036b88ada53fe49141f2"
+    },
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "cores": 20,
+    "uptime_before": "15:51:29 up 23:47,  1 user,  load average: 3.43, 3.23, 2.64",
+    "profile": "release; jobs=4; test-util seams; only profiled executable uses dhat 0.3.3"
+  },
+  "pair_count": 5,
+  "unexpected_errors": 0,
+  "timing_scope": "ordinary executable only; median and range of per-run percentiles",
+  "ordinary_runs": [
+    {
+      "pair": 1,
+      "kind": "ordinary",
+      "elapsed_seconds": 11.580935456004227,
+      "user_cpu_seconds": 1.631701,
+      "system_cpu_seconds": 0.24403099999999997,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9699360576
+      },
+      "measurements": {
+        "baseline_heap": null,
+        "baseline_rss": {
+          "hwm_bytes": 5758976,
+          "rss_bytes": 5758976
+        },
+        "copied": {
+          "edges": 89,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 424889,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142459605,
+          "peak_physical_bytes": 8874278,
+          "peak_reserved_bytes": 8388608,
+          "physical_bytes": 8793689,
+          "unclassified_bytes": 0,
+          "verified_bytes": 9466547,
+          "verified_calls": 49
+        },
+        "duplicate": {
+          "before": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 230,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 230,
+            "peak_physical_bytes": 230,
+            "peak_reserved_bytes": 230,
+            "physical_bytes": 230,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "first": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 1114112,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "second": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 2162688,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8388608,
+            "verified_calls": 1
+          }
+        },
+        "elapsed_ms": 11577.757176000001,
+        "errors": 0,
+        "expected_failed_copies": 3,
+        "final_heap": null,
+        "final_rss": {
+          "hwm_bytes": 37089280,
+          "rss_bytes": 37089280
+        },
+        "first_save": {
+          "destination": {
+            "edges": 8,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 18225,
+            "objects": 9,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67366262,
+            "peak_physical_bytes": 2112022,
+            "peak_reserved_bytes": 2097152,
+            "physical_bytes": 2111793,
+            "unclassified_bytes": 0,
+            "verified_bytes": 2101330,
+            "verified_calls": 8
+          },
+          "source_after_last_reader": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 0,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 0,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          },
+          "source_overlap": {
+            "edges": 1,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 1029,
+            "objects": 2,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 2097509,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          }
+        },
+        "floor": {
+          "latencies": {
+            "count": 6,
+            "max_ms": 228.503029,
+            "min_ms": 176.58126299999998,
+            "p50_ms": 196.47491,
+            "p95_ms": 228.503029
+          },
+          "usage": {
+            "edges": 96,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 161028,
+            "objects": 36,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67815341,
+            "peak_physical_bytes": 186837,
+            "peak_reserved_bytes": 30958,
+            "physical_bytes": 136452,
+            "unclassified_bytes": 0,
+            "verified_bytes": 491734,
+            "verified_calls": 345
+          }
+        },
+        "history": {
+          "accepted_commands": 120,
+          "decoded_reservation_bytes": 25000775,
+          "encoded_bytes": 216346,
+          "redo_entries": 24,
+          "restore": {
+            "count": 5,
+            "max_ms": 1.413367,
+            "min_ms": 1.119231,
+            "p50_ms": 1.143281,
+            "p95_ms": 1.413367
+          },
+          "tracks": 32,
+          "undo_entries": 72
+        },
+        "history_heap": null,
+        "metadata": {
+          "comments": {
+            "count": 8,
+            "max_ms": 269.806368,
+            "min_ms": 222.98309899999998,
+            "p50_ms": 256.33826999999997,
+            "p95_ms": 269.806368
+          },
+          "saves": {
+            "count": 8,
+            "max_ms": 191.95039699999998,
+            "min_ms": 143.556662,
+            "p50_ms": 174.09327,
+            "p95_ms": 191.95039699999998
+          },
+          "verified_bytes_delta": 5324982
+        },
+        "metadata_heap": null,
+        "profiled": false,
+        "recovery": {
+          "latencies": {
+            "count": 5,
+            "max_ms": 46.77814,
+            "min_ms": 43.460077,
+            "p50_ms": 43.989616000000005,
+            "p95_ms": 46.77814
+          },
+          "usage": {
+            "edges": 95,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 429419,
+            "objects": 33,
+            "owned_bytes": 8391488,
+            "peak_decoded_reservation_bytes": 97053325,
+            "peak_physical_bytes": 8797259,
+            "peak_reserved_bytes": 0,
+            "physical_bytes": 8797259,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8799682,
+            "verified_calls": 35
+          }
+        },
+        "restore_heap": null,
+        "schema": 1,
+        "source": {
+          "edges": 95,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 429419,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142944697,
+          "peak_physical_bytes": 8859118,
+          "peak_reserved_bytes": 8796771,
+          "physical_bytes": 8797259,
+          "unclassified_bytes": 0,
+          "verified_bytes": 57369332,
+          "verified_calls": 426
+        },
+        "source_physical": {
+          "allocated_file_bytes": 8908800,
+          "files": 35,
+          "lock_payload_bytes": 0,
+          "payload_bytes": 8797259
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "kind": "ordinary",
+      "elapsed_seconds": 11.02645592999761,
+      "user_cpu_seconds": 1.5455250000000014,
+      "system_cpu_seconds": 0.20654300000000003,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9256828544
+      },
+      "measurements": {
+        "baseline_heap": null,
+        "baseline_rss": {
+          "hwm_bytes": 5824512,
+          "rss_bytes": 5824512
+        },
+        "copied": {
+          "edges": 89,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 424905,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142459605,
+          "peak_physical_bytes": 8874300,
+          "peak_reserved_bytes": 8388608,
+          "physical_bytes": 8793705,
+          "unclassified_bytes": 0,
+          "verified_bytes": 9466578,
+          "verified_calls": 49
+        },
+        "duplicate": {
+          "before": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 230,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 230,
+            "peak_physical_bytes": 230,
+            "peak_reserved_bytes": 230,
+            "physical_bytes": 230,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "first": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 1114112,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "second": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 2162688,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8388608,
+            "verified_calls": 1
+          }
+        },
+        "elapsed_ms": 11022.577583,
+        "errors": 0,
+        "expected_failed_copies": 3,
+        "final_heap": null,
+        "final_rss": {
+          "hwm_bytes": 37019648,
+          "rss_bytes": 37019648
+        },
+        "first_save": {
+          "destination": {
+            "edges": 8,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 18223,
+            "objects": 9,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67366260,
+            "peak_physical_bytes": 2112020,
+            "peak_reserved_bytes": 2097152,
+            "physical_bytes": 2111791,
+            "unclassified_bytes": 0,
+            "verified_bytes": 2101327,
+            "verified_calls": 8
+          },
+          "source_after_last_reader": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 0,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67109220,
+            "peak_physical_bytes": 2097508,
+            "peak_reserved_bytes": 2099037,
+            "physical_bytes": 0,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195016,
+            "verified_calls": 4
+          },
+          "source_overlap": {
+            "edges": 1,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 1028,
+            "objects": 2,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67109220,
+            "peak_physical_bytes": 2097508,
+            "peak_reserved_bytes": 2099037,
+            "physical_bytes": 2097508,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195016,
+            "verified_calls": 4
+          }
+        },
+        "floor": {
+          "latencies": {
+            "count": 6,
+            "max_ms": 197.212571,
+            "min_ms": 151.205525,
+            "p50_ms": 191.358904,
+            "p95_ms": 197.212571
+          },
+          "usage": {
+            "edges": 96,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 161028,
+            "objects": 36,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67815341,
+            "peak_physical_bytes": 186837,
+            "peak_reserved_bytes": 30958,
+            "physical_bytes": 136452,
+            "unclassified_bytes": 0,
+            "verified_bytes": 491734,
+            "verified_calls": 345
+          }
+        },
+        "history": {
+          "accepted_commands": 120,
+          "decoded_reservation_bytes": 25000775,
+          "encoded_bytes": 216346,
+          "redo_entries": 24,
+          "restore": {
+            "count": 5,
+            "max_ms": 1.584878,
+            "min_ms": 1.2310159999999999,
+            "p50_ms": 1.28761,
+            "p95_ms": 1.584878
+          },
+          "tracks": 32,
+          "undo_entries": 72
+        },
+        "history_heap": null,
+        "metadata": {
+          "comments": {
+            "count": 8,
+            "max_ms": 255.57148099999998,
+            "min_ms": 213.438017,
+            "p50_ms": 239.102882,
+            "p95_ms": 255.57148099999998
+          },
+          "saves": {
+            "count": 8,
+            "max_ms": 177.65328,
+            "min_ms": 145.303704,
+            "p50_ms": 172.789984,
+            "p95_ms": 177.65328
+          },
+          "verified_bytes_delta": 5324990
+        },
+        "metadata_heap": null,
+        "profiled": false,
+        "recovery": {
+          "latencies": {
+            "count": 5,
+            "max_ms": 44.542668,
+            "min_ms": 43.217804,
+            "p50_ms": 43.664228,
+            "p95_ms": 44.542668
+          },
+          "usage": {
+            "edges": 95,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 429441,
+            "objects": 33,
+            "owned_bytes": 8391488,
+            "peak_decoded_reservation_bytes": 97053343,
+            "peak_physical_bytes": 8797281,
+            "peak_reserved_bytes": 0,
+            "physical_bytes": 8797281,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8799712,
+            "verified_calls": 35
+          }
+        },
+        "restore_heap": null,
+        "schema": 1,
+        "source": {
+          "edges": 95,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 429441,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142944700,
+          "peak_physical_bytes": 8859145,
+          "peak_reserved_bytes": 8796793,
+          "physical_bytes": 8797281,
+          "unclassified_bytes": 0,
+          "verified_bytes": 57369474,
+          "verified_calls": 426
+        },
+        "source_physical": {
+          "allocated_file_bytes": 8908800,
+          "files": 35,
+          "lock_payload_bytes": 0,
+          "payload_bytes": 8797281
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "kind": "ordinary",
+      "elapsed_seconds": 11.643106710995198,
+      "user_cpu_seconds": 1.5933400000000049,
+      "system_cpu_seconds": 0.19439700000000004,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9833881492
+      },
+      "measurements": {
+        "baseline_heap": null,
+        "baseline_rss": {
+          "hwm_bytes": 5734400,
+          "rss_bytes": 5734400
+        },
+        "copied": {
+          "edges": 89,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 424889,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142459605,
+          "peak_physical_bytes": 8874278,
+          "peak_reserved_bytes": 8388608,
+          "physical_bytes": 8793689,
+          "unclassified_bytes": 0,
+          "verified_bytes": 9466547,
+          "verified_calls": 49
+        },
+        "duplicate": {
+          "before": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 230,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 230,
+            "peak_physical_bytes": 230,
+            "peak_reserved_bytes": 230,
+            "physical_bytes": 230,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "first": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 1114112,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "second": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 2162688,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8388608,
+            "verified_calls": 1
+          }
+        },
+        "elapsed_ms": 11639.322945,
+        "errors": 0,
+        "expected_failed_copies": 3,
+        "final_heap": null,
+        "final_rss": {
+          "hwm_bytes": 37122048,
+          "rss_bytes": 37122048
+        },
+        "first_save": {
+          "destination": {
+            "edges": 8,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 18224,
+            "objects": 9,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67366260,
+            "peak_physical_bytes": 2112021,
+            "peak_reserved_bytes": 2097152,
+            "physical_bytes": 2111792,
+            "unclassified_bytes": 0,
+            "verified_bytes": 2101329,
+            "verified_calls": 8
+          },
+          "source_after_last_reader": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 0,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 0,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          },
+          "source_overlap": {
+            "edges": 1,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 1029,
+            "objects": 2,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 2097509,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          }
+        },
+        "floor": {
+          "latencies": {
+            "count": 6,
+            "max_ms": 225.986636,
+            "min_ms": 117.143656,
+            "p50_ms": 197.13667700000002,
+            "p95_ms": 225.986636
+          },
+          "usage": {
+            "edges": 96,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 161041,
+            "objects": 36,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67815344,
+            "peak_physical_bytes": 186880,
+            "peak_reserved_bytes": 30958,
+            "physical_bytes": 136465,
+            "unclassified_bytes": 0,
+            "verified_bytes": 491887,
+            "verified_calls": 345
+          }
+        },
+        "history": {
+          "accepted_commands": 120,
+          "decoded_reservation_bytes": 25000775,
+          "encoded_bytes": 216346,
+          "redo_entries": 24,
+          "restore": {
+            "count": 5,
+            "max_ms": 1.5646849999999999,
+            "min_ms": 1.246611,
+            "p50_ms": 1.2964630000000001,
+            "p95_ms": 1.5646849999999999
+          },
+          "tracks": 32,
+          "undo_entries": 72
+        },
+        "history_heap": null,
+        "metadata": {
+          "comments": {
+            "count": 8,
+            "max_ms": 276.095494,
+            "min_ms": 244.90472,
+            "p50_ms": 250.30424499999998,
+            "p95_ms": 276.095494
+          },
+          "saves": {
+            "count": 8,
+            "max_ms": 187.78101,
+            "min_ms": 150.20297699999998,
+            "p50_ms": 182.101993,
+            "p95_ms": 187.78101
+          },
+          "verified_bytes_delta": 5324982
+        },
+        "metadata_heap": null,
+        "profiled": false,
+        "recovery": {
+          "latencies": {
+            "count": 5,
+            "max_ms": 50.495815,
+            "min_ms": 43.804905999999995,
+            "p50_ms": 44.02701,
+            "p95_ms": 50.495815
+          },
+          "usage": {
+            "edges": 95,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 429419,
+            "objects": 33,
+            "owned_bytes": 8391488,
+            "peak_decoded_reservation_bytes": 97053325,
+            "peak_physical_bytes": 8797259,
+            "peak_reserved_bytes": 0,
+            "physical_bytes": 8797259,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8799682,
+            "verified_calls": 35
+          }
+        },
+        "restore_heap": null,
+        "schema": 1,
+        "source": {
+          "edges": 95,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 429419,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142944697,
+          "peak_physical_bytes": 8859118,
+          "peak_reserved_bytes": 8796771,
+          "physical_bytes": 8797259,
+          "unclassified_bytes": 0,
+          "verified_bytes": 57369332,
+          "verified_calls": 426
+        },
+        "source_physical": {
+          "allocated_file_bytes": 8908800,
+          "files": 35,
+          "lock_payload_bytes": 0,
+          "payload_bytes": 8797259
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "kind": "ordinary",
+      "elapsed_seconds": 11.034169380000094,
+      "user_cpu_seconds": 1.5721719999999948,
+      "system_cpu_seconds": 0.18714500000000012,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9252097999
+      },
+      "measurements": {
+        "baseline_heap": null,
+        "baseline_rss": {
+          "hwm_bytes": 5554176,
+          "rss_bytes": 5554176
+        },
+        "copied": {
+          "edges": 89,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 424904,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142459603,
+          "peak_physical_bytes": 8874299,
+          "peak_reserved_bytes": 8388608,
+          "physical_bytes": 8793704,
+          "unclassified_bytes": 0,
+          "verified_bytes": 9466577,
+          "verified_calls": 49
+        },
+        "duplicate": {
+          "before": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 230,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 230,
+            "peak_physical_bytes": 230,
+            "peak_reserved_bytes": 230,
+            "physical_bytes": 230,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "first": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 1114112,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "second": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 2162688,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8388608,
+            "verified_calls": 1
+          }
+        },
+        "elapsed_ms": 11030.684661000001,
+        "errors": 0,
+        "expected_failed_copies": 3,
+        "final_heap": null,
+        "final_rss": {
+          "hwm_bytes": 36839424,
+          "rss_bytes": 36839424
+        },
+        "first_save": {
+          "destination": {
+            "edges": 8,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 18226,
+            "objects": 9,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67366264,
+            "peak_physical_bytes": 2112023,
+            "peak_reserved_bytes": 2097152,
+            "physical_bytes": 2111794,
+            "unclassified_bytes": 0,
+            "verified_bytes": 2101331,
+            "verified_calls": 8
+          },
+          "source_after_last_reader": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 0,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 0,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          },
+          "source_overlap": {
+            "edges": 1,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 1029,
+            "objects": 2,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 2097509,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          }
+        },
+        "floor": {
+          "latencies": {
+            "count": 6,
+            "max_ms": 197.378578,
+            "min_ms": 175.07401000000002,
+            "p50_ms": 189.15356,
+            "p95_ms": 197.378578
+          },
+          "usage": {
+            "edges": 96,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 161041,
+            "objects": 36,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67815344,
+            "peak_physical_bytes": 186880,
+            "peak_reserved_bytes": 30958,
+            "physical_bytes": 136465,
+            "unclassified_bytes": 0,
+            "verified_bytes": 491887,
+            "verified_calls": 345
+          }
+        },
+        "history": {
+          "accepted_commands": 120,
+          "decoded_reservation_bytes": 25000775,
+          "encoded_bytes": 216346,
+          "redo_entries": 24,
+          "restore": {
+            "count": 5,
+            "max_ms": 1.3614670000000002,
+            "min_ms": 1.100861,
+            "p50_ms": 1.147542,
+            "p95_ms": 1.3614670000000002
+          },
+          "tracks": 32,
+          "undo_entries": 72
+        },
+        "history_heap": null,
+        "metadata": {
+          "comments": {
+            "count": 8,
+            "max_ms": 253.86579799999998,
+            "min_ms": 223.876525,
+            "p50_ms": 238.35210800000002,
+            "p95_ms": 253.86579799999998
+          },
+          "saves": {
+            "count": 8,
+            "max_ms": 175.84901299999999,
+            "min_ms": 113.552483,
+            "p50_ms": 132.304445,
+            "p95_ms": 175.84901299999999
+          },
+          "verified_bytes_delta": 5324990
+        },
+        "metadata_heap": null,
+        "profiled": false,
+        "recovery": {
+          "latencies": {
+            "count": 5,
+            "max_ms": 45.456952,
+            "min_ms": 43.394449,
+            "p50_ms": 43.805212000000004,
+            "p95_ms": 45.456952
+          },
+          "usage": {
+            "edges": 95,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 429441,
+            "objects": 33,
+            "owned_bytes": 8391488,
+            "peak_decoded_reservation_bytes": 97053343,
+            "peak_physical_bytes": 8797281,
+            "peak_reserved_bytes": 0,
+            "physical_bytes": 8797281,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8799712,
+            "verified_calls": 35
+          }
+        },
+        "restore_heap": null,
+        "schema": 1,
+        "source": {
+          "edges": 95,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 429441,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142944700,
+          "peak_physical_bytes": 8859145,
+          "peak_reserved_bytes": 8796793,
+          "physical_bytes": 8797281,
+          "unclassified_bytes": 0,
+          "verified_bytes": 57369474,
+          "verified_calls": 426
+        },
+        "source_physical": {
+          "allocated_file_bytes": 8908800,
+          "files": 35,
+          "lock_payload_bytes": 0,
+          "payload_bytes": 8797281
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "kind": "ordinary",
+      "elapsed_seconds": 11.797890046000248,
+      "user_cpu_seconds": 1.6172750000000065,
+      "system_cpu_seconds": 0.21165999999999996,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9956173355
+      },
+      "measurements": {
+        "baseline_heap": null,
+        "baseline_rss": {
+          "hwm_bytes": 5697536,
+          "rss_bytes": 5697536
+        },
+        "copied": {
+          "edges": 89,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 424905,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142459605,
+          "peak_physical_bytes": 8874300,
+          "peak_reserved_bytes": 8388608,
+          "physical_bytes": 8793705,
+          "unclassified_bytes": 0,
+          "verified_bytes": 9466578,
+          "verified_calls": 49
+        },
+        "duplicate": {
+          "before": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 230,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 230,
+            "peak_physical_bytes": 230,
+            "peak_reserved_bytes": 230,
+            "physical_bytes": 230,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "first": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 1114112,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 0,
+            "verified_calls": 0
+          },
+          "second": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 486,
+            "objects": 1,
+            "owned_bytes": 8388608,
+            "peak_decoded_reservation_bytes": 2162688,
+            "peak_physical_bytes": 8388838,
+            "peak_reserved_bytes": 8388608,
+            "physical_bytes": 8388838,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8388608,
+            "verified_calls": 1
+          }
+        },
+        "elapsed_ms": 11793.103055,
+        "errors": 0,
+        "expected_failed_copies": 3,
+        "final_heap": null,
+        "final_rss": {
+          "hwm_bytes": 36999168,
+          "rss_bytes": 36999168
+        },
+        "first_save": {
+          "destination": {
+            "edges": 8,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 18225,
+            "objects": 9,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67366262,
+            "peak_physical_bytes": 2112022,
+            "peak_reserved_bytes": 2097152,
+            "physical_bytes": 2111793,
+            "unclassified_bytes": 0,
+            "verified_bytes": 2101330,
+            "verified_calls": 8
+          },
+          "source_after_last_reader": {
+            "edges": 0,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 0,
+            "objects": 0,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 0,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          },
+          "source_overlap": {
+            "edges": 1,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 1029,
+            "objects": 2,
+            "owned_bytes": 2097152,
+            "peak_decoded_reservation_bytes": 67109221,
+            "peak_physical_bytes": 2097509,
+            "peak_reserved_bytes": 2099038,
+            "physical_bytes": 2097509,
+            "unclassified_bytes": 0,
+            "verified_bytes": 4195018,
+            "verified_calls": 4
+          }
+        },
+        "floor": {
+          "latencies": {
+            "count": 6,
+            "max_ms": 214.461119,
+            "min_ms": 198.805723,
+            "p50_ms": 202.366073,
+            "p95_ms": 214.461119
+          },
+          "usage": {
+            "edges": 96,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 161028,
+            "objects": 36,
+            "owned_bytes": 0,
+            "peak_decoded_reservation_bytes": 67815341,
+            "peak_physical_bytes": 186837,
+            "peak_reserved_bytes": 30958,
+            "physical_bytes": 136452,
+            "unclassified_bytes": 0,
+            "verified_bytes": 491734,
+            "verified_calls": 345
+          }
+        },
+        "history": {
+          "accepted_commands": 120,
+          "decoded_reservation_bytes": 25000775,
+          "encoded_bytes": 216346,
+          "redo_entries": 24,
+          "restore": {
+            "count": 5,
+            "max_ms": 1.592267,
+            "min_ms": 1.0850199999999999,
+            "p50_ms": 1.320502,
+            "p95_ms": 1.592267
+          },
+          "tracks": 32,
+          "undo_entries": 72
+        },
+        "history_heap": null,
+        "metadata": {
+          "comments": {
+            "count": 8,
+            "max_ms": 265.138186,
+            "min_ms": 230.45026900000002,
+            "p50_ms": 253.276573,
+            "p95_ms": 265.138186
+          },
+          "saves": {
+            "count": 8,
+            "max_ms": 222.539234,
+            "min_ms": 130.59458800000002,
+            "p50_ms": 131.925806,
+            "p95_ms": 222.539234
+          },
+          "verified_bytes_delta": 5324990
+        },
+        "metadata_heap": null,
+        "profiled": false,
+        "recovery": {
+          "latencies": {
+            "count": 5,
+            "max_ms": 48.865261,
+            "min_ms": 44.252451,
+            "p50_ms": 47.248427,
+            "p95_ms": 48.865261
+          },
+          "usage": {
+            "edges": 95,
+            "live_history_reservation_bytes": 0,
+            "metadata_reservation_bytes": 429441,
+            "objects": 33,
+            "owned_bytes": 8391488,
+            "peak_decoded_reservation_bytes": 97053343,
+            "peak_physical_bytes": 8797281,
+            "peak_reserved_bytes": 0,
+            "physical_bytes": 8797281,
+            "unclassified_bytes": 0,
+            "verified_bytes": 8799712,
+            "verified_calls": 35
+          }
+        },
+        "restore_heap": null,
+        "schema": 1,
+        "source": {
+          "edges": 95,
+          "live_history_reservation_bytes": 0,
+          "metadata_reservation_bytes": 429441,
+          "objects": 33,
+          "owned_bytes": 8391488,
+          "peak_decoded_reservation_bytes": 142944700,
+          "peak_physical_bytes": 8859145,
+          "peak_reserved_bytes": 8796793,
+          "physical_bytes": 8797281,
+          "unclassified_bytes": 0,
+          "verified_bytes": 57369474,
+          "verified_calls": 426
+        },
+        "source_physical": {
+          "allocated_file_bytes": 8908800,
+          "files": 35,
+          "lock_payload_bytes": 0,
+          "payload_bytes": 8797281
+        }
+      }
+    }
+  ],
+  "profiled_runs": [
+    {
+      "pair": 1,
+      "kind": "profiled",
+      "elapsed_seconds": 33.71982785900764,
+      "user_cpu_seconds": 23.463108,
+      "system_cpu_seconds": 0.21055800000000002,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9995772436
+      },
+      "heap": {
+        "baseline_heap": {
+          "allocations": 14,
+          "current_bytes": 963,
+          "peak_bytes": 3011,
+          "total_allocated_bytes": 5075
+        },
+        "history_heap": {
+          "allocations": 2045,
+          "current_bytes": 637345,
+          "peak_bytes": 640937,
+          "total_allocated_bytes": 5534972
+        },
+        "restore_heap": {
+          "allocations": 12412,
+          "current_bytes": 1111119,
+          "peak_bytes": 1437927,
+          "total_allocated_bytes": 12894205
+        },
+        "metadata_heap": {
+          "allocations": 12237132,
+          "current_bytes": 9945733,
+          "peak_bytes": 14679761,
+          "total_allocated_bytes": 1221382179
+        },
+        "final_heap": {
+          "allocations": 29957523,
+          "current_bytes": 16413013,
+          "peak_bytes": 16448789,
+          "total_allocated_bytes": 4167770693
+        }
+      }
+    },
+    {
+      "pair": 2,
+      "kind": "profiled",
+      "elapsed_seconds": 33.27023582599941,
+      "user_cpu_seconds": 23.301793999999997,
+      "system_cpu_seconds": 0.20940799999999993,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9718128729
+      },
+      "heap": {
+        "baseline_heap": {
+          "allocations": 14,
+          "current_bytes": 963,
+          "peak_bytes": 3011,
+          "total_allocated_bytes": 5075
+        },
+        "history_heap": {
+          "allocations": 2028,
+          "current_bytes": 637345,
+          "peak_bytes": 640937,
+          "total_allocated_bytes": 5533340
+        },
+        "restore_heap": {
+          "allocations": 12395,
+          "current_bytes": 1111119,
+          "peak_bytes": 1437927,
+          "total_allocated_bytes": 12892573
+        },
+        "metadata_heap": {
+          "allocations": 12237095,
+          "current_bytes": 9943357,
+          "peak_bytes": 14679865,
+          "total_allocated_bytes": 1221371539
+        },
+        "final_heap": {
+          "allocations": 29957443,
+          "current_bytes": 16413013,
+          "peak_bytes": 16448789,
+          "total_allocated_bytes": 4167736057
+        }
+      }
+    },
+    {
+      "pair": 3,
+      "kind": "profiled",
+      "elapsed_seconds": 33.565156764991116,
+      "user_cpu_seconds": 23.346626,
+      "system_cpu_seconds": 0.21331999999999995,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9933537001
+      },
+      "heap": {
+        "baseline_heap": {
+          "allocations": 14,
+          "current_bytes": 963,
+          "peak_bytes": 3011,
+          "total_allocated_bytes": 5075
+        },
+        "history_heap": {
+          "allocations": 2046,
+          "current_bytes": 637345,
+          "peak_bytes": 640937,
+          "total_allocated_bytes": 5535068
+        },
+        "restore_heap": {
+          "allocations": 12413,
+          "current_bytes": 1111119,
+          "peak_bytes": 1437927,
+          "total_allocated_bytes": 12894301
+        },
+        "metadata_heap": {
+          "allocations": 12237130,
+          "current_bytes": 9943733,
+          "peak_bytes": 14679321,
+          "total_allocated_bytes": 1221381129
+        },
+        "final_heap": {
+          "allocations": 29957461,
+          "current_bytes": 16413013,
+          "peak_bytes": 16448789,
+          "total_allocated_bytes": 4167737417
+        }
+      }
+    },
+    {
+      "pair": 4,
+      "kind": "profiled",
+      "elapsed_seconds": 33.79172809199372,
+      "user_cpu_seconds": 23.493263,
+      "system_cpu_seconds": 0.22239399999999998,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 10016712564
+      },
+      "heap": {
+        "baseline_heap": {
+          "allocations": 14,
+          "current_bytes": 963,
+          "peak_bytes": 3011,
+          "total_allocated_bytes": 5075
+        },
+        "history_heap": {
+          "allocations": 2048,
+          "current_bytes": 637345,
+          "peak_bytes": 640937,
+          "total_allocated_bytes": 5535260
+        },
+        "restore_heap": {
+          "allocations": 12415,
+          "current_bytes": 1111119,
+          "peak_bytes": 1437927,
+          "total_allocated_bytes": 12894493
+        },
+        "metadata_heap": {
+          "allocations": 12237126,
+          "current_bytes": 9943733,
+          "peak_bytes": 14679761,
+          "total_allocated_bytes": 1221378057
+        },
+        "final_heap": {
+          "allocations": 29957405,
+          "current_bytes": 16413013,
+          "peak_bytes": 16448789,
+          "total_allocated_bytes": 4167698189
+        }
+      }
+    },
+    {
+      "pair": 5,
+      "kind": "profiled",
+      "elapsed_seconds": 33.309919139996055,
+      "user_cpu_seconds": 23.487296,
+      "system_cpu_seconds": 0.20842700000000014,
+      "sync": {
+        "calls": 1327,
+        "nanoseconds": 9569388682
+      },
+      "heap": {
+        "baseline_heap": {
+          "allocations": 14,
+          "current_bytes": 963,
+          "peak_bytes": 3011,
+          "total_allocated_bytes": 5075
+        },
+        "history_heap": {
+          "allocations": 2041,
+          "current_bytes": 637345,
+          "peak_bytes": 640937,
+          "total_allocated_bytes": 5534588
+        },
+        "restore_heap": {
+          "allocations": 12408,
+          "current_bytes": 1111119,
+          "peak_bytes": 1437927,
+          "total_allocated_bytes": 12893821
+        },
+        "metadata_heap": {
+          "allocations": 12237100,
+          "current_bytes": 9943733,
+          "peak_bytes": 14679521,
+          "total_allocated_bytes": 1221370361
+        },
+        "final_heap": {
+          "allocations": 29957492,
+          "current_bytes": 16413013,
+          "peak_bytes": 16448789,
+          "total_allocated_bytes": 4167739975
+        }
+      }
+    }
+  ],
+  "timings_ms": {
+    "metadata_saves": {
+      "p50_ms": {
+        "median": 172.789984,
+        "min": 131.925806,
+        "max": 182.101993
+      },
+      "p95_ms": {
+        "median": 187.78101,
+        "min": 175.84901299999999,
+        "max": 222.539234
+      }
+    },
+    "metadata_comments": {
+      "p50_ms": {
+        "median": 250.30424499999998,
+        "min": 238.35210800000002,
+        "max": 256.33826999999997
+      },
+      "p95_ms": {
+        "median": 265.138186,
+        "min": 253.86579799999998,
+        "max": 276.095494
+      }
+    },
+    "history_restore": {
+      "p50_ms": {
+        "median": 1.28761,
+        "min": 1.143281,
+        "max": 1.320502
+      },
+      "p95_ms": {
+        "median": 1.5646849999999999,
+        "min": 1.3614670000000002,
+        "max": 1.592267
+      }
+    },
+    "recovery_latencies": {
+      "p50_ms": {
+        "median": 43.989616000000005,
+        "min": 43.664228,
+        "max": 47.248427
+      },
+      "p95_ms": {
+        "median": 46.77814,
+        "min": 44.542668,
+        "max": 50.495815
+      }
+    },
+    "floor_latencies": {
+      "p50_ms": {
+        "median": 196.47491,
+        "min": 189.15356,
+        "max": 202.366073
+      },
+      "p95_ms": {
+        "median": 214.461119,
+        "min": 197.212571,
+        "max": 228.503029
+      }
+    }
+  },
+  "rss_hwm_bytes": {
+    "median": 37019648,
+    "min": 36839424,
+    "max": 37122048
+  },
+  "rust_allocator_peak_bytes": {
+    "median": 16448789,
+    "min": 16448789,
+    "max": 16448789
+  },
+  "sync_share": {
+    "median": 0.8395107732500597,
+    "min": 0.8375282474242002,
+    "max": 0.8446097537449647
+  },
+  "uptime_after": "15:55:14 up 23:51,  1 user,  load average: 1.99, 2.72, 2.56"
+}

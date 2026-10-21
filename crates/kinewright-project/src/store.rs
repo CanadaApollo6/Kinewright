@@ -60,6 +60,8 @@ struct Ledger {
     pending: Vec<StorageReservation>,
     pending_controls: Vec<StorageReservation>,
     copy_holds: u64,
+    unclassified: BTreeMap<String, u64>,
+    temporaries: Vec<crate::namespace::PhysicalFile>,
 }
 
 struct StoreInner {
@@ -127,6 +129,8 @@ impl ProjectStore {
                     objects: BTreeMap::new(),
                     pins: BTreeMap::new(),
                     inventory_dependencies: BTreeMap::new(),
+                    unclassified: BTreeMap::new(),
+                    temporaries: vec![],
                     verified: BTreeSet::new(),
                     committed: vec![],
                     mirrors: vec![],
@@ -163,6 +167,14 @@ impl ProjectStore {
     }
     pub fn reserve_copy(&self, bytes: u64) -> Result<StorageReservation, BundleError> {
         self.reserve(bytes, 0, 0, true)
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn reserve_probe(
+        &self,
+        decoded: u64,
+        history: u64,
+    ) -> Result<StorageReservation, BundleError> {
+        self.reserve(0, decoded, history, false)
     }
     pub fn reserve_history_shadow(&self, bytes: u64) -> Result<StorageReservation, BundleError> {
         if bytes > self.limits().branch_history_bytes {
@@ -250,10 +262,24 @@ impl ProjectStore {
         let mut dependencies = dependencies.to_vec();
         dependencies.sort();
         dependencies.dedup();
-        self.closure_with_inventory(
+        self.closure_at(
             &dependencies,
             reference.record_kind != RecordKind::RootCheckpoint,
+            1,
         )?;
+        let unclassified = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .unclassified
+            .get(&reference.sha256)
+            .copied();
+        if unclassified.is_some_and(|length| length != reference.byte_length) {
+            return Err(BundleError::Corrupt(
+                "unclassified object length differs".into(),
+            ));
+        }
         let existing = {
             let ledger = self
                 .inner
@@ -268,7 +294,21 @@ impl ProjectStore {
                 }
                 true
             } else {
-                let usage = self.usage()?;
+                let mut usage = self.usage()?;
+                if let Some(length) = unclassified {
+                    usage.metadata_bytes = usage
+                        .metadata_bytes
+                        .checked_sub(
+                            length
+                                .checked_add(256)
+                                .ok_or(BundleError::Capacity("unclassified metadata overflow"))?,
+                        )
+                        .ok_or(BundleError::Capacity("unclassified metadata underflow"))?;
+                    usage.owned_bytes = usage
+                        .owned_bytes
+                        .checked_sub(length)
+                        .ok_or(BundleError::Capacity("unclassified owned underflow"))?;
+                }
                 let metadata_charge = 256_u64
                     .checked_add(
                         (dependencies.len() as u64)
@@ -286,6 +326,7 @@ impl ProjectStore {
                 if usage
                     .metadata_bytes
                     .checked_add(metadata_charge)
+                    .and_then(|n| n.checked_add(usage.decoded_bytes))
                     .is_none_or(|n| n > self.inner.limits.metadata_bytes)
                     || (reference.record_kind.is_owned_bytes()
                         && usage
@@ -295,7 +336,7 @@ impl ProjectStore {
                 {
                     return Err(BundleError::Capacity("object/edge metadata or owned bytes"));
                 }
-                if ledger.objects.len() as u64 >= self.inner.limits.objects {
+                if usage.objects >= self.inner.limits.objects && unclassified.is_none() {
                     return Err(BundleError::Capacity("object count"));
                 }
                 false
@@ -320,9 +361,19 @@ impl ProjectStore {
                 pin: self.pin(std::slice::from_ref(reference))?,
             });
         }
-        let reservation = self.reserve(reference.byte_length, 0, 0, false)?;
+        let reservation = self.reserve(
+            if unclassified.is_some() {
+                0
+            } else {
+                reference.byte_length
+            },
+            0,
+            0,
+            false,
+        )?;
         let path = Self::object_path(reference)?;
-        let recovered = recover && self.with_namespace(|n| n.open_owned(&path))?.is_some();
+        let recovered = (recover || unclassified.is_some())
+            && self.with_namespace(|n| n.open_owned(&path))?.is_some();
         let published = if recovered {
             self.with_namespace(|n| {
                 Self::verify_in_namespace(n, reference, &self.inner.usage, &self.inner.limits)
@@ -401,7 +452,11 @@ impl ProjectStore {
             }
             return Err(error);
         }
-        reservation.seal(reference.byte_length)?;
+        reservation.seal(if unclassified.is_some() {
+            0
+        } else {
+            reference.byte_length
+        })?;
         {
             let mut ledger = self
                 .inner
@@ -413,6 +468,9 @@ impl ProjectStore {
                 (reference.clone(), dependencies.clone()),
             );
             ledger.verified.insert(reference.sha256.clone());
+            if unclassified.is_some() {
+                ledger.unclassified.remove(&reference.sha256);
+            }
             let metadata_charge = 256
                 + (dependencies.len() as u64) * 160
                 + if reference.record_kind.is_owned_bytes() {
@@ -429,9 +487,27 @@ impl ProjectStore {
             .usage
             .lock()
             .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        if let Some(length) = unclassified {
+            usage.owned_bytes = usage
+                .owned_bytes
+                .checked_sub(length)
+                .ok_or(BundleError::Capacity("unclassified owned underflow"))?;
+            usage.metadata_bytes = usage
+                .metadata_bytes
+                .checked_sub(
+                    length
+                        .checked_add(256)
+                        .ok_or(BundleError::Capacity("unclassified metadata overflow"))?,
+                )
+                .ok_or(BundleError::Capacity("unclassified metadata underflow"))?;
+            usage.unclassified_bytes = usage
+                .unclassified_bytes
+                .checked_sub(length)
+                .ok_or(BundleError::Capacity("unclassified bytes underflow"))?;
+        }
         usage.objects = usage
             .objects
-            .checked_add(1)
+            .checked_add(u64::from(unclassified.is_none()))
             .ok_or(BundleError::Capacity("object accounting overflow"))?;
         usage.edges = usage
             .edges
@@ -468,6 +544,14 @@ impl ProjectStore {
         roots: &[ObjectRef],
         include_inventory: bool,
     ) -> Result<Vec<ObjectRef>, BundleError> {
+        self.closure_at(roots, include_inventory, 0)
+    }
+    fn closure_at(
+        &self,
+        roots: &[ObjectRef],
+        include_inventory: bool,
+        depth: u64,
+    ) -> Result<Vec<ObjectRef>, BundleError> {
         let ledger = self
             .inner
             .ledger
@@ -485,7 +569,7 @@ impl ProjectStore {
                 &mut active,
                 &mut visited,
                 include_inventory,
-                0,
+                depth,
             )?;
         }
         Ok(found.into_values().collect())
@@ -726,6 +810,10 @@ impl Drop for StorePin {
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one authority retires known objects and owned temporary charges after durable publication"
+)]
 fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
     let victims = {
         let ledger = inner
@@ -769,6 +857,8 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
     let mut retired = 0_u64;
     for (hash, reference, edges, metadata) in victims {
         let path = ProjectStore::object_path(&reference)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("gc_before_unlink", path.as_path())?;
         inner
             .namespace
             .lock()
@@ -812,9 +902,63 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
         ledger.pins.remove(&hash);
         ledger.verified.remove(&hash);
         ledger.metadata_sizes.remove(&hash);
+        ledger.inventory_dependencies.remove(&hash);
         retired = retired
             .checked_add(reference.byte_length)
             .ok_or(BundleError::Capacity("retirement overflow"))?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("gc_after_unlink", path.as_path())?;
+    }
+    let temporaries = inner
+        .ledger
+        .lock()
+        .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+        .temporaries
+        .clone();
+    for file in temporaries {
+        inner
+            .namespace
+            .lock()
+            .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
+            .retire_temporary(&file)?;
+        let mut ledger = inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        ledger
+            .temporaries
+            .retain(|f| f.relative != file.relative || f.root_parent != file.root_parent);
+        let mut usage = inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        usage.physical_bytes = usage
+            .physical_bytes
+            .checked_sub(file.length)
+            .ok_or(BundleError::Capacity("temporary physical underflow"))?;
+        usage.owned_bytes = usage
+            .owned_bytes
+            .checked_sub(file.length)
+            .ok_or(BundleError::Capacity("temporary owned underflow"))?;
+        usage.metadata_bytes = usage
+            .metadata_bytes
+            .checked_sub(
+                file.length
+                    .checked_add(256)
+                    .ok_or(BundleError::Capacity("temporary metadata overflow"))?,
+            )
+            .ok_or(BundleError::Capacity("temporary metadata underflow"))?;
+        usage.unclassified_bytes = usage
+            .unclassified_bytes
+            .checked_sub(file.length)
+            .ok_or(BundleError::Capacity("temporary unclassified underflow"))?;
+        usage.objects = usage
+            .objects
+            .checked_sub(1)
+            .ok_or(BundleError::Capacity("temporary count underflow"))?;
+        retired = retired
+            .checked_add(file.length)
+            .ok_or(BundleError::Capacity("temporary retirement overflow"))?;
     }
     Ok(retired)
 }
@@ -1484,6 +1628,7 @@ impl ProjectStore {
         state.edges = edges;
         state.objects = ledger.objects.len() as u64;
         drop(state);
+        store.account_residuals()?;
         Ok(store)
     }
     pub(crate) fn selected_manifest(
@@ -1997,6 +2142,98 @@ impl Drop for SourceCopyHold {
 }
 
 impl ProjectStore {
+    /// Unknown immutable files stay charged; only owner-prefixed staging files may retire.
+    #[allow(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "exact generated names define temporary ownership"
+    )]
+    pub(crate) fn account_residuals(&mut self) -> Result<(), BundleError> {
+        let files = self.with_namespace(|n| n.physical_files(self.inner.limits.objects))?;
+        let mut ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        let mut usage = self
+            .inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        for file in files {
+            let name = file
+                .relative
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| BundleError::Identity("physical filename".into()))?;
+            if !file.root_parent && file.relative.parent() == Some(Path::new("studio/objects")) {
+                if let Some((r, _)) = ledger.objects.get(name) {
+                    if r.byte_length != file.length {
+                        return Err(BundleError::Corrupt("physical object length".into()));
+                    }
+                    continue;
+                }
+                if ledger.unclassified.contains_key(name) {
+                    continue;
+                }
+            } else if ledger
+                .temporaries
+                .iter()
+                .any(|f| f.relative == file.relative && f.root_parent == file.root_parent)
+            {
+                continue;
+            }
+            let metadata_charge = file
+                .length
+                .checked_add(256)
+                .ok_or(BundleError::Capacity("unclassified metadata overflow"))?;
+            let owned = usage
+                .owned_bytes
+                .checked_add(file.length)
+                .ok_or(BundleError::Capacity("unclassified owned overflow"))?;
+            let metadata = usage
+                .metadata_bytes
+                .checked_add(metadata_charge)
+                .ok_or(BundleError::Capacity("unclassified metadata overflow"))?;
+            let count = usage
+                .objects
+                .checked_add(1)
+                .ok_or(BundleError::Capacity("unclassified object overflow"))?;
+            if owned > self.inner.limits.owned_bytes
+                || metadata > self.inner.limits.metadata_bytes
+                || count > self.inner.limits.objects
+            {
+                return Err(BundleError::Capacity("unclassified physical files"));
+            }
+            usage.physical_bytes = usage
+                .physical_bytes
+                .checked_add(file.length)
+                .ok_or(BundleError::Capacity("unclassified physical overflow"))?;
+            usage.unclassified_bytes = usage
+                .unclassified_bytes
+                .checked_add(file.length)
+                .ok_or(BundleError::Capacity("unclassified bytes overflow"))?;
+            usage.peak_physical_bytes = usage.peak_physical_bytes.max(usage.physical_bytes);
+            usage.owned_bytes = owned;
+            usage.metadata_bytes = metadata;
+            usage.objects = count;
+            if name.starts_with(".studio-") && name.ends_with(".tmp") {
+                ledger.temporaries.push(file);
+            } else if !file.root_parent
+                && file.relative.parent() == Some(Path::new("studio/objects"))
+                && name.len() == 64
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                ledger.unclassified.insert(name.to_owned(), file.length);
+            } else {
+                return Err(BundleError::Identity(
+                    "unclassified non-object managed file".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn restrict_copy_limits(
         &mut self,
         limits: StorageLimits,

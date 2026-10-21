@@ -1,6 +1,8 @@
 //! Job A's eval-only baseline CLI and assertion runner.
 #![allow(clippy::missing_errors_doc)]
 pub mod baseline;
+#[cfg(target_os = "linux")]
+mod budget_observer;
 pub mod controller;
 #[cfg(target_os = "linux")]
 mod copy_observer;

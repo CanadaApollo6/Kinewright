@@ -4,6 +4,46 @@ use std::{cell::RefCell, path::PathBuf};
 
 use serde::Serialize;
 
+#[derive(Debug, Default, Serialize)]
+pub struct SyncProfile {
+    pub calls: u64,
+    pub nanoseconds: u128,
+}
+thread_local! {static SYNC_PROFILE: RefCell<Option<SyncProfile>>=const{RefCell::new(None)};}
+#[cfg(target_os = "linux")]
+pub(crate) fn measure_sync<T, E>(run: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+    let started = std::time::Instant::now();
+    let result = run();
+    SYNC_PROFILE.with_borrow_mut(|s| {
+        if let Some(s) = s {
+            s.calls += 1;
+            s.nanoseconds += started.elapsed().as_nanos();
+        }
+    });
+    result
+}
+/// Time the actual sync calls on this thread; independent from object/hash counters.
+/// # Panics
+/// Refuses nested profiling scopes.
+pub fn profile_sync<T>(run: impl FnOnce() -> T) -> (T, SyncProfile) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            SYNC_PROFILE.with_borrow_mut(|s| *s = None);
+        }
+    }
+    SYNC_PROFILE.with_borrow_mut(|s| {
+        assert!(s.is_none());
+        *s = Some(SyncProfile::default());
+    });
+    let _reset = Reset;
+    let result = run();
+    let profile = SYNC_PROFILE
+        .with_borrow_mut(Option::take)
+        .expect("profile installed");
+    (result, profile)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IoObservation {
     pub operation: &'static str,

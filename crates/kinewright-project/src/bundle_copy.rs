@@ -197,7 +197,11 @@ fn origins(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    if (target.origin_project_ids.len() + target.origin_session_ids.len()) as u64
+    if target
+        .origin_project_ids
+        .len()
+        .checked_add(target.origin_session_ids.len())
+        .ok_or(BundleError::Capacity("project origins overflow"))? as u64
         > target.store.limits().versions
     {
         return Err(BundleError::Capacity("project origins"));

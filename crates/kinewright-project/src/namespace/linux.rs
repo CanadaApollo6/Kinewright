@@ -365,10 +365,23 @@ pub(super) fn read_at(
     crate::bundle_recovery::bounded_bytes(file, limit).map(Some)
 }
 
-fn temp(dir: &File) -> Result<(std::ffi::OsString, File), BundleError> {
+fn temp_prefix(namespace: &ProjectNamespace) -> Result<String, BundleError> {
+    let name = namespace
+        .root_name
+        .to_str()
+        .ok_or_else(|| BundleError::Identity("temporary owner filename".into()))?;
+    Ok(format!(
+        ".studio-{}-",
+        kinewright_media::sha256_bytes(name.as_bytes())
+    ))
+}
+fn temp(
+    namespace: &ProjectNamespace,
+    dir: &File,
+) -> Result<(std::ffi::OsString, File), BundleError> {
     let mut random = [0_u8; 16];
     getrandom::fill(&mut random).map_err(|e| BundleError::Identity(e.to_string()))?;
-    let mut encoded = String::from(".studio-");
+    let mut encoded = temp_prefix(namespace)?;
     for byte in random {
         let _ = write!(encoded, "{byte:02x}");
     }
@@ -393,7 +406,7 @@ pub(super) fn replace_inner(
     refuse: bool,
 ) -> Result<(), BundleError> {
     namespace.verify()?;
-    let (name, mut file) = temp(&namespace.parent)?;
+    let (name, mut file) = temp(namespace, &namespace.parent)?;
     let temp_path = namespace
         .identity
         .resolved_root
@@ -547,7 +560,7 @@ pub(super) fn publish(
             "immutable name has different bytes".into(),
         ));
     }
-    let (temp_name, mut file) = temp(&dir)?;
+    let (temp_name, mut file) = temp(namespace, &dir)?;
     let result = (|| {
         file.write_all(bytes)?;
         #[cfg(any(test, feature = "test-util"))]
@@ -638,7 +651,7 @@ pub(super) fn publish_with(
         Err(rustix::io::Errno::NOENT) => {}
         Err(e) => return Err(e.into()),
     }
-    let (temp_name, mut file) = temp(&dir)?;
+    let (temp_name, mut file) = temp(namespace, &dir)?;
     let result = (|| {
         write(&mut file)?;
         sync_file(&file, "object_file_sync", path)?;
@@ -697,12 +710,21 @@ pub(super) fn open_relative(
 }
 
 fn sync_directory(directory: &File, observed: &Path) -> Result<(), BundleError> {
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::measure_sync(|| fs::fsync(directory))?;
+    #[cfg(not(any(test, feature = "test-util")))]
     fs::fsync(directory)?;
     note("directory_sync", observed);
     Ok(())
 }
 
 fn sync_file(file: &File, operation: &'static str, observed: &Path) -> Result<(), BundleError> {
+    #[cfg(any(test, feature = "test-util"))]
+    {
+        crate::io_observer::check_failure(operation, observed)?;
+        crate::io_observer::measure_sync(|| file.sync_all())?;
+    }
+    #[cfg(not(any(test, feature = "test-util")))]
     file.sync_all()?;
     note(operation, observed);
     Ok(())
@@ -867,7 +889,7 @@ pub(super) fn replace_relative(
         .as_path()
         .file_name()
         .ok_or_else(|| BundleError::Identity("missing journal name".into()))?;
-    let (temporary, mut file) = temp(&dir)?;
+    let (temporary, mut file) = temp(namespace, &dir)?;
     let result = (|| {
         file.write_all(bytes)?;
         #[cfg(any(test, feature = "test-util"))]
@@ -875,8 +897,13 @@ pub(super) fn replace_relative(
         sync_file(&file, "inventory_file_sync", path.as_path())?;
         namespace.verify()?;
         namespace.uncertain = true;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("inventory_before_rename", path.as_path())?;
         fs::renameat(&dir, &temporary, &dir, name).map_err(|_| BundleError::DurabilityUnknown)?;
         note("inventory_rename", path.as_path());
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("inventory_after_rename", path.as_path())
+            .map_err(|_| BundleError::DurabilityUnknown)?;
         namespace.uncertain = true;
         sync_directory(&dir, path.as_path().parent().unwrap())
             .map_err(|_| BundleError::DurabilityUnknown)?;
@@ -917,6 +944,100 @@ pub(super) fn reconcile_copy_root(
     })();
     namespace.uncertain = result.is_err();
     result
+}
+
+/// Enumerate only the pinned managed directories and this root's temporary prefix.
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "exact generated names define temporary ownership"
+)]
+pub(super) fn physical_files(
+    namespace: &ProjectNamespace,
+    limit: u64,
+) -> Result<Vec<super::PhysicalFile>, BundleError> {
+    use std::os::fd::AsRawFd;
+    namespace.verify_read_authority()?;
+    let prefix = temp_prefix(namespace)?;
+    let mut files = vec![];
+    for relative in [
+        None,
+        Some(Path::new("studio/objects")),
+        Some(Path::new("studio/recovery")),
+    ] {
+        let dir = if let Some(relative) = relative {
+            match directory(namespace, relative, false) {
+                Ok(dir) => dir,
+                Err(BundleError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            }
+        } else {
+            namespace.parent.try_clone()?
+        };
+        for entry in std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))? {
+            let name = entry?.file_name();
+            let text = name
+                .to_str()
+                .ok_or_else(|| BundleError::Identity("managed non-UTF8 filename".into()))?;
+            if relative.is_none() && !(text.starts_with(&prefix) && text.ends_with(".tmp")) {
+                continue;
+            }
+            if relative == Some(Path::new("studio/recovery")) && text == "inventory" {
+                continue;
+            }
+            if files.len() as u64 >= limit {
+                return Err(BundleError::Capacity("physical file count"));
+            }
+            let file = File::from(fs::openat(
+                &dir,
+                &name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+                Mode::empty(),
+            )?);
+            let stat = fs::fstat(&file)?;
+            if !file.metadata()?.is_file()
+                || stat.st_nlink != 1
+                || stat.st_dev != namespace.identity.parent_device
+            {
+                return Err(BundleError::Identity("managed file identity/type".into()));
+            }
+            files.push(super::PhysicalFile {
+                relative: relative
+                    .map_or_else(|| Path::new(&name).to_path_buf(), |p| p.join(&name)),
+                root_parent: relative.is_none(),
+                length: file.metadata()?.len(),
+            });
+        }
+    }
+    Ok(files)
+}
+#[allow(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "case folding would widen deletion authority"
+)]
+pub(super) fn retire_temporary(
+    namespace: &mut ProjectNamespace,
+    file: &super::PhysicalFile,
+) -> Result<(), BundleError> {
+    namespace.verify()?;
+    let name = file
+        .relative
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| BundleError::Identity("temporary filename".into()))?;
+    if !name.starts_with(&temp_prefix(namespace)?) || !name.ends_with(".tmp") {
+        return Err(BundleError::Identity(
+            "unclassified immutable bytes cannot be retired as temporary".into(),
+        ));
+    }
+    if file.root_parent {
+        fs::unlinkat(&namespace.parent, name, AtFlags::empty())?;
+        sync_directory(
+            &namespace.parent,
+            namespace.identity.resolved_root.parent().unwrap(),
+        )
+    } else {
+        unlink_relative(namespace, &PortablePath::new(&file.relative)?)
+    }
 }
 
 pub(super) fn seal_existing(
