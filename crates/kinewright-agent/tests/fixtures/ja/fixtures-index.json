@@ -886,6 +886,59 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s1-edit-receipt-restart",
+      "relative_file": "s1-edit-receipt-restart.json",
+      "sha256": "390f62e8a1983876f33c60fc385b1c6d778e25f704d7295952fab51f45c1aba3",
+      "byte_length": 5389,
+      "expected_baseline_process_exit": 2,
+      "inputs": {
+        "edit": {
+          "relative_file": "command-sync-lock.json",
+          "sha256": "15afc89b3c02e8ff7ce7caf1c3f0efa66e7a4d1a19e1e964e1fb8fb93d53df3e",
+          "byte_length": 91,
+          "kind": "input"
+        },
+        "undo": {
+          "relative_file": "command-undo.json",
+          "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
+          "byte_length": 7,
+          "kind": "input"
+        },
+        "initial": {
+          "relative_file": "writer-v1-track.kinewright",
+          "sha256": "bb17fd2cad27cc7e168555e3cdd0cb360f72d7ce18d1d64b50ee3479c05e0958",
+          "byte_length": 1089,
+          "kind": "project"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        },
+        "false": {
+          "relative_file": "oracle-false.json",
+          "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+          "byte_length": 6,
+          "kind": "input"
+        },
+        "one": {
+          "relative_file": "oracle-one.json",
+          "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+          "byte_length": 2,
+          "kind": "input"
+        },
+        "empty": {
+          "relative_file": "oracle-empty-array.json",
+          "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+          "byte_length": 3,
+          "kind": "input"
+        }
+      }
     }
   ]
 }

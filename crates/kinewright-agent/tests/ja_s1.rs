@@ -300,3 +300,154 @@ fn bundle_migration_fixture_uses_the_real_reader_and_writer() {
         "{summary:#}"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn reply_retry_fixture_revised_has_one_durable_entry() {
+    let temp = TempDirectory::new("ja-s1-retry-revised");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/reply-retry.json");
+    let output = temp.path("out");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "revised", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    assert!(
+        summary["assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["passed"] == true),
+        "{summary:#}"
+    );
+    let observation = |id| -> Value {
+        serde_json::from_slice(
+            &std::fs::read(output.join(format!("artifacts/observation-{id}.json"))).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(observation(6)["receipt"], observation(9)["receipt"]);
+    assert_eq!(observation(9)["backend"], "linux-local-durable-receipts");
+    assert_eq!(observation(10)["undo_count"], 1);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn comment_receipt_fixture_revised_reconciles_exact_original_result() {
+    let temp = TempDirectory::new("ja-s1-comment-revised");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/comment-receipt.json");
+    let output = temp.path("out");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "revised", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    assert!(
+        summary["assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["passed"] == true),
+        "{summary:#}"
+    );
+    let observation = |id| -> Value {
+        serde_json::from_slice(
+            &std::fs::read(output.join(format!("artifacts/observation-{id}.json"))).unwrap(),
+        )
+        .unwrap()
+    };
+    let original = observation(10);
+    assert_eq!(original["record_id"], observation(16)["record_id"]);
+    assert_eq!(original["receipt"], observation(26)["receipt"]);
+    assert_eq!(observation(22)["mutation_calls"], 0);
+    assert_eq!(observation(32)["retired_unresolved"], true);
+    assert_eq!(observation(32)["mutation_calls"], 0);
+    let seal_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/reports/ja1-s1/comment-baseline.json");
+    // This is the recorded clean commit-4 baseline, not a claimed rerun at this HEAD.
+    let seal: Value = serde_json::from_slice(&std::fs::read(seal_path).unwrap()).unwrap();
+    assert_eq!(
+        seal["source_head"],
+        "f9f6089d87037e680e85f7551320739f69926ac0"
+    );
+    assert_eq!(seal["source_clean"], true);
+    assert_eq!(
+        seal["fixture_sha256"],
+        kinewright_media::sha256_file(&fixture).unwrap()
+    );
+    assert_eq!(seal["literal_missing_result"]["actual"], false);
+    assert_eq!(seal["literal_missing_result"]["expected"], true);
+    assert_eq!(
+        seal["binary_sha256"],
+        "fe073fe00f3c57368d3a294b948b2cf8be8f77123f3d59803ea2c81e1d2a3ffc"
+    );
+    // CI compares the recorded identities. The sealed executable and raw run remain local evidence.
+    let current: Value =
+        serde_json::from_slice(&std::fs::read(output.join("run.json")).unwrap()).unwrap();
+    assert_eq!(seal["inputs"], current["inputs"]);
+    assert_eq!(seal["oracles"], current["oracles"]);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn edit_receipt_restart_reconciles_original_envelope() {
+    let temp = TempDirectory::new("ja-s1-edit-restart");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/ja/s1-edit-receipt-restart.json");
+    let output = temp.path("out");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "revised", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{} {}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let observation = |id| -> Value {
+        serde_json::from_slice(
+            &std::fs::read(output.join(format!("artifacts/observation-{id}.json"))).unwrap(),
+        )
+        .unwrap()
+    };
+    assert_eq!(observation(6)["receipt"], observation(14)["receipt"]);
+    assert_eq!(observation(14)["original_epoch_is_current"], false);
+    assert_eq!(observation(16)["undo_count"], 1);
+    let events: Vec<Value> = std::fs::read_to_string(output.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let processes: std::collections::BTreeSet<_> = events
+        .iter()
+        .filter(|e| e["kind"] == "process_spawn" && e["participant"] == "A")
+        .map(|e| e["data"]["pid"].as_u64().unwrap())
+        .collect();
+    assert_eq!(processes.len(), 2);
+}

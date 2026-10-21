@@ -208,11 +208,14 @@ impl ProjectNamespace {
         }
     }
     pub fn verify(&self) -> Result<(), BundleError> {
-        if self.read_only {
-            return Err(BundleError::Identity("read-only namespace".into()));
-        }
         if self.uncertain {
             return Err(BundleError::Unsettled);
+        }
+        self.verify_read_authority()
+    }
+    pub(crate) fn verify_read_authority(&self) -> Result<(), BundleError> {
+        if self.read_only {
+            return Err(BundleError::Identity("read-only namespace".into()));
         }
         if let Some(lock) = self.lock.as_ref() {
             lock.verify()

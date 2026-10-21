@@ -4,6 +4,8 @@ pub mod baseline;
 pub mod controller;
 pub mod media_observer;
 pub mod protocol;
+#[cfg(target_os = "linux")]
+mod receipt_observer;
 pub mod recording;
 pub mod report;
 pub mod revised;
@@ -154,7 +156,7 @@ fn execute(
                     report.pending.push(pending.clone());
                     report.event(action.id, &action.participant, "pending", pending)?;
                 }
-                call => {
+                _ => {
                     let routed = controller.dispatch(action, loaded, &observed, report)?;
                     let dispatched = if routed.is_some() {
                         routed
@@ -171,7 +173,7 @@ fn execute(
                     };
                     let (observation, delivered) = match dispatched {
                         Some(result) => result,
-                        None => (adapter.execute(call, loaded)?, true),
+                        None => (adapter.execute(action, loaded)?, true),
                     };
                     let delivered = delivered && controller.deliver_reply(action.id);
                     let adapter_ns = started.elapsed().as_nanos().to_string();

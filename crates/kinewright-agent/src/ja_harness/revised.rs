@@ -11,7 +11,7 @@ use std::{fs, path::Path};
 pub struct Adapter {
     pub baseline: Baseline,
     mode: Mode,
-    bundle: Option<kinewright_project::bundle::ProjectBundle>,
+    pub(super) bundle: Option<kinewright_project::bundle::ProjectBundle>,
 }
 
 impl Adapter {
@@ -29,12 +29,38 @@ impl Adapter {
     }
 
     #[allow(clippy::too_many_lines, reason = "exhaustive adapter dispatch")]
-    pub fn execute(&mut self, call: &Call, fixture: &LoadedFixture) -> Result<Value, String> {
+    pub fn execute(
+        &mut self,
+        action: &super::protocol::Action,
+        fixture: &LoadedFixture,
+    ) -> Result<Value, String> {
+        let call = &action.call;
         match call {
+            Call::CoreSend(args)
+                if self.mode == Mode::Revised
+                    && matches!(
+                        fixture.fixture.fixture_id.as_str(),
+                        "reply-retry" | "s1-edit-receipt-restart"
+                    ) =>
+            {
+                #[cfg(target_os = "linux")]
+                {
+                    self.receipt_edit(action, args, fixture)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = args;
+                    Err("Linux native durable command prerequisite unavailable; NOT RUN".into())
+                }
+            }
             Call::CommentSubmit(args) => {
                 #[cfg(target_os = "linux")]
                 {
-                    self.comment_graph_submit(args, fixture)
+                    if self.mode == Mode::Revised {
+                        self.comment_receipt_submit(args, fixture)
+                    } else {
+                        self.comment_graph_submit(args, fixture)
+                    }
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -45,7 +71,11 @@ impl Adapter {
             Call::CommentInspect(args) => {
                 #[cfg(target_os = "linux")]
                 {
-                    self.comment_graph_inspect(args, fixture)
+                    if self.mode == Mode::Revised {
+                        self.comment_receipt_inspect(args, fixture)
+                    } else {
+                        self.comment_graph_inspect(args, fixture)
+                    }
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
@@ -53,8 +83,23 @@ impl Adapter {
                     Err("comment graph Linux prerequisite unavailable; NOT RUN".into())
                 }
             }
-            Call::CommentRetire(_) | Call::CommentRotate(_) => {
-                Err("later receipt retirement scenario unavailable before receipts; NOT RUN".into())
+            Call::CommentRetire(args) | Call::CommentRotate(args) => {
+                #[cfg(target_os = "linux")]
+                {
+                    if self.mode == Mode::Revised {
+                        self.comment_receipt_maintenance(
+                            args,
+                            matches!(call, Call::CommentRotate(_)),
+                        )
+                    } else {
+                        Err("later receipt scenario unavailable on the pre-receipt observer; NOT RUN".into())
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = args;
+                    Err("Linux native receipt prerequisite unavailable; NOT RUN".into())
+                }
             }
 
             Call::BundleFixtureProbe(args) => {
@@ -143,7 +188,12 @@ impl Adapter {
             }
             Call::ProjectReopen(args) if self.mode == Mode::Revised => {
                 let path = self.baseline.root.join(&args.path);
-                let (_, before) = self.baseline.snapshot()?;
+                let before = self
+                    .baseline
+                    .core
+                    .as_ref()
+                    .map(|_| self.baseline.snapshot().map(|(_, document)| document))
+                    .transpose()?;
                 self.bundle = None;
                 let loaded = kinewright_project::bundle::LoadedBundle::read(&path)
                     .map_err(|e| e.to_string())?;
@@ -154,7 +204,7 @@ impl Adapter {
                 self.bundle = Some(loaded.into_writer().map_err(|e| e.to_string())?);
                 let (_, after) = self.baseline.snapshot()?;
                 Ok(
-                    json!({"backend":"linux-local-bundle","same_document":before==after,"history":self.baseline.history()?}),
+                    json!({"backend":"linux-local-bundle","same_document":before.is_some_and(|document|document==after),"history":self.baseline.history()?}),
                 )
             }
 
@@ -223,7 +273,7 @@ impl Adapter {
         }
     }
     #[cfg(target_os = "linux")]
-    fn open_comment_bundle(&mut self, path: &Path) -> Result<(), String> {
+    pub(super) fn open_comment_bundle(&mut self, path: &Path) -> Result<(), String> {
         if let Some(bundle) = self.bundle.as_ref() {
             if bundle.store().resolved_root().map_err(|e| e.to_string())?
                 != kinewright_project::canonical_project_identity(path)
@@ -259,7 +309,7 @@ impl Adapter {
         Ok(())
     }
     #[cfg(target_os = "linux")]
-    fn comment_request_path(&self, key: &str) -> Result<std::path::PathBuf, String> {
+    pub(super) fn comment_request_path(&self, key: &str) -> Result<std::path::PathBuf, String> {
         if key.is_empty()
             || key.len() > 128
             || !key

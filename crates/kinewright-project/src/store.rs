@@ -70,6 +70,7 @@ struct StoreInner {
     inventory_bytes: Mutex<u64>,
     project_id: Option<ProjectId>,
     session_id: Option<SessionId>,
+    owner_epoch: u64,
 }
 
 pub struct ProjectStore {
@@ -104,6 +105,9 @@ impl ProjectStore {
             ));
         }
         namespace.verify()?;
+        let mut epoch_bytes = [0_u8; 8];
+        getrandom::fill(&mut epoch_bytes).map_err(|e| BundleError::Identity(e.to_string()))?;
+        let owner_epoch = u64::from_le_bytes(epoch_bytes).max(1);
         let root_bytes = namespace.read_root()?.map_or(0, |b| b.len() as u64);
         let inventory_bytes = namespace
             .read(
@@ -141,6 +145,7 @@ impl ProjectStore {
                 limits,
                 project_id,
                 session_id,
+                owner_epoch,
             }),
         })
     }
@@ -550,8 +555,8 @@ impl ProjectStore {
         (self.inner.project_id.clone(), self.inner.session_id.clone())
     }
     #[must_use]
-    pub const fn owner_epoch(&self) -> u64 {
-        1
+    pub fn owner_epoch(&self) -> u64 {
+        self.inner.owner_epoch
     }
     /// This handle observes accounting after the final reader/owner retires.
     pub fn usage_handle(&self) -> impl Fn() -> Result<StorageUsage, BundleError> + use<> {
@@ -845,7 +850,7 @@ impl Drop for StoreInner {
     }
 }
 
-mod record_sealed {
+pub(crate) mod record_sealed {
     pub trait Sealed {}
 }
 /// Only production record types can use the typed-record ingress.
@@ -1452,6 +1457,14 @@ impl ProjectStore {
                 .cloned()
                 .collect(),
         })
+    }
+    pub(crate) fn begin_publication(&mut self) -> Result<(), BundleError> {
+        self.inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .can_collect = false;
+        Ok(())
     }
     pub(crate) fn mark_committed(&mut self, roots: &[ObjectRef]) -> Result<StorePin, BundleError> {
         let pin = self.pin(roots)?;

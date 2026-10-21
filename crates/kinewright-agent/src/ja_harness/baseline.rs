@@ -455,7 +455,7 @@ impl Drop for Baseline {
     }
 }
 
-fn history_value(core: &Core) -> Result<Value, String> {
+pub(super) fn history_value(core: &Core) -> Result<Value, String> {
     let history = core.observe_history().map_err(|e| e.to_string())?;
     Ok(json!({"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history}))
 }

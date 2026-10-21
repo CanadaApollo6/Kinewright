@@ -95,6 +95,8 @@ impl RecordKind {
                 | Self::Lineage
                 | Self::StoreManifest
                 | Self::InputManifest
+                | Self::ReceiptIndex
+                | Self::IssuerState
                 | Self::OwnedMedia
                 | Self::OwnedFont
                 | Self::OwnedNotice

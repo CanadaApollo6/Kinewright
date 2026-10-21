@@ -92,3 +92,41 @@ pub fn observe<T>(run: impl FnOnce() -> T) -> (T, IoTrace) {
         .expect("observer installed");
     (result, trace)
 }
+
+thread_local! { static FAILURE: RefCell<Option<&'static str>> = const {RefCell::new(None)}; }
+/// Inject one operation error in a fixture-owned temporary namespace.
+/// # Panics
+/// Refuses nested fault scopes. Unwinding clears the scope.
+pub fn fail_once<T>(operation: &'static str, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FAILURE.with_borrow_mut(|failure| *failure = None);
+        }
+    }
+    FAILURE.with_borrow_mut(|failure| {
+        assert!(failure.is_none(), "nested failure scope");
+        *failure = Some(operation);
+    });
+    let _reset = Reset;
+    run()
+}
+pub(crate) fn check_failure(
+    operation: &'static str,
+    path: &std::path::Path,
+) -> std::io::Result<()> {
+    let fail = FAILURE.with_borrow_mut(|failure| {
+        if *failure == Some(operation) {
+            *failure = None;
+            true
+        } else {
+            false
+        }
+    });
+    if fail {
+        note("injected_failure", path);
+        Err(std::io::Error::other(format!("injected {operation}")))
+    } else {
+        Ok(())
+    }
+}

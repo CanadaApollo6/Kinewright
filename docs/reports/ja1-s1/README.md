@@ -40,7 +40,12 @@ Storage limits remain provisional until L6's workload measurements.
    scans, all harness modules, all three explicit native bridges, the ceiling controls
    and the caller/media selections passed. Known ignored pins remain named NOT RUN.
    Fourteen targeted mutation red/restored-green pairs passed at the final source.
-5. Command receipts and issuer retirement: not committed.
+5. Command receipts and issuer retirement: Linux gate passed (`c5-gate1`),
+   23 commands and 17 test summaries, 101 selected passes including overlaps.
+   All six project receipt witnesses and eleven revised tests passed, plus the
+   complete affected harness/format sets and all three explicitly provisioned App
+   bridges. Seven targeted mutation pairs failed their intended witness and passed
+   after restoration. Exact raw summaries are in `commit-5.json`.
 6. Durable bases, lineage and floors: not committed.
 7. Save As and first save: not committed.
 8. Recovery retention and measured evidence: not committed.
@@ -137,3 +142,36 @@ artifact hashes are checked in both modes. Windows executes the baseline there;
 its native durable-success properties remain NOT RUN and have separate refusal
 witnesses. This updates an obsolete revised-red expectation without weakening any
 baseline assertion.
+
+### Resume, commit 5
+
+The compatible comment baseline was sealed from clean commit 4 before receipt code.
+`comment-baseline.json` records that actual run's source, binary, fixture and independent
+oracle identities, successful exact-byte controls and literal missing-result red. The
+executable and full run remain local evidence. CI compares that recorded baseline with
+a fresh revised run; it does not pretend to rerun the old source at current HEAD.
+
+Production receipt lookup precedes epoch/head/revision admission. Native fixture workers
+preserve original request envelopes on disk and forward `retry_of`; results are always
+read from the production receipt owner. The additive edit-restart fixture is separate
+from the unchanged S0 reply-retry fixture. Its unavailable predecessor reopen is not
+credited as another baseline runtime red.
+
+Verification exposed three adjacent ownership defects, repaired in this commit:
+
+- The store's owner epoch was constant. Each owner now receives a fresh epoch
+  (`crates/kinewright-project/src/store.rs:110`). An archived input manifest records
+  capture provenance; a new reader validates its project/entry and receives the new
+  owner's epoch (`owned_inputs.rs:183`). The old admission request still refuses.
+  The lost-reply test exercises actual admitted owned bytes through reopening.
+- Pending publication still needs read-only identity checks to reconcile an outcome.
+  `namespace/mod.rs:216` permits that read while mutation verification continues to
+  refuse uncertainty. Publication freezes collection before sealing any next-root
+  object (`store.rs:1461`), so an unknown root cannot lose its graph on drop.
+- A restarted fixture participant has no Core yet. The real reopen path now treats
+  its before-document observation as unavailable and restores from the verified bundle
+  (`crates/kinewright-agent/src/ja_harness/revised.rs:189`). Existing before/after
+  comparisons remain when a Core exists.
+
+These are S1 owner/observer corrections. No GUI fencing, producer drain or transport
+host is implemented, and decoder-open certification remains unavailable.

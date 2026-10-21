@@ -868,7 +868,7 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
                     json!({"owned_child_retired":retired,"os_children":os_children(std::process::id())}),
                 )
             }
-            call => baseline.execute(call, &loaded),
+            _ => baseline.execute(&request.action, &loaded),
         };
         let result = result.and_then(|value| {
             let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;

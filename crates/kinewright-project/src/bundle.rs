@@ -106,8 +106,6 @@ impl StudioRoot {
             self.feedback_index_ref.as_ref(),
             self.run_index_ref.as_ref(),
             self.claim_index_ref.as_ref(),
-            self.receipt_index_ref.as_ref(),
-            self.issuer_state_ref.as_ref(),
         ]
         .into_iter()
         .flatten()
@@ -130,7 +128,33 @@ impl StudioRoot {
                 ));
             }
         }
+        if self.receipt_index_ref.is_some() && self.issuer_state_ref.is_none() {
+            return Err(BundleError::Corrupt(
+                "receipt index without issuer state".into(),
+            ));
+        }
+        for (reference, kind) in [
+            (&self.receipt_index_ref, RecordKind::ReceiptIndex),
+            (&self.issuer_state_ref, RecordKind::IssuerState),
+        ] {
+            if let Some(reference) = reference {
+                reference.validate()?;
+                if reference.record_kind != kind {
+                    return Err(BundleError::Corrupt("receipt/issuer kind".into()));
+                }
+            }
+        }
         Ok(())
+    }
+    pub(crate) fn references(&self) -> Vec<ObjectRef> {
+        let mut refs = vec![
+            self.branch_index_ref.clone(),
+            self.input_manifest_ref.clone(),
+            self.store_manifest_ref.clone(),
+        ];
+        refs.extend(self.receipt_index_ref.clone());
+        refs.extend(self.issuer_state_ref.clone());
+        refs
     }
 }
 pub(crate) struct AdmissionData {
@@ -434,6 +458,10 @@ pub struct LoadedBundle {
     pub(crate) branches: BTreeMap<BranchId, LoadedBranch>,
     pub(crate) verified: BTreeSet<String>,
     pub(crate) inventory: SupportInventory,
+    pub(crate) receipts: Option<StorageReservation<crate::receipts::ReceiptLedger>>,
+    pub(crate) issuers: Option<
+        StorageReservation<BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>>,
+    >,
 }
 impl LoadedBundle {
     pub fn read(path: &Path) -> Result<Self, BundleError> {
@@ -502,6 +530,16 @@ impl LoadedBundle {
             pending_evidence: vec![],
             durable: None,
             unsettled: false,
+            receipts: self
+                .receipts
+                .as_ref()
+                .map_or_else(crate::receipts::ReceiptLedger::default, |v| (**v).clone()),
+            issuers: self
+                .issuers
+                .as_ref()
+                .map_or_else(BTreeMap::new, |v| (**v).clone()),
+            pending_command: None,
+            pending_result: None,
         };
         bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
         Ok(bundle)
@@ -523,6 +561,10 @@ pub struct ProjectBundle {
     pub(crate) evidence: Vec<ObjectRef>,
     pub(crate) pending_evidence: Vec<StorePin>,
     pub(crate) unsettled: bool,
+    pub(crate) receipts: crate::receipts::ReceiptLedger,
+    pub(crate) issuers: BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>,
+    pub(crate) pending_command: Option<StorageReservation<crate::receipts::CommandEnvelope>>,
+    pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
 }
 impl ProjectBundle {
     /// Explicit activation. Existing Studio state is resumed without minting another manual branch.
@@ -637,6 +679,10 @@ impl ProjectBundle {
                 evidence: vec![],
                 pending_evidence: vec![],
                 unsettled: false,
+                receipts: crate::receipts::ReceiptLedger::default(),
+                issuers: BTreeMap::new(),
+                pending_command: None,
+                pending_result: None,
             })
         }
     }
@@ -759,6 +805,14 @@ impl ProjectBundle {
         self.store
             .with_namespace(|n| n.reconcile(loaded.admission.raw_bytes()))?;
         self.store.settle_controls()?;
+        self.receipts = loaded
+            .receipts
+            .as_ref()
+            .map_or_else(crate::receipts::ReceiptLedger::default, |v| (**v).clone());
+        self.issuers = loaded
+            .issuers
+            .as_ref()
+            .map_or_else(BTreeMap::new, |v| (**v).clone());
         self.evidence = loaded.manifest.durable_pins.clone();
         self.branches = loaded
             .branches
@@ -801,6 +855,9 @@ impl ProjectBundle {
         history: &HistorySnapshot,
         inputs: &ObjectRef,
     ) -> Result<BundleSaveReport, BundleError> {
+        if self.pending_command.is_some() {
+            return Err(BundleError::Unsettled);
+        }
         crate::bundle_commit::BundleCommit::publish(self, history, inputs)
     }
     pub(crate) fn admit_root_checkpoint(

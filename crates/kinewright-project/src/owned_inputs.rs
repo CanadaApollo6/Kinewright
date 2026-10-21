@@ -183,7 +183,6 @@ impl ProjectStore {
     pub fn lease_input(&self, reference: &OwnedInputRef) -> Result<OwnedInputLease, BundleError> {
         let manifest = self.read_record::<OwnedInputManifest>(&reference.manifest_ref)?;
         if (manifest.project_id.clone(), manifest.session_id.clone()) != self.input_owner()
-            || manifest.owner_epoch != self.owner_epoch()
             || !manifest.entries.contains(&reference.entry)
         {
             return Err(BundleError::Identity(

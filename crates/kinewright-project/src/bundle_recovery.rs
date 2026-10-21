@@ -343,11 +343,7 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
     let mut found = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut active = BTreeSet::new();
-    for reference in [
-        &root.branch_index_ref,
-        &root.input_manifest_ref,
-        &root.store_manifest_ref,
-    ] {
+    for reference in &root.references() {
         walk(
             reference,
             &objects,
@@ -400,6 +396,14 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
             RecordKind::InputManifest => {
                 let _value = admit!(OwnedInputManifest);
             }
+            RecordKind::ReceiptIndex => {
+                let _value = admit!(crate::receipts::ReceiptLedger);
+            }
+            RecordKind::IssuerState => {
+                let _value =
+                    admit!(BTreeMap<crate::receipts::IssuerId,crate::receipts::IssuerState>);
+            }
+
             RecordKind::StoreManifest => {
                 let value = admit!(StoreManifest);
                 if value.required_apis != supported_apis() {
@@ -416,13 +420,7 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                     .file
                     .as_ref()
                     .and_then(|f| f.studio.as_ref())
-                    .map_or_else(Vec::new, |s| {
-                        vec![
-                            s.branch_index_ref.clone(),
-                            s.input_manifest_ref.clone(),
-                            s.store_manifest_ref.clone(),
-                        ]
-                    });
+                    .map_or_else(Vec::new, super::bundle::StudioRoot::references);
                 let actual = manifest
                     .dependencies
                     .get(&reference.sha256)
@@ -519,6 +517,42 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
         required_kinds: kinds,
         required_apis: supported_apis(),
     };
+    let receipts = root
+        .receipt_index_ref
+        .as_ref()
+        .map(|r| {
+            read_record::<crate::receipts::ReceiptLedger>(
+                &namespace,
+                r,
+                usage,
+                &mut BTreeSet::new(),
+            )
+        })
+        .transpose()?;
+    let issuers = root
+        .issuer_state_ref
+        .as_ref()
+        .map(|r| {
+            read_record::<BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>>(
+                &namespace,
+                r,
+                usage,
+                &mut BTreeSet::new(),
+            )
+        })
+        .transpose()?;
+    if let Some(ledger) = &receipts {
+        for receipt in ledger.detailed.iter().chain(&ledger.retired) {
+            if receipt.project_id != root.project_id
+                || receipt.generation > root.generation
+                || !issuers
+                    .as_ref()
+                    .is_some_and(|i| i.contains_key(&receipt.id.issuer))
+            {
+                return Err(BundleError::Corrupt("receipt root/issuer binding".into()));
+            }
+        }
+    }
     Ok(LoadedBundle {
         admission,
         namespace,
@@ -526,6 +560,8 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
         branches,
         verified,
         inventory,
+        receipts,
+        issuers,
     })
 }
 

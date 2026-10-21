@@ -9,7 +9,7 @@ use crate::{
         BatchId, BranchCheckpoint, HeadId, LineageRecord, ObjectRef, OccurrenceId, RecordKind,
     },
     owned_inputs::OwnedInputManifest,
-    receipts::CommandId,
+    receipts::{CommandEnvelope, CommandReceipt, ReceiptLookup, ReceiptResult},
     store::SealedObject,
 };
 use kinewright_core::{ClipId, Core, HistorySnapshot, JournalCommand};
@@ -32,20 +32,144 @@ pub enum CommitOutcome {
 }
 pub struct BundleCommit;
 impl BundleCommit {
-    /// C4 publishes graph/checkpoint state only. Receipt-bearing admission lands with its ledger.
+    /// Stage through Core, then publish the result and issuer sequence with the same root.
+    #[allow(clippy::too_many_lines)]
     pub fn command(
-        _bundle: &mut ProjectBundle,
-        _id: &CommandId,
-    ) -> Result<CommitOutcome, BundleError> {
-        Err(BundleError::Unsupported(
-            "durable command receipts are not implemented".into(),
-        ))
+        bundle: &mut ProjectBundle,
+        envelope: &CommandEnvelope,
+        core: &Core,
+        inputs: &ObjectRef,
+        blobs: &[(&ObjectRef, &[u8])],
+    ) -> Result<ReceiptLookup, BundleError> {
+        use kinewright_core::{Command, Event, Query, QueryResult};
+        let lookup = bundle.receipt_lookup(envelope)?;
+        if lookup != ReceiptLookup::Absent {
+            return Ok(lookup);
+        }
+        if bundle.unsettled || bundle.pending_command.is_some() {
+            return Err(BundleError::Unsettled);
+        }
+        if envelope.project_id != bundle.project_id
+            || envelope.target_branch != bundle.manual_branch_id
+            || envelope.owner_epoch != bundle.store.owner_epoch()
+            || envelope.lease.is_some()
+            || envelope.expected_head.as_ref() != bundle.manual_head()
+        {
+            return Err(BundleError::Unsupported(
+                "stale command authority/head".into(),
+            ));
+        }
+        let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = core
+            .request(Command::Query(Query::Snapshot))
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+        else {
+            return Err(BundleError::Corrupt("Core snapshot response".into()));
+        };
+        if revision != envelope.expected_revision {
+            return Err(BundleError::Unsupported("stale runtime binding".into()));
+        }
+        let issuer = bundle
+            .issuers
+            .get(&envelope.id.issuer)
+            .cloned()
+            .ok_or_else(|| BundleError::Unsupported("unknown issuer".into()))?;
+        if issuer.retired || issuer.next_sequence != envelope.id.sequence {
+            return Err(BundleError::Unsupported(
+                "issuer sequence/retirement".into(),
+            ));
+        }
+        let next_sequence = envelope
+            .id
+            .sequence
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("issuer sequence overflow"))?;
+        if bundle.store.limits().pending_commands == 0
+            || (bundle.receipts.detailed.len() as u64)
+                .checked_add(bundle.receipts.retired.len() as u64)
+                .is_none_or(|n| n >= bundle.store.limits().receipts)
+        {
+            return Err(BundleError::Capacity("pending command/receipt entries"));
+        }
+        let encoded = envelope.encoded_bytes()?;
+        if encoded > bundle.store.limits().command_bytes {
+            return Err(BundleError::Capacity("command bytes"));
+        }
+        let reservation = bundle.store.reserve(0, encoded, 0, false)?;
+        let before = core
+            .export_history()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        if let Some(checkpoint) = bundle.branches.get(&bundle.manual_branch_id)
+            && *bundle
+                .store
+                .read_record::<HistorySnapshot>(&checkpoint.history_ref)?
+                != before
+        {
+            return Err(BundleError::Unsupported(
+                "Core is not the acknowledged checkpoint".into(),
+            ));
+        }
+        let _shadow = bundle.store.reserve_history_shadow(
+            before
+                .encoded_bytes()
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+        )?;
+        let candidate = Core::spawn((*before.baseline).clone())
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        candidate
+            .restore_history(before.clone())
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        if let Some(command) = &envelope.command
+            && !matches!(
+                candidate
+                    .request(Command::from(command.clone()))
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                Event::DocumentChanged { .. }
+            )
+        {
+            return Err(BundleError::Unsupported("Core rejected the command".into()));
+        }
+        let after = candidate
+            .export_history()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        bundle.pending_command = Some(reservation.hold(envelope.clone()));
+        if envelope.action == "comment" {
+            match crate::receipts::stage_comment(bundle, envelope, blobs) {
+                Ok(result) => bundle.pending_result = Some(result),
+                Err(error) => {
+                    bundle.unsettled = true;
+                    return Err(error);
+                }
+            }
+        }
+        bundle
+            .issuers
+            .get_mut(&envelope.id.issuer)
+            .ok_or_else(|| BundleError::Corrupt("admitted issuer disappeared".into()))?
+            .next_sequence = next_sequence;
+        if let Err(error) = Self::publish(bundle, &after, inputs) {
+            if !matches!(
+                error,
+                BundleError::DurabilityUnknown | BundleError::Unsettled
+            ) {
+                bundle.issuers.insert(envelope.id.issuer.clone(), issuer);
+            }
+            bundle.unsettled = true;
+            return Err(error);
+        }
+        bundle.pending_command = None;
+        bundle.pending_result = None;
+        core.restore_history(after)
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        bundle.receipt_lookup(envelope)
     }
     pub fn run(
         bundle: &mut ProjectBundle,
         history: &HistorySnapshot,
         inputs: &ObjectRef,
     ) -> CommitOutcome {
+        if bundle.pending_command.is_some() {
+            return CommitOutcome::DefinitelyUnpublished(BundleError::Unsettled);
+        }
         match Self::publish(bundle, history, inputs) {
             Ok(report) => CommitOutcome::Committed(report),
             Err(BundleError::DurabilityUnknown | BundleError::Unsettled) => {
@@ -144,6 +268,7 @@ impl BundleCommit {
             HeadId::fresh()?
         };
         barrier(bundle, CommitBarrier::B0)?;
+        bundle.store.begin_publication()?;
         let mut seals: Vec<SealedObject> = vec![];
         macro_rules! seal {
             ($value:expr) => {{
@@ -183,7 +308,11 @@ impl BundleCommit {
             ),
             checkpoint_generation: generation,
             floor_generation: prior.as_ref().map_or(0, |p| p.floor_generation),
-            command_cut: None,
+            command_cut: bundle
+                .pending_command
+                .as_ref()
+                .map(|e| e.id.clone())
+                .or_else(|| prior.as_ref().and_then(|p| p.command_cut.clone())),
             predecessor: prior.as_ref().map(|p| p.head_id.clone()),
             take_map_revision_ref: None,
         };
@@ -200,7 +329,7 @@ impl BundleCommit {
         } else {
             BTreeMap::new()
         };
-        branch_index.insert(bundle.manual_branch_id.clone(), checkpoint_ref);
+        branch_index.insert(bundle.manual_branch_id.clone(), checkpoint_ref.clone());
         let branch_index_ref = seal!(&branch_index);
         barrier(bundle, CommitBarrier::B1)?;
         barrier(bundle, CommitBarrier::B2)?;
@@ -224,7 +353,50 @@ impl BundleCommit {
         recovery.generation = generation;
         recovery.staging = None;
         barrier(bundle, CommitBarrier::B3)?;
-        let roots = vec![branch_index_ref.clone(), inputs.clone()];
+        let mut receipts = bundle.receipts.clone();
+        if let Some(envelope) = &bundle.pending_command {
+            let result = bundle
+                .pending_result
+                .clone()
+                .unwrap_or_else(|| ReceiptResult::Edit {
+                    checkpoint_ref: checkpoint_ref.clone(),
+                    batch_id: branches[&bundle.manual_branch_id].batch_ids.last().cloned(),
+                });
+            if matches!(result, ReceiptResult::Comment { .. }) {
+                receipts.comments = receipts
+                    .comments
+                    .checked_add(1)
+                    .ok_or(BundleError::Capacity("comment count"))?;
+            }
+            receipts.detailed.push(CommandReceipt {
+                id: envelope.id.clone(),
+                digest: envelope.digest()?,
+                project_id: bundle.project_id.clone(),
+                target_branch: envelope.target_branch.clone(),
+                original_epoch: envelope.owner_epoch,
+                expected_head: envelope.expected_head.clone(),
+                head_id: head_id.clone(),
+                generation,
+                result,
+            });
+        }
+        receipts.validate(bundle.store.limits())?;
+        let receipt_index_ref = if receipts.detailed.is_empty()
+            && receipts.retired.is_empty()
+            && receipts.comments == 0
+        {
+            None
+        } else {
+            Some(seal!(&receipts))
+        };
+        let issuer_state_ref = if bundle.issuers.is_empty() {
+            None
+        } else {
+            Some(seal!(&bundle.issuers))
+        };
+        let mut roots = vec![branch_index_ref.clone(), inputs.clone()];
+        roots.extend(receipt_index_ref.clone());
+        roots.extend(issuer_state_ref.clone());
         let mut inventory = SupportInventory {
             required_fields: BTreeSet::new(),
             required_kinds: BTreeSet::new(),
@@ -255,8 +427,8 @@ impl BundleCommit {
             run_index_ref: None,
             claim_index_ref: None,
             input_manifest_ref: inputs.clone(),
-            receipt_index_ref: None,
-            issuer_state_ref: None,
+            receipt_index_ref,
+            issuer_state_ref,
             store_manifest_ref,
         };
         root.admit()?;
@@ -267,11 +439,7 @@ impl BundleCommit {
             bundle.store.usage_arc(),
         )?;
         next_admission.require_supported()?;
-        bundle.store.closure(&[
-            root.branch_index_ref.clone(),
-            root.input_manifest_ref.clone(),
-            root.store_manifest_ref.clone(),
-        ])?;
+        bundle.store.closure(&root.references())?;
         if let Err(error) = bundle.store.publish_root(next_admission.raw_bytes()) {
             if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {
                 bundle.unsettled = true;
@@ -279,6 +447,7 @@ impl BundleCommit {
             }
             return Err(error);
         }
+        bundle.receipts = receipts;
         bundle.root = Some(root);
         bundle.branches = branches;
         bundle.generation = generation;

@@ -202,6 +202,9 @@ pub(super) fn replace_inner(
         .map_err(|_| BundleError::DurabilityUnknown)?;
         note("root_rename", &namespace.identity.resolved_root);
         namespace.uncertain = true;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("root_parent_sync", &namespace.identity.resolved_root)
+            .map_err(|_| BundleError::DurabilityUnknown)?;
         sync_directory(
             &namespace.parent,
             namespace.identity.resolved_root.parent().unwrap(),
