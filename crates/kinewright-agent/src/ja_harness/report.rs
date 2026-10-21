@@ -238,6 +238,7 @@ impl Report {
     pub fn header(
         &mut self,
         fixture: Option<&super::protocol::LoadedFixture>,
+        selection: Option<&str>,
     ) -> Result<(), String> {
         let executable = std::env::current_exe().map_err(|e| e.to_string())?;
         let (repo_root, head, diff) = source_identity()?;
@@ -250,7 +251,7 @@ impl Report {
             .map_err(|e| e.to_string())?,
         )?;
         let identity = json!({"protocol":PROTOCOL,"protocol_version":1,"run_id":self.run_id,
-            "mode":self.mode,"fixture_id":fixture.map(|f| &f.fixture.fixture_id),
+            "mode":self.mode,"scenario_selection":selection,"fixture_id":fixture.map(|f| &f.fixture.fixture_id),
             "fixture_sha256":fixture.map(|f| kinewright_media::sha256_bytes(&f.bytes)),
             "lane":fixture.map(|f| f.fixture.lane),"requirements":fixture.map(|f| &f.fixture.requirements),
             "inputs":fixture.map(|f| &f.fixture.inputs),"oracles":fixture.map(|f| &f.fixture.oracles),

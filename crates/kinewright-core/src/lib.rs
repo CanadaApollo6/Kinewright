@@ -245,6 +245,9 @@ pub use model::{
     chain_lookahead_milliseconds, clip_effective_fps, envelope_coalesce_key,
     project_format_version, track_automation_coalesce_key, validate_lut_asset,
 };
+pub use model::{
+    clip_support_fields, document_support_fields, history_support_fields, operation_support_fields,
+};
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,
     SpeakerMulticamPlan, SpeakerMulticamSettings, SubjectCenterBasisPointSample,

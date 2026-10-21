@@ -236,7 +236,7 @@ impl Worker {
             .ok_or("worker already reaped")?
             .join()
             .map_err(|_| "worker stderr reader panicked")??;
-        let stderr = report.artifact(&format!("stderr-{}.txt", self.name), &stderr)?;
+        let stderr = report.artifact(&format!("stderr-{}-{pid}.txt", self.name), &stderr)?;
         let result = json!({"pid":pid,"reaped":true,"status":status.to_string(),"killed":kill,"os_children_before_reap":before,"stderr":stderr,
             "guardian_containment":"pending_baseline_witness"});
         report.event(0, &self.name, "process_exit", result.clone())?;
@@ -592,7 +592,10 @@ impl Controller {
                         a.id == args.action_id
                             && matches!(
                                 a.call,
-                                Call::CoreSend(_) | Call::HeadlessSave(_) | Call::ProjectSave(_)
+                                Call::CoreSend(_)
+                                    | Call::HeadlessSave(_)
+                                    | Call::ProjectSave(_)
+                                    | Call::CommentSubmit(_)
                             )
                     })
                 {
@@ -623,6 +626,44 @@ impl Controller {
                     return Err("barrier was not acknowledged".into());
                 }
                 Ok(Some((json!({"barrier":args.name,"released":true}), true)))
+            }
+            Call::ParticipantRestart(_) => {
+                if self.workers.contains_key(&action.participant)
+                    || !loaded
+                        .fixture
+                        .initial
+                        .participants
+                        .contains(&action.participant)
+                {
+                    return Err("restart requires a retired original fixed participant".into());
+                }
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let fixture = report
+                    .root
+                    .join("frozen/__ja_fixture.json")
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+                let root = report
+                    .root
+                    .join("work")
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+                let worker =
+                    Worker::spawn(&exe, &fixture, &root, &action.participant, report.mode)?;
+                let ready = worker.receive(0, loaded.fixture.limits.setup_timeout_ms)?;
+                if ready["pid"] != worker.child.id()
+                    || ready["os_start_identity"] != json!(os_start_identity(worker.child.id()))
+                {
+                    return Err("restarted worker birth identity differs".into());
+                }
+                report.event(
+                    action.id,
+                    &action.participant,
+                    "process_spawn",
+                    ready.clone(),
+                )?;
+                self.workers.insert(action.participant.clone(), worker);
+                Ok(Some((ready, true)))
             }
             Call::ParticipantExit(_) | Call::ParticipantKill(_) => {
                 let mut worker = self

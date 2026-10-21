@@ -42,13 +42,24 @@ pub fn run_with_observer(
     observer: &mut Observer<'_>,
 ) -> Result<i32, String> {
     let report = Report::create(output, mode)?;
-    run_report(fixture_path, observer, report)
+    run_report(fixture_path, observer, report, None)
+}
+
+pub fn run_comment_baseline(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
+    let report = Report::create(output, mode)?;
+    run_report(
+        fixture_path,
+        &mut |_, _, _| Ok(None),
+        report,
+        Some("comment-baseline"),
+    )
 }
 
 fn run_report(
     fixture_path: &Path,
     observer: &mut Observer<'_>,
     mut report: Report,
+    selection: Option<&str>,
 ) -> Result<i32, String> {
     if std::env::var_os("JA_HARNESS_DEADLINE_FILE").is_some() {
         supervision::validate_reserved(&report.root)?;
@@ -64,7 +75,7 @@ fn run_report(
     let loaded = match protocol::load(fixture_path) {
         Ok(loaded) => loaded,
         Err(error) => {
-            report.header(None)?;
+            report.header(None, selection)?;
             if let Ok(bytes) = protocol::read_bounded(fixture_path, protocol::INDEX_BYTES) {
                 let identity = json!({"sha256":kinewright_media::sha256_bytes(&bytes),"byte_length":bytes.len()});
                 if let Err(reason) = report.artifact("invalid-fixture.json", &bytes) {
@@ -81,8 +92,17 @@ fn run_report(
     };
     let result = (|| {
         report.set_quota(loaded.fixture.limits.output_bytes)?;
-        report.header(Some(&loaded))?;
-        execute(&loaded, &mut report, observer)
+        report.header(Some(&loaded), selection)?;
+        if let Some(selection) = selection {
+            if selection != "comment-baseline"
+                || loaded.fixture.fixture_id != "comment-receipt"
+                || report.mode != Mode::Baseline
+            {
+                return Err("invalid pre-receipt scenario selection".into());
+            }
+            report.event(0,"controller","scenario_selection",json!({"selection":selection,"scope":"exact-byte save, lost reply, restart and literal missing binding; later receipt scenarios pending"}))?;
+        }
+        execute(&loaded, &mut report, observer, selection)
     })();
     report.finish(
         Some(&loaded.fixture),
@@ -94,6 +114,7 @@ fn execute(
     loaded: &LoadedFixture,
     report: &mut Report,
     extension: &mut Observer<'_>,
+    selection: Option<&str>,
 ) -> Result<(), String> {
     supervision::heartbeat(0, "setup", loaded.fixture.limits.setup_timeout_ms)?;
     prerequisites(&loaded.fixture)?;
@@ -112,6 +133,12 @@ fn execute(
             match &action.call {
                 Call::AssertObserved(assertion) => {
                     assert_observed(assertion, loaded, &observed, report)?;
+                    if selection == Some("comment-baseline")
+                        && assertion.id == "durable-comment-result-binding"
+                    {
+                        report.pending.push(json!({"disposition":"not_run","selection":"comment-baseline","later_scenarios":["old-epoch-receipt-reconciliation","changed-payload","retired-exact-result","retired-unresolved"],"reason":"pre-receipt source"}));
+                        break;
+                    }
                     if report
                         .assertions
                         .last()
@@ -308,7 +335,16 @@ pub fn cli() -> Result<i32, String> {
     if args.first().is_some_and(|a| a == "--role") {
         return controller::worker_cli(&args);
     }
-    if args.len() != 6 || args[0] != "--mode" || args[2] != "--fixture" || args[4] != "--output" {
+    let selection = if args.len() == 8 && args[6] == "--scenario" && args[7] == "comment-baseline" {
+        Some("comment-baseline")
+    } else {
+        None
+    };
+    if (args.len() != 6 && selection.is_none())
+        || args[0] != "--mode"
+        || args[2] != "--fixture"
+        || args[4] != "--output"
+    {
         return Err("usage: kinewright-ja-baseline --mode baseline|revised --fixture FILE --output NEW_DIRECTORY".into());
     }
     let mode = match args[1].as_str() {
@@ -320,9 +356,14 @@ pub fn cli() -> Result<i32, String> {
         let root = Path::new(&args[5]);
         supervision::validate_reserved(root)?;
         let report = Report::create_reserved(root, mode)?;
-        return run_report(Path::new(&args[3]), &mut |_, _, _| Ok(None), report);
+        return run_report(
+            Path::new(&args[3]),
+            &mut |_, _, _| Ok(None),
+            report,
+            selection,
+        );
     }
-    let exit = supervision::run(Path::new(&args[3]), Path::new(&args[5]), mode)?;
+    let exit = supervision::run(Path::new(&args[3]), Path::new(&args[5]), mode, selection)?;
     println!(
         "{}",
         json!({"protocol":protocol::PROTOCOL,"protocol_version":1,"exit_code":exit,"output":args[5]})
@@ -402,6 +443,11 @@ mod tests {
             "clip-id-reuse",
         ] {
             let temp = TempDirectory::new("ja-controls");
+            if name == "format-corpus" {
+                kinewright_project::project::predecessor_format_controls(&temp.path("predecessor"))
+                    .expect("actual pinned max-2 controls");
+                continue;
+            }
             assert_eq!(
                 run(
                     &fixtures().join(format!("{name}.json")),

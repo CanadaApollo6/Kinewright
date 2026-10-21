@@ -708,6 +708,184 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s1-bundle-migration",
+      "relative_file": "s1-bundle-migration.json",
+      "sha256": "3b136e1b3e4ff6afc01aca3effd3f6b4f248ae6ba55dc720cb61b31692612438",
+      "byte_length": 7007,
+      "expected_baseline_process_exit": 1,
+      "inputs": {
+        "legacy": {
+          "relative_file": "s1-migration-input.kinewright",
+          "sha256": "f58de3aaad5211ead878b265cceba464363bc142e1661abea91c8f55b61ace77",
+          "byte_length": 107,
+          "kind": "project"
+        },
+        "edit": {
+          "relative_file": "command-add-track.json",
+          "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
+          "byte_length": 157,
+          "kind": "current-command"
+        },
+        "sample-root": {
+          "relative_file": "s1-v3-bundle/studio.kinewright",
+          "sha256": "876e2abb35287567c43a4b62f811fdd377ed9295f7a16709fa88335883960567",
+          "byte_length": 1846,
+          "kind": "v3-bundle-root"
+        },
+        "sample-object-4": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
+          "sha256": "3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
+          "byte_length": 11029,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-5": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
+          "sha256": "55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
+          "byte_length": 121,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-6": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
+          "sha256": "6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
+          "byte_length": 1377,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-7": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
+          "sha256": "892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
+          "byte_length": 167,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-8": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
+          "sha256": "b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
+          "byte_length": 2624,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-9": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
+          "sha256": "e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
+          "byte_length": 765,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-10": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
+          "sha256": "f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
+          "byte_length": 96,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-11": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
+          "sha256": "f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
+          "byte_length": 730,
+          "kind": "v3-bundle-object"
+        },
+        "sample-object-13": {
+          "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/recovery/inventory",
+          "sha256": "6840caac33a6b8d900a352e2a4f2a640ba18c9792e071dd0abeb8c40d78dbbc8",
+          "byte_length": 230,
+          "kind": "v3-bundle-object"
+        },
+        "portable-crash-model": {
+          "relative_file": "s1-crash-model.json",
+          "sha256": "94dbd68d59d6ff905dd1100271e86b8dbab2cd2949b52688bff91b842ad2b1eb",
+          "byte_length": 92643,
+          "kind": "portable-dropped-write-model-input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        },
+        "one": {
+          "relative_file": "oracle-one.json",
+          "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+          "byte_length": 2,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "comment-receipt",
+      "relative_file": "comment-receipt.json",
+      "sha256": "a818c18f30eb8dfe98a5528aea6c26d435ff8d40c2c58ac4223abd40032d62e9",
+      "byte_length": 12204,
+      "expected_baseline_process_exit": 2,
+      "inputs": {
+        "retained-text": {
+          "relative_file": "s1-comment-retained.txt",
+          "sha256": "2f4631b3ebd758fa3d2aa875f99d81fbd97a88fd5c988e324cc4dcc48ede0f86",
+          "byte_length": 27,
+          "kind": "independent-opaque-comment-bytes"
+        },
+        "retained-strokes": {
+          "relative_file": "s1-strokes-retained.json",
+          "sha256": "fe1bb5651601ee472eb96473617f02cc731727d5f1216e9e65767f2db4edb46e",
+          "byte_length": 32,
+          "kind": "independent-opaque-comment-bytes"
+        },
+        "lost-text": {
+          "relative_file": "s1-comment-lost.txt",
+          "sha256": "ff816ac274dd699f0ed0fd345e5495b143891eeae49fde178329e505ae6f8a03",
+          "byte_length": 27,
+          "kind": "independent-opaque-comment-bytes"
+        },
+        "lost-strokes": {
+          "relative_file": "s1-strokes-lost.json",
+          "sha256": "9f72d5e2ada9b0bb353a1b12f8419211f6ace0fe09ccd245bf441cb900a59398",
+          "byte_length": 48,
+          "kind": "independent-opaque-comment-bytes"
+        },
+        "changed-text": {
+          "relative_file": "s1-comment-changed.txt",
+          "sha256": "7de758b2e023ddf116e6f7fd6a49509a6968540e3acf521b7177aa624aa50c4f",
+          "byte_length": 25,
+          "kind": "independent-opaque-comment-bytes"
+        }
+      },
+      "oracles": {
+        "retained-text": {
+          "relative_file": "s1-oracle-comment-retained.json",
+          "sha256": "8a602ba8cb1d3e84503d80b68b2ecb53012a94b60417dc7f944a4756595171d9",
+          "byte_length": 33,
+          "kind": "independent-exact-byte-string-oracle"
+        },
+        "retained-strokes": {
+          "relative_file": "s1-oracle-strokes-retained.json",
+          "sha256": "29fceb1c3c087303c09f85f7986850383039908b7df38fbe9ad3b5de8c09881d",
+          "byte_length": 36,
+          "kind": "independent-exact-byte-string-oracle"
+        },
+        "lost-text": {
+          "relative_file": "s1-oracle-comment-lost.json",
+          "sha256": "0a822fbdeb8c9313087b2d441c67afd8cfe0816c15cc5b6d41bca00969361d59",
+          "byte_length": 34,
+          "kind": "independent-exact-byte-string-oracle"
+        },
+        "lost-strokes": {
+          "relative_file": "s1-oracle-strokes-lost.json",
+          "sha256": "707815be8c62f4f2e66c6370cfcdd41c9ed91e89411494ff9f6cf9d378b22b20",
+          "byte_length": 53,
+          "kind": "independent-exact-byte-string-oracle"
+        },
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        },
+        "one": {
+          "relative_file": "oracle-one.json",
+          "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+          "byte_length": 2,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

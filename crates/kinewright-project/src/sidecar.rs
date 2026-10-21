@@ -275,6 +275,8 @@ pub type RefuseRename = dyn Fn(&Path, &Path) -> io::Result<()>;
 /// # Errors
 /// Returns the injected rename's IO error, with the sidecar left in place.
 pub fn refuse_sidecar_with(sidecar_path: &Path, rename: &RefuseRename) -> io::Result<PathBuf> {
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::mutation_attempt("sidecar_move_enter", sidecar_path);
     let mut first = sidecar_path.as_os_str().to_owned();
     first.push(".bak");
     let mut candidate = PathBuf::from(first);

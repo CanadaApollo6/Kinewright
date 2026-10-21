@@ -167,3 +167,136 @@ fn owned_input_fixture_retains_bytes_and_charges_until_reader_close() {
     assert_eq!(observed["backend"], "linux-local-owned-store");
     assert_eq!(observed["decoder_certification_unavailable"], true);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn history_loss_fixture_revised_preserves_one_entry() {
+    let temp = TempDirectory::new("ja-s1-history-revised");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/history-loss.json");
+    let output = temp.path("out");
+    assert_eq!(
+        kinewright_agent::ja_harness::run(
+            &fixture,
+            &output,
+            kinewright_agent::ja_harness::protocol::Mode::Revised
+        )
+        .unwrap(),
+        0
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    let assertions = summary["assertions"].as_array().unwrap();
+    assert!(assertions.iter().all(|a| a["passed"] == true));
+    assert!(
+        assertions
+            .iter()
+            .any(|a| a["id"] == "history-survives-reopen" && a["passed"] == true)
+    );
+    let save: Value = serde_json::from_slice(
+        &std::fs::read(output.join("artifacts/observation-4.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(save["backend"], "linux-local-bundle");
+    assert_eq!(save["writer_bytes_equal"], true);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn comment_observer_persists_exact_bytes_then_missing_receipt() {
+    let temp = TempDirectory::new("ja-s1-comment-baseline");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/comment-receipt.json");
+    let output = temp.path("out");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "baseline", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&output)
+        .args(["--scenario", "comment-baseline"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    let assertions = summary["assertions"].as_array().unwrap();
+    assert!(
+        assertions
+            .iter()
+            .filter(|a| a["evidence_class"] == "control")
+            .all(|a| a["passed"] == true),
+        "{summary:#}"
+    );
+    let missing = assertions
+        .iter()
+        .find(|a| a["id"] == "durable-comment-result-binding")
+        .unwrap();
+    assert_eq!(missing["passed"], false);
+    assert_eq!(missing["disposition"], "baseline_red");
+    let events = std::fs::read_to_string(output.join("events.jsonl")).unwrap();
+    let events: Vec<Value> = events
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| e["kind"] == "scenario_selection"
+                && e["data"]["selection"] == "comment-baseline")
+    );
+    let pids: std::collections::BTreeSet<_> = events
+        .iter()
+        .filter(|e| e["kind"] == "process_spawn" && e["participant"] == "A")
+        .map(|e| e["data"]["pid"].as_u64().unwrap())
+        .collect();
+    assert_eq!(
+        pids.len(),
+        3,
+        "real worker restarts supplied the retained/lost request controls"
+    );
+    assert!(
+        summary["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["selection"] == "comment-baseline")
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn strict_io_properties_revised_use_actual_syncs_and_no_fallback() {
+    strict_io_protocol_separates_legacy_control_from_bundle_result();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bundle_migration_fixture_uses_the_real_reader_and_writer() {
+    let temp = TempDirectory::new("ja-s1-migration-fixture");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-bundle-migration.json");
+    let output = temp.path("out");
+    assert_eq!(
+        kinewright_agent::ja_harness::run(
+            &fixture,
+            &output,
+            kinewright_agent::ja_harness::protocol::Mode::Revised
+        )
+        .unwrap(),
+        0
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    assert!(
+        summary["assertions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|a| a["passed"] == true),
+        "{summary:#}"
+    );
+}

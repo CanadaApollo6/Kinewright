@@ -8,7 +8,12 @@ fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
     let temp = TempDirectory::new("ja-native");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/history-loss.json");
     let mut hashes = Vec::new();
-    for mode in ["baseline", "revised"] {
+    let modes: &[&str] = if cfg!(target_os = "linux") {
+        &["baseline", "revised"]
+    } else {
+        &["baseline"]
+    };
+    for &mode in modes {
         let output = temp.path(mode);
         let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
             .args(["--mode", mode, "--fixture"])
@@ -17,14 +22,15 @@ fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
             .arg(&output)
             .output()
             .unwrap();
+        let expected = i32::from(mode == "baseline");
         assert_eq!(
             result.status.code(),
-            Some(1),
+            Some(expected),
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
         let line: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(line["exit_code"], 1);
+        assert_eq!(line["exit_code"], expected);
         let run: Value =
             serde_json::from_slice(&std::fs::read(output.join("run.json")).unwrap()).unwrap();
         hashes.push(run["fixture_sha256"].clone());
@@ -32,7 +38,11 @@ fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
             serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
         assert_eq!(
             summary["assertions"].as_array().unwrap().last().unwrap()["disposition"],
-            "baseline_red"
+            if mode == "baseline" {
+                "baseline_red"
+            } else {
+                "pass_control"
+            }
         );
         for artifact in summary["artifacts"].as_array().unwrap() {
             let bytes =
@@ -43,7 +53,11 @@ fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
             );
         }
     }
-    assert_eq!(hashes[0], hashes[1]);
+    assert_eq!(hashes[0], kinewright_media::sha256_file(&fixture).unwrap());
+    if cfg!(target_os = "linux") {
+        assert_eq!(hashes[0], hashes[1]);
+    }
+    // Windows native durable-success assertions are NOT RUN; its dedicated refusal wrapper is independent.
 }
 
 fn native_fixture(name: &str, output: &Path, expected: i32) -> Value {

@@ -24,7 +24,7 @@ use kinewright_core::{
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 use kinewright_project::{
     FlushOutcome, ProjectSaveError, ProjectSaveReport, RefuseRename, SidecarMode, SidecarWriter,
-    can_overwrite_save, canonical_session_key, derive_lut_store, digest_bytes, load_document,
+    can_overwrite_save, canonical_session_key, derive_lut_store, digest_bytes,
     min_required_format_version, project_newer_format_observation, refuse_sidecar,
     rollback_sidecar_write, serialize_project_document, sidecar_path_for_project,
     sidecar_write_failed_observation, snapshot_sidecar_rollback, write_project_bytes,
@@ -45,6 +45,43 @@ use crate::{
     timeline_ui::is_internal_marker,
     transcript_ui::TranscriptScope,
 };
+
+fn inspect_project_document(
+    path: &Path,
+) -> Result<
+    (
+        Document,
+        u32,
+        String,
+        kinewright_project::bundle::BundleWriteAdmission,
+    ),
+    String,
+> {
+    let admission =
+        kinewright_project::bundle::BundleWriteAdmission::read(path).map_err(|e| e.to_string())?;
+    let document = admission
+        .inspection_document()
+        .cloned()
+        .ok_or("no inspectable Document")?;
+    document.validate().map_err(|e| e.to_string())?;
+    let digest = digest_bytes(admission.raw_bytes());
+    Ok((document, admission.read_version(), digest, admission))
+}
+#[cfg(test)]
+pub(crate) fn fixture_source_admission(
+    path: Option<&Path>,
+) -> kinewright_project::bundle::BundleWriteAdmission {
+    path.filter(|p| p.is_file()).map_or_else(
+        kinewright_project::bundle::BundleWriteAdmission::new_document,
+        |p| {
+            kinewright_project::bundle::BundleWriteAdmission::read(p)
+                .expect("raw fixture admission")
+        },
+    )
+}
+
+#[cfg(test)]
+use kinewright_project::load_document;
 
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
 
@@ -530,9 +567,11 @@ impl KinewrightApp {
     fn new(media: Arc<FfmpegMediaEngine>, startup_path: Option<PathBuf>) -> Self {
         let mut load_error = None;
         let mut newer_note = None;
+        let mut source_admission = kinewright_project::bundle::BundleWriteAdmission::new_document();
         let (name, document, project_path, format_version, project_digest) = match startup_path {
-            Some(path) if path.is_file() => match load_document(&path) {
-                Ok((document, version, digest)) => {
+            Some(path) if path.is_file() => match inspect_project_document(&path) {
+                Ok((document, version, digest, admission)) => {
+                    source_admission = admission;
                     // `IN2B` §4 rule 4, startup arm: a newer file opens; the
                     // note queues below, beside `load_error`.
                     if version > PROJECT_FORMAT_VERSION {
@@ -607,6 +646,7 @@ impl KinewrightApp {
             1,
             name,
             document.clone(),
+            source_admission,
             project_path.clone(),
             &playback,
             &analysis,
@@ -889,6 +929,7 @@ impl KinewrightApp {
         &mut self,
         name: String,
         document: Document,
+        source_admission: kinewright_project::bundle::BundleWriteAdmission,
         project_path: Option<PathBuf>,
         sidecar_mode: &SidecarMode,
         format_version: u32,
@@ -904,6 +945,7 @@ impl KinewrightApp {
             id,
             name,
             document,
+            source_admission,
             project_path,
             &self.playback,
             &self.analysis,
@@ -981,6 +1023,16 @@ impl KinewrightApp {
         &mut self,
         path: &Path,
     ) -> Result<ProjectSaveReport, ProjectSaveError> {
+        if !can_overwrite_save(self.focused().format_version)
+            && self.focused().project_path.as_deref() == Some(path)
+        {
+            return Err(ProjectSaveError::NewerFormat {
+                read_version: self.focused().format_version,
+            });
+        }
+        self.focused()
+            .source_admission
+            .authorize_legacy_write(path)?;
         let save_as = self.focused().project_path.as_deref() != Some(path);
         // N6/H5: Save As onto a path another session holds open is refused
         // before any IO — the target's history is not ours to replace. The
@@ -993,9 +1045,8 @@ impl KinewrightApp {
                 ),
             });
         }
-        // `IN2B` §4 rule 3: a newer-format session never overwrites its own
-        // file — checked before any IO, so a refused save writes neither
-        // file. Save As stays enabled.
+        // Retained raw admission already protects both Save and Save As.
+        // Preserve the typed newer-version error for same-project saves.
         if !save_as && !can_overwrite_save(self.focused().format_version) {
             return Err(ProjectSaveError::NewerFormat {
                 read_version: self.focused().format_version,
@@ -1148,6 +1199,11 @@ impl KinewrightApp {
             report.digest, new_digest,
             "one serialisation serves both files"
         );
+        self.focused_mut().source_admission =
+            kinewright_project::bundle::BundleWriteAdmission::from_written_legacy(
+                path,
+                json.as_bytes(),
+            )?;
         self.adopt_saved_path(path, &new_digest, written_version);
         if let Some(reason) = &report.lut_store_error {
             // Appendix B row 3: the project **was** saved.
@@ -1206,7 +1262,8 @@ impl KinewrightApp {
             // N6/H2, H5: a routed or refused save posts its notice — a
             // refusal, not an incident.
             Err(
-                ProjectSaveError::SaveAsRequired { notice }
+                ProjectSaveError::UnsupportedBundle { notice }
+                | ProjectSaveError::SaveAsRequired { notice }
                 | ProjectSaveError::PathOpenElsewhere { notice },
             ) => {
                 notice.clone_into(&mut self.status);
@@ -1277,7 +1334,7 @@ impl KinewrightApp {
     fn resurface_newer_format_card(&mut self) {
         self.incidents_open = true;
         self.status = format!(
-            "Save disabled — this project was written by a newer Kinewright (format_version {}); use Save As",
+            "Save and Save As disabled — this source is read-only (format_version {})",
             self.focused().format_version
         );
     }
@@ -1297,6 +1354,7 @@ impl KinewrightApp {
         let session = match self.create_project_session(
             name,
             default_project_document(),
+            kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
             &SidecarMode::None,
             PROJECT_FORMAT_VERSION,
@@ -1395,18 +1453,19 @@ impl KinewrightApp {
         if self.refocus_if_open(path) {
             return;
         }
-        let (document, format_version, project_digest) = match load_document(path) {
-            Ok(triple) => triple,
-            // Appendix B row 7.
-            Err(error) => {
-                self.note_label(
-                    LabelIncident::Project,
-                    IncidentSubject::Project,
-                    format!("Could not open {}: {error}", path.display()),
-                );
-                return;
-            }
-        };
+        let (document, format_version, project_digest, admission) =
+            match inspect_project_document(path) {
+                Ok(triple) => triple,
+                // Appendix B row 7.
+                Err(error) => {
+                    self.note_label(
+                        LabelIncident::Project,
+                        IncidentSubject::Project,
+                        format!("Could not open {}: {error}", path.display()),
+                    );
+                    return;
+                }
+            };
         let missing: Vec<String> = document
             .media_pool
             .iter()
@@ -1418,6 +1477,7 @@ impl KinewrightApp {
         let mut session = match self.create_project_session(
             name,
             document,
+            admission,
             Some(path.to_path_buf()),
             &SidecarMode::Load { project_digest },
             format_version,
@@ -1545,6 +1605,7 @@ impl KinewrightApp {
             .create_project_session(
                 name,
                 request.document,
+                kinewright_project::bundle::BundleWriteAdmission::new_document(),
                 request.project_path,
                 &SidecarMode::RecoveryNoDigest,
                 format_version,
@@ -5766,6 +5827,7 @@ pub(crate) mod in1_tests {
             1,
             "IN1",
             document,
+            kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
             &playback,
             &analysis,
@@ -9066,6 +9128,7 @@ pub(crate) mod in1_tests {
             id,
             format!("IN2 project {id}"),
             Document::default(),
+            kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
             &app.playback,
             &app.analysis,
@@ -10601,6 +10664,273 @@ mod in2b_tests {
         FlushOutcome, ProjectFile, SidecarLoad, load_sidecar, sidecar_matches_project,
     };
 
+    fn admission_tree(path: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                let metadata = fs::symlink_metadata(&path).unwrap();
+                if metadata.is_dir() {
+                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), vec![]);
+                    visit(root, &path, out);
+                } else {
+                    assert!(metadata.is_file());
+                    out.insert(
+                        path.strip_prefix(root).unwrap().to_path_buf(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        visit(path, path, &mut out);
+        out
+    }
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "full app caller refusal matrix and successful control"
+    )]
+    fn save_as_unsupported_source_or_destination_has_zero_mutations() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let temp = TempDirectory::new("ja-s1-app-admission");
+        let recovery = temp.path("recovery");
+        fs::create_dir(&recovery).unwrap();
+        crate::recovery::with_ja_directory(recovery.clone(), || {
+            let legacy = serialize_project_document(&Document::default()).unwrap();
+            let future = legacy.replacen(
+                '{',
+                &format!("{{\"format_version\":{},", PROJECT_FORMAT_VERSION + 1),
+                1,
+            );
+            let studio = include_bytes!(
+                "../../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright"
+            );
+            for (case, source_bytes, destination_bytes, same) in [
+                ("future-new", future.as_bytes(), None, false),
+                (
+                    "future-existing",
+                    future.as_bytes(),
+                    Some(legacy.as_bytes()),
+                    false,
+                ),
+                ("future-same", future.as_bytes(), None, true),
+                ("studio-new", studio.as_slice(), None, false),
+                (
+                    "studio-existing",
+                    studio.as_slice(),
+                    Some(legacy.as_bytes()),
+                    false,
+                ),
+                ("studio-same", studio.as_slice(), None, true),
+                (
+                    "legacy-studio",
+                    legacy.as_bytes(),
+                    Some(studio.as_slice()),
+                    false,
+                ),
+                (
+                    "legacy-future",
+                    legacy.as_bytes(),
+                    Some(future.as_bytes()),
+                    false,
+                ),
+            ] {
+                let source = temp.path(&format!("{case}-source.kinewright"));
+                let target = if same {
+                    source.clone()
+                } else {
+                    temp.path(&format!("{case}-target.kinewright"))
+                };
+                fs::write(&source, source_bytes).unwrap();
+                if let Some(bytes) = destination_bytes {
+                    fs::write(&target, bytes).unwrap();
+                }
+                let (mut app, engine) = in2b_harness(Document::default(), None);
+                let ((), open_trace) =
+                    kinewright_project::io_observer::observe(|| app.open_project(&source));
+                assert_eq!(
+                    app.focused().project_path.as_deref(),
+                    Some(source.as_path())
+                );
+                if app.focused().source_admission.refusal().is_some()
+                    || app.focused().source_admission.is_studio()
+                {
+                    assert!(
+                        open_trace.events.is_empty(),
+                        "read-only open mutated: {:?}",
+                        open_trace.events
+                    );
+                }
+                // Keep every downstream mutator eligible. Source admission must be the deciding guard.
+                app.focused_mut().sidecar_suspended = false;
+                app.focused_mut().recovery_suspended = false;
+                app.focused_mut()
+                    .established
+                    .insert(sidecar_path_for_project(Some(&source)).unwrap());
+                let renames = Arc::new(AtomicUsize::new(0));
+                let count = Arc::clone(&renames);
+                app.focused()
+                    .sidecar_writer
+                    .set_rename_hook(Arc::new(move || {
+                        count.fetch_add(1, Ordering::SeqCst);
+                    }));
+                app.focused()
+                    .incidents
+                    .write()
+                    .unwrap()
+                    .observe(IncidentObservation::plain(
+                        IncidentCode::Label(LabelIncident::Project),
+                        IncidentSubject::Project,
+                        "pending eligible sidecar entry",
+                        TimelineRevision::default(),
+                    ));
+                for (index, path) in [&source, &target].into_iter().enumerate() {
+                    let assets = path.with_extension("kinewright-assets");
+                    fs::create_dir_all(&assets).unwrap();
+                    let sample=Path::new(env!("CARGO_MANIFEST_DIR")).join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright-assets");
+                    for (relative, bytes) in admission_tree(&sample) {
+                        let destination = assets.join(&relative);
+                        if sample.join(&relative).is_dir() {
+                            fs::create_dir_all(destination).unwrap();
+                        } else {
+                            fs::write(destination, bytes).unwrap();
+                        }
+                    }
+                    fs::write(
+                        assets.join("distinguishable-input"),
+                        format!("{case}-{index}"),
+                    )
+                    .unwrap();
+                    fs::write(
+                        sidecar_path_for_project(Some(path)).unwrap(),
+                        format!("occupied-{case}-{index}"),
+                    )
+                    .unwrap();
+                    let base = recovery.join(kinewright_project::journal_file_name(path));
+                    if !base.exists() {
+                        fs::write(&base, format!("base-{case}-{index}")).unwrap();
+                    }
+                    let suffix = kinewright_project::allocate_journal_path(
+                        &recovery,
+                        Some(path),
+                        Path::new(""),
+                        &[],
+                    );
+                    fs::write(suffix, format!("suffix-{case}-{index}")).unwrap();
+                }
+                for session in &app.projects {
+                    if session.source_admission.require_supported().is_ok()
+                        && !session.source_admission.is_studio()
+                    {
+                        session
+                            .recovery
+                            .ja_observe()
+                            .expect("eligible recorder is ready");
+                    }
+                }
+                let before = admission_tree(temp.root());
+                let old_path = app.focused().project_path.clone();
+                let admission = app.focused().source_admission.clone();
+                let digest = app.focused().saved_digest.clone();
+                let history = app.focused().core.export_history().unwrap();
+                let generations = (
+                    app.focused().last_written_gen,
+                    app.focused().confirmed_written_gen,
+                    app.focused().incidents.read().unwrap().generation(),
+                );
+                let (result, trace) =
+                    kinewright_project::io_observer::observe(|| app.write_project(&target));
+                assert!(result.is_err(), "{case}");
+                assert!(trace.events.is_empty(), "{case}: {:?}", trace.events);
+                assert_eq!(renames.load(Ordering::SeqCst), 0);
+                assert_eq!(admission_tree(temp.root()), before, "{case}");
+                assert_eq!(app.focused().project_path, old_path);
+                assert_eq!(app.focused().source_admission, admission);
+                assert_eq!(app.focused().saved_digest, digest);
+                assert_eq!(app.focused().core.export_history().unwrap(), history);
+                assert_eq!(
+                    (
+                        app.focused().last_written_gen,
+                        app.focused().confirmed_written_gen,
+                        app.focused().incidents.read().unwrap().generation()
+                    ),
+                    generations
+                );
+                in2b_quiesce_engine(&engine);
+                in2b_shutdown(&mut app);
+            }
+            let control = temp.path("admitted-control.kinewright");
+            fs::write(&control, &legacy).unwrap();
+            let (mut app, engine) = in2b_harness(Document::default(), Some(control.clone()));
+            let core = app.focused().core.clone();
+            let Event::DocumentChanged { doc, revision, .. } = core
+                .request(Command::Do(Operation::AddTrack {
+                    track: Track {
+                        id: TrackId(81),
+                        kind: TrackKind::Video,
+                        sync_lock: true,
+                        clips: vec![],
+                    },
+                }))
+                .unwrap()
+            else {
+                panic!("control edit refused")
+            };
+            app.focused_mut().document = doc;
+            app.focused_mut().revision = revision;
+            app.write_project(&control).unwrap();
+            assert_eq!(load_document(&control).unwrap().0, *app.focused().document);
+            assert!(app.focused().source_admission.legacy_document().is_ok());
+            in2b_quiesce_engine(&engine);
+            in2b_shutdown(&mut app);
+        });
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_app_save_refusal_precedes_session_and_sidecar_mutation() {
+        let temp = TempDirectory::new("ja-s1-windows-app-refusal");
+        let recovery = temp.path("recovery");
+        fs::create_dir(&recovery).unwrap();
+        crate::recovery::with_ja_directory(recovery, || {
+            let source = temp.path("studio.kinewright");
+            fs::write(
+                &source,
+                include_bytes!(
+                    "../../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright"
+                ),
+            )
+            .unwrap();
+            let destination = temp.path("fresh.kinewright");
+            fs::write(
+                sidecar_path_for_project(Some(&destination)).unwrap(),
+                b"occupied destination sidecar",
+            )
+            .unwrap();
+            let (mut app, engine) = in2b_harness(Document::default(), None);
+            app.open_project(&source);
+            let before = admission_tree(temp.root());
+            let path = app.focused().project_path.clone();
+            let admission = app.focused().source_admission.clone();
+            let history = app.focused().core.export_history().unwrap();
+            let (result, trace) =
+                kinewright_project::io_observer::observe(|| app.write_project(&destination));
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("durability_unsupported")
+            );
+            assert!(trace.events.is_empty());
+            assert_eq!(admission_tree(temp.root()), before);
+            assert_eq!(app.focused().project_path, path);
+            assert_eq!(app.focused().source_admission, admission);
+            assert_eq!(app.focused().core.export_history().unwrap(), history);
+            in2b_quiesce_engine(&engine);
+            in2b_shutdown(&mut app);
+        });
+    }
+
     /// The smallest real app that can save, on an optional project path.
     #[allow(clippy::too_many_lines)]
     fn in2b_harness(
@@ -10626,6 +10956,7 @@ mod in2b_tests {
             1,
             "IN2B",
             document,
+            fixture_source_admission((project_path).as_deref()),
             project_path,
             &playback,
             &analysis,
@@ -11009,6 +11340,7 @@ mod in2b_tests {
             7,
             "reopened",
             document,
+            fixture_source_admission((Some(project_path.clone())).as_deref()),
             Some(project_path.clone()),
             &playback,
             &analysis,
@@ -11153,6 +11485,7 @@ mod in2b_tests {
             id,
             "second",
             Document::default(),
+            fixture_source_admission((Some(c_path.clone())).as_deref()),
             Some(c_path.clone()),
             &playback,
             &analysis,
@@ -11199,6 +11532,7 @@ mod in2b_tests {
             9,
             "copy",
             document,
+            fixture_source_admission((Some(d_path.clone())).as_deref()),
             Some(d_path),
             &playback,
             &analysis,
@@ -11304,12 +11638,14 @@ mod in2b_tests {
         // newer-than-current fixture).
         let newer_path = temp.path("newer.kinewright");
         let written = serde_json::to_string_pretty(&ProjectFile {
+            studio: None,
             format_version: 999,
             document: Document::default(),
         })
         .expect("the 999 file serialises");
         fs::write(&newer_path, &written).expect("the 999 file writes");
-        let (document, version, digest) = load_document(&newer_path).expect("the 999 file loads");
+        let (document, version, digest, _) =
+            inspect_project_document(&newer_path).expect("the 999 file inspects");
         assert_eq!(version, 999);
         assert_eq!(
             digest,
@@ -11356,8 +11692,8 @@ mod in2b_tests {
         );
         assert!(app.incidents_open, "the refusal re-surfaces the card");
         assert!(
-            app.status.contains("Save As"),
-            "the refusal names the way out: {}",
+            app.status.contains("read-only"),
+            "the refusal preserves inspection-only status: {}",
             app.status
         );
         app.route_incidents();
@@ -11370,53 +11706,20 @@ mod in2b_tests {
             assert_eq!(log.len(), 1, "no second incident");
         }
 
-        // Box 7: Save As writes current-version bytes that reopen clean.
+        // Generic Save As retains the unsupported source admission and refuses.
         let copy_path = temp.path("copy.kinewright");
-        app.write_project(&copy_path).expect("Save As succeeds");
+        let old_path = app.focused().project_path.clone();
+        let old_admission = app.focused().source_admission.clone();
+        assert!(matches!(
+            app.write_project(&copy_path),
+            Err(ProjectSaveError::UnsupportedBundle { .. })
+        ));
+        assert!(!copy_path.exists());
+        assert_eq!(app.focused().project_path, old_path);
+        assert_eq!(app.focused().source_admission, old_admission);
         assert_eq!(
-            app.focused().format_version,
-            1,
-            "Save As records the version written"
-        );
-        app.write_project(&copy_path)
-            .expect("overwrite-save re-enables for the new path");
-        let (copy, copy_version, copy_digest) =
-            load_document(&copy_path).expect("the copy re-reads");
-        assert_eq!(copy_version, 1, "Save As writes current-version bytes");
-        let playback = Arc::clone(&app.playback);
-        let analysis = Arc::clone(&app.analysis);
-        let exporter = Arc::clone(&app.exporter);
-        let writer = Arc::clone(&app.sidecar_writer);
-        let mut reopened = ProjectSession::create(
-            9,
-            "copy",
-            copy,
-            Some(copy_path),
-            &playback,
-            &analysis,
-            &exporter,
-            &SidecarMode::Load {
-                project_digest: copy_digest,
-            },
-            Some(writer),
-            copy_version,
-            None,
-        )
-        .expect("the copy reopens");
-        {
-            let log = reopened
-                .incidents
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert_eq!(log.len(), 0, "the copy reopens with 0 incidents");
-        }
-        in2b_shutdown_session(&mut reopened);
-        assert_eq!(
-            fs::read(&newer_path)
-                .expect("the 999 file re-reads")
-                .as_slice(),
-            written.as_bytes(),
-            "the original is never modified"
+            fs::read(&newer_path).expect("original bytes"),
+            written.as_bytes()
         );
 
         // Box 8: a versionless file reads as 1 and opens silently.
@@ -13895,7 +14198,8 @@ mod in2b_tests {
         fs::write(
             &project_path,
             serde_json::to_string_pretty(&ProjectFile {
-                format_version: PROJECT_FORMAT_VERSION,
+                studio: None,
+                format_version: 2,
                 document,
             })
             .expect("the project serialises"),
@@ -14938,7 +15242,8 @@ mod in2b_tests {
         fs::write(
             &project_path,
             serde_json::to_string_pretty(&ProjectFile {
-                format_version: PROJECT_FORMAT_VERSION,
+                studio: None,
+                format_version: 2,
                 document,
             })
             .expect("the project serialises"),

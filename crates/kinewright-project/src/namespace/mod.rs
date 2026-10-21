@@ -118,6 +118,7 @@ pub struct ProjectNamespace {
     directories: RefCell<BTreeMap<PathBuf, File>>,
     lock: Option<LockfileHandle>,
     uncertain: bool,
+    read_only: bool,
 }
 impl ProjectNamespace {
     pub(crate) fn create_session(
@@ -158,6 +159,27 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
+    pub(crate) fn inspect(path: &Path) -> Result<Self, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::inspect(path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = path;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn claim(&mut self) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::claim(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub fn acquire(path: &Path) -> Result<Self, BundleError> {
         #[cfg(target_os = "linux")]
         {
@@ -186,6 +208,9 @@ impl ProjectNamespace {
         }
     }
     pub fn verify(&self) -> Result<(), BundleError> {
+        if self.read_only {
+            return Err(BundleError::Identity("read-only namespace".into()));
+        }
         if self.uncertain {
             return Err(BundleError::Unsettled);
         }
@@ -203,7 +228,10 @@ impl ProjectNamespace {
             }
         }
         #[cfg(target_os = "linux")]
-        linux::verify_directories(self)?;
+        {
+            linux::verify_parent(self)?;
+            linux::verify_directories(self)?;
+        }
         Ok(())
     }
     pub fn read_root(&self) -> Result<Option<Vec<u8>>, BundleError> {
@@ -216,7 +244,44 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
-    pub fn replace_root(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
+    pub(crate) fn seal_existing(&mut self, path: &PortablePath) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::seal_existing(self, path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = path;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn replace_relative(
+        &mut self,
+        path: &PortablePath,
+        bytes: &[u8],
+    ) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::replace_relative(self, path, bytes)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, bytes);
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn reconcile(&mut self, expected: &[u8]) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::reconcile(self, expected)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = expected;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn replace_root(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
         #[cfg(target_os = "linux")]
         {
             linux::replace(self, bytes)
@@ -227,7 +292,7 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
-    pub fn publish_immutable(
+    pub(crate) fn publish_immutable(
         &mut self,
         name: &PortablePath,
         bytes: &[u8],
@@ -242,7 +307,11 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
-    pub fn read(&self, name: &PortablePath, limit: u64) -> Result<Option<Vec<u8>>, BundleError> {
+    pub(crate) fn read(
+        &self,
+        name: &PortablePath,
+        limit: u64,
+    ) -> Result<Option<Vec<u8>>, BundleError> {
         #[cfg(target_os = "linux")]
         {
             linux::read_relative(self, name, limit)
@@ -281,7 +350,7 @@ impl ProjectNamespace {
     pub fn inspect_windows_parents(path: &Path) -> Result<Vec<std::fs::File>, BundleError> {
         windows::pin_parents(path)
     }
-    pub fn publish_with(
+    pub(crate) fn publish_with(
         &mut self,
         path: &PortablePath,
         write: impl FnOnce(&mut std::fs::File) -> Result<(), BundleError>,
@@ -296,7 +365,10 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
-    pub fn open_owned(&self, path: &PortablePath) -> Result<Option<std::fs::File>, BundleError> {
+    pub(crate) fn open_owned(
+        &self,
+        path: &PortablePath,
+    ) -> Result<Option<std::fs::File>, BundleError> {
         #[cfg(target_os = "linux")]
         {
             linux::open_relative(self, path)
@@ -307,7 +379,7 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
-    pub fn available_bytes(&self) -> Result<u64, BundleError> {
+    pub(crate) fn available_bytes(&self) -> Result<u64, BundleError> {
         #[cfg(target_os = "linux")]
         {
             let stat = rustix::fs::fstatvfs(&self.parent)?;
@@ -333,7 +405,10 @@ impl ProjectNamespace {
 
 pub(super) fn note(operation: &'static str, path: &Path) {
     #[cfg(any(test, feature = "test-util"))]
-    crate::io_observer::note(operation, path);
+    {
+        crate::io_observer::note(operation, path);
+        crate::test_hook(operation);
+    }
     #[cfg(not(any(test, feature = "test-util")))]
     let _ = (operation, path);
 }

@@ -20,9 +20,14 @@ use std::{
 pub struct StoreManifest {
     pub project_id: Option<ProjectId>,
     pub session_id: Option<SessionId>,
+    pub generation: u64,
     pub objects: Vec<ObjectRef>,
     pub dependencies: BTreeMap<String, Vec<ObjectRef>>,
+    pub inventory_dependencies: BTreeMap<String, Vec<ObjectRef>>,
     pub durable_pins: Vec<ObjectRef>,
+    pub recovery: RecoveryInventory,
+    pub required_fields: BTreeSet<String>,
+    pub required_apis: BTreeMap<String, u32>,
     pub required_kinds: BTreeSet<RecordKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mirrors: Vec<(ObjectRef, PortablePath)>,
@@ -32,6 +37,12 @@ pub struct StoreManifest {
 #[serde(deny_unknown_fields)]
 pub struct RecoveryInventory {
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual_branch_id: Option<crate::bundle_records::BranchId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_root_file_name: Option<String>,
     pub predecessors: Vec<ObjectRef>,
     pub staging: Option<ObjectRef>,
     pub pre_migration: Option<ObjectRef>,
@@ -40,12 +51,14 @@ pub struct RecoveryInventory {
 struct Ledger {
     objects: BTreeMap<String, (ObjectRef, Vec<ObjectRef>)>,
     pins: BTreeMap<String, u64>,
+    inventory_dependencies: BTreeMap<String, Vec<ObjectRef>>,
     verified: BTreeSet<String>,
     committed: Vec<ObjectRef>,
     mirrors: Vec<(ObjectRef, PortablePath)>,
     can_collect: bool,
     metadata_sizes: BTreeMap<String, u64>,
     pending: Vec<StorageReservation>,
+    pending_controls: Vec<StorageReservation>,
 }
 
 struct StoreInner {
@@ -53,6 +66,8 @@ struct StoreInner {
     ledger: Mutex<Ledger>,
     usage: Arc<Mutex<StorageUsage>>,
     limits: StorageLimits,
+    root_bytes: Mutex<u64>,
+    inventory_bytes: Mutex<u64>,
     project_id: Option<ProjectId>,
     session_id: Option<SessionId>,
 }
@@ -89,21 +104,40 @@ impl ProjectStore {
             ));
         }
         namespace.verify()?;
-        let can_collect = namespace.read_root()?.is_none();
+        let root_bytes = namespace.read_root()?.map_or(0, |b| b.len() as u64);
+        let inventory_bytes = namespace
+            .read(
+                &crate::bundle_recovery::inventory_path()?,
+                limits.control_bytes,
+            )?
+            .map_or(0, |b| b.len() as u64);
+        let control_bytes = root_bytes
+            .checked_add(inventory_bytes)
+            .ok_or(BundleError::Capacity("control files"))?;
+        let can_collect = root_bytes == 0;
         Ok(Self {
             inner: Arc::new(StoreInner {
                 namespace: Mutex::new(namespace),
                 ledger: Mutex::new(Ledger {
                     objects: BTreeMap::new(),
                     pins: BTreeMap::new(),
+                    inventory_dependencies: BTreeMap::new(),
                     verified: BTreeSet::new(),
                     committed: vec![],
                     mirrors: vec![],
                     can_collect,
                     metadata_sizes: BTreeMap::new(),
                     pending: vec![],
+                    pending_controls: vec![],
                 }),
-                usage: Arc::new(Mutex::new(StorageUsage::default())),
+                usage: Arc::new(Mutex::new(StorageUsage {
+                    physical_bytes: control_bytes,
+                    peak_physical_bytes: control_bytes,
+                    metadata_bytes: control_bytes,
+                    ..StorageUsage::default()
+                })),
+                root_bytes: Mutex::new(root_bytes),
+                inventory_bytes: Mutex::new(inventory_bytes),
                 limits,
                 project_id,
                 session_id,
@@ -180,12 +214,29 @@ impl ProjectStore {
         }
         self.admit(reader, reference, dependencies)
     }
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn admit(
         &mut self,
         reader: &mut impl Read,
         reference: &ObjectRef,
         dependencies: &[ObjectRef],
+    ) -> Result<SealedObject, BundleError> {
+        self.admit_internal(reader, reference, dependencies, false)
+    }
+    pub(crate) fn admit_recovered(
+        &mut self,
+        reader: &mut impl Read,
+        reference: &ObjectRef,
+        dependencies: &[ObjectRef],
+    ) -> Result<SealedObject, BundleError> {
+        self.admit_internal(reader, reference, dependencies, true)
+    }
+    #[allow(clippy::too_many_lines)]
+    fn admit_internal(
+        &mut self,
+        reader: &mut impl Read,
+        reference: &ObjectRef,
+        dependencies: &[ObjectRef],
+        recover: bool,
     ) -> Result<SealedObject, BundleError> {
         reference.validate()?;
         let _working = self.reserve(0, (1 << 20) + 65_536, 0, false)?;
@@ -215,7 +266,7 @@ impl ProjectStore {
                             .ok_or(BundleError::Capacity("edge metadata overflow"))?,
                     )
                     .and_then(|n| {
-                        n.checked_add(if reference.record_kind.is_blob() {
+                        n.checked_add(if reference.record_kind.is_owned_bytes() {
                             0
                         } else {
                             reference.byte_length
@@ -226,7 +277,7 @@ impl ProjectStore {
                     .metadata_bytes
                     .checked_add(metadata_charge)
                     .is_none_or(|n| n > self.inner.limits.metadata_bytes)
-                    || (reference.record_kind.is_blob()
+                    || (reference.record_kind.is_owned_bytes()
                         && usage
                             .owned_bytes
                             .checked_add(reference.byte_length)
@@ -261,33 +312,69 @@ impl ProjectStore {
         }
         let reservation = self.reserve(reference.byte_length, 0, 0, false)?;
         let path = Self::object_path(reference)?;
-        let published = self.with_namespace(|namespace| {
-            namespace.publish_with(&path, |file| {
-                let mut bytes = 0_u64;
-                let mut buffer = vec![0_u8; 65_536];
-                loop {
-                    let count = reader.read(&mut buffer)?;
-                    if count == 0 {
-                        break;
+        let recovered = recover && self.with_namespace(|n| n.open_owned(&path))?.is_some();
+        let published = if recovered {
+            self.with_namespace(|n| {
+                Self::verify_in_namespace(n, reference, &self.inner.usage, &self.inner.limits)
+            })?;
+            let mut measured = CountingReader {
+                inner: reader,
+                bytes: 0,
+                limit: reference.byte_length,
+            };
+            let digest = kinewright_media::sha256_reader(&mut measured)?;
+            if digest == reference.sha256 && measured.bytes == reference.byte_length {
+                #[cfg(any(test, feature = "test-util"))]
+                crate::io_observer::note_digest(
+                    "object_stage",
+                    path.as_path(),
+                    digest,
+                    usize::try_from(measured.bytes)
+                        .map_err(|_| BundleError::Capacity("object address space"))?,
+                );
+                self.with_namespace(|n| n.seal_existing(&path))
+            } else {
+                Err(BundleError::Corrupt(
+                    "recovered input differs from owned object".into(),
+                ))
+            }
+        } else {
+            self.with_namespace(|namespace| {
+                namespace.publish_with(&path, |file| {
+                    let mut bytes = 0_u64;
+                    let mut buffer = vec![0_u8; 65_536];
+                    loop {
+                        let count = reader.read(&mut buffer)?;
+                        if count == 0 {
+                            break;
+                        }
+                        bytes = bytes
+                            .checked_add(count as u64)
+                            .filter(|n| *n <= reference.byte_length)
+                            .ok_or(BundleError::Capacity("stream exceeded its reservation"))?;
+                        file.write_all(&buffer[..count])?;
                     }
-                    bytes = bytes
-                        .checked_add(count as u64)
-                        .filter(|n| *n <= reference.byte_length)
-                        .ok_or(BundleError::Capacity("stream exceeded its reservation"))?;
-                    file.write_all(&buffer[..count])?;
-                }
-                if bytes != reference.byte_length {
-                    return Err(BundleError::Corrupt("short owned input".into()));
-                }
-                file.seek(SeekFrom::Start(0))?;
-                let digest = kinewright_media::sha256_reader(file)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-                if digest != reference.sha256 {
-                    return Err(BundleError::Corrupt("owned input digest mismatch".into()));
-                }
-                Ok(())
+                    if bytes != reference.byte_length {
+                        return Err(BundleError::Corrupt("short owned input".into()));
+                    }
+                    file.seek(SeekFrom::Start(0))?;
+                    let digest = kinewright_media::sha256_reader(file)
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                    if digest != reference.sha256 {
+                        return Err(BundleError::Corrupt("owned input digest mismatch".into()));
+                    }
+                    #[cfg(any(test, feature = "test-util"))]
+                    crate::io_observer::note_digest(
+                        "object_stage",
+                        path.as_path(),
+                        digest,
+                        usize::try_from(bytes)
+                            .map_err(|_| BundleError::Capacity("object address space"))?,
+                    );
+                    Ok(())
+                })
             })
-        });
+        };
         if let Err(error) = published {
             if self.with_namespace(|namespace| Ok(namespace.is_uncertain()))? {
                 self.inner
@@ -318,7 +405,7 @@ impl ProjectStore {
             ledger.verified.insert(reference.sha256.clone());
             let metadata_charge = 256
                 + (dependencies.len() as u64) * 160
-                + if reference.record_kind.is_blob() {
+                + if reference.record_kind.is_owned_bytes() {
                     0
                 } else {
                     reference.byte_length
@@ -342,7 +429,7 @@ impl ProjectStore {
             .ok_or(BundleError::Capacity("edge accounting overflow"))?;
         let metadata_charge = 256
             + (dependencies.len() as u64) * 160
-            + if reference.record_kind.is_blob() {
+            + if reference.record_kind.is_owned_bytes() {
                 0
             } else {
                 reference.byte_length
@@ -351,7 +438,7 @@ impl ProjectStore {
             .metadata_bytes
             .checked_add(metadata_charge)
             .ok_or(BundleError::Capacity("metadata accounting overflow"))?;
-        if reference.record_kind.is_blob() {
+        if reference.record_kind.is_owned_bytes() {
             usage.owned_bytes = usage
                 .owned_bytes
                 .checked_add(reference.byte_length)
@@ -371,6 +458,7 @@ impl ProjectStore {
             .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
         let mut found = BTreeMap::new();
         let mut active = BTreeSet::new();
+        let mut visited = BTreeSet::new();
         for root in roots {
             walk(
                 root,
@@ -378,6 +466,8 @@ impl ProjectStore {
                 &self.inner.limits,
                 &mut found,
                 &mut active,
+                &mut visited,
+                true,
                 0,
             )?;
         }
@@ -408,6 +498,7 @@ impl ProjectStore {
         self.open_verified(reference).map(drop)
     }
     pub(crate) fn open_verified(&self, reference: &ObjectRef) -> Result<File, BundleError> {
+        self.closure(std::slice::from_ref(reference))?;
         let _working = self.reserve(0, 1 << 20, 0, false)?;
         let path = Self::object_path(reference)?;
         let mut file = self
@@ -484,13 +575,18 @@ impl ProjectStore {
         Ok(StoreManifest {
             project_id: self.inner.project_id.clone(),
             session_id: self.inner.session_id.clone(),
+            generation: 0,
             objects: ledger.objects.values().map(|(r, _)| r.clone()).collect(),
             dependencies: ledger
                 .objects
                 .iter()
                 .map(|(h, (_, d))| (h.clone(), d.clone()))
                 .collect(),
+            inventory_dependencies: ledger.inventory_dependencies.clone(),
             durable_pins: ledger.committed.clone(),
+            recovery: RecoveryInventory::default(),
+            required_fields: BTreeSet::new(),
+            required_apis: BTreeMap::new(),
             required_kinds: ledger
                 .objects
                 .values()
@@ -501,12 +597,15 @@ impl ProjectStore {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn walk(
     reference: &ObjectRef,
     ledger: &Ledger,
     limits: &StorageLimits,
     found: &mut BTreeMap<String, ObjectRef>,
     active: &mut BTreeSet<String>,
+    visited: &mut BTreeSet<(String, bool)>,
+    include_inventory: bool,
     depth: u64,
 ) -> Result<(), BundleError> {
     reference.validate()?;
@@ -516,12 +615,17 @@ fn walk(
     if active.contains(&reference.sha256) {
         return Err(BundleError::Corrupt("dependency cycle".into()));
     }
-    if let Some(known) = found.get(&reference.sha256) {
-        if known != reference {
-            return Err(BundleError::Corrupt(
-                "inconsistent reference identity".into(),
-            ));
-        }
+    if found
+        .get(&reference.sha256)
+        .is_some_and(|known| known != reference)
+    {
+        return Err(BundleError::Corrupt(
+            "inconsistent reference identity".into(),
+        ));
+    }
+    let include_inventory =
+        include_inventory && reference.record_kind != RecordKind::RootCheckpoint;
+    if !visited.insert((reference.sha256.clone(), include_inventory)) {
         return Ok(());
     }
     let (known, dependencies) = ledger
@@ -538,7 +642,32 @@ fn walk(
     }
     active.insert(reference.sha256.clone());
     for dependency in dependencies {
-        walk(dependency, ledger, limits, found, active, depth + 1)?;
+        walk(
+            dependency,
+            ledger,
+            limits,
+            found,
+            active,
+            visited,
+            include_inventory,
+            depth + 1,
+        )?;
+    }
+    if include_inventory
+        && let Some(dependencies) = ledger.inventory_dependencies.get(&reference.sha256)
+    {
+        for dependency in dependencies {
+            walk(
+                dependency,
+                ledger,
+                limits,
+                found,
+                active,
+                visited,
+                true,
+                depth + 1,
+            )?;
+        }
     }
     active.remove(&reference.sha256);
     found.insert(reference.sha256.clone(), reference.clone());
@@ -556,8 +685,10 @@ impl<R: Read> Read for CountingReader<'_, R> {
         self.bytes = self
             .bytes
             .checked_add(count as u64)
-            .filter(|n| *n <= self.limit)
-            .ok_or_else(|| std::io::Error::other("owned bytes exceed reservation"))?;
+            .ok_or_else(|| std::io::Error::other("read counter overflow"))?;
+        if self.bytes > self.limit {
+            return Err(std::io::Error::other("owned bytes exceed reservation"));
+        }
         Ok(count)
     }
 }
@@ -587,10 +718,27 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
         if !ledger.can_collect {
             return Err(BundleError::Unsettled);
         }
+        let mut durable = BTreeMap::new();
+        let mut active = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        for root in &ledger.committed {
+            walk(
+                root,
+                &ledger,
+                &inner.limits,
+                &mut durable,
+                &mut active,
+                &mut visited,
+                true,
+                0,
+            )?;
+        }
         ledger
             .objects
             .iter()
-            .filter(|(h, _)| ledger.pins.get(*h).copied().unwrap_or(0) == 0)
+            .filter(|(h, _)| {
+                ledger.pins.get(*h).copied().unwrap_or(0) == 0 && !durable.contains_key(*h)
+            })
             .map(|(h, (r, d))| {
                 (
                     h.clone(),
@@ -633,7 +781,7 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
             usage.damaged_accounting = true;
             return Err(BundleError::Capacity("object retirement underflow"));
         };
-        if reference.record_kind.is_blob() {
+        if reference.record_kind.is_owned_bytes() {
             usage.owned_bytes = usage
                 .owned_bytes
                 .checked_sub(reference.byte_length)
@@ -658,8 +806,12 @@ impl Drop for StoreInner {
         let temporary = self.session_id.is_some();
         let mut collectable = false;
         if let Ok(ledger) = self.ledger.get_mut() {
-            if !ledger.pending.is_empty() {
-                for reservation in ledger.pending.drain(..) {
+            if !ledger.pending.is_empty() || !ledger.pending_controls.is_empty() {
+                for reservation in ledger
+                    .pending
+                    .drain(..)
+                    .chain(ledger.pending_controls.drain(..))
+                {
                     reservation.retain_charge();
                 }
                 if let Ok(mut usage) = self.usage.lock() {
@@ -668,6 +820,7 @@ impl Drop for StoreInner {
             }
             if temporary {
                 ledger.can_collect = true;
+                ledger.committed.clear();
             }
             collectable = ledger.can_collect;
         }
@@ -701,6 +854,9 @@ pub(crate) trait BundleRecord:
 {
     const KIND: RecordKind;
     fn dependencies(&self) -> Vec<ObjectRef> {
+        vec![]
+    }
+    fn inventory_dependencies(&self) -> Vec<ObjectRef> {
         vec![]
     }
     fn validate(&self, _limits: &StorageLimits) -> Result<(), BundleError> {
@@ -785,12 +941,41 @@ impl BundleRecord for crate::bundle_records::BranchCheckpoint {
         refs
     }
 }
+impl record_sealed::Sealed for BTreeMap<crate::bundle_records::BranchId, ObjectRef> {}
+impl BundleRecord for BTreeMap<crate::bundle_records::BranchId, ObjectRef> {
+    const KIND: RecordKind = RecordKind::BranchIndex;
+    fn dependencies(&self) -> Vec<ObjectRef> {
+        self.values().cloned().collect()
+    }
+    fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
+        if self.len() as u64 > limits.objects {
+            return Err(BundleError::Capacity("branch index"));
+        }
+        if self
+            .values()
+            .any(|r| r.record_kind != RecordKind::BranchCheckpoint)
+        {
+            return Err(BundleError::Corrupt("branch index kind".into()));
+        }
+        Ok(())
+    }
+}
 record!(crate::bundle_records::LineageRecord, Lineage);
 impl record_sealed::Sealed for StoreManifest {}
 impl BundleRecord for StoreManifest {
     const KIND: RecordKind = RecordKind::StoreManifest;
     fn dependencies(&self) -> Vec<ObjectRef> {
-        self.objects.clone()
+        self.durable_pins.clone()
+    }
+    fn inventory_dependencies(&self) -> Vec<ObjectRef> {
+        self.recovery.references()
+    }
+    fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
+        self.recovery.validate()?;
+        if self.objects.len() as u64 >= limits.objects {
+            return Err(BundleError::Capacity("manifest object count"));
+        }
+        Ok(())
     }
 }
 
@@ -853,7 +1038,20 @@ impl ProjectStore {
             byte_length: counter.bytes,
             record_kind: T::KIND,
         };
-        self.admit(&mut bytes.as_slice(), &reference, &record.dependencies())
+        let inventory_dependencies = record.inventory_dependencies();
+        self.closure(&inventory_dependencies)?;
+        let mut sealed =
+            self.admit_recovered(&mut bytes.as_slice(), &reference, &record.dependencies())?;
+        if !inventory_dependencies.is_empty() {
+            self.inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                .inventory_dependencies
+                .insert(reference.sha256, inventory_dependencies);
+        }
+        sealed.pin = self.pin(std::slice::from_ref(&sealed.reference))?;
+        Ok(sealed)
     }
     pub(crate) fn read_record<T: BundleRecord>(
         &self,
@@ -872,18 +1070,8 @@ impl ProjectStore {
         }
         let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
         let mut file = self.open_verified(reference)?;
-        let capacity = usize::try_from(reference.byte_length)
-            .map_err(|_| BundleError::Capacity("record size"))?;
-        let mut bytes = Vec::with_capacity(capacity);
-        (&mut file)
-            .take(
-                reference
-                    .byte_length
-                    .checked_add(1)
-                    .ok_or(BundleError::Capacity("record overflow"))?,
-            )
-            .read_to_end(&mut bytes)?;
-        if bytes.len() != capacity {
+        let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
+        if bytes.len() as u64 != reference.byte_length {
             return Err(BundleError::Corrupt("record changed while decoding".into()));
         }
         let preflight = self.reserve(0, self.limits().decoded_record_bytes, 0, false)?;
@@ -908,9 +1096,9 @@ impl ProjectStore {
         Ok(decoded_reservation.hold(value))
     }
 }
-struct BoundedCounter {
-    bytes: u64,
-    limit: u64,
+pub(crate) struct BoundedCounter {
+    pub(crate) bytes: u64,
+    pub(crate) limit: u64,
 }
 impl Write for BoundedCounter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -928,7 +1116,7 @@ impl Write for BoundedCounter {
 
 /// Admission bound, not a measured heap/RSS value. Runs before typed allocations.
 #[allow(clippy::too_many_lines)]
-fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u64, BundleError> {
+pub(crate) fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u64, BundleError> {
     use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
     use std::{cell::Cell, fmt};
     struct Scan<'a> {
@@ -1047,4 +1235,522 @@ fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u64, BundleE
     })?;
     d.end().map_err(|e| BundleError::Corrupt(e.to_string()))?;
     Ok(charge.get())
+}
+
+impl ProjectStore {
+    pub(crate) fn verify_in_namespace(
+        namespace: &ProjectNamespace,
+        reference: &ObjectRef,
+        usage: &Arc<Mutex<StorageUsage>>,
+        limits: &StorageLimits,
+    ) -> Result<File, BundleError> {
+        reference.validate()?;
+        let _working = StorageReservation::reserve(usage, limits, 0, 1 << 20, 0, false, u64::MAX)?;
+        let mut file = namespace
+            .open_owned(&Self::object_path(reference)?)?
+            .ok_or_else(|| BundleError::Corrupt("missing owned object".into()))?;
+        if file.metadata()?.len() != reference.byte_length {
+            return Err(BundleError::Corrupt("owned byte length changed".into()));
+        }
+        let mut counted = CountingReader {
+            inner: &mut file,
+            bytes: 0,
+            limit: reference.byte_length,
+        };
+        let digest = kinewright_media::sha256_reader(&mut counted);
+        let measured = counted.bytes;
+        let mut state = usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        state.verified_calls = state
+            .verified_calls
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("verification calls"))?;
+        state.verified_bytes = state
+            .verified_bytes
+            .checked_add(measured)
+            .ok_or(BundleError::Capacity("verification bytes"))?;
+        drop(state);
+        if measured != reference.byte_length
+            || !digest.as_ref().is_ok_and(|h| h == &reference.sha256)
+        {
+            return Err(BundleError::Corrupt("owned identity changed".into()));
+        }
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "adopt a verified graph and its physical charges together"
+    )]
+    pub(crate) fn from_verified(
+        namespace: ProjectNamespace,
+        project_id: ProjectId,
+        manifest: &StoreManifest,
+        manifest_ref: &ObjectRef,
+        verified: &BTreeSet<String>,
+        usage: Arc<Mutex<StorageUsage>>,
+    ) -> Result<Self, BundleError> {
+        if manifest.project_id.as_ref() != Some(&project_id) || manifest.session_id.is_some() {
+            return Err(BundleError::Identity(
+                "store owner differs from root".into(),
+            ));
+        }
+        let mut store = Self::new(namespace, Some(project_id), None, StorageLimits::default())?;
+        let inner = Arc::get_mut(&mut store.inner)
+            .ok_or_else(|| BundleError::Identity("store already shared".into()))?;
+        inner.usage = usage;
+        let ledger = inner
+            .ledger
+            .get_mut()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        let mut references = manifest.objects.clone();
+        references.push(manifest_ref.clone());
+        if references.len() as u64 > inner.limits.objects {
+            return Err(BundleError::Capacity("restored object count"));
+        }
+        let controls = *inner
+            .root_bytes
+            .get_mut()
+            .map_err(|_| BundleError::Capacity("root accounting"))?
+            + *inner
+                .inventory_bytes
+                .get_mut()
+                .map_err(|_| BundleError::Capacity("inventory accounting"))?;
+        let mut physical = controls;
+        let mut owned = 0_u64;
+        let mut metadata = controls;
+        let mut edges = 0_u64;
+        for reference in references {
+            reference.validate()?;
+            if !verified.contains(&reference.sha256)
+                || ledger.objects.contains_key(&reference.sha256)
+            {
+                return Err(BundleError::Corrupt(
+                    "duplicate or unverified declaration".into(),
+                ));
+            }
+            let dependencies = if reference == *manifest_ref {
+                manifest.durable_pins.clone()
+            } else {
+                manifest
+                    .dependencies
+                    .get(&reference.sha256)
+                    .cloned()
+                    .ok_or_else(|| BundleError::Corrupt("missing dependency row".into()))?
+            };
+            let charge = 256_u64
+                .checked_add(
+                    (dependencies.len() as u64)
+                        .checked_mul(160)
+                        .ok_or(BundleError::Capacity("edge overflow"))?,
+                )
+                .and_then(|n| {
+                    n.checked_add(if reference.record_kind.is_owned_bytes() {
+                        0
+                    } else {
+                        reference.byte_length
+                    })
+                })
+                .ok_or(BundleError::Capacity("metadata overflow"))?;
+            physical = physical
+                .checked_add(reference.byte_length)
+                .ok_or(BundleError::Capacity("physical overflow"))?;
+            if reference.record_kind.is_owned_bytes() {
+                owned = owned
+                    .checked_add(reference.byte_length)
+                    .ok_or(BundleError::Capacity("owned overflow"))?;
+            }
+            metadata = metadata
+                .checked_add(charge)
+                .ok_or(BundleError::Capacity("metadata overflow"))?;
+            edges = edges
+                .checked_add(dependencies.len() as u64)
+                .ok_or(BundleError::Capacity("edge overflow"))?;
+            ledger
+                .metadata_sizes
+                .insert(reference.sha256.clone(), charge);
+            ledger.verified.insert(reference.sha256.clone());
+            ledger
+                .objects
+                .insert(reference.sha256.clone(), (reference, dependencies));
+        }
+        if owned > inner.limits.owned_bytes || metadata > inner.limits.metadata_bytes {
+            return Err(BundleError::Capacity("restored graph quota"));
+        }
+        ledger.inventory_dependencies = manifest.inventory_dependencies.clone();
+        ledger
+            .inventory_dependencies
+            .insert(manifest_ref.sha256.clone(), manifest.recovery.references());
+        ledger.mirrors.clone_from(&manifest.mirrors);
+        let mut state = inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        if state.physical_bytes != 0 {
+            return Err(BundleError::Identity(
+                "physical accounting already adopted".into(),
+            ));
+        }
+        state.physical_bytes = physical;
+        state.peak_physical_bytes = physical;
+        state.owned_bytes = owned;
+        state.metadata_bytes = metadata;
+        state.edges = edges;
+        state.objects = ledger.objects.len() as u64;
+        drop(state);
+        Ok(store)
+    }
+    pub(crate) fn selected_manifest(
+        &self,
+        roots: &[ObjectRef],
+        pins: &[ObjectRef],
+        recovery: RecoveryInventory,
+        inventory: &crate::bundle::SupportInventory,
+        generation: u64,
+    ) -> Result<StoreManifest, BundleError> {
+        let mut all = roots.to_vec();
+        all.extend_from_slice(pins);
+        all.extend(recovery.references());
+        let objects = self.closure(&all)?;
+        let ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        let hashes: BTreeSet<_> = objects.iter().map(|r| r.sha256.as_str()).collect();
+        Ok(StoreManifest {
+            project_id: self.inner.project_id.clone(),
+            session_id: self.inner.session_id.clone(),
+            generation,
+            objects: objects.clone(),
+            dependencies: ledger
+                .objects
+                .iter()
+                .filter(|(h, _)| hashes.contains(h.as_str()))
+                .map(|(h, (_, d))| (h.clone(), d.clone()))
+                .collect(),
+            inventory_dependencies: ledger
+                .inventory_dependencies
+                .iter()
+                .filter(|(h, _)| hashes.contains(h.as_str()))
+                .map(|(h, d)| (h.clone(), d.clone()))
+                .collect(),
+            durable_pins: pins.to_vec(),
+            recovery,
+            required_fields: inventory.required_fields.clone(),
+            required_kinds: objects
+                .iter()
+                .map(|r| r.record_kind)
+                .chain(std::iter::once(RecordKind::StoreManifest))
+                .collect(),
+            required_apis: inventory.required_apis.clone(),
+            mirrors: ledger
+                .mirrors
+                .iter()
+                .filter(|(r, _)| hashes.contains(r.sha256.as_str()))
+                .cloned()
+                .collect(),
+        })
+    }
+    pub(crate) fn mark_committed(&mut self, roots: &[ObjectRef]) -> Result<StorePin, BundleError> {
+        let pin = self.pin(roots)?;
+        let mut ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        ledger.committed = roots.to_vec();
+        ledger.can_collect = false;
+        Ok(pin)
+    }
+    pub(crate) fn allow_collection(&mut self) -> Result<(), BundleError> {
+        self.with_namespace(|n| n.verify())?;
+        self.inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .can_collect = true;
+        Ok(())
+    }
+}
+impl RecoveryInventory {
+    pub(crate) fn references(&self) -> Vec<ObjectRef> {
+        self.predecessors
+            .iter()
+            .cloned()
+            .chain(self.staging.clone())
+            .chain(self.pre_migration.clone())
+            .collect()
+    }
+    pub(crate) fn validate(&self) -> Result<(), BundleError> {
+        if self.predecessors.len() > 2 {
+            return Err(BundleError::Capacity("automatic predecessors"));
+        }
+        for reference in self.references() {
+            reference.validate()?;
+            if reference.record_kind != RecordKind::RootCheckpoint {
+                return Err(BundleError::Corrupt(
+                    "recovery reference is not exact root bytes".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ProjectStore {
+    pub(crate) fn usage_arc(&self) -> Arc<Mutex<StorageUsage>> {
+        Arc::clone(&self.inner.usage)
+    }
+    pub(crate) fn publish_inventory(
+        &mut self,
+        inventory: &RecoveryInventory,
+    ) -> Result<(), BundleError> {
+        inventory.validate()?;
+        let mut count = BoundedCounter {
+            bytes: 0,
+            limit: self.limits().control_bytes,
+        };
+        serde_json::to_writer(&mut count, inventory)
+            .map_err(|_| BundleError::Capacity("recovery inventory"))?;
+        let _encoded = self.reserve(0, count.bytes, 0, false)?;
+        let bytes =
+            serde_json::to_vec(inventory).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        self.publish_control(&bytes, false)
+    }
+    pub(crate) fn publish_root(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
+        self.publish_control(bytes, true)
+    }
+    fn publish_control(&mut self, bytes: &[u8], root: bool) -> Result<(), BundleError> {
+        let length = bytes.len() as u64;
+        if length > self.limits().control_bytes
+            || self
+                .usage()?
+                .metadata_bytes
+                .checked_add(length)
+                .is_none_or(|n| n > self.limits().metadata_bytes)
+        {
+            return Err(BundleError::Capacity("control publication"));
+        }
+        let reservation = self.reserve(length, 0, 0, false)?;
+        let result = if root {
+            self.with_namespace(|n| n.replace_root(bytes))
+        } else {
+            self.with_namespace(|n| {
+                n.replace_relative(&crate::bundle_recovery::inventory_path()?, bytes)
+            })
+        };
+        if let Err(error) = result {
+            if self.with_namespace(|n| Ok(n.is_uncertain()))? {
+                self.inner
+                    .ledger
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                    .pending_controls
+                    .push(reservation);
+                self.inner
+                    .usage
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("usage poisoned"))?
+                    .unsettled = true;
+            }
+            return Err(error);
+        }
+        reservation.seal(length)?;
+        let mut prior = if root {
+            self.inner.root_bytes.lock()
+        } else {
+            self.inner.inventory_bytes.lock()
+        }
+        .map_err(|_| BundleError::Capacity("control accounting"))?;
+        let mut usage = self
+            .inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        usage.physical_bytes = usage
+            .physical_bytes
+            .checked_sub(*prior)
+            .ok_or(BundleError::Capacity("control retirement underflow"))?;
+        usage.metadata_bytes = usage
+            .metadata_bytes
+            .checked_sub(*prior)
+            .and_then(|n| n.checked_add(length))
+            .ok_or(BundleError::Capacity("control metadata overflow"))?;
+        *prior = length;
+        Ok(())
+    }
+    pub(crate) fn support_fields(
+        &self,
+        roots: &[ObjectRef],
+    ) -> Result<BTreeSet<String>, BundleError> {
+        let mut fields = BTreeSet::new();
+        for reference in self.closure(roots)? {
+            if !matches!(
+                reference.record_kind,
+                RecordKind::Document
+                    | RecordKind::History
+                    | RecordKind::Lineage
+                    | RecordKind::RootCheckpoint
+            ) {
+                continue;
+            }
+            if reference.byte_length > self.limits().control_bytes {
+                return Err(BundleError::Capacity("support record bytes"));
+            }
+            let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
+            let mut file = self.open_verified(&reference)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(
+                    usize::try_from(reference.byte_length)
+                        .map_err(|_| BundleError::Capacity("record address space"))?,
+                )
+                .map_err(|_| BundleError::Capacity("support bytes allocation"))?;
+            (&mut file)
+                .take(reference.byte_length + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 != reference.byte_length {
+                return Err(BundleError::Corrupt("support bytes changed".into()));
+            }
+            if reference.record_kind == RecordKind::RootCheckpoint {
+                let admission = crate::bundle::BundleWriteAdmission::from_bytes(None, bytes)?;
+                admission.require_supported()?;
+                fields.extend(admission.data.inventory.required_fields.iter().cloned());
+            } else {
+                let _raw = crate::bundle_recovery::decode::<serde_json::Value>(
+                    &bytes,
+                    &self.inner.usage,
+                    reference.record_kind,
+                    &mut fields,
+                )?;
+            }
+        }
+        Ok(fields)
+    }
+}
+impl ProjectStore {
+    pub(crate) fn settle_controls(&mut self) -> Result<(), BundleError> {
+        let mut ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        if !ledger.pending.is_empty() {
+            return Err(BundleError::Unsettled);
+        }
+        ledger.pending_controls.clear();
+        let (root, inventory) = self.with_namespace(|n| {
+            Ok((
+                n.read_root()?.map_or(0, |b| b.len() as u64),
+                n.read(
+                    &crate::bundle_recovery::inventory_path()?,
+                    self.limits().control_bytes,
+                )?
+                .map_or(0, |b| b.len() as u64),
+            ))
+        })?;
+        let mut old_root = self
+            .inner
+            .root_bytes
+            .lock()
+            .map_err(|_| BundleError::Capacity("root accounting"))?;
+        let mut old_inventory = self
+            .inner
+            .inventory_bytes
+            .lock()
+            .map_err(|_| BundleError::Capacity("inventory accounting"))?;
+        let mut usage = self
+            .inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        let old = old_root
+            .checked_add(*old_inventory)
+            .ok_or(BundleError::Capacity("old controls overflow"))?;
+        let new = root
+            .checked_add(inventory)
+            .ok_or(BundleError::Capacity("new controls overflow"))?;
+        usage.physical_bytes = usage
+            .physical_bytes
+            .checked_sub(old)
+            .and_then(|n| n.checked_add(new))
+            .ok_or(BundleError::Capacity("control reconciliation accounting"))?;
+        usage.metadata_bytes = usage
+            .metadata_bytes
+            .checked_sub(old)
+            .and_then(|n| n.checked_add(new))
+            .ok_or(BundleError::Capacity("control reconciliation metadata"))?;
+        usage.peak_physical_bytes = usage.peak_physical_bytes.max(usage.physical_bytes);
+        usage.unsettled = false;
+        *old_root = root;
+        *old_inventory = inventory;
+        Ok(())
+    }
+}
+impl ProjectStore {
+    pub(crate) fn adopt_usage(
+        &mut self,
+        usage: Arc<Mutex<StorageUsage>>,
+    ) -> Result<(), BundleError> {
+        let inner = Arc::get_mut(&mut self.inner)
+            .ok_or_else(|| BundleError::Identity("store already shared".into()))?;
+        let prior = inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?
+            .clone();
+        let mut state = usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("admission usage poisoned"))?;
+        if state.physical_bytes != 0 || prior.objects != 0 {
+            return Err(BundleError::Identity("store usage already adopted".into()));
+        }
+        if state
+            .decoded_bytes
+            .checked_add(prior.metadata_bytes)
+            .is_none_or(|n| n > inner.limits.metadata_bytes)
+        {
+            return Err(BundleError::Capacity("admission/store overlap"));
+        }
+        state.physical_bytes = prior.physical_bytes;
+        state.metadata_bytes = prior.metadata_bytes;
+        state.peak_physical_bytes = state.peak_physical_bytes.max(prior.peak_physical_bytes);
+        drop(state);
+        inner.usage = usage;
+        Ok(())
+    }
+}
+impl ProjectStore {
+    /// Read a bounded opaque evidence snapshot. This is no decoder-use certification or lease grant.
+    pub fn read_evidence(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<StorageReservation<Vec<u8>>, BundleError> {
+        if reference.record_kind != RecordKind::OwnedEvidence
+            || reference.byte_length > self.limits().control_bytes
+        {
+            return Err(BundleError::Capacity("evidence snapshot"));
+        }
+        let _pin = self.pin(std::slice::from_ref(reference))?;
+        let charge = self.reserve(0, reference.byte_length, 0, false)?;
+        let file = self.open_verified(reference)?;
+        let bytes = crate::bundle_recovery::bounded_bytes(file, reference.byte_length)?;
+        if bytes.len() as u64 != reference.byte_length {
+            return Err(BundleError::Corrupt(
+                "evidence changed while reading".into(),
+            ));
+        }
+        Ok(charge.hold(bytes))
+    }
+    pub(crate) fn has_unsettled_objects(&self) -> Result<bool, BundleError> {
+        Ok(!self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .pending
+            .is_empty())
+    }
 }

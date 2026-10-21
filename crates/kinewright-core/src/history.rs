@@ -9,7 +9,7 @@ use crate::{Clip, ClipId, Document, JournalCommand, Operation};
 pub const HISTORY_BYTES: u64 = 32 * 1024 * 1024;
 pub const HISTORY_COMMANDS: usize = 65_536;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OperationIdentityEffect {
     pub created: Vec<ClipId>,
@@ -21,7 +21,7 @@ pub struct OperationIdentityEffect {
     pub split_results: Vec<Clip>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GestureBoundary {
     pub document: Arc<Document>,
@@ -29,7 +29,7 @@ pub struct GestureBoundary {
     pub coalesce_key: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryCursor {
     /// Oldest first; the last redo entry is the next redo.
@@ -37,7 +37,7 @@ pub struct HistoryCursor {
     pub redo: Vec<GestureBoundary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryBatch {
     pub order: u64,
@@ -47,7 +47,7 @@ pub struct HistoryBatch {
     pub redo_entries: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistorySnapshot {
     pub baseline: Arc<Document>,

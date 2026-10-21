@@ -3,8 +3,10 @@
 //! [`SidecarSession`] extraction delta).
 
 pub mod bundle;
+pub mod bundle_commit;
 pub mod bundle_copy;
 pub mod bundle_records;
+pub mod bundle_recovery;
 pub mod owned_inputs;
 pub mod receipts;
 pub mod storage_budget;

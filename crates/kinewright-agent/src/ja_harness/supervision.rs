@@ -227,7 +227,12 @@ fn capture(
 }
 
 #[allow(clippy::too_many_lines)]
-pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
+pub(super) fn run(
+    fixture: &Path,
+    output: &Path,
+    mode: Mode,
+    selection: Option<&str>,
+) -> Result<i32, String> {
     fs::create_dir(output).map_err(|e| format!("private output directory: {e}"))?;
     let root = output.canonicalize().map_err(|e| e.to_string())?;
     let control = root.join("supervisor-deadline.json");
@@ -252,6 +257,9 @@ pub(super) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, Stri
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(selection) = selection {
+        command.args(["--scenario", selection]);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;

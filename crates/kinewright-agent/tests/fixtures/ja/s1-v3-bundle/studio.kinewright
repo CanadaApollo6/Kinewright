@@ -1,0 +1,74 @@
+{
+  "format_version": 3,
+  "studio": {
+    "project_id": "719e495500d54cd38f3f822a99682a1b",
+    "generation": 1,
+    "manual_branch_id": "b513bf765721c553e2388af4e8868917",
+    "manual_switch_generation": 0,
+    "branch_index_ref": {
+      "sha256": "892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
+      "byte_length": 167,
+      "record_kind": "branch_index"
+    },
+    "input_manifest_ref": {
+      "sha256": "f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
+      "byte_length": 96,
+      "record_kind": "input_manifest"
+    },
+    "store_manifest_ref": {
+      "sha256": "3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
+      "byte_length": 11029,
+      "record_kind": "store_manifest"
+    }
+  },
+  "tracks": [
+    {
+      "id": 71,
+      "kind": "Video",
+      "clips": []
+    }
+  ],
+  "media_pool": [],
+  "color_context": {
+    "pipeline_state": "managed_sdr_v1",
+    "working": {
+      "primaries": "bt709",
+      "transfer": "linear",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "monitoring": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "rgb",
+      "range": "full",
+      "white_point": "d65",
+      "bit_depth": "float16",
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    },
+    "delivery": {
+      "primaries": "bt709",
+      "transfer": "bt709",
+      "matrix": "bt709",
+      "range": "limited",
+      "white_point": "d65",
+      "bit_depth": 8,
+      "confidence_basis_points": 10000,
+      "provenance": "application_default"
+    }
+  },
+  "fps": {
+    "numerator": 30,
+    "denominator": 1
+  },
+  "resolution": [
+    1920,
+    1080
+  ],
+  "duration": 0
+}

@@ -35,7 +35,11 @@ Storage limits remain provisional until L6's workload measurements.
    regressions (10/5/3 passed, no ignored pins). Ten storage mutation pairs failed
    their intended witness and passed after restoration. Exact summaries are in
    `commit-3.json`. No bundle root is declared durable at this stage.
-4. V3 publication and durable history: not committed.
+4. V3 publication and durable history: the Linux gate passed (`c4-resume-gate7`).
+   Exact summaries and predecessor identities are in `commit-4.json`. Both architecture
+   scans, all harness modules, all three explicit native bridges, the ceiling controls
+   and the caller/media selections passed. Known ignored pins remain named NOT RUN.
+   Fourteen targeted mutation red/restored-green pairs passed at the final source.
 5. Command receipts and issuer retirement: not committed.
 6. Durable bases, lineage and floors: not committed.
 7. Save As and first save: not committed.
@@ -94,3 +98,42 @@ remain NOT RUN with the native toolchain prerequisite recorded above.
 
 The gate runs new storage/revised witnesses before longer unchanged harness checks,
 without removing any required selection. This only changes ordering within step 4.
+
+### Resume, commit 4
+
+The inherited commit-4 diff built but had not passed its full gate. The resumed
+run finishes its lint, caller and lane checks before committing. The predecessor
+remains the existing detached `target/ja-s1-predecessor/source` checkout.
+
+Additional plan adjustments found during verification:
+
+- `project::predecessor_format_controls` must launch the sealed predecessor from
+  its own validated source checkout. Its source reporter derives HEAD from its
+  working directory; launching from the successor falsely associates the old
+  executable with the successor SHA. The helper now validates and selects the
+  source directory recorded by the prerequisite script.
+- Core's existing `skip_json_value` treated a nested comma as a closing bracket.
+  Reordered valid envelopes could therefore hide a later top-level version from
+  the scanner. The format test now covers nested objects and multi-member arrays;
+  commas leave depth unchanged. Without this repair, unsupported-inventory tests
+  could refuse for a mistaken version rather than exercise their intended guard.
+- The portable crash model replays a frozen, component-based production IO input
+  on platforms without Linux publication. Linux captures fresh production calls.
+  This is dropped-write model evidence; neither portable replay nor Linux process
+  death certifies native Windows storage durability.
+- The plan's new app refusal witness lives in the existing `app::in2b_tests`
+  module, alongside the real save/session harness. The gate explicitly selects it
+  and the new eval refusal witness in addition to the whole requested modules.
+
+Evidence pointers for these adjustments are
+`crates/kinewright-project/src/project.rs:630`,
+`crates/kinewright-core/src/model.rs:1394`,
+`crates/kinewright-project/tests/ja_s1_storage.rs:925` and `:1041`, and
+`crates/kinewright-app/src/app.rs:10693`.
+The native CLI integration test at
+`crates/kinewright-agent/tests/ja_baseline.rs:7` now retains the baseline red and
+expects the actual Linux revised history pass. The unchanged fixture hash and
+artifact hashes are checked in both modes. Windows executes the baseline there;
+its native durable-success properties remain NOT RUN and have separate refusal
+witnesses. This updates an obsolete revised-red expectation without weakening any
+baseline assertion.

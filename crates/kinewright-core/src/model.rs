@@ -1260,7 +1260,7 @@ fn effect_references_lut_asset(effect: &Effect, id: LutAssetId) -> bool {
 /// document's minimum required version (`kinewright-project`'s
 /// `min_required_format_version`), so a file without MO2 features stays 1;
 /// recovery journal headers carry this maximum.
-pub const PROJECT_FORMAT_VERSION: u32 = 2;
+pub const PROJECT_FORMAT_VERSION: u32 = 3;
 
 /// The `format_version` of serialised project-file bytes (`IN2B` §4 rule 1).
 ///
@@ -1271,8 +1271,7 @@ pub const PROJECT_FORMAT_VERSION: u32 = 2;
 /// Never fails: malformed bytes read as 1 and the real parse — the caller's —
 /// decides `Corrupt`.
 ///
-/// A dependency-free scan, not `serde_json` (core carries none outside
-/// dev-dependencies — the `json_escaped_len` precedent): it walks the
+/// A dependency-free header scan following the `json_escaped_len` precedent: it walks the
 /// top-level members with string and depth tracking, so a nested value that
 /// mentions the key — an asset name, a transcript word, a whole embedded
 /// document — cannot spoof the gate.
@@ -1405,7 +1404,8 @@ fn skip_json_value(bytes: &[u8], index: usize) -> Option<usize> {
                 depth += 1;
                 index += 1;
             }
-            b'}' | b']' | b',' => {
+            b',' if depth == 0 => return Some(index),
+            b'}' | b']' => {
                 if depth == 0 {
                     return Some(index);
                 }
@@ -1694,6 +1694,207 @@ impl Document {
     }
 }
 
+/// Validate raw persisted Document fields and enum spellings before projection.
+///
+/// This is structural support admission, independent of the project envelope version.
+/// # Errors
+/// Refuses unknown fields/variants instead of permitting serde's lossy fallbacks.
+pub fn document_support_fields(
+    raw: &serde_json::Value,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    let schema = SCHEMA.get_or_init(|| schemars::schema_for!(Document).to_value());
+    serialized_support_fields(raw, "document", schema)
+}
+/// Validate a raw persisted operation before its typed payload can discard fields.
+/// # Errors
+/// Refuses unknown fields/variants in the compiled operation model.
+pub fn operation_support_fields(
+    raw: &serde_json::Value,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    let schema = SCHEMA.get_or_init(|| schemars::schema_for!(crate::Operation).to_value());
+    serialized_support_fields(raw, "operation", schema)
+}
+/// Validate split-ancestry clip payloads without applying an operation.
+/// # Errors
+/// Refuses unknown fields/variants in the compiled clip model.
+pub fn clip_support_fields(
+    raw: &serde_json::Value,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    let schema = SCHEMA.get_or_init(|| schemars::schema_for!(Clip).to_value());
+    serialized_support_fields(raw, "clip", schema)
+}
+#[allow(clippy::too_many_lines)]
+/// Closed serialized history support, including every retained operation and document.
+/// # Errors
+/// Refuses fields or tags outside this build's compiled schema.
+pub fn history_support_fields(
+    raw: &serde_json::Value,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    static SCHEMA: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    let schema = SCHEMA.get_or_init(|| schemars::schema_for!(crate::HistorySnapshot).to_value());
+    serialized_support_fields(raw, "history", schema)
+}
+
+fn serialized_support_fields(
+    raw: &serde_json::Value,
+    name: &str,
+    schema: &serde_json::Value,
+) -> Result<std::collections::BTreeSet<String>, String> {
+    use std::collections::BTreeSet;
+    let mut fields = BTreeSet::new();
+    walk_serialized_support(raw, schema, schema, name, 0, &mut fields)?;
+    Ok(fields)
+}
+
+use serde_json::Value;
+fn matches_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "null" => value.is_null(),
+        "boolean" => value.is_boolean(),
+        "number" => value.is_number(),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        _ => false,
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exhaustive compiled-schema traversal"
+)]
+fn walk_serialized_support(
+    value: &Value,
+    schema: &Value,
+    root: &Value,
+    path: &str,
+    depth: u32,
+    fields: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    if depth > 128 {
+        return Err("raw support depth exceeded".into());
+    }
+    if schema == &Value::Bool(false) {
+        return Err(format!("unsupported value at {path}"));
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let local = reference
+            .strip_prefix('#')
+            .and_then(|r| root.pointer(r))
+            .ok_or_else(|| "nonlocal compiled schema reference".to_owned())?;
+        return walk_serialized_support(value, local, root, path, depth + 1, fields);
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(alternatives) = schema.get(key).and_then(Value::as_array) {
+            for alternative in alternatives {
+                let mut candidate = fields.clone();
+                if walk_serialized_support(
+                    value,
+                    alternative,
+                    root,
+                    path,
+                    depth + 1,
+                    &mut candidate,
+                )
+                .is_ok()
+                {
+                    *fields = candidate;
+                    return Ok(());
+                }
+            }
+            return Err(format!("unsupported variant at {path}"));
+        }
+    }
+    if let Some(variants) = schema.get("enum").and_then(Value::as_array)
+        && !variants.contains(value)
+    {
+        return Err(format!("unsupported enum at {path}"));
+    }
+    if let Some(constant) = schema.get("const")
+        && value != constant
+    {
+        return Err(format!("unsupported tag at {path}"));
+    }
+    if let Some(kind) = schema.get("type") {
+        let matches = kind.as_str().is_some_and(|k| matches_type(value, k))
+            || kind.as_array().is_some_and(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .any(|k| matches_type(value, k))
+            });
+        if !matches {
+            return Err(format!("unsupported shape at {path}"));
+        }
+    }
+    if let Some(all) = schema.get("allOf").and_then(Value::as_array) {
+        for member in all {
+            walk_serialized_support(value, member, root, path, depth + 1, fields)?;
+        }
+    }
+    if let Some(object) = value.as_object() {
+        if let Some(required) = schema.get("required").and_then(Value::as_array)
+            && required
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|k| !object.contains_key(k))
+        {
+            return Err(format!("missing required field at {path}"));
+        }
+        let properties = schema.get("properties").and_then(Value::as_object);
+        for (key, child) in object {
+            if let Some(property) = properties.and_then(|p| p.get(key)) {
+                let field = format!("{path}.{key}");
+                fields.insert(field.clone());
+                walk_serialized_support(child, property, root, &field, depth + 1, fields)?;
+            } else if let Some(additional) = schema.get("additionalProperties") {
+                if additional == &Value::Bool(false)
+                    || (properties.is_some() && additional == &Value::Bool(true))
+                {
+                    return Err(format!("unknown field at {path}"));
+                }
+                let field = format!("{path}.*");
+                fields.insert(field.clone());
+                walk_serialized_support(child, additional, root, &field, depth + 1, fields)?;
+            } else if properties.is_some() {
+                return Err(format!("unknown field at {path}"));
+            }
+        }
+    }
+    if let Some(array) = value.as_array() {
+        let tuple = schema.get("prefixItems").and_then(Value::as_array);
+        if let Some(tuple) = tuple {
+            for (child, item) in array.iter().zip(tuple) {
+                walk_serialized_support(
+                    child,
+                    item,
+                    root,
+                    &format!("{path}[]"),
+                    depth + 1,
+                    fields,
+                )?;
+            }
+        }
+        if let Some(items) = schema.get("items") {
+            for child in array.iter().skip(tuple.map_or(0, Vec::len)) {
+                walk_serialized_support(
+                    child,
+                    items,
+                    root,
+                    &format!("{path}[]"),
+                    depth + 1,
+                    fields,
+                )?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -1863,7 +2064,7 @@ mod tests {
     /// envelope tests and stage D2's eval test drive through real files.
     #[test]
     fn project_format_version_reads_the_top_level_key() {
-        assert_eq!(PROJECT_FORMAT_VERSION, 2);
+        assert_eq!(PROJECT_FORMAT_VERSION, 3);
         // Valid documents, differentially checked against `serde_json`.
         for document in [
             "{}",
@@ -1873,6 +2074,8 @@ mod tests {
             r#"{"format_version":999}"#,
             "{\n  \"format_version\" : 2,\n  \"tracks\": []\n}",
             r#"{"tracks":[],"format_version":2}"#,
+            r#"{"nested":{"a":1,"b":[1,2]},"format_version":3}"#,
+            r#"{"nested":[{"a":1,"b":2},{"c":3}],"format_version":999}"#,
             r#"{"asset":{"format_version":999}}"#,
             r#"{"name":"format_version: 999"}"#,
             r#"{"tracks":[{"format_version":999}],"format_version":2}"#,
@@ -2222,5 +2425,21 @@ mod tests {
         let off = effect.evaluated_at(TimeCode(7));
         assert!(!off.enabled);
         assert_eq!(off.enabled_curve, None);
+    }
+}
+
+#[cfg(test)]
+mod s1_support_tests {
+    use super::*;
+    #[test]
+    fn raw_support_refuses_unknown_fields_before_projection() {
+        let mut document = serde_json::to_value(Document::default()).unwrap();
+        assert!(document_support_fields(&document).is_ok());
+        document["unsupported_disabled_resource"] = serde_json::json!({"enabled":false,"api":99});
+        assert!(document_support_fields(&document).is_err());
+        let mut operation = serde_json::json!({"AddTrack":{"track":{"id":71,"kind":"Video","sync_lock":true,"clips":[]}}});
+        assert!(operation_support_fields(&operation).is_ok());
+        operation["AddTrack"]["track"]["Code"] = serde_json::json!({"enabled":false});
+        assert!(operation_support_fields(&operation).is_err());
     }
 }

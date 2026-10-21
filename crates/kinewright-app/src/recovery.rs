@@ -649,6 +649,16 @@ pub(crate) struct Recovery {
 }
 
 impl Recovery {
+    pub(crate) fn read_only() -> Self {
+        Self {
+            directory: PathBuf::new(),
+            path: PathBuf::new(),
+            recorder: None,
+            pending: vec![],
+            runtime_error: Arc::new(Mutex::new(None)),
+        }
+    }
+
     pub(crate) fn start(core: &Core, project_path: Option<&Path>) -> Self {
         #[cfg(test)]
         if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
@@ -716,6 +726,10 @@ impl Recovery {
     /// current snapshot. Core's initial subscription event makes this race-free
     /// with edits from the agent server.
     pub(crate) fn attach(&mut self, core: &Core, project_path: Option<&Path>) {
+        #[cfg(test)]
+        if let Some(path) = project_path {
+            kinewright_project::io_observer::mutation_attempt("journal_attach_enter", path);
+        }
         self.stop_active();
         let reserved: Vec<&Path> = self
             .pending
@@ -902,6 +916,9 @@ impl Recovery {
     }
 
     fn remove_journal(&self) {
+        if self.path.as_os_str().is_empty() {
+            return;
+        }
         remove_file_best_effort(&self.path, &self.runtime_error);
     }
 }

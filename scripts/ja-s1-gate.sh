@@ -99,6 +99,8 @@ if [[ "$stage" -eq 4 || "$stage" -eq 8 ]]; then
     run_selected I-headless cargo test -p kinewright-project --lib headless::tests
     run_selected I-lock cargo test -p kinewright-project --lib lockfile::race_tests
     run_selected I-app cargo test -p kinewright-app --bin kinewright-app app::tests
+    run_selected I-app-refusal cargo test -p kinewright-app --bin kinewright-app app::in2b_tests::save_as_unsupported_source_or_destination_has_zero_mutations -- --exact
+    run_selected I-eval-refusal cargo test -p kinewright-agent --bin kinewright-eval tests::rerender_refuses_v3_before_projection_or_output -- --exact
     run_selected I-project cargo test -p kinewright-app --bin kinewright-app project::tests
 fi
 if [[ "$stage" -ge 5 ]]; then run_selected receipts cargo test -p kinewright-project --features test-util --test ja_s1_receipts; fi

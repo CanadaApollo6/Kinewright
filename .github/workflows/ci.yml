@@ -76,6 +76,10 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Prepare sealed JA S1 predecessor controls
+        shell: bash
+        run: bash scripts/ja-s1-predecessor-controls.sh
+
       - name: Provision FFmpeg, test (fast tier), and lint
         shell: pwsh
         env:
@@ -169,6 +173,10 @@ jobs:
         run: |
           python3 scripts/slow_tests.py lint
           python3 scripts/slow_tests_selftest.py
+
+      - name: Prepare sealed JA S1 predecessor controls
+        shell: bash
+        run: bash scripts/ja-s1-predecessor-controls.sh
 
       - name: Provision FFmpeg, build, test (fast tier), and lint
         run: |

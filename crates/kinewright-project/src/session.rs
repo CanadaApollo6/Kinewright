@@ -302,6 +302,10 @@ impl SidecarSession {
         previous_digest: &str,
         prepare: impl FnOnce(&mut BTreeMap<IncidentId, Operation>) -> Option<RunningInvestigation>,
     ) -> std::io::Result<FlushOutcome> {
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(path) = project_path {
+            crate::io_observer::mutation_attempt("sidecar_flush_enter", path);
+        }
         if self.sidecar_suspended {
             return Ok(FlushOutcome::Skipped);
         }

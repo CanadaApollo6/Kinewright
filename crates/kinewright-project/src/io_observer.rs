@@ -45,6 +45,32 @@ pub(crate) fn note_bytes(operation: &'static str, path: &std::path::Path, bytes:
     });
 }
 
+pub(crate) fn note_digest(
+    operation: &'static str,
+    path: &std::path::Path,
+    sha256: String,
+    length: usize,
+) {
+    TRACE.with_borrow_mut(|trace| {
+        if let Some(trace) = trace {
+            if trace.events.len() == 128 {
+                trace.overflowed = true;
+            } else {
+                trace.events.push(IoObservation {
+                    operation,
+                    path: path.to_path_buf(),
+                    attempted_sha256: Some(sha256),
+                    attempted_length: Some(length),
+                });
+            }
+        }
+    });
+}
+/// Test observation at a caller's actual mutation entry, including app-private journal work.
+pub fn mutation_attempt(operation: &'static str, path: &std::path::Path) {
+    note(operation, path);
+}
+
 /// Capture only calls made by this thread in `run`. Nested observations refuse.
 /// # Panics
 /// Panics on a nested observation. Unwinding still clears the observer.

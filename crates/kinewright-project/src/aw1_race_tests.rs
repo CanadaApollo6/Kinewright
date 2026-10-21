@@ -1860,6 +1860,7 @@ fn defect_lock_object_deleted_under_a_live_owner() {
     let before = fs::read(&fx.project).unwrap();
     let saved = save_headless(
         &kinewright_core::Document::default(),
+        &crate::bundle::BundleWriteAdmission::new_document(),
         &fx.project,
         None,
         &mut session,
@@ -1999,6 +2000,7 @@ fn guard_save_as_transfer_refuses_on_a_lost_lock() {
     let fresh = fx.dir.path("save-as.kinewright");
     let saved = save_headless(
         &kinewright_core::Document::default(),
+        &crate::bundle::BundleWriteAdmission::new_document(),
         &fresh,
         None,
         &mut session,
@@ -2623,6 +2625,7 @@ fn j3_link_retargeted_after_acquire_refuses_the_next_save() {
     .session;
     let saved = save_headless(
         &kinewright_core::Document::default(),
+        &crate::bundle::BundleWriteAdmission::new_document(),
         &current,
         None,
         &mut session,

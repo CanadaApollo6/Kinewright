@@ -52,6 +52,8 @@ pub enum RecordKind {
     Document,
     History,
     BranchCheckpoint,
+    BranchIndex,
+    RootCheckpoint,
     SpecialistBase,
     HistoryFloor,
     RecoveryClose,
@@ -88,6 +90,8 @@ impl RecordKind {
             Self::Document
                 | Self::History
                 | Self::BranchCheckpoint
+                | Self::BranchIndex
+                | Self::RootCheckpoint
                 | Self::Lineage
                 | Self::StoreManifest
                 | Self::InputManifest
@@ -103,10 +107,15 @@ impl RecordKind {
         )
     }
     #[must_use]
+    pub const fn is_owned_bytes(self) -> bool {
+        self.is_blob() && !matches!(self, Self::RootCheckpoint)
+    }
+    #[must_use]
     pub const fn is_blob(self) -> bool {
         matches!(
             self,
-            Self::OwnedMedia
+            Self::RootCheckpoint
+                | Self::OwnedMedia
                 | Self::OwnedFont
                 | Self::OwnedNotice
                 | Self::OwnedLut
@@ -214,6 +223,7 @@ pub struct OccurrenceId {
 #[serde(deny_unknown_fields)]
 pub struct LineageRecord {
     pub branch_origin: BranchId,
+    pub baseline: BTreeMap<ClipId, OccurrenceId>,
     pub current: BTreeMap<ClipId, OccurrenceId>,
     pub undo: Vec<BTreeMap<ClipId, OccurrenceId>>,
     pub redo: Vec<BTreeMap<ClipId, OccurrenceId>>,

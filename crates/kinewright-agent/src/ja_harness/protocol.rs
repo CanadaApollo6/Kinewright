@@ -110,6 +110,11 @@ pub struct Action {
 pub enum Call {
     AdapterStatus(Empty),
     OwnedInputProbe(InputArgs),
+    BundleFixtureProbe(InputArgs),
+    CommentSubmit(CommentArgs),
+    CommentInspect(CommentArgs),
+    CommentRetire(CommentMaintenanceArgs),
+    CommentRotate(CommentMaintenanceArgs),
     StrictSave(IoProbeArgs),
     StrictRenameRefusal(IoProbeArgs),
     CoreStart(Empty),
@@ -135,6 +140,7 @@ pub enum Call {
     BarrierRelease(BarrierArgs),
     DropReply(ActionRef),
     ParticipantExit(Empty),
+    ParticipantRestart(Empty),
     ParticipantKill(Empty),
     ParticipantInventory(Empty),
     SpawnChild(Empty),
@@ -217,6 +223,24 @@ pub struct CommandArgs {
     pub input: String,
     pub expected_revision: Option<u64>,
     pub branch: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommentArgs {
+    pub path: PathBuf,
+    pub request: String,
+    pub text: String,
+    pub strokes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommentMaintenanceArgs {
+    pub path: PathBuf,
+    pub request: String,
+    #[serde(default)]
+    pub rotations: u32,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -418,6 +442,10 @@ pub fn validate_local_control_operations(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "validate every fixture action and prerequisite together"
+)]
 fn validate(f: &Fixture) -> Result<(), String> {
     if f.protocol != PROTOCOL || f.protocol_version != 1 {
         return Err("wrong protocol/version".into());
@@ -492,9 +520,33 @@ fn validate(f: &Fixture) -> Result<(), String> {
                     return Err("missing IO probe input".into());
                 }
             }
-            Call::OwnedInputProbe(a) => {
+            Call::OwnedInputProbe(a) | Call::BundleFixtureProbe(a) => {
                 if !f.inputs.contains_key(&a.input) {
                     return Err("missing owned-input probe input".into());
+                }
+            }
+            Call::CommentSubmit(a) | Call::CommentInspect(a) => {
+                relative_path(&a.path)?;
+                if !f.inputs.contains_key(&a.text)
+                    || !f.inputs.contains_key(&a.strokes)
+                    || a.request.is_empty()
+                    || a.request.len() > 128
+                    || a.request.contains(['/', '\\'])
+                    || a.original
+                        .as_ref()
+                        .is_some_and(|o| o.is_empty() || o.len() > 128 || o.contains(['/', '\\']))
+                {
+                    return Err("invalid bounded comment request roles".into());
+                }
+            }
+            Call::CommentRetire(a) | Call::CommentRotate(a) => {
+                relative_path(&a.path)?;
+                if a.request.is_empty()
+                    || a.request.len() > 128
+                    || a.request.contains(['/', '\\'])
+                    || a.rotations > 8
+                {
+                    return Err("invalid comment maintenance request".into());
                 }
             }
             Call::CoreSend(a) => {
