@@ -1,0 +1,598 @@
+//! Fixture-owned native processes and acknowledged observation barriers.
+//! This supervisor supplies no production guardian, receipts or leases.
+#![allow(clippy::missing_errors_doc)]
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{BufRead, BufReader, Read, Write},
+    path::{Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use super::{
+    baseline::Baseline,
+    protocol::{self, Action, CONTROL_BYTES, Call, LoadedFixture},
+    report::{Report, os_start_identity},
+};
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    protocol_version: u32,
+    sequence: u64,
+    action: Action,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Reply {
+    protocol_version: u32,
+    sequence: u64,
+    participant: String,
+    action_id: u32,
+    result: Result<Value, String>,
+}
+
+fn line(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, String> {
+    let mut bytes = Vec::new();
+    loop {
+        let buffer = reader.fill_buf().map_err(|e| e.to_string())?;
+        if buffer.is_empty() {
+            return if bytes.is_empty() {
+                Ok(None)
+            } else {
+                Err("incomplete JSONL record".into())
+            };
+        }
+        let length = buffer
+            .iter()
+            .position(|b| *b == b'\n')
+            .map_or(buffer.len(), |i| i + 1);
+        if bytes.len() + length > CONTROL_BYTES {
+            return Err("oversize JSONL record".into());
+        }
+        bytes.extend_from_slice(&buffer[..length]);
+        reader.consume(length);
+        if bytes.last() == Some(&b'\n') {
+            return Ok(Some(bytes));
+        }
+    }
+}
+
+fn write_line(out: &mut impl Write, value: &impl Serialize) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    if bytes.len() > CONTROL_BYTES {
+        return Err("oversize JSONL write".into());
+    }
+    out.write_all(&bytes)
+        .and_then(|()| out.flush())
+        .map_err(|e| e.to_string())
+}
+
+struct Worker {
+    child: Child,
+    name: String,
+    sequence: u64,
+    replies: mpsc::Receiver<Result<Reply, String>>,
+    stdout: Option<thread::JoinHandle<()>>,
+    stderr: Option<thread::JoinHandle<Result<Vec<u8>, String>>>,
+    root: PathBuf,
+}
+
+impl Worker {
+    fn spawn(exe: &Path, fixture: &Path, root: &Path, name: &str) -> Result<Self, String> {
+        let mut child = Command::new(exe)
+            .args(["--role", "worker", "--fixture"])
+            .arg(fixture)
+            .arg("--root")
+            .arg(root)
+            .args(["--participant", name])
+            .env_remove("REV2_HOOK")
+            .env_remove("REV2_SIGNALS")
+            .env_remove("REV2_EXIT")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        let stdout = child.stdout.take().ok_or("missing worker stdout")?;
+        let stderr = child.stderr.take().ok_or("missing worker stderr")?;
+        let (sender, replies) = mpsc::sync_channel(64);
+        let reader = thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            loop {
+                let next = line(&mut reader)
+                    .and_then(|record| record.ok_or_else(|| "worker EOF".into()))
+                    .and_then(|bytes| protocol::unique_json(&bytes))
+                    .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
+                let stop = next.is_err();
+                if sender.send(next).is_err() || stop {
+                    break;
+                }
+            }
+        });
+        let stderr = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr
+                .take(u64::try_from(CONTROL_BYTES + 1).map_err(|e| e.to_string())?)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > CONTROL_BYTES {
+                return Err("worker stderr quota exceeded".into());
+            }
+            Ok(bytes)
+        });
+        Ok(Self {
+            child,
+            name: name.into(),
+            sequence: 0,
+            replies,
+            stdout: Some(reader),
+            stderr: Some(stderr),
+            root: root.to_path_buf(),
+        })
+    }
+
+    fn receive(&self, action: u32, deadline_ms: u64) -> Result<Value, String> {
+        let reply = self
+            .replies
+            .recv_timeout(Duration::from_millis(deadline_ms))
+            .map_err(|e| format!("worker deadline/disconnect: {e}"))??;
+        if reply.protocol_version != 1
+            || reply.sequence != self.sequence
+            || reply.action_id != action
+            || reply.participant != self.name
+        {
+            return Err("worker protocol identity/order mismatch".into());
+        }
+        reply.result
+    }
+
+    fn request(&mut self, action: &Action, timeout: u64) -> Result<Value, String> {
+        self.sequence += 1;
+        write_line(
+            self.child.stdin.as_mut().ok_or("worker stdin closed")?,
+            &Request {
+                protocol_version: 1,
+                sequence: self.sequence,
+                action: action.clone(),
+            },
+        )?;
+        let reference = self.receive(action.id, timeout)?;
+        let relative = Path::new(
+            reference["relative_file"]
+                .as_str()
+                .ok_or("missing worker artifact")?,
+        );
+        protocol::relative_path(relative)?;
+        let length = reference["byte_length"]
+            .as_u64()
+            .ok_or("missing worker length")?;
+        if length > protocol::INDEX_BYTES {
+            return Err("worker artifact quota".into());
+        }
+        let bytes = protocol::read_bounded(&self.root.join(relative), length)?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != length
+            || kinewright_media::sha256_bytes(&bytes)
+                != reference["sha256"].as_str().ok_or("missing worker hash")?
+        {
+            return Err("worker artifact identity mismatch".into());
+        }
+        protocol::unique_json(&bytes)
+    }
+
+    fn finish(&mut self, kill: bool, report: &mut Report) -> Result<Value, String> {
+        let pid = self.child.id();
+        let before = os_children(pid);
+        drop(self.child.stdin.take());
+        if kill {
+            self.child.kill().map_err(|e| e.to_string())?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = self.child.try_wait().map_err(|e| e.to_string())? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                return Err("fixture cleanup_blocked: worker missed reap deadline".into());
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        if let Some(reader) = self.stdout.take() {
+            reader.join().map_err(|_| "worker stdout reader panicked")?;
+        }
+        let stderr = self
+            .stderr
+            .take()
+            .ok_or("worker already reaped")?
+            .join()
+            .map_err(|_| "worker stderr reader panicked")??;
+        let stderr = report.artifact(&format!("stderr-{}.txt", self.name), &stderr)?;
+        let result = json!({"pid":pid,"reaped":true,"status":status.to_string(),"killed":kill,"os_children_before_reap":before,"stderr":stderr,
+            "guardian_containment":"pending_baseline_witness"});
+        report.event(0, &self.name, "process_exit", result.clone())?;
+        if !kill && !status.success() {
+            return Err(format!("fixture participant cleanup exited {status}"));
+        }
+        Ok(result)
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        if self.child.try_wait().ok().flatten().is_none() {
+            // EOF gives the fixture worker a chance to reap its own child.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while self.child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(2));
+            }
+            if self.child.try_wait().ok().flatten().is_none() {
+                let _ = self.child.kill();
+            }
+            let _ = self.child.wait();
+        }
+    }
+}
+
+pub struct Controller {
+    workers: BTreeMap<String, Worker>,
+    dropped: BTreeSet<u32>,
+    waiting: BTreeSet<String>,
+}
+
+impl Controller {
+    pub fn new(loaded: &LoadedFixture, report: &mut Report) -> Result<Self, String> {
+        let mut controller = Self {
+            workers: BTreeMap::new(),
+            dropped: BTreeSet::new(),
+            waiting: BTreeSet::new(),
+        };
+        if loaded.fixture.initial.participants.is_empty() {
+            return Ok(controller);
+        }
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        if exe.file_stem().and_then(|s| s.to_str()) != Some("kinewright-ja-baseline") {
+            return Err("native baseline worker binary prerequisite missing".into());
+        }
+        let frozen = report.root.join("frozen");
+        fs::create_dir(&frozen).map_err(|e| e.to_string())?;
+        for (prefix, refs) in [
+            ("", &loaded.fixture.inputs),
+            ("oracle:", &loaded.fixture.oracles),
+        ] {
+            for (role, reference) in refs {
+                let path = frozen.join(&reference.relative_file);
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                fs::write(
+                    path,
+                    super::baseline::input(loaded, &format!("{prefix}{role}"))?,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        let fixture = frozen.join("fixture.json");
+        fs::write(&fixture, &loaded.bytes).map_err(|e| e.to_string())?;
+        let root = report
+            .root
+            .join("work")
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        for name in &loaded.fixture.initial.participants {
+            if !matches!(name.as_str(), "A" | "B") || controller.workers.contains_key(name) {
+                return Err("participants must be distinct A/B".into());
+            }
+            let worker = Worker::spawn(
+                &exe,
+                &fixture.canonicalize().map_err(|e| e.to_string())?,
+                &root,
+                name,
+            )?;
+            let ready = worker.receive(0, loaded.fixture.limits.setup_timeout_ms)?;
+            report.event(0, name, "process_spawn", ready)?;
+            controller.workers.insert(name.clone(), worker);
+        }
+        Ok(controller)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn dispatch(
+        &mut self,
+        action: &Action,
+        loaded: &LoadedFixture,
+        observations: &BTreeMap<u32, Value>,
+        report: &mut Report,
+    ) -> Result<Option<(Value, bool)>, String> {
+        if let Some(original) = action.retry_of {
+            let original = loaded
+                .fixture
+                .actions
+                .iter()
+                .find(|a| a.id == original && a.id < action.id)
+                .ok_or("invalid retry origin")?;
+            if original.participant != action.participant
+                || serde_json::to_value(&original.call).map_err(|e| e.to_string())?
+                    != serde_json::to_value(&action.call).map_err(|e| e.to_string())?
+            {
+                return Err("retry changed original action bytes/participant".into());
+            }
+            report.event(
+                action.id,
+                &action.participant,
+                "retry_original_action",
+                json!({"original_action_id":original.id}),
+            )?;
+        }
+        match &action.call {
+            Call::DropReply(args) => {
+                if args.action_id <= action.id
+                    || !loaded.fixture.actions.iter().any(|a| {
+                        a.id == args.action_id
+                            && matches!(
+                                a.call,
+                                Call::CoreSend(_) | Call::HeadlessSave(_) | Call::ProjectSave(_)
+                            )
+                    })
+                {
+                    return Err("invalid reply-drop target".into());
+                }
+                self.dropped.insert(args.action_id);
+                Ok(Some((json!({"armed_for":args.action_id}), true)))
+            }
+            Call::BarrierWait(args) => {
+                let barrier = loaded
+                    .fixture
+                    .barriers
+                    .iter()
+                    .find(|b| b.name == args.name)
+                    .ok_or("unknown barrier")?;
+                super::require_control(&barrier.positive_control, report)?;
+                if barrier.after >= action.id || !observations.contains_key(&barrier.after) {
+                    return Err("barrier lacks actual acknowledged observation".into());
+                }
+                self.waiting.insert(args.name.clone());
+                Ok(Some((
+                    json!({"barrier":args.name,"acknowledged_action":barrier.after,"waiting":true}),
+                    true,
+                )))
+            }
+            Call::BarrierRelease(args) => {
+                if !self.waiting.remove(&args.name) {
+                    return Err("barrier was not acknowledged".into());
+                }
+                Ok(Some((json!({"barrier":args.name,"released":true}), true)))
+            }
+            Call::ParticipantExit(_) | Call::ParticipantKill(_) => {
+                let mut worker = self
+                    .workers
+                    .remove(&action.participant)
+                    .ok_or("unknown/live participant")?;
+                let kill = matches!(action.call, Call::ParticipantKill(_));
+                if kill {
+                    // Never manufacture guardian behavior: forceful death with
+                    // descendants remains pending. Only a verified empty worker
+                    // may be killed by this fixture control.
+                    let inventory = Action {
+                        call: Call::ParticipantInventory(protocol::Empty {}),
+                        ..action.clone()
+                    };
+                    let inventory =
+                        worker.request(&inventory, loaded.fixture.limits.action_timeout_ms)?;
+                    if inventory["owned_child"].is_object()
+                        || os_children(worker.child.id()).is_some_and(|v| !v.is_empty())
+                    {
+                        return Err(
+                            "forceful descendant cleanup needs production guardian; pending".into(),
+                        );
+                    }
+                } else {
+                    worker.request(action, loaded.fixture.limits.action_timeout_ms)?;
+                }
+                Ok(Some((worker.finish(kill, report)?, true)))
+            }
+            _ if self.workers.contains_key(&action.participant) => {
+                let result = self
+                    .workers
+                    .get_mut(&action.participant)
+                    .ok_or("missing worker")?
+                    .request(action, loaded.fixture.limits.action_timeout_ms)?;
+                Ok(Some((result, !self.dropped.remove(&action.id))))
+            }
+            _ if action.participant != "main" && action.participant != "controller" => {
+                Err("participant not live".into())
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn cleanup(&mut self, report: &mut Report) -> Result<(), String> {
+        let mut failures = Vec::new();
+        for (_, mut worker) in std::mem::take(&mut self.workers) {
+            if let Err(error) = worker.finish(false, report) {
+                failures.push(error);
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
+    }
+}
+
+fn os_children(pid: u32) -> Option<Vec<u32>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut children = BTreeSet::new();
+        for task in fs::read_dir(format!("/proc/{pid}/task")).ok()? {
+            let task = task.ok()?;
+            let text = fs::read_to_string(task.path().join("children")).ok()?;
+            for child in text.split_whitespace() {
+                children.insert(child.parse().ok()?);
+            }
+        }
+        Some(children.into_iter().collect())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+struct OwnedChild(Child);
+impl OwnedChild {
+    fn retire(&mut self) -> Result<Value, String> {
+        let pid = self.0.id();
+        drop(self.0.stdin.take());
+        let status = self.0.wait().map_err(|e| e.to_string())?;
+        Ok(json!({"pid":pid,"reaped":true,"status":status.to_string()}))
+    }
+}
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+/// Exact fixed worker/sentinel roles. No fixture shell snippets are executable.
+#[allow(clippy::too_many_lines)] // One fixed wire loop and its exhaustive process-only controls.
+pub fn worker_cli(args: &[String]) -> Result<i32, String> {
+    if args == ["--role", "sentinel"] {
+        let mut byte = [0_u8];
+        while std::io::stdin()
+            .read(&mut byte)
+            .map_err(|e| e.to_string())?
+            != 0
+        {}
+        return Ok(0);
+    }
+    if args.len() != 8
+        || args[0] != "--role"
+        || args[1] != "worker"
+        || args[2] != "--fixture"
+        || args[4] != "--root"
+        || args[6] != "--participant"
+    {
+        return Err("invalid fixed worker arguments".into());
+    }
+    let loaded = protocol::load(Path::new(&args[3]))?;
+    let root = Path::new(&args[5]);
+    let participant = &args[7];
+    if !matches!(participant.as_str(), "A" | "B") {
+        return Err("invalid worker identity".into());
+    }
+    let mut baseline = Baseline::new(root)?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut stdout = std::io::stdout().lock();
+    write_line(
+        &mut stdout,
+        &Reply {
+            protocol_version: 1,
+            sequence: 0,
+            action_id: 0,
+            participant: participant.clone(),
+            result: Ok(
+                json!({"pid":std::process::id(),"os_start_identity":os_start_identity(std::process::id()),"executable_sha256":kinewright_media::sha256_file(&exe).map_err(|e| e.to_string())?,"os_children":os_children(std::process::id())}),
+            ),
+        },
+    )?;
+    let mut stdin = BufReader::new(std::io::stdin().lock());
+    let mut sequence = 0;
+    let mut previous = 0;
+    let mut child: Option<OwnedChild> = None;
+    let mut written = 0_u64;
+    while let Some(bytes) = line(&mut stdin)? {
+        let request: Request =
+            serde_json::from_value(protocol::unique_json(&bytes)?).map_err(|e| e.to_string())?;
+        sequence += 1;
+        if request.protocol_version != 1
+            || request.sequence != sequence
+            || request.action.participant != *participant
+            || request.action.id <= previous
+        {
+            return Err("worker request identity/order mismatch".into());
+        }
+        previous = request.action.id;
+        let exit = matches!(request.action.call, Call::ParticipantExit(_));
+        let result = match &request.action.call {
+            Call::ParticipantInventory(_) => Ok(
+                json!({"pid":std::process::id(),"owned_child":child.as_ref().map(|c| json!({"pid":c.0.id(),"os_start_identity":os_start_identity(c.0.id())})),"os_children":os_children(std::process::id())}),
+            ),
+            Call::SpawnChild(_) => {
+                if child.is_some() {
+                    return Err("one fixture child allowed".into());
+                }
+                let spawned = Command::new(&exe)
+                    .args(["--role", "sentinel"])
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                let identity = json!({"pid":spawned.id(),"os_start_identity":os_start_identity(spawned.id()),"executable_sha256":kinewright_media::sha256_file(&exe).map_err(|e| e.to_string())?});
+                child = Some(OwnedChild(spawned));
+                Ok(identity)
+            }
+            Call::ChildExit(_) => child.take().ok_or("no fixture child")?.retire(),
+            Call::ParticipantExit(_) => {
+                let retired = child.take().map(|mut c| c.retire()).transpose()?;
+                Ok(
+                    json!({"owned_child_retired":retired,"os_children":os_children(std::process::id())}),
+                )
+            }
+            call => baseline.execute(call, &loaded),
+        };
+        let result = result.and_then(|value| {
+            let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
+            written = written.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            if written > loaded.fixture.limits.output_bytes { return Err("worker output quota".into()); }
+            let relative = format!("worker-{participant}-{previous}.json");
+            fs::write(root.join(&relative), &bytes).map_err(|e| e.to_string())?;
+            Ok(json!({"relative_file":relative,"byte_length":bytes.len(),"sha256":kinewright_media::sha256_bytes(&bytes)}))
+        });
+        write_line(
+            &mut stdout,
+            &Reply {
+                protocol_version: 1,
+                sequence,
+                participant: participant.clone(),
+                action_id: previous,
+                result,
+            },
+        )?;
+        if exit {
+            break;
+        }
+    }
+    if let Some(mut child) = child.take() {
+        child.retire()?;
+    }
+    baseline.finish()?;
+    Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn wire_reader_refuses_oversize_partial_and_preserves_i64() {
+        assert!(line(&mut BufReader::new(&b"partial"[..])).is_err());
+        assert!(line(&mut BufReader::new(&vec![b'x'; CONTROL_BYTES + 1][..])).is_err());
+        let raw = b"{\"frame\":-9223372036854775808}\n";
+        assert_eq!(line(&mut BufReader::new(&raw[..])).unwrap().unwrap(), raw);
+    }
+}

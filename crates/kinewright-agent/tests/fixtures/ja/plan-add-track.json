@@ -1,0 +1,21 @@
+[
+  {
+    "op": "add_track",
+    "track": {
+      "id": 1,
+      "kind": "Video",
+      "clips": []
+    }
+  },
+  {
+    "op": "add_solid_clip",
+    "track": 1,
+    "timeline_start": 0,
+    "duration": 30,
+    "color": {
+      "r": 24,
+      "g": 88,
+      "b": 152
+    }
+  }
+]

@@ -1,0 +1,199 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "recording-loopback",
+  "gate_ids": [
+    "JA1.G12",
+    "JA1.G14"
+  ],
+  "lane": "media",
+  "requirements": [],
+  "inputs": {
+    "script": {
+      "relative_file": "scripted-two-sessions.json",
+      "sha256": "4278ce1f4822fb08349a9bdedc6445233585ce9b9aac21105b264114b3a4d31c",
+      "byte_length": 1340,
+      "kind": "input"
+    },
+    "add": {
+      "relative_file": "plan-add-track.json",
+      "sha256": "6aa91c79158333c3f3e8adbfe411dc61f1487d4de5856b963a1d02d1a3ac89e8",
+      "byte_length": 276,
+      "kind": "input"
+    },
+    "remove": {
+      "relative_file": "plan-remove-track.json",
+      "sha256": "c971c2c3544795cb0ccf2e557d588a189e7b0c1be3506e63ba1641dd8cca3459",
+      "byte_length": 53,
+      "kind": "input"
+    },
+    "undo": {
+      "relative_file": "command-undo.json",
+      "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
+      "byte_length": 7,
+      "kind": "input"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": [],
+    "document": null
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "server_start",
+      "args": {}
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "scripted_session",
+      "args": {
+        "input": "script"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "first-session-forwarded-unchanged",
+        "observation": 3,
+        "pointer": "/sessions/0/forwarded_equals_pumped",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 5,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "second-session-forwarded-unchanged",
+        "observation": 3,
+        "pointer": "/sessions/1/forwarded_equals_pumped",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "prepared_commit",
+      "args": {
+        "input": "add",
+        "expected_revision": 0
+      }
+    },
+    {
+      "id": 7,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "ordinary-prepared-plan-commits",
+        "observation": 6,
+        "pointer": "/trace/commit_succeeded",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "prepared_commit",
+      "args": {
+        "input": "remove",
+        "expected_revision": 1,
+        "confirmation": true
+      }
+    },
+    {
+      "id": 9,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "destructive-confirmed-plan-commits",
+        "observation": 8,
+        "pointer": "/trace/commit_succeeded",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 10,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "undo"
+      }
+    },
+    {
+      "id": 11,
+      "participant": "main",
+      "action": "prepared_commit",
+      "args": {
+        "input": "remove",
+        "expected_revision": 3,
+        "confirmation": false
+      }
+    },
+    {
+      "id": 12,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "refused-confirmation-does-not-commit",
+        "observation": 11,
+        "pointer": "/trace/commit_succeeded",
+        "oracle": "false",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "input"
+    },
+    "false": {
+      "relative_file": "oracle-false.json",
+      "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+      "byte_length": 6,
+      "kind": "input"
+    },
+    "one": {
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "byte_length": 2,
+      "kind": "input"
+    },
+    "empty": {
+      "relative_file": "oracle-empty-array.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "byte_length": 3,
+      "kind": "input"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 16777216,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

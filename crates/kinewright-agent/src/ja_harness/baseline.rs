@@ -22,15 +22,21 @@ pub struct Baseline {
     pub core: Option<Core>,
     branches: BTreeMap<String, TimelineBranch>,
     pub root: PathBuf,
+    lock: Option<kinewright_project::LockfileHandle>,
+    server: Option<crate::McpServer>,
+    media: Option<Arc<kinewright_media::FfmpegMediaEngine>>,
 }
 
 impl Baseline {
     pub fn new(root: &Path) -> Result<Self, String> {
-        fs::create_dir(root).map_err(|e| e.to_string())?;
+        fs::create_dir_all(root).map_err(|e| e.to_string())?;
         Ok(Self {
             core: None,
             branches: BTreeMap::new(),
             root: root.to_path_buf(),
+            lock: None,
+            server: None,
+            media: None,
         })
     }
 
@@ -52,6 +58,64 @@ impl Baseline {
     #[allow(clippy::too_many_lines)] // Exhaustive current-API dispatch, with no second host.
     pub fn execute(&mut self, call: &Call, fixture: &LoadedFixture) -> Result<Value, String> {
         match call {
+            Call::LockAcquire(args) => {
+                if self.lock.is_some() {
+                    return Err("participant already holds a lock".into());
+                }
+                let path = self.output_path(&args.path)?;
+                match kinewright_project::acquire_project_lock_with_policy(
+                    &path,
+                    kinewright_project::LockMode::Headless,
+                    "http://127.0.0.1:9/mcp",
+                    &self.root.join("recovery"),
+                    1,
+                    std::time::Duration::ZERO,
+                ) {
+                    Ok(acquired) => {
+                        self.lock = Some(acquired.handle);
+                        Ok(json!({"acquired":true}))
+                    }
+                    Err(error) => Ok(json!({"acquired":false,"error":error.to_string()})),
+                }
+            }
+            Call::LockVerify(_) => {
+                Ok(json!({"verified":self.lock.as_ref().ok_or("no held lock")?.verify().is_ok()}))
+            }
+            Call::LockRelease(_) => {
+                self.lock
+                    .take()
+                    .ok_or("no held lock")?
+                    .release()
+                    .map_err(|e| e.to_string())?;
+                Ok(json!({"released":true}))
+            }
+            Call::HeadlessSave(args) => self.headless_save(&args.path),
+            Call::ServerStart(_) => {
+                if self.server.is_some() {
+                    return Err("server already started".into());
+                }
+                let media = Arc::new(
+                    kinewright_media::FfmpegMediaEngine::new()
+                        .map_err(|e| format!("media prerequisite NOT RUN: {e}"))?,
+                );
+                self.server = Some(
+                    crate::McpServer::start(self.core()?.clone(), media.clone(), media.clone())
+                        .map_err(|e| e.to_string())?,
+                );
+                self.media = Some(media);
+                Ok(
+                    json!({"endpoint":self.server.as_ref().ok_or("no server")?.endpoint(),"provider":null}),
+                )
+            }
+            Call::ScriptedSession(args) => super::recording::scripted_session(
+                self.server.as_ref().ok_or("server not started")?,
+                input(fixture, &args.input)?,
+            ),
+            Call::PreparedCommit(args) => super::recording::prepared_commit(
+                self.server.as_ref().ok_or("server not started")?,
+                args,
+                input(fixture, &args.input)?,
+            ),
             Call::CoreStart(_) => {
                 let document = match &fixture.fixture.initial.document {
                     None => Document::default(),
@@ -205,6 +269,45 @@ impl Baseline {
         }
     }
 
+    fn headless_save(&self, relative: &Path) -> Result<Value, String> {
+        use kinewright_project::{SidecarMode, SidecarSession, digest_bytes};
+        use std::sync::RwLock;
+        let path = self.output_path(relative)?;
+        let (revision, document) = self.snapshot()?;
+        let digest = fs::read(&path).map_or_else(|_| String::new(), |b| digest_bytes(&b));
+        let mut loaded = SidecarSession::load(
+            &SidecarMode::Load {
+                project_digest: digest.clone(),
+            },
+            Some(&path),
+            Arc::new(RwLock::new(kinewright_core::IncidentLog::default())),
+            revision,
+            None,
+            None,
+        )
+        .session;
+        let recovery = self.root.join("recovery");
+        fs::create_dir_all(&recovery).map_err(|e| e.to_string())?;
+        let (result, trace) = io_observer::observe(|| {
+            kinewright_project::save_headless(
+                &document,
+                &path,
+                None,
+                &mut loaded,
+                &digest,
+                revision,
+                &recovery,
+                self.lock.as_ref(),
+            )
+        });
+        match result {
+            Ok(result) => Ok(
+                json!({"saved":true,"sidecar":format!("{:?}",result.sidecar),"file":file_value(&path)?,"io":trace}),
+            ),
+            Err(error) => Ok(json!({"saved":false,"error":error.to_string(),"io":trace})),
+        }
+    }
+
     pub fn output_path(&self, relative: &Path) -> Result<PathBuf, String> {
         super::protocol::relative_path(relative)?;
         let path = self.root.join(relative);
@@ -225,6 +328,28 @@ impl Baseline {
 
     pub fn history(&self) -> Result<Value, String> {
         history_value(self.core()?)
+    }
+
+    pub fn finish(&mut self) -> Result<Value, String> {
+        if let Some(server) = self.server.take() {
+            server.shutdown();
+        }
+        let media = if let Some(media) = self.media.take() {
+            let finished = media.teardown_observer();
+            drop(media);
+            if finished.recv_timeout(std::time::Duration::from_secs(30))
+                != Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+            {
+                return Err("media worker teardown not observed; NOT RUN".into());
+            }
+            Some(json!({"worker_finished":true}))
+        } else {
+            None
+        };
+        if let Some(lock) = self.lock.take() {
+            lock.release().map_err(|e| e.to_string())?;
+        }
+        Ok(json!({"media":media}))
     }
 
     fn target(&self, branch: Option<&str>) -> Result<Core, String> {
@@ -273,6 +398,12 @@ impl Baseline {
                 json!({"loaded":false,"error":error,"original_bytes_unchanged":fs::read(path).map_err(|e| e.to_string())? == raw}),
             ),
         }
+    }
+}
+
+impl Drop for Baseline {
+    fn drop(&mut self) {
+        let _ = self.finish();
     }
 }
 

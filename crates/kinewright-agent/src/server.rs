@@ -494,6 +494,8 @@ pub enum McpServerError {
 pub type IncidentLogHandle = Arc<RwLock<IncidentLog>>;
 
 pub struct McpServer {
+    #[cfg(feature = "eval-harness")]
+    ja_request_counts: Arc<[std::sync::atomic::AtomicU64; 2]>,
     endpoint: String,
     confirmations: ConfirmationBroker,
     /// The saved project file path this session owns, or `None` for a project
@@ -863,11 +865,15 @@ impl McpServer {
         .with_capability_denylist(capability_denylist)
         .with_investigator_context(investigator)
         .with_served_tool_allowlist(served_tool_allowlist);
+        #[cfg(feature = "eval-harness")]
+        let ja_request_counts = Arc::clone(&handler.ja_request_counts);
         let server_thread = thread::Builder::new()
             .name("kinewright-mcp".to_owned())
             .spawn(move || run_server(listener, handler, shutdown_rx, worker_threads))
             .map_err(McpServerError::Thread)?;
         Ok(Self {
+            #[cfg(feature = "eval-harness")]
+            ja_request_counts,
             endpoint,
             confirmations,
             project_path,
@@ -881,6 +887,15 @@ impl McpServer {
     #[must_use]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Actual loopback tool-handler ingress/completion counts, eval only.
+    #[cfg(feature = "eval-harness")]
+    #[must_use]
+    pub fn ja_request_counts(&self) -> [u64; 2] {
+        self.ja_request_counts
+            .each_ref()
+            .map(|n| n.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     #[must_use]
@@ -1015,6 +1030,8 @@ fn run_server(
 
 #[derive(Clone)]
 struct KinewrightMcp {
+    #[cfg(feature = "eval-harness")]
+    ja_request_counts: Arc<[std::sync::atomic::AtomicU64; 2]>,
     core: Core,
     playback: Arc<dyn Playback>,
     analysis: Arc<dyn Analysis>,
@@ -1077,6 +1094,10 @@ impl KinewrightMcp {
     ) -> Self {
         Self {
             core,
+            #[cfg(feature = "eval-harness")]
+            ja_request_counts: Arc::new(std::array::from_fn(|_| {
+                std::sync::atomic::AtomicU64::new(0)
+            })),
             playback,
             analysis,
             export_queue,
@@ -11872,6 +11893,10 @@ impl ServerHandler for KinewrightMcp {
         context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<CallToolResponse, McpError>> + Send + '_ {
         let service = self.clone();
+        #[cfg(feature = "eval-harness")]
+        let ja_counts = Arc::clone(&self.ja_request_counts);
+        #[cfg(feature = "eval-harness")]
+        ja_counts[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let solo = (request.name == "invoke_capability")
             .then(|| request.arguments.as_ref()?.get("name")?.as_str())
             .flatten()
@@ -11896,6 +11921,8 @@ impl ServerHandler for KinewrightMcp {
             } else {
                 reply
             };
+            #[cfg(feature = "eval-harness")]
+            ja_counts[1].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             reply.map(Into::into)
         }
     }

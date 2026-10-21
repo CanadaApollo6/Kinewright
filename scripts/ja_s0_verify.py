@@ -97,7 +97,9 @@ def main():
         run("native-harness-tests", cargo + ["test", "-p", "kinewright-agent", "--features", "eval-harness", "--test", "ja_baseline", "--", "--test-threads=1"])
     for i, row in enumerate(rows):
         affected_s0_2 = args.stage == 2 and (row["stage"] == 1 or row["package"] == "kinewright-core")
-        if row["stage"] != args.stage and args.stage != 5 and not affected_s0_2:
+        affected_s0_3 = args.stage == 3 and row["test"].split("::")[-1] in {
+            "an_idle_engine_holds_no_preview_reader_or_decoder", "dropping_the_engine_stops_the_preview_thread", "sync_decoders_counts_open_decoders_until_teardown"}
+        if row["stage"] != args.stage and args.stage != 5 and not affected_s0_2 and not affected_s0_3:
             continue
         target = row["target"].split(":")
         flag = ["--lib"] if target == ["lib"] else ["--" + target[0], target[1]]

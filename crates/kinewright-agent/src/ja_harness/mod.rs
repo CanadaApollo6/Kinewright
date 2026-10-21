@@ -1,7 +1,9 @@
 //! Job A's eval-only baseline CLI and assertion runner.
 #![allow(clippy::missing_errors_doc)]
 pub mod baseline;
+pub mod controller;
 pub mod protocol;
+pub mod recording;
 pub mod report;
 
 use std::{collections::BTreeMap, path::Path, time::Instant};
@@ -36,50 +38,77 @@ pub fn run(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String
 fn execute(loaded: &LoadedFixture, report: &mut Report) -> Result<(), String> {
     prerequisites(&loaded.fixture)?;
     let mut adapter = baseline::Baseline::new(&report.root.join("work"))?;
+    let mut controller = controller::Controller::new(loaded, report)?;
     let mut observed = BTreeMap::new();
-    for action in &loaded.fixture.actions {
-        if action.after.is_some_and(|id| !observed.contains_key(&id)) {
-            return Err("action prerequisite was not observed".into());
-        }
-        let started = Instant::now();
-        match &action.call {
-            Call::AssertObserved(assertion) => {
-                assert_observed(assertion, loaded, &observed, report)?;
-                if report
-                    .assertions
-                    .last()
-                    .is_some_and(|a| a["evidence_class"] == "control" && a["passed"] == false)
-                {
-                    break;
+    let mut completed = std::collections::BTreeSet::new();
+    let result = (|| {
+        for action in &loaded.fixture.actions {
+            if action.after.is_some_and(|id| !completed.contains(&id)) {
+                return Err("action prerequisite was not observed".into());
+            }
+            let started = Instant::now();
+            match &action.call {
+                Call::AssertObserved(assertion) => {
+                    assert_observed(assertion, loaded, &observed, report)?;
+                    if report
+                        .assertions
+                        .last()
+                        .is_some_and(|a| a["evidence_class"] == "control" && a["passed"] == false)
+                    {
+                        break;
+                    }
+                }
+                Call::SurfaceAbsent(args) => {
+                    require_control(&args.positive_control, report)?;
+                    let pending = json!({"disposition":"surface_absent","surface":args.surface,"owner":args.owner,
+                    "baseline_witness":"pending_baseline_witness","positive_control":args.positive_control});
+                    report.pending.push(pending.clone());
+                    report.event(action.id, &action.participant, "pending", pending)?;
+                }
+                call => {
+                    let (observation, delivered) =
+                        match controller.dispatch(action, loaded, &observed, report)? {
+                            Some(result) => result,
+                            None => (adapter.execute(call, loaded)?, true),
+                        };
+                    let adapter_ns = started.elapsed().as_nanos().to_string();
+                    let observer_started = Instant::now();
+                    let bytes = serde_json::to_vec(&observation).map_err(|e| e.to_string())?;
+                    let artifact =
+                        report.artifact(&format!("observation-{}.json", action.id), &bytes)?;
+                    report.event(
+                        action.id,
+                        &action.participant,
+                        if delivered {
+                            "observation"
+                        } else {
+                            "reply_dropped"
+                        },
+                        artifact.clone(),
+                    )?;
+                    report.observations.push(json!({"action_id":action.id,"participant":action.participant,"reply_delivered":delivered,"artifact":artifact}));
+                    report.event(action.id, &action.participant, "observer_timing", json!({"adapter_elapsed_ns":adapter_ns,"observer_elapsed_ns":observer_started.elapsed().as_nanos().to_string()}))?;
+                    if delivered {
+                        observed.insert(action.id, observation);
+                    }
                 }
             }
-            Call::SurfaceAbsent(args) => {
-                require_control(&args.positive_control, report)?;
-                let pending = json!({"disposition":"surface_absent","surface":args.surface,"owner":args.owner,
-                    "baseline_witness":"pending_baseline_witness","positive_control":args.positive_control});
-                report.pending.push(pending.clone());
-                report.event(action.id, &action.participant, "pending", pending)?;
+            if started.elapsed().as_millis() > u128::from(loaded.fixture.limits.action_timeout_ms) {
+                return Err("action deadline exceeded; incomplete evidence".into());
             }
-            call => {
-                let observation = adapter.execute(call, loaded)?;
-                let bytes = serde_json::to_vec(&observation).map_err(|e| e.to_string())?;
-                let artifact =
-                    report.artifact(&format!("observation-{}.json", action.id), &bytes)?;
-                report.event(
-                    action.id,
-                    &action.participant,
-                    "observation",
-                    artifact.clone(),
-                )?;
-                report.observations.push(json!({"action_id":action.id,"participant":action.participant,"artifact":artifact}));
-                observed.insert(action.id, observation);
-            }
+            completed.insert(action.id);
         }
-        if started.elapsed().as_millis() > u128::from(loaded.fixture.limits.action_timeout_ms) {
-            return Err("action deadline exceeded; incomplete evidence".into());
-        }
+        Ok(())
+    })();
+    let cleanup = controller.cleanup(report).and_then(|()| {
+        let observation = adapter.finish()?;
+        report.event(0, "main", "adapter_cleanup", observation)
+    });
+    match (result, cleanup) {
+        (Err(action), Err(cleanup)) => Err(format!("{action}; cleanup: {cleanup}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
     }
-    Ok(())
 }
 
 fn prerequisites(fixture: &protocol::Fixture) -> Result<(), String> {
@@ -184,6 +213,9 @@ fn assert_observed(
 /// Fixed CLI arguments only; stdout contains one protocol summary record.
 pub fn cli() -> Result<i32, String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_some_and(|a| a == "--role") {
+        return controller::worker_cli(&args);
+    }
     if args.len() != 6 || args[0] != "--mode" || args[2] != "--fixture" || args[4] != "--output" {
         return Err("usage: kinewright-ja-baseline --mode baseline|revised --fixture FILE --output NEW_DIRECTORY".into());
     }
@@ -259,7 +291,7 @@ mod tests {
 
     #[test]
     fn existing_edit_undo_redo_and_format_corpus_controls_pass() {
-        for name in ["edit-undo-redo", "format-corpus"] {
+        for name in ["edit-undo-redo", "format-corpus", "branches-current"] {
             let temp = TempDirectory::new("ja-controls");
             assert_eq!(
                 run(
@@ -271,6 +303,71 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn recording_forwards_real_loopback_sessions_and_confirmation() {
+        let temp = TempDirectory::new("ja-recording");
+        let out = temp.path("out");
+        assert_eq!(
+            run(
+                &fixtures().join("recording-loopback.json"),
+                &out,
+                Mode::Baseline
+            )
+            .unwrap(),
+            0
+        );
+        let read = |id| -> Value {
+            serde_json::from_slice(
+                &std::fs::read(out.join(format!("artifacts/observation-{id}.json"))).unwrap(),
+            )
+            .unwrap()
+        };
+        let sessions = read(3);
+        assert_eq!(sessions["server_requests"], 2);
+        assert_eq!(sessions["server_results"], 2);
+        let events = sessions["sessions"][0]["events"].as_array().unwrap();
+        let cost = events
+            .iter()
+            .find(|e| e["kind"] == "pump_event" && e["event"]["kind"] == "cost")
+            .unwrap();
+        assert!(cost["event"]["cached_input_tokens"].is_null());
+        let second = sessions["sessions"][1]["events"].as_array().unwrap();
+        assert!(second.iter().any(|e| {
+            e["event"]["kind"] == "tool_result"
+                && e["event"]["result"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("internal capability"))
+        }));
+        assert_eq!(
+            read(8)["trace"]["confirmations"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(read(11)["trace"]["confirmations"][0]["approved"], false);
+    }
+
+    #[test]
+    fn a_test_executable_cannot_silently_substitute_for_the_native_worker() {
+        let temp = TempDirectory::new("ja-missing-worker");
+        assert_eq!(
+            run(
+                &fixtures().join("reply-retry.json"),
+                &temp.path("out"),
+                Mode::Baseline
+            )
+            .unwrap(),
+            2
+        );
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(temp.path("out/summary.json")).unwrap()).unwrap();
+        assert_eq!(summary["disposition"], "not_run");
+        assert!(
+            summary["missing_requirements"]
+                .as_str()
+                .unwrap()
+                .contains("native baseline worker binary")
+        );
     }
 
     #[test]

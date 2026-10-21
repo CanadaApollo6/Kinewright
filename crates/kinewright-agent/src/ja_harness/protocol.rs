@@ -95,6 +95,7 @@ pub struct Action {
     pub id: u32,
     pub participant: String,
     pub after: Option<u32>,
+    pub retry_of: Option<u32>,
     #[serde(flatten)]
     pub call: Call,
 }
@@ -122,11 +123,43 @@ pub enum Call {
     LegacyRenameRefusal(PathArgs),
     AssertObserved(Assertion),
     SurfaceAbsent(SurfaceArgs),
+    LockAcquire(PathArgs),
+    LockVerify(Empty),
+    LockRelease(Empty),
+    HeadlessSave(PathArgs),
+    BarrierWait(BarrierArgs),
+    BarrierRelease(BarrierArgs),
+    DropReply(ActionRef),
+    ParticipantExit(Empty),
+    ParticipantKill(Empty),
+    ParticipantInventory(Empty),
+    SpawnChild(Empty),
+    ChildExit(Empty),
+    ServerStart(Empty),
+    ScriptedSession(InputArgs),
+    PreparedCommit(PreparedArgs),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Empty {}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionRef {
+    pub action_id: u32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BarrierArgs {
+    pub name: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedArgs {
+    pub input: String,
+    pub expected_revision: u64,
+    pub confirmation: Option<bool>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandArgs {

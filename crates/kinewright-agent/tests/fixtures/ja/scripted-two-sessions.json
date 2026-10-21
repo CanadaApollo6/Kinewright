@@ -1,0 +1,59 @@
+{
+  "sessions": [
+    {
+      "prompts": [
+        "inspect the ordinary timeline"
+      ],
+      "turns": [
+        {
+          "calls": [
+            {
+              "tool": "get_timeline_state",
+              "arguments": {}
+            }
+          ],
+          "message": "observed",
+          "cost": {
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "cached_input_tokens": null,
+            "cache_creation_input_tokens": null,
+            "reasoning_output_tokens": null,
+            "cost_usd": null
+          }
+        }
+      ]
+    },
+    {
+      "prompts": [
+        "attempt an internal tool through the compact server"
+      ],
+      "turns": [
+        {
+          "calls": [
+            {
+              "tool": "add_track",
+              "arguments": {
+                "expected_revision": 0,
+                "track": {
+                  "id": 9,
+                  "kind": "Video",
+                  "clips": []
+                }
+              }
+            }
+          ],
+          "message": "refusal observed",
+          "cost": {
+            "input_tokens": 13,
+            "output_tokens": 5,
+            "cached_input_tokens": 3,
+            "cache_creation_input_tokens": null,
+            "reasoning_output_tokens": 2,
+            "cost_usd": null
+          }
+        }
+      ]
+    }
+  ]
+}

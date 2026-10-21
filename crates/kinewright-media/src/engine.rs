@@ -410,7 +410,7 @@ pub struct FfmpegMediaEngine {
     visual_assets: VisualAssetService,
     derived_analysis: DerivedAnalysisService,
     /// Re-review B D6: disconnects once the worker thread has finished.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     finished: Receiver<()>,
 }
 
@@ -597,7 +597,7 @@ impl FfmpegMediaEngine {
         let lut_lattices = Arc::new(RwLock::new(PublishedLattices::default()));
         let worker_lut_lattices = Arc::clone(&lut_lattices);
         let diagnostics = Arc::clone(&options.diagnostics);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-util"))]
         let (finished_tx, finished) = bounded::<()>(0);
         let spawned = thread::Builder::new()
             .name("kinewright-media".to_owned())
@@ -625,8 +625,10 @@ impl FfmpegMediaEngine {
                 }
                 worker.preview = RefCell::new(PreviewThread::Unstarted(preview));
                 worker.run();
-                #[cfg(test)]
-                drop(finished_tx);
+                #[cfg(any(test, feature = "test-util"))]
+                {
+                    drop(finished_tx);
+                }
             });
         if let Err(error) = spawned {
             // The worker never started: stop the preview it would have joined.
@@ -657,7 +659,7 @@ impl FfmpegMediaEngine {
             transcripts: TranscriptService::new(data_dir)?,
             visual_assets,
             derived_analysis,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-util"))]
             finished,
         })
     }
@@ -668,6 +670,14 @@ impl FfmpegMediaEngine {
     /// decoders dropped), the worker and its audio runtime dropped.
     #[cfg(test)]
     pub(crate) fn finished(&self) -> Receiver<()> {
+        self.finished.clone()
+    }
+
+    /// Read-only teardown signal for native eval owners. Disconnection follows
+    /// actual worker/preview destruction; it does not perform that destruction.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn teardown_observer(&self) -> Receiver<()> {
         self.finished.clone()
     }
 
