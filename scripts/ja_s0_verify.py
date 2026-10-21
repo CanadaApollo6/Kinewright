@@ -85,6 +85,17 @@ def main():
     run("workspace-build", cargo + ["build", "--workspace"])
     run("harness-build", cargo + ["build", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness])
     run("shipping-app-build", cargo + ["build", "-p", "kinewright-app"])
+    if args.stage >= 4:
+        run("app-adapter-build", cargo + ["test", "-p", "kinewright-app", "--bin", "kinewright-app", "--no-run", "--message-format=json"])
+        artifacts = []
+        for line in (out / f"{len(records)-1:02}-app-adapter-build.log").read_text().splitlines():
+            if line.startswith('{'):
+                message = json.loads(line)
+                if message.get("reason") == "compiler-artifact" and message["target"]["name"] == "kinewright-app" and message.get("executable") and message["profile"]["test"]:
+                    artifacts.append(message["executable"])
+        assert len(artifacts) == 1, artifacts
+        env["JA_HARNESS_APP_TEST_BINARY"] = artifacts[0]
+        (out / "app-test-binary.txt").write_text(artifacts[0] + "\n")
     run("workspace-clippy", cargo + ["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])
     run("harness-clippy", cargo + ["clippy", "-p", "kinewright-agent", "--features", "eval-harness", "--bin", harness, "--", "-D", "warnings"])
     touched = subprocess.check_output(["git", "diff", "--name-only", "HEAD"], cwd=ROOT, text=True).splitlines()
@@ -95,6 +106,8 @@ def main():
     if args.stage >= 2:
         run("harness-tests", cargo + ["test", "-p", "kinewright-agent", "--lib", "ja_harness::", "--", "--test-threads=1"])
         run("native-harness-tests", cargo + ["test", "-p", "kinewright-agent", "--features", "eval-harness", "--test", "ja_baseline", "--", "--test-threads=1"])
+    if args.stage >= 4:
+        run("app-observer-test", cargo + ["test", "-p", "kinewright-app", "--bin", "kinewright-app", "ja_harness::tests::coalesced_app_input_reaches_actual_headless_paint", "--", "--exact", "--test-threads=1"])
     for i, row in enumerate(rows):
         affected_s0_2 = args.stage == 2 and (row["stage"] == 1 or row["package"] == "kinewright-core")
         affected_s0_3 = args.stage == 3 and row["test"].split("::")[-1] in {

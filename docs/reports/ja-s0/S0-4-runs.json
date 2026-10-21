@@ -1,0 +1,203 @@
+[
+  {
+    "fixture": "media-shared-control",
+    "process_exit": 0,
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 313,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "a3c23e4dcdcae7d2cd5533f2605da377a954aa11cbf616bdf2e387a5abf54a9c"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "preview-independent-red-landmark",
+        "observation": 2,
+        "oracle": "red",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/center_rgba",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 315,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "1d150a5700496ac897cb3649fec704ce70a8255ae3c5c41f170f785236fc562a"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "shared-preview-export-pixel-bound",
+        "observation": 6,
+        "oracle": "tolerance",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/max_channel_delta_from_preview",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 297,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "c8b5cabd47c7a62bc7b3e767c381e1a4bb08c1e92ab93340fa03412cb66409a8"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "decode-worker-retired",
+        "observation": 6,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/decoder_worker_finished",
+        "positive_control": null
+      }
+    ],
+    "pending": []
+  },
+  {
+    "fixture": "app-coalesced-paint",
+    "process_exit": 0,
+    "assertions": [
+      {
+        "artifact": {
+          "byte_length": 295,
+          "relative_file": "artifacts/assertion-0.json",
+          "sha256": "06c5a17e6c499daed42781bc209848e79637b7ce3aeff89e50b76bcdda3038f0"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "coalesced-gesture-one-undo",
+        "observation": 1,
+        "oracle": "one",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/core_history/undo_count",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 311,
+          "relative_file": "artifacts/assertion-1.json",
+          "sha256": "23a60ab2db8cfa350b44fb25f92c804429ad17e571aed24c5cb2d62c4ed63d51"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "exact-gesture-key",
+        "observation": 1,
+        "oracle": "key",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/core_history/trace/undo/0/coalesce_key",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 302,
+          "relative_file": "artifacts/assertion-2.json",
+          "sha256": "cd8185ad45123846431b8ea3293933168b39f71eb38e5bf2d45caa60a79f1975"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-returned-frame-binds",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/bound_matches_returned",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 302,
+          "relative_file": "artifacts/assertion-3.json",
+          "sha256": "b14e451d2a1d1d1b4254ac9825136deb45994872bea3bf981b48a5c85ddabacf"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "discarded-pass-no-paint-mark",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/discarded_has_no_mark",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 304,
+          "relative_file": "artifacts/assertion-4.json",
+          "sha256": "4400bcd12f5cf9b1942be577de6ad0b6ea5130d1ba9cc8f79fca953117e9123e"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-headless-callback-ran",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/paint_callback_observed",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 287,
+          "relative_file": "artifacts/assertion-5.json",
+          "sha256": "19c5c30b222d47be4af6cb1470db337ce8463c58b45d7fd3990621948427cd03"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "ack-consumed-once",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/ack_consumed_once",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 318,
+          "relative_file": "artifacts/assertion-6.json",
+          "sha256": "b7e9746e6866ba95e79ddca7f77b4fabf6201c9c0709bde870fbbcb1d13e138c"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "changed-red-landmark-not-initial-blue",
+        "observation": 1,
+        "oracle": "red",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/center_rgba",
+        "positive_control": null
+      },
+      {
+        "artifact": {
+          "byte_length": 297,
+          "relative_file": "artifacts/assertion-7.json",
+          "sha256": "3d8fcad9bc3e034f09784defd60a68af94c710ee1c0551ce92621d313d679cff"
+        },
+        "assertion": "actual == independently frozen expected",
+        "disposition": "pass_control",
+        "evidence_class": "control",
+        "id": "actual-worker-teardown",
+        "observation": 1,
+        "oracle": "true",
+        "oracle_pointer": "",
+        "passed": true,
+        "pointer": "/engine_worker_finished",
+        "positive_control": null
+      }
+    ],
+    "pending": []
+  }
+]

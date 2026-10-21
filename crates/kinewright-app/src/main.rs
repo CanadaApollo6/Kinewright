@@ -13,6 +13,8 @@ mod icons;
 mod incident_ui;
 mod inspector_ui;
 mod investigator;
+#[cfg(test)]
+mod ja_harness;
 mod keys;
 mod look_browser_ui;
 mod matte_overlay_ui;

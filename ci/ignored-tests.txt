@@ -38,6 +38,7 @@ generated_media timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test crates
 kinewright_agent server::tests::served_tools_direct_vs_legacy_filtered_microbench crates/kinewright-agent/src/server.rs any on-demand  # manual release performance measurement
 
 # kinewright_app
+kinewright_app ja_harness::tests::run_fixture_from_env crates/kinewright-app/src/ja_harness.rs any on-demand  # exact native fixture adapter; controller supplies private fixture/output paths
 kinewright_app project::tests::is_dirty_memoized_poll_release_perf crates/kinewright-app/src/project.rs any on-demand  # manual release performance measurement
 kinewright_app recovery::tests::crash_child_process crates/kinewright-app/src/recovery.rs any on-demand  # invoked as the deliberately crashing subprocess
 

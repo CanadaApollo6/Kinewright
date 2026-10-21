@@ -1,0 +1,144 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "media-shared-control",
+  "gate_ids": [
+    "JA1.G7-S",
+    "JA1.G16"
+  ],
+  "lane": "media",
+  "requirements": [],
+  "inputs": {
+    "initial": {
+      "relative_file": "synthetic-red-project.kinewright",
+      "sha256": "b01388e07fb5c11c598a748282daef7b12478fd061f5a7b4a133787f737ec44f",
+      "byte_length": 1491,
+      "kind": "synthetic-control"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": [],
+    "document": "initial"
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "media_seek",
+      "args": {
+        "at": 0
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "preview-independent-red-landmark",
+        "observation": 2,
+        "pointer": "/center_rgba",
+        "oracle": "red",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "media_proof",
+      "args": {
+        "at": 0,
+        "max_width": 64
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "media_export",
+      "args": {
+        "path": "control.mp4"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "media_decode",
+      "args": {
+        "path": "control.mp4",
+        "at": 0
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "shared-preview-export-pixel-bound",
+        "observation": 6,
+        "pointer": "/max_channel_delta_from_preview",
+        "oracle": "tolerance",
+        "evidence_class": "control",
+        "comparison": "at_most"
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "decode-worker-retired",
+        "observation": 6,
+        "pointer": "/decoder_worker_finished",
+        "oracle": "true",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 9,
+      "participant": "main",
+      "action": "media_stats",
+      "args": {}
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "input"
+    },
+    "one": {
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "byte_length": 2,
+      "kind": "input"
+    },
+    "red": {
+      "relative_file": "oracle-red-rgba.json",
+      "sha256": "d2fc591344738b05e6eabe35b9069bd599788dd0d250c47faf76ab8282f8eb34",
+      "byte_length": 27,
+      "kind": "independent-landmark"
+    },
+    "tolerance": {
+      "relative_file": "oracle-h264-tolerance.json",
+      "sha256": "aa67a169b0bba217aa0aa88a65346920c84c42447c36ba5f7ea65f422c1fe5d8",
+      "byte_length": 2,
+      "kind": "independent-tolerance"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 16777216,
+    "action_timeout_ms": 60000,
+    "setup_timeout_ms": 30000
+  }
+}

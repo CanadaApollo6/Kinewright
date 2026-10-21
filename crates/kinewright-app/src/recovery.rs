@@ -49,6 +49,29 @@ use crate::theme::{self, type_size};
 const FORMAT_VERSION: u32 = 1;
 const CORE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[cfg(test)]
+thread_local! {
+    static JA_DIRECTORY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Bind the real GUI recorder to the fixture's private directory, on this
+/// constructor thread only. No shipping path reads this override.
+#[cfg(test)]
+pub(crate) fn with_ja_directory<T>(directory: PathBuf, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            JA_DIRECTORY.with_borrow_mut(|p| *p = None);
+        }
+    }
+    JA_DIRECTORY.with_borrow_mut(|p| {
+        assert!(p.is_none());
+        *p = Some(directory);
+    });
+    let _reset = Reset;
+    run()
+}
+
 /// The default project version: journals written before Part B read as 1
 /// (`IN2B` §4 rule 5, N-4 — a named fn, not a bare `default`).
 fn v1() -> u32 {
@@ -627,13 +650,39 @@ pub(crate) struct Recovery {
 
 impl Recovery {
     pub(crate) fn start(core: &Core, project_path: Option<&Path>) -> Self {
+        #[cfg(test)]
+        if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
+            return Self::start_in(directory, core, project_path);
+        }
         Self::start_in(default_recovery_directory(), core, project_path)
     }
 
     /// Start a per-project recorder without repeating the process-startup
     /// recovery scan. Only the startup session owns restore decisions.
     pub(crate) fn start_attached(core: &Core, project_path: Option<&Path>) -> Self {
+        #[cfg(test)]
+        if let Some(directory) = JA_DIRECTORY.with_borrow(Clone::clone) {
+            return Self::start_attached_in(directory, core, project_path);
+        }
         Self::start_attached_in(default_recovery_directory(), core, project_path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ja_observe(&self) -> Result<(Vec<u8>, serde_json::Value), String> {
+        self.recorder
+            .as_ref()
+            .ok_or("GUI recorder unavailable")?
+            .flush()?;
+        if let Some(error) = lock_unpoisoned(&self.runtime_error).clone() {
+            return Err(error);
+        }
+        let bytes =
+            kinewright_agent::ja_harness::protocol::read_bounded(&self.path, 64 * 1024 * 1024)?;
+        let parsed = parse_journal(&bytes).map_err(|e| e.reason)?;
+        let observed = serde_json::json!({"path":self.path,"writer_format_version":parsed.writer_format_version,
+            "initial_document":parsed.initial_document,"commands":parsed.commands.iter().map(|c| &c.command).collect::<Vec<_>>(),
+            "damage":parsed.damage.map(|d| d.reason),"gui_post_scan_exclusion":"pending_baseline_witness"});
+        Ok((bytes, observed))
     }
 
     fn start_in(directory: PathBuf, core: &Core, project_path: Option<&Path>) -> Self {

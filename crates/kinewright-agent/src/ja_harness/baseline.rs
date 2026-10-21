@@ -44,6 +44,18 @@ impl Baseline {
         self.core.as_ref().ok_or_else(|| "core not started".into())
     }
 
+    pub fn media(&mut self) -> Result<Arc<kinewright_media::FfmpegMediaEngine>, String> {
+        if self.media.is_none() {
+            self.media = Some(Arc::new(
+                kinewright_media::FfmpegMediaEngine::new_with_data_dir(
+                    self.root.join("media-cache"),
+                )
+                .map_err(|e| format!("media prerequisite NOT RUN: {e}"))?,
+            ));
+        }
+        self.media.clone().ok_or_else(|| "media missing".into())
+    }
+
     pub fn snapshot(&self) -> Result<(TimelineRevision, Arc<Document>), String> {
         let Event::QueryResult(QueryResult::Snapshot { revision, document }) = self
             .core()?
@@ -94,10 +106,7 @@ impl Baseline {
                 if self.server.is_some() {
                     return Err("server already started".into());
                 }
-                let media = Arc::new(
-                    kinewright_media::FfmpegMediaEngine::new()
-                        .map_err(|e| format!("media prerequisite NOT RUN: {e}"))?,
-                );
+                let media = self.media()?;
                 self.server = Some(
                     crate::McpServer::start(self.core()?.clone(), media.clone(), media.clone())
                         .map_err(|e| e.to_string())?,

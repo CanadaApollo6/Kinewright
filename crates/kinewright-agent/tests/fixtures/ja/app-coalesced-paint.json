@@ -1,0 +1,179 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "app-coalesced-paint",
+  "gate_ids": [
+    "JA1.G5-L",
+    "JA1.G8",
+    "JA1.G9",
+    "JA1.G20"
+  ],
+  "lane": "app-paint",
+  "requirements": [],
+  "inputs": {
+    "initial": {
+      "relative_file": "synthetic-blue-project.kinewright",
+      "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
+      "byte_length": 1491,
+      "kind": "synthetic-control"
+    },
+    "gesture": {
+      "relative_file": "app-gesture.json",
+      "sha256": "41eb046ac70d4a2023d4febe10527f154bfdea3a863f36544031a3f4146ae59a",
+      "byte_length": 395,
+      "kind": "input"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": [],
+    "document": "initial"
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "app_fixture",
+      "args": {
+        "input": "gesture"
+      }
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "coalesced-gesture-one-undo",
+        "observation": 1,
+        "pointer": "/core_history/undo_count",
+        "oracle": "one",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "exact-gesture-key",
+        "observation": 1,
+        "pointer": "/core_history/trace/undo/0/coalesce_key",
+        "oracle": "key",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "actual-returned-frame-binds",
+        "observation": 1,
+        "pointer": "/bound_matches_returned",
+        "oracle": "true",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "discarded-pass-no-paint-mark",
+        "observation": 1,
+        "pointer": "/discarded_has_no_mark",
+        "oracle": "true",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "actual-headless-callback-ran",
+        "observation": 1,
+        "pointer": "/paint_callback_observed",
+        "oracle": "true",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "ack-consumed-once",
+        "observation": 1,
+        "pointer": "/ack_consumed_once",
+        "oracle": "true",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "changed-red-landmark-not-initial-blue",
+        "observation": 1,
+        "pointer": "/center_rgba",
+        "oracle": "red",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 9,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "actual-worker-teardown",
+        "observation": 1,
+        "pointer": "/engine_worker_finished",
+        "oracle": "true",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "input"
+    },
+    "one": {
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "byte_length": 2,
+      "kind": "input"
+    },
+    "red": {
+      "relative_file": "oracle-red-rgba.json",
+      "sha256": "d2fc591344738b05e6eabe35b9069bd599788dd0d250c47faf76ab8282f8eb34",
+      "byte_length": 27,
+      "kind": "independent-landmark"
+    },
+    "key": {
+      "relative_file": "oracle-gesture-key.json",
+      "sha256": "17049e474ae190b9bb9708ab6c43eba3e1f1e421d1aefb49236cc733010ce9b4",
+      "byte_length": 7,
+      "kind": "independent-identity"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 16777216,
+    "action_timeout_ms": 60000,
+    "setup_timeout_ms": 30000
+  }
+}

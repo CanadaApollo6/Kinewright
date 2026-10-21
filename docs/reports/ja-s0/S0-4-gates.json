@@ -1,0 +1,626 @@
+{
+  "source_head": "d8c53af5a64d3d3d4c1921037472f105befa6edf",
+  "source_tree_sha256": "4dd9adacc55a6a1a2d870ff41d1dfe51c7a3e04987b7ccba8da3522419323f81",
+  "dirty_diff_sha256": "4cc91ebb916eabce7eed0f085d7a31e98307495fcdb4aa17141ee298b3759645",
+  "gates": [
+    {
+      "label": "workspace-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "--workspace"
+      ],
+      "exit": 0,
+      "sha256": "bcb20724eb761124e317b8e3341f6d8c85d994a9cd9c512ea1596b89ea0bf4b7",
+      "summaries": []
+    },
+    {
+      "label": "harness-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--bin",
+        "kinewright-ja-baseline"
+      ],
+      "exit": 0,
+      "sha256": "b2c469ab934f44ec32da90ae215c4944721b57da2f3a345cb3083dde3afd0374",
+      "summaries": []
+    },
+    {
+      "label": "shipping-app-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "-p",
+        "kinewright-app"
+      ],
+      "exit": 0,
+      "sha256": "75cdcd10f3b7a62c51b40e6d24b4e25ecfb69e6ad6ee0fffc1be3fc57bf9c74f",
+      "summaries": []
+    },
+    {
+      "label": "app-adapter-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "--no-run",
+        "--message-format=json"
+      ],
+      "exit": 0,
+      "sha256": "22c6a22c2e29c17dbddebd6c300510b61162261700f51f2834184f25f2da9fee",
+      "summaries": []
+    },
+    {
+      "label": "workspace-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "sha256": "419afa16c3eadc3a83545504a0557e3a511d59131d4dec893bf125b69567e927",
+      "summaries": []
+    },
+    {
+      "label": "harness-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "clippy",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--bin",
+        "kinewright-ja-baseline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "sha256": "7489140d6c95ac7564c53793d2e02a2ca297a777ae5336ea046256dec0e3fd9a",
+      "summaries": []
+    },
+    {
+      "label": "rustfmt",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--config",
+        "skip_children=true",
+        "--check",
+        "crates/kinewright-agent/src/ja_harness/baseline.rs",
+        "crates/kinewright-agent/src/ja_harness/controller.rs",
+        "crates/kinewright-agent/src/ja_harness/media_observer.rs",
+        "crates/kinewright-agent/src/ja_harness/mod.rs",
+        "crates/kinewright-agent/src/ja_harness/protocol.rs",
+        "crates/kinewright-agent/src/ja_harness/report.rs",
+        "crates/kinewright-app/src/app.rs",
+        "crates/kinewright-app/src/ja_harness.rs",
+        "crates/kinewright-app/src/main.rs",
+        "crates/kinewright-app/src/presenter.rs",
+        "crates/kinewright-app/src/recovery.rs",
+        "crates/kinewright-media/tests/generated_media.rs"
+      ],
+      "exit": 0,
+      "sha256": "58aa7ad540281f99434eda953ed8b668ffea852dbfc13db03dfdbb8f958abdc9",
+      "summaries": []
+    },
+    {
+      "label": "harness-tests",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-agent",
+        "--lib",
+        "ja_harness::",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "cc230355a2dcb1a181f461e6e49318046f5e4b21d40812daa82a10115fcb2383",
+      "summaries": [
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 67.87s"
+      ]
+    },
+    {
+      "label": "native-harness-tests",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--test",
+        "ja_baseline",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "b158419f103a7c5e7c11b40276b7b8dbff48924ea81498b274a204cad7e21eef",
+      "summaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 48.43s"
+      ]
+    },
+    {
+      "label": "app-observer-test",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "ja_harness::tests::coalesced_app_input_reaches_actual_headless_paint",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "f42e3074bd51213fcf2246d6c541d4b666d36db4a5f824ad59dba76b231fe37c",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 6.48s"
+      ]
+    },
+    {
+      "label": "pin-07",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::i8_media_0",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "51b089dada0addb02abeb78df97caac44ad8e0897fd9ee2928800a851c742e88",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.21s"
+      ]
+    },
+    {
+      "label": "pin-08",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::i8_media_1",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "57f1505a9a33e8ba951c2443259f04bbc068a52860665894c8f46df5dca6b4f9",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.23s"
+      ]
+    },
+    {
+      "label": "pin-09",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::i8_media_2",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "d49973080358612f432d5599c9de5df16707fa359b5f16d2a5cc823d05ff9bcc",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.21s"
+      ]
+    },
+    {
+      "label": "pin-10",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::i8_media_3",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "7a7bc56e83aa8e83089f3731d04b9d3f1266a7e79e01f7a82489f69703b0a580",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.22s"
+      ]
+    },
+    {
+      "label": "pin-11",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::i8_media_real_audio",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "20e7d12df261f546ad04ad2b112aa23923295b88d038089b8b018db22a0eeac6",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 1.69s"
+      ]
+    },
+    {
+      "label": "pin-12",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::only_a_current_stamped_failure_stops_playback",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "34b9b0ff6b236bbaf742fdfef062401dd3a6e07eb961c1128e640e299605bc08",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.13s"
+      ]
+    },
+    {
+      "label": "pin-13",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::a_request_issued_before_a_new_document_is_superseded_not_relabelled",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "ab809883f486bcc91f4d73e41691ec3bfe5fb3cfbd7e2ddf40b6392a77950c8c",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-14",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::an_idle_engine_holds_no_preview_reader_or_decoder",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "ead245eab151eb1b01a2f59ddeffb4c3e6d41a23cf49a109c9d27b6f4f6406a1",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.29s"
+      ]
+    },
+    {
+      "label": "pin-15",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::dropping_the_engine_stops_the_preview_thread",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "1c3d15cf051fd655dafb4a361d1ea1b8d6f9c39d65aa36bcc738084386b13875",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.20s"
+      ]
+    },
+    {
+      "label": "pin-16",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--lib",
+        "engine::tests::sync_decoders_counts_open_decoders_until_teardown",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "a07613f841d62d74bd689993771cd2107444f7f838c607449d3410dde6b18c07",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1196 filtered out; finished in 0.26s"
+      ]
+    },
+    {
+      "label": "pin-17",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "presenter::tests::the_marker_marks_what_is_bound_when_it_paints",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "9f45bcbef75ceb3cfec837ae6639ac03e495bb36193ad49d6785711f0998bb2f",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-18",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "presenter::tests::a_marker_that_never_paints_is_never_acked",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "a46a4d6e082bb1a38f12ac456e49ac918b7333cc5d375f0500a8ba41fe497817",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-19",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "presenter::tests::the_real_paint_callback_acks_only_painted_images",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "514e9e48628e8652dfc0ef8259c6219177ac45147ae5b03ab14729561ec0cf77",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.12s"
+      ]
+    },
+    {
+      "label": "pin-20",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "presenter::tests::seeded_interleavings_bind_and_ack_only_current_frames",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "e2857ef5f98d9b36f2515ccf9d46643e7d46baacace5bff291bd685dda6407c5",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.01s"
+      ]
+    },
+    {
+      "label": "pin-21",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--test",
+        "generated_media",
+        "two_track_effect_export_matches_preview_after_h264_redecode",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "604e1998574f26a119fd4aad30d6f0c6b99f4897bbdc8853306c06d6941831ba",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.65s"
+      ]
+    },
+    {
+      "label": "pin-22",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--test",
+        "generated_media",
+        "title_export_pixels_match_preview_after_h264_redecode",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "c030b6f099f3fc96e82d6a5e9e02cf9bb86e5dbd36ef314f52393b1f1a9f3b3e",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.51s"
+      ]
+    },
+    {
+      "label": "pin-23",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--test",
+        "generated_media",
+        "cancelled_export_writes_no_output",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "fb261087aec63e73d0d7942979111ada01d8d2f65e1ea9402a3f65bbc8be055c",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.27s"
+      ]
+    },
+    {
+      "label": "pin-35",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "recovery::tests::journal_round_trip_preserves_agent_ops_and_undo_redo_history",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "1c2f66b26784026bdcd70cc1ee269ff1558362604f7d2c353507f50c6aee20e8",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "classification",
+      "command": [
+        "nice",
+        "-n",
+        "19",
+        "python3",
+        "-I",
+        "scripts/slow_tests.py",
+        "lint"
+      ],
+      "exit": 0,
+      "sha256": "086c564c180cfb0b7bd8f024140159c183bdd8c948db7647ff5f56f444714167",
+      "summaries": []
+    }
+  ]
+}

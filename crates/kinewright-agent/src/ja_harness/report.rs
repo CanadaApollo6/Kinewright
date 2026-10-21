@@ -99,6 +99,68 @@ impl Report {
         Ok(reference)
     }
 
+    /// Stream a completed fixture-owned file into the bounded report.
+    pub fn artifact_file(&mut self, name: &str, source: &Path) -> Result<Value, String> {
+        use std::io::Read as _;
+        relative_path(Path::new(name))?;
+        let length = fs::metadata(source).map_err(|e| e.to_string())?.len();
+        if length > INDEX_BYTES {
+            return Err("artifact exceeds ceiling".into());
+        }
+        self.charge(usize::try_from(length).map_err(|e| e.to_string())?)?;
+        let destination = self.root.join("artifacts").join(name);
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+            .map_err(|e| e.to_string())?;
+        let copied = std::io::copy(
+            &mut fs::File::open(source)
+                .map_err(|e| e.to_string())?
+                .take(length + 1),
+            &mut output,
+        )
+        .map_err(|e| e.to_string())?;
+        if copied != length {
+            return Err("artifact changed while copying; incomplete".into());
+        }
+        let reference = json!({"relative_file":format!("artifacts/{name}"),"sha256":kinewright_media::sha256_file(&destination).map_err(|e| e.to_string())?,"byte_length":copied});
+        self.artifacts.push(reference.clone());
+        Ok(reference)
+    }
+
+    /// Register files produced by the exact App test adapter in our private tree.
+    pub fn admit_adapter_tree(&mut self, root: &Path) -> Result<(), String> {
+        let mut pending = vec![(root.to_path_buf(), 0)];
+        let mut count = 0;
+        while let Some((directory, depth)) = pending.pop() {
+            if depth > 32 {
+                return Err("adapter artifact depth quota".into());
+            }
+            for entry in fs::read_dir(directory).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                count += 1;
+                if count > 10_000 || entry.file_type().map_err(|e| e.to_string())?.is_symlink() {
+                    return Err("adapter artifact inventory quota/symlink".into());
+                }
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push((path, depth + 1));
+                } else {
+                    let relative = path
+                        .strip_prefix(&self.root)
+                        .map_err(|e| e.to_string())?
+                        .to_path_buf();
+                    relative_path(&relative)?;
+                    let length = entry.metadata().map_err(|e| e.to_string())?.len();
+                    self.charge(usize::try_from(length).map_err(|e| e.to_string())?)?;
+                    self.artifacts.push(json!({"relative_file":relative,"byte_length":length,"sha256":kinewright_media::sha256_file(&path).map_err(|e| e.to_string())?}));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn json_file(&mut self, name: &str, value: &impl Serialize) -> Result<(), String> {
         relative_path(Path::new(name))?;
         let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;

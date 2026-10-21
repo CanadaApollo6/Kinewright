@@ -138,6 +138,12 @@ pub enum Call {
     ServerStart(Empty),
     ScriptedSession(InputArgs),
     PreparedCommit(PreparedArgs),
+    MediaSeek(FrameArgs),
+    MediaProof(ProofArgs),
+    MediaExport(PathArgs),
+    MediaDecode(DecodeArgs),
+    MediaStats(Empty),
+    AppFixture(InputArgs),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +165,23 @@ pub struct PreparedArgs {
     pub input: String,
     pub expected_revision: u64,
     pub confirmation: Option<bool>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrameArgs {
+    pub at: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProofArgs {
+    pub at: i64,
+    pub max_width: u32,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecodeArgs {
+    pub path: PathBuf,
+    pub at: i64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -221,6 +244,15 @@ pub struct Assertion {
     pub oracle_pointer: String,
     pub evidence_class: EvidenceClass,
     pub positive_control: Option<String>,
+    #[serde(default)]
+    pub comparison: Comparison,
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Comparison {
+    #[default]
+    Equal,
+    AtMost,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

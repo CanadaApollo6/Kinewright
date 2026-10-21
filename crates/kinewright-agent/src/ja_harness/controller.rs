@@ -249,6 +249,143 @@ pub struct Controller {
     waiting: BTreeSet<String>,
 }
 
+fn freeze_fixture(loaded: &LoadedFixture, root: &Path) -> Result<PathBuf, String> {
+    fs::create_dir(root).map_err(|e| e.to_string())?;
+    for (prefix, refs) in [
+        ("", &loaded.fixture.inputs),
+        ("oracle:", &loaded.fixture.oracles),
+    ] {
+        for (role, reference) in refs {
+            if reference.relative_file == Path::new("__ja_fixture.json") {
+                return Err("reserved frozen fixture name".into());
+            }
+            let path = root.join(&reference.relative_file);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::write(
+                path,
+                super::baseline::input(loaded, &format!("{prefix}{role}"))?,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    let path = root.join("__ja_fixture.json");
+    fs::write(&path, &loaded.bytes).map_err(|e| e.to_string())?;
+    path.canonicalize().map_err(|e| e.to_string())
+}
+
+/// Invoke only the built App libtest's exact fixture entry. The process exit,
+/// inner common report, and stdout test summary are retained independently.
+#[allow(clippy::too_many_lines)] // Fixed process launch, bounded capture and common-report verification.
+pub fn app_fixture(
+    action: &Action,
+    loaded: &LoadedFixture,
+    report: &mut Report,
+) -> Result<Value, String> {
+    let binary = std::env::var_os("JA_HARNESS_APP_TEST_BINARY")
+        .ok_or("App test binary prerequisite missing; NOT RUN")?;
+    let binary = PathBuf::from(binary)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !binary
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.starts_with("kinewright_app-"))
+    {
+        return Err("expected built App test executable".into());
+    }
+    let fixture = freeze_fixture(
+        loaded,
+        &report.root.join(format!("app-input-{}", action.id)),
+    )?;
+    let out = report.root.join(format!("app-{}", action.id));
+    let child = Command::new(&binary)
+        .args([
+            "--exact",
+            "ja_harness::tests::run_fixture_from_env",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("JA_HARNESS_FIXTURE", &fixture)
+        .env("JA_HARNESS_OUTPUT", &out)
+        .env(
+            "JA_HARNESS_MODE",
+            if report.mode == protocol::Mode::Baseline {
+                "baseline"
+            } else {
+                "revised"
+            },
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut child = OwnedChild(child);
+    let stdout = child.0.stdout.take().ok_or("App stdout missing")?;
+    let stderr = child.0.stderr.take().ok_or("App stderr missing")?;
+    let capture = |mut stream: Box<dyn Read + Send>| {
+        thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stream
+                .by_ref()
+                .take(u64::try_from(CONTROL_BYTES + 1).map_err(|e| e.to_string())?)
+                .read_to_end(&mut bytes)
+                .map_err(|e| e.to_string())?;
+            if bytes.len() > CONTROL_BYTES {
+                return Err("App output capture quota".into());
+            }
+            Ok::<_, String>(bytes)
+        })
+    };
+    let stdout = capture(Box::new(stdout));
+    let stderr = capture(Box::new(stderr));
+    let deadline = Instant::now() + Duration::from_millis(loaded.fixture.limits.action_timeout_ms);
+    let status = loop {
+        if let Some(status) = child.0.try_wait().map_err(|e| e.to_string())? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            return Err("App adapter deadline; NOT RUN".into());
+        }
+        thread::sleep(Duration::from_millis(2));
+    };
+    let stdout = stdout.join().map_err(|_| "App stdout capture panic")??;
+    let stderr = stderr.join().map_err(|_| "App stderr capture panic")??;
+    report.artifact(&format!("app-{}-stdout.txt", action.id), &stdout)?;
+    report.artifact(&format!("app-{}-stderr.txt", action.id), &stderr)?;
+    report.event(action.id, "app-test", "process_exit", json!({"pid":child.0.id(),"reaped":true,"status":status.to_string(),"executable_sha256":kinewright_media::sha256_file(&binary).map_err(|e| e.to_string())?}))?;
+    if !status.success() {
+        return Err(format!(
+            "App test adapter exited {status}; NOT RUN, inspect common inner report"
+        ));
+    }
+    let summary = protocol::unique_json(&protocol::read_bounded(
+        &out.join("summary.json"),
+        protocol::INDEX_BYTES,
+    )?)?;
+    report.admit_adapter_tree(&out)?;
+    if summary["exit_code"] != 0 {
+        return Err("App adapter did not pass selected controls".into());
+    }
+    let reference = summary["observations"]
+        .as_array()
+        .ok_or("App observations absent")?
+        .iter()
+        .find(|v| v["action_id"] == action.id)
+        .ok_or("App action not observed")?;
+    let path = reference["artifact"]["relative_file"]
+        .as_str()
+        .ok_or("App observation file missing")?;
+    protocol::relative_path(Path::new(path))?;
+    protocol::unique_json(&protocol::read_bounded(
+        &out.join(path),
+        protocol::INDEX_BYTES,
+    )?)
+}
+
 impl Controller {
     pub fn new(loaded: &LoadedFixture, report: &mut Report) -> Result<Self, String> {
         let mut controller = Self {

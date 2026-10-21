@@ -34,6 +34,42 @@ struct TestClip(PathBuf);
 
 struct TemporaryFile(PathBuf);
 
+/// The native pin's process must outlive the real media worker and renderer.
+/// This waits on the existing test-util observation; it changes no engine work.
+struct TeardownObservedEngine {
+    engine: Option<FfmpegMediaEngine>,
+    finished: crossbeam_channel::Receiver<()>,
+}
+
+impl TeardownObservedEngine {
+    fn new() -> Self {
+        let engine = FfmpegMediaEngine::new().unwrap();
+        let finished = engine.teardown_observer();
+        Self {
+            engine: Some(engine),
+            finished,
+        }
+    }
+}
+
+impl std::ops::Deref for TeardownObservedEngine {
+    type Target = FfmpegMediaEngine;
+    fn deref(&self) -> &Self::Target {
+        self.engine.as_ref().unwrap()
+    }
+}
+
+impl Drop for TeardownObservedEngine {
+    fn drop(&mut self) {
+        drop(self.engine.take());
+        assert_eq!(
+            self.finished.recv_timeout(Duration::from_secs(30)),
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected),
+            "native pin process must await media teardown"
+        );
+    }
+}
+
 impl Drop for TemporaryFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -493,8 +529,8 @@ fn remove_fixture_assets(document: &Document) {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn two_track_effect_export_matches_preview_after_h264_redecode() {
-    let engine = FfmpegMediaEngine::new().unwrap();
-    let document = export_fixture(&engine);
+    let engine = TeardownObservedEngine::new();
+    let document = export_fixture(&*engine);
     let frames = engine.frames();
     engine.set_document(std::sync::Arc::new(document.clone()));
     engine.request_frame(TimeCode(0));
@@ -535,7 +571,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
     assert_eq!(updates.last().unwrap().completed_frames, 10);
     assert_eq!(updates.last().unwrap().total_frames, 10);
 
-    let decode_engine = FfmpegMediaEngine::new().unwrap();
+    let decode_engine = TeardownObservedEngine::new();
     let exported_asset = decode_engine.probe(&output.0).unwrap();
     assert_eq!(exported_asset.kind, MediaKind::AudioVideo);
     assert_eq!(exported_asset.resolution, Some((64, 64)));
@@ -623,7 +659,7 @@ fn two_track_effect_export_matches_preview_after_h264_redecode() {
 
 #[test]
 fn title_export_pixels_match_preview_after_h264_redecode() {
-    let engine = FfmpegMediaEngine::new().unwrap();
+    let engine = TeardownObservedEngine::new();
     let document = Document {
         investigator: None,
         catalog: kinewright_core::MediaCatalog::default(),
@@ -706,7 +742,7 @@ fn title_export_pixels_match_preview_after_h264_redecode() {
         )
         .unwrap();
 
-    let decode_engine = FfmpegMediaEngine::new().unwrap();
+    let decode_engine = TeardownObservedEngine::new();
     let exported_asset = decode_engine.probe(&output.0).unwrap();
     let exported_document = full_timeline(exported_asset);
     let exported_frames = decode_engine.frames();
@@ -862,8 +898,8 @@ fn tone_amplitude(samples: &[f32], sample_rate: u32, frequency: f64) -> f64 {
 
 #[test]
 fn cancelled_export_writes_no_output() {
-    let engine = FfmpegMediaEngine::new().unwrap();
-    let document = export_fixture(&engine);
+    let engine = TeardownObservedEngine::new();
+    let document = export_fixture(&*engine);
     engine.set_document(std::sync::Arc::new(document.clone()));
     let output = TemporaryFile(std::env::temp_dir().join(format!(
         "kinewright-cancelled-export-{}.mp4",

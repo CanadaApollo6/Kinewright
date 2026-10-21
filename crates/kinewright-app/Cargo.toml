@@ -27,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+kinewright-agent = { path = "../kinewright-agent", default-features = false, features = ["eval-harness"] }
 pollster.workspace = true
 proptest.workspace = true
 # The person-path tests read `au6_scenarios` / `cc7_scenarios` and generate

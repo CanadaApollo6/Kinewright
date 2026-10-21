@@ -204,6 +204,10 @@ impl Presenter {
     pub(crate) fn bound_for_test(&self) -> Option<DisplayCell> {
         read(&self.cell)
     }
+    #[cfg(test)]
+    pub(crate) fn paint_mark_for_test(&self) -> Option<PaintMark> {
+        read(&self.mark)
+    }
     pub(crate) fn stale(&self) -> bool {
         read(&self.cell).is_some_and(|cell| cell.stale)
     }

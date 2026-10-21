@@ -2,6 +2,7 @@
 #![allow(clippy::missing_errors_doc)]
 pub mod baseline;
 pub mod controller;
+pub mod media_observer;
 pub mod protocol;
 pub mod recording;
 pub mod report;
@@ -16,6 +17,19 @@ use report::Report;
 /// Run a fixture unchanged in either mode. Revised currently uses the same
 /// production adapter; it does not invent successor behavior.
 pub fn run(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
+    run_with_observer(fixture_path, output, mode, &mut |_, _, _| Ok(None))
+}
+
+pub type Observer<'a> =
+    dyn FnMut(&protocol::Action, &LoadedFixture, &mut Report) -> Result<Option<Value>, String> + 'a;
+
+/// App's cfg(test) adapter supplies only its private current-path observations.
+pub fn run_with_observer(
+    fixture_path: &Path,
+    output: &Path,
+    mode: Mode,
+    observer: &mut Observer<'_>,
+) -> Result<i32, String> {
     let mut report = Report::create(output, mode)?;
     let loaded = match protocol::load(fixture_path) {
         Ok(loaded) => loaded,
@@ -27,7 +41,7 @@ pub fn run(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String
     let result = (|| {
         report.set_quota(loaded.fixture.limits.output_bytes)?;
         report.header(Some(&loaded))?;
-        execute(&loaded, &mut report)
+        execute(&loaded, &mut report, observer)
     })();
     report.finish(
         Some(&loaded.fixture),
@@ -35,11 +49,16 @@ pub fn run(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String
     )
 }
 
-fn execute(loaded: &LoadedFixture, report: &mut Report) -> Result<(), String> {
+fn execute(
+    loaded: &LoadedFixture,
+    report: &mut Report,
+    extension: &mut Observer<'_>,
+) -> Result<(), String> {
     prerequisites(&loaded.fixture)?;
     let mut adapter = baseline::Baseline::new(&report.root.join("work"))?;
     let mut controller = controller::Controller::new(loaded, report)?;
     let mut observed = BTreeMap::new();
+    let mut media = media_observer::MediaObserver::default();
     let mut completed = std::collections::BTreeSet::new();
     let result = (|| {
         for action in &loaded.fixture.actions {
@@ -66,11 +85,20 @@ fn execute(loaded: &LoadedFixture, report: &mut Report) -> Result<(), String> {
                     report.event(action.id, &action.participant, "pending", pending)?;
                 }
                 call => {
-                    let (observation, delivered) =
-                        match controller.dispatch(action, loaded, &observed, report)? {
-                            Some(result) => result,
-                            None => (adapter.execute(call, loaded)?, true),
-                        };
+                    let custom = extension(action, loaded, report)?;
+                    let dispatched = if let Some(value) = custom {
+                        Some((value, true))
+                    } else if matches!(action.call, Call::AppFixture(_)) {
+                        Some((controller::app_fixture(action, loaded, report)?, true))
+                    } else if let Some(value) = media.execute(&action.call, &mut adapter, report)? {
+                        Some((value, true))
+                    } else {
+                        controller.dispatch(action, loaded, &observed, report)?
+                    };
+                    let (observation, delivered) = match dispatched {
+                        Some(result) => result,
+                        None => (adapter.execute(call, loaded)?, true),
+                    };
                     let adapter_ns = started.elapsed().as_nanos().to_string();
                     let observer_started = Instant::now();
                     let bytes = serde_json::to_vec(&observation).map_err(|e| e.to_string())?;
@@ -186,7 +214,17 @@ fn assert_observed(
     let expected = oracle
         .pointer(&a.oracle_pointer)
         .ok_or("oracle pointer unavailable")?;
-    let passed = actual == expected;
+    let passed = match a.comparison {
+        protocol::Comparison::Equal => actual == expected,
+        protocol::Comparison::AtMost => {
+            actual
+                .as_u64()
+                .ok_or("at_most needs exact unsigned integer observation")?
+                <= expected
+                    .as_u64()
+                    .ok_or("at_most needs exact unsigned integer oracle")?
+        }
+    };
     let detail = json!({"id":a.id,"evidence_class":a.evidence_class,"passed":passed,
         "assertion":"actual == independently frozen expected", "actual":actual,"expected":expected,
         "observation":a.observation,"pointer":a.pointer,"oracle":a.oracle,"oracle_pointer":a.oracle_pointer,
