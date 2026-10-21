@@ -22,11 +22,17 @@ eval-harness = [
     "kinewright-core/test-util",
     "kinewright-media/test-util",
     "dep:kinewright-project",
+    "kinewright-project/test-util",
 ]
 # Slow tier (docs/BUILDING.md, ci/slow-tests.txt): tests marked with
 # `cfg_attr(not(feature = "slow-tests"), ignore = ...)` run only with this
 # feature, which CI's slow tier and a full local run enable.
 slow-tests = []
+
+[[bin]]
+name = "kinewright-ja-baseline"
+path = "src/bin/kinewright-ja-baseline.rs"
+required-features = ["eval-harness"]
 
 [dependencies]
 axum.workspace = true

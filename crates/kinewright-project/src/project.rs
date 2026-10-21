@@ -443,6 +443,23 @@ pub fn write_file_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     write_file_atomic_with_rename(path, contents, None)
 }
 
+/// Drive the existing rename-refusal seam; available only to test harnesses.
+/// # Errors
+/// Returns the existing writer's IO error.
+#[cfg(any(test, feature = "test-util"))]
+pub fn observe_refused_rename(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    write_file_atomic_with_rename(
+        path,
+        contents,
+        Some(&|_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "S0 injected rename refusal",
+            ))
+        }),
+    )
+}
+
 /// Whether a rename failure is the permission/sharing kind the atomic
 /// write falls back from (N6.1/J6).
 fn is_permission_or_sharing(error: &std::io::Error) -> bool {
@@ -485,6 +502,8 @@ fn write_file_atomic_with_rename(
     // The temp's bytes reach the disk before the rename does, so a crash
     // between the two cannot surface torn bytes (the H9 shape).
     crate::sidecar::write_synced(&temp, contents)?;
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::note("temp_write_and_file_sync", &temp);
     if let Some(permissions) = permissions
         && let Err(error) = fs::set_permissions(&temp, permissions)
     {
@@ -498,10 +517,17 @@ fn write_file_atomic_with_rename(
     if let Err(error) = renamed {
         let _ = fs::remove_file(&temp);
         if is_permission_or_sharing(&error) {
-            return fs::write(path, contents);
+            let result = fs::write(path, contents);
+            #[cfg(any(test, feature = "test-util"))]
+            if result.is_ok() {
+                crate::io_observer::note("in_place_fallback", path);
+            }
+            return result;
         }
         return Err(error);
     }
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::note("rename", &target);
     Ok(())
 }
 
@@ -521,6 +547,8 @@ pub fn write_project_bytes(
 ) -> Result<ProjectSaveReport, ProjectSaveError> {
     write_file_atomic(path, json.as_bytes())
         .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::note("project_published", path);
     let (next_store, lut_store_error) = match derive_lut_store(Some(path)) {
         Ok(store) => (store, None),
         Err(reason) => (None, Some(reason)),

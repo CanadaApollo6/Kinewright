@@ -42,6 +42,8 @@ mod transition;
 pub use actor::{
     Command, CommandToken, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,
 };
+#[cfg(any(test, feature = "test-util"))]
+pub use actor::{HistoryEntryObservation, HistoryObservation};
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,

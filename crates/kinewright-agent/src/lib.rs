@@ -23,6 +23,9 @@ pub mod eval;
 pub mod export_queue;
 pub mod fixture_pack;
 mod harness;
+/// Job A predecessor-compatible, observational evaluation harness.
+#[cfg(feature = "eval-harness")]
+pub mod ja_harness;
 mod models;
 mod motion;
 mod muse;

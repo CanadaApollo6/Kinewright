@@ -1,0 +1,401 @@
+{
+  "source_head": "2723f82ce635331b5cdf3b7b93a450ea17793c6b",
+  "source_tree_sha256": "19ea7018c5504fb765c0196941d8e6553dfdaba6d91f152e34b9cab4b56ec46e",
+  "dirty_diff_sha256": "af0f1d0dbf39b1227aa8b5bbc02e8f1427d72722d834dd50918b30789ed11f0e",
+  "gates": [
+    {
+      "label": "workspace-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "--workspace"
+      ],
+      "exit": 0,
+      "sha256": "945666c7b937fb3ebf17faf1547dd6a413dd43010ccfbead23c4afabf5628ee0",
+      "summaries": []
+    },
+    {
+      "label": "harness-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--bin",
+        "kinewright-ja-baseline"
+      ],
+      "exit": 0,
+      "sha256": "0304f659d69faf114195c53343c30e687d087297ac57c536170705f4e5520c9c",
+      "summaries": []
+    },
+    {
+      "label": "shipping-app-build",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "build",
+        "-p",
+        "kinewright-app"
+      ],
+      "exit": 0,
+      "sha256": "564cd79ce0f434f859a9b837488e050c372e61dddd260dcfb2b4c01dbe0eda1d",
+      "summaries": []
+    },
+    {
+      "label": "workspace-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "sha256": "8aeda3a972be945decf20ce5ced53cd34fe96c1c824152200cefa88b8950039b",
+      "summaries": []
+    },
+    {
+      "label": "harness-clippy",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "clippy",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--bin",
+        "kinewright-ja-baseline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "sha256": "3d57390a0b41b359779dab63c24ddebf10a0631dea5c0f3f95332f80fcfcf3cb",
+      "summaries": []
+    },
+    {
+      "label": "rustfmt",
+      "command": [
+        "rustfmt",
+        "--edition",
+        "2024",
+        "--config",
+        "skip_children=true",
+        "--check",
+        "crates/kinewright-agent/src/bin/kinewright-ja-baseline.rs",
+        "crates/kinewright-agent/src/ja_harness/baseline.rs",
+        "crates/kinewright-agent/src/ja_harness/mod.rs",
+        "crates/kinewright-agent/src/ja_harness/protocol.rs",
+        "crates/kinewright-agent/src/ja_harness/report.rs",
+        "crates/kinewright-agent/src/lib.rs",
+        "crates/kinewright-agent/tests/ja_baseline.rs",
+        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/lib.rs",
+        "crates/kinewright-project/src/io_observer.rs",
+        "crates/kinewright-project/src/lib.rs",
+        "crates/kinewright-project/src/project.rs"
+      ],
+      "exit": 0,
+      "sha256": "dcd894a2d0a25c62a722726aaa4b13da2496936311ec261ba0f450d397c93a16",
+      "summaries": []
+    },
+    {
+      "label": "harness-tests",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-agent",
+        "--lib",
+        "ja_harness::",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "cfbc8d01f2616db5a812871a544b0fbbcd10fb2a13a684df1c1839e61353d9be",
+      "summaries": [
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 51.10s"
+      ]
+    },
+    {
+      "label": "native-harness-tests",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness",
+        "--test",
+        "ja_baseline",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "e81f3134a716ec57a63af620dd654b29091ef55339b7bdf3ff068eb42e0fe004",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.45s"
+      ]
+    },
+    {
+      "label": "pin-03",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-core",
+        "--lib",
+        "actor::tests::applied_operations_follow_undo_and_redo_instead_of_the_append_only_log",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "e69224ac60eb0fa10ff3217c5eda64c9350099c2edf5720c3df8058b6051987b",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-04",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-core",
+        "--lib",
+        "actor::tests::batch_broadcasts_once_appends_each_op_and_undoes_as_one_snapshot",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "cc8d77f2c8ea865b7fca0d1e77d21eec449e0a78966a3c064a71233eddc60472",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-05",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-core",
+        "--lib",
+        "actor::tests::coalesced_batches_under_one_key_form_a_single_undo_entry",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "e94089f7a77a657545f32955374909dc2130db854ec1d697d614e56c54ca263a",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-06",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-core",
+        "--lib",
+        "actor::tests::coalesced_history_replays_faithfully_through_applied_operations",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "9e373b0d9deba91d7b8e0ba60143d5e81ea7e404ce21bc3d7bba0b7bcef9f813",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-36",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "bd41f52ef1d379428366b22e56bd66efb609bcd23e59b7d913ecfa7c8310e6d8",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-37",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::v2_stamps_only_when_used",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "f91855a68967c9dc7f6ba1712d21f22d705eb80ea939b2bf2067acba3a7df165",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-38",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::mo2_inactive_features_still_stamp_v2",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "260685ad3333c2ca038660348133f6332ec107a4c7a5584a0a501f18d25e11cd",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-39",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "e29bcce864ecbaede8695d320e4354f1c2fd70dd1fa76820970d0e1e74bc7263",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-40",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--lib",
+        "project::tests::project_atomic_write_falls_back_when_rename_is_refused",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "5216f81c5b91c3acc78d3820a256710bd7da04cd84a93fd663ad2db91b45df2e",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 136 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "pin-41",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app",
+        "--bin",
+        "kinewright-app",
+        "project::tests::can_overwrite_save_gates_on_the_read_version",
+        "--",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "sha256": "2356db57d2acc19a558c14838f78d2189e411587354fbe2148a19f716c2bcfd8",
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 798 filtered out; finished in 0.00s"
+      ]
+    },
+    {
+      "label": "classification",
+      "command": [
+        "nice",
+        "-n",
+        "19",
+        "python3",
+        "-I",
+        "scripts/slow_tests.py",
+        "lint"
+      ],
+      "exit": 0,
+      "sha256": "ec1cf2e046cfbb33e861e5f475fee1f07139cc289a62275dfe2be0a2dbf33aaf",
+      "summaries": []
+    }
+  ]
+}

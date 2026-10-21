@@ -151,6 +151,29 @@ enum CoreMessage {
     Command(Command),
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
+    #[cfg(any(test, feature = "test-util"))]
+    ObserveHistory(Sender<HistoryObservation>),
+}
+
+/// Read-only actor-boundary observation. Stack order is oldest to newest;
+/// the last redo entry is the next redo. This is not a restore interface.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HistoryObservation {
+    pub revision: TimelineRevision,
+    pub document: Arc<Document>,
+    pub undo: Vec<HistoryEntryObservation>,
+    pub redo: Vec<HistoryEntryObservation>,
+    pub op_log: Vec<Operation>,
+}
+
+/// An exact retained entry, including its pre-edit document and gesture key.
+#[cfg(any(test, feature = "test-util"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HistoryEntryObservation {
+    pub document: Arc<Document>,
+    pub operations: Vec<Operation>,
+    pub coalesce_key: Option<String>,
 }
 
 /// Cloneable client handle for the single thread that owns project state.
@@ -160,6 +183,17 @@ pub struct Core {
 }
 
 impl Core {
+    /// Observe private history on the actor thread without changing it.
+    /// # Errors
+    /// Returns an error if the actor has stopped.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn observe_history(&self) -> Result<HistoryObservation, CoreDisconnected> {
+        let (sender, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ObserveHistory(sender))
+            .map_err(|_| CoreDisconnected)?;
+        receiver.recv().map_err(|_| CoreDisconnected)
+    }
     /// Start the core actor with a validated project document.
     ///
     /// # Errors
@@ -406,6 +440,21 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
+            #[cfg(any(test, feature = "test-util"))]
+            CoreMessage::ObserveHistory(reply) => {
+                let observe = |entry: &HistoryEntry| HistoryEntryObservation {
+                    document: Arc::clone(&entry.document),
+                    operations: entry.operations.clone(),
+                    coalesce_key: entry.coalesce_key.clone(),
+                };
+                let _ = reply.send(HistoryObservation {
+                    revision: state.revision,
+                    document: Arc::clone(&state.document),
+                    undo: state.undo.iter().map(observe).collect(),
+                    redo: state.redo.iter().map(observe).collect(),
+                    op_log: state.op_log.clone(),
+                });
+            }
             CoreMessage::Subscribe(subscriber) => {
                 if subscriber
                     .send(Event::DocumentChanged {

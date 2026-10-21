@@ -1,0 +1,163 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "edit-undo-redo",
+  "gate_ids": [
+    "JA1.G2"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {
+    "edit": {
+      "relative_file": "command-add-track.json",
+      "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
+      "byte_length": 157,
+      "kind": "current-command"
+    },
+    "undo": {
+      "relative_file": "command-undo.json",
+      "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751",
+      "byte_length": 7,
+      "kind": "current-command"
+    },
+    "redo": {
+      "relative_file": "command-redo.json",
+      "sha256": "0b1a52518bc6d5e77daa6fd7f3ca404c11cd3a719e1f41e6d27f4f1b2ac98c0c",
+      "byte_length": 7,
+      "kind": "current-command"
+    }
+  },
+  "initial": {
+    "revision": 37,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "edit"
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "edit-accepted",
+        "observation": 2,
+        "pointer": "/event/accepted",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "undo"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "undo-accepted",
+        "observation": 4,
+        "pointer": "/event/accepted",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "redo"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "redo-accepted",
+        "observation": 6,
+        "pointer": "/event/accepted",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "project_save",
+      "args": {
+        "path": "edit.kinewright"
+      }
+    },
+    {
+      "id": 9,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "saved-exact-bytes",
+        "observation": 8,
+        "pointer": "/writer_bytes_equal",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    },
+    {
+      "id": 10,
+      "participant": "main",
+      "action": "project_reopen",
+      "args": {
+        "path": "edit.kinewright"
+      }
+    },
+    {
+      "id": 11,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "reopened-exact-document",
+        "observation": 10,
+        "pointer": "/same_document",
+        "oracle": "true",
+        "evidence_class": "control"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    },
+    "one": {
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "byte_length": 2,
+      "kind": "independent-scalar-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

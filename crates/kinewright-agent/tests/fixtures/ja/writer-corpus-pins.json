@@ -1,0 +1,27 @@
+{
+  "captured_source_head": "2723f82ce635331b5cdf3b7b93a450ea17793c6b",
+  "captured_binary_sha256": "424361f170d5622f5147e24569c32759245016f844c2d7b900b8e611a851c4ed",
+  "writer_source": "source-pins.json: crates/kinewright-project/src/project.rs",
+  "files": [
+    {
+      "path": "writer-v1-empty.kinewright",
+      "sha256": "59611abbbf40aed579dda09a9f7d4900904dc06af7badd96cd475df200062326",
+      "byte_length": 1017
+    },
+    {
+      "path": "writer-v1-legacy.kinewright",
+      "sha256": "1c7d54a934331bdd929d65b2ff21d9a5d3ced41796ed243ce34efb5ddec8fb55",
+      "byte_length": 1891
+    },
+    {
+      "path": "writer-v1-track.kinewright",
+      "sha256": "bb17fd2cad27cc7e168555e3cdd0cb360f72d7ce18d1d64b50ee3479c05e0958",
+      "byte_length": 1089
+    },
+    {
+      "path": "writer-v2-adjustment.kinewright",
+      "sha256": "b8edf112cd0483a3f2b15a2045d00fbaa30e77c4af025dd6437c77afcb65031c",
+      "byte_length": 1391
+    }
+  ]
+}

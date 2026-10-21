@@ -94,8 +94,10 @@ def main():
         run("rustfmt", ["rustfmt", "--edition", "2024", "--config", "skip_children=true", "--check"] + rust)
     if args.stage >= 2:
         run("harness-tests", cargo + ["test", "-p", "kinewright-agent", "--lib", "ja_harness::", "--", "--test-threads=1"])
+        run("native-harness-tests", cargo + ["test", "-p", "kinewright-agent", "--features", "eval-harness", "--test", "ja_baseline", "--", "--test-threads=1"])
     for i, row in enumerate(rows):
-        if row["stage"] != args.stage and args.stage != 5:
+        affected_s0_2 = args.stage == 2 and (row["stage"] == 1 or row["package"] == "kinewright-core")
+        if row["stage"] != args.stage and args.stage != 5 and not affected_s0_2:
             continue
         target = row["target"].split(":")
         flag = ["--lib"] if target == ["lib"] else ["--" + target[0], target[1]]

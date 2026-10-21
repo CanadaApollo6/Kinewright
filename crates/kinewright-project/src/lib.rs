@@ -3,6 +3,8 @@
 //! [`SidecarSession`] extraction delta).
 
 pub mod headless;
+#[cfg(any(test, feature = "test-util"))]
+pub mod io_observer;
 pub mod lockfile;
 pub mod project;
 pub mod recovery;
