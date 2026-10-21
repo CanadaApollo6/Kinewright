@@ -109,6 +109,7 @@ pub struct Action {
 )]
 pub enum Call {
     AdapterStatus(Empty),
+    OwnedInputProbe(InputArgs),
     StrictSave(IoProbeArgs),
     StrictRenameRefusal(IoProbeArgs),
     CoreStart(Empty),
@@ -489,6 +490,11 @@ fn validate(f: &Fixture) -> Result<(), String> {
                 relative_path(&a.path)?;
                 if !f.inputs.contains_key(&a.input) {
                     return Err("missing IO probe input".into());
+                }
+            }
+            Call::OwnedInputProbe(a) => {
+                if !f.inputs.contains_key(&a.input) {
+                    return Err("missing owned-input probe input".into());
                 }
             }
             Call::CoreSend(a) => {

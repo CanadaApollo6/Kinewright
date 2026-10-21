@@ -3,6 +3,13 @@
 //! [`SidecarSession`] extraction delta).
 
 pub mod bundle;
+pub mod bundle_copy;
+pub mod bundle_records;
+pub mod owned_inputs;
+pub mod receipts;
+pub mod storage_budget;
+pub mod store;
+
 pub mod headless;
 #[cfg(any(test, feature = "test-util"))]
 pub mod io_observer;

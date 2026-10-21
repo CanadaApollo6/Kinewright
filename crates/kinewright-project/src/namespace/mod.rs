@@ -111,6 +111,8 @@ pub struct ProjectNamespace {
     #[cfg(target_os = "linux")]
     parent: File,
     #[cfg(target_os = "linux")]
+    session: Option<(File, OsString)>,
+    #[cfg(target_os = "linux")]
     root_name: OsString,
     #[cfg(target_os = "linux")]
     directories: RefCell<BTreeMap<PathBuf, File>>,
@@ -118,6 +120,44 @@ pub struct ProjectNamespace {
     uncertain: bool,
 }
 impl ProjectNamespace {
+    pub(crate) fn create_session(
+        parent: &Path,
+        session_id: &crate::bundle_records::SessionId,
+    ) -> Result<Self, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::create_session(parent, session_id)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (parent, session_id);
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn cleanup_session(&mut self) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::cleanup_session(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+    pub(crate) fn is_uncertain(&self) -> bool {
+        self.uncertain
+    }
+    pub(crate) fn unlink_owned(&mut self, path: &PortablePath) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::unlink_relative(self, path)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = path;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub fn acquire(path: &Path) -> Result<Self, BundleError> {
         #[cfg(target_os = "linux")]
         {
@@ -149,11 +189,19 @@ impl ProjectNamespace {
         if self.uncertain {
             return Err(BundleError::Unsettled);
         }
-        self.lock
-            .as_ref()
-            .ok_or_else(|| BundleError::Identity("released namespace".into()))?
-            .verify()
-            .map_err(|e| BundleError::Identity(e.to_string()))?;
+        if let Some(lock) = self.lock.as_ref() {
+            lock.verify()
+                .map_err(|e| BundleError::Identity(e.to_string()))?;
+        } else {
+            #[cfg(target_os = "linux")]
+            {
+                linux::verify_session(self)?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(BundleError::Identity("released namespace".into()));
+            }
+        }
         #[cfg(target_os = "linux")]
         linux::verify_directories(self)?;
         Ok(())
@@ -288,4 +336,12 @@ pub(super) fn note(operation: &'static str, path: &Path) {
     crate::io_observer::note(operation, path);
     #[cfg(not(any(test, feature = "test-util")))]
     let _ = (operation, path);
+}
+
+impl Drop for ProjectNamespace {
+    fn drop(&mut self) {
+        if self.cleanup_session().is_err() {
+            eprintln!("kinewright: temporary namespace retained for reconciliation");
+        }
+    }
 }

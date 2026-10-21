@@ -1,7 +1,6 @@
 use std::{
     fmt::Write as _,
     fs::{self, File, Metadata},
-    io::Read as _,
     path::Path,
 };
 
@@ -238,12 +237,17 @@ fn metadata_changed(before: &Metadata, after: &Metadata) -> bool {
 }
 
 fn hash_reader(file: &mut File, path: &Path) -> Result<String, MediaError> {
+    sha256_reader(file)
+        .map_err(|error| MediaError::Backend(format!("could not hash {}: {error}", path.display())))
+}
+/// Hash the exact caller-owned reader without resolving or reopening any path.
+/// # Errors
+/// Returns an error when the reader cannot be read completely.
+pub fn sha256_reader(file: &mut impl std::io::Read) -> std::io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
-        let count = file.read(&mut buffer).map_err(|error| {
-            MediaError::Backend(format!("could not hash {}: {error}", path.display()))
-        })?;
+        let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
         }

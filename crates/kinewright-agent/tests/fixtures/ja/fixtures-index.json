@@ -685,6 +685,29 @@
           "kind": "independent-routing-backend-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s1-owned-input",
+      "relative_file": "s1-owned-input.json",
+      "sha256": "712630d1811b910329a7df633c4df3e57e5ffe38425c26ebc6840dba9f4043ac",
+      "byte_length": 2418,
+      "expected_baseline_process_exit": 2,
+      "inputs": {
+        "bytes": {
+          "relative_file": "s1-owned-bytes.bin",
+          "sha256": "7e5b632c72adb55c8d12e73552998fbdab86bbffd234e7ba192823a6c56e70bf",
+          "byte_length": 25,
+          "kind": "independent-opaque-owned-bytes"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

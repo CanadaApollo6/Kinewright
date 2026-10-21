@@ -66,13 +66,16 @@ run_selected() {
 }
 run_selected architecture-agent cargo test -p kinewright-agent --lib --features eval-harness -- session::tests::in2_the_agent_crate_has_one_agent_event_loop --exact
 run_selected architecture-app cargo test -p kinewright-app --bin kinewright-app -- investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call --exact
+run_selected core-history cargo test -p kinewright-core --test ja_s1_history
+run_selected revised cargo test -p kinewright-agent --features eval-harness --test ja_s1
+if [[ "$stage" -ge 2 ]]; then
+    run_selected storage cargo test -p kinewright-project --features test-util --test ja_s1_storage
+fi
 run_selected harness-lib cargo test -p kinewright-agent --lib --features eval-harness ja_harness:: -- --test-threads=1
 run_selected harness-integration cargo test -p kinewright-agent --features eval-harness --test ja_baseline
 for test in native_app_bridge_retains_exercised_control_and_property_failures native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two native_app_bridge_rejects_abnormal_exit_after_completed_report; do
     run_selected "$test" cargo test -p kinewright-agent --features eval-harness --test ja_baseline "$test" -- --ignored --exact
 done
-run_selected core-history cargo test -p kinewright-core --test ja_s1_history
-run_selected revised cargo test -p kinewright-agent --features eval-harness --test ja_s1
 if [[ "$stage" -eq 1 || "$stage" -ge 4 ]]; then
     run_selected H cargo test -p kinewright-core --lib -- --exact actor::tests::applied_operations_follow_undo_and_redo_instead_of_the_append_only_log actor::tests::batch_broadcasts_once_appends_each_op_and_undoes_as_one_snapshot actor::tests::coalesced_batches_under_one_key_form_a_single_undo_entry actor::tests::coalesced_history_replays_faithfully_through_applied_operations
 fi
@@ -80,7 +83,6 @@ if [[ "$stage" -eq 1 || "$stage" -eq 6 || "$stage" -eq 8 ]]; then
     run_selected M cargo test -p kinewright-agent --lib -- --exact branch::tests::sibling_branches_diverge_without_touching_live_state branch::tests::merge_is_atomic_and_rejects_a_stale_base branch::tests::cherry_pick_preserves_branch_order_and_validates_indices_first
 fi
 if [[ "$stage" -ge 2 ]]; then
-    run_selected storage cargo test -p kinewright-project --features test-util --test ja_s1_storage
     run_selected L cargo test -p kinewright-project --lib -- --exact lockfile::tests::r19_second_acquire_refuses_while_held lockfile::tests::r19_release_frees_the_lock_for_a_clean_reacquire lockfile::tests::f4_symlink_alias_shares_one_lock lockfile::tests::g9_fd_check_detects_a_swapped_object lockfile::race_tests::guard_missing_discovery_with_held_lock lockfile::race_tests::guard_alias_spellings_race_one_owner lockfile::race_tests::h7_stale_same_endpoint_release_spares_the_successor lockfile::race_tests::j3_link_retargeted_after_acquire_refuses_the_next_save headless::tests::headless_save_preserves_an_unreplayed_journal headless::tests::g3_headless_occupied_save_as_preserves_and_pairs headless::tests::f6_failed_project_write_restores_the_prior_sidecar
 fi
 # Ceiling/format-sensitive controls are mandatory even before the ceiling changes.

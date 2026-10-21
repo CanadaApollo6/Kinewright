@@ -196,7 +196,7 @@ pub use room_tone_store::{
     RoomToneAvailabilityKind, RoomToneAvailabilityStatus, RoomToneCapture, RoomToneStore,
     RoomToneStoreError, RoomToneStoreErrorCode,
 };
-pub use sha256::{sha256_bytes, sha256_file, source_fingerprint};
+pub use sha256::{sha256_bytes, sha256_file, sha256_reader, source_fingerprint};
 pub use timeline::{
     TimelineAdjustmentLayer, TimelineAudioSegment, TimelineSolidLayer, TimelineSource,
     TimelineTitleLayer, TimelineVideoLayer, TimelineVisualLayer, TransitionCoverage,

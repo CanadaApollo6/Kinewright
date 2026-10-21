@@ -20,16 +20,7 @@ pub(super) fn acquire(path: &Path) -> Result<ProjectNamespace, BundleError> {
     let parent_path = resolved
         .parent()
         .ok_or_else(|| BundleError::Identity("root has no parent".into()))?;
-    let mut parent = File::from(fs::open("/", DIR, Mode::empty())?);
-    for component in parent_path.components() {
-        match component {
-            Component::RootDir => {}
-            Component::Normal(name) => {
-                parent = File::from(fs::openat(&parent, name, DIR, Mode::empty())?);
-            }
-            _ => return Err(BundleError::Identity("unresolved parent component".into())),
-        }
-    }
+    let parent = pin_directory(parent_path)?;
     let root_name = resolved
         .file_name()
         .ok_or_else(|| BundleError::Identity("missing root name".into()))?
@@ -46,11 +37,7 @@ pub(super) fn acquire(path: &Path) -> Result<ProjectNamespace, BundleError> {
         Ok(_) | Err(rustix::io::Errno::NOENT) => {}
         Err(e) => return Err(e.into()),
     }
-    let profile = fs::fstatfs(&parent)?;
-    // Reviewed local Linux namespace profile; tmpfs/network/other filesystems refuse.
-    if ![0x9123_683e, 0xef53, 0x5846_5342].contains(&profile.f_type) {
-        return Err(BundleError::DurabilityUnsupported);
-    }
+    check_profile(&parent)?;
     let acquired = acquire_project_lock_with_policy(
         &resolved,
         LockMode::Headless,
@@ -68,6 +55,7 @@ pub(super) fn acquire(path: &Path) -> Result<ProjectNamespace, BundleError> {
             parent_inode: stat.st_ino,
         },
         parent,
+        session: None,
         root_name,
         lock: Some(acquired.handle),
         directories: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -189,7 +177,12 @@ pub(super) fn replace_inner(
     })();
     if staged.is_err()
         && !namespace.uncertain
-        && fs::unlinkat(&namespace.parent, &name, AtFlags::empty()).is_err()
+        && (fs::unlinkat(&namespace.parent, &name, AtFlags::empty()).is_err()
+            || sync_directory(
+                &namespace.parent,
+                namespace.identity.resolved_root.parent().unwrap(),
+            )
+            .is_err())
     {
         namespace.uncertain = true;
         return Err(BundleError::DurabilityUnknown);
@@ -291,7 +284,8 @@ pub(super) fn publish(
     })();
     if result.is_err()
         && !namespace.uncertain
-        && fs::unlinkat(&dir, &temp_name, AtFlags::empty()).is_err()
+        && (fs::unlinkat(&dir, &temp_name, AtFlags::empty()).is_err()
+            || sync_directory(&dir, path.parent().unwrap()).is_err())
     {
         namespace.uncertain = true;
         return Err(BundleError::DurabilityUnknown);
@@ -380,7 +374,8 @@ pub(super) fn publish_with(
     })();
     if result.is_err()
         && !namespace.uncertain
-        && fs::unlinkat(&dir, &temp_name, AtFlags::empty()).is_err()
+        && (fs::unlinkat(&dir, &temp_name, AtFlags::empty()).is_err()
+            || sync_directory(&dir, path.parent().unwrap()).is_err())
     {
         namespace.uncertain = true;
         return Err(BundleError::DurabilityUnknown);
@@ -432,5 +427,143 @@ fn sync_directory(directory: &File, observed: &Path) -> Result<(), BundleError> 
 fn sync_file(file: &File, operation: &'static str, observed: &Path) -> Result<(), BundleError> {
     file.sync_all()?;
     note(operation, observed);
+    Ok(())
+}
+
+pub(super) fn pin_directory(path: &Path) -> Result<File, BundleError> {
+    if !path.is_absolute() {
+        return Err(BundleError::Identity(
+            "absolute resolved directory required".into(),
+        ));
+    }
+    let mut directory = File::from(fs::open("/", DIR, Mode::empty())?);
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                directory = File::from(fs::openat(&directory, name, DIR, Mode::empty())?);
+            }
+            _ => {
+                return Err(BundleError::Identity(
+                    "unresolved directory component".into(),
+                ));
+            }
+        }
+    }
+    Ok(directory)
+}
+pub(super) fn check_profile(directory: &File) -> Result<(), BundleError> {
+    if ![0x9123_683e, 0xef53, 0x5846_5342].contains(&fs::fstatfs(directory)?.f_type) {
+        return Err(BundleError::DurabilityUnsupported);
+    }
+    Ok(())
+}
+pub(super) fn unlink_relative(
+    namespace: &mut ProjectNamespace,
+    path: &PortablePath,
+) -> Result<(), BundleError> {
+    namespace.verify()?;
+    let path = path.as_path();
+    let dir = directory(
+        namespace,
+        path.parent().unwrap_or_else(|| Path::new("")),
+        false,
+    )?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| BundleError::Identity("missing object name".into()))?;
+    let stat = fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    if fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::RegularFile {
+        return Err(BundleError::Identity(
+            "retirement target is not an owned regular file".into(),
+        ));
+    }
+    fs::unlinkat(&dir, name, AtFlags::empty())?;
+    namespace.uncertain = true;
+    sync_directory(&dir, path.parent().unwrap()).map_err(|_| BundleError::DurabilityUnknown)?;
+    namespace.uncertain = false;
+    Ok(())
+}
+
+pub(super) fn verify_session(namespace: &ProjectNamespace) -> Result<(), BundleError> {
+    let (base, name) = namespace
+        .session
+        .as_ref()
+        .ok_or_else(|| BundleError::Identity("missing temporary authority".into()))?;
+    let current = fs::statat(base, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    let opened = fs::fstat(&namespace.parent)?;
+    if current.st_dev != opened.st_dev || current.st_ino != opened.st_ino {
+        return Err(BundleError::Identity(
+            "temporary root binding changed".into(),
+        ));
+    }
+    Ok(())
+}
+pub(super) fn create_session(
+    base: &Path,
+    session_id: &crate::bundle_records::SessionId,
+) -> Result<ProjectNamespace, BundleError> {
+    let base_path = base.canonicalize()?;
+    let base = pin_directory(&base_path)?;
+    check_profile(&base)?;
+    let name: std::ffi::OsString = format!(".kinewright-session-{}", session_id.as_str()).into();
+    fs::mkdirat(&base, &name, Mode::RUSR | Mode::WUSR | Mode::XUSR)?;
+    let parent = File::from(fs::openat(
+        &base,
+        &name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    fs::fsync(&parent)?;
+    fs::fsync(&base)?;
+    let stat = fs::fstat(&parent)?;
+    Ok(ProjectNamespace {
+        identity: NamespaceIdentity {
+            resolved_root: base_path.join(&name).join("session.kinewright"),
+            parent_device: stat.st_dev,
+            parent_inode: stat.st_ino,
+        },
+        parent,
+        root_name: "session.kinewright".into(),
+        directories: std::cell::RefCell::default(),
+        lock: None,
+        uncertain: false,
+        session: Some((base, name)),
+    })
+}
+pub(super) fn cleanup_session(namespace: &mut ProjectNamespace) -> Result<(), BundleError> {
+    let Some((base, name)) = namespace.session.as_ref() else {
+        return Ok(());
+    };
+    if namespace.uncertain {
+        return Err(BundleError::Unsettled);
+    }
+    verify_session(namespace)?;
+    verify_directories(namespace)?;
+    match fs::unlinkat(&namespace.parent, &namespace.root_name, AtFlags::empty()) {
+        Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let directories = namespace.directories.get_mut();
+    let mut names = directories.keys().cloned().collect::<Vec<_>>();
+    names.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for path in names {
+        let held_parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| {
+                directories
+                    .get(p)
+                    .ok_or_else(|| BundleError::Identity("missing temporary parent".into()))
+            })
+            .transpose()?
+            .unwrap_or(&namespace.parent);
+        fs::unlinkat(held_parent, path.file_name().unwrap(), AtFlags::REMOVEDIR)?;
+        directories.remove(&path);
+    }
+    fs::fsync(&namespace.parent)?;
+    fs::unlinkat(base, name, AtFlags::REMOVEDIR)?;
+    fs::fsync(base)?;
+    namespace.session = None;
     Ok(())
 }

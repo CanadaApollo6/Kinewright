@@ -135,3 +135,35 @@ fn strict_io_protocol_separates_legacy_control_from_bundle_result() {
     assert_eq!(observed["attempted_bytes_equal"], true);
     assert_eq!(observed["in_place_fallback_observed"], false);
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn owned_input_fixture_retains_bytes_and_charges_until_reader_close() {
+    let temp = TempDirectory::new("ja-s1-owned-fixture");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-owned-input.json");
+    let output = temp.path("out");
+    assert_eq!(
+        kinewright_agent::ja_harness::run(
+            &fixture,
+            &output,
+            kinewright_agent::ja_harness::protocol::Mode::Revised
+        )
+        .unwrap(),
+        0
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    let assertions = summary["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 4);
+    assert!(
+        assertions.iter().all(|a| a["passed"] == true),
+        "{summary:#}"
+    );
+    let observed: Value = serde_json::from_slice(
+        &std::fs::read(output.join("artifacts/observation-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(observed["backend"], "linux-local-owned-store");
+    assert_eq!(observed["decoder_certification_unavailable"], true);
+}

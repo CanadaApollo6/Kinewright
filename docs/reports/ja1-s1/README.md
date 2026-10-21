@@ -30,7 +30,11 @@ Storage limits remain provisional until L6's workload measurements.
    preserved-root properties. The original contradictory IO fixture remains red.
    Full graph crash durability awaits commit 4. Exact raw summaries are in
    `commit-2.json`.
-3. Bounded objects and owned inputs: not committed.
+3. Bounded objects and owned inputs: Linux gate passed (`c3-gate-attempt5`),
+   including ten storage tests, four revised tests and all selected media/presentation
+   regressions (10/5/3 passed, no ignored pins). Ten storage mutation pairs failed
+   their intended witness and passed after restoration. Exact summaries are in
+   `commit-3.json`. No bundle root is declared durable at this stage.
 4. V3 publication and durable history: not committed.
 5. Command receipts and issuer retirement: not committed.
 6. Durable bases, lineage and floors: not committed.
@@ -69,3 +73,24 @@ calls, using shared narrow sync functions so omission mutations remove the actua
 barrier and its observation together. There is no claim that a trace alone is a
 storage-crash model. Paired probe observations identify `linux-local-strict` even
 though the unchanged compatible paired fixture's scalar protocol lane is portable.
+
+
+Commit 3 uses a private exclusive session directory in the same namespace/store
+implementation. It creates no named lock/discovery object for an unsaved edit, so
+last-reader cleanup does not unlink a named OS-lock object. Object and decode
+reservations follow their actual ownership; uncertain staged bytes remain charged.
+The `StorageReservation` type also carries decoded values, avoiding a second public
+lease/accounting type. The five storage witnesses live under the cfg-Linux
+`bounded_store` test module; mutation selectors include that real module prefix.
+These are implementation details within the planned ownership contract.
+
+Decoded admission charges include conservative native slots and parser scratch;
+they are bounds, not measurements of heap allocation or whole-process RSS. L6
+remains open. Decoder-open certification remains unavailable; raw stored-byte/read
+controls do not claim stability through decoder use. The new owned-input fixture
+has successful revised controls. Its baseline capability refusal is NOT RUN and
+is not counted as a baseline runtime red. Windows native and full Windows build/CI
+remain NOT RUN with the native toolchain prerequisite recorded above.
+
+The gate runs new storage/revised witnesses before longer unchanged harness checks,
+without removing any required selection. This only changes ordering within step 4.
