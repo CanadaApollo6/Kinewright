@@ -989,12 +989,20 @@ mod tests {
         let mut read = 0_usize;
         let mut allowlisted = 0_usize;
         let mut truncated = 0_usize;
+        let mut skipped_harness = false;
         let mut loops = Vec::new();
         let mut pending = vec![source.to_path_buf()];
         while let Some(directory) = pending.pop() {
             for entry in std::fs::read_dir(&directory).expect("the crate's own src is readable") {
                 let path = entry.expect("a readable directory entry").path();
                 if path.is_dir() {
+                    // The Job A eval harness (`eval-harness` only) waits on its
+                    // fixture processes, not on agent events; it is test
+                    // infrastructure, not a second agent-event loop.
+                    if path.file_name().is_some_and(|name| name == "ja_harness") {
+                        skipped_harness = true;
+                        continue;
+                    }
                     pending.push(path);
                     continue;
                 }
@@ -1031,6 +1039,10 @@ mod tests {
             }
         }
         assert!(read >= 10, "the walk read only {read} source files");
+        assert!(
+            skipped_harness,
+            "the ja_harness exclusion must match a real directory, or it is stale"
+        );
         assert!(
             truncated > 0,
             "the test-module truncation must bite, or it proves nothing"
