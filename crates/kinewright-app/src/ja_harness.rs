@@ -44,8 +44,13 @@ fn observe(
     for batch in &control.batches {
         ja_harness::protocol::validate_local_control_operations(batch)?;
     }
-    crate::app::ja_observe_current(document, control.batches, TimeCode(control.at), report)
-        .map(Some)
+    crate::app::ja_observe::ja_observe_current(
+        document,
+        control.batches,
+        TimeCode(control.at),
+        report,
+    )
+    .map(Some)
 }
 
 fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, String> {

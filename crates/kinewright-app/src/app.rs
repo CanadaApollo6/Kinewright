@@ -3435,130 +3435,6 @@ impl KinewrightApp {
     }
 }
 
-/// Drive only current App/Core/presenter/GUI-recorder paths in a private test
-/// tree. The paint is a real headless callback, not a physical display proof.
-#[cfg(test)]
-#[allow(clippy::too_many_lines)]
-pub(crate) fn ja_observe_current(
-    document: Document,
-    batches: Vec<Vec<Operation>>,
-    at: TimeCode,
-    report: &mut kinewright_agent::ja_harness::report::Report,
-) -> Result<serde_json::Value, String> {
-    use crate::presenter::paint_support::{Painted, Pass};
-    use kinewright_agent::ja_harness::media_observer::stamp_value as stamp;
-    use serde_json::json;
-    document.validate().map_err(|e| e.to_string())?;
-    if document.resolution.0 > 1024
-        || document.resolution.1 > 1024
-        || batches.is_empty()
-        || batches.len() > 64
-    {
-        return Err("App control raster/gesture quota".into());
-    }
-    let engine = Arc::new(
-        FfmpegMediaEngine::new_with_data_dir(report.root.join("app-media-cache"))
-            .map_err(|e| format!("GPU/media prerequisite NOT RUN: {e}"))?,
-    );
-    let finished = engine.teardown_observer();
-    let (mut app, _) = crate::recovery::with_ja_directory(report.root.join("gui-recovery"), || {
-        in1_tests::in1_harness_with_engine(document, Arc::clone(&engine))
-    });
-    let result: Result<serde_json::Value, String> = (|| {
-        let started = Instant::now();
-        let gesture = app.begin_edit_gesture();
-        let key = format!("ja-{gesture}");
-        let mut inputs = Vec::new();
-        for operations in batches {
-            inputs.push(json!({"elapsed_ns":started.elapsed().as_nanos().to_string(),"operations":operations,"coalesce_key":key}));
-            app.send_operations_coalesced(operations, key.clone());
-        }
-        let core = app.focused().core.clone();
-        let history = core.observe_history().map_err(|e| e.to_string())?;
-        let accepted_observed_ns = started.elapsed().as_nanos().to_string();
-        let context = egui::Context::default();
-        app.poll_background(&context);
-        let pending_revision = app.focused().revision;
-        let frames = engine.frames();
-        while frames.try_recv().is_ok() {}
-        engine.request_frame(at);
-        let issued = engine.stamp();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let frame = loop {
-            let frame = frames
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .map_err(|e| format!("App frame prerequisite/deadline: {e}"))?;
-            if frame.at == at && frame.stamp == issued {
-                break frame;
-            }
-        };
-        let center = usize::try_from(
-            (u64::from(frame.texture.height / 2) * u64::from(frame.texture.width)
-                + u64::from(frame.texture.width / 2))
-                * 4,
-        )
-        .map_err(|e| e.to_string())?;
-        let landmark = frame
-            .texture
-            .rgba
-            .get(center..center + 4)
-            .ok_or("App raw center landmark absent")?
-            .to_vec();
-        let raw = report.artifact("app-preview.rgba", &frame.texture.rgba)?;
-        let returned = frame.stamp;
-        app.presenter.collect(frame);
-        app.finalize_preview(&context);
-        let bound = app.presenter.bound_for_test();
-        let mut painted = Painted::new();
-        let whole = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64.0, 64.0));
-        let image = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(48.0, 48.0));
-        painted.pass(
-            &app.presenter,
-            &|| app.paint_clock(),
-            whole,
-            image,
-            Pass::Discarded,
-        );
-        let discarded_has_no_mark = app.presenter.paint_mark_for_test().is_none();
-        painted.pass(
-            &app.presenter,
-            &|| app.paint_clock(),
-            whole,
-            image,
-            Pass::Rendered,
-        );
-        let mark = app.presenter.paint_mark_for_test();
-        app.acknowledge_paint(painted.epoch());
-        let ack_consumed_once = app.presenter.take_ack(painted.epoch() + 1).is_none();
-        let (journal_bytes, journal) = app.focused().recovery.ja_observe()?;
-        let journal_artifact = report.artifact("gui-journal.bin", &journal_bytes)?;
-        Ok(
-            json!({"input_events":inputs,"core_accepted_observed_ns":accepted_observed_ns,
-            "core_history":{"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history},
-            "app_pending_revision":pending_revision,"issued_stamp":stamp(issued),"returned_stamp":stamp(returned),
-            "bound_display_cell":bound.map(|c| json!({"stamp":stamp(c.stamp),"at":c.at,"frame_id":c.frame_id,"stale":c.stale})),
-            "bound_matches_returned":bound.is_some_and(|c| c.stamp == returned && c.at == at),
-            "paint_callback_observed":mark.is_some(),"paint_mark":mark.map(|m| json!({"stamp":stamp(m.cell.stamp),"at":m.cell.at,"frame_id":m.cell.frame_id,"epoch":m.epoch,"expired":m.expired,"elapsed_ns":m.painted.duration_since(started).as_nanos().to_string()})),
-            "discarded_has_no_mark":discarded_has_no_mark,"ack_consumed_once":ack_consumed_once,
-            "raw_frame":raw,"center_rgba":landmark,"letterbox_landmark":crate::matte_overlay_ui::ja_letterbox_observation(),"gui_journal":journal,"journal_bytes":journal_artifact,
-            "evidence_class":"actual_headless_paint_callback","physical_display_verified":false,"preview_adapter":engine.observed_adapter(),"paint_adapter":painted.observed_adapter(),
-            "durable_version_id":null,"owned_input_association":null,"requested_version_id":null}),
-        )
-    })();
-    in1_tests::in2_cleanup(&mut app);
-    drop(app);
-    drop(engine);
-    if finished.recv_timeout(Duration::from_millis(
-        kinewright_agent::ja_harness::MEDIA_TEARDOWN_MS,
-    )) != Err(crossbeam_channel::RecvTimeoutError::Disconnected)
-    {
-        return Err("App media worker teardown not observed; NOT RUN".into());
-    }
-    let mut result = result?;
-    result["engine_worker_finished"] = json!(true);
-    Ok(result)
-}
-
 /// Two seconds of lead-in so a reviewed change plays with context.
 pub(crate) fn review_preroll_frames(fps: kinewright_core::Rational) -> i64 {
     let nominal = i64::from(fps.numerator().saturating_add(fps.denominator() / 2))
@@ -15441,5 +15317,136 @@ mod s3a_tests {
     }
     mod r71 {
         include!("display_r71_tests.rs");
+    }
+}
+
+/// The Job A harness observation of current App paths. It lives after the
+/// test modules so the IN2 no-agent-event-loop scan reads only production code.
+#[cfg(test)]
+pub(crate) mod ja_observe {
+    use super::*;
+
+    /// Drive only current App/Core/presenter/GUI-recorder paths in a private test
+    /// tree. The paint is a real headless callback, not a physical display proof.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn ja_observe_current(
+        document: Document,
+        batches: Vec<Vec<Operation>>,
+        at: TimeCode,
+        report: &mut kinewright_agent::ja_harness::report::Report,
+    ) -> Result<serde_json::Value, String> {
+        use crate::presenter::paint_support::{Painted, Pass};
+        use kinewright_agent::ja_harness::media_observer::stamp_value as stamp;
+        use serde_json::json;
+        document.validate().map_err(|e| e.to_string())?;
+        if document.resolution.0 > 1024
+            || document.resolution.1 > 1024
+            || batches.is_empty()
+            || batches.len() > 64
+        {
+            return Err("App control raster/gesture quota".into());
+        }
+        let engine = Arc::new(
+            FfmpegMediaEngine::new_with_data_dir(report.root.join("app-media-cache"))
+                .map_err(|e| format!("GPU/media prerequisite NOT RUN: {e}"))?,
+        );
+        let finished = engine.teardown_observer();
+        let (mut app, _) =
+            crate::recovery::with_ja_directory(report.root.join("gui-recovery"), || {
+                in1_tests::in1_harness_with_engine(document, Arc::clone(&engine))
+            });
+        let result: Result<serde_json::Value, String> = (|| {
+            let started = Instant::now();
+            let gesture = app.begin_edit_gesture();
+            let key = format!("ja-{gesture}");
+            let mut inputs = Vec::new();
+            for operations in batches {
+                inputs.push(json!({"elapsed_ns":started.elapsed().as_nanos().to_string(),"operations":operations,"coalesce_key":key}));
+                app.send_operations_coalesced(operations, key.clone());
+            }
+            let core = app.focused().core.clone();
+            let history = core.observe_history().map_err(|e| e.to_string())?;
+            let accepted_observed_ns = started.elapsed().as_nanos().to_string();
+            let context = egui::Context::default();
+            app.poll_background(&context);
+            let pending_revision = app.focused().revision;
+            let frames = engine.frames();
+            while frames.try_recv().is_ok() {}
+            engine.request_frame(at);
+            let issued = engine.stamp();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let frame = loop {
+                let frame = frames
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .map_err(|e| format!("App frame prerequisite/deadline: {e}"))?;
+                if frame.at == at && frame.stamp == issued {
+                    break frame;
+                }
+            };
+            let center = usize::try_from(
+                (u64::from(frame.texture.height / 2) * u64::from(frame.texture.width)
+                    + u64::from(frame.texture.width / 2))
+                    * 4,
+            )
+            .map_err(|e| e.to_string())?;
+            let landmark = frame
+                .texture
+                .rgba
+                .get(center..center + 4)
+                .ok_or("App raw center landmark absent")?
+                .to_vec();
+            let raw = report.artifact("app-preview.rgba", &frame.texture.rgba)?;
+            let returned = frame.stamp;
+            app.presenter.collect(frame);
+            app.finalize_preview(&context);
+            let bound = app.presenter.bound_for_test();
+            let mut painted = Painted::new();
+            let whole = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64.0, 64.0));
+            let image = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(48.0, 48.0));
+            painted.pass(
+                &app.presenter,
+                &|| app.paint_clock(),
+                whole,
+                image,
+                Pass::Discarded,
+            );
+            let discarded_has_no_mark = app.presenter.paint_mark_for_test().is_none();
+            painted.pass(
+                &app.presenter,
+                &|| app.paint_clock(),
+                whole,
+                image,
+                Pass::Rendered,
+            );
+            let mark = app.presenter.paint_mark_for_test();
+            app.acknowledge_paint(painted.epoch());
+            let ack_consumed_once = app.presenter.take_ack(painted.epoch() + 1).is_none();
+            let (journal_bytes, journal) = app.focused().recovery.ja_observe()?;
+            let journal_artifact = report.artifact("gui-journal.bin", &journal_bytes)?;
+            Ok(
+                json!({"input_events":inputs,"core_accepted_observed_ns":accepted_observed_ns,
+                "core_history":{"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history},
+                "app_pending_revision":pending_revision,"issued_stamp":stamp(issued),"returned_stamp":stamp(returned),
+                "bound_display_cell":bound.map(|c| json!({"stamp":stamp(c.stamp),"at":c.at,"frame_id":c.frame_id,"stale":c.stale})),
+                "bound_matches_returned":bound.is_some_and(|c| c.stamp == returned && c.at == at),
+                "paint_callback_observed":mark.is_some(),"paint_mark":mark.map(|m| json!({"stamp":stamp(m.cell.stamp),"at":m.cell.at,"frame_id":m.cell.frame_id,"epoch":m.epoch,"expired":m.expired,"elapsed_ns":m.painted.duration_since(started).as_nanos().to_string()})),
+                "discarded_has_no_mark":discarded_has_no_mark,"ack_consumed_once":ack_consumed_once,
+                "raw_frame":raw,"center_rgba":landmark,"letterbox_landmark":crate::matte_overlay_ui::ja_letterbox_observation(),"gui_journal":journal,"journal_bytes":journal_artifact,
+                "evidence_class":"actual_headless_paint_callback","physical_display_verified":false,"preview_adapter":engine.observed_adapter(),"paint_adapter":painted.observed_adapter(),
+                "durable_version_id":null,"owned_input_association":null,"requested_version_id":null}),
+            )
+        })();
+        in1_tests::in2_cleanup(&mut app);
+        drop(app);
+        drop(engine);
+        if finished.recv_timeout(Duration::from_millis(
+            kinewright_agent::ja_harness::MEDIA_TEARDOWN_MS,
+        )) != Err(crossbeam_channel::RecvTimeoutError::Disconnected)
+        {
+            return Err("App media worker teardown not observed; NOT RUN".into());
+        }
+        let mut result = result?;
+        result["engine_worker_finished"] = json!(true);
+        Ok(result)
     }
 }
