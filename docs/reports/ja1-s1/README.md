@@ -24,7 +24,12 @@ Storage limits remain provisional until L6's workload measurements.
    five history and two adapter mutation red/restored-green pairs passed. Exact
    raw summaries are in `commit-1.json`. The three ignored native bridge cases
    were each explicitly executed and passed. No durable S0 flip is claimed.
-2. Namespace authority and strict IO: not committed.
+2. Namespace authority and strict IO: Linux gate passed (`c2-gate-attempt4`),
+   with nine targeted namespace mutation red/restored-green pairs. The same paired
+   IO fixture hash has successful controls and revised directory-sync/no-fallback/
+   preserved-root properties. The original contradictory IO fixture remains red.
+   Full graph crash durability awaits commit 4. Exact raw summaries are in
+   `commit-2.json`.
 3. Bounded objects and owned inputs: not committed.
 4. V3 publication and durable history: not committed.
 5. Command receipts and issuer retirement: not committed.
@@ -50,3 +55,17 @@ lint, which was corrected. Gate retries retain their own logs. Shared machine
 memory sometimes falls below the required 6 GiB available; cargo waits rather
 than changing other workloads or weakening the machine rule. No skipped gate is
 reported as passed.
+
+
+The optional pure Core Windows target check passed. Commit 2's isolated real
+stable-std Windows API module compile passed using the installed MSVC Rust target.
+The full project/agent Windows cfg check was attempted and stopped in
+`aws-lc-sys` because the native MSVC cross-toolchain prerequisites are unavailable.
+That full lane is NOT RUN, and all native Windows witnesses/CI remain NOT RUN.
+It is neither a runtime red nor a passing Windows gate. No toolchain was installed.
+
+Commit 2 records observations adjacent to successful native file/directory sync
+calls, using shared narrow sync functions so omission mutations remove the actual
+barrier and its observation together. There is no claim that a trace alone is a
+storage-crash model. Paired probe observations identify `linux-local-strict` even
+though the unchanged compatible paired fixture's scalar protocol lane is portable.

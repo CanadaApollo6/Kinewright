@@ -2,10 +2,12 @@
 //! from the app in AW1 S1 (zero logic change except the named
 //! [`SidecarSession`] extraction delta).
 
+pub mod bundle;
 pub mod headless;
 #[cfg(any(test, feature = "test-util"))]
 pub mod io_observer;
 pub mod lockfile;
+pub mod namespace;
 pub mod project;
 pub mod recovery;
 pub mod session;

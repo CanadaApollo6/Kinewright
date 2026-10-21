@@ -100,6 +100,6 @@
     ]
   },
   "windows_native": "NOT RUN",
-  "windows_core_optional_check": "waiting for memory; no Windows-specific C1 witness",
+  "windows_core_optional_check": "passed cargo check for installed x86_64-pc-windows-msvc target; c1-windows-core.log.gz; source 5bc776d Core unchanged",
   "baseline_flips": []
 }

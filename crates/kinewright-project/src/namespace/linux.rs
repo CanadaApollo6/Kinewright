@@ -1,0 +1,436 @@
+use super::{NamespaceIdentity, PortablePath, ProjectNamespace, note};
+use crate::{LockMode, acquire_project_lock_with_policy, bundle::BundleError};
+use rustix::fs::{self, AtFlags, Mode, OFlags, RenameFlags};
+use std::{
+    fmt::Write as _,
+    fs::File,
+    io::{Read, Write},
+    path::{Component, Path},
+    time::Duration,
+};
+
+const DIR: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+pub(super) fn acquire(path: &Path) -> Result<ProjectNamespace, BundleError> {
+    let resolved = crate::canonical_project_identity(path)
+        .map_err(|e| BundleError::Identity(e.to_string()))?;
+    let parent_path = resolved
+        .parent()
+        .ok_or_else(|| BundleError::Identity("root has no parent".into()))?;
+    let mut parent = File::from(fs::open("/", DIR, Mode::empty())?);
+    for component in parent_path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                parent = File::from(fs::openat(&parent, name, DIR, Mode::empty())?);
+            }
+            _ => return Err(BundleError::Identity("unresolved parent component".into())),
+        }
+    }
+    let root_name = resolved
+        .file_name()
+        .ok_or_else(|| BundleError::Identity("missing root name".into()))?
+        .to_os_string();
+    match fs::statat(&parent, &root_name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat)
+            if stat.st_nlink != 1
+                || fs::FileType::from_raw_mode(stat.st_mode) != fs::FileType::RegularFile =>
+        {
+            return Err(BundleError::Identity(
+                "ambiguous or non-regular root".into(),
+            ));
+        }
+        Ok(_) | Err(rustix::io::Errno::NOENT) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let profile = fs::fstatfs(&parent)?;
+    // Reviewed local Linux namespace profile; tmpfs/network/other filesystems refuse.
+    if ![0x9123_683e, 0xef53, 0x5846_5342].contains(&profile.f_type) {
+        return Err(BundleError::DurabilityUnsupported);
+    }
+    let acquired = acquire_project_lock_with_policy(
+        &resolved,
+        LockMode::Headless,
+        "http://127.0.0.1:9/studio",
+        &parent_path.join(".studio-recovery-scan"),
+        1,
+        Duration::ZERO,
+    )
+    .map_err(|e| BundleError::Contention(e.to_string()))?;
+    let stat = fs::fstat(&parent)?;
+    let namespace = ProjectNamespace {
+        identity: NamespaceIdentity {
+            resolved_root: resolved,
+            parent_device: stat.st_dev,
+            parent_inode: stat.st_ino,
+        },
+        parent,
+        root_name,
+        lock: Some(acquired.handle),
+        directories: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+        uncertain: false,
+    };
+    if namespace.lock.as_ref().unwrap().resolved_identity() != namespace.identity.resolved_root {
+        return Err(BundleError::Identity(
+            "claim identity changed during admission".into(),
+        ));
+    }
+    namespace.verify()?;
+    Ok(namespace)
+}
+
+pub(super) fn read_at(
+    dir: &File,
+    name: &std::ffi::OsStr,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, BundleError> {
+    let fd = match fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let file = File::from(fd);
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > limit {
+        return Err(BundleError::Capacity("bounded regular file"));
+    }
+    let mut bytes = Vec::new();
+    file.take(
+        limit
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("read overflow"))?,
+    )
+    .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(BundleError::Capacity("file grew during read"));
+    }
+    Ok(Some(bytes))
+}
+
+fn temp(dir: &File) -> Result<(std::ffi::OsString, File), BundleError> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|e| BundleError::Identity(e.to_string()))?;
+    let mut encoded = String::from(".studio-");
+    for byte in random {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded.push_str(".tmp");
+    let name = std::ffi::OsString::from(encoded);
+    let file = File::from(fs::openat(
+        dir,
+        &name,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?);
+    Ok((name, file))
+}
+
+pub(super) fn replace(namespace: &mut ProjectNamespace, bytes: &[u8]) -> Result<(), BundleError> {
+    replace_inner(namespace, bytes, false)
+}
+
+pub(super) fn replace_inner(
+    namespace: &mut ProjectNamespace,
+    bytes: &[u8],
+    refuse: bool,
+) -> Result<(), BundleError> {
+    namespace.verify()?;
+    let (name, mut file) = temp(&namespace.parent)?;
+    let temp_path = namespace
+        .identity
+        .resolved_root
+        .parent()
+        .unwrap()
+        .join(&name);
+    let staged = (|| {
+        file.write_all(bytes)?;
+        sync_file(&file, "root_file_sync", &temp_path)?;
+        namespace.verify()?;
+        if refuse {
+            #[cfg(any(test, feature = "test-util"))]
+            {
+                let attempted = read_at(&namespace.parent, &name, bytes.len() as u64)?
+                    .ok_or_else(|| BundleError::Corrupt("missing staged root".into()))?;
+                crate::io_observer::note_bytes(
+                    "rename_refusal_hook",
+                    &namespace.identity.resolved_root,
+                    Some(&attempted),
+                );
+                note("rename_refusal_injected", &namespace.identity.resolved_root);
+            }
+            return Err(BundleError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "S1 injected rename refusal",
+            )));
+        }
+        fs::renameat(
+            &namespace.parent,
+            &name,
+            &namespace.parent,
+            &namespace.root_name,
+        )?;
+        note("root_rename", &namespace.identity.resolved_root);
+        namespace.uncertain = true;
+        sync_directory(
+            &namespace.parent,
+            namespace.identity.resolved_root.parent().unwrap(),
+        )
+        .map_err(|_| BundleError::DurabilityUnknown)?;
+        namespace.uncertain = false;
+        Ok(())
+    })();
+    if staged.is_err()
+        && !namespace.uncertain
+        && fs::unlinkat(&namespace.parent, &name, AtFlags::empty()).is_err()
+    {
+        namespace.uncertain = true;
+        return Err(BundleError::DurabilityUnknown);
+    }
+    staged
+}
+
+fn directory(
+    namespace: &ProjectNamespace,
+    relative: &Path,
+    create: bool,
+) -> Result<File, BundleError> {
+    let root = &namespace.identity.resolved_root;
+    let mut assets = root
+        .file_stem()
+        .ok_or_else(|| BundleError::Identity("missing stem".into()))?
+        .to_os_string();
+    assets.push(".kinewright-assets");
+    let path = Path::new(&assets).join(relative);
+    let mut dir = namespace.parent.try_clone()?;
+    let mut key = std::path::PathBuf::new();
+    let mut observed = root.parent().unwrap().to_path_buf();
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            return Err(BundleError::Identity("invalid owned path".into()));
+        };
+        key.push(name);
+        observed.push(name);
+        if let Some(cached) = namespace.directories.borrow().get(&key) {
+            let current = fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+            let held = fs::fstat(cached)?;
+            if current.st_dev != held.st_dev || current.st_ino != held.st_ino {
+                return Err(BundleError::Identity(
+                    "owned directory binding changed".into(),
+                ));
+            }
+            dir = cached.try_clone()?;
+            continue;
+        }
+        if namespace.directories.borrow().len() >= 128 {
+            return Err(BundleError::Capacity("owned directory handles"));
+        }
+        let created = if create {
+            match fs::mkdirat(&dir, name, Mode::RUSR | Mode::WUSR | Mode::XUSR) {
+                Ok(()) => true,
+                Err(rustix::io::Errno::EXIST) => false,
+                Err(e) => return Err(e.into()),
+            }
+        } else {
+            false
+        };
+        let child = File::from(fs::openat(&dir, name, DIR, Mode::empty())?);
+        if created {
+            sync_directory(&child, &observed)?;
+            sync_directory(&dir, observed.parent().unwrap())?;
+        }
+        namespace
+            .directories
+            .borrow_mut()
+            .insert(key.clone(), child.try_clone()?);
+        dir = child;
+    }
+    Ok(dir)
+}
+
+pub(super) fn publish(
+    namespace: &mut ProjectNamespace,
+    path: &PortablePath,
+    bytes: &[u8],
+) -> Result<(), BundleError> {
+    namespace.verify()?;
+    let path = path.as_path();
+    let dir = directory(
+        namespace,
+        path.parent().unwrap_or_else(|| Path::new("")),
+        true,
+    )?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| BundleError::Identity("missing immutable name".into()))?;
+    if let Some(existing) = read_at(&dir, name, bytes.len() as u64)? {
+        if existing == bytes {
+            return Ok(());
+        }
+        return Err(BundleError::Corrupt(
+            "immutable name has different bytes".into(),
+        ));
+    }
+    let (temp_name, mut file) = temp(&dir)?;
+    let result = (|| {
+        file.write_all(bytes)?;
+        sync_file(&file, "object_file_sync", path)?;
+        fs::renameat_with(&dir, &temp_name, &dir, name, RenameFlags::NOREPLACE)?;
+        note("object_rename", path);
+        namespace.uncertain = true;
+        sync_directory(&dir, path.parent().unwrap()).map_err(|_| BundleError::DurabilityUnknown)?;
+        namespace.uncertain = false;
+        Ok(())
+    })();
+    if result.is_err()
+        && !namespace.uncertain
+        && fs::unlinkat(&dir, &temp_name, AtFlags::empty()).is_err()
+    {
+        namespace.uncertain = true;
+        return Err(BundleError::DurabilityUnknown);
+    }
+    result
+}
+
+pub(super) fn read_relative(
+    namespace: &ProjectNamespace,
+    path: &PortablePath,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, BundleError> {
+    let path = path.as_path();
+    let dir = match directory(
+        namespace,
+        path.parent().unwrap_or_else(|| Path::new("")),
+        false,
+    ) {
+        Ok(dir) => dir,
+        Err(BundleError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    read_at(
+        &dir,
+        path.file_name()
+            .ok_or_else(|| BundleError::Identity("missing name".into()))?,
+        limit,
+    )
+}
+
+pub(super) fn verify_directories(namespace: &ProjectNamespace) -> Result<(), BundleError> {
+    let directories = namespace.directories.borrow();
+    for (path, held) in directories.iter() {
+        let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+        let parent = if let Some(parent) = parent {
+            directories
+                .get(parent)
+                .ok_or_else(|| BundleError::Identity("unpinned ancestor".into()))?
+        } else {
+            &namespace.parent
+        };
+        let current = fs::statat(parent, path.file_name().unwrap(), AtFlags::SYMLINK_NOFOLLOW)?;
+        let held = fs::fstat(held)?;
+        if current.st_dev != held.st_dev || current.st_ino != held.st_ino {
+            return Err(BundleError::Identity("owned namespace moved".into()));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn publish_with(
+    namespace: &mut ProjectNamespace,
+    path: &PortablePath,
+    write: impl FnOnce(&mut File) -> Result<(), BundleError>,
+) -> Result<(), BundleError> {
+    namespace.verify()?;
+    let path = path.as_path();
+    let dir = directory(
+        namespace,
+        path.parent().unwrap_or_else(|| Path::new("")),
+        true,
+    )?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| BundleError::Identity("missing object name".into()))?;
+    match fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => {
+            return Err(BundleError::Corrupt(
+                "unregistered immutable object already exists".into(),
+            ));
+        }
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(e) => return Err(e.into()),
+    }
+    let (temp_name, mut file) = temp(&dir)?;
+    let result = (|| {
+        write(&mut file)?;
+        sync_file(&file, "object_file_sync", path)?;
+        namespace.verify()?;
+        fs::renameat_with(&dir, &temp_name, &dir, name, RenameFlags::NOREPLACE)?;
+        note("object_rename", path);
+        namespace.uncertain = true;
+        sync_directory(&dir, path.parent().unwrap()).map_err(|_| BundleError::DurabilityUnknown)?;
+        namespace.uncertain = false;
+        Ok(())
+    })();
+    if result.is_err()
+        && !namespace.uncertain
+        && fs::unlinkat(&dir, &temp_name, AtFlags::empty()).is_err()
+    {
+        namespace.uncertain = true;
+        return Err(BundleError::DurabilityUnknown);
+    }
+    result
+}
+
+pub(super) fn open_relative(
+    namespace: &ProjectNamespace,
+    path: &PortablePath,
+) -> Result<Option<File>, BundleError> {
+    let path = path.as_path();
+    let dir = match directory(
+        namespace,
+        path.parent().unwrap_or_else(|| Path::new("")),
+        false,
+    ) {
+        Ok(dir) => dir,
+        Err(BundleError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    match fs::openat(
+        &dir,
+        path.file_name()
+            .ok_or_else(|| BundleError::Identity("missing object name".into()))?,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => {
+            let file = File::from(fd);
+            if !file.metadata()?.is_file() {
+                return Err(BundleError::Corrupt(
+                    "owned object is not a regular file".into(),
+                ));
+            }
+            Ok(Some(file))
+        }
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn sync_directory(directory: &File, observed: &Path) -> Result<(), BundleError> {
+    fs::fsync(directory)?;
+    note("directory_sync", observed);
+    Ok(())
+}
+
+fn sync_file(file: &File, operation: &'static str, observed: &Path) -> Result<(), BundleError> {
+    file.sync_all()?;
+    note(operation, observed);
+    Ok(())
+}

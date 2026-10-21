@@ -39,7 +39,20 @@ impl Adapter {
                 let before = fs::read(&path).ok();
                 let refused = matches!(call, Call::StrictRenameRefusal(_));
                 let (result, trace) = io_observer::observe(|| {
-                    if refused {
+                    if self.mode == Mode::Revised {
+                        let mut namespace =
+                            kinewright_project::namespace::ProjectNamespace::acquire(&path)
+                                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        let result = if refused {
+                            namespace.replace_root_refusing_rename(bytes)
+                        } else {
+                            namespace.replace_root(bytes)
+                        };
+                        let released = namespace.release();
+                        result
+                            .and(released)
+                            .map_err(|e| std::io::Error::other(e.to_string()))
+                    } else if refused {
                         project::observe_refused_rename(&path, bytes)
                     } else {
                         project::write_file_atomic(&path, bytes)
@@ -52,7 +65,7 @@ impl Adapter {
                     .iter()
                     .find(|e| e.operation == "rename_refusal_hook");
                 Ok(
-                    json!({"succeeded":result.is_ok(),"writer_bytes_equal":after == *bytes,
+                    json!({"backend":if self.mode == Mode::Revised { "linux-local-strict" } else { "legacy-native-io" },"succeeded":result.is_ok(),"writer_bytes_equal":after == *bytes,
                     "root_preserved":before.as_ref() == Some(&after),
                     "refusal_reached":hook.is_some(),
                     "refusal_injected":trace.events.iter().any(|e| e.operation == "rename_refusal_injected"),

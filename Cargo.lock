@@ -2349,6 +2349,7 @@ dependencies = [
  "kinewright-core",
  "kinewright-media",
  "libc",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
 ]

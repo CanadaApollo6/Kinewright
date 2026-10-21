@@ -99,3 +99,39 @@ fn paired_io_baseline_has_successful_refusal_controls_and_literal_reds() {
         assert_eq!(assertion["passed"], false);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn strict_io_protocol_separates_legacy_control_from_bundle_result() {
+    let temp = TempDirectory::new("ja-s1-paired-revised");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-paired-io.json");
+    let output = temp.path("out");
+    assert_eq!(
+        kinewright_agent::ja_harness::run(
+            &fixture,
+            &output,
+            kinewright_agent::ja_harness::protocol::Mode::Revised
+        )
+        .unwrap(),
+        0
+    );
+    let summary: Value =
+        serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+    let assertions = summary["assertions"].as_array().unwrap();
+    assert_eq!(assertions.len(), 7);
+    assert!(
+        assertions.iter().all(|a| a["passed"] == true),
+        "{summary:#}"
+    );
+    let observed: Value = serde_json::from_slice(
+        &std::fs::read(output.join("artifacts/observation-3.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(observed["backend"], "linux-local-strict");
+    assert_eq!(observed["succeeded"], false);
+    assert_eq!(observed["root_preserved"], true);
+    assert_eq!(observed["refusal_reached"], true);
+    assert_eq!(observed["refusal_injected"], true);
+    assert_eq!(observed["attempted_bytes_equal"], true);
+    assert_eq!(observed["in_place_fallback_observed"], false);
+}
