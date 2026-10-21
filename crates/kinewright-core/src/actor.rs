@@ -156,7 +156,11 @@ enum CoreMessage {
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
     ExportHistory(Sender<Result<HistorySnapshot, HistoryError>>),
-    RestoreHistory(Box<HistorySnapshot>, Sender<Result<(), HistoryError>>),
+    RestoreHistory(
+        Box<HistorySnapshot>,
+        Option<Box<HistorySnapshot>>,
+        Sender<Result<(), HistoryError>>,
+    ),
     #[cfg(any(test, feature = "test-util"))]
     ObserveHistory(Sender<HistoryObservation>),
 }
@@ -208,7 +212,26 @@ impl Core {
         history.encoded_bytes()?;
         let (reply, receiver) = unbounded();
         self.sender
-            .send(CoreMessage::RestoreHistory(Box::new(history), reply))
+            .send(CoreMessage::RestoreHistory(Box::new(history), None, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Install one validated floor or recovery-close only at its exact current cut.
+    /// # Errors
+    /// Refuses a changed cut, corrupt candidate or disconnected actor atomically.
+    pub fn install_history_transition(
+        &self,
+        transition: crate::HistoryTransition,
+    ) -> Result<(), HistoryError> {
+        transition.after.encoded_bytes()?;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(
+                Box::new(transition.after),
+                Some(Box::new(transition.before)),
+                reply,
+            ))
             .map_err(|_| HistoryError::Disconnected)?;
         receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
@@ -525,8 +548,16 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                 let history = state.history();
                 let _ = reply.send(history.encoded_bytes().map(|_| history));
             }
-            CoreMessage::RestoreHistory(history, reply) => {
-                let result = CoreState::restore(&history).and_then(|mut candidate| {
+            CoreMessage::RestoreHistory(history, expected, reply) => {
+                let admitted = if expected
+                    .as_deref()
+                    .is_some_and(|before| state.history() != *before)
+                {
+                    Err(HistoryError::Corrupt)
+                } else {
+                    CoreState::restore(&history)
+                };
+                let result = admitted.and_then(|mut candidate| {
                     candidate.revision = TimelineRevision(
                         state
                             .revision

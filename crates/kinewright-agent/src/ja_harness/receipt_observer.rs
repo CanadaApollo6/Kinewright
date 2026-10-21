@@ -103,6 +103,7 @@ impl Adapter {
                 comment_text: None,
                 comment_strokes: None,
                 evidence: vec![],
+                transition: None,
             };
             write_request(&request_path, &request)?;
             request
@@ -167,6 +168,7 @@ impl Adapter {
                 comment_text: Some(text_ref.clone()),
                 comment_strokes: Some(strokes_ref.clone()),
                 evidence: vec![],
+                transition: None,
             };
             write_request(&request_path, &request)?;
             request

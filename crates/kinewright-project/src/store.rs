@@ -854,9 +854,7 @@ pub(crate) mod record_sealed {
     pub trait Sealed {}
 }
 /// Only production record types can use the typed-record ingress.
-pub(crate) trait BundleRecord:
-    record_sealed::Sealed + Serialize + serde::de::DeserializeOwned
-{
+pub trait BundleRecord: record_sealed::Sealed + Serialize + serde::de::DeserializeOwned {
     const KIND: RecordKind;
     fn dependencies(&self) -> Vec<ObjectRef> {
         vec![]
@@ -965,6 +963,65 @@ impl BundleRecord for BTreeMap<crate::bundle_records::BranchId, ObjectRef> {
         Ok(())
     }
 }
+impl record_sealed::Sealed for crate::bundle_records::SpecialistBaseRecord {}
+impl BundleRecord for crate::bundle_records::SpecialistBaseRecord {
+    const KIND: RecordKind = RecordKind::SpecialistBase;
+    fn dependencies(&self) -> Vec<ObjectRef> {
+        vec![
+            self.original_baseline_ref.clone(),
+            self.frozen_checkpoint_ref.clone(),
+        ]
+    }
+    fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
+        if self.base_document_hash.len() != 64
+            || self.full_applied_delta.len() as u64 > kinewright_core::HISTORY_COMMANDS as u64
+        {
+            return Err(BundleError::Capacity("specialist delta"));
+        }
+        let mut counter = BoundedCounter {
+            bytes: 0,
+            limit: limits.branch_history_bytes,
+        };
+        serde_json::to_writer(&mut counter, self)
+            .map_err(|_| BundleError::Capacity("specialist delta bytes"))?;
+        Ok(())
+    }
+}
+impl record_sealed::Sealed for crate::bundle_records::HistoryFloorCheckpoint {}
+impl BundleRecord for crate::bundle_records::HistoryFloorCheckpoint {
+    const KIND: RecordKind = RecordKind::HistoryFloor;
+    fn dependencies(&self) -> Vec<ObjectRef> {
+        vec![
+            self.old_baseline_ref.clone(),
+            self.new_baseline_ref.clone(),
+            self.checkpoint_ref.clone(),
+        ]
+    }
+    fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
+        if self.preceding_floor_generation.checked_add(1) != Some(self.floor_generation)
+            || self.equivalence_digest.len() != 64
+        {
+            return Err(BundleError::Corrupt("floor generation/equivalence".into()));
+        }
+        Ok(())
+    }
+}
+impl record_sealed::Sealed for crate::bundle_records::RecoveryCloseCheckpoint {}
+impl BundleRecord for crate::bundle_records::RecoveryCloseCheckpoint {
+    const KIND: RecordKind = RecordKind::RecoveryClose;
+    fn dependencies(&self) -> Vec<ObjectRef> {
+        vec![
+            self.preceding_checkpoint_ref.clone(),
+            self.closed_checkpoint_ref.clone(),
+        ]
+    }
+    fn validate(&self, _: &StorageLimits) -> Result<(), BundleError> {
+        if self.suffix_digest.len() != 64 {
+            return Err(BundleError::Corrupt("recovery suffix digest".into()));
+        }
+        Ok(())
+    }
+}
 record!(crate::bundle_records::LineageRecord, Lineage);
 impl record_sealed::Sealed for StoreManifest {}
 impl BundleRecord for StoreManifest {
@@ -1058,7 +1115,7 @@ impl ProjectStore {
         sealed.pin = self.pin(std::slice::from_ref(&sealed.reference))?;
         Ok(sealed)
     }
-    pub(crate) fn read_record<T: BundleRecord>(
+    pub fn read_record<T: BundleRecord>(
         &self,
         reference: &ObjectRef,
     ) -> Result<StorageReservation<T>, BundleError> {
@@ -1603,6 +1660,7 @@ impl ProjectStore {
             if !matches!(
                 reference.record_kind,
                 RecordKind::Document
+                    | RecordKind::SpecialistBase
                     | RecordKind::History
                     | RecordKind::Lineage
                     | RecordKind::RootCheckpoint

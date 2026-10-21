@@ -63,6 +63,20 @@ pub(crate) fn decode<T: DeserializeOwned>(
     let observed = match kind {
         RecordKind::Document => kinewright_core::document_support_fields(&raw),
         RecordKind::History => kinewright_core::history_support_fields(&raw),
+        RecordKind::SpecialistBase => {
+            if let Some(operations) = raw
+                .get("full_applied_delta")
+                .and_then(serde_json::Value::as_array)
+            {
+                for operation in operations {
+                    fields.extend(
+                        kinewright_core::operation_support_fields(operation)
+                            .map_err(BundleError::Unsupported)?,
+                    );
+                }
+            }
+            Ok(BTreeSet::new())
+        }
         RecordKind::Lineage => {
             if let Some(ancestry) = raw
                 .get("split_ancestry")
@@ -379,7 +393,10 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                 documents.insert(reference.sha256.clone(), admit!(Document));
             }
             RecordKind::History => {
-                histories.insert(reference.sha256.clone(), admit!(HistorySnapshot));
+                histories.insert(
+                    reference.sha256.clone(),
+                    std::sync::Arc::new(admit!(HistorySnapshot)),
+                );
             }
             RecordKind::BranchCheckpoint => {
                 checkpoints.insert(reference.sha256.clone(), admit!(BranchCheckpoint));
@@ -391,7 +408,19 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                 );
             }
             RecordKind::Lineage => {
-                lineages.insert(reference.sha256.clone(), admit!(LineageRecord));
+                lineages.insert(
+                    reference.sha256.clone(),
+                    std::sync::Arc::new(admit!(LineageRecord)),
+                );
+            }
+            RecordKind::SpecialistBase => {
+                let _value = admit!(crate::bundle_records::SpecialistBaseRecord);
+            }
+            RecordKind::HistoryFloor => {
+                let _value = admit!(crate::bundle_records::HistoryFloorCheckpoint);
+            }
+            RecordKind::RecoveryClose => {
+                let _value = admit!(crate::bundle_records::RecoveryCloseCheckpoint);
             }
             RecordKind::InputManifest => {
                 let _value = admit!(OwnedInputManifest);
@@ -456,10 +485,12 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
             .remove(&reference.sha256)
             .ok_or_else(|| BundleError::Corrupt("missing branch checkpoint".into()))?;
         let history = histories
-            .remove(&checkpoint.history_ref.sha256)
+            .get(&checkpoint.history_ref.sha256)
+            .cloned()
             .ok_or_else(|| BundleError::Corrupt("missing/shared history".into()))?;
         let lineage = lineages
-            .remove(&checkpoint.lineage_ref.sha256)
+            .get(&checkpoint.lineage_ref.sha256)
+            .cloned()
             .ok_or_else(|| BundleError::Corrupt("missing/shared lineage".into()))?;
         let document = documents
             .get(&checkpoint.document_ref.sha256)
@@ -486,7 +517,7 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
         // Private candidate replay; no live Core is changed on a damaged branch.
         let core = kinewright_core::Core::spawn((*history.baseline).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        core.restore_history((*history).clone())
+        core.restore_history((**history).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         if lineage.current.keys().copied().collect::<BTreeSet<_>>()
             != history
@@ -501,6 +532,16 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
             ));
         }
         branches.insert(id.clone(), (checkpoint, history, lineage));
+    }
+    let candidates: Vec<_> = branches
+        .keys()
+        .filter(|id| **id != root.manual_branch_id)
+        .cloned()
+        .collect();
+    if root.candidate_branch_ids != candidates {
+        return Err(BundleError::Corrupt(
+            "candidate branch inventory mismatch".into(),
+        ));
     }
     let manual = branches
         .get(&root.manual_branch_id)

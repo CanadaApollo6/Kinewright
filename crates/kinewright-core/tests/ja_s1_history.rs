@@ -161,3 +161,97 @@ fn identity_effects_distinguish_reuse_and_split_undo() {
         1
     );
 }
+
+#[test]
+fn ordered_floor_install_preserves_open_gesture_and_redo() {
+    let core = initial();
+    let drag = |locked| Command::DoBatchCoalesced {
+        operations: vec![lock(locked)],
+        coalesce_key: "floor-drag".into(),
+    };
+    apply(&core, drag(false));
+    let frozen = core.export_history().unwrap();
+    let reopened = restore(&core);
+    let transition = HistoryTransition::floor(frozen.clone(), 1).unwrap();
+    reopened.install_history_transition(transition).unwrap();
+    let transition = HistoryTransition::floor(frozen, 1).unwrap();
+    core.install_history_transition(transition).unwrap();
+    assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
+    assert_eq!(
+        core.export_history().unwrap().cursor.undo[0]
+            .coalesce_key
+            .as_deref(),
+        Some("floor-drag")
+    );
+    for command in [
+        drag(true),
+        drag(false),
+        Command::Undo,
+        Command::Redo,
+        Command::Undo,
+    ] {
+        apply(&core, command.clone());
+        apply(&reopened, command);
+        assert_eq!(
+            core.export_history().unwrap(),
+            reopened.export_history().unwrap()
+        );
+    }
+    let with_redo = core.export_history().unwrap();
+    let restored = restore(&core);
+    assert_eq!(restored.export_history().unwrap(), with_redo);
+    apply(&restored, Command::Redo);
+    assert_eq!(restored.export_history().unwrap().cursor.undo.len(), 1);
+    assert!(
+        restored.export_history().unwrap().cursor.undo[0]
+            .document
+            .tracks[0]
+            .sync_lock
+    );
+    // A transition validated at a previous cut cannot overwrite a newer suffix.
+    let stale = HistoryTransition::recovery_close(with_redo.clone(), &with_redo).unwrap();
+    assert_eq!(
+        restored.install_history_transition(stale),
+        Err(HistoryError::Corrupt)
+    );
+}
+
+#[test]
+fn recovery_close_follows_suffix_equivalence() {
+    let uninterrupted = initial();
+    let drag = |locked| Command::DoBatchCoalesced {
+        operations: vec![lock(locked)],
+        coalesce_key: "recovery-K".into(),
+    };
+    apply(&uninterrupted, drag(false));
+    let recovered = restore(&uninterrupted);
+    apply(&uninterrupted, drag(true));
+    let stale = recovered.export_history().unwrap();
+    apply(&recovered, drag(true));
+    let cut = recovered.export_history().unwrap();
+    assert!(HistoryTransition::recovery_close(cut.clone(), &stale).is_err());
+    assert_eq!(cut, uninterrupted.export_history().unwrap());
+    for core in [&uninterrupted, &recovered] {
+        let transition =
+            HistoryTransition::recovery_close(core.export_history().unwrap(), &cut).unwrap();
+        core.install_history_transition(transition).unwrap();
+        assert_eq!(core.export_history().unwrap().cursor.undo.len(), 2);
+        assert_eq!(
+            core.export_history().unwrap().cursor.undo[1].coalesce_key,
+            None
+        );
+    }
+    assert_eq!(
+        uninterrupted.export_history().unwrap(),
+        recovered.export_history().unwrap()
+    );
+    for command in [Command::Undo, Command::Redo, drag(false)] {
+        apply(&uninterrupted, command.clone());
+        apply(&recovered, command);
+        assert_eq!(
+            uninterrupted.export_history().unwrap(),
+            recovered.export_history().unwrap()
+        );
+    }
+    assert_eq!(recovered.export_history().unwrap().cursor.undo.len(), 3);
+}

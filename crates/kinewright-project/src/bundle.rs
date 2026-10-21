@@ -92,10 +92,7 @@ pub struct StudioRoot {
 }
 impl StudioRoot {
     pub(crate) fn admit(&self) -> Result<(), BundleError> {
-        if self.generation == 0
-            || self.manual_switch_generation != 0
-            || !self.candidate_branch_ids.is_empty()
-        {
+        if self.generation == 0 || self.manual_switch_generation != 0 {
             return Err(BundleError::Unsupported(
                 "unsupported Studio generation/switch state".into(),
             ));
@@ -447,8 +444,8 @@ use kinewright_core::{Core, HistorySnapshot};
 /// Fully verified, read-only graph. Claiming is a separate consuming operation.
 type LoadedBranch = (
     StorageReservation<BranchCheckpoint>,
-    StorageReservation<HistorySnapshot>,
-    StorageReservation<LineageRecord>,
+    Arc<StorageReservation<HistorySnapshot>>,
+    Arc<StorageReservation<LineageRecord>>,
 );
 
 pub struct LoadedBundle {
@@ -491,7 +488,7 @@ impl LoadedBundle {
             .branches
             .get(&self.root()?.manual_branch_id)
             .ok_or_else(|| BundleError::Corrupt("missing manual branch".into()))?;
-        core.restore_history((*branch.1).clone())
+        core.restore_history((**branch.1).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))
     }
     pub fn into_writer(mut self) -> Result<ProjectBundle, BundleError> {

@@ -62,6 +62,7 @@ fn envelope(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> Comm
         comment_text: None,
         comment_strokes: None,
         evidence: vec![],
+        transition: None,
     }
 }
 fn committed(lookup: ReceiptLookup) -> CommandReceipt {

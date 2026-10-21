@@ -93,6 +93,9 @@ impl RecordKind {
                 | Self::BranchIndex
                 | Self::RootCheckpoint
                 | Self::Lineage
+                | Self::SpecialistBase
+                | Self::HistoryFloor
+                | Self::RecoveryClose
                 | Self::StoreManifest
                 | Self::InputManifest
                 | Self::ReceiptIndex

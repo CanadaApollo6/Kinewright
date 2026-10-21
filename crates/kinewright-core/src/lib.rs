@@ -27,6 +27,7 @@ mod delivery;
 mod editorial;
 mod effect;
 mod history;
+mod history_transition;
 mod incident;
 mod journal;
 mod media;
@@ -39,6 +40,8 @@ mod time;
 mod title;
 mod transcript_edit;
 mod transition;
+
+pub use history_transition::HistoryTransition;
 
 pub use actor::{
     Command, CommandToken, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,
@@ -193,7 +196,7 @@ pub use effect::{
     matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
 pub use history::{
-    GestureBoundary, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
+    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
     OperationIdentityEffect,
 };
 pub use incident::{

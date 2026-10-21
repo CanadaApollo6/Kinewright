@@ -39,12 +39,18 @@ run() {
 }
 run build cargo build --workspace
 run eval-bins cargo build -p kinewright-agent --features eval-harness --bins
-if [[ "$stage" -eq 6 ]]; then
+if [[ "$stage" -ge 6 ]]; then
     run agent-no-default cargo build -p kinewright-agent --no-default-features
     run app-no-default cargo build -p kinewright-app --no-default-features
+    run agent-no-default-check cargo check -p kinewright-agent --lib --no-default-features
+    run app-no-default-check cargo check -p kinewright-app --bin kinewright-app --no-default-features
 fi
 run clippy cargo clippy --workspace --all-targets -- -D warnings
-mapfile -t touched < <( { git diff --name-only -- '*.rs'; git ls-files --others --exclude-standard -- '*.rs'; } | sort -u)
+if [[ "${JA_S1_FINAL_HEAD:-0}" == 1 ]]; then
+    mapfile -t touched < <(git diff --name-only 076a96c HEAD -- '*.rs')
+else
+    mapfile -t touched < <( { git diff --name-only -- '*.rs'; git ls-files --others --exclude-standard -- '*.rs'; } | sort -u)
+fi
 run rustfmt rustfmt --edition 2024 --config skip_children=true --check "${touched[@]}"
 test_build=(cargo test -p kinewright-core -p kinewright-project -p kinewright-agent -p kinewright-app --features kinewright-agent/eval-harness,kinewright-project/test-util --lib --bins --test ja_s1_history --test ja_baseline --test ja_s1 --no-run --message-format=json)
 if [[ "$stage" -ge 2 ]]; then test_build+=(--test ja_s1_storage); fi
@@ -66,6 +72,10 @@ run_selected() {
 }
 run_selected architecture-agent cargo test -p kinewright-agent --lib --features eval-harness -- session::tests::in2_the_agent_crate_has_one_agent_event_loop --exact
 run_selected architecture-app cargo test -p kinewright-app --bin kinewright-app -- investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call --exact
+if [[ "$stage" -ge 6 ]]; then
+    run architecture-agent-normal cargo test -p kinewright-agent --lib --no-default-features -- session::tests::in2_the_agent_crate_has_one_agent_event_loop --exact
+    run architecture-app-normal cargo test -p kinewright-app --bin kinewright-app --no-default-features -- investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call --exact
+fi
 run_selected core-history cargo test -p kinewright-core --test ja_s1_history
 run_selected revised cargo test -p kinewright-agent --features eval-harness --test ja_s1
 if [[ "$stage" -ge 2 ]]; then

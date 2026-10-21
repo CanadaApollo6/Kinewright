@@ -113,24 +113,66 @@ impl BundleCommit {
                 .encoded_bytes()
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?,
         )?;
+        let _transition_overlap = if envelope.transition.is_some() {
+            Some((
+                bundle.store.reserve_history_shadow(
+                    before
+                        .encoded_bytes()
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                )?,
+                bundle.store.reserve_history_shadow(
+                    before
+                        .encoded_bytes()
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                )?,
+            ))
+        } else {
+            None
+        };
         let candidate = Core::spawn((*before.baseline).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         candidate
             .restore_history(before.clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        if let Some(command) = &envelope.command
-            && !matches!(
+        if let Some(transition) = &envelope.transition {
+            let checkpoint = bundle
+                .branches
+                .get(&bundle.manual_branch_id)
+                .ok_or_else(|| {
+                    BundleError::Corrupt("transition without acknowledged checkpoint".into())
+                })?;
+            let install = crate::bundle_branch::transition(transition, checkpoint, before.clone())?;
+            candidate
+                .install_history_transition(install)
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        } else if let Some(command) = &envelope.command {
+            let command = if let JournalCommand::DoBatch(operations) = command {
+                let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = candidate
+                    .request(Command::Query(Query::Snapshot))
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?
+                else {
+                    return Err(BundleError::Corrupt("candidate revision".into()));
+                };
+                Command::DoBatchIfRevision {
+                    expected: revision,
+                    operations: operations.clone(),
+                }
+            } else {
+                Command::from(command.clone())
+            };
+            if !matches!(
                 candidate
-                    .request(Command::from(command.clone()))
+                    .request(command)
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?,
                 Event::DocumentChanged { .. }
-            )
-        {
-            return Err(BundleError::Unsupported("Core rejected the command".into()));
+            ) {
+                return Err(BundleError::Unsupported("Core rejected the command".into()));
+            }
         }
         let after = candidate
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        drop(candidate);
         bundle.pending_command = Some(reservation.hold(envelope.clone()));
         if envelope.action == "comment" {
             match crate::receipts::stage_comment(bundle, envelope, blobs) {
@@ -184,6 +226,17 @@ impl BundleCommit {
         history: &HistorySnapshot,
         inputs: &ObjectRef,
     ) -> Result<BundleSaveReport, BundleError> {
+        let branch_id = bundle.manual_branch_id.clone();
+        Self::publish_branch(bundle, history, inputs, &branch_id, None)
+    }
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn publish_branch(
+        bundle: &mut ProjectBundle,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch_id: &crate::bundle_records::BranchId,
+        seed: Option<&LineageRecord>,
+    ) -> Result<BundleSaveReport, BundleError> {
         if bundle.unsettled {
             return Err(BundleError::Unsettled);
         }
@@ -223,17 +276,30 @@ impl BundleCommit {
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         core.restore_history((*checked).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        drop(core);
         let manifest = bundle.store.read_input_manifest(inputs)?;
         validate_inputs(&checked, &manifest)?;
-        let prior = bundle.branches.get(&bundle.manual_branch_id).cloned();
+        let prior = bundle.branches.get(branch_id).cloned();
         let old_history = prior
             .as_ref()
             .map(|p| bundle.store.read_record::<HistorySnapshot>(&p.history_ref))
             .transpose()?;
-        if old_history.as_ref().is_some_and(|old| {
-            checked.batches.len() < old.batches.len()
-                || checked.batches[..old.batches.len()] != old.batches
-        }) {
+        let floor_discard =
+            bundle
+                .pending_command
+                .as_ref()
+                .and_then(|e| match e.transition.as_ref() {
+                    Some(crate::receipts::HistoryRequest::Floor {
+                        discard_batches, ..
+                    }) => Some(*discard_batches),
+                    _ => None,
+                });
+        if floor_discard.is_none()
+            && old_history.as_ref().is_some_and(|old| {
+                checked.batches.len() < old.batches.len()
+                    || checked.batches[..old.batches.len()] != old.batches
+            })
+        {
             return Err(BundleError::Corrupt(
                 "history is not a continuation of the admitted head".into(),
             ));
@@ -241,6 +307,12 @@ impl BundleCommit {
         let mut batch_ids = prior
             .as_ref()
             .map_or_else(Vec::new, |p| p.batch_ids.clone());
+        if let Some(discard) = floor_discard {
+            batch_ids = batch_ids
+                .get(discard..)
+                .ok_or_else(|| BundleError::Corrupt("floor batch cut".into()))?
+                .to_vec();
+        }
         while batch_ids.len() < checked.batches.len() {
             batch_ids.push(BatchId::fresh()?);
         }
@@ -248,11 +320,32 @@ impl BundleCommit {
             .as_ref()
             .map(|p| bundle.store.read_record::<LineageRecord>(&p.lineage_ref))
             .transpose()?;
+        let floor_seed = if let Some(discard) = floor_discard {
+            let old = old_history
+                .as_ref()
+                .ok_or_else(|| BundleError::Corrupt("floor without previous history".into()))?;
+            let prefix = crate::bundle_branch::replay_prefix(old, discard)?;
+            let prior_ids = &prior
+                .as_ref()
+                .ok_or_else(|| BundleError::Corrupt("floor checkpoint".into()))?
+                .batch_ids[..discard];
+            let prefix_lineage = lineage(branch_id, &prefix, prior_ids, old_lineage.as_deref())?;
+            Some(LineageRecord {
+                branch_origin: branch_id.clone(),
+                baseline: prefix_lineage.current.clone(),
+                current: prefix_lineage.current,
+                undo: vec![],
+                redo: vec![],
+                split_ancestry: prefix_lineage.split_ancestry,
+            })
+        } else {
+            None
+        };
         let lineage = lineage(
-            &bundle.manual_branch_id,
+            branch_id,
             &checked,
             &batch_ids,
-            old_lineage.as_deref(),
+            floor_seed.as_ref().or(seed).or(old_lineage.as_deref()),
         )?;
         let generation = bundle
             .generation
@@ -262,7 +355,12 @@ impl BundleCommit {
             && prior
                 .as_ref()
                 .is_some_and(|p| p.input_manifest_ref == *inputs);
-        let head_id = if unchanged {
+        let head_id = if unchanged
+            && bundle
+                .pending_command
+                .as_ref()
+                .is_none_or(|e| e.transition.is_none())
+        {
             prior.as_ref().unwrap().head_id.clone()
         } else {
             HeadId::fresh()?
@@ -285,6 +383,12 @@ impl BundleCommit {
         let mut contexts = prior
             .as_ref()
             .map_or_else(Vec::new, |p| p.history_input_manifest_refs.clone());
+        if let Some(discard) = floor_discard {
+            contexts = contexts
+                .get(discard..)
+                .ok_or_else(|| BundleError::Corrupt("floor input-context cut".into()))?
+                .to_vec();
+        }
         if contexts.is_empty() {
             contexts.push(inputs.clone());
         }
@@ -292,7 +396,7 @@ impl BundleCommit {
             contexts.push(inputs.clone());
         }
         let checkpoint = BranchCheckpoint {
-            branch_id: bundle.manual_branch_id.clone(),
+            branch_id: branch_id.clone(),
             head_id: head_id.clone(),
             document_hash: document_ref.sha256.clone(),
             document_ref,
@@ -307,7 +411,15 @@ impl BundleCommit {
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?,
             ),
             checkpoint_generation: generation,
-            floor_generation: prior.as_ref().map_or(0, |p| p.floor_generation),
+            floor_generation: if floor_discard.is_some() {
+                prior
+                    .as_ref()
+                    .map_or(0, |p| p.floor_generation)
+                    .checked_add(1)
+                    .ok_or(BundleError::Capacity("floor generation"))?
+            } else {
+                prior.as_ref().map_or(0, |p| p.floor_generation)
+            },
             command_cut: bundle
                 .pending_command
                 .as_ref()
@@ -318,7 +430,7 @@ impl BundleCommit {
         };
         let checkpoint_ref = seal!(&checkpoint);
         let mut branches = bundle.branches.clone();
-        branches.insert(bundle.manual_branch_id.clone(), checkpoint);
+        branches.insert(branch_id.clone(), checkpoint);
         let mut branch_index: BTreeMap<_, _> = if let Some(root) = bundle.root.as_ref() {
             (*bundle
                 .store
@@ -329,7 +441,48 @@ impl BundleCommit {
         } else {
             BTreeMap::new()
         };
-        branch_index.insert(bundle.manual_branch_id.clone(), checkpoint_ref.clone());
+        let preceding_checkpoint_ref = branch_index.get(branch_id).cloned();
+        branch_index.insert(branch_id.clone(), checkpoint_ref.clone());
+        let mut evidence = bundle.evidence.clone();
+        if let Some(envelope) = bundle.pending_command.as_ref()
+            && let Some(transition) = &envelope.transition
+        {
+            evidence.retain(|r| {
+                !matches!(
+                    r.record_kind,
+                    RecordKind::HistoryFloor | RecordKind::RecoveryClose
+                )
+            });
+            let previous = prior
+                .as_ref()
+                .ok_or_else(|| BundleError::Corrupt("transition without checkpoint".into()))?;
+            let reference = match transition {
+                crate::receipts::HistoryRequest::Floor { .. } => {
+                    seal!(&crate::bundle_records::HistoryFloorCheckpoint {
+                        preceding_checkpoint_generation: previous.checkpoint_generation,
+                        preceding_floor_generation: previous.floor_generation,
+                        floor_generation: branches[branch_id].floor_generation,
+                        command_cut: envelope.id.clone(),
+                        old_baseline_ref: previous.baseline_ref.clone(),
+                        new_baseline_ref: branches[branch_id].baseline_ref.clone(),
+                        checkpoint_ref: checkpoint_ref.clone(),
+                        equivalence_digest: branches[branch_id].history_ref.sha256.clone(),
+                    })
+                }
+                crate::receipts::HistoryRequest::RecoveryClose {
+                    suffix_digest,
+                    reconciled_cut,
+                    ..
+                } => seal!(&crate::bundle_records::RecoveryCloseCheckpoint {
+                    preceding_checkpoint_ref: preceding_checkpoint_ref
+                        .ok_or_else(|| BundleError::Corrupt("close predecessor".into()))?,
+                    reconciled_cut: reconciled_cut.clone(),
+                    suffix_digest: suffix_digest.clone(),
+                    closed_checkpoint_ref: checkpoint_ref.clone(),
+                }),
+            };
+            evidence.push(reference);
+        }
         let branch_index_ref = seal!(&branch_index);
         barrier(bundle, CommitBarrier::B1)?;
         barrier(bundle, CommitBarrier::B2)?;
@@ -394,7 +547,12 @@ impl BundleCommit {
         } else {
             Some(seal!(&bundle.issuers))
         };
-        let mut roots = vec![branch_index_ref.clone(), inputs.clone()];
+        let mut roots = vec![
+            branch_index_ref.clone(),
+            branches[&bundle.manual_branch_id]
+                .input_manifest_ref
+                .clone(),
+        ];
         roots.extend(receipt_index_ref.clone());
         roots.extend(issuer_state_ref.clone());
         let mut inventory = SupportInventory {
@@ -403,12 +561,12 @@ impl BundleCommit {
             required_apis: crate::bundle_recovery::supported_apis(),
         };
         let mut retained = roots.clone();
-        retained.extend(bundle.evidence.clone());
+        retained.extend(evidence.clone());
         retained.extend(recovery.references());
         inventory.required_fields = bundle.store.support_fields(&retained)?;
         let store_manifest = bundle.store.selected_manifest(
             &roots,
-            &bundle.evidence,
+            &evidence,
             recovery.clone(),
             &inventory,
             generation,
@@ -420,19 +578,36 @@ impl BundleCommit {
             creation_brief_ref: None,
             manual_branch_id: bundle.manual_branch_id.clone(),
             manual_switch_generation: 0,
-            candidate_branch_ids: vec![],
+            candidate_branch_ids: branches
+                .keys()
+                .filter(|id| **id != bundle.manual_branch_id)
+                .cloned()
+                .collect(),
             branch_index_ref,
             version_index_ref: None,
             feedback_index_ref: None,
             run_index_ref: None,
             claim_index_ref: None,
-            input_manifest_ref: inputs.clone(),
+            input_manifest_ref: branches[&bundle.manual_branch_id]
+                .input_manifest_ref
+                .clone(),
             receipt_index_ref,
             issuer_state_ref,
             store_manifest_ref,
         };
         root.admit()?;
-        let (bytes, _encoded_root) = serialize_root(&bundle.store, &checked.document, &root)?;
+        let manual_history =
+            if *branch_id == bundle.manual_branch_id {
+                None
+            } else {
+                Some(bundle.store.read_record::<HistorySnapshot>(
+                    &branches[&bundle.manual_branch_id].history_ref,
+                )?)
+            };
+        let manual_document = manual_history
+            .as_ref()
+            .map_or(&checked.document, |h| &h.document);
+        let (bytes, _encoded_root) = serialize_root(&bundle.store, manual_document, &root)?;
         let next_admission = BundleWriteAdmission::from_bytes_using(
             Some(bundle.store.resolved_root()?),
             bytes,
@@ -447,6 +622,7 @@ impl BundleCommit {
             }
             return Err(error);
         }
+        bundle.evidence = evidence;
         bundle.receipts = receipts;
         bundle.root = Some(root);
         bundle.branches = branches;
@@ -552,7 +728,7 @@ fn validate_inputs(
     clippy::too_many_lines,
     reason = "one ordered history replay of occurrence maps"
 )]
-fn lineage(
+pub(crate) fn lineage(
     branch: &crate::bundle_records::BranchId,
     history: &HistorySnapshot,
     batches: &[BatchId],
@@ -583,7 +759,8 @@ fn lineage(
     let mut current = baseline.clone();
     let mut undo = vec![];
     let mut redo = vec![];
-    let mut split_ancestry = vec![];
+    let mut split_ancestry =
+        old.map_or_else(Vec::new, |old| ancestry(&baseline, &old.split_ancestry));
     for (batch, id) in history.batches.iter().zip(batches) {
         match &batch.command {
             JournalCommand::Undo => {
@@ -653,6 +830,7 @@ fn lineage(
             return Err(BundleError::Corrupt("lineage cursor counts".into()));
         }
     }
+    split_ancestry = ancestry(&current, &split_ancestry);
     Ok(LineageRecord {
         branch_origin: branch.clone(),
         baseline,
@@ -661,6 +839,28 @@ fn lineage(
         redo,
         split_ancestry,
     })
+}
+
+fn ancestry(
+    current: &BTreeMap<ClipId, OccurrenceId>,
+    all: &[(OccurrenceId, OccurrenceId, kinewright_core::Clip)],
+) -> Vec<(OccurrenceId, OccurrenceId, kinewright_core::Clip)> {
+    let mut retained: BTreeSet<_> = current.values().cloned().collect();
+    loop {
+        let before = retained.len();
+        for (child, parent, _) in all {
+            if retained.contains(child) {
+                retained.insert(parent.clone());
+            }
+        }
+        if before == retained.len() {
+            break;
+        }
+    }
+    all.iter()
+        .filter(|(child, _, _)| retained.contains(child))
+        .cloned()
+        .collect()
 }
 
 pub(crate) fn serialize_root(

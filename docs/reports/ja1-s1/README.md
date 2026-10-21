@@ -46,7 +46,12 @@ Storage limits remain provisional until L6's workload measurements.
    complete affected harness/format sets and all three explicitly provisioned App
    bridges. Seven targeted mutation pairs failed their intended witness and passed
    after restoration. Exact raw summaries are in `commit-5.json`.
-6. Durable bases, lineage and floors: not committed.
+6. Durable bases, lineage and floors: Linux gate passed (`c6-gate2`),
+   31 commands, 21 summaries and 112 selected passes including overlaps.
+   All four normal/eval architecture scans, no-default builds/checks, six Core history
+   tests, four durable branch tests, six receipt tests and all affected harness/format
+   selections passed. Eleven targeted mutation pairs failed and passed after restoration.
+   Exact raw summaries are in `commit-6.json`.
 7. Save As and first save: not committed.
 8. Recovery retention and measured evidence: not committed.
 
@@ -175,3 +180,63 @@ Verification exposed three adjacent ownership defects, repaired in this commit:
 
 These are S1 owner/observer corrections. No GUI fencing, producer drain or transport
 host is implemented, and decoder-open certification remains unavailable.
+
+### Resume, commit 6
+
+Durable specialist bases now persist the original `(BranchId, HeadId, document_hash)`
+and full currently applied delta. The ordinary agent dependency reads those verified
+records, restores the candidate and binds the target to the current Core revision.
+The retained numeric-counter control actually conflicts after reopen; the durable
+path merges as one entry. Equal hashes at another head refuse. Retry lookup precedes
+rebinding because a committed merge has already changed the target head.
+
+The project adds `bundle_branch.rs` for frozen branch and transition admission; the
+existing `BundleCommit` still owns staging and publication. Candidate saves preserve
+the manual root/document/input manifest and do not switch the manual branch. Shared
+physical histories in multiple candidate checkpoints use one `Arc`-held decode charge
+in the reader. The lineage replay retains baseline-reachable ancestors, then selects
+only the current head's ancestry, including after undo/redo and local-ID reuse.
+
+Core uses one validated `HistoryTransition` and the existing actor restore message
+with an optional exact expected-before snapshot. Floor construction replays a closed
+prefix and retained suffix through the ordinary executor; it compares the complete
+remaining undo/redo cursor and document. Project admission additionally checks the
+checkpoint/floor generations and exact command cut, reserves transition overlap and
+publishes the resulting receipt and floor descriptor through the same root.
+
+The recovery-close implementation reuses ordinary Undo/Redo in a private Core after
+full suffix equivalence. Those two accepted commands close the coalescing key and
+remain in the retained stream; they preserve the gesture's single undo entry. This
+is a smaller faithful alternative to extending JournalCommand's serialized enum or
+adding a second replay engine. The tests continue the same gesture before closing,
+then verify subsequent Undo/Redo and a new gesture. Project recovery-close checks its
+persisted predecessor/cut/digest and uses the same receipt path. S2's shared GUI/host
+freeze, installation and reply handshake remain pending.
+
+The optional transition field is omitted from canonical original edit/comment
+requests, preserving their pre-transition digests. Specialized record kinds are
+admitted only with their typed validators and raw nested-operation support scan;
+the supported API inventory stays compatible with the frozen commit-4 v3 corpus.
+`ProjectStore::read_record` exposes the existing verified reader through a sealed
+record trait so the ordinary agent dependency can consume these typed values.
+
+The new no-default crate build exposed a pre-existing feature boundary: the
+`kinewright-eval` executable imported eval-only modules without a `required-features`
+declaration. Its manifest now explicitly requires `eval-harness`, as the JA native
+executable already does. Defaults still enable that feature, and every ordinary and
+explicit eval gate still builds both executables. A production no-default build can
+now build the library without compiling fixture-only executable code. This is build
+routing, not a skipped eval acceptance check.
+
+Commit-6 ownership/implementation pointers are
+`crates/kinewright-core/src/history_transition.rs:24` and `:63`,
+`crates/kinewright-core/src/actor.rs:223`,
+`crates/kinewright-project/src/bundle_branch.rs:113` and `:149`,
+`crates/kinewright-project/src/bundle_commit.rs:233`, `:323` and `:844`, and
+`crates/kinewright-agent/src/durable_branch.rs:98`, `:146`, `:164` and `:201`.
+
+Commit 6's installed MSVC target compiled Core plus its tests successfully (compile
+only). Explicit no-default agent and app target checks were attempted separately;
+FFmpeg, Whisper and aws-lc native MSVC build prerequisites are unavailable. Those
+full cfg lanes and all native Windows execution remain NOT RUN. No toolchains were
+installed, no native storage-durability success is inferred, and no full CI ran.

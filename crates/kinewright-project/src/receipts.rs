@@ -40,6 +40,23 @@ fn hex(value: &str, length: usize) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// A transition is admitted only at its original acknowledged checkpoint and cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HistoryRequest {
+    Floor {
+        discard_batches: usize,
+        preceding_checkpoint_generation: u64,
+        preceding_floor_generation: u64,
+        command_cut: CommandId,
+    },
+    RecoveryClose {
+        preceding_checkpoint_generation: u64,
+        reconciled_cut: CommandId,
+        suffix_digest: String,
+    },
+}
+
 /// Transport tokens are deliberately absent. A retry preserves every original field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,6 +74,8 @@ pub struct CommandEnvelope {
     pub comment_text: Option<ObjectRef>,
     pub comment_strokes: Option<ObjectRef>,
     pub evidence: Vec<ObjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<HistoryRequest>,
 }
 impl CommandEnvelope {
     pub fn encoded_bytes(&self) -> Result<u64, BundleError> {
@@ -71,14 +90,28 @@ impl CommandEnvelope {
         }
         match self.action.as_str() {
             "edit"
-                if self.command.is_some()
+                if self.transition.is_none()
+                    && self.command.is_some()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
                     && self.evidence.is_empty() => {}
             "comment"
-                if self.command.is_none()
+                if self.transition.is_none()
+                    && self.command.is_none()
                     && self.comment_text.is_some()
                     && self.comment_strokes.is_some() => {}
+            "floor"
+                if matches!(self.transition, Some(HistoryRequest::Floor { .. }))
+                    && self.command.is_none()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.is_empty() => {}
+            "recovery_close"
+                if matches!(self.transition, Some(HistoryRequest::RecoveryClose { .. }))
+                    && self.command.is_none()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.is_empty() => {}
             _ => {
                 return Err(BundleError::Unsupported(
                     "command action/payload, including branch switch".into(),

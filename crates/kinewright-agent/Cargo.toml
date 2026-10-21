@@ -12,7 +12,8 @@ repository.workspace = true
 # harness genuinely needs the fixture gates at build time. It stays a default
 # feature, which keeps `cargo build --workspace`, `cargo test --workspace` and
 # `cargo clippy --all-targets` building, running and linting the binary with no
-# extra flag -- `required-features` would have made all three skip it silently.
+# extra flag. Required-feature declarations also protect explicit production builds
+# with defaults disabled; the default and explicit eval gates still build both bins.
 # `kinewright-app` takes this crate with `default-features = false` instead, so
 # the shipping binary links an agent library with no fixture data in it.
 default = ["eval-harness"]
@@ -22,13 +23,17 @@ eval-harness = [
     "dep:rustix",
     "kinewright-core/test-util",
     "kinewright-media/test-util",
-    "dep:kinewright-project",
     "kinewright-project/test-util",
 ]
 # Slow tier (docs/BUILDING.md, ci/slow-tests.txt): tests marked with
 # `cfg_attr(not(feature = "slow-tests"), ignore = ...)` run only with this
 # feature, which CI's slow tier and a full local run enable.
 slow-tests = []
+
+[[bin]]
+name = "kinewright-eval"
+path = "src/bin/kinewright-eval.rs"
+required-features = ["eval-harness"]
 
 [[bin]]
 name = "kinewright-ja-baseline"
@@ -42,7 +47,7 @@ crossbeam-channel.workspace = true
 image.workspace = true
 kinewright-core = { path = "../kinewright-core" }
 kinewright-media = { path = "../kinewright-media" }
-kinewright-project = { path = "../kinewright-project", optional = true }
+kinewright-project = { path = "../kinewright-project" }
 reqwest.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
