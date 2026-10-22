@@ -525,6 +525,7 @@ fn refuse_activation_journal(path: &Path) -> Result<(), ProjectSaveError> {
 }
 #[derive(Debug, Clone)]
 pub struct BundleSaveReport {
+    pub collection: crate::store::CollectionStatus,
     pub path: PathBuf,
     pub project_id: crate::bundle_records::ProjectId,
     pub generation: u64,
@@ -656,6 +657,7 @@ impl LoadedBundle {
             pending_command: None,
             pending_result: None,
             last_collection_error: None,
+            pending_save: None,
         };
         bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
         Ok(bundle)
@@ -664,6 +666,7 @@ impl LoadedBundle {
 
 /// One synchronous named-bundle owner. It accepts frozen Core exports, never live snapshots assembled piecemeal.
 pub struct ProjectBundle {
+    pub(crate) pending_save: Option<PendingSave>,
     pub(crate) last_collection_error: Option<String>,
     pub(crate) store: ProjectStore,
     pub(crate) project_id: ProjectId,
@@ -685,6 +688,12 @@ pub struct ProjectBundle {
     pub(crate) issuers: BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>,
     pub(crate) pending_command: Option<StorageReservation<crate::receipts::CommandEnvelope>>,
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
+}
+pub(crate) struct PendingSave {
+    core: Core,
+    before: HistorySnapshot,
+    branch: BranchId,
+    pub(crate) root_sha256: Option<String>,
 }
 impl ProjectBundle {
     /// Explicit activation. Existing Studio state is resumed without minting another manual branch.
@@ -858,6 +867,7 @@ impl ProjectBundle {
                 pending_command: None,
                 pending_result: None,
                 last_collection_error: None,
+                pending_save: None,
             })
         }
     }
@@ -950,6 +960,7 @@ impl ProjectBundle {
     /// Validate the exact published graph, complete its parent barrier, then clear unknown publication.
     pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
         self.unsettled = true;
+        let collection = self.store.collection_status()?;
         if self.store.has_unsettled_objects()? {
             return Err(BundleError::Unsettled);
         }
@@ -969,6 +980,7 @@ impl ProjectBundle {
             self.store
                 .with_namespace(|n| n.reconcile(admission.raw_bytes()))?;
             self.store.settle_controls()?;
+            self.pending_save = None;
             self.unsettled = false;
             return Ok(None);
         }
@@ -1017,8 +1029,18 @@ impl ProjectBundle {
         self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
         self.store.publish_inventory(&self.recovery)?;
         self.store.allow_collection()?;
+        if let Some(pending) = self.pending_save.take()
+            && pending.root_sha256.as_deref()
+                == Some(kinewright_media::sha256_bytes(self.admission.raw_bytes()).as_str())
+            && let Err(error) =
+                self.install_published(&pending.core, pending.before.clone(), &pending.branch)
+        {
+            self.pending_save = Some(pending);
+            return Err(error);
+        }
         self.unsettled = false;
         Ok(Some(BundleSaveReport {
+            collection,
             path,
             project_id: self.project_id.clone(),
             generation: self.generation,
@@ -1076,10 +1098,43 @@ impl ProjectBundle {
         let before = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let report = crate::bundle_commit::BundleCommit::publish(self, &before, inputs)?;
         let id = self.manual_branch_id.clone();
-        self.install_published(core, before, &id)?;
-        Ok(report)
+        self.publish_core(core, before.clone(), &before, inputs, &id)
+    }
+
+    pub(crate) fn publish_core(
+        &mut self,
+        core: &Core,
+        before: HistorySnapshot,
+        selected: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch: &BranchId,
+    ) -> Result<BundleSaveReport, BundleError> {
+        if self.unsettled {
+            return Err(BundleError::Unsettled);
+        }
+        self.pending_save = Some(PendingSave {
+            core: core.clone(),
+            before: before.clone(),
+            branch: branch.clone(),
+            root_sha256: None,
+        });
+        let result = crate::bundle_commit::BundleCommit::publish_branch(
+            self, selected, inputs, branch, None,
+        );
+        match result {
+            Ok(report) => {
+                self.install_published(core, before, branch)?;
+                self.pending_save = None;
+                Ok(report)
+            }
+            Err(error) => {
+                if !self.unsettled {
+                    self.pending_save = None;
+                }
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn install_published(

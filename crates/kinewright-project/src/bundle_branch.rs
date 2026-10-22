@@ -146,9 +146,7 @@ impl ProjectBundle {
         let before = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let report = BundleCommit::publish_branch(self, &before, &inputs, id, None)?;
-        self.install_published(core, before, id)?;
-        Ok(report)
+        self.publish_core(core, before.clone(), &before, &inputs, id)
     }
     /// Persist the full frozen delta independently of subsequent manual floors.
     pub fn retain_specialist_base(

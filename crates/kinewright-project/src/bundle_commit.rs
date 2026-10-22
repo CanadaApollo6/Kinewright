@@ -443,6 +443,7 @@ impl BundleCommit {
             // Give the retained checkpoint its own exact owned graph before validating it.
             retain_history_inputs(&checked, &mut retained_manifest);
             validate_inputs(&checked, &retained_manifest)?;
+            crate::store::BundleRecord::validate(&retained_manifest, bundle.store.limits())?;
             Some(retained_manifest)
         } else {
             validate_inputs(&checked, &retained_manifest)?;
@@ -796,6 +797,10 @@ impl BundleCommit {
         #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::check_failure("root_before_publish", &bundle.store.resolved_root()?)?;
         let saved_path = bundle.store.resolved_root()?;
+        let collection = bundle.store.collection_status()?;
+        if let Some(pending) = &mut bundle.pending_save {
+            pending.root_sha256 = Some(kinewright_media::sha256_bytes(next_admission.raw_bytes()));
+        }
         if let Err(error) = bundle.store.publish_root(next_admission.raw_bytes()) {
             if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {
                 bundle.unsettled = true;
@@ -828,6 +833,7 @@ impl BundleCommit {
         bundle.unsettled = false;
         drop(seals);
         Ok(BundleSaveReport {
+            collection,
             path: saved_path,
             project_id: bundle.project_id.clone(),
             generation,
@@ -838,6 +844,18 @@ impl BundleCommit {
     }
 }
 pub(crate) fn bound_history(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<HistorySnapshot, BundleError> {
+    #[cfg(any(test, feature = "test-util"))]
+    let started = std::time::Instant::now();
+    let result = bound_history_inner(history, limits);
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::note_history_bound(started.elapsed());
+    result
+}
+
+fn bound_history_inner(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<HistorySnapshot, BundleError> {
@@ -854,19 +872,116 @@ pub(crate) fn bound_history(
         crate::store::preflight_record(&bytes, limits)
             .is_ok_and(|n| n <= limits.branch_history_bytes)
     };
-    if fits(history) {
+    // Keep the common small checkpoint path direct. For a long session, component
+    // costs can reject the original stream without first serializing tens of MiB.
+    if history.batches.len() <= 64 && fits(history) {
         return Ok(history.clone());
     }
-    for cut in 1..=history.batches.len() {
-        if let Ok(transition) = kinewright_core::HistoryTransition::floor(history.clone(), cut)
-            && fits(transition.after())
-        {
-            return Ok(transition.after().clone());
-        }
+    // Independent JSON subtrees give a lower bound without reserializing every suffix.
+    // Zeroing counters only shortens their encoding; the final fit/replay remains authoritative.
+    let undo = suffix_costs(history.cursor.undo.iter(), limits);
+    let redo = suffix_costs(history.cursor.redo.iter(), limits);
+    let mut batches = history.batches.clone();
+    for batch in &mut batches {
+        batch.order = 0;
+        batch.undo_entries = 0;
     }
-    Err(BundleError::Capacity(
-        "history baseline exceeds branch allowance",
-    ))
+    let batches = suffix_costs(batches.iter(), limits);
+    if history.batches.len() > 64
+        && undo[0].saturating_add(redo[0]).saturating_add(batches[0]) <= limits.branch_history_bytes
+        && fits(history)
+    {
+        return Ok(history.clone());
+    }
+    let document_cost = record_cost(&*history.document, limits)?;
+    let skeleton = serde_json::json!({"floor_offset":1,"baseline":null,"document":null,"batches":[],"cursor":{"undo":[],"redo":[]}});
+    // Remove the two null value slots; their actual Document subtrees are added below.
+    let overhead = record_cost(&skeleton, limits)?
+        .checked_sub(128)
+        .ok_or(BundleError::Capacity("history cost"))?;
+    let mut baseline_cost: Option<(std::sync::Arc<kinewright_core::Document>, u64)> = None;
+    kinewright_core::HistoryTransition::find_floor(
+        history.clone(),
+        |cut, dropped, baseline| {
+            let count = history.batches.len() - cut;
+            let Some(undo_cost) = undo.get(dropped) else {
+                return false;
+            };
+            let lower = undo_cost
+                .saturating_add(redo[0])
+                .saturating_add(batches[cut]);
+            if count > kinewright_core::HISTORY_COMMANDS || lower > limits.branch_history_bytes {
+                return false;
+            }
+            if baseline_cost
+                .as_ref()
+                .is_none_or(|(prior, _)| !std::sync::Arc::ptr_eq(prior, baseline))
+            {
+                baseline_cost = Some((
+                    std::sync::Arc::clone(baseline),
+                    record_cost(&**baseline, limits).unwrap_or(u64::MAX),
+                ));
+            }
+            let Some(offset) = history.floor_offset.checked_add(cut as u64) else {
+                return false;
+            };
+            let commas = count.saturating_sub(1)
+                + (history.cursor.undo.len() - dropped).saturating_sub(1)
+                + history.cursor.redo.len().saturating_sub(1);
+            let mut cost = lower
+                .saturating_add(document_cost)
+                .saturating_add(baseline_cost.as_ref().unwrap().1)
+                .saturating_add(overhead)
+                .saturating_add(2 * commas as u64)
+                .saturating_add(2 * u64::from(offset.ilog10()));
+            for (order, batch) in history.batches[cut..].iter().enumerate() {
+                let Some(entries) = batch.undo_entries.checked_sub(dropped) else {
+                    return false;
+                };
+                // Only normalized order and undo count change in an equivalent retained batch.
+                cost = cost.saturating_add(
+                    2 * u64::from(
+                        order.checked_ilog10().unwrap_or(0) + entries.checked_ilog10().unwrap_or(0),
+                    ),
+                );
+            }
+            cost <= limits.branch_history_bytes
+        },
+        fits,
+    )
+    .map(|transition| transition.after().clone())
+    .map_err(|_| BundleError::Capacity("history baseline exceeds branch allowance"))
+}
+
+fn record_cost(
+    value: &impl serde::Serialize,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<u64, BundleError> {
+    let bytes = serde_json::to_vec(value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    crate::store::preflight_record(&bytes, limits)
+}
+
+fn suffix_costs<'a, T: serde::Serialize + PartialEq + Clone + 'a>(
+    values: impl DoubleEndedIterator<Item = &'a T>,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Vec<u64> {
+    let mut costs = vec![0_u64];
+    let mut cache: Vec<(T, u64)> = vec![];
+    for value in values.rev() {
+        let cost = if let Some((_, cost)) = cache.iter().find(|(prior, _)| prior == value) {
+            *cost
+        } else {
+            let cost = record_cost(value, limits).unwrap_or(u64::MAX);
+            if cache.len() == 16 {
+                cache.remove(0);
+            }
+            cache.push((value.clone(), cost));
+            cost
+        };
+        costs.push(costs.last().unwrap().saturating_add(cost));
+    }
+    costs.reverse();
+    costs
 }
 
 fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleError> {
@@ -923,8 +1038,7 @@ fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut OwnedInputMan
                 .iter()
                 .any(|a| entry.entry_id == format!("media:{}", a.id.0))
                 || document.lut_assets.iter().any(|a| {
-                    (entry.entry_id == format!("lut:{}", a.id.0)
-                        || entry.entry_id == format!("lut:{}:{}", a.id.0, a.sha256))
+                    lut_entry_id_matches(&entry.entry_id, a)
                         && entry.object.sha256 == a.sha256
                         && entry.object.byte_length == a.byte_len
                 })
@@ -936,10 +1050,39 @@ fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut OwnedInputMan
                         .any(|c| matches!(c.content, kinewright_core::ClipContent::Title(_))))
         })
     });
-    let mut seen = BTreeSet::new();
-    manifest
-        .entries
-        .retain(|e| seen.insert((e.entry_id.clone(), e.object.clone())));
+    for entry in &mut manifest.entries {
+        if entry.object.record_kind == RecordKind::OwnedLut
+            && let Some(asset) = documents.iter().flat_map(|d| &d.lut_assets).find(|a| {
+                lut_entry_id_matches(&entry.entry_id, a)
+                    && entry.object.sha256 == a.sha256
+                    && entry.object.byte_length == a.byte_len
+            })
+        {
+            entry.entry_id = format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len);
+        }
+    }
+    // Merge dependency metadata for identical entries; conflicting non-LUT identities refuse.
+    let mut unique: BTreeMap<String, crate::owned_inputs::OwnedInputEntry> = BTreeMap::new();
+    for entry in std::mem::take(&mut manifest.entries) {
+        if let Some(prior) = unique.get_mut(&entry.entry_id) {
+            if prior.object == entry.object {
+                prior.dependencies.extend(entry.dependencies);
+                prior.dependencies.sort();
+                prior.dependencies.dedup();
+            } else {
+                // Retain the conflict so manifest validation refuses before any root publication.
+                manifest.entries.push(entry);
+            }
+        } else {
+            unique.insert(entry.entry_id.clone(), entry);
+        }
+    }
+    manifest.entries.extend(unique.into_values());
+}
+fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
+    id == format!("lut:{}", asset.id.0)
+        || id == format!("lut:{}:{}", asset.id.0, asset.sha256)
+        || id == format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len)
 }
 pub(crate) fn validate_document_inputs(
     document: &kinewright_core::Document,
@@ -976,8 +1119,7 @@ pub(crate) fn validate_document_inputs(
     }
     for asset in &document.lut_assets {
         if !manifest.entries.iter().any(|e| {
-            (e.entry_id == format!("lut:{}", asset.id.0)
-                || e.entry_id == format!("lut:{}:{}", asset.id.0, asset.sha256))
+            lut_entry_id_matches(&e.entry_id, asset)
                 && e.object.record_kind == RecordKind::OwnedLut
                 && e.object.sha256 == asset.sha256
                 && e.object.byte_length == asset.byte_len

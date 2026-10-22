@@ -9,6 +9,17 @@ pub struct SyncProfile {
     pub calls: u64,
     pub nanoseconds: u128,
 }
+thread_local! { static HISTORY_BOUND: RefCell<SyncProfile> = const { RefCell::new(SyncProfile { calls: 0, nanoseconds: 0 }) }; }
+pub(crate) fn note_history_bound(duration: std::time::Duration) {
+    HISTORY_BOUND.with_borrow_mut(|p| {
+        p.calls += 1;
+        p.nanoseconds += duration.as_nanos();
+    });
+}
+#[must_use]
+pub fn history_bound_profile() -> SyncProfile {
+    HISTORY_BOUND.with_borrow(Clone::clone)
+}
 thread_local! { static HISTORY_DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 pub(crate) fn note_history_decode() {
     HISTORY_DECODES.with(|count| {
@@ -156,6 +167,24 @@ pub fn observe<T>(run: impl FnOnce() -> T) -> (T, IoTrace) {
 }
 
 thread_local! { static FAILURE: RefCell<Option<&'static str>> = const {RefCell::new(None)}; }
+thread_local! { static PATH_FAILURE: RefCell<Option<(&'static str, PathBuf)>> = const {RefCell::new(None)}; }
+/// Keep one file undeletable for the entire scope, including every retry.
+/// # Panics
+/// Refuses nested persistent fault scopes.
+pub fn fail_path<T>(operation: &'static str, path: &std::path::Path, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PATH_FAILURE.with_borrow_mut(|f| *f = None);
+        }
+    }
+    PATH_FAILURE.with_borrow_mut(|f| {
+        assert!(f.is_none());
+        *f = Some((operation, path.to_path_buf()));
+    });
+    let _reset = Reset;
+    run()
+}
 /// Inject one operation error in a fixture-owned temporary namespace.
 /// # Panics
 /// Refuses nested fault scopes. Unwinding clears the scope.
@@ -185,7 +214,12 @@ pub(crate) fn check_failure(
             false
         }
     });
-    if fail {
+    let persistent = PATH_FAILURE.with_borrow(|failure| {
+        failure
+            .as_ref()
+            .is_some_and(|(op, p)| *op == operation && p == path)
+    });
+    if fail || persistent {
         note("injected_failure", path);
         Err(std::io::Error::other(format!("injected {operation}")))
     } else {

@@ -369,6 +369,7 @@ struct HistoryEntry {
     coalesce_key: Option<String>,
 }
 
+#[derive(Clone)]
 struct CoreState {
     floor_offset: u64,
     baseline: Arc<Document>,
@@ -580,6 +581,64 @@ pub(crate) fn floor_history(
             return Err(HistoryError::Corrupt);
         }
     }
+    floor_from_prefix(before, discard, &prefix)
+}
+
+pub(crate) fn find_floor_history(
+    before: &HistorySnapshot,
+    mut may_fit: impl FnMut(usize, usize, &Arc<Document>) -> bool,
+    mut accepts: impl FnMut(&HistorySnapshot) -> bool,
+) -> Result<HistorySnapshot, HistoryError> {
+    before
+        .baseline
+        .validate()
+        .map_err(|_| HistoryError::Corrupt)?;
+    let mut prefix = CoreState::new((*before.baseline).clone(), TimelineRevision(0));
+    for (index, batch) in before.batches.iter().enumerate() {
+        if !matches!(
+            execute_command(&mut prefix, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) {
+            return Err(HistoryError::Corrupt);
+        }
+        if prefix.batches.last() != Some(batch) {
+            return Err(HistoryError::Corrupt);
+        }
+        let discard = index + 1;
+        if prefix.redo.is_empty()
+            && may_fit(discard, prefix.undo.len(), &prefix.document)
+            && let Ok(after) = floor_from_prefix(before, discard, &prefix)
+            && accepts(&after)
+        {
+            // Finish validation from the already replayed prefix rather than replaying it again.
+            let mut complete = prefix.clone();
+            for batch in &before.batches[discard..] {
+                if !matches!(
+                    execute_command(&mut complete, batch.command.clone().into()),
+                    Event::DocumentChanged { .. }
+                ) {
+                    return Err(HistoryError::Corrupt);
+                }
+            }
+            complete.floor_offset = before.floor_offset;
+            if complete.history() != *before {
+                return Err(HistoryError::Corrupt);
+            }
+            return Ok(after);
+        }
+    }
+    prefix.floor_offset = before.floor_offset;
+    if prefix.history() != *before {
+        return Err(HistoryError::Corrupt);
+    }
+    Err(HistoryError::Capacity)
+}
+
+fn floor_from_prefix(
+    before: &HistorySnapshot,
+    discard: usize,
+    prefix: &CoreState,
+) -> Result<HistorySnapshot, HistoryError> {
     let dropped = prefix.undo.len();
     if !prefix.redo.is_empty()
         || dropped > before.cursor.undo.len()

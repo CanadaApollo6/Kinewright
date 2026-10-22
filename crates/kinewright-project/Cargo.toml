@@ -10,7 +10,7 @@ repository.workspace = true
 # Test-only IO seams (`SidecarWriter::set_rename_hook`): the app's IN2B tests
 # drive them cross-crate, so they ride the same gate the app already enables
 # on core and media.
-test-util = []
+test-util = ["kinewright-media/test-util"]
 storage-heap-profile = []
 
 [dependencies]

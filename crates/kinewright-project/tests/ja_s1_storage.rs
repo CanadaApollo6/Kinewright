@@ -1728,5 +1728,8 @@ mod final_head;
 #[path = "support/ja_s1_retention.rs"]
 mod retention;
 #[cfg(target_os = "linux")]
+#[path = "support/ja_s1_fix_r3.rs"]
+mod round_three;
+#[cfg(target_os = "linux")]
 #[path = "support/ja_s1_fix_r2.rs"]
 mod round_two;

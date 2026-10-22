@@ -271,3 +271,51 @@ fn checkpoint_install_refuses_a_newer_producer_suffix() {
     );
     assert_eq!(core.export_history().unwrap(), current);
 }
+#[test]
+fn floor_search_matches_exhaustive_nonmonotone_cuts() {
+    let core = initial();
+    for command in [
+        Command::Do(lock(false)),
+        Command::Undo,
+        Command::Redo,
+        Command::DoBatchCoalesced {
+            coalesce_key: "drag".into(),
+            operations: vec![lock(true)],
+        },
+        Command::DoBatchCoalesced {
+            coalesce_key: "drag".into(),
+            operations: vec![lock(false)],
+        },
+        Command::Undo,
+        Command::Redo,
+    ] {
+        core.request(command).unwrap();
+    }
+    let before = core.export_history().unwrap();
+    let mut validity = vec![];
+    for minimum in 1..=before.batches.len() {
+        let expected = (minimum..=before.batches.len())
+            .find_map(|cut| HistoryTransition::floor(before.clone(), cut).ok());
+        let actual =
+            HistoryTransition::find_floor(before.clone(), |cut, _, _| cut >= minimum, |_| true);
+        assert_eq!(
+            actual.as_ref().ok().map(HistoryTransition::after),
+            expected.as_ref().map(HistoryTransition::after)
+        );
+        validity.push(HistoryTransition::floor(before.clone(), minimum).is_ok());
+    }
+    assert!(
+        validity.windows(3).any(|w| w == [true, false, true]),
+        "fixture must include valid-invalid-valid cuts"
+    );
+    let mut corrupt = before.clone();
+    corrupt.batches[0].undo_entries += 1;
+    assert!(HistoryTransition::find_floor(corrupt, |_, _, _| true, |_| true).is_err());
+    let mut corrupt = before;
+    let track = &mut std::sync::Arc::make_mut(&mut corrupt.document).tracks[0];
+    track.sync_lock = !track.sync_lock;
+    assert!(matches!(
+        HistoryTransition::find_floor(corrupt, |_, _, _| false, |_| true),
+        Err(HistoryError::Corrupt)
+    ));
+}

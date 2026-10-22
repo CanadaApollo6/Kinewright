@@ -18,6 +18,18 @@ fn replay(core: &Core, command: Command) -> Result<(), HistoryError> {
 }
 
 impl HistoryTransition {
+    /// Search in command order, replaying each prefix command once. The budget callback
+    /// can skip candidates using a lower bound; every accepted cut still replays its suffix.
+    /// # Errors
+    /// Refuses corrupt history or a history with no equivalent fitting floor.
+    pub fn find_floor(
+        before: HistorySnapshot,
+        may_fit: impl FnMut(usize, usize, &std::sync::Arc<crate::Document>) -> bool,
+        accepts: impl FnMut(&HistorySnapshot) -> bool,
+    ) -> Result<Self, HistoryError> {
+        let after = crate::actor::find_floor_history(&before, may_fit, accepts)?;
+        Ok(Self { before, after })
+    }
     /// Discard a closed prefix only when the retained cursor is exactly equivalent.
     /// # Errors
     /// Refuses a corrupt cut, a prefix intersecting a retained gesture or a changed redo chain.

@@ -8,7 +8,7 @@ use crate::{
     storage_budget::StorageLimits,
     store::{ProjectStore, SourceCopyHold},
 };
-use kinewright_core::{Core, HistorySnapshot};
+use kinewright_core::Core;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -40,7 +40,6 @@ pub struct BundleCopy {
     before: DestinationBefore,
     status: CopyStatus,
     input_rebindings: BTreeMap<ObjectRef, ObjectRef>,
-    handoff: Option<(Core, HistorySnapshot)>,
 }
 impl BundleCopy {
     #[must_use]
@@ -101,10 +100,6 @@ impl BundleCopy {
         let report = destination
             .reconcile()?
             .ok_or_else(|| BundleError::Corrupt("copy did not publish a Studio root".into()))?;
-        if let Some((core, before)) = &self.handoff {
-            let id = destination.manual_branch_id.clone();
-            destination.install_published(core, before.clone(), &id)?;
-        }
         self.source.reconciled();
         self.status = CopyStatus::Committed(report.clone());
         Ok(Some(report))
@@ -244,7 +239,6 @@ fn result(
     mut source: SourceCopyHold,
     rebindings: BTreeMap<ObjectRef, ObjectRef>,
     publication: Result<BundleSaveReport, BundleError>,
-    handoff: Option<(Core, HistorySnapshot)>,
 ) -> Result<BundleCopy, BundleError> {
     let status = match publication {
         Ok(report) => CopyStatus::Committed(report),
@@ -275,7 +269,6 @@ fn result(
         before,
         status,
         input_rebindings: rebindings,
-        handoff,
     })
 }
 fn frozen_size(store: &ProjectStore, roots: &[ObjectRef], extra: u64) -> Result<u64, BundleError> {
@@ -327,6 +320,7 @@ impl ProjectBundle {
                 .as_ref()
                 .ok_or_else(|| BundleError::Corrupt("no acknowledged copy source".into()))?;
             return Ok(SaveAsOutcome::SameProject(BundleSaveReport {
+                collection: self.store.collection_status()?,
                 path: resolved,
                 project_id: self.project_id.clone(),
                 generation: root.generation,
@@ -424,7 +418,7 @@ impl ProjectBundle {
                 .clone();
             crate::bundle_commit::BundleCommit::publish(&mut target, &history, &inputs)
         })();
-        result(target, before, prepared, source, map, publication, None)
+        result(target, before, prepared, source, map, publication)
             .map(|copy| SaveAsOutcome::Copied(Box::new(copy)))
     }
 }
@@ -481,10 +475,8 @@ impl SessionStore {
         let frozen = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let history = &frozen;
-        history
-            .encoded_bytes()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let bounded = crate::bundle_commit::bound_history(&frozen, &limits)?;
+        let history = &bounded;
         let roots = [inputs.clone()];
         let source = self.store.begin_copy(
             &roots,
@@ -516,20 +508,10 @@ impl SessionStore {
             for reference in target.store.closure(&roots)? {
                 target.store.verify(&reference)?;
             }
-            let report =
-                crate::bundle_commit::BundleCommit::publish(&mut target, history, &rebound)?;
             let id = target.manual_branch_id.clone();
-            target.install_published(core, frozen.clone(), &id)?;
+            let report = target.publish_core(core, frozen.clone(), history, &rebound, &id)?;
             Ok(report)
         })();
-        result(
-            target,
-            before,
-            prepared,
-            source,
-            map,
-            publication,
-            Some((core.clone(), frozen)),
-        )
+        result(target, before, prepared, source, map, publication)
     }
 }

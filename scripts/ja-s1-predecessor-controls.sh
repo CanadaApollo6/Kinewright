@@ -119,6 +119,9 @@ else
         mkdir -p "$TMPDIR"
         nice -n 10 cargo build -p kinewright-agent --features eval-harness --bin kinewright-ja-baseline
         cp "$CARGO_TARGET_DIR/debug/$executable" "$sealed/$executable"
+        # Every process hashes its executable during setup. Debug sections are not code;
+        # exclude them from the sealed artifact instead of extending the frozen deadline.
+        strip --strip-all "$sealed/$executable"
         mkdir -p crates/kinewright-project/tests
         observer=crates/kinewright-project/tests/ja_s1_predecessor_format.rs
         cp "$scratch/predecessor-format.rs" "$observer"
@@ -133,7 +136,7 @@ else
         for fixture in format-corpus history-loss reply-retry legacy-io; do
             expected=1; if [[ "$fixture" == format-corpus ]]; then expected=0; fi
             set +e
-            nice -n 10 "$sealed/$executable" --mode baseline --fixture "crates/kinewright-agent/tests/fixtures/ja/$fixture.json" --output "$controls/$fixture"
+            bash "$repo/scripts/ja-s1-profile-control.sh" "$sealed/$executable" "crates/kinewright-agent/tests/fixtures/ja/$fixture.json" "$controls/$fixture" "$controls/$fixture-profile"
             result=$?
             set -e
             if [[ "$result" -ne "$expected" ]]; then

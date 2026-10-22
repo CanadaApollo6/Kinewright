@@ -48,7 +48,22 @@ pub struct RecoveryInventory {
     pub pre_migration: Option<ObjectRef>,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct CollectionStatus {
+    /// At most 32 paths; totals cover every failed file in the latest pass.
+    pub failures: Vec<CollectionFailure>,
+    pub failed_files: u64,
+    pub pending_bytes: u64,
+}
+#[derive(Debug, Clone)]
+pub struct CollectionFailure {
+    pub path: std::path::PathBuf,
+    pub attempts: u64,
+    pub error: String,
+}
+
 struct Ledger {
+    collection: CollectionStatus,
     objects: BTreeMap<String, (ObjectRef, Vec<ObjectRef>)>,
     pins: BTreeMap<String, u64>,
     inventory_dependencies: BTreeMap<String, Vec<ObjectRef>>,
@@ -97,6 +112,15 @@ impl SealedObject {
     }
 }
 impl ProjectStore {
+    pub fn collection_status(&self) -> Result<CollectionStatus, BundleError> {
+        Ok(self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .collection
+            .clone())
+    }
     pub fn new(
         namespace: ProjectNamespace,
         project_id: Option<ProjectId>,
@@ -128,6 +152,7 @@ impl ProjectStore {
             inner: Arc::new(StoreInner {
                 namespace: Mutex::new(namespace),
                 ledger: Mutex::new(Ledger {
+                    collection: CollectionStatus::default(),
                     objects: BTreeMap::new(),
                     pins: BTreeMap::new(),
                     inventory_dependencies: BTreeMap::new(),
@@ -836,6 +861,56 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
 
 #[allow(clippy::too_many_lines)]
 fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
+    let previous = inner
+        .ledger
+        .lock()
+        .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+        .collection
+        .clone();
+    let mut collection = CollectionStatus::default();
+    let mut retire = |path: &Path,
+                      length: u64,
+                      run: &mut dyn FnMut() -> Result<(), BundleError>|
+     -> Result<bool, BundleError> {
+        let result = (|| {
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::check_failure("gc_before_unlink", path)?;
+            run()
+        })();
+        match result {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                // An ordinary file refusal must not prevent unrelated retirement. Uncertain
+                // namespace operations still stop collection and fence publication.
+                if matches!(
+                    error,
+                    BundleError::Unsettled
+                        | BundleError::DurabilityUnknown
+                        | BundleError::Identity(_)
+                ) {
+                    return Err(error);
+                }
+                collection.failed_files += 1;
+                collection.pending_bytes = collection
+                    .pending_bytes
+                    .checked_add(length)
+                    .ok_or(BundleError::Capacity("failed collection bytes"))?;
+                if collection.failures.len() < 32 {
+                    let attempts = previous
+                        .failures
+                        .iter()
+                        .find(|f| f.path == path)
+                        .map_or(1, |f| f.attempts.saturating_add(1));
+                    collection.failures.push(CollectionFailure {
+                        path: path.to_path_buf(),
+                        attempts,
+                        error: error.to_string(),
+                    });
+                }
+                Ok(false)
+            }
+        }
+    };
     let victims = {
         let ledger = inner
             .ledger
@@ -880,13 +955,15 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
     let mut retired = 0_u64;
     for (hash, reference, edges, metadata) in victims {
         let path = ProjectStore::object_path(&reference)?;
-        #[cfg(any(test, feature = "test-util"))]
-        crate::io_observer::check_failure("gc_before_unlink", path.as_path())?;
-        inner
-            .namespace
-            .lock()
-            .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
-            .unlink_owned(&path)?;
+        if !retire(path.as_path(), reference.byte_length, &mut || {
+            inner
+                .namespace
+                .lock()
+                .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
+                .unlink_owned(&path)
+        })? {
+            continue;
+        }
         let mut ledger = inner
             .ledger
             .lock()
@@ -941,11 +1018,15 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         .temporaries
         .clone();
     for file in temporaries {
-        inner
-            .namespace
-            .lock()
-            .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
-            .retire_temporary(&file)?;
+        if !retire(file.relative.as_path(), file.length, &mut || {
+            inner
+                .namespace
+                .lock()
+                .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
+                .retire_temporary(&file)
+        })? {
+            continue;
+        }
         let mut ledger = inner
             .ledger
             .lock()
@@ -994,11 +1075,15 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         .clone();
     for (hash, length) in orphans {
         let path = PortablePath::new(&Path::new("studio/objects").join(&hash))?;
-        inner
-            .namespace
-            .lock()
-            .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
-            .unlink_owned(&path)?;
+        if !retire(path.as_path(), length, &mut || {
+            inner
+                .namespace
+                .lock()
+                .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
+                .unlink_owned(&path)
+        })? {
+            continue;
+        }
         let mut ledger = inner
             .ledger
             .lock()
@@ -1031,6 +1116,14 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         retired = retired
             .checked_add(length)
             .ok_or(BundleError::Capacity("orphan retirement overflow"))?;
+    }
+    inner
+        .ledger
+        .lock()
+        .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+        .collection = collection.clone();
+    if let Some(failure) = collection.failures.first() {
+        return Err(std::io::Error::other(failure.error.clone()).into());
     }
     Ok(retired)
 }

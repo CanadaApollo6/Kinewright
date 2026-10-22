@@ -433,3 +433,13 @@ rollback eligibility in the existing collector
 (`crates/kinewright-project/src/store.rs:2425`), preserving exact pre-copy
 inventory bytes. These integration adjustments and their witnesses are detailed
 in the round-2 report.
+
+### Round 3
+
+See [fix-r3.md](fix-r3.md) for the first-save caps, reused LUT IDs, root-bound Core
+reconciliation, persistent cleanup reporting, incremental floor search and standalone
+feature wiring. N4's cold-search deferral is replaced by measured default-limit runs.
+The frozen predecessor's executable hashes account for the local setup delay; the
+Linux script strips the artifact and emits per-phase diagnostics. Hosted C1 confirmation
+and new native Windows execution remain with the lead. L4, L6 and the existing O11/O26
+deferrals are unchanged. No S2 writer or producer-fencing scope was added.
