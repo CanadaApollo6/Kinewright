@@ -51,11 +51,18 @@ pub(crate) fn settle_copy_source(
     pending: &mut Option<PendingCopySource>,
 ) -> Result<(), BundleError> {
     if let Some(hold) = pending {
-        crate::bundle::reconcile_save_tag(&hold.tag)?;
-        hold.source
+        let needs_reconciliation = hold
+            .source
             .lock()
             .map_err(|_| BundleError::Capacity("copy source poisoned"))?
-            .reconciled();
+            .requires_reconciliation();
+        if needs_reconciliation {
+            crate::bundle::reconcile_save_tag(&hold.tag)?;
+            hold.source
+                .lock()
+                .map_err(|_| BundleError::Capacity("copy source poisoned"))?
+                .reconciled();
+        }
     }
     *pending = None;
     Ok(())
@@ -71,6 +78,16 @@ impl BundleCopy {
         })
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn destination_usage_probe(
+        &self,
+    ) -> Result<crate::storage_budget::StorageUsage, BundleError> {
+        self.destination
+            .as_ref()
+            .ok_or_else(|| BundleError::Corrupt("copy owner missing".into()))?
+            .store
+            .usage()
+    }
     #[must_use]
     pub const fn status(&self) -> &CopyStatus {
         &self.status

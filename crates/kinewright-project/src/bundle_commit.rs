@@ -101,16 +101,16 @@ impl BundleCommit {
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let original = before.clone();
         if let Some(checkpoint) = bundle.branches.get(&bundle.manual_branch_id) {
-            let acknowledged =
-                if let Some(cached) = bundle.history_cache.get(&bundle.manual_branch_id) {
-                    std::sync::Arc::clone(cached)
-                } else {
-                    std::sync::Arc::new(
-                        bundle
-                            .store
-                            .read_record::<HistorySnapshot>(&checkpoint.history_ref)?,
-                    )
-                };
+            let acknowledged = if let Some(cached) = bundle.cached_history(&bundle.manual_branch_id)
+            {
+                std::sync::Arc::clone(cached)
+            } else {
+                std::sync::Arc::new(
+                    bundle
+                        .store
+                        .read_record::<HistorySnapshot>(&checkpoint.history_ref)?,
+                )
+            };
             if before.floor_offset < acknowledged.floor_offset {
                 let cut = usize::try_from(acknowledged.floor_offset - before.floor_offset)
                     .map_err(|_| BundleError::Capacity("history floor offset"))?;
@@ -229,14 +229,10 @@ impl BundleCommit {
         }
         bundle.pending_command = None;
         bundle.pending_result = None;
-        let published = std::sync::Arc::clone(
-            bundle
-                .history_cache
-                .get(&bundle.manual_branch_id)
-                .ok_or_else(|| {
-                    BundleError::Corrupt("published history missing from owner".into())
-                })?,
-        );
+        let published =
+            std::sync::Arc::clone(bundle.cached_history(&bundle.manual_branch_id).ok_or_else(
+                || BundleError::Corrupt("published history missing from owner".into()),
+            )?);
         if **published != original
             && core
                 .install_checkpoint(original, (**published).clone())
@@ -319,7 +315,7 @@ impl BundleCommit {
         }
         let prior = bundle.branches.get(branch_id).cloned();
         let old_history = if let Some(prior) = &prior {
-            Some(if let Some(cached) = bundle.history_cache.get(branch_id) {
+            Some(if let Some(cached) = bundle.cached_history(branch_id) {
                 std::sync::Arc::clone(cached)
             } else {
                 std::sync::Arc::new(
@@ -837,12 +833,17 @@ impl BundleCommit {
                     .map_err(crate::bundle::history_error)?;
             }
         }
-        if let Err(error) = bundle.store.publish_root(next_admission.raw_bytes()) {
-            if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {
+        if let Err(failure) = bundle.store.publish_root(next_admission.raw_bytes()) {
+            if failure.boundary == crate::namespace::RootReplaceBoundary::Unknown {
                 bundle.unsettled = true;
                 return Err(BundleError::DurabilityUnknown);
             }
-            return Err(error);
+            // Cleanup may still be uncertain, but it cannot have published this root.
+            bundle.publication_tag = None;
+            if let Some(pending) = &mut bundle.pending_save {
+                pending.root_sha256 = None;
+            }
+            return Err(failure.error);
         }
         // Publication is monotonic: any fallible tail is unsettled, never a definite rollback.
         bundle.unsettled = true;
@@ -851,9 +852,13 @@ impl BundleCommit {
             bundle.receipts = receipts;
             bundle.root = Some(root);
             bundle.branches = branches;
-            bundle
-                .history_cache
-                .insert(branch_id.clone(), std::sync::Arc::clone(&checked));
+            bundle.history_cache.insert(
+                branch_id.clone(),
+                crate::bundle::CachedHistory {
+                    reference: bundle.branches[branch_id].history_ref.clone(),
+                    history: std::sync::Arc::clone(&checked),
+                },
+            );
             bundle.generation = generation;
             bundle.inventory = inventory;
             bundle.recovery = recovery;

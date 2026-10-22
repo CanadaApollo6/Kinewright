@@ -13,6 +13,7 @@ pub enum BundleError {
     HistoryChanged,
     SaveInProgress,
     HistoryBarrierInvariant,
+    HistoryCommitInvariant,
     Capacity(&'static str),
     Unsupported(String),
     Corrupt(String),
@@ -34,6 +35,9 @@ impl fmt::Display for BundleError {
             Self::HistoryChanged => f.write_str("history_changed: retry the save"),
             Self::SaveInProgress => f.write_str("save_in_progress: retry after the current save"),
             Self::HistoryBarrierInvariant => f.write_str("internal_history_barrier_invariant"),
+            Self::HistoryCommitInvariant => {
+                f.write_str("internal_history_commit_invariant: ticket released")
+            }
             Self::Capacity(e) => write!(f, "storage_backpressure: {e}"),
             Self::Unsupported(e) => write!(f, "unsupported_bundle: {e}"),
             Self::Corrupt(e) => write!(f, "damaged_bundle: {e}"),
@@ -635,7 +639,15 @@ impl LoadedBundle {
         let history_cache = self
             .branches
             .iter()
-            .map(|(id, branch)| (id.clone(), Arc::clone(&branch.1)))
+            .map(|(id, branch)| {
+                (
+                    id.clone(),
+                    CachedHistory {
+                        reference: branch.0.history_ref.clone(),
+                        history: Arc::clone(&branch.1),
+                    },
+                )
+            })
             .collect();
         let branches = self
             .branches
@@ -679,6 +691,12 @@ impl LoadedBundle {
     }
 }
 
+/// A verified history bound to the immutable checkpoint object it came from.
+pub(crate) struct CachedHistory {
+    pub(crate) reference: ObjectRef,
+    pub(crate) history: Arc<StorageReservation<HistorySnapshot>>,
+}
+
 /// One synchronous named-bundle owner. It accepts frozen Core exports, never live snapshots assembled piecemeal.
 pub struct ProjectBundle {
     pub(crate) publication_tag: Option<kinewright_core::HistorySaveTag>,
@@ -692,7 +710,7 @@ pub struct ProjectBundle {
     pub(crate) manual_branch_id: BranchId,
     pub(crate) generation: u64,
     pub(crate) branches: BTreeMap<BranchId, BranchCheckpoint>,
-    pub(crate) history_cache: BTreeMap<BranchId, Arc<StorageReservation<HistorySnapshot>>>,
+    pub(crate) history_cache: BTreeMap<BranchId, CachedHistory>,
     pub(crate) root: Option<StudioRoot>,
     pub(crate) admission: BundleWriteAdmission,
     pub(crate) inventory: SupportInventory,
@@ -708,7 +726,7 @@ pub struct ProjectBundle {
 }
 pub(crate) struct PendingSave {
     pub(crate) core: Core,
-    pub(crate) barrier: Option<kinewright_core::HistoryFloorBarrier>,
+    pub(crate) barrier: Option<crate::history_save::FloorBarrier>,
     pub(crate) root_sha256: Option<String>,
 }
 impl ProjectBundle {
@@ -889,6 +907,22 @@ impl ProjectBundle {
             })
         }
     }
+    pub(crate) fn cached_history(
+        &self,
+        branch: &BranchId,
+    ) -> Option<&Arc<StorageReservation<HistorySnapshot>>> {
+        let current = &self.branches.get(branch)?.history_ref;
+        self.history_cache
+            .get(branch)
+            .filter(|cached| &cached.reference == current)
+            .map(|cached| &cached.history)
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn invalidate_history_cache_binding_probe(&mut self) {
+        if let Some(cached) = self.history_cache.get_mut(&self.manual_branch_id) {
+            cached.reference.sha256 = "0".repeat(64);
+        }
+    }
     #[must_use]
     pub fn project_id(&self) -> &ProjectId {
         &self.project_id
@@ -978,6 +1012,10 @@ impl ProjectBundle {
         })
     }
     /// Validate the exact published graph, complete its parent barrier, then clear unknown publication.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one reconciliation refreshes destination authority, graph and runtime state together"
+    )]
     pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
         if let Some(pending) = &self.pending_save {
             reconcile_core_save(&pending.core)?;
@@ -1046,7 +1084,15 @@ impl ProjectBundle {
         self.history_cache = loaded
             .branches
             .iter()
-            .map(|(id, branch)| (id.clone(), Arc::clone(&branch.1)))
+            .map(|(id, branch)| {
+                (
+                    id.clone(),
+                    CachedHistory {
+                        reference: branch.0.history_ref.clone(),
+                        history: Arc::clone(&branch.1),
+                    },
+                )
+            })
             .collect();
         self.branches = loaded
             .branches
@@ -1161,9 +1207,14 @@ impl ProjectBundle {
         }
         let mut aligned = selected.clone();
         if let Some(prior) = self.branches.get(branch) {
-            let durable = self
-                .store
-                .read_record::<HistorySnapshot>(&prior.history_ref)?;
+            let durable = if let Some(cached) = self.cached_history(branch) {
+                Arc::clone(cached)
+            } else {
+                Arc::new(
+                    self.store
+                        .read_record::<HistorySnapshot>(&prior.history_ref)?,
+                )
+            };
             if aligned.floor_offset < durable.floor_offset {
                 aligned = kinewright_core::HistoryTransition::floor(
                     selected.clone(),
@@ -1199,7 +1250,7 @@ impl ProjectBundle {
     pub(crate) fn publish_barrier(
         &mut self,
         core: &Core,
-        barrier: Option<kinewright_core::HistoryFloorBarrier>,
+        barrier: Option<crate::history_save::FloorBarrier>,
         history: &HistorySnapshot,
         selected: &HistorySnapshot,
         inputs: &ObjectRef,
@@ -1268,9 +1319,10 @@ impl ProjectBundle {
             } else {
                 barrier.release()
             };
-            if result.is_err() {
+            if let Err(error) = result {
                 self.unsettled = true;
-                return Err(BundleError::Unsettled);
+                self.pending_save = None;
+                return Err(history_error(error));
             }
         }
         self.pending_save = None;
@@ -1295,9 +1347,9 @@ impl ProjectBundle {
 pub(crate) fn pending_floor(
     core: &Core,
     transition: Option<kinewright_core::HistoryTransition>,
-) -> Result<Option<kinewright_core::HistoryFloorBarrier>, BundleError> {
+) -> Result<Option<crate::history_save::FloorBarrier>, BundleError> {
     transition
-        .map(|floor| core.begin_history_floor(floor))
+        .map(|floor| crate::history_save::begin(core, floor))
         .transpose()
         .map_err(history_error)
 }
@@ -1307,12 +1359,14 @@ pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError
         kinewright_core::HistoryError::CaptureChanged => BundleError::HistoryChanged,
         kinewright_core::HistoryError::BarrierInvariant => BundleError::HistoryBarrierInvariant,
         kinewright_core::HistoryError::SaveInProgress => BundleError::SaveInProgress,
+        kinewright_core::HistoryError::CommitInvariant => BundleError::HistoryCommitInvariant,
         other => BundleError::Corrupt(other.to_string()),
     }
 }
 
 /// Reconcile an orphan independently of the old store's object reservation ledger.
 pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
+    crate::history_save::bind(core).map_err(history_error)?;
     let Some(pending) = core.pending_history_save().map_err(history_error)? else {
         return Ok(());
     };
@@ -1324,8 +1378,7 @@ pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
         .as_ref()
         .ok_or(BundleError::HistoryBarrierInvariant)?;
     let commit = reconcile_save_tag(tag)?;
-    core.settle_history_save(&pending, commit)
-        .map_err(history_error)
+    crate::history_save::settle(core, &pending, commit).map_err(history_error)
 }
 
 pub(crate) fn reconcile_save_tag(

@@ -106,6 +106,27 @@ impl<'de> serde::Deserialize<'de> for PortablePath {
     }
 }
 
+/// The root boundary is independent of temporary-file cleanup uncertainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootReplaceBoundary {
+    NeverAttempted,
+    DefinitelyRefused,
+    Unknown,
+}
+#[derive(Debug)]
+pub(crate) struct RootReplaceFailure {
+    pub(crate) boundary: RootReplaceBoundary,
+    pub(crate) error: BundleError,
+}
+impl From<BundleError> for RootReplaceFailure {
+    fn from(error: BundleError) -> Self {
+        Self {
+            boundary: RootReplaceBoundary::NeverAttempted,
+            error,
+        }
+    }
+}
+
 pub struct ProjectNamespace {
     identity: NamespaceIdentity,
     #[cfg(target_os = "linux")]
@@ -114,6 +135,8 @@ pub struct ProjectNamespace {
     session: Option<(File, OsString)>,
     #[cfg(target_os = "linux")]
     root_name: OsString,
+    #[cfg(target_os = "linux")]
+    pending_root_cleanup: Option<OsString>,
     #[cfg(target_os = "linux")]
     directories: RefCell<BTreeMap<PathBuf, File>>,
     #[cfg(target_os = "linux")]
@@ -493,7 +516,7 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
-    pub(crate) fn replace_root(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
+    pub(crate) fn replace_root(&mut self, bytes: &[u8]) -> Result<(), RootReplaceFailure> {
         #[cfg(target_os = "linux")]
         {
             linux::replace(self, bytes)
@@ -501,7 +524,7 @@ impl ProjectNamespace {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = bytes;
-            Err(BundleError::DurabilityUnsupported)
+            Err(BundleError::DurabilityUnsupported.into())
         }
     }
     pub(crate) fn publish_immutable(
@@ -536,7 +559,7 @@ impl ProjectNamespace {
     }
     #[cfg(any(test, feature = "test-util"))]
     pub fn replace_root_probe(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
-        self.replace_root(bytes)
+        self.replace_root(bytes).map_err(|failure| failure.error)
     }
     #[cfg(any(test, feature = "test-util"))]
     pub fn publish_immutable_probe(
@@ -550,7 +573,7 @@ impl ProjectNamespace {
     pub fn replace_root_refusing_rename(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
         #[cfg(target_os = "linux")]
         {
-            linux::replace_inner(self, bytes, true)
+            linux::replace_inner(self, bytes, true).map_err(|failure| failure.error)
         }
         #[cfg(not(target_os = "linux"))]
         {

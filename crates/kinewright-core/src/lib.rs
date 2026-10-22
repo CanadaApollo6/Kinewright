@@ -42,7 +42,7 @@ mod transcript_edit;
 mod transition;
 
 pub use history_transition::{
-    HistoryFloorBarrier, HistorySaveTag, HistoryTransition, PendingHistorySave,
+    HistoryFloorBarrier, HistorySaveOwner, HistorySaveTag, HistoryTransition, PendingHistorySave,
 };
 
 pub use actor::{

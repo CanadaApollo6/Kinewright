@@ -81,17 +81,18 @@ The mutation pairs, all 26 run on one source tree: every red failed at its inten
 hand-written SHA-256 was built at opt-level 0 in dev and test. Workers start one after the other,
 and the supervisor's setup deadline is 30 s counted from fixture birth
 (`supervision.rs:287-288`). Locally the second worker became ready at about 13.5 s, 45% of the
-deadline. On a slower hosted runner it crosses 30 s. The supervisor then kills the whole fixture
-process group and records `not_run`, "native fixture deadline exceeded during setup", with zero
-`process_spawn` events, so the old assertion saw 0 `process_exit` events. The test asserted reaps
-that never had a chance to happen; with zero spawns it was not a reap bug.
+deadline. On a slower runner setup can cross 30 s. The supervisor then kills the whole fixture
+process group and records `not_run`, "native fixture deadline exceeded during setup". The CI
+assertion recorded zero `process_exit` events; that alone does not establish its spawn count.
+The local 40% CPU-quota red recorded **one** `process_spawn`, not zero, before the setup deadline.
+This is consistent with the setup-timeout conclusion; it does not reproduce a zero-spawn CI trace.
 
 **Reproduced.** The unchanged witness binary was run under a user-scope CPU quota of 40%
 (`systemd-run --user --scope -p CPUQuota=40%`), once against each CLI:
 
 | CLI | Result | Second spawn |
 | --- | --- | --- |
-| before (`b66d8c87…`, sealed pre-change build) | FAILED after 30.04 s: setup deadline, 0 spawns | none |
+| before (`b66d8c87…`, sealed pre-change build) | FAILED after 30.04 s: setup deadline, 1 spawn | none |
 | after | ok, in 3.84 s | 3,748 ms |
 
 **Fix.** The SHA-256 code moved, unchanged, into the `kinewright-hash` workspace crate, built at
@@ -133,7 +134,7 @@ allocator (`measure/summary.json.gz`):
 | 2, batch limit | 26,673 | 4.4–9.4 ms | 5.4 ms |
 | 3, large excursion | none: this witness never commits | – | – |
 
-Edits wait at most about 24 ms behind a commit. No change was made. Selection bounds in the same
+The sampled suffix replay and document/history comparison took at most about 24 ms. This interval excludes state replacement/drop and actor notification/reply; it is not a complete actor-blocking bound. No change was made. Selection bounds in the same
 runs: encoded median 777 ms, batch 214 ms, excursion 32 ms. The first-save retry took 1.78–1.98 s.
 
 ## Gate

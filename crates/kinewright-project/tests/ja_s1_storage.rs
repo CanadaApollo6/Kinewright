@@ -1740,3 +1740,7 @@ mod round_four;
 #[cfg(target_os = "linux")]
 #[path = "support/ja_s1_fix_r5.rs"]
 mod round_five;
+
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s1_fix_r6.rs"]
+mod round_six;

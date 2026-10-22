@@ -477,3 +477,10 @@ C4 explicitly authorizes the small `kinewright-hash` workspace crate, an excepti
 to the original plan's no-new-crate rule. It contains the existing SHA implementation
 and adds no third-party dependency. The predecessor source and setup deadlines stay
 frozen. Existing m2/m3/m4, L4/L6 and S2/S6 boundaries remain unchanged.
+
+### Round 6 known limitation
+
+A permanently unreadable tagged destination blocks further saves of that session,
+including Save As elsewhere. Every entry stays in memory and nothing is lost while
+the session lives. An exit requires an S0 amendment, which the lead will raise
+separately; round 6 does not add an abandon action.

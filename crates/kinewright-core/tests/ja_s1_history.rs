@@ -1,4 +1,16 @@
 use kinewright_core::*;
+struct TestProof;
+fn owner(core: &Core) -> HistorySaveOwner<TestProof> {
+    core.history_save_owner(&TestProof).unwrap()
+}
+fn tag() -> HistorySaveTag {
+    HistorySaveTag {
+        destination: "test.kinewright".into(),
+        parent_device: 1,
+        parent_inode: 1,
+        root_sha256: "a".repeat(64),
+    }
+}
 
 fn apply(core: &Core, command: Command) {
     assert!(matches!(
@@ -280,7 +292,9 @@ fn pending_floor_blocks_undo_and_commits_current_suffix() {
     let before = core.export_history().unwrap();
     let transition = HistoryTransition::floor(before.clone(), 2).unwrap();
     let retained = transition.after().cursor.undo.len();
-    let mut barrier = core.begin_history_floor(transition).unwrap();
+    let mut barrier = owner(&core)
+        .begin_history_floor(&TestProof, transition)
+        .unwrap();
     assert_eq!(
         core.export_history().unwrap(),
         before,
@@ -311,7 +325,7 @@ fn pending_floor_blocks_undo_and_commits_current_suffix() {
         _ => panic!("snapshot response"),
     };
     let prior = revision();
-    barrier.commit().unwrap();
+    barrier.commit(&TestProof).unwrap();
     assert_eq!(
         revision().0,
         prior.0 + 1,
@@ -333,17 +347,22 @@ fn pending_floor_release_restores_entries_and_rejects_a_stale_capture() {
     core.request(Command::Undo).unwrap();
     let before = core.export_history().unwrap();
     let transition = HistoryTransition::floor(before.clone(), 1).unwrap();
-    let mut barrier = core.begin_history_floor(transition).unwrap();
+    let mut barrier = owner(&core)
+        .begin_history_floor(&TestProof, transition)
+        .unwrap();
     assert!(
         core.restore_history(before.clone()).is_err(),
         "restore cannot bypass a pending floor"
     );
     barrier.release().unwrap();
-    let mut retry_barrier = core
-        .begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap())
+    let mut retry_barrier = owner(&core)
+        .begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap(),
+        )
         .unwrap();
     assert!(
-        barrier.commit().is_err(),
+        barrier.commit(&TestProof).is_err(),
         "released handle must not commit a retry's floor"
     );
     assert!(
@@ -362,7 +381,7 @@ fn pending_floor_release_restores_entries_and_rejects_a_stale_capture() {
     assert!(core.export_history().unwrap().cursor.redo.is_empty());
     let stale = HistoryTransition::floor(before, 1).unwrap();
     assert!(
-        core.begin_history_floor(stale).is_err(),
+        owner(&core).begin_history_floor(&TestProof, stale).is_err(),
         "capture/install race must refuse before IO"
     );
 }
@@ -374,16 +393,26 @@ fn second_barrier_is_an_internal_invariant_and_stale_owners_are_harmless() {
         core.request(Command::Do(lock(locked))).unwrap();
     }
     let before = core.export_history().unwrap();
-    let mut first = core
-        .begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap())
+    let mut first = owner(&core)
+        .begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap(),
+        )
         .unwrap();
     assert!(matches!(
-        core.begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap()),
+        owner(&core).begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap()
+        ),
         Err(HistoryError::SaveInProgress)
     ));
-    first.retain_until_reconcile().unwrap();
+    first.tag_publication(&TestProof, tag()).unwrap();
+    first.retain_until_reconcile(&TestProof).unwrap();
     assert!(matches!(
-        core.begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap()),
+        owner(&core).begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap()
+        ),
         Err(HistoryError::BarrierInvariant)
     ));
     let ticket = core.pending_history_save().unwrap().unwrap();
@@ -391,13 +420,18 @@ fn second_barrier_is_an_internal_invariant_and_stale_owners_are_harmless() {
     let mut unknown = ticket.clone();
     unknown.id = u64::MAX;
     assert!(matches!(
-        core.settle_history_save(&unknown, false),
+        owner(&core).settle_history_save(&TestProof, &unknown, false),
         Err(HistoryError::BarrierInvariant)
     ));
     assert_eq!(core.pending_history_save().unwrap(), Some(ticket.clone()));
-    core.settle_history_save(&ticket, false).unwrap();
-    let mut second = core
-        .begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap())
+    owner(&core)
+        .settle_history_save(&TestProof, &ticket, false)
+        .unwrap();
+    let mut second = owner(&core)
+        .begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap(),
+        )
         .unwrap();
     assert_ne!(ticket.id, core.pending_history_save().unwrap().unwrap().id);
     first.release().unwrap();
@@ -407,4 +441,100 @@ fn second_barrier_is_an_internal_invariant_and_stale_owners_are_harmless() {
     );
     second.release().unwrap();
     assert_eq!(core.export_history().unwrap(), before);
+}
+
+#[test]
+fn failed_commit_releases_the_ticket_with_a_typed_internal_error() {
+    let document = (*initial().export_history().unwrap().document).clone();
+    let core = Core::spawn_at(document, TimelineRevision(u64::MAX - 2)).unwrap();
+    apply(&core, Command::Do(lock(false)));
+    apply(&core, Command::Do(lock(true)));
+    let before = core.export_history().unwrap();
+    let mut barrier = owner(&core)
+        .begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap(),
+        )
+        .unwrap();
+    barrier.tag_publication(&TestProof, tag()).unwrap();
+    barrier.retain_until_reconcile(&TestProof).unwrap();
+    assert_eq!(
+        barrier.commit(&TestProof),
+        Err(HistoryError::CommitInvariant)
+    );
+    assert!(
+        core.pending_history_save().unwrap().is_none(),
+        "failed commit left save in progress forever"
+    );
+    assert_eq!(
+        core.export_history().unwrap(),
+        before,
+        "internal commit error lost entries"
+    );
+    let mut retry = owner(&core)
+        .begin_history_floor(&TestProof, HistoryTransition::floor(before, 1).unwrap())
+        .unwrap();
+    retry.release().unwrap();
+}
+#[test]
+fn restore_during_a_save_returns_typed_contention_and_keeps_entries() {
+    let core = initial();
+    apply(&core, Command::Do(lock(false)));
+    let before = core.export_history().unwrap();
+    let mut barrier = owner(&core)
+        .begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        core.restore_history(before.clone()),
+        Err(HistoryError::SaveInProgress)
+    );
+    barrier.tag_publication(&TestProof, tag()).unwrap();
+    barrier.retain_until_reconcile(&TestProof).unwrap();
+    assert_eq!(
+        core.restore_history(before.clone()),
+        Err(HistoryError::SaveInProgress)
+    );
+    assert_eq!(core.export_history().unwrap(), before);
+    barrier.release().unwrap();
+}
+#[test]
+fn another_proof_type_cannot_take_over_a_history_save_owner() {
+    struct ForgedProof;
+    let core = initial();
+    apply(&core, Command::Do(lock(false)));
+    let before = core.export_history().unwrap();
+    let mut barrier = owner(&core)
+        .begin_history_floor(
+            &TestProof,
+            HistoryTransition::floor(before.clone(), 1).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        matches!(
+            core.clone().history_save_owner(&ForgedProof),
+            Err(HistoryError::BarrierInvariant)
+        ),
+        "a Core clone acquired the persistence owner's capability"
+    );
+    let ticket = core.pending_history_save().unwrap();
+    assert!(
+        matches!(
+            barrier.retain_until_reconcile(&TestProof),
+            Err(HistoryError::BarrierInvariant)
+        ),
+        "an untagged ticket became ready"
+    );
+    assert_eq!(core.pending_history_save().unwrap(), ticket);
+    barrier.release().unwrap();
+    core.restore_history(before).unwrap();
+    assert!(
+        matches!(
+            core.history_save_owner(&ForgedProof),
+            Err(HistoryError::BarrierInvariant)
+        ),
+        "restore reset persistence authority"
+    );
 }

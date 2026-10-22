@@ -8,6 +8,7 @@ pub mod bundle_commit;
 pub mod bundle_copy;
 pub mod bundle_records;
 pub mod bundle_recovery;
+mod history_save;
 pub mod owned_inputs;
 pub mod receipts;
 pub mod storage_budget;

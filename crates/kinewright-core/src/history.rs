@@ -66,6 +66,8 @@ pub enum HistoryError {
     SaveInProgress,
     #[error("internal history barrier invariant")]
     BarrierInvariant,
+    #[error("internal history commit invariant; ticket released without discarding entries")]
+    CommitInvariant,
     #[error("history exceeds its bounded admission")]
     Capacity,
     #[error("history replay differs from the retained checkpoint")]

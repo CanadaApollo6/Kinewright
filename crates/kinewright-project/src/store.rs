@@ -1933,12 +1933,26 @@ impl ProjectStore {
         let _encoded = self.reserve(0, count.bytes, 0, false)?;
         let bytes =
             serde_json::to_vec(inventory).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        self.publish_control(&bytes, false)
+        self.publish_control(
+            &bytes,
+            false,
+            &mut crate::namespace::RootReplaceBoundary::NeverAttempted,
+        )
     }
-    pub(crate) fn publish_root(&mut self, bytes: &[u8]) -> Result<(), BundleError> {
-        self.publish_control(bytes, true)
+    pub(crate) fn publish_root(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), crate::namespace::RootReplaceFailure> {
+        let mut boundary = crate::namespace::RootReplaceBoundary::NeverAttempted;
+        self.publish_control(bytes, true, &mut boundary)
+            .map_err(|error| crate::namespace::RootReplaceFailure { boundary, error })
     }
-    fn publish_control(&mut self, bytes: &[u8], root: bool) -> Result<(), BundleError> {
+    fn publish_control(
+        &mut self,
+        bytes: &[u8],
+        root: bool,
+        boundary: &mut crate::namespace::RootReplaceBoundary,
+    ) -> Result<(), BundleError> {
         let length = bytes.len() as u64;
         if length > self.limits().control_bytes
             || self
@@ -1951,7 +1965,17 @@ impl ProjectStore {
         }
         let reservation = self.reserve(length, 0, 0, false)?;
         let result = if root {
-            self.with_namespace(|n| n.replace_root(bytes))
+            self.with_namespace(|n| match n.replace_root(bytes) {
+                Ok(()) => {
+                    // Any later accounting failure follows a completed root replacement.
+                    *boundary = crate::namespace::RootReplaceBoundary::Unknown;
+                    Ok(())
+                }
+                Err(failure) => {
+                    *boundary = failure.boundary;
+                    Err(failure.error)
+                }
+            })
         } else {
             self.with_namespace(|n| {
                 n.replace_relative(&crate::bundle_recovery::inventory_path()?, bytes)
@@ -2319,6 +2343,9 @@ impl ProjectStore {
     }
 }
 impl SourceCopyHold {
+    pub(crate) const fn requires_reconciliation(&self) -> bool {
+        self.uncertain
+    }
     pub(crate) fn mark_uncertain(&mut self) -> Result<(), BundleError> {
         self.uncertain = true;
         self.pin

@@ -202,22 +202,43 @@ pub struct HistoryEntryObservation {
 #[derive(Clone)]
 pub struct Core {
     sender: Sender<CoreMessage>,
+    history_owner: Arc<std::sync::Mutex<Option<std::any::TypeId>>>,
 }
 
 impl Core {
+    /// Bind the persistence owner to its private proof type for this actor's lifetime.
+    /// An owner supplies its own unforgeable proof; clones cannot bind a different type.
+    /// # Errors
+    /// Refuses a different owner or a poisoned capability binding.
+    pub fn history_save_owner<P: 'static>(
+        &self,
+        _proof: &P,
+    ) -> Result<crate::HistorySaveOwner<P>, HistoryError> {
+        let mut owner = self
+            .history_owner
+            .lock()
+            .map_err(|_| HistoryError::BarrierInvariant)?;
+        let requested = std::any::TypeId::of::<P>();
+        if owner.is_some_and(|existing| existing != requested) {
+            return Err(HistoryError::BarrierInvariant);
+        }
+        *owner = Some(requested);
+        Ok(crate::HistorySaveOwner::new(self.clone()))
+    }
+
     /// Retain a validated prefix while preventing Undo from crossing its pending floor.
     /// # Errors
     /// Refuses a changed cut, an existing barrier or a disconnected actor before mutation.
-    pub fn begin_history_floor(
+    pub(crate) fn begin_history_floor(
         &self,
         transition: crate::HistoryTransition,
-    ) -> Result<crate::HistoryFloorBarrier, HistoryError> {
+    ) -> Result<u64, HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
             .send(CoreMessage::BeginFloor(transition, reply))
             .map_err(|_| HistoryError::Disconnected)?;
         let id = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
-        Ok(crate::HistoryFloorBarrier::new(self.clone(), id))
+        Ok(id)
     }
 
     /// Read the current save ticket without filesystem IO.
@@ -234,7 +255,7 @@ impl Core {
     /// Settle a ticket after the persistence owner reconciles its tagged root.
     /// # Errors
     /// Refuses an unknown ticket or a disconnected actor.
-    pub fn settle_history_save(
+    pub(crate) fn settle_history_save(
         &self,
         pending: &crate::PendingHistorySave,
         commit: bool,
@@ -381,7 +402,10 @@ impl Core {
             .name("kinewright-core".to_owned())
             .spawn(move || run_actor(&receiver, CoreState::new(initial_document, revision)))
             .expect("failed to spawn Core actor");
-        Ok(Self { sender })
+        Ok(Self {
+            sender,
+            history_owner: Arc::new(std::sync::Mutex::new(None)),
+        })
     }
 
     /// Queue a command for the core actor.
@@ -690,55 +714,57 @@ impl CoreState {
             return Err(HistoryError::BarrierInvariant);
         }
         let offset = pending.offset;
-        if commit {
-            #[cfg(any(test, feature = "test-util"))]
-            let started = std::time::Instant::now();
-            // The barrier kept the prefix unchanged. Replay only the current suffix
-            // through the ordinary executor, including commands accepted during IO.
-            let mut candidate = Self::new((*pending.baseline).clone(), TimelineRevision(0));
-            candidate.floor_offset = offset;
-            for batch in self
-                .batches
-                .get(pending.discard..)
-                .ok_or(HistoryError::Corrupt)?
-            {
-                if !matches!(
-                    execute_command(&mut candidate, batch.command.clone().into()),
-                    Event::DocumentChanged { .. }
-                ) {
+        let baseline = Arc::clone(&pending.baseline);
+        let discard = pending.discard;
+        let depth = pending.depth;
+        let result = (|| {
+            if commit {
+                #[cfg(any(test, feature = "test-util"))]
+                let started = std::time::Instant::now();
+                // The barrier kept the prefix unchanged. Replay only the current suffix
+                // through the ordinary executor, including commands accepted during IO.
+                let mut candidate = Self::new((*baseline).clone(), TimelineRevision(0));
+                candidate.floor_offset = offset;
+                for batch in self.batches.get(discard..).ok_or(HistoryError::Corrupt)? {
+                    if !matches!(
+                        execute_command(&mut candidate, batch.command.clone().into()),
+                        Event::DocumentChanged { .. }
+                    ) {
+                        return Err(HistoryError::Corrupt);
+                    }
+                }
+                if candidate.document != self.document
+                    || candidate.undo != self.undo.get(depth..).ok_or(HistoryError::Corrupt)?
+                    || candidate.redo != self.redo
+                {
                     return Err(HistoryError::Corrupt);
                 }
-            }
-            if candidate.document != self.document
-                || candidate.undo
-                    != self
-                        .undo
-                        .get(pending.depth..)
-                        .ok_or(HistoryError::Corrupt)?
-                || candidate.redo != self.redo
-            {
-                return Err(HistoryError::Corrupt);
-            }
-            candidate.revision = TimelineRevision(
-                self.revision
-                    .0
-                    .checked_add(1)
-                    .ok_or(HistoryError::Capacity)?,
-            );
-            candidate.next_floor_id = self.next_floor_id;
-            #[cfg(any(test, feature = "test-util"))]
-            if std::env::var_os("JA_S1_COMMIT_TIMING").is_some() {
-                eprintln!(
-                    "R5_ACTOR_COMMIT batches={} elapsed_us={}",
-                    candidate.batches.len(),
-                    started.elapsed().as_micros()
+                candidate.revision = TimelineRevision(
+                    self.revision
+                        .0
+                        .checked_add(1)
+                        .ok_or(HistoryError::Capacity)?,
                 );
+                candidate.next_floor_id = self.next_floor_id;
+                #[cfg(any(test, feature = "test-util"))]
+                if std::env::var_os("JA_S1_COMMIT_TIMING").is_some() {
+                    eprintln!(
+                        "R5_ACTOR_COMMIT batches={} elapsed_us={}",
+                        candidate.batches.len(),
+                        started.elapsed().as_micros()
+                    );
+                }
+                *self = candidate;
+            } else {
+                self.pending_floor = None;
             }
-            *self = candidate;
-        } else {
+            Ok(())
+        })();
+        if result.is_err() {
             self.pending_floor = None;
+            return Err(HistoryError::CommitInvariant);
         }
-        Ok(())
+        result
     }
 
     fn increment_revision(&mut self) {
@@ -878,8 +904,12 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                         if let Some(tag) = tag {
                             pending.save.tag = Some(tag);
                         }
-                        pending.save.ready = ready;
-                        Ok(())
+                        if ready && pending.save.tag.is_none() {
+                            Err(HistoryError::BarrierInvariant)
+                        } else {
+                            pending.save.ready = ready;
+                            Ok(())
+                        }
                     }
                     _ => Err(HistoryError::BarrierInvariant),
                 };
@@ -910,10 +940,11 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                 let _ = reply.send(Ok(state.history()));
             }
             CoreMessage::RestoreHistory(history, expected, reply) => {
-                let admitted = if state.pending_floor.is_some()
-                    || expected
-                        .as_deref()
-                        .is_some_and(|before| state.history() != *before)
+                let admitted = if state.pending_floor.is_some() {
+                    Err(HistoryError::SaveInProgress)
+                } else if expected
+                    .as_deref()
+                    .is_some_and(|before| state.history() != *before)
                 {
                     Err(HistoryError::Corrupt)
                 } else {

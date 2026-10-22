@@ -305,6 +305,7 @@ pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
         lock: None,
         directories: std::cell::RefCell::new(std::collections::BTreeMap::new()),
         pending_directory_syncs: std::cell::RefCell::default(),
+        pending_root_cleanup: None,
         dirty_object_directories: std::collections::BTreeMap::new(),
         batch_objects: false,
         uncertain: false,
@@ -438,7 +439,10 @@ fn temp(
     Ok((name, file))
 }
 
-pub(super) fn replace(namespace: &mut ProjectNamespace, bytes: &[u8]) -> Result<(), BundleError> {
+pub(super) fn replace(
+    namespace: &mut ProjectNamespace,
+    bytes: &[u8],
+) -> Result<(), super::RootReplaceFailure> {
     replace_inner(namespace, bytes, false)
 }
 
@@ -446,9 +450,11 @@ pub(super) fn replace_inner(
     namespace: &mut ProjectNamespace,
     bytes: &[u8],
     refuse: bool,
-) -> Result<(), BundleError> {
+) -> Result<(), super::RootReplaceFailure> {
+    use super::RootReplaceBoundary;
     namespace.verify()?;
     let (name, mut file) = temp(namespace, &namespace.parent)?;
+    let mut boundary = RootReplaceBoundary::NeverAttempted;
     let temp_path = namespace
         .identity
         .resolved_root
@@ -468,6 +474,8 @@ pub(super) fn replace_inner(
                 .is_err();
         #[cfg(not(any(test, feature = "test-util")))]
         let inject_io_error = false;
+        boundary = RootReplaceBoundary::Unknown;
+        note("root_rename_attempt", &namespace.identity.resolved_root);
         let renamed = if refuse {
             #[cfg(any(test, feature = "test-util"))]
             {
@@ -498,6 +506,7 @@ pub(super) fn replace_inner(
                 namespace.uncertain = true;
                 return Err(BundleError::DurabilityUnknown);
             }
+            boundary = RootReplaceBoundary::DefinitelyRefused;
             return Err(error.into());
         }
         note("root_rename", &namespace.identity.resolved_root);
@@ -513,19 +522,27 @@ pub(super) fn replace_inner(
         namespace.uncertain = false;
         Ok(())
     })();
-    if staged.is_err()
-        && !namespace.uncertain
-        && (fs::unlinkat(&namespace.parent, &name, AtFlags::empty()).is_err()
-            || sync_directory(
-                &namespace.parent,
-                namespace.identity.resolved_root.parent().unwrap(),
-            )
-            .is_err())
-    {
+    let cleanup = || -> Result<(), BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure(
+            "root_cleanup_unlink",
+            &namespace.identity.resolved_root,
+        )?;
+        fs::unlinkat(&namespace.parent, &name, AtFlags::empty())?;
+        sync_directory(
+            &namespace.parent,
+            namespace.identity.resolved_root.parent().unwrap(),
+        )
+    };
+    if staged.is_err() && !namespace.uncertain && cleanup().is_err() {
+        namespace.pending_root_cleanup = Some(name);
         namespace.uncertain = true;
-        return Err(BundleError::DurabilityUnknown);
+        return Err(super::RootReplaceFailure {
+            boundary,
+            error: BundleError::DurabilityUnknown,
+        });
     }
-    staged
+    staged.map_err(|error| super::RootReplaceFailure { boundary, error })
 }
 
 fn directory(
@@ -944,6 +961,7 @@ pub(super) fn create_session(
         directories: std::cell::RefCell::default(),
         lock: None,
         pending_directory_syncs: std::cell::RefCell::default(),
+        pending_root_cleanup: None,
         dirty_object_directories: std::collections::BTreeMap::new(),
         batch_objects: false,
         uncertain: false,
@@ -1068,10 +1086,22 @@ pub(super) fn reconcile_copy_root(
         if namespace.read_root()?.as_deref() != expected {
             return Err(BundleError::Corrupt("reconciliation root changed".into()));
         }
+        if let Some(temporary) = &namespace.pending_root_cleanup {
+            #[cfg(any(test, feature = "test-util"))]
+            crate::io_observer::check_failure(
+                "root_cleanup_unlink",
+                &namespace.identity.resolved_root,
+            )?;
+            match fs::unlinkat(&namespace.parent, temporary, AtFlags::empty()) {
+                Ok(()) | Err(rustix::io::Errno::NOENT) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         sync_directory(
             &namespace.parent,
             namespace.identity.resolved_root.parent().unwrap(),
         )?;
+        namespace.pending_root_cleanup = None;
         Ok(())
     })();
     namespace.uncertain = result.is_err();

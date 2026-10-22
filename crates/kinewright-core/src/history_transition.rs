@@ -18,56 +18,95 @@ pub struct PendingHistorySave {
     pub ready: bool,
 }
 
-/// Revocable save barrier. Definite failure releases on drop; uncertain publication
-/// retains the barrier until its owner explicitly commits or releases it.
-pub struct HistoryFloorBarrier {
+/// Persistence capability bound to an owner's private proof type.
+/// Merely holding a Core or a copied ticket cannot settle that owner's save.
+///
+/// ```compile_fail
+/// use kinewright_core::{Core, PendingHistorySave};
+/// fn forge(core: &Core, ticket: &PendingHistorySave) {
+///     core.settle_history_save(ticket, true).unwrap();
+/// }
+/// ```
+/// ```compile_fail
+/// use kinewright_core::{Core, HistoryTransition};
+/// fn forge(core: &Core, transition: HistoryTransition) {
+///     core.begin_history_floor(transition).unwrap();
+/// }
+/// ```
+pub struct HistorySaveOwner<P> {
+    core: Core,
+    proof: std::marker::PhantomData<fn(P)>,
+}
+impl<P> HistorySaveOwner<P> {
+    pub(crate) const fn new(core: Core) -> Self {
+        Self {
+            core,
+            proof: std::marker::PhantomData,
+        }
+    }
+    pub fn begin_history_floor(
+        &self,
+        _proof: &P,
+        transition: HistoryTransition,
+    ) -> Result<HistoryFloorBarrier<P>, HistoryError> {
+        let id = self.core.begin_history_floor(transition)?;
+        Ok(HistoryFloorBarrier::new(self.core.clone(), id))
+    }
+    pub fn settle_history_save(
+        &self,
+        _proof: &P,
+        pending: &PendingHistorySave,
+        commit: bool,
+    ) -> Result<(), HistoryError> {
+        self.core.settle_history_save(pending, commit)
+    }
+}
+
+/// Revocable save barrier; only the bound owner's proof authorizes commit or retention.
+pub struct HistoryFloorBarrier<P> {
     core: Core,
     id: u64,
     retain: bool,
     settled: bool,
+    proof: std::marker::PhantomData<fn(P)>,
 }
-impl HistoryFloorBarrier {
+impl<P> HistoryFloorBarrier<P> {
     pub(crate) const fn new(core: Core, id: u64) -> Self {
         Self {
             core,
             id,
             retain: false,
             settled: false,
+            proof: std::marker::PhantomData,
         }
     }
-    pub fn retain_until_reconcile(&mut self) -> Result<(), HistoryError> {
+    pub fn retain_until_reconcile(&mut self, _proof: &P) -> Result<(), HistoryError> {
         self.core.tag_history_floor(self.id, None, true)?;
         self.retain = true;
         Ok(())
     }
-    pub fn tag_publication(&self, tag: HistorySaveTag) -> Result<(), HistoryError> {
+    pub fn tag_publication(&self, _proof: &P, tag: HistorySaveTag) -> Result<(), HistoryError> {
         self.core.tag_history_floor(self.id, Some(tag), false)
     }
-    /// Commit the floor against Core's current history.
-    /// # Errors
-    /// Returns an error if this barrier no longer matches or Core disconnected.
-    pub fn commit(&mut self) -> Result<(), HistoryError> {
+    pub fn commit(&mut self, _proof: &P) -> Result<(), HistoryError> {
         if self.settled {
-            return Err(HistoryError::Corrupt);
+            return Err(HistoryError::BarrierInvariant);
         }
-        self.retain = true;
+        // The actor releases losslessly on an internal commit failure.
         self.core.settle_history_floor(self.id, true)?;
         self.settled = true;
         Ok(())
     }
-    /// Release without discarding any entries.
-    /// # Errors
-    /// Returns an error if this barrier no longer matches or Core disconnected.
     pub fn release(&mut self) -> Result<(), HistoryError> {
         if self.settled {
-            return Err(HistoryError::Corrupt);
+            return Err(HistoryError::BarrierInvariant);
         }
         self.core.settle_history_floor(self.id, false)?;
         self.settled = true;
         Ok(())
     }
 }
-impl Drop for HistoryFloorBarrier {
+impl<P> Drop for HistoryFloorBarrier<P> {
     fn drop(&mut self) {
         if !self.settled && !self.retain {
             let _ = self.release();
