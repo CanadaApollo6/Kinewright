@@ -162,8 +162,52 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
+      # The Azure Ubuntu mirror has stalled for 30+ minutes on the large debs
+      # (cmake, libclang, mesa), twice on 2026-10-22, which ran the job into
+      # its timeout. Keep the downloaded archives between runs so a warm run
+      # fetches only the package indexes. The key carries the runner image
+      # version (a runner environment variable, which the `env` expression
+      # context does not see), so the cache follows the image's packages.
+      - name: Read the runner image version
+        id: image
+        run: echo "key=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: Restore apt archives
+        id: apt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/apt-archives
+          key: apt-${{ steps.image.outputs.key }}-${{ hashFiles('scripts/install-linux-deps.sh') }}
+          restore-keys: apt-
+
       - name: Install native build dependencies
-        run: ./scripts/install-linux-deps.sh
+        run: |
+          set -euo pipefail
+          echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' |
+            sudo tee /etc/apt/apt.conf.d/99kinewright-keep-debs >/dev/null
+          mkdir -p ~/apt-archives
+          if compgen -G ~/apt-archives/'*.deb' >/dev/null; then
+            sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/
+          fi
+          ./scripts/install-linux-deps.sh
+          # Drop archives the mirror no longer serves, so a cache restored
+          # from an older image does not grow without bound. A caching miss
+          # must not fail the job.
+          sudo apt-get autoclean -qq
+          if compgen -G /var/cache/apt/archives/'*.deb' >/dev/null; then
+            cp /var/cache/apt/archives/*.deb ~/apt-archives/
+          fi
+          echo "apt archives cached: $(find ~/apt-archives -name "*.deb" | wc -l) debs, $(du -sh ~/apt-archives | cut -f1)"
+
+      # Saved here rather than in a post step: a slow download is exactly the
+      # run most likely to time out later, and a post step saves only when
+      # the whole job succeeds.
+      - name: Save apt archives
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       - name: PF1 portable pins witnesses
         run: python scripts/pf1/test_validate.py
@@ -219,8 +263,52 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
+      # The Azure Ubuntu mirror has stalled for 30+ minutes on the large debs
+      # (cmake, libclang, mesa), twice on 2026-10-22, which ran the job into
+      # its timeout. Keep the downloaded archives between runs so a warm run
+      # fetches only the package indexes. The key carries the runner image
+      # version (a runner environment variable, which the `env` expression
+      # context does not see), so the cache follows the image's packages.
+      - name: Read the runner image version
+        id: image
+        run: echo "key=$ImageOS-$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: Restore apt archives
+        id: apt-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/apt-archives
+          key: apt-${{ steps.image.outputs.key }}-${{ hashFiles('scripts/install-linux-deps.sh') }}
+          restore-keys: apt-
+
       - name: Install native build dependencies
-        run: ./scripts/install-linux-deps.sh
+        run: |
+          set -euo pipefail
+          echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' |
+            sudo tee /etc/apt/apt.conf.d/99kinewright-keep-debs >/dev/null
+          mkdir -p ~/apt-archives
+          if compgen -G ~/apt-archives/'*.deb' >/dev/null; then
+            sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/
+          fi
+          ./scripts/install-linux-deps.sh
+          # Drop archives the mirror no longer serves, so a cache restored
+          # from an older image does not grow without bound. A caching miss
+          # must not fail the job.
+          sudo apt-get autoclean -qq
+          if compgen -G /var/cache/apt/archives/'*.deb' >/dev/null; then
+            cp /var/cache/apt/archives/*.deb ~/apt-archives/
+          fi
+          echo "apt archives cached: $(find ~/apt-archives -name "*.deb" | wc -l) debs, $(du -sh ~/apt-archives | cut -f1)"
+
+      # Saved here rather than in a post step: a slow download is exactly the
+      # run most likely to time out later, and a post step saves only when
+      # the whole job succeeds.
+      - name: Save apt archives
+        if: steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/apt-archives
+          key: ${{ steps.apt-cache.outputs.cache-primary-key }}
 
       - name: Provision FFmpeg and run the slow tier
         run: |
