@@ -13,10 +13,11 @@
     python3 scripts/slow_tests.py verify-slow FILE   the check `slow` applies, on a saved log
     python3 scripts/slow_tests.py features      print the --features list for the slow tier
 
-The manifest is ci/slow-tests.txt; ci/ignored-tests.txt allowlists the hardware,
+The manifest is ci/slow-tests.txt, scoped by OS (any, linux or windows);
+ci/ignored-tests.txt allowlists the hardware,
 audio-device, live-subscription, manual and on-demand tests, each with the OS it
 applies to (any, linux or windows). The authoritative check is the compiled run's own
-output: on each OS the fast tier must have skipped exactly the manifest plus the
+output: on each OS the fast tier must have skipped exactly its manifest entries plus the
 allowlist entries for that OS, every one observed as ignored under its exact binary
 and test path (doctests too), and nothing else. A stale, fabricated or conditionally
 ignored entry is never observed ignored on every OS it claims, so it fails. A slow
@@ -27,7 +28,10 @@ test carries
 which makes a plain `cargo test` skip it. Enabling the crate's `slow-tests`
 feature makes it an ordinary test again, so `cargo test -- --ignored` would
 run only the hardware (NVIDIA) lanes; the slow tier therefore selects its
-tests by exact name from the manifest instead.
+tests by exact name from the manifest instead. An OS-scoped test uses
+`all(windows, not(feature = "slow-tests"))` (or target_os = "linux") as its cfg_attr condition.
+On the other OS, the fast tier must observe it passing. Both slow tiers run
+the whole manifest, including OS-scoped entries.
 
 Cargo is run as `cargo`; a caller that needs `nice`, `-j` or other cargo
 arguments passes them after `--` (`slow_tests.py fast -- -j 4`), and libtest
@@ -49,7 +53,8 @@ REASON = "slow tier: cargo test --features slow-tests"
 
 # The marker, tolerant of rustfmt wrapping it over several lines.
 MARKER = re.compile(
-    r'#\[cfg_attr\(\s*not\(feature = "slow-tests"\),\s*'
+    r'#\[cfg_attr\(\s*(?:not\(feature = "slow-tests"\)|'
+    r'all\(\s*(?:target_os = "(?P<linux>linux)"|(?P<windows>windows)),\s*not\(feature = "slow-tests"\)\s*\)),\s*'
     r'ignore = "' + re.escape(REASON) + r'"\s*,?\s*\)\]'
 )
 ATTRIBUTE_OR_COMMENT = re.compile(r"\s*(?:#\[[^\]]*\]|//[^\n]*)")
@@ -157,19 +162,22 @@ def result_lines(log: str):
         yield pending
 
 
-def read_entries(path: Path) -> list[tuple[str, str, str]]:
-    """`<binary> <test path> <source file>` lines; the path may not contain `#`."""
+def read_entries(path: Path) -> list[tuple[str, str, str, str]]:
+    """`<binary> <test path> <source file> <os>` lines; the path may not contain `#`."""
     entries = []
     for number, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = raw.split("#", 1)[0].strip()
         if not line:
             continue
-        # A doctest path has spaces, so split off the binary and the file only.
+        # A doctest path has spaces, so split off the binary, file and OS only.
         binary, _, rest = line.partition(" ")
-        test_path, _, source_file = rest.rpartition(" ")
-        if not binary or not test_path or not source_file:
-            sys.exit(f"{path}:{number}: want '<binary> <test path> <source file>', got {raw!r}")
-        entries.append((binary, test_path, source_file))
+        parts = rest.rsplit(None, 2)
+        if not binary or len(parts) != 3:
+            sys.exit(f"{path}:{number}: want '<binary> <test path> <source file> <os>', got {raw!r}")
+        test_path, source_file, scope = parts
+        if scope not in OSES:
+            sys.exit(f"{path}:{number}: os {scope!r} is not one of {', '.join(OSES)}")
+        entries.append((binary, test_path, source_file, scope))
     seen = set()
     for entry in entries:
         if entry[:2] in seen:
@@ -178,7 +186,7 @@ def read_entries(path: Path) -> list[tuple[str, str, str]]:
     return entries
 
 
-def read_manifest() -> list[tuple[str, str, str]]:
+def read_manifest() -> list[tuple[str, str, str, str]]:
     return read_entries(MANIFEST)
 
 
@@ -241,8 +249,8 @@ def read_ignored() -> list[tuple[str, str, str]]:
     return [(e["binary"], e["path"], e["file"]) for e in read_allowlist()]
 
 
-def marked_tests() -> set[tuple[str, str]]:
-    """(source file, function name) of every slow-tier marker under crates/."""
+def marked_tests() -> set[tuple[str, str, str]]:
+    """(source file, function name, OS scope) of every slow-tier marker under crates/."""
     found = set()
     total_reasons = 0
     for path in sorted((ROOT / "crates").rglob("*.rs")):
@@ -261,7 +269,8 @@ def marked_tests() -> set[tuple[str, str]]:
             rel = path.relative_to(ROOT).as_posix()
             if not named:
                 sys.exit(f"{rel}: a slow-tier marker is not followed by a test function")
-            found.add((rel, named.group(1)))
+            scope = match.group("linux") or match.group("windows") or "any"
+            found.add((rel, named.group(1), scope))
     marker_count = sum(
         len(MARKER.findall(p.read_text(encoding="utf-8")))
         for p in (ROOT / "crates").rglob("*.rs")
@@ -283,7 +292,7 @@ def crate_of(source_file: str) -> str:
 
 
 def feature_list(entries) -> str:
-    return ",".join(sorted({f"{crate_of(f)}/slow-tests" for _, _, f in entries}))
+    return ",".join(sorted({f"{crate_of(f)}/slow-tests" for _, _, f, _ in entries}))
 
 
 def lint_ignored(problems: list[str], slow_keys: set[tuple[str, str]]) -> None:
@@ -312,22 +321,22 @@ def lint_ignored(problems: list[str], slow_keys: set[tuple[str, str]]) -> None:
 
 def lint() -> int:
     entries = read_manifest()
-    listed = {(f, path.rsplit("::", 1)[-1]) for _, path, f in entries}
+    listed = {(f, path.rsplit("::", 1)[-1], scope) for _, path, f, scope in entries}
     marked = marked_tests()
     problems = []
-    for file, name in sorted(listed - marked):
-        problems.append(f"in the manifest but not marked slow: {name} ({file})")
-    for file, name in sorted(marked - listed):
-        problems.append(f"marked slow but not in {MANIFEST.relative_to(ROOT)}: {name} ({file})")
-    for crate in sorted({crate_of(f) for _, _, f in entries} | {crate_of(f) for f, _ in marked}):
+    for file, name, scope in sorted(listed - marked):
+        problems.append(f"in the manifest but not marked slow for {scope}: {name} ({file})")
+    for file, name, scope in sorted(marked - listed):
+        problems.append(f"marked slow for {scope} but not in {MANIFEST.relative_to(ROOT)}: {name} ({file})")
+    for crate in sorted({crate_of(f) for _, _, f, _ in entries} | {crate_of(f) for f, _, _ in marked}):
         manifest_toml = (ROOT / "crates" / crate / "Cargo.toml").read_text(encoding="utf-8")
         if not re.search(r"^slow-tests\s*=\s*\[\s*\]", manifest_toml, re.M):
             problems.append(f"crates/{crate}/Cargo.toml has no `slow-tests = []` feature")
-    for file, name in sorted(marked):
+    for file, name, _ in sorted(marked):
         text = (ROOT / file).read_text(encoding="utf-8")
         if not re.search(rf"\bfn\s+{re.escape(name)}\b|\b{re.escape(name)}\s*=>", text):
             problems.append(f"{file} has no {name}")
-    lint_ignored(problems, {(b, p) for b, p, _ in entries})
+    lint_ignored(problems, {(b, p) for b, p, _, _ in entries})
     if problems:
         print("slow-test manifest, ignored-test allowlist and markers disagree:")
         for problem in problems:
@@ -440,7 +449,7 @@ def parse(log: str) -> list[tuple[str, str, str]]:
 def verify_fast(log: str, os_name: str | None = None) -> int:
     """The authoritative check of the skipped set, on the compiled run's own output.
 
-    On `os_name` (default: this machine) the run must have skipped exactly the manifest
+    On `os_name` (default: this machine) the run must have skipped exactly its manifest entries
     (as slow) plus the allowlist entries that apply to that OS (as plain ignores), each
     under its exact binary and test path, doctests included. An allowlist entry the run
     does not report as ignored (stale, misnamed, fabricated, or only conditionally
@@ -451,7 +460,12 @@ def verify_fast(log: str, os_name: str | None = None) -> int:
         rows = parse(log)
     except UnparsableLog as error:
         return unparsable(error)
-    expected = {(b, p) for b, p, _ in read_manifest()}
+    entries = read_manifest()
+    expected = {(b, p) for b, p, _, scope in entries if scope in ("any", os_name)}
+    must_pass = {(b, p) for b, p, _, scope in entries if scope not in ("any", os_name)}
+    outcomes = {}
+    for b, p, outcome in rows:
+        outcomes.setdefault((b, p), []).append(outcome)
     allowed = allowlist_for(os_name)
     ignored = {(b, p, outcome) for b, p, outcome in rows if outcome.startswith("ignored")}
     skipped = {(b, p) for b, p, outcome in ignored if REASON in outcome}
@@ -468,13 +482,19 @@ def verify_fast(log: str, os_name: str | None = None) -> int:
         for (b, p), outcome in sorted(others.items())
         if (b, p) not in allowed
     ]
+    problems += [
+        f"not observed run and passed exactly once on {os_name}: {b} {p} {outcomes.get((b, p), '')}"
+        for b, p in sorted(must_pass)
+        if outcomes.get((b, p)) != ["ok"]
+    ]
     if problems:
         print("fast tier and manifest disagree:")
         print("\n".join("  " + p for p in problems))
         return 1
     print(
         f"fast tier on {os_name} skipped exactly the {len(expected)} manifest tests and "
-        f"{len(others)} allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else"
+        f"{len(others)} allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else; "
+        f"{len(must_pass)} other-OS manifest tests ran and passed"
     )
     return 0
 
@@ -492,7 +512,7 @@ def verify_slow(log: str) -> int:
         rows = parse(log)
     except UnparsableLog as error:
         return unparsable(error)
-    expected = {(b, p) for b, p, _ in read_manifest()}
+    expected = {(b, p) for b, p, _, _ in read_manifest()}
     outcomes = {}
     for b, p, outcome in rows:
         outcomes.setdefault((b, p), []).append(outcome)
@@ -566,7 +586,7 @@ def main(argv: list[str]) -> int:
         return verify_fast(log)
     if command == "slow":
         entries = read_manifest()
-        names = [path for _, path, _ in entries]
+        names = [path for _, path, _, _ in entries]
         cargo = [
             "cargo", "test", "--workspace",
             "--features", feature_list(entries),

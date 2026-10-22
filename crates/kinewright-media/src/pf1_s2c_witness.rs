@@ -1654,6 +1654,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn fixtures_have_the_shape_their_names_promise() {
         for kind in KINDS {
             Fixture::new(kind).assert_shape();
@@ -1663,6 +1667,10 @@ mod tests {
     /// The shape checks reject a substitute that lacks the property: each
     /// file kind generated as another kind would be fails `assert_shape`.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_substitute_fixture_fails_the_shape_check() {
         let substitutes = [
             (Kind::Pyramid, Kind::Default),
@@ -1693,6 +1701,10 @@ mod tests {
     /// the real seek's first packet equal to the shadow's at every target (the
     /// retried anchor at an S2c-5 retried target).
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_oracle_covers_the_special_targets() {
         for c in corpora(&[1]) {
             let (kind, facts) = (c.fx.kind, &c.fx.facts);
@@ -1849,6 +1861,10 @@ mod tests {
     /// timestamps, `ffmpeg -f framehash` SHA-256 of the raw planes). On the
     /// S-2 pair no frame is unreachable (S2c-5's retry).
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_seek_path_matches_the_cli_reference() {
         for kind in KINDS {
             let fx = Fixture::new(kind);
@@ -1879,6 +1895,10 @@ mod tests {
     /// stream's start; it seeks twice (the retry). Before S2c-5 the window
     /// held no frame at its start.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn an_open_gop_region_start_returns_its_leading_frames() {
         let fx = Fixture::new(Kind::OpenGop);
         let last = fx.facts.last;
@@ -1925,6 +1945,10 @@ mod tests {
     /// The CLI comparison fails for a wrong reference: another file's frames,
     /// one flipped frame hash, one shifted timestamp.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_wrong_cli_reference_fails_the_comparison() {
         let (a, b) = (Fixture::new(Kind::Default), Fixture::new(Kind::Vfr));
         cli_check(&a, &a.reference()).unwrap();
@@ -2090,6 +2114,10 @@ mod tests {
     /// `pin_check`, and the per-fixture live-oracle floor. Prints the
     /// verified, mismatched and skipped counts.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_pinned_oracle_has_not_drifted() {
         let os = std::env::consts::OS;
         let build = build_id();
@@ -2161,6 +2189,10 @@ mod tests {
     /// of the same architecture. Evidence is from x86-64 with and without asm
     /// only; it is not a claim about other architectures.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_fixture_files_do_not_depend_on_the_cpu() {
         for kind in KINDS {
             let (full, limited) = (generated_sha256(kind, false), generated_sha256(kind, true));
@@ -2175,6 +2207,10 @@ mod tests {
     /// (swscale has no accelerated yuv420p to rgba64le path here, so it is
     /// expected to match on x86-64; other architectures are untested).
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_canonical_conversion_does_not_depend_on_the_cpu() {
         for kind in KINDS {
             let fx = Fixture::new(kind);
@@ -2209,6 +2245,10 @@ mod tests {
     /// digest; so does a different build. The output digest never fails. A
     /// missing Windows entry is a skip.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_pin_check_follows_the_policy() {
         let pin = &PINS[0];
         let kind = pin.kind;
@@ -2310,6 +2350,10 @@ mod tests {
     /// absent, whose reference is another file's, or that verified too few
     /// frames fails, however many other fixtures pass.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_live_oracle_floor_is_enforced_per_fixture() {
         let mut c = Corpus::new(Kind::Default, &[1]);
         let n = live_oracle(&c).unwrap();
@@ -2366,6 +2410,10 @@ mod tests {
     /// rather than assumed: it lies between the seek times of two adjacent
     /// frames, and its distance from each is logged.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_anchor_boundaries_hold_at_the_tick_level() {
         for kind in KINDS {
             let fx = Fixture::new(kind);
@@ -2398,6 +2446,10 @@ mod tests {
 
     /// A shadow that puts a boundary one tick early or late is caught.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_shadow_boundary_one_tick_off_fails_the_tick_witness() {
         for kind in [Kind::Default, Kind::Pyramid, Kind::EditList] {
             let fx = Fixture::new(kind);
@@ -2417,6 +2469,10 @@ mod tests {
     /// frame, timestamp, retained frames and anchor. (`eof_sent` near the end
     /// of the stream may differ; the count is logged.)
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_seek_selection_does_not_depend_on_the_thread_count() {
         let threads = thread_counts();
         for c in corpora(&threads) {
@@ -2442,6 +2498,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_seek_path_reproduces_the_oracle_on_every_fixture() {
         let threads = thread_counts();
         eprintln!("pf1-c4 frame-thread counts run: {threads:?}");
@@ -2463,6 +2523,10 @@ mod tests {
     /// every hash altered, fail the comparison on the very frames the Seek
     /// path returns.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_wrong_output_reference_fails_the_output_oracle() {
         let (a, b) = (Fixture::new(Kind::Default), Fixture::new(Kind::Vfr));
         let mut corpus = Corpus::new(Kind::Default, &[1]);
@@ -2490,6 +2554,10 @@ mod tests {
     /// witness's `Tap`; with the tap off the output oracle fails on the
     /// first returned frame, it does not skip it.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_output_oracle_fails_without_the_conversion_tap() {
         let corpus = Corpus::new(Kind::Default, &[1]);
         let seek = |c: &Corpus| witness(&mut SeekPath::new(&c.fx, 1), c, 1, false);
@@ -2505,6 +2573,10 @@ mod tests {
     /// records nothing and clears the record before it, so no observation
     /// can pair a returned frame with an earlier frame's conversion.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_conversion_without_the_tap_clears_the_last_record() {
         let fx = Fixture::new(Kind::Default);
         let (mut decoder, mut cache) = (fx.open(1), FrameCache::<WorkingFrame>::new(1));
@@ -2526,6 +2598,10 @@ mod tests {
     /// stop flag is raised after n received frames), so they are live for
     /// the implementation too; all but the exact stop with frames waiting.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_scripted_cases_hold_for_the_seek_path() {
         let threads = thread_counts();
         let (a, b) = (
@@ -2597,6 +2673,10 @@ mod tests {
     /// (bytes, state, retained frames, routes, cancel) on every file at every
     /// thread count, so the route truth and the design agree with a real decode.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_correct_continuation_satisfies_every_witness() {
         let threads = thread_counts();
         run_all(&Suite::new(&threads), Rules::ALL, 2, &threads).unwrap();
@@ -2605,6 +2685,10 @@ mod tests {
     /// The same reference with exactly one rule removed fails the witnesses,
     /// each rule at the file or script aimed at it.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_continuation_that_drops_one_rule_fails() {
         let mutants: [(&str, RuleMutation); 13] = [
             ("pair", |r| r.pair = false),
@@ -2647,6 +2731,10 @@ mod tests {
     /// decoder that is never marked replaced (no recovery), fails each of the
     /// four scripts, not just the first.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn each_replacement_script_needs_the_latch_and_the_recovery() {
         let suite = Suite::new(&[1]);
         let (a, b) = (suite.of(Kind::Default), suite.of(Kind::EditList));
@@ -2685,6 +2773,10 @@ mod tests {
     /// Damage to the retained lookahead frame that only a later hop consumes
     /// (the second continuation in a row) is missed without the chained hops.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn damage_that_only_a_chained_hop_sees_needs_the_chained_hops() {
         let suite = Suite::new(&[1]);
         let mut rules = Rules::ALL;
@@ -2735,6 +2827,10 @@ mod tests {
     /// continuation. Only the independent output oracle (the CLI's own
     /// conversion of the frame, and the table-derived working frame) sees it.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_fault_in_the_shared_output_path_is_seen_only_by_the_output_oracle() {
         for (name, fault) in [
             ("conversion", OutputFault::Conversion),
@@ -2786,6 +2882,10 @@ mod tests {
     /// itself passes. Claiming control without a token, or arming without
     /// one, does not compile; there is no runtime test for that.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_production_adapter_may_not_arm_the_cancel_seam() {
         let c = Corpus::new(Kind::Default, &[1]);
         let control = ReferenceContinuation::new(&c.fx, 1, Rules::ALL);
@@ -2873,12 +2973,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_path_that_skips_a_frame_fails() {
         let error = wrong(Kind::Default, |_, t| t + 1, |_| {}).unwrap_err();
         assert!(error.contains("!= oracle"), "{error}");
     }
 
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_path_that_ignores_the_edit_list_offset_fails_on_the_edit_list_file_only() {
         let ignore = |fx: &Fixture, t: i64| (t - fx.facts.offset_frames).max(0);
         wrong(Kind::EditList, ignore, |_| {}).unwrap_err();
@@ -2888,6 +2996,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_path_that_returns_the_previous_gop_across_a_key_packet_fails() {
         let previous_gop = |fx: &Fixture, t: i64| {
             let key = fx
@@ -2906,6 +3018,10 @@ mod tests {
     /// The state fields are compared, not just the pixels: each scalar, the
     /// retained frames' timestamps and content hashes, and the anchor.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_path_with_the_right_frame_and_wrong_state_fails() {
         let same = |_: &Fixture, t: i64| t;
         wrong(Kind::Vfr, same, |o| o.state.lookahead = None).unwrap_err();
@@ -2938,6 +3054,10 @@ mod tests {
     /// after the one that raised the flag fails, though the packet-boundary
     /// rule (today's Seek) lets it through.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_cancel_that_is_early_late_or_unproductive_fails() {
         let fx = Rc::new(Fixture::new(Kind::Default));
         let mut path = SeekPath::new(&fx, 1);
@@ -3056,6 +3176,10 @@ mod tests {
     /// boundary differs from the fresh seek's (on the open-GOP file the
     /// frame itself differs as well: the fresh seek yields none at t = 47).
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn a_continuation_that_ignores_the_domain_fails() {
         for c in corpora(&[1]) {
             let path = |mask_anchor| NaiveContinuation {
@@ -3087,6 +3211,10 @@ mod tests {
     /// the positive control's capabilities and builds no `Observation` but
     /// through `observe()` (no literal, no field edited afterwards).
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn the_continuation_adapter_holds_no_control_capability() {
         let source = include_str!("pf1_s2c_continuation.rs");
         let banned = [
@@ -3129,6 +3257,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn continuation_reproduces_seek_on_every_fixture() {
         let threads = thread_counts();
         for c in corpora(&threads) {
@@ -3145,6 +3277,10 @@ mod tests {
     /// `continuation_holds_the_scripted_cases`. The seam models that check
     /// for the positive control only; it cannot stand in for it.
     #[test]
+    #[cfg_attr(
+        all(windows, not(feature = "slow-tests")),
+        ignore = "slow tier: cargo test --features slow-tests"
+    )]
     fn continuation_holds_the_scripted_cases() {
         let threads = thread_counts();
         let (a, b) = (

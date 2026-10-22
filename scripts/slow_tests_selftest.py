@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -78,7 +79,10 @@ def build_log(rows, **kwargs) -> str:
 
 
 def fast_rows(os_name: str, extra_ok=True):
-    rows = [(b, p, f"ignored, {st.REASON}") for b, p, _ in st.read_manifest()]
+    rows = [
+        (b, p, f"ignored, {st.REASON}" if scope in ("any", os_name) else "ok")
+        for b, p, _, scope in st.read_manifest()
+    ]
     applies = st.allowlist_for(os_name)
     rows += [(b, p, "ignored, allowlisted") for b, p in sorted(applies)]
     if extra_ok:
@@ -87,13 +91,13 @@ def fast_rows(os_name: str, extra_ok=True):
 
 
 def slow_rows():
-    return [(b, p, "ok") for b, p, _ in st.read_manifest()]
+    return [(b, p, "ok") for b, p, _, _ in st.read_manifest()]
 
 
-def check(verify, log: str, *args) -> tuple[int, str]:
+def check(verify, *args) -> tuple[int, str]:
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        code = verify(log, *args)
+        code = verify(*args)
     return code, out.getvalue()
 
 
@@ -241,8 +245,10 @@ class PartialParse(unittest.TestCase):
 
     def test_r79_literal_multiline_probe_log_keeps_the_result(self):
         for windows in (False, True):
-            lines = self.lines(windows)
-            at = next(i for i, line in enumerate(lines) if line.startswith("test ") and line.endswith(" ok"))
+            rows = fast_rows("windows" if windows else "linux")
+            rows.append(("kinewright_media", "decode::tests::still_probe_failure_rides_backend_unclassified", "ok"))
+            lines = build_lines(rows, windows=windows)
+            at = next(i for i, line in enumerate(lines) if line.startswith("test decode::tests::still_probe_failure"))
             lines[at: at + 1] = R79_PROBE_LOG.splitlines()
             code, out = check(st.verify_fast, "\n".join(lines) + "\n", "windows" if windows else "linux")
             self.assertEqual(code, 0, out)
@@ -430,6 +436,38 @@ class PartialParse(unittest.TestCase):
 
 
 class PerOsObservation(unittest.TestCase):
+    def test_windows_slow_tests_must_pass_on_linux_and_be_skipped_on_windows(self):
+        scoped = [(b, p) for b, p, _, scope in st.read_manifest() if scope == "windows"]
+        self.assertEqual(len(scoped), 34)
+        for os_name in ("linux", "windows"):
+            for binary, path in scoped:
+                for replacement in (None, "ignored", f"ignored, {st.REASON}", "ok"):
+                    if replacement == ("ok" if os_name == "linux" else f"ignored, {st.REASON}"):
+                        continue
+                    with self.subTest(os=os_name, path=path, replacement=replacement):
+                        rows = [r for r in fast_rows(os_name) if r[:2] != (binary, path)]
+                        if replacement is not None:
+                            rows.append((binary, path, replacement))
+                        code, out = check(st.verify_fast, build_log(rows), os_name)
+                        self.assertEqual(code, 1, out)
+                rows = [r for r in fast_rows(os_name) if r[:2] != (binary, path)]
+                rows.append(("wrong_binary", path, "ok" if os_name == "linux" else f"ignored, {st.REASON}"))
+                code, out = check(st.verify_fast, build_log(rows), os_name)
+                self.assertEqual(code, 1, out)
+
+    def test_both_slow_tiers_require_every_windows_scoped_test_to_pass(self):
+        for windows in (False, True):
+            for binary, path, _, scope in st.read_manifest():
+                if scope != "windows":
+                    continue
+                for replacement in (None, "ignored"):
+                    with self.subTest(windows=windows, path=path, replacement=replacement):
+                        rows = [r for r in slow_rows() if r[:2] != (binary, path)]
+                        if replacement is not None:
+                            rows.append((binary, path, replacement))
+                        code, out = check(st.verify_slow, build_log(rows, windows=windows))
+                        self.assertEqual(code, 1, out)
+
     def test_an_entry_listed_any_but_not_ignored_on_windows_fails(self):
         # Astra's case: a Linux-only cfg_attr ignore. The entry is `any`, so Windows must see it ignored.
         rows = [
@@ -475,7 +513,53 @@ class PerOsObservation(unittest.TestCase):
             self.assertIn("unexpected skip", out)
 
 
+class ManifestLint(unittest.TestCase):
+    def test_manifest_scope_must_match_the_source_marker_in_both_directions(self):
+        for scope, condition in (("any", 'not(feature = "slow-tests")'),
+                                 ("windows", 'all(windows, not(feature = "slow-tests"))'),
+                                 ("linux", 'all(target_os = "linux", not(feature = "slow-tests"))')):
+            marker = f'#[cfg_attr({condition}, ignore = "{st.REASON}")]'
+            for listed_scope in ("any", "windows", "linux"):
+                with self.subTest(marker_scope=scope, manifest_scope=listed_scope):
+                    code, out = self.lint_fixture(listed_scope, marker)
+                    self.assertEqual(code, 0 if listed_scope == scope else 1, out)
+                    if code:
+                        self.assertIn(f"not marked slow for {listed_scope}", out)
+                        self.assertIn(f"marked slow for {scope}", out)
+
+    def test_windows_scoped_entry_with_plain_ignore_fails_lint(self):
+        code, out = self.lint_fixture("windows", "#[ignore]")
+        self.assertEqual(code, 1, out)
+        self.assertIn("in the manifest but not marked slow for windows", out)
+
+    def lint_fixture(self, scope, marker):
+        with tempfile.TemporaryDirectory(prefix="kinewright-ci-lint-") as directory:
+            root = Path(directory)
+            source = root / "crates" / "witness" / "src" / "lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text(f"#[test]\n{marker}\nfn witness() {{}}\n", encoding="utf-8")
+            (source.parent.parent / "Cargo.toml").write_text('[features]\nslow-tests = []\n', encoding="utf-8")
+            manifest = root / "ci" / "slow-tests.txt"
+            manifest.parent.mkdir()
+            manifest.write_text(f"witness witness crates/witness/src/lib.rs {scope}\n", encoding="utf-8")
+            ignored = manifest.with_name("ignored-tests.txt")
+            ignored.write_text("", encoding="utf-8")
+            with mock.patch.multiple(st, ROOT=root, MANIFEST=manifest, IGNORED=ignored):
+                return check(st.lint)
+
+
 class RunCargoTests(unittest.TestCase):
+    def test_slow_runner_selects_the_whole_manifest_with_features_on_both_oses(self):
+        for platform in ("linux", "win32"):
+            with mock.patch.object(st.sys, "platform", platform), mock.patch.object(
+                st, "run_cargo", return_value=(0, build_log(slow_rows()))
+            ) as run:
+                code, out = check(st.main, ["slow_tests.py", "slow"])
+                self.assertEqual(code, 0, out)
+                args = run.call_args.args[0]
+                self.assertIn("kinewright-media/slow-tests", args[args.index("--features") + 1])
+                self.assertEqual(args[args.index("--exact") + 1:], [p for _, p, _, _ in st.read_manifest()])
+
     def test_child_gets_no_colour_even_when_the_parent_asks_for_it(self):
         old = os.environ.get("CARGO_TERM_COLOR")
         os.environ["CARGO_TERM_COLOR"] = "always"
