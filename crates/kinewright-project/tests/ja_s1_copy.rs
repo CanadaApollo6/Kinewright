@@ -334,7 +334,7 @@ fn controlled_copy_case(
     reason = "one complete retained graph with independent receipt and specialist pins"
 )]
 fn save_as_copies_every_retained_asset_including_luts_before_root() {
-    let temp = TempDirectory::new("ja-s1-copy-all");
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "ja-s1-copy-all");
     let source = temp.path("source.kinewright");
     let destination = temp.path("new/parents/copied.kinewright");
     let (core, mut bundle, inputs, exact) = named(&source);
@@ -526,7 +526,10 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
 
 #[test]
 fn save_as_contention_preserves_source_and_destination_graphs() {
-    let temp = TempDirectory::new("ja-s1-copy-contention");
+    let temp = TempDirectory::new_in(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-copy-contention",
+    );
     let a = temp.path("a.kinewright");
     let b = temp.path("b.kinewright");
     let (_, mut first, _, exact) = named(&a);
@@ -605,7 +608,7 @@ fn save_as_alias_traversal_case_collision_and_foreign_store_refuse() {
         assert_eq!(graph(&source), before);
         return;
     }
-    let temp = TempDirectory::new("ja-s1-copy-paths");
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "ja-s1-copy-paths");
     let path = temp.path("source.kinewright");
     let (_, mut source, _, _) = named(&path);
     let alias = temp.path("alias.kinewright");
@@ -695,7 +698,7 @@ fn save_as_alias_traversal_case_collision_and_foreign_store_refuse() {
 
 #[test]
 fn first_save_failure_undo_live_reader() {
-    let temp = TempDirectory::new("ja-s1-first-save");
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "ja-s1-first-save");
     let path = temp.path("saved.kinewright");
     let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
     let core = core();
@@ -768,8 +771,12 @@ fn first_save_failure_undo_live_reader() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "complete copy reconciliation and live-reader witness"
+)]
 fn copy_b5_unknown_reconciles_before_handoff_or_retry() {
-    let temp = TempDirectory::new("ja-s1-copy-unknown");
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "ja-s1-copy-unknown");
     let source = temp.path("source.kinewright");
     let destination = temp.path("copy.kinewright");
     let (core, mut bundle, _, exact) = named(&source);
@@ -927,7 +934,10 @@ fn opposing_save_as_try_locks_do_not_deadlock() {
             let _ = self.0.wait();
         }
     }
-    let temp = TempDirectory::new("ja-s1-opposing-copies");
+    let temp = TempDirectory::new_in(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-opposing-copies",
+    );
     let a = temp.path("a.kinewright");
     let b = temp.path("b.kinewright");
     let (_, first, _, exact) = named(&a);

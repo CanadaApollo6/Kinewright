@@ -95,18 +95,37 @@ impl BundleCommit {
             return Err(BundleError::Capacity("command bytes"));
         }
         let reservation = bundle.store.reserve(0, encoded, 0, false)?;
-        let before = core
+        let mut before = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        if let Some(checkpoint) = bundle.branches.get(&bundle.manual_branch_id)
-            && *bundle
-                .store
-                .read_record::<HistorySnapshot>(&checkpoint.history_ref)?
-                != before
-        {
-            return Err(BundleError::Unsupported(
-                "Core is not the acknowledged checkpoint".into(),
-            ));
+        if let Some(checkpoint) = bundle.branches.get(&bundle.manual_branch_id) {
+            let acknowledged =
+                if let Some(cached) = bundle.history_cache.get(&bundle.manual_branch_id) {
+                    std::sync::Arc::clone(cached)
+                } else {
+                    std::sync::Arc::new(
+                        bundle
+                            .store
+                            .read_record::<HistorySnapshot>(&checkpoint.history_ref)?,
+                    )
+                };
+            if before.floor_offset < acknowledged.floor_offset {
+                let cut = usize::try_from(acknowledged.floor_offset - before.floor_offset)
+                    .map_err(|_| BundleError::Capacity("history floor offset"))?;
+                before = kinewright_core::HistoryTransition::floor(before, cut)
+                    .map_err(|_| {
+                        BundleError::Unsupported(
+                            "Core floor differs from acknowledged checkpoint".into(),
+                        )
+                    })?
+                    .after()
+                    .clone();
+            }
+            if **acknowledged != before {
+                return Err(BundleError::Unsupported(
+                    "Core is not the acknowledged checkpoint".into(),
+                ));
+            }
         }
         let _shadow = bundle.store.reserve_history_shadow(
             before
@@ -129,60 +148,68 @@ impl BundleCommit {
         } else {
             None
         };
-        let candidate = Core::spawn((*before.baseline).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        candidate
-            .restore_history(before.clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        if let Some(transition) = &envelope.transition {
-            let checkpoint = bundle
-                .branches
-                .get(&bundle.manual_branch_id)
-                .ok_or_else(|| {
-                    BundleError::Corrupt("transition without acknowledged checkpoint".into())
-                })?;
-            let install = crate::bundle_branch::transition(transition, checkpoint, before.clone())?;
-            candidate
-                .install_history_transition(install)
+        let after = if envelope.command.is_none() && envelope.transition.is_none() {
+            before.clone()
+        } else {
+            let candidate = Core::spawn((*before.baseline).clone())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        } else if let Some(command) = &envelope.command {
-            let command = if let JournalCommand::DoBatch(operations) = command {
-                let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = candidate
-                    .request(Command::Query(Query::Snapshot))
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?
-                else {
-                    return Err(BundleError::Corrupt("candidate revision".into()));
-                };
-                Command::DoBatchIfRevision {
-                    expected: revision,
-                    operations: operations.clone(),
-                }
-            } else {
-                Command::from(command.clone())
-            };
-            if !matches!(
+            candidate
+                .restore_history(before.clone())
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if let Some(transition) = &envelope.transition {
+                let checkpoint =
+                    bundle
+                        .branches
+                        .get(&bundle.manual_branch_id)
+                        .ok_or_else(|| {
+                            BundleError::Corrupt(
+                                "transition without acknowledged checkpoint".into(),
+                            )
+                        })?;
+                let install =
+                    crate::bundle_branch::transition(transition, checkpoint, before.clone())?;
                 candidate
-                    .request(command)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                Event::DocumentChanged { .. }
-            ) {
-                return Err(BundleError::Unsupported("Core rejected the command".into()));
+                    .install_history_transition(install)
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            } else if let Some(command) = &envelope.command {
+                let command = if let JournalCommand::DoBatch(operations) = command {
+                    let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = candidate
+                        .request(Command::Query(Query::Snapshot))
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))?
+                    else {
+                        return Err(BundleError::Corrupt("candidate revision".into()));
+                    };
+                    Command::DoBatchIfRevision {
+                        expected: revision,
+                        operations: operations.clone(),
+                    }
+                } else {
+                    Command::from(command.clone())
+                };
+                if !matches!(
+                    candidate
+                        .request(command)
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                    Event::DocumentChanged { .. }
+                ) {
+                    return Err(BundleError::Unsupported("Core rejected the command".into()));
+                }
             }
-        }
-        let after = candidate
-            .export_history()
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        drop(candidate);
-        bundle.pending_command = Some(reservation.hold(envelope.clone()));
+            let after = candidate
+                .export_history()
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            drop(candidate);
+            after
+        };
         if envelope.action == "comment" {
             match crate::receipts::stage_comment(bundle, envelope, blobs) {
                 Ok(result) => bundle.pending_result = Some(result),
                 Err(error) => {
-                    bundle.unsettled = true;
                     return Err(error);
                 }
             }
         }
+        bundle.pending_command = Some(reservation.hold(envelope.clone()));
         bundle
             .issuers
             .get_mut(&envelope.id.issuer)
@@ -200,8 +227,18 @@ impl BundleCommit {
         }
         bundle.pending_command = None;
         bundle.pending_result = None;
-        core.restore_history(after)
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let published = std::sync::Arc::clone(
+            bundle
+                .history_cache
+                .get(&bundle.manual_branch_id)
+                .ok_or_else(|| {
+                    BundleError::Corrupt("published history missing from owner".into())
+                })?,
+        );
+        if **published != before {
+            core.restore_history((**published).clone())
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        }
         bundle.receipt_lookup(envelope)
     }
     pub fn run(
@@ -251,89 +288,167 @@ impl BundleCommit {
                 "root changed since bundle admission".into(),
             ));
         }
-        history.encoded_bytes().map_err(|e| {
-            BundleError::Capacity(match e {
-                kinewright_core::HistoryError::Capacity => "history",
-                _ => "history actor",
-            })
-        })?;
-        let serialized =
-            serde_json::to_vec(history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let mut support = BTreeSet::new();
-        let checked = crate::bundle_recovery::decode::<HistorySnapshot>(
-            &serialized,
-            &bundle.store.usage_arc(),
-            RecordKind::History,
-            &mut support,
-        )?;
-        let _replay = bundle
+        if !bundle
             .store
-            .reserve_history_shadow(crate::store::preflight_record(
-                &serialized,
-                bundle.store.limits(),
-            )?)?;
-        let core = Core::spawn((*checked.baseline).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        core.restore_history((*checked).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        drop(core);
-        let manifest = bundle.store.read_input_manifest(inputs)?;
-        if manifest.project_id.as_ref() != Some(&bundle.project_id) || manifest.session_id.is_some()
+            .with_namespace(|n| Ok(n.object_batch_active()))?
         {
-            return Err(BundleError::Identity("current input manifest owner".into()));
+            bundle.collect_after_ack()?;
         }
-        validate_inputs(&checked, &manifest)?;
         let prior = bundle.branches.get(branch_id).cloned();
-        let old_history = prior
-            .as_ref()
-            .map(|p| bundle.store.read_record::<HistorySnapshot>(&p.history_ref))
-            .transpose()?;
-        let floor_discard =
-            bundle
-                .pending_command
-                .as_ref()
-                .and_then(|e| match e.transition.as_ref() {
-                    Some(crate::receipts::HistoryRequest::Floor {
-                        discard_batches, ..
-                    }) => Some(*discard_batches),
-                    _ => None,
-                });
-        if floor_discard.is_none()
+        let old_history = if let Some(prior) = &prior {
+            Some(if let Some(cached) = bundle.history_cache.get(branch_id) {
+                std::sync::Arc::clone(cached)
+            } else {
+                std::sync::Arc::new(
+                    bundle
+                        .store
+                        .read_record::<HistorySnapshot>(&prior.history_ref)?,
+                )
+            })
+        } else {
+            None
+        };
+        let explicit_floor = bundle.pending_command.as_ref().is_some_and(|e| {
+            matches!(
+                e.transition,
+                Some(crate::receipts::HistoryRequest::Floor { .. })
+            )
+        });
+        let aligned = if let Some(old) = &old_history
+            && history.floor_offset < old.floor_offset
+        {
+            kinewright_core::HistoryTransition::floor(
+                history.clone(),
+                usize::try_from(old.floor_offset - history.floor_offset)
+                    .map_err(|_| BundleError::Capacity("history floor offset"))?,
+            )
+            .map_err(|_| BundleError::Corrupt("history before durable floor".into()))?
+            .after()
+            .clone()
+        } else {
+            history.clone()
+        };
+        if !explicit_floor
             && old_history.as_ref().is_some_and(|old| {
-                checked.batches.len() < old.batches.len()
-                    || checked.batches[..old.batches.len()] != old.batches
+                aligned.floor_offset == old.floor_offset
+                    && (aligned.baseline != old.baseline
+                        || aligned.batches.len() < old.batches.len()
+                        || aligned.batches[..old.batches.len()] != old.batches)
             })
         {
             return Err(BundleError::Corrupt(
                 "history is not a continuation of the admitted head".into(),
             ));
         }
+        if !explicit_floor
+            && let Some(old) = &old_history
+            && aligned.floor_offset > old.floor_offset
+        {
+            let cut = usize::try_from(aligned.floor_offset - old.floor_offset)
+                .map_err(|_| BundleError::Capacity("history floor offset"))?;
+            let expected = kinewright_core::HistoryTransition::floor((***old).clone(), cut)
+                .map_err(|_| BundleError::Corrupt("unproved history floor".into()))?;
+            let expected = expected.after();
+            if aligned.baseline != expected.baseline
+                || aligned.batches.len() < expected.batches.len()
+                || aligned.batches[..expected.batches.len()] != expected.batches
+            {
+                return Err(BundleError::Corrupt(
+                    "history floor differs from admitted cut".into(),
+                ));
+            }
+        }
+        let bounded = if old_history.as_ref().is_some_and(|old| ***old == aligned) {
+            aligned.clone()
+        } else {
+            bound_history(&aligned, bundle.store.limits())?
+        };
+        let checked = if old_history.as_ref().is_some_and(|old| ***old == bounded) {
+            std::sync::Arc::clone(old_history.as_ref().unwrap())
+        } else {
+            let serialized =
+                serde_json::to_vec(&bounded).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let mut support = BTreeSet::new();
+            let checked = crate::bundle_recovery::decode::<HistorySnapshot>(
+                &serialized,
+                &bundle.store.usage_arc(),
+                RecordKind::History,
+                &mut support,
+            )?;
+            let _replay = bundle
+                .store
+                .reserve_history_shadow(crate::store::preflight_record(
+                    &serialized,
+                    bundle.store.limits(),
+                )?)?;
+            let core = Core::spawn((*checked.baseline).clone())
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            core.restore_history((*checked).clone())
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            std::sync::Arc::new(checked)
+        };
+        let manifest = bundle.store.read_input_manifest(inputs)?;
+        if manifest.project_id.as_ref() != Some(&bundle.project_id) || manifest.session_id.is_some()
+        {
+            return Err(BundleError::Identity("current input manifest owner".into()));
+        }
+        validate_document_inputs(&checked.document, &manifest)?;
+        let mut retained_manifest = (*manifest).clone();
+        if let Some(prior) = &prior {
+            for reference in &prior.history_input_manifest_refs {
+                let old = bundle.store.read_input_manifest(reference)?;
+                retained_manifest.entries.extend(old.entries.clone());
+            }
+        }
+        validate_inputs(&checked, &retained_manifest)?;
+        let floor_discard = old_history
+            .as_ref()
+            .map(|old| {
+                usize::try_from(
+                    checked
+                        .floor_offset
+                        .checked_sub(old.floor_offset)
+                        .ok_or_else(|| {
+                            BundleError::Corrupt("history floor moved backward".into())
+                        })?,
+                )
+                .map_err(|_| BundleError::Capacity("history floor offset"))
+            })
+            .transpose()?
+            .filter(|n| *n > 0);
         let mut batch_ids = prior
             .as_ref()
             .map_or_else(Vec::new, |p| p.batch_ids.clone());
+        let total_batches = checked.batches.len() + floor_discard.unwrap_or(0);
+        while batch_ids.len() < total_batches {
+            batch_ids.push(BatchId::fresh()?);
+        }
+        let all_batch_ids = batch_ids.clone();
         if let Some(discard) = floor_discard {
             batch_ids = batch_ids
                 .get(discard..)
                 .ok_or_else(|| BundleError::Corrupt("floor batch cut".into()))?
                 .to_vec();
         }
-        while batch_ids.len() < checked.batches.len() {
-            batch_ids.push(BatchId::fresh()?);
-        }
         let old_lineage = prior
             .as_ref()
             .map(|p| bundle.store.read_record::<LineageRecord>(&p.lineage_ref))
             .transpose()?;
         let floor_seed = if let Some(discard) = floor_discard {
-            let old = old_history
-                .as_ref()
-                .ok_or_else(|| BundleError::Corrupt("floor without previous history".into()))?;
+            let old = if aligned.floor_offset < checked.floor_offset {
+                &aligned
+            } else {
+                &***old_history
+                    .as_ref()
+                    .ok_or_else(|| BundleError::Corrupt("floor without previous history".into()))?
+            };
             let prefix = crate::bundle_branch::replay_prefix(old, discard)?;
-            let prior_ids = &prior
-                .as_ref()
-                .ok_or_else(|| BundleError::Corrupt("floor checkpoint".into()))?
-                .batch_ids[..discard];
-            let prefix_lineage = lineage(branch_id, &prefix, prior_ids, old_lineage.as_deref())?;
+            let prefix_lineage = lineage(
+                branch_id,
+                &prefix,
+                &all_batch_ids[..discard],
+                old_lineage.as_deref(),
+            )?;
             Some(LineageRecord {
                 branch_origin: branch_id.clone(),
                 baseline: prefix_lineage.current.clone(),
@@ -355,7 +470,7 @@ impl BundleCommit {
             .generation
             .checked_add(1)
             .ok_or(BundleError::Capacity("root generation"))?;
-        let unchanged = old_history.as_ref().is_some_and(|h| **h == *checked)
+        let unchanged = old_history.as_ref().is_some_and(|h| ***h == **checked)
             && prior
                 .as_ref()
                 .is_some_and(|p| p.input_manifest_ref == *inputs);
@@ -380,24 +495,36 @@ impl BundleCommit {
                 reference
             }};
         }
-        let document_ref = seal!(&*checked.document);
-        let baseline_ref = seal!(&*checked.baseline);
-        let history_ref = seal!(&*checked);
-        let lineage_ref = seal!(&lineage);
+        let (document_ref, baseline_ref, history_ref, lineage_ref) = if unchanged {
+            let prior = prior.as_ref().unwrap();
+            (
+                prior.document_ref.clone(),
+                prior.baseline_ref.clone(),
+                prior.history_ref.clone(),
+                prior.lineage_ref.clone(),
+            )
+        } else {
+            (
+                seal!(&*checked.document),
+                seal!(&*checked.baseline),
+                seal!(&**checked),
+                seal!(&lineage),
+            )
+        };
         let mut contexts = prior
             .as_ref()
             .map_or_else(Vec::new, |p| p.history_input_manifest_refs.clone());
+        if contexts.is_empty() {
+            contexts.push(inputs.clone());
+        }
+        while contexts.len() < checked.batches.len() + floor_discard.unwrap_or(0) + 1 {
+            contexts.push(inputs.clone());
+        }
         if let Some(discard) = floor_discard {
             contexts = contexts
                 .get(discard..)
                 .ok_or_else(|| BundleError::Corrupt("floor input-context cut".into()))?
                 .to_vec();
-        }
-        if contexts.is_empty() {
-            contexts.push(inputs.clone());
-        }
-        while contexts.len() < checked.batches.len() + 1 {
-            contexts.push(inputs.clone());
         }
         let checkpoint = BranchCheckpoint {
             branch_id: branch_id.clone(),
@@ -466,7 +593,7 @@ impl BundleCommit {
                         preceding_checkpoint_generation: previous.checkpoint_generation,
                         preceding_floor_generation: previous.floor_generation,
                         floor_generation: branches[branch_id].floor_generation,
-                        command_cut: envelope.id.clone(),
+                        command_cut: Some(envelope.id.clone()),
                         old_baseline_ref: previous.baseline_ref.clone(),
                         new_baseline_ref: branches[branch_id].baseline_ref.clone(),
                         checkpoint_ref: checkpoint_ref.clone(),
@@ -487,9 +614,25 @@ impl BundleCommit {
             };
             evidence.push(reference);
         }
+        if floor_discard.is_some()
+            && !explicit_floor
+            && let Some(previous) = &prior
+        {
+            evidence.retain(|r| r.record_kind != RecordKind::HistoryFloor);
+            evidence.push(seal!(&crate::bundle_records::HistoryFloorCheckpoint {
+                preceding_checkpoint_generation: previous.checkpoint_generation,
+                preceding_floor_generation: previous.floor_generation,
+                floor_generation: branches[branch_id].floor_generation,
+                command_cut: branches[branch_id].command_cut.clone(),
+                old_baseline_ref: previous.baseline_ref.clone(),
+                new_baseline_ref: branches[branch_id].baseline_ref.clone(),
+                checkpoint_ref: checkpoint_ref.clone(),
+                equivalence_digest: branches[branch_id].history_ref.sha256.clone(),
+            }));
+        }
         let branch_index_ref = seal!(&branch_index);
         barrier(bundle, CommitBarrier::B1)?;
-        barrier(bundle, CommitBarrier::B2)?;
+        let mut staged_inventory = None;
         let mut recovery = bundle.recovery.clone();
         if !bundle.admission.raw_bytes().is_empty() {
             let deps = bundle
@@ -505,13 +648,12 @@ impl BundleCommit {
             seals.push(previous);
             let mut staged = recovery.clone();
             staged.staging = Some(reference.clone());
-            bundle.store.publish_inventory(&staged)?;
+            staged_inventory = Some(staged);
             recovery.predecessors.insert(0, reference);
             recovery.predecessors.truncate(2);
         }
         recovery.generation = generation;
         recovery.staging = None;
-        barrier(bundle, CommitBarrier::B3)?;
         let mut receipts = bundle.receipts.clone();
         if let Some(envelope) = &bundle.pending_command {
             let result = bundle
@@ -548,7 +690,7 @@ impl BundleCommit {
         } else {
             Some(seal!(&receipts))
         };
-        let issuer_state_ref = if bundle.issuers.is_empty() {
+        let issuer_state_ref = if bundle.issuers.is_empty() && receipt_index_ref.is_none() {
             None
         } else {
             Some(seal!(&bundle.issuers))
@@ -604,6 +746,14 @@ impl BundleCommit {
             store_manifest_ref,
         };
         root.admit()?;
+        bundle
+            .store
+            .with_namespace(crate::namespace::ProjectNamespace::finish_object_batch)?;
+        barrier(bundle, CommitBarrier::B2)?;
+        if let Some(staged) = staged_inventory {
+            bundle.store.publish_inventory(&staged)?;
+        }
+        barrier(bundle, CommitBarrier::B3)?;
         let manual_history =
             if *branch_id == bundle.manual_branch_id {
                 None
@@ -625,6 +775,7 @@ impl BundleCommit {
         bundle.store.closure(&root.references())?;
         #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::check_failure("root_before_publish", &bundle.store.resolved_root()?)?;
+        let saved_path = bundle.store.resolved_root()?;
         if let Err(error) = bundle.store.publish_root(next_admission.raw_bytes()) {
             if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {
                 bundle.unsettled = true;
@@ -632,27 +783,32 @@ impl BundleCommit {
             }
             return Err(error);
         }
-        bundle.evidence = evidence;
-        bundle.receipts = receipts;
-        bundle.root = Some(root);
-        bundle.branches = branches;
-        bundle.generation = generation;
-        bundle.inventory = inventory;
-        bundle.recovery = recovery;
-        bundle.admission = next_admission;
-        bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
-        // A root has already landed. An unsettled subordinate inventory cannot be called a rollback.
-        if bundle.store.publish_inventory(&bundle.recovery).is_err() {
-            bundle.unsettled = true;
+        // Publication is monotonic: any fallible tail is unsettled, never a definite rollback.
+        bundle.unsettled = true;
+        let tail = (|| -> Result<(), BundleError> {
+            bundle.evidence = evidence;
+            bundle.receipts = receipts;
+            bundle.root = Some(root);
+            bundle.branches = branches;
+            bundle
+                .history_cache
+                .insert(branch_id.clone(), std::sync::Arc::clone(&checked));
+            bundle.generation = generation;
+            bundle.inventory = inventory;
+            bundle.recovery = recovery;
+            bundle.admission = next_admission;
+            bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
+            barrier(bundle, CommitBarrier::B5)?;
+            bundle.pending_evidence.clear();
+            Ok(())
+        })();
+        if tail.is_err() {
             return Err(BundleError::DurabilityUnknown);
         }
-        barrier(bundle, CommitBarrier::B5)?;
-        bundle.store.allow_collection()?;
-        bundle.pending_evidence.clear();
+        bundle.unsettled = false;
         drop(seals);
-        bundle.store.collect_unpublished()?;
         Ok(BundleSaveReport {
-            path: bundle.store.resolved_root()?,
+            path: saved_path,
             project_id: bundle.project_id.clone(),
             generation,
             head_id,
@@ -661,6 +817,38 @@ impl BundleCommit {
         })
     }
 }
+pub(crate) fn bound_history(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<HistorySnapshot, BundleError> {
+    let fits = |h: &HistorySnapshot| -> bool {
+        let Ok(encoded) = h.encoded_bytes() else {
+            return false;
+        };
+        if encoded > limits.branch_history_bytes {
+            return false;
+        }
+        let Ok(bytes) = serde_json::to_vec(h) else {
+            return false;
+        };
+        crate::store::preflight_record(&bytes, limits)
+            .is_ok_and(|n| n <= limits.branch_history_bytes)
+    };
+    if fits(history) {
+        return Ok(history.clone());
+    }
+    for cut in 1..=history.batches.len() {
+        if let Ok(transition) = kinewright_core::HistoryTransition::floor(history.clone(), cut)
+            && fits(transition.after())
+        {
+            return Ok(transition.after().clone());
+        }
+    }
+    Err(BundleError::Capacity(
+        "history baseline exceeds branch allowance",
+    ))
+}
+
 fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleError> {
     let path = bundle.store.resolved_root()?;
     let label = match barrier {
@@ -676,7 +864,7 @@ fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleE
     crate::test_hook(label);
     Ok(())
 }
-fn validate_inputs(
+pub(crate) fn validate_inputs(
     history: &HistorySnapshot,
     manifest: &OwnedInputManifest,
 ) -> Result<(), BundleError> {
@@ -692,48 +880,59 @@ fn validate_inputs(
                 .map(|e| &e.document),
         );
     for document in documents {
-        for asset in &document.media_pool {
-            let id = format!("media:{}", asset.id.0);
-            if !manifest
-                .entries
-                .iter()
-                .any(|e| e.entry_id == id && e.object.record_kind == RecordKind::OwnedMedia)
-            {
-                return Err(BundleError::Unsupported(format!(
-                    "retained asset {id} lacks owned input"
-                )));
-            }
-        }
-        if document
-            .tracks
+        validate_document_inputs(document, manifest)?;
+    }
+    Ok(())
+}
+pub(crate) fn validate_document_inputs(
+    document: &kinewright_core::Document,
+    manifest: &OwnedInputManifest,
+) -> Result<(), BundleError> {
+    for asset in &document.media_pool {
+        let id = format!("media:{}", asset.id.0);
+        if !manifest
+            .entries
             .iter()
-            .flat_map(|t| &t.clips)
-            .any(|c| matches!(c.content, kinewright_core::ClipContent::Title(_)))
+            .any(|e| e.entry_id == id && e.object.record_kind == RecordKind::OwnedMedia)
         {
-            let digest = kinewright_media::sha256_bytes(kinewright_core::title_font_bytes());
-            if !manifest.entries.iter().any(|e| {
-                e.entry_id == "font:Inter"
-                    && e.object.record_kind == RecordKind::OwnedFont
-                    && e.object.sha256 == digest
-            }) {
-                return Err(BundleError::Unsupported(
-                    "retained title requires its owned embedded font".into(),
-                ));
-            }
+            return Err(BundleError::Unsupported(format!(
+                "retained asset {id} lacks owned input"
+            )));
         }
-        for asset in &document.lut_assets {
-            if !manifest.entries.iter().any(|e| {
-                e.entry_id == format!("lut:{}", asset.id.0)
-                    && e.object.record_kind == RecordKind::OwnedLut
-            }) {
-                return Err(BundleError::Unsupported(
-                    "retained LUT lacks owned bytes".into(),
-                ));
-            }
+    }
+    if document
+        .tracks
+        .iter()
+        .flat_map(|t| &t.clips)
+        .any(|c| matches!(c.content, kinewright_core::ClipContent::Title(_)))
+    {
+        let digest = kinewright_media::sha256_bytes(kinewright_core::title_font_bytes());
+        if !manifest.entries.iter().any(|e| {
+            e.entry_id == "font:Inter"
+                && e.object.record_kind == RecordKind::OwnedFont
+                && e.object.sha256 == digest
+        }) {
+            return Err(BundleError::Unsupported(
+                "retained title requires its owned embedded font".into(),
+            ));
+        }
+    }
+    for asset in &document.lut_assets {
+        if !manifest.entries.iter().any(|e| {
+            (e.entry_id == format!("lut:{}", asset.id.0)
+                || e.entry_id == format!("lut:{}:{}", asset.id.0, asset.sha256))
+                && e.object.record_kind == RecordKind::OwnedLut
+                && e.object.sha256 == asset.sha256
+                && e.object.byte_length == asset.byte_len
+        }) {
+            return Err(BundleError::Unsupported(
+                "retained LUT lacks owned bytes".into(),
+            ));
         }
     }
     Ok(())
 }
+
 #[allow(
     clippy::too_many_lines,
     reason = "one ordered history replay of occurrence maps"

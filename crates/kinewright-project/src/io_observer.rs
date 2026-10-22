@@ -4,10 +4,26 @@ use std::{cell::RefCell, path::PathBuf};
 
 use serde::Serialize;
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Default, Clone, Serialize)]
 pub struct SyncProfile {
     pub calls: u64,
     pub nanoseconds: u128,
+}
+thread_local! { static HISTORY_DECODES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
+pub(crate) fn note_history_decode() {
+    HISTORY_DECODES.with(|count| {
+        count.set(
+            count
+                .get()
+                .checked_add(1)
+                .expect("test decode counter overflow"),
+        );
+    });
+}
+/// Number of full history decodes on this thread, separate from mutation observations.
+#[must_use]
+pub fn history_decode_count() -> u64 {
+    HISTORY_DECODES.with(std::cell::Cell::get)
 }
 thread_local! {static SYNC_PROFILE: RefCell<Option<SyncProfile>>=const{RefCell::new(None)};}
 #[cfg(target_os = "linux")]
@@ -22,6 +38,12 @@ pub(crate) fn measure_sync<T, E>(run: impl FnOnce() -> Result<T, E>) -> Result<T
     });
     result
 }
+/// Snapshot the active thread's counters without nesting a profiling scope.
+#[must_use]
+pub fn sync_profile() -> SyncProfile {
+    SYNC_PROFILE.with_borrow(|s| s.clone().unwrap_or_default())
+}
+
 /// Time the actual sync calls on this thread; independent from object/hash counters.
 /// # Panics
 /// Refuses nested profiling scopes.

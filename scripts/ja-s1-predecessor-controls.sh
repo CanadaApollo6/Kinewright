@@ -9,7 +9,15 @@ sealed="$scratch/sealed"
 evidence="${1:-$scratch/evidence}"
 mkdir -p "$sealed" "$evidence"
 controls="$(mktemp -d "$evidence/controls-XXXXXXXX")"
-trap 'find "$evidence" -maxdepth 1 -type f -name "*.log" -exec gzip -f {} +' EXIT
+finish() {
+    local status=$?
+    if [[ "$status" -ne 0 ]]; then
+        for log in "$evidence"/*.log; do [[ ! -f "$log" ]] || tail -n 80 "$log"; done
+    fi
+    find "$evidence" -maxdepth 1 -type f -name '*.log' -exec gzip -f {} +
+    return "$status"
+}
+trap finish EXIT
 if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
     git fetch --no-tags origin "$base"
 fi
@@ -53,7 +61,6 @@ if [[ "${OS:-}" == Windows_NT ]]; then
 $ErrorActionPreference='Stop'
 Set-Location -LiteralPath $env:JA_S1_PREDECESSOR_TREE
 & .\scripts\setup-ffmpeg.ps1 -SkipBuildCachePrune
-if ($LASTEXITCODE -ne 0) { throw "FFmpeg prerequisite exited $LASTEXITCODE" }
 $env:CARGO_TARGET_DIR=$env:JA_S1_PREDECESSOR_TARGET
 cargo build -p kinewright-agent --features eval-harness --bin kinewright-ja-baseline
 if ($LASTEXITCODE -ne 0) { throw "predecessor build exited $LASTEXITCODE" }
@@ -76,7 +83,6 @@ PS
 $ErrorActionPreference='Stop'
 Set-Location -LiteralPath $env:JA_S1_PREDECESSOR_TREE
 & .\scripts\setup-ffmpeg.ps1 -SkipBuildCachePrune
-if ($LASTEXITCODE -ne 0) { throw "FFmpeg prerequisite exited $LASTEXITCODE" }
 $control=Join-Path $env:JA_S1_PREDECESSOR_SEALED 'max2-control.exe'
 & $control --exact pinned_max2_format_controls
 if ($LASTEXITCODE -ne 0) { throw "max-2 observer exited $LASTEXITCODE" }
@@ -90,7 +96,12 @@ PS
     pwsh -NoProfile -File "$scratch/run-windows.ps1" > "$evidence/controls.log" 2>&1
 else
     executable=kinewright-ja-baseline
-    while [[ "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)" -lt 6291456 ]]; do free -g; sleep 300; done
+    wait_started=$SECONDS
+    while [[ -z "${CI:-}" && "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)" -lt 6291456 ]]; do
+        if (( SECONDS - wait_started >= 600 )); then echo "6 GiB memory prerequisite unavailable after 600 seconds" >&2; exit 1; fi
+        free -g
+        sleep 30
+    done
     (
         cd "$source_tree"
         # Reuse only the pinned native distribution; compilation has its own source/target identities.
@@ -125,7 +136,8 @@ else
     ) > "$evidence/build-controls.log" 2>&1
 fi
 # Bind the sealed artifact and the original frozen fixture reports to actual clean predecessor source.
-nice -n 19 python3 -I - "$source_tree" "$sealed/$executable" "$sealed" "$base" "$controls" <<'PY'
+if [[ "${OS:-}" == Windows_NT ]]; then python_runner=(python); else python_runner=(nice -n 19 python3); fi
+"${python_runner[@]}" -I - "$source_tree" "$sealed/$executable" "$sealed" "$base" "$controls" <<'PY'
 import hashlib,json,pathlib,platform,subprocess,sys
 source,binary,sealed=map(pathlib.Path,sys.argv[1:4])
 base=sys.argv[4]

@@ -1,0 +1,864 @@
+{
+  "identity": {
+    "before_source": "0f4f88e0a46544810be41db654f66472f7d4540c plus per-comment counter instrumentation only",
+    "after_parent": "0f4f88e0a46544810be41db654f66472f7d4540c",
+    "after_diff_sha256": "b525902d983de83513ad479a09180ea7e3320fd6d3dda27c43a1d832dd78dd22",
+    "binary_sha256": {
+      "before": "00faaaeee9005727ed7efaf7123538c7954750fb54c810fdfca1721c0aca5b38",
+      "after": "9d46c7b2c3a5199df322d9d75d619ef14d4139df054fe77a0dca46a8d893611e",
+      "profiled": "93e4bd1bd13bdd9dc3c2fcff2bc4dd0de50f31f24b3afce74be48d947c4fb0ea"
+    },
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "profile": "release; ordinary system allocator; separate DHAT 0.3.3 profiled runs"
+  },
+  "pairs": 5,
+  "unexpected_errors": 0,
+  "timing_scope": "five alternating unprofiled runs per side, eight durable comments per run; DHAT timings excluded",
+  "runs": [
+    {
+      "pair": 1,
+      "side": "before",
+      "elapsed_seconds": 11.578535826993175,
+      "user_cpu_seconds": 1.6015899999999998,
+      "system_cpu_seconds": 0.22525399999999998,
+      "comment": {
+        "count": 8,
+        "max_ms": 254.198678,
+        "min_ms": 225.856634,
+        "p50_ms": 246.83165300000002,
+        "p95_ms": 254.198678
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 181.774913,
+        "min_ms": 143.302073,
+        "p50_ms": 172.13894499999998,
+        "p95_ms": 181.774913
+      },
+      "comment_syncs": [
+        {
+          "calls": 28,
+          "nanoseconds": 198248434
+        },
+        {
+          "calls": 24,
+          "nanoseconds": 168741084
+        },
+        {
+          "calls": 25,
+          "nanoseconds": 193120983
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 193107722
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 194035969
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 194110194
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 194730523
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 194943704
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 37150720,
+        "rss_bytes": 37150720
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decoded_reservation_bytes": 25000775,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.6046159999999998,
+          "min_ms": 1.107453,
+          "p50_ms": 1.3768120000000001,
+          "p95_ms": 1.6046159999999998
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 1,
+      "side": "after",
+      "elapsed_seconds": 7.057771339997998,
+      "user_cpu_seconds": 1.0877319999999997,
+      "system_cpu_seconds": 0.16453399999999996,
+      "comment": {
+        "count": 8,
+        "max_ms": 164.736263,
+        "min_ms": 124.606139,
+        "p50_ms": 126.470876,
+        "p95_ms": 164.736263
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 101.347518,
+        "min_ms": 86.381938,
+        "p50_ms": 94.137058,
+        "p95_ms": 101.347518
+      },
+      "comment_syncs": [
+        {
+          "calls": 20,
+          "nanoseconds": 156617317
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 126402266
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 119318583
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 118782441
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 118229739
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 118833697
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 119938524
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 119507121
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 36032512,
+        "rss_bytes": 36032512
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decode_after_heap": null,
+        "decode_before_heap": null,
+        "decoded_reservation_bytes": 3676919,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.201061,
+          "min_ms": 0.871597,
+          "p50_ms": 0.910262,
+          "p95_ms": 1.201061
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 2,
+      "side": "before",
+      "elapsed_seconds": 11.432868096992024,
+      "user_cpu_seconds": 1.6097719999999995,
+      "system_cpu_seconds": 0.23641299999999998,
+      "comment": {
+        "count": 8,
+        "max_ms": 312.906886,
+        "min_ms": 222.250241,
+        "p50_ms": 236.817816,
+        "p95_ms": 312.906886
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 195.728024,
+        "min_ms": 148.11512199999999,
+        "p50_ms": 177.443498,
+        "p95_ms": 195.728024
+      },
+      "comment_syncs": [
+        {
+          "calls": 28,
+          "nanoseconds": 207301406
+        },
+        {
+          "calls": 24,
+          "nanoseconds": 170593073
+        },
+        {
+          "calls": 25,
+          "nanoseconds": 178225709
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 259506937
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 184262052
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 183973295
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 185516025
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 182334676
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 37339136,
+        "rss_bytes": 37339136
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decoded_reservation_bytes": 25000775,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.575474,
+          "min_ms": 1.2319419999999999,
+          "p50_ms": 1.279313,
+          "p95_ms": 1.575474
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 2,
+      "side": "after",
+      "elapsed_seconds": 6.93149849899055,
+      "user_cpu_seconds": 1.0919340000000002,
+      "system_cpu_seconds": 0.20191199999999998,
+      "comment": {
+        "count": 8,
+        "max_ms": 165.545503,
+        "min_ms": 119.07401200000001,
+        "p50_ms": 120.679928,
+        "p95_ms": 165.545503
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 95.913653,
+        "min_ms": 82.560569,
+        "p50_ms": 89.715871,
+        "p95_ms": 95.913653
+      },
+      "comment_syncs": [
+        {
+          "calls": 20,
+          "nanoseconds": 156769101
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 113685183
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 112793216
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 113537956
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 113754170
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 112781876
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 114281790
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 114207676
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 36737024,
+        "rss_bytes": 36737024
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decode_after_heap": null,
+        "decode_before_heap": null,
+        "decoded_reservation_bytes": 3676919,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.1375490000000001,
+          "min_ms": 0.862005,
+          "p50_ms": 0.904513,
+          "p95_ms": 1.1375490000000001
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 3,
+      "side": "before",
+      "elapsed_seconds": 11.493163822000497,
+      "user_cpu_seconds": 1.619561,
+      "system_cpu_seconds": 0.22167000000000003,
+      "comment": {
+        "count": 8,
+        "max_ms": 256.419654,
+        "min_ms": 231.60012,
+        "p50_ms": 232.92629100000002,
+        "p95_ms": 256.419654
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 181.549361,
+        "min_ms": 144.65208700000002,
+        "p50_ms": 173.380902,
+        "p95_ms": 181.549361
+      },
+      "comment_syncs": [
+        {
+          "calls": 28,
+          "nanoseconds": 200142842
+        },
+        {
+          "calls": 24,
+          "nanoseconds": 171326674
+        },
+        {
+          "calls": 25,
+          "nanoseconds": 178094623
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 187691973
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 182472066
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 179507977
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 183947994
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 180214315
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 37220352,
+        "rss_bytes": 37220352
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decoded_reservation_bytes": 25000775,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.570927,
+          "min_ms": 0.950958,
+          "p50_ms": 1.255217,
+          "p95_ms": 1.570927
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 3,
+      "side": "after",
+      "elapsed_seconds": 7.436288404001971,
+      "user_cpu_seconds": 1.0624980000000006,
+      "system_cpu_seconds": 0.19128299999999987,
+      "comment": {
+        "count": 8,
+        "max_ms": 164.86883699999998,
+        "min_ms": 126.464771,
+        "p50_ms": 132.790079,
+        "p95_ms": 164.86883699999998
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 101.042354,
+        "min_ms": 80.75201999999999,
+        "p50_ms": 93.370934,
+        "p95_ms": 101.042354
+      },
+      "comment_syncs": [
+        {
+          "calls": 20,
+          "nanoseconds": 154078858
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 121496603
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 120022297
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 157134675
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 153006968
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 121487305
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 121305722
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 128533127
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 35897344,
+        "rss_bytes": 35897344
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decode_after_heap": null,
+        "decode_before_heap": null,
+        "decoded_reservation_bytes": 3676919,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.1889750000000001,
+          "min_ms": 0.856458,
+          "p50_ms": 0.898315,
+          "p95_ms": 1.1889750000000001
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 4,
+      "side": "before",
+      "elapsed_seconds": 12.238512520998484,
+      "user_cpu_seconds": 1.5918659999999996,
+      "system_cpu_seconds": 0.24711400000000006,
+      "comment": {
+        "count": 8,
+        "max_ms": 279.553247,
+        "min_ms": 245.467738,
+        "p50_ms": 254.799434,
+        "p95_ms": 279.553247
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 221.879718,
+        "min_ms": 148.970447,
+        "p50_ms": 188.088672,
+        "p95_ms": 221.879718
+      },
+      "comment_syncs": [
+        {
+          "calls": 28,
+          "nanoseconds": 225860339
+        },
+        {
+          "calls": 24,
+          "nanoseconds": 186004189
+        },
+        {
+          "calls": 25,
+          "nanoseconds": 195865440
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 199685566
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 202031627
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 210495279
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 201449901
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 201351482
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 37138432,
+        "rss_bytes": 37138432
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decoded_reservation_bytes": 25000775,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.385683,
+          "min_ms": 1.0919910000000002,
+          "p50_ms": 1.109752,
+          "p95_ms": 1.385683
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 4,
+      "side": "after",
+      "elapsed_seconds": 7.616915735998191,
+      "user_cpu_seconds": 1.0721760000000007,
+      "system_cpu_seconds": 0.19935500000000017,
+      "comment": {
+        "count": 8,
+        "max_ms": 162.48121500000002,
+        "min_ms": 118.73144099999999,
+        "p50_ms": 132.902479,
+        "p95_ms": 162.48121500000002
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 106.802948,
+        "min_ms": 77.740605,
+        "p50_ms": 86.815433,
+        "p95_ms": 106.802948
+      },
+      "comment_syncs": [
+        {
+          "calls": 20,
+          "nanoseconds": 153671241
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 112709124
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 125421416
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 127037414
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 126099945
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 113830933
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 133638114
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 125763890
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 36057088,
+        "rss_bytes": 36057088
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decode_after_heap": null,
+        "decode_before_heap": null,
+        "decoded_reservation_bytes": 3676919,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.188515,
+          "min_ms": 0.744054,
+          "p50_ms": 0.950082,
+          "p95_ms": 1.188515
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 5,
+      "side": "before",
+      "elapsed_seconds": 11.417155950999586,
+      "user_cpu_seconds": 1.6096009999999996,
+      "system_cpu_seconds": 0.25037200000000004,
+      "comment": {
+        "count": 8,
+        "max_ms": 262.515874,
+        "min_ms": 221.888993,
+        "p50_ms": 238.948083,
+        "p95_ms": 262.515874
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 188.039827,
+        "min_ms": 144.64316399999998,
+        "p50_ms": 175.828914,
+        "p95_ms": 188.039827
+      },
+      "comment_syncs": [
+        {
+          "calls": 28,
+          "nanoseconds": 198890141
+        },
+        {
+          "calls": 24,
+          "nanoseconds": 169336499
+        },
+        {
+          "calls": 25,
+          "nanoseconds": 176955909
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 185785577
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 187341909
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 185913486
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 186245295
+        },
+        {
+          "calls": 26,
+          "nanoseconds": 186682888
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 37154816,
+        "rss_bytes": 37154816
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decoded_reservation_bytes": 25000775,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 1.532079,
+          "min_ms": 0.819132,
+          "p50_ms": 1.268912,
+          "p95_ms": 1.532079
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    },
+    {
+      "pair": 5,
+      "side": "after",
+      "elapsed_seconds": 7.216951512993546,
+      "user_cpu_seconds": 1.0894359999999992,
+      "system_cpu_seconds": 0.19799699999999998,
+      "comment": {
+        "count": 8,
+        "max_ms": 161.305417,
+        "min_ms": 129.100706,
+        "p50_ms": 131.510707,
+        "p95_ms": 161.305417
+      },
+      "save": {
+        "count": 8,
+        "max_ms": 99.58113300000001,
+        "min_ms": 87.58741500000001,
+        "p50_ms": 94.491977,
+        "p95_ms": 99.58113300000001
+      },
+      "comment_syncs": [
+        {
+          "calls": 20,
+          "nanoseconds": 152890598
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 122945248
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 136544241
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 122008855
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 121383083
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 126671507
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 123376453
+        },
+        {
+          "calls": 16,
+          "nanoseconds": 122679232
+        }
+      ],
+      "rss": {
+        "hwm_bytes": 36749312,
+        "rss_bytes": 36749312
+      },
+      "history": {
+        "accepted_commands": 120,
+        "decode_after_heap": null,
+        "decode_before_heap": null,
+        "decoded_reservation_bytes": 3676919,
+        "encoded_bytes": 216346,
+        "redo_entries": 24,
+        "restore": {
+          "count": 5,
+          "max_ms": 0.9880209999999999,
+          "min_ms": 0.7205729999999999,
+          "p50_ms": 0.7980619999999999,
+          "p95_ms": 0.9880209999999999
+        },
+        "tracks": 32,
+        "undo_entries": 72
+      }
+    }
+  ],
+  "heap_runs": [
+    {
+      "pair": 1,
+      "decode_live_allocation_bytes": 640687,
+      "decode_reservation_bytes": 3676919,
+      "encoded_history_bytes": 216346,
+      "whole_process_rust_allocator_peak_bytes": 16259646,
+      "rss": {
+        "hwm_bytes": 40865792,
+        "rss_bytes": 40865792
+      }
+    },
+    {
+      "pair": 2,
+      "decode_live_allocation_bytes": 640687,
+      "decode_reservation_bytes": 3676919,
+      "encoded_history_bytes": 216346,
+      "whole_process_rust_allocator_peak_bytes": 16259646,
+      "rss": {
+        "hwm_bytes": 41177088,
+        "rss_bytes": 41177088
+      }
+    },
+    {
+      "pair": 3,
+      "decode_live_allocation_bytes": 640687,
+      "decode_reservation_bytes": 3676919,
+      "encoded_history_bytes": 216346,
+      "whole_process_rust_allocator_peak_bytes": 16259646,
+      "rss": {
+        "hwm_bytes": 41185280,
+        "rss_bytes": 41185280
+      }
+    },
+    {
+      "pair": 4,
+      "decode_live_allocation_bytes": 640687,
+      "decode_reservation_bytes": 3676919,
+      "encoded_history_bytes": 216346,
+      "whole_process_rust_allocator_peak_bytes": 16259646,
+      "rss": {
+        "hwm_bytes": 41111552,
+        "rss_bytes": 41111552
+      }
+    },
+    {
+      "pair": 5,
+      "decode_live_allocation_bytes": 640687,
+      "decode_reservation_bytes": 3676919,
+      "encoded_history_bytes": 216346,
+      "whole_process_rust_allocator_peak_bytes": 16259646,
+      "rss": {
+        "hwm_bytes": 41086976,
+        "rss_bytes": 41086976
+      }
+    }
+  ],
+  "comment_ms": {
+    "before": {
+      "p50_ms": {
+        "median": 238.948083,
+        "min": 232.92629100000002,
+        "max": 254.799434
+      },
+      "p95_ms": {
+        "median": 262.515874,
+        "min": 254.198678,
+        "max": 312.906886
+      }
+    },
+    "after": {
+      "p50_ms": {
+        "median": 131.510707,
+        "min": 120.679928,
+        "max": 132.902479
+      },
+      "p95_ms": {
+        "median": 164.736263,
+        "min": 161.305417,
+        "max": 165.545503
+      }
+    }
+  },
+  "comment_sync_calls": {
+    "before": {
+      "median": 26.0,
+      "min": 24,
+      "max": 28
+    },
+    "after": {
+      "median": 16.0,
+      "min": 16,
+      "max": 20
+    }
+  }
+}

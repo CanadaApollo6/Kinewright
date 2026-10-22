@@ -133,7 +133,10 @@ fn inventory(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
 }
 #[test]
 fn edit_and_comment_lost_replies_reconcile_before_stale_admission() {
-    let temp = TempDirectory::new("ja-s1-receipts");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-receipts",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, _) = setup(&path);
     let source = b"archived owned font bytes survive a new owner epoch";
@@ -218,7 +221,10 @@ fn edit_and_comment_lost_replies_reconcile_before_stale_admission() {
 }
 #[test]
 fn same_id_changed_digest_refuses_without_mutation() {
-    let temp = TempDirectory::new("ja-s1-digest");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-digest",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let request = envelope(&mut bundle, &core, &inputs);
@@ -235,7 +241,10 @@ fn same_id_changed_digest_refuses_without_mutation() {
 }
 #[test]
 fn retired_exact_evidence_resolves_original_edit_and_comment_results() {
-    let temp = TempDirectory::new("ja-s1-retired-exact");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-retired-exact",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let edit = envelope(&mut bundle, &core, &inputs);
@@ -282,7 +291,10 @@ fn retired_exact_evidence_resolves_original_edit_and_comment_results() {
 }
 #[test]
 fn retired_unresolved_never_reapplies_or_acknowledges() {
-    let temp = TempDirectory::new("ja-s1-retired-unresolved");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-retired-unresolved",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let request = envelope(&mut bundle, &core, &inputs);
@@ -293,6 +305,13 @@ fn retired_unresolved_never_reapplies_or_acknowledges() {
     bundle
         .retire_issuer(&request.id.issuer, true, &core, &inputs)
         .unwrap();
+    assert!(
+        matches!(
+            bundle.receipt_lookup(&request).unwrap(),
+            ReceiptLookup::Retired(_)
+        ),
+        "exact predecessor result must immediately be labelled retired"
+    );
     for _ in 0..3 {
         bundle
             .save(&core.export_history().unwrap(), &inputs)
@@ -314,7 +333,10 @@ fn retired_unresolved_never_reapplies_or_acknowledges() {
 }
 #[test]
 fn issuer_exhaustion_preserves_unresolved_evidence() {
-    let temp = TempDirectory::new("ja-s1-issuer-cap");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-issuer-cap",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let request = envelope(&mut bundle, &core, &inputs);
@@ -344,7 +366,10 @@ fn issuer_exhaustion_preserves_unresolved_evidence() {
 }
 #[test]
 fn ambiguous_commit_keeps_pending_until_receipt_reconciliation() {
-    let temp = TempDirectory::new("ja-s1-receipt-unknown");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-receipt-unknown",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let control = envelope(&mut bundle, &core, &inputs);
@@ -382,4 +407,126 @@ fn ambiguous_commit_keeps_pending_until_receipt_reconciliation() {
     let result = committed(bundle.command(&request, &core, &inputs, &[]).unwrap());
     assert!(matches!(result.result, ReceiptResult::Edit { .. }));
     assert_eq!(core.export_history().unwrap().cursor.undo.len(), 2);
+}
+
+#[test]
+fn two_hundred_resolved_issuers_retire_without_a_lifetime_cap() {
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "r1-issuer-compaction",
+    );
+    let path = temp.path("edit.kinewright");
+    let (core, mut bundle, inputs) = setup(&path);
+    let mut old_ids = vec![];
+    for _ in 0..200 {
+        let id = bundle.issue_issuer(&core, &inputs, 1).unwrap();
+        bundle.retire_issuer(&id, true, &core, &inputs).unwrap();
+        old_ids.push(id);
+    }
+    drop(bundle);
+    let (core, mut bundle, inputs) = restart(&path);
+    assert!(
+        bundle.issue_issuer(&core, &inputs, 1).is_ok(),
+        "resolved identities still consume the live issuer cap after reopen"
+    );
+    let mut request = envelope(&mut bundle, &core, &inputs);
+    for id in old_ids {
+        request.id.issuer = id;
+        assert_eq!(
+            bundle.receipt_lookup(&request).unwrap(),
+            ReceiptLookup::RetiredUnresolved
+        );
+    }
+}
+
+#[test]
+fn invalid_comment_does_not_enter_pending_or_pause_the_next_command() {
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "r1-comment-refusal",
+    );
+    let (core, mut bundle, inputs) = setup(&temp.path("edit.kinewright"));
+    let request = envelope(&mut bundle, &core, &inputs);
+    let before = core.export_history().unwrap();
+    let bad_text = b"\xff";
+    let strokes = b"[]";
+    let invalid = comment(request.clone(), bad_text, strokes);
+    assert!(
+        bundle
+            .command(
+                &invalid,
+                &core,
+                &inputs,
+                &[
+                    (invalid.comment_text.as_ref().unwrap(), bad_text),
+                    (invalid.comment_strokes.as_ref().unwrap(), strokes)
+                ]
+            )
+            .is_err()
+    );
+    assert_eq!(
+        bundle.receipt_lookup(&invalid).unwrap(),
+        ReceiptLookup::Absent,
+        "input refusal became a pending command"
+    );
+    assert_eq!(core.export_history().unwrap(), before);
+    assert!(matches!(
+        bundle.command(&request, &core, &inputs, &[]).unwrap(),
+        ReceiptLookup::Committed(_)
+    ));
+}
+
+#[test]
+fn unchanged_comment_skips_history_decode_and_coalesces_directory_syncs() {
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "r1-comment-work",
+    );
+    let (core, mut bundle, inputs) = setup(&temp.path("edit.kinewright"));
+    let request = comment(
+        envelope(&mut bundle, &core, &inputs),
+        b"exact comment",
+        b"[]",
+    );
+    let decoded_before = io_observer::history_decode_count();
+    let (result, trace) = io_observer::observe(|| {
+        execute_comment(
+            &mut bundle,
+            &core,
+            &inputs,
+            &request,
+            b"exact comment",
+            b"[]",
+        )
+    });
+    assert!(matches!(result, ReceiptLookup::Committed(_)));
+    assert_eq!(
+        io_observer::history_decode_count(),
+        decoded_before,
+        "unchanged history was decoded again"
+    );
+    let start = trace
+        .events
+        .iter()
+        .position(|e| e.operation == "bundle_B0")
+        .unwrap();
+    let end = trace
+        .events
+        .iter()
+        .position(|e| e.operation == "bundle_B5")
+        .unwrap();
+    assert_eq!(
+        trace.events[start..end]
+            .iter()
+            .filter(|e| e.operation == "directory_sync" && e.path == Path::new("studio/objects"))
+            .count(),
+        1,
+        "object directory syncs were not coalesced"
+    );
+    assert!(
+        !trace.events[start..end]
+            .iter()
+            .any(|e| e.operation == "object_unlink"),
+        "GC still runs during acknowledged publication"
+    );
 }

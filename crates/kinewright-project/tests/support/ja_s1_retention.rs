@@ -172,7 +172,10 @@ fn physical_payload(path: &Path) -> u64 {
 
 #[test]
 fn recovery_inventory_retains_two_predecessors_and_one_staging_slot() {
-    let temp = TempDirectory::new("ja-s1-retention");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-retention",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let mut previous = vec![];
@@ -218,6 +221,8 @@ fn recovery_inventory_retains_two_predecessors_and_one_staging_slot() {
     bundle
         .save(&restored.export_history().unwrap(), &inputs)
         .unwrap();
+    // Retirement inventory/GC now finish after acknowledgment rather than delaying it.
+    bundle.collect_after_ack().unwrap();
     assert!(inventory(&path).staging.is_none());
     assert!(!bundle.store().usage().unwrap().damaged_accounting);
 }
@@ -245,7 +250,10 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
         "gc_before_unlink",
         "gc_after_unlink",
     ] {
-        let temp = TempDirectory::new("ja-s1-inventory-crash");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-inventory-crash",
+        );
         let path = temp.path("edit.kinewright");
         let (core, mut bundle, inputs) = setup(&path);
         for i in 0..4 {
@@ -290,7 +298,10 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
             physical_payload(&path)
         );
     }
-    let temp = TempDirectory::new("ja-s1-physical-stage-crash");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-physical-stage-crash",
+    );
     let path = temp.path("edit.kinewright");
     let signals = temp.path("signals");
     fs::create_dir(&signals).unwrap();
@@ -374,13 +385,16 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
         .save(&restored.export_history().unwrap(), &inputs)
         .unwrap();
     drop(sealed);
-    bundle.store_mut().unwrap().collect_unpublished().unwrap();
+    bundle.collect_after_ack().unwrap();
     assert!(!object_path(&path, &orphan_ref).exists());
 }
 
 #[test]
 fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
-    let temp = TempDirectory::new("ja-s1-floor-retention");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-floor-retention",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let first = request(&mut bundle, &core, &inputs, JournalCommand::Do(lock(false)));
@@ -459,7 +473,10 @@ fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
 
 #[test]
 fn metadata_commit_verifies_new_bytes_but_recovery_verifies_full_graph() {
-    let temp = TempDirectory::new("ja-s1-verification-work");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-verification-work",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let bytes = vec![71; 4 << 20];
@@ -519,7 +536,10 @@ fn store(temp: &TempDirectory, name: &str, limits: StorageLimits) -> ProjectStor
     reason = "one boundary/one-beyond matrix at production storage ingress"
 )]
 fn every_storage_cap_backpressures_without_data_loss() {
-    let temp = TempDirectory::new("ja-s1-all-caps");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-all-caps",
+    );
     combined_metadata_cap(&temp);
     // Boundary and one beyond at actual byte, count, graph and transient ingress.
     let mut limits = StorageLimits::default();

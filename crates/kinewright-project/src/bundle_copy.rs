@@ -154,6 +154,9 @@ fn destination(
             "destination inventory changed during claim".into(),
         ));
     }
+    target
+        .store
+        .with_namespace(|n| n.seal_destination_ancestors())?;
     target.store.begin_publication()?;
     drop(target.durable.take());
     target.store.restrict_copy_limits(limits)?;
@@ -389,6 +392,7 @@ impl ProjectBundle {
             root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();
             target.root = Some(root);
             target.branches = branches;
+            target.history_cache.clear();
             #[cfg(any(test, feature = "test-util"))]
             crate::test_hook("copy_before_publish");
             #[cfg(any(test, feature = "test-util"))]
@@ -456,6 +460,8 @@ impl SessionStore {
         inputs: &ObjectRef,
         limits: StorageLimits,
     ) -> Result<BundleCopy, BundleError> {
+        let bounded = crate::bundle_commit::bound_history(history, &limits)?;
+        let history = &bounded;
         history
             .encoded_bytes()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;

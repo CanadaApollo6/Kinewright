@@ -53,6 +53,7 @@ struct Ledger {
     pins: BTreeMap<String, u64>,
     inventory_dependencies: BTreeMap<String, Vec<ObjectRef>>,
     verified: BTreeSet<String>,
+    support_fields: BTreeMap<String, StorageReservation<BTreeSet<String>>>,
     committed: Vec<ObjectRef>,
     mirrors: Vec<(ObjectRef, PortablePath)>,
     can_collect: bool,
@@ -132,6 +133,7 @@ impl ProjectStore {
                     unclassified: BTreeMap::new(),
                     temporaries: vec![],
                     verified: BTreeSet::new(),
+                    support_fields: BTreeMap::new(),
                     committed: vec![],
                     mirrors: vec![],
                     can_collect,
@@ -815,6 +817,23 @@ impl Drop for StorePin {
     reason = "one authority retires known objects and owned temporary charges after durable publication"
 )]
 fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
+    inner
+        .namespace
+        .lock()
+        .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
+        .begin_object_batch()?;
+    let result = collect_objects(inner);
+    let barrier = inner
+        .namespace
+        .lock()
+        .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
+        .finish_object_batch();
+    barrier?;
+    result
+}
+
+#[allow(clippy::too_many_lines)]
+fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
     let victims = {
         let ledger = inner
             .ledger
@@ -868,6 +887,7 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
             .ledger
             .lock()
             .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        drop(ledger.support_fields.remove(&hash));
         let mut usage = inner
             .usage
             .lock()
@@ -901,6 +921,7 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
         ledger.objects.remove(&hash);
         ledger.pins.remove(&hash);
         ledger.verified.remove(&hash);
+
         ledger.metadata_sizes.remove(&hash);
         ledger.inventory_dependencies.remove(&hash);
         retired = retired
@@ -959,6 +980,53 @@ fn collect(inner: &StoreInner) -> Result<u64, BundleError> {
         retired = retired
             .checked_add(file.length)
             .ok_or(BundleError::Capacity("temporary retirement overflow"))?;
+    }
+    // The claim and verified committed closure exclude these generated names from every retained root.
+    let orphans = inner
+        .ledger
+        .lock()
+        .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+        .unclassified
+        .clone();
+    for (hash, length) in orphans {
+        let path = PortablePath::new(&Path::new("studio/objects").join(&hash))?;
+        inner
+            .namespace
+            .lock()
+            .map_err(|_| BundleError::Identity("namespace poisoned".into()))?
+            .unlink_owned(&path)?;
+        let mut ledger = inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        let mut usage = inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        usage.physical_bytes = usage
+            .physical_bytes
+            .checked_sub(length)
+            .ok_or(BundleError::Capacity("orphan physical underflow"))?;
+        usage.owned_bytes = usage
+            .owned_bytes
+            .checked_sub(length)
+            .ok_or(BundleError::Capacity("orphan owned underflow"))?;
+        usage.metadata_bytes = usage
+            .metadata_bytes
+            .checked_sub(length + 256)
+            .ok_or(BundleError::Capacity("orphan metadata underflow"))?;
+        usage.unclassified_bytes = usage
+            .unclassified_bytes
+            .checked_sub(length)
+            .ok_or(BundleError::Capacity("orphan bytes underflow"))?;
+        usage.objects = usage
+            .objects
+            .checked_sub(1)
+            .ok_or(BundleError::Capacity("orphan object underflow"))?;
+        ledger.unclassified.remove(&hash);
+        retired = retired
+            .checked_add(length)
+            .ok_or(BundleError::Capacity("orphan retirement overflow"))?;
     }
     Ok(retired)
 }
@@ -1286,6 +1354,10 @@ impl ProjectStore {
         &self,
         reference: &ObjectRef,
     ) -> Result<StorageReservation<T>, BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        if T::KIND == RecordKind::History {
+            crate::io_observer::note_history_decode();
+        }
         if reference.record_kind != T::KIND {
             return Err(BundleError::Corrupt("typed record kind mismatch".into()));
         }
@@ -1378,16 +1450,8 @@ pub(crate) fn preflight_record(bytes: &[u8], limits: &StorageLimits) -> Result<u
             if self.depth > self.limits.graph_depth.saturating_mul(4) {
                 return Err(D::Error::custom("JSON depth cap"));
             }
-            // Counts a conservative native variant slot at every node. Measurements are separate.
-            let node = std::mem::size_of::<kinewright_core::Operation>()
-                .max(std::mem::size_of::<kinewright_core::HistoryBatch>())
-                .max(128);
-            self.charge(
-                u64::try_from(node)
-                    .map_err(D::Error::custom)?
-                    .checked_mul(2)
-                    .ok_or_else(|| D::Error::custom("native slot overflow"))?,
-            )?;
+            // Format-defined slots, independent of Rust enum layout and target ABI.
+            self.charge(64)?;
             d.deserialize_any(self)
         }
     }
@@ -1628,7 +1692,7 @@ impl ProjectStore {
         state.edges = edges;
         state.objects = ledger.objects.len() as u64;
         drop(state);
-        store.account_residuals()?;
+        store.account_residuals(true)?;
         Ok(store)
     }
     pub(crate) fn selected_manifest(
@@ -1684,6 +1748,7 @@ impl ProjectStore {
         })
     }
     pub(crate) fn begin_publication(&mut self) -> Result<(), BundleError> {
+        self.with_namespace(crate::namespace::ProjectNamespace::begin_object_batch)?;
         self.inner
             .ledger
             .lock()
@@ -1835,6 +1900,18 @@ impl ProjectStore {
             ) {
                 continue;
             }
+            {
+                let ledger = self
+                    .inner
+                    .ledger
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+                if let Some(cached) = ledger.support_fields.get(&reference.sha256) {
+                    fields.extend(cached.iter().cloned());
+                    continue;
+                }
+            }
+            let mut object_fields = BTreeSet::new();
             if reference.byte_length > self.limits().control_bytes {
                 return Err(BundleError::Capacity("support record bytes"));
             }
@@ -1856,15 +1933,28 @@ impl ProjectStore {
             if reference.record_kind == RecordKind::RootCheckpoint {
                 let admission = crate::bundle::BundleWriteAdmission::from_bytes(None, bytes)?;
                 admission.require_supported()?;
-                fields.extend(admission.data.inventory.required_fields.iter().cloned());
+                object_fields.extend(admission.data.inventory.required_fields.iter().cloned());
             } else {
                 let _raw = crate::bundle_recovery::decode::<serde_json::Value>(
                     &bytes,
                     &self.inner.usage,
                     reference.record_kind,
-                    &mut fields,
+                    &mut object_fields,
                 )?;
             }
+            let cache_charge = object_fields.iter().try_fold(128_u64, |total, field| {
+                total
+                    .checked_add(field.len() as u64 + 64)
+                    .ok_or(BundleError::Capacity("support field cache"))
+            })?;
+            fields.extend(object_fields.iter().cloned());
+            let cached = self.reserve(0, cache_charge, 0, false)?.hold(object_fields);
+            self.inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                .support_fields
+                .insert(reference.sha256, cached);
         }
         Ok(fields)
     }
@@ -1929,6 +2019,7 @@ impl ProjectStore {
     }
 }
 impl ProjectStore {
+    #[cfg(target_os = "linux")]
     pub(crate) fn adopt_usage(
         &mut self,
         usage: Arc<Mutex<StorageUsage>>,
@@ -2142,12 +2233,16 @@ impl Drop for SourceCopyHold {
 }
 
 impl ProjectStore {
-    /// Unknown immutable files stay charged; only owner-prefixed staging files may retire.
+    /// Charge all residuals until the claimed, verified closure permits unreachable-name retirement.
     #[allow(
         clippy::case_sensitive_file_extension_comparisons,
         reason = "exact generated names define temporary ownership"
     )]
-    pub(crate) fn account_residuals(&mut self) -> Result<(), BundleError> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one owner classifies, accounts and retires residual physical files"
+    )]
+    pub(crate) fn account_residuals(&mut self, verified_graph: bool) -> Result<(), BundleError> {
         let files = self.with_namespace(|n| n.physical_files(self.inner.limits.objects))?;
         let mut ledger = self
             .inner
@@ -2202,6 +2297,32 @@ impl ProjectStore {
                 || metadata > self.inner.limits.metadata_bytes
                 || count > self.inner.limits.objects
             {
+                let generated_orphan = !file.root_parent
+                    && file.relative.parent() == Some(Path::new("studio/objects"))
+                    && name.len() == 64
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if verified_graph && generated_orphan {
+                    // The fully verified root/retained inventory excludes this generated name.
+                    // Retire it before an old crash's orphan can prevent reopening for cleanup.
+                    drop(usage);
+                    drop(ledger);
+                    self.with_namespace(|namespace| {
+                        namespace.unlink_owned(&PortablePath::new(&file.relative)?)
+                    })?;
+                    ledger = self
+                        .inner
+                        .ledger
+                        .lock()
+                        .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+                    usage = self
+                        .inner
+                        .usage
+                        .lock()
+                        .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+                    continue;
+                }
                 return Err(BundleError::Capacity("unclassified physical files"));
             }
             usage.physical_bytes = usage

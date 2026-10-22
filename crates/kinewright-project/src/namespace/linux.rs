@@ -160,7 +160,13 @@ pub(super) fn prepare_destination(path: &Path) -> Result<super::PreparedDestinat
         }
         let next = File::from(fs::openat(&parent, &component, DIR, Mode::empty())?);
         check_profile(&next)?;
-        sync_directory(&next, &actual)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("destination_child_sync", &actual)
+            .map_err(|_| BundleError::DurabilityUnknown)?;
+        sync_directory(&next, &actual).map_err(|_| BundleError::DurabilityUnknown)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("destination_parent_sync", actual.parent().unwrap())
+            .map_err(|_| BundleError::DurabilityUnknown)?;
         sync_directory(
             &parent,
             actual
@@ -187,6 +193,22 @@ pub(super) fn prepare_destination(path: &Path) -> Result<super::PreparedDestinat
     prepared.path = path;
     prepared.parent = parent;
     Ok(prepared)
+}
+pub(super) fn seal_destination_ancestors(namespace: &ProjectNamespace) -> Result<(), BundleError> {
+    namespace.verify()?;
+    let mut path = namespace.identity.resolved_root.parent();
+    while let Some(ancestor) = path {
+        let handle = pin_directory(ancestor)?;
+        if fs::fstat(&handle)?.st_dev != namespace.identity.parent_device {
+            break;
+        }
+        namespace
+            .pending_directory_syncs
+            .borrow_mut()
+            .insert(ancestor.to_path_buf(), (handle, true));
+        path = ancestor.parent();
+    }
+    finish_directory_barriers(namespace)
 }
 pub(super) fn matches_destination(
     namespace: &ProjectNamespace,
@@ -282,6 +304,9 @@ pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
         root_name,
         lock: None,
         directories: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+        pending_directory_syncs: std::cell::RefCell::default(),
+        dirty_object_directories: std::collections::BTreeMap::new(),
+        batch_objects: false,
         uncertain: false,
         read_only: true,
     };
@@ -321,6 +346,23 @@ pub(super) fn claim(namespace: &mut ProjectNamespace) -> Result<(), BundleError>
     }
     namespace.lock = Some(acquired.handle);
     namespace.read_only = false;
+    {
+        let directories = namespace.directories.borrow();
+        let base = namespace.identity.resolved_root.parent().unwrap();
+        for (path, child) in directories.iter() {
+            namespace
+                .pending_directory_syncs
+                .borrow_mut()
+                .insert(base.join(path), (child.try_clone()?, false));
+            let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+            let handle = parent.map_or(&namespace.parent, |p| &directories[p]);
+            namespace.pending_directory_syncs.borrow_mut().insert(
+                base.join(path.parent().unwrap()),
+                (handle.try_clone()?, true),
+            );
+        }
+    }
+
     if let Err(error) = namespace.verify() {
         if let Some(lock) = namespace.lock.take() {
             let _ = lock.release();
@@ -420,7 +462,13 @@ pub(super) fn replace_inner(
         sync_file(&file, "root_file_sync", &temp_path)?;
         note("bundle_B4", &namespace.identity.resolved_root);
         namespace.verify()?;
-        if refuse {
+        #[cfg(any(test, feature = "test-util"))]
+        let inject_io_error =
+            crate::io_observer::check_failure("root_rename_io", &namespace.identity.resolved_root)
+                .is_err();
+        #[cfg(not(any(test, feature = "test-util")))]
+        let inject_io_error = false;
+        let renamed = if refuse {
             #[cfg(any(test, feature = "test-util"))]
             {
                 let attempted = read_at(&namespace.parent, &name, bytes.len() as u64)?
@@ -432,19 +480,26 @@ pub(super) fn replace_inner(
                 );
                 note("rename_refusal_injected", &namespace.identity.resolved_root);
             }
-            return Err(BundleError::Io(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "S1 injected rename refusal",
-            )));
+            Err(rustix::io::Errno::ACCESS)
+        } else if inject_io_error {
+            Err(rustix::io::Errno::IO)
+        } else {
+            fs::renameat(
+                &namespace.parent,
+                &name,
+                &namespace.parent,
+                &namespace.root_name,
+            )
+        };
+        if let Err(error) = renamed {
+            note("root_rename_refused", &namespace.identity.resolved_root);
+            // Permission refusal is definite; other errors can leave publication ambiguous.
+            if error != rustix::io::Errno::ACCESS {
+                namespace.uncertain = true;
+                return Err(BundleError::DurabilityUnknown);
+            }
+            return Err(error.into());
         }
-        namespace.uncertain = true;
-        fs::renameat(
-            &namespace.parent,
-            &name,
-            &namespace.parent,
-            &namespace.root_name,
-        )
-        .map_err(|_| BundleError::DurabilityUnknown)?;
         note("root_rename", &namespace.identity.resolved_root);
         namespace.uncertain = true;
         #[cfg(any(test, feature = "test-util"))]
@@ -525,8 +580,18 @@ fn directory(
         }
         if created {
             note("directory_create", &observed);
-            sync_directory(&child, &observed)?;
-            sync_directory(&dir, observed.parent().unwrap())?;
+        }
+        if create {
+            // Keep both barriers even if the first sync fails. EXIST may be an interrupted mkdir.
+            namespace
+                .pending_directory_syncs
+                .borrow_mut()
+                .insert(observed.clone(), (child.try_clone()?, false));
+            namespace.pending_directory_syncs.borrow_mut().insert(
+                observed.parent().unwrap().to_path_buf(),
+                (dir.try_clone()?, true),
+            );
+            finish_directory_barriers(namespace)?;
         }
         namespace
             .directories
@@ -568,9 +633,7 @@ pub(super) fn publish(
         sync_file(&file, "object_file_sync", path)?;
         fs::renameat_with(&dir, &temp_name, &dir, name, RenameFlags::NOREPLACE)?;
         note("object_rename", path);
-        namespace.uncertain = true;
-        sync_directory(&dir, path.parent().unwrap()).map_err(|_| BundleError::DurabilityUnknown)?;
-        namespace.uncertain = false;
+        sync_object_directory(namespace, dir.try_clone()?, path.parent().unwrap())?;
         Ok(())
     })();
     if result.is_err()
@@ -658,9 +721,7 @@ pub(super) fn publish_with(
         namespace.verify()?;
         fs::renameat_with(&dir, &temp_name, &dir, name, RenameFlags::NOREPLACE)?;
         note("object_rename", path);
-        namespace.uncertain = true;
-        sync_directory(&dir, path.parent().unwrap()).map_err(|_| BundleError::DurabilityUnknown)?;
-        namespace.uncertain = false;
+        sync_object_directory(namespace, dir.try_clone()?, path.parent().unwrap())?;
         Ok(())
     })();
     if result.is_err()
@@ -707,6 +768,55 @@ pub(super) fn open_relative(
         Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(e) => Err(e.into()),
     }
+}
+
+pub(super) fn finish_directory_barriers(namespace: &ProjectNamespace) -> Result<(), BundleError> {
+    let mut pending = namespace.pending_directory_syncs.borrow_mut();
+    let mut paths: Vec<_> = pending.keys().cloned().collect();
+    paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for path in paths {
+        let (handle, parent) = &pending[&path];
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure(
+            if *parent {
+                "directory_parent_sync"
+            } else {
+                "directory_child_sync"
+            },
+            &path,
+        )
+        .map_err(|_| BundleError::DurabilityUnknown)?;
+        #[cfg(not(any(test, feature = "test-util")))]
+        let _ = parent;
+        sync_directory(handle, &path).map_err(|_| BundleError::DurabilityUnknown)?;
+        pending.remove(&path);
+    }
+    Ok(())
+}
+fn sync_object_directory(
+    namespace: &mut ProjectNamespace,
+    directory: File,
+    path: &Path,
+) -> Result<(), BundleError> {
+    namespace
+        .dirty_object_directories
+        .insert(path.to_path_buf(), directory);
+    if !namespace.batch_objects {
+        finish_object_batch(namespace)?;
+    }
+    Ok(())
+}
+pub(super) fn finish_object_batch(namespace: &mut ProjectNamespace) -> Result<(), BundleError> {
+    let paths: Vec<_> = namespace.dirty_object_directories.keys().cloned().collect();
+    for path in paths {
+        namespace.uncertain = true;
+        sync_directory(&namespace.dirty_object_directories[&path], &path)
+            .map_err(|_| BundleError::DurabilityUnknown)?;
+        namespace.dirty_object_directories.remove(&path);
+        namespace.uncertain = false;
+    }
+    namespace.batch_objects = false;
+    Ok(())
 }
 
 fn sync_directory(directory: &File, observed: &Path) -> Result<(), BundleError> {
@@ -784,9 +894,7 @@ pub(super) fn unlink_relative(
     }
     fs::unlinkat(&dir, name, AtFlags::empty())?;
     note("object_unlink", path);
-    namespace.uncertain = true;
-    sync_directory(&dir, path.parent().unwrap()).map_err(|_| BundleError::DurabilityUnknown)?;
-    namespace.uncertain = false;
+    sync_object_directory(namespace, dir.try_clone()?, path.parent().unwrap())?;
     Ok(())
 }
 
@@ -832,6 +940,9 @@ pub(super) fn create_session(
         root_name: "session.kinewright".into(),
         directories: std::cell::RefCell::default(),
         lock: None,
+        pending_directory_syncs: std::cell::RefCell::default(),
+        dirty_object_directories: std::collections::BTreeMap::new(),
+        batch_objects: false,
         uncertain: false,
         read_only: false,
         session: Some((base, name)),

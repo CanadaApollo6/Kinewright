@@ -25,7 +25,16 @@ impl TempDirectory {
     /// Panics if the operating system cannot create the directory.
     #[must_use]
     pub fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(unique_stem(label));
+        Self::new_in(&std::env::temp_dir(), label)
+    }
+
+    /// Create a fixture under a caller-selected filesystem (for durable storage tests).
+    ///
+    /// # Panics
+    /// Panics if the fixture directory cannot be created.
+    #[must_use]
+    pub fn new_in(parent: &Path, label: &str) -> Self {
+        let path = parent.join(unique_stem(label));
         fs::create_dir_all(&path).expect("temporary test directory should be created");
         Self(path)
     }

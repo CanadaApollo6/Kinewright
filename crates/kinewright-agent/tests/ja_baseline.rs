@@ -5,7 +5,10 @@ use std::{path::Path, process::Command};
 
 #[test]
 fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
-    let temp = TempDirectory::new("ja-native");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/history-loss.json");
     let mut hashes = Vec::new();
     let modes: &[&str] = if cfg!(target_os = "linux") {
@@ -83,7 +86,10 @@ fn native_fixture(name: &str, output: &Path, expected: i32) -> Value {
 #[test]
 #[cfg(target_os = "linux")]
 fn participants_hold_real_locks_and_reap_their_exact_children() {
-    let temp = TempDirectory::new("ja-processes");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-processes",
+    );
     let output = temp.path("out");
     native_fixture("participants-lock", &output, 0);
     let observation = |id| -> Value {
@@ -126,7 +132,10 @@ fn participants_hold_real_locks_and_reap_their_exact_children() {
 
 #[test]
 fn accepted_edit_reply_loss_and_original_retry_observe_two_undo_entries() {
-    let temp = TempDirectory::new("ja-retry");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-retry",
+    );
     let output = temp.path("out");
     let summary = native_fixture("reply-retry", &output, 1);
     assert!(
@@ -163,7 +172,10 @@ fn accepted_edit_reply_loss_and_original_retry_observe_two_undo_entries() {
 
 #[test]
 fn controller_failure_still_reaps_both_recorded_participants() {
-    let temp = TempDirectory::new("ja-cleanup-failure");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-cleanup-failure",
+    );
     let fixture = temp.path("fixture.json");
     let template =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/participants-lock.json");
@@ -200,7 +212,10 @@ fn controller_failure_still_reaps_both_recorded_participants() {
 #[test]
 #[cfg(unix)]
 fn native_deadline_interrupts_pending_confirmation_and_reaps_fixture() {
-    let temp = TempDirectory::new("ja-native-deadline");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native-deadline",
+    );
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja");
     for entry in std::fs::read_dir(&fixtures).unwrap() {
         let path = entry.unwrap().path();
@@ -288,7 +303,10 @@ fn native_app_bridge_retains_exercised_control_and_property_failures() {
         "build and supply the actual App test executable"
     );
     for class in ["control", "baseline_property"] {
-        let temp = TempDirectory::new("ja-native-app-failure");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-native-app-failure",
+        );
         let root = copied_fixtures(&temp);
         let file = root.join("app-coalesced-paint.json");
         let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -386,7 +404,10 @@ fn native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two() {
         std::env::var_os("JA_HARNESS_APP_TEST_BINARY").is_some(),
         "build and supply the actual App test executable"
     );
-    let temp = TempDirectory::new("ja-native-app-setup");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native-app-setup",
+    );
     let root = copied_fixtures(&temp);
     let file = root.join("app-coalesced-paint.json");
     let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -425,7 +446,10 @@ fn native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two() {
 fn native_app_bridge_rejects_abnormal_exit_after_completed_report() {
     assert!(std::env::var_os("JA_HARNESS_APP_TEST_BINARY").is_some());
     for inner_exit in [0, 1] {
-        let temp = TempDirectory::new("ja-native-app-abnormal");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-native-app-abnormal",
+        );
         let root = copied_fixtures(&temp);
         let file = root.join("app-coalesced-paint.json");
         if inner_exit == 1 {
@@ -497,7 +521,10 @@ fn native_app_bridge_rejects_abnormal_exit_after_completed_report() {
 
 #[test]
 fn native_source_identity_is_repository_wide_from_root_and_crate_cwd() {
-    let temp = TempDirectory::new("ja-native-source");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native-source",
+    );
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo = crate_root.parent().unwrap().parent().unwrap();
     let fixture = crate_root.join("tests/fixtures/ja/history-loss.json");
@@ -540,7 +567,10 @@ fn native_source_identity_is_repository_wide_from_root_and_crate_cwd() {
 #[test]
 #[cfg(target_os = "linux")]
 fn refused_participant_kill_records_the_graceful_exit_and_reap() {
-    let temp = TempDirectory::new("ja-refused-kill");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-refused-kill",
+    );
     let root = copied_fixtures(&temp);
     let file = root.join("participants-lock.json");
     let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -575,7 +605,10 @@ fn refused_participant_kill_records_the_graceful_exit_and_reap() {
 fn unexpected_controller_exit_reaps_a_recorded_stopped_worker_before_return() {
     use rustix::process::{Pid, Signal, kill_process};
     use std::time::{Duration, Instant};
-    let temp = TempDirectory::new("ja-unexpected-exit");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-unexpected-exit",
+    );
     let root = copied_fixtures(&temp);
     let file = root.join("recording-loopback.json");
     let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();

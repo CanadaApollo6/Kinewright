@@ -50,6 +50,8 @@ pub struct HistoryBatch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistorySnapshot {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub floor_offset: u64,
     pub baseline: Arc<Document>,
     pub document: Arc<Document>,
     pub batches: Vec<HistoryBatch>,
@@ -66,6 +68,13 @@ pub enum HistoryError {
     Disconnected,
 }
 
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip predicates borrow their field"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
 impl HistorySnapshot {
     /// Count encoded bytes without allocating another serialized copy.
     ///

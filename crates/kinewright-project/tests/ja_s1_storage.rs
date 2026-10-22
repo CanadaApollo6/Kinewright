@@ -13,7 +13,10 @@ use std::path::Path;
 #[test]
 fn namespace_remains_bound_after_alias_swap() {
     use std::os::unix::fs::symlink;
-    let temp = TempDirectory::new("ja-s1-namespace-alias");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-namespace-alias",
+    );
     let original = temp.path("original.kinewright");
     let other = temp.path("other.kinewright");
     let alias = temp.path("alias.kinewright");
@@ -54,7 +57,10 @@ fn namespace_remains_bound_after_alias_swap() {
 #[cfg(target_os = "linux")]
 #[test]
 fn namespace_release_preserves_replaced_lock() {
-    let temp = TempDirectory::new("ja-s1-replaced-lock");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-replaced-lock",
+    );
     let root = temp.path("edit.kinewright");
     let mut owner = ProjectNamespace::acquire(&root).unwrap();
     let lock = kinewright_project::lockfile_path_for_project(Some(&root)).unwrap();
@@ -70,7 +76,10 @@ fn namespace_release_preserves_replaced_lock() {
 #[cfg(target_os = "linux")]
 #[test]
 fn strict_replace_refusal_preserves_exact_root() {
-    let temp = TempDirectory::new("ja-s1-strict-refusal");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-strict-refusal",
+    );
     let root = temp.path("edit.kinewright");
     fs::write(&root, b"prior A").unwrap();
     let mut owner = ProjectNamespace::acquire(&root).unwrap();
@@ -78,7 +87,24 @@ fn strict_replace_refusal_preserves_exact_root() {
     assert_eq!(owner.read_root().unwrap().unwrap(), b"normal changed B");
     let attempt = b"independent attempted C\n";
     let (result, trace) = io_observer::observe(|| owner.replace_root_refusing_rename(attempt));
-    assert!(result.is_err());
+    assert!(
+        matches!(result, Err(kinewright_project::bundle::BundleError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied),
+        "the production rename refusal must be definitely unpublished"
+    );
+    assert!(
+        trace
+            .events
+            .iter()
+            .any(|event| event.operation == "root_rename_refused")
+    );
+    assert!(
+        !fs::read_dir(temp.root()).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".studio-")),
+        "definitely unpublished root temporary was not retired"
+    );
     let hook = trace
         .events
         .iter()
@@ -108,7 +134,10 @@ fn strict_replace_refusal_preserves_exact_root() {
 #[cfg(target_os = "linux")]
 #[test]
 fn new_ancestor_syncs_precede_root_publication() {
-    let temp = TempDirectory::new("ja-s1-ancestor-sync");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-ancestor-sync",
+    );
     let root = temp.path("edit.kinewright");
     let mut owner = ProjectNamespace::acquire(&root).unwrap();
     let ((), trace) = io_observer::observe(|| {
@@ -175,7 +204,10 @@ fn new_ancestor_syncs_precede_root_publication() {
 #[cfg(windows)]
 #[test]
 fn unsupported_profile_refuses_before_store_mutation() {
-    let temp = TempDirectory::new("ja-s1-windows-refusal");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-windows-refusal",
+    );
     let root = temp.path("new.kinewright");
     let (result, trace) = io_observer::observe(|| ProjectNamespace::acquire(&root));
     assert!(matches!(result, Err(BundleError::DurabilityUnsupported)));
@@ -191,7 +223,10 @@ fn unsupported_profile_refuses_before_store_mutation() {
 #[cfg(windows)]
 #[test]
 fn windows_unprovable_identity_refuses_before_claim_or_mutation() {
-    let temp = TempDirectory::new("ja-s1-windows-identity");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-windows-identity",
+    );
     let root = temp.path("existing.kinewright");
     fs::write(&root, b"exact existing bytes").unwrap();
     let (result, trace) = io_observer::observe(|| ProjectNamespace::acquire(&root));
@@ -208,7 +243,10 @@ fn windows_unprovable_identity_refuses_before_claim_or_mutation() {
 #[cfg(windows)]
 #[test]
 fn windows_ancestor_pins_deny_delete_and_reparse_components() {
-    let temp = TempDirectory::new("ja-s1-windows-parents");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-windows-parents",
+    );
     let parent = temp.path("parent");
     fs::create_dir(&parent).unwrap();
     let pins = ProjectNamespace::inspect_windows_parents(&parent.join("new.kinewright")).unwrap();
@@ -225,8 +263,8 @@ fn portable_owned_paths_refuse_nonportable_spellings() {
     use kinewright_project::namespace::PortablePath;
     use std::path::Path;
     for spelling in [
-        "", ".", "a/./b", "a//b", "a/../b", "../x", "/x", "a\\b", "a:b", "NUL.txt", "COM¹",
-        "LPT2.x", "space ", "dot.", "a?b",
+        "", ".", "a/./b", "a//b", "a/../b", "../x", "/x", "a:b", "NUL.txt", "COM¹", "LPT2.x",
+        "space ", "dot.", "a?b",
     ] {
         assert!(
             PortablePath::new(Path::new(spelling)).is_err(),
@@ -234,6 +272,21 @@ fn portable_owned_paths_refuse_nonportable_spellings() {
         );
     }
     assert!(PortablePath::new(Path::new("studio/objects/abcd")).is_ok());
+    #[cfg(windows)]
+    assert_eq!(
+        PortablePath::new(Path::new(r"a\b")).unwrap(),
+        PortablePath::new(Path::new("a/b")).unwrap()
+    );
+    #[cfg(not(windows))]
+    assert!(PortablePath::new(Path::new(r"a\b")).is_err());
+    let path = PortablePath::new(Path::new("a/b")).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<PortablePath>(&serde_json::to_vec(&path).unwrap()).unwrap(),
+        path
+    );
+    for bad in [r#"["a/b"]"#, r#"["a\\b"]"#] {
+        assert!(serde_json::from_str::<PortablePath>(bad).is_err());
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -281,7 +334,10 @@ mod bounded_store {
     }
     #[test]
     fn object_admission_checks_exact_bytes_and_dependency_closure() {
-        let temp = TempDirectory::new("ja-s1-object-ingress");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-object-ingress",
+        );
         let mut store = named(&temp.path("edit.kinewright"), StorageLimits::default());
         let bytes = b"actual independently specified camera bytes";
         let r = reference(bytes);
@@ -345,7 +401,10 @@ mod bounded_store {
     }
     #[test]
     fn reservation_counts_unique_blobs_and_simultaneous_copies() {
-        let temp = TempDirectory::new("ja-s1-reservations");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-reservations",
+        );
         let limits = StorageLimits {
             owned_bytes: 16,
             copy_overlap_bytes: 16,
@@ -381,7 +440,10 @@ mod bounded_store {
     }
     #[test]
     fn failed_seal_and_last_reader_retire_charges_once() {
-        let temp = TempDirectory::new("ja-s1-last-reader");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-last-reader",
+        );
         let mut session = SessionStore::create(&temp.path(""), StorageLimits::default()).unwrap();
         let root = session.store().resolved_root().unwrap();
         let directory = root.parent().unwrap().to_path_buf();
@@ -424,7 +486,10 @@ mod bounded_store {
     }
     #[test]
     fn storage_ingress_refuses_decoded_and_transient_overflow() {
-        let temp = TempDirectory::new("ja-s1-ingress-caps");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-ingress-caps",
+        );
         let limits = StorageLimits {
             decoded_record_bytes: 4096,
             branch_history_bytes: 4096,
@@ -468,7 +533,10 @@ mod bounded_store {
     }
     #[test]
     fn owned_input_tamper_invalidates_verified_identity() {
-        let temp = TempDirectory::new("ja-s1-owned-tamper");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-owned-tamper",
+        );
         let root = temp.path("edit.kinewright");
         let mut store = named(&root, StorageLimits::default());
         let bytes = b"owned font exact bytes A";
@@ -499,8 +567,9 @@ mod bounded_store {
 
 mod durable_bundle {
     use super::*;
+    use kinewright_core::Document;
     #[cfg(target_os = "linux")]
-    use kinewright_core::{Command, Core, Document, Operation, Track, TrackId, TrackKind};
+    use kinewright_core::{Command, Core, Operation, Track, TrackId, TrackKind};
     #[cfg(target_os = "linux")]
     use kinewright_project::bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle};
     use std::path::{Path, PathBuf};
@@ -585,7 +654,10 @@ mod durable_bundle {
     #[test]
     #[cfg(target_os = "linux")]
     fn document_only_paths_refuse_loaded_studio_bundle() {
-        let temp = TempDirectory::new("ja-s1-no-projection");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-no-projection",
+        );
         let path = temp.path("studio.kinewright");
         let (_core, bundle) = initial_bundle(&path);
         drop(bundle);
@@ -629,7 +701,10 @@ mod durable_bundle {
     #[test]
     #[cfg(target_os = "linux")]
     fn v3_support_inventory_refuses_hidden_and_future_kinds_without_writes() {
-        let temp = TempDirectory::new("ja-s1-raw-support");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-raw-support",
+        );
         let path = temp.path("studio.kinewright");
         let (_core, bundle) = initial_bundle(&path);
         drop(bundle);
@@ -696,7 +771,10 @@ mod durable_bundle {
     #[test]
     #[cfg(target_os = "linux")]
     fn corrupt_history_quarantines_without_rewriting_usable_versions() {
-        let temp = TempDirectory::new("ja-s1-quarantine");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-quarantine",
+        );
         let path = temp.path("studio.kinewright");
         let (_core, bundle) = initial_bundle(&path);
         drop(bundle);
@@ -750,7 +828,7 @@ mod durable_bundle {
         );
     }
     #[derive(Clone)]
-    struct CrashFs {
+    pub(super) struct CrashFs {
         root: PathBuf,
         assets: PathBuf,
         next: u64,
@@ -764,7 +842,7 @@ mod durable_bundle {
         root_stage: Option<PathBuf>,
     }
     impl CrashFs {
-        fn new(root: &Path, original: &[u8]) -> Self {
+        pub(super) fn new(root: &Path, original: &[u8]) -> Self {
             let parent = root.parent().unwrap().to_path_buf();
             Self {
                 root: root.to_path_buf(),
@@ -790,7 +868,7 @@ mod durable_bundle {
                 self.assets.join(path)
             }
         }
-        fn apply(&mut self, event: &kinewright_project::io_observer::IoObservation) {
+        pub(super) fn apply(&mut self, event: &kinewright_project::io_observer::IoObservation) {
             let path = self.path(&event.path);
             match event.operation {
                 "directory_create" => {
@@ -855,7 +933,7 @@ mod durable_bundle {
                 _ => {}
             }
         }
-        fn read<'a>(
+        pub(super) fn read<'a>(
             &self,
             path: &Path,
             bytes: &'a std::collections::BTreeMap<String, Vec<u8>>,
@@ -933,7 +1011,10 @@ mod durable_bundle {
             bundle_records::{ObjectRef, RecordKind},
             store::RecoveryInventory,
         };
-        let temp = TempDirectory::new("ja-s1-retirement-model");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-retirement-model",
+        );
         let path = temp.path("edit.kinewright");
         let (core, mut bundle) = initial_bundle(&path);
         let original = fs::read(&path).unwrap();
@@ -969,11 +1050,15 @@ mod durable_bundle {
         let inputs = bundle.root().unwrap().input_manifest_ref.clone();
         for iteration in 0..6 {
             let old = fs::read(&path).unwrap();
-            let journal = path
-                .with_extension("kinewright-assets")
-                .join("studio/recovery/inventory");
-            let mut staged: RecoveryInventory =
-                serde_json::from_slice(&fs::read(journal).unwrap()).unwrap();
+            let committed = bundle
+                .store()
+                .read_record::<kinewright_project::store::StoreManifest>(
+                    &bundle.root().unwrap().store_manifest_ref,
+                )
+                .unwrap();
+            let mut staged = committed.recovery.clone();
+            let settled = serde_json::to_vec(&staged).unwrap();
+            bytes.insert(kinewright_media::sha256_bytes(&settled), settled);
             staged.staging = Some(ObjectRef {
                 sha256: kinewright_media::sha256_bytes(&old),
                 byte_length: old.len() as u64,
@@ -1028,7 +1113,7 @@ mod durable_bundle {
             let journal = model.assets.join("studio/recovery/inventory");
             let encoded = model.read(&journal, &bytes).unwrap();
             let inventory: RecoveryInventory = serde_json::from_slice(encoded).unwrap();
-            if event.operation == "bundle_B5" {
+            if matches!(event.operation, "bundle_B5" | "object_unlink") {
                 let root: serde_json::Value =
                     serde_json::from_slice(model.read(&model.root, &bytes).unwrap()).unwrap();
                 let manifest_hash = root["studio"]["store_manifest_ref"]["sha256"]
@@ -1043,11 +1128,28 @@ mod durable_bundle {
                         .unwrap(),
                 )
                 .unwrap();
-                assert_eq!(
-                    serde_json::to_value(&inventory).unwrap(),
-                    manifest["recovery"],
-                    "acknowledged inventory was not durably replaced"
-                );
+                if event.operation == "object_unlink" {
+                    assert_eq!(
+                        serde_json::to_value(&inventory).unwrap(),
+                        manifest["recovery"],
+                        "collection preceded reconciled retirement inventory"
+                    );
+                } else {
+                    let selected: RecoveryInventory =
+                        serde_json::from_value(manifest["recovery"].clone()).unwrap();
+                    for reference in selected
+                        .predecessors
+                        .iter()
+                        .chain(selected.pre_migration.iter())
+                    {
+                        assert!(
+                            inventory.predecessors.contains(reference)
+                                || inventory.staging.as_ref() == Some(reference)
+                                || inventory.pre_migration.as_ref() == Some(reference),
+                            "B3 inventory lost the acknowledged recovery union"
+                        );
+                    }
+                }
             }
             for reference in inventory
                 .predecessors
@@ -1089,7 +1191,10 @@ mod durable_bundle {
             bundle_records::{ObjectRef, RecordKind},
             owned_inputs::{OwnedInputEntry, OwnedInputManifest},
         };
-        let temp = TempDirectory::new("ja-s1-crash-model");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-crash-model",
+        );
         let path = temp.path("studio.kinewright");
         let original = include_bytes!(
             "../../kinewright-agent/tests/fixtures/ja/s1-migration-input.kinewright"
@@ -1203,7 +1308,10 @@ mod durable_bundle {
     ) {
         let frozen = include_bytes!("../../kinewright-agent/tests/fixtures/ja/s1-crash-model.json");
         let record: serde_json::Value = serde_json::from_slice(frozen).unwrap();
-        let temp = TempDirectory::new("ja-s1-portable-model");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-portable-model",
+        );
         let events = record["events"]
             .as_array()
             .unwrap()
@@ -1409,7 +1517,10 @@ mod durable_bundle {
             "root_rename",
             "bundle_B5",
         ] {
-            let temp = TempDirectory::new("ja-s1-owned-process-crash");
+            let temp = TempDirectory::new_in(
+                std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+                "ja-s1-owned-process-crash",
+            );
             let path = temp.path("studio.kinewright");
             let signals = temp.path("signals");
             fs::create_dir(&signals).unwrap();
@@ -1505,7 +1616,10 @@ mod durable_bundle {
     #[test]
     #[cfg(target_os = "linux")]
     fn migration_keeps_exact_backup_and_is_idempotent() {
-        let temp = TempDirectory::new("ja-s1-migration");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-migration",
+        );
         let path = temp.path("edit.kinewright");
         let bytes=b"{\"tracks\":[],\"media_pool\":[],\"fps\":{\"numerator\":30,\"denominator\":1},\"duration\":0,\"resolution\":[1920,1080]}";
         // The source deliberately has independent compact whitespace and omitted default fields.
@@ -1561,7 +1675,10 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
     let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../kinewright-agent/tests/fixtures/ja");
     for name in ["history-loss", "reply-retry"] {
-        let temp = TempDirectory::new("ja-s1-windows-headless-refusal");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-s1-windows-headless-refusal",
+        );
         let original = fs::read(fixtures.join(format!("{name}.json"))).unwrap();
         let fixture: serde_json::Value = serde_json::from_slice(&original).unwrap();
         let action = fixture["actions"]
@@ -1600,7 +1717,8 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
             "the unchanged edit fixture reached Core"
         );
         let path = temp.path("valid-new-root.kinewright");
-        fs::write(temp.path("occupied-sidecar"), b"unchanged sidecar bytes").unwrap();
+        let sidecar = kinewright_project::sidecar_path_for_project(Some(&path)).unwrap();
+        fs::write(&sidecar, b"unchanged sidecar bytes").unwrap();
         let (result, trace) = io_observer::observe(|| {
             save_headless_bundle(&path, BundleWriteAdmission::new_document(), &frozen, None)
         });
@@ -1608,10 +1726,7 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
         assert!(trace.events.is_empty());
         assert!(!path.exists());
         assert_eq!(fs::read_dir(temp.root()).unwrap().count(), 1);
-        assert_eq!(
-            fs::read(temp.path("occupied-sidecar")).unwrap(),
-            b"unchanged sidecar bytes"
-        );
+        assert_eq!(fs::read(&sidecar).unwrap(), b"unchanged sidecar bytes");
         assert_eq!(core.export_history().unwrap(), frozen);
         assert_eq!(
             fs::read(fixtures.join(format!("{name}.json"))).unwrap(),
@@ -1620,6 +1735,9 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s1_fix_r1.rs"]
+mod final_head;
 #[cfg(target_os = "linux")]
 #[path = "support/ja_s1_retention.rs"]
 mod retention;

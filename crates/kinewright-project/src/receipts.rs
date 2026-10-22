@@ -282,7 +282,20 @@ impl crate::store::record_sealed::Sealed for BTreeMap<IssuerId, IssuerState> {}
 impl BundleRecord for BTreeMap<IssuerId, IssuerState> {
     const KIND: RecordKind = RecordKind::IssuerState;
     fn validate(&self, limits: &StorageLimits) -> Result<(), BundleError> {
-        if self.len() as u64 > limits.issuers {
+        if self
+            .values()
+            .filter(|state| {
+                !state.retired
+                    || state.reconciled_high_water.checked_add(1) != Some(state.next_sequence)
+            })
+            .count() as u64
+            > limits.issuers
+            || self.len() as u64
+                > limits
+                    .issuers
+                    .checked_add(limits.receipts)
+                    .ok_or(BundleError::Capacity("issuer index overflow"))?
+        {
             return Err(BundleError::Capacity("issuer entries"));
         }
         for (id, state) in self {
@@ -306,7 +319,17 @@ impl ProjectBundle {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
-        if first_sequence == 0 || self.issuers.len() as u64 >= self.store.limits().issuers {
+        if first_sequence == 0
+            || self
+                .issuers
+                .values()
+                .filter(|state| {
+                    !state.retired
+                        || state.reconciled_high_water.checked_add(1) != Some(state.next_sequence)
+                })
+                .count() as u64
+                >= self.store.limits().issuers
+        {
             return Err(BundleError::Capacity("issuer entries"));
         }
         let id = IssuerId::fresh()?;
@@ -366,7 +389,17 @@ impl ProjectBundle {
                 let ledger = self.store.read_record::<ReceiptLedger>(index)?;
                 let result = ledger.lookup(&envelope.id, &digest);
                 if result != ReceiptLookup::Absent {
-                    return Ok(result);
+                    return Ok(match result {
+                        ReceiptLookup::Committed(receipt)
+                            if self
+                                .issuers
+                                .get(&envelope.id.issuer)
+                                .is_none_or(|state| state.retired) =>
+                        {
+                            ReceiptLookup::Retired(receipt)
+                        }
+                        other => other,
+                    });
                 }
             }
         }
@@ -463,6 +496,15 @@ impl ProjectBundle {
         self.receipts.detailed = kept;
         if forget {
             self.receipts.retired.retain(|r| r.id.issuer != *id);
+        }
+        if !self
+            .receipts
+            .detailed
+            .iter()
+            .chain(&self.receipts.retired)
+            .any(|r| r.id.issuer == *id)
+        {
+            self.issuers.remove(id);
         }
         if let Err(error) = self.save(
             &core

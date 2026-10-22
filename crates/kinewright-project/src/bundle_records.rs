@@ -200,7 +200,7 @@ pub struct HistoryFloorCheckpoint {
     pub preceding_checkpoint_generation: u64,
     pub preceding_floor_generation: u64,
     pub floor_generation: u64,
-    pub command_cut: CommandId,
+    pub command_cut: Option<CommandId>,
     pub old_baseline_ref: ObjectRef,
     pub new_baseline_ref: ObjectRef,
     pub checkpoint_ref: ObjectRef,

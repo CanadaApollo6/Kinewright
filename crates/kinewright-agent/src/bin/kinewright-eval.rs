@@ -5360,7 +5360,6 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
     fn rerender_refuses_v3_before_projection_or_output() {
         let temp = kinewright_media::test_support::TempDirectory::new("ja-s1-eval-v3");
@@ -5379,7 +5378,17 @@ mod tests {
         assert!(error.to_string().contains("bundle-aware"));
         assert!(!output.exists());
         assert_eq!(fs::read(&source).unwrap(), bytes);
-        // An admitted legacy envelope reaches the actual renderer and report writer.
+    }
+
+    #[test]
+    fn rerender_admitted_legacy_reaches_renderer_and_report_writer() {
+        let temp = kinewright_media::test_support::TempDirectory::new("ja-s1-eval-legacy");
+        let source = temp.path("legacy.kinewright");
+        let output = temp.path("output");
+        let options = Options {
+            artifact_directory: Some(output.clone()),
+            ..Options::defaults()
+        };
         let legacy = serde_json::to_vec(&Document::default()).unwrap();
         check_saved_document_format(&legacy).unwrap();
         fs::write(&source, legacy).unwrap();

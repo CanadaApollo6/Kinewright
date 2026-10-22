@@ -195,7 +195,7 @@ pub struct Core {
 impl Core {
     /// Atomically capture the accepted stream and exact undo/redo/gesture state.
     /// # Errors
-    /// Returns capacity or actor-disconnection errors.
+    /// Returns an actor-disconnection error. The persistence owner bounds the retained cut.
     pub fn export_history(&self) -> Result<HistorySnapshot, HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
@@ -350,6 +350,7 @@ struct HistoryEntry {
 }
 
 struct CoreState {
+    floor_offset: u64,
     baseline: Arc<Document>,
     batches: Vec<HistoryBatch>,
     identity_effects: Vec<OperationIdentityEffect>,
@@ -364,6 +365,7 @@ impl CoreState {
     fn new(document: Document, revision: TimelineRevision) -> Self {
         let document = Arc::new(document);
         Self {
+            floor_offset: 0,
             baseline: Arc::clone(&document),
             batches: Vec::new(),
             identity_effects: Vec::new(),
@@ -499,6 +501,7 @@ impl CoreState {
             coalesce_key: e.coalesce_key.clone(),
         };
         HistorySnapshot {
+            floor_offset: self.floor_offset,
             baseline: Arc::clone(&self.baseline),
             document: Arc::clone(&self.document),
             batches: self.batches.clone(),
@@ -510,7 +513,6 @@ impl CoreState {
     }
 
     fn restore(snapshot: &HistorySnapshot) -> Result<Self, HistoryError> {
-        snapshot.encoded_bytes()?;
         snapshot
             .baseline
             .validate()
@@ -524,6 +526,7 @@ impl CoreState {
                 return Err(HistoryError::Corrupt);
             }
         }
+        candidate.floor_offset = snapshot.floor_offset;
         if candidate.history() != *snapshot {
             return Err(HistoryError::Corrupt);
         }
@@ -540,13 +543,65 @@ impl CoreState {
     }
 }
 
+pub(crate) fn floor_history(
+    before: &HistorySnapshot,
+    discard: usize,
+) -> Result<HistorySnapshot, HistoryError> {
+    if discard == 0 || discard > before.batches.len() {
+        return Err(HistoryError::Corrupt);
+    }
+    CoreState::restore(before)?;
+    let mut prefix = CoreState::new((*before.baseline).clone(), TimelineRevision(0));
+    for batch in &before.batches[..discard] {
+        if !matches!(
+            execute_command(&mut prefix, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    let dropped = prefix.undo.len();
+    if !prefix.redo.is_empty()
+        || dropped > before.cursor.undo.len()
+        || (dropped == before.cursor.undo.len()
+            && before
+                .cursor
+                .undo
+                .last()
+                .is_some_and(|entry| entry.coalesce_key.is_some()))
+    {
+        return Err(HistoryError::Corrupt);
+    }
+    let mut suffix = CoreState::new((*prefix.document).clone(), TimelineRevision(0));
+    for batch in &before.batches[discard..] {
+        if !matches!(
+            execute_command(&mut suffix, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    let mut after = suffix.history();
+    if after.document != before.document
+        || after.cursor.undo != before.cursor.undo[dropped..]
+        || after.cursor.redo != before.cursor.redo
+    {
+        return Err(HistoryError::Corrupt);
+    }
+    after.floor_offset = before
+        .floor_offset
+        .checked_add(discard as u64)
+        .ok_or(HistoryError::Capacity)?;
+    Ok(after)
+}
+
 fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
             CoreMessage::ExportHistory(reply) => {
-                let history = state.history();
-                let _ = reply.send(history.encoded_bytes().map(|_| history));
+                // Publication chooses and records any floor before the owner installs it.
+                let _ = reply.send(Ok(state.history()));
             }
             CoreMessage::RestoreHistory(history, expected, reply) => {
                 let admitted = if expected

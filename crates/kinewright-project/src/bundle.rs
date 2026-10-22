@@ -247,46 +247,76 @@ impl BundleWriteAdmission {
     pub fn read(path: &Path) -> Result<Self, BundleError> {
         let source = crate::canonical_project_identity(path)
             .map_err(|e| BundleError::Identity(e.to_string()))?;
-        let file = File::open(&source)?;
+        let mut file = File::open(&source)?;
         let limit = StorageLimits::default().control_bytes;
         let length = file.metadata()?.len();
-        if length > limit {
-            return Err(BundleError::Capacity("root envelope bytes"));
-        }
-        let bytes = crate::bundle_recovery::bounded_bytes(file, limit)?;
+        let read_limit = if length > limit {
+            let mut probe =
+                serde_json::Deserializer::from_reader(std::io::BufReader::new(&mut file));
+            if !legacy_envelope(&mut probe)? {
+                return Err(BundleError::Capacity("root envelope bytes"));
+            }
+            std::io::Seek::rewind(&mut file)?;
+            length
+        } else {
+            limit
+        };
+        let bytes = crate::bundle_recovery::bounded_bytes(file, read_limit)?;
         Self::from_bytes(Some(source), bytes)
     }
     pub(crate) fn from_bytes(source: Option<PathBuf>, bytes: Vec<u8>) -> Result<Self, BundleError> {
         Self::from_bytes_using(source, bytes, Arc::new(Mutex::new(StorageUsage::default())))
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one raw admission boundary preserves legacy behavior and applies Studio quotas"
+    )]
     pub(crate) fn from_bytes_using(
         source: Option<PathBuf>,
         bytes: Vec<u8>,
         usage: Arc<Mutex<StorageUsage>>,
     ) -> Result<Self, BundleError> {
+        let mut probe = serde_json::Deserializer::from_slice(&bytes);
+        let legacy = legacy_envelope(&mut probe)?;
         let limits = StorageLimits::default();
-        let encoded = StorageReservation::reserve(
-            &usage,
-            &limits,
-            0,
-            bytes.len() as u64,
-            0,
-            false,
-            u64::MAX,
-        )?;
-        let preflight = StorageReservation::reserve(
-            &usage,
-            &limits,
-            0,
-            limits.decoded_record_bytes,
-            0,
-            false,
-            u64::MAX,
-        )?;
-        let decoded_charge = crate::store::preflight_record(&bytes, &limits)?;
-        drop(preflight);
-        let value_charge =
-            StorageReservation::reserve(&usage, &limits, 0, decoded_charge, 0, false, u64::MAX)?;
+        let holds = if legacy {
+            // v1/v2 keep their pre-S1 size contract. Studio quotas apply only to Studio roots.
+            let mut scan_limits = limits.clone();
+            scan_limits.decoded_record_bytes = u64::MAX;
+            crate::store::preflight_record(&bytes, &scan_limits)?;
+            vec![]
+        } else {
+            let encoded = StorageReservation::reserve(
+                &usage,
+                &limits,
+                0,
+                bytes.len() as u64,
+                0,
+                false,
+                u64::MAX,
+            )?;
+            let preflight = StorageReservation::reserve(
+                &usage,
+                &limits,
+                0,
+                limits.decoded_record_bytes,
+                0,
+                false,
+                u64::MAX,
+            )?;
+            let decoded_charge = crate::store::preflight_record(&bytes, &limits)?;
+            drop(preflight);
+            let value_charge = StorageReservation::reserve(
+                &usage,
+                &limits,
+                0,
+                decoded_charge,
+                0,
+                false,
+                u64::MAX,
+            )?;
+            vec![encoded, value_charge]
+        };
         let mut raw: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let version = kinewright_core::project_format_version(&bytes);
@@ -355,7 +385,7 @@ impl BundleWriteAdmission {
                 inventory,
                 refusal,
                 usage,
-                _holds: vec![encoded, value_charge],
+                _holds: holds,
             }),
         })
     }
@@ -416,6 +446,7 @@ impl BundleWriteAdmission {
             return Err(ProjectSaveError::UnsupportedBundle { notice });
         }
         if let Some(source) = self.source() {
+            refuse_activation_journal(source)?;
             let current = Self::read(source).map_err(|e| ProjectSaveError::Write(e.to_string()))?;
             if current.raw_bytes() != self.raw_bytes() {
                 return Err(ProjectSaveError::UnsupportedBundle {
@@ -423,6 +454,7 @@ impl BundleWriteAdmission {
                 });
             }
         }
+        refuse_activation_journal(destination)?;
         match std::fs::symlink_metadata(destination) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(ProjectSaveError::Write(error.to_string())),
@@ -450,6 +482,47 @@ impl BundleWriteAdmission {
         Ok(())
     }
 }
+fn legacy_envelope<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, BundleError> {
+    use serde::de::{IgnoredAny, MapAccess, Visitor};
+    struct Probe;
+    impl<'de> Visitor<'de> for Probe {
+        type Value = bool;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("project envelope")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            let mut version = 1_u32;
+            let mut studio = false;
+            while let Some(key) = map.next_key::<String>()? {
+                if key == "format_version" {
+                    version = map.next_value()?;
+                } else {
+                    studio |= key == "studio";
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(version <= 2 && !studio)
+        }
+    }
+    deserializer
+        .deserialize_map(Probe)
+        .map_err(|e| BundleError::Corrupt(e.to_string()))
+}
+
+fn refuse_activation_journal(path: &Path) -> Result<(), ProjectSaveError> {
+    let path = crate::canonical_project_identity(path)
+        .map_err(|e| ProjectSaveError::Write(e.to_string()))?;
+    if path
+        .with_extension("kinewright-assets")
+        .join("studio/recovery/inventory")
+        .exists()
+    {
+        return Err(ProjectSaveError::UnsupportedBundle {
+            notice: "Studio activation is pending; reconcile it before a legacy save".into(),
+        });
+    }
+    Ok(())
+}
 #[derive(Debug, Clone)]
 pub struct BundleSaveReport {
     pub path: PathBuf,
@@ -468,7 +541,7 @@ use crate::{
 use kinewright_core::{Core, HistorySnapshot};
 
 /// Fully verified, read-only graph. Claiming is a separate consuming operation.
-type LoadedBranch = (
+pub(crate) type LoadedBranch = (
     StorageReservation<BranchCheckpoint>,
     Arc<StorageReservation<HistorySnapshot>>,
     Arc<StorageReservation<LineageRecord>>,
@@ -534,6 +607,11 @@ impl LoadedBundle {
             &self.verified,
             Arc::clone(&self.admission.data.usage),
         )?;
+        let history_cache = self
+            .branches
+            .iter()
+            .map(|(id, branch)| (id.clone(), Arc::clone(&branch.1)))
+            .collect();
         let branches = self
             .branches
             .into_iter()
@@ -547,6 +625,7 @@ impl LoadedBundle {
             manual_branch_id: root.manual_branch_id.clone(),
             generation: root.generation,
             branches,
+            history_cache,
             root: Some(root),
             admission: self.admission,
             inventory: self.inventory,
@@ -580,6 +659,7 @@ pub struct ProjectBundle {
     pub(crate) manual_branch_id: BranchId,
     pub(crate) generation: u64,
     pub(crate) branches: BTreeMap<BranchId, BranchCheckpoint>,
+    pub(crate) history_cache: BTreeMap<BranchId, Arc<StorageReservation<HistorySnapshot>>>,
     pub(crate) root: Option<StudioRoot>,
     pub(crate) admission: BundleWriteAdmission,
     pub(crate) inventory: SupportInventory,
@@ -633,10 +713,21 @@ impl ProjectBundle {
         }
         #[cfg(not(target_os = "linux"))]
         {
+            drop(admission);
             let _ = ProjectNamespace::acquire(path)?;
-            return Err(BundleError::DurabilityUnsupported);
+            Err(BundleError::DurabilityUnsupported)
         }
         #[cfg(target_os = "linux")]
+        Self::activate_linux(path, admission, prepared)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[allow(clippy::too_many_lines)]
+    fn activate_linux(
+        path: &Path,
+        admission: BundleWriteAdmission,
+        prepared: Option<&crate::namespace::PreparedDestination>,
+    ) -> Result<Self, BundleError> {
         {
             let mut namespace = ProjectNamespace::inspect(path)?;
             if let Some(prepared) = prepared {
@@ -708,7 +799,7 @@ impl ProjectBundle {
             recovery.namespace_root_file_name = Some(root_name);
             let mut store = ProjectStore::new(namespace, Some(project_id.clone()), None, limits)?;
             store.adopt_usage(Arc::clone(&admission.data.usage))?;
-            store.account_residuals()?;
+            store.account_residuals(false)?;
             let mut durable = None;
             if let Some(original) = original {
                 let reference = ObjectRef {
@@ -740,6 +831,7 @@ impl ProjectBundle {
                 manual_branch_id,
                 generation: 0,
                 branches: BTreeMap::new(),
+                history_cache: BTreeMap::new(),
                 root: None,
                 admission,
                 inventory: SupportInventory::default(),
@@ -891,6 +983,11 @@ impl ProjectBundle {
             .as_ref()
             .map_or_else(BTreeMap::new, |v| (**v).clone());
         self.evidence = loaded.manifest.durable_pins.clone();
+        self.history_cache = loaded
+            .branches
+            .iter()
+            .map(|(id, branch)| (id.clone(), Arc::clone(&branch.1)))
+            .collect();
         self.branches = loaded
             .branches
             .iter()
@@ -928,6 +1025,21 @@ impl ProjectBundle {
         let document = self.store.read_record::<Document>(&branch.document_ref)?;
         let (bytes, charge) = crate::bundle_commit::serialize_root(&self.store, &document, root)?;
         Ok(charge.hold(bytes))
+    }
+    /// Retire the preceding save's unreachable objects after its acknowledgment.
+    /// This also runs on the next save/open, so interrupted maintenance is retried.
+    pub fn collect_after_ack(&mut self) -> Result<u64, BundleError> {
+        if self.unsettled {
+            return Err(BundleError::Unsettled);
+        }
+        self.store
+            .with_namespace(ProjectNamespace::finish_object_batch)?;
+        if self.root.is_none() {
+            return Ok(0);
+        }
+        self.store.publish_inventory(&self.recovery)?;
+        self.store.allow_collection()?;
+        self.store.collect_unpublished()
     }
     pub fn save(
         &mut self,

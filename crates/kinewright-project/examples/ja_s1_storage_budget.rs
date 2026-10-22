@@ -205,6 +205,8 @@ fn run() {
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
     bundle.save(&history, &input_ref).unwrap();
+    let decode_before_heap = heap();
+    let decode_before_history = bundle.store().usage().unwrap().live_history_bytes;
     let decoded_history = bundle
         .store()
         .read_record::<kinewright_core::HistorySnapshot>(
@@ -214,7 +216,16 @@ fn run() {
                 .history_ref,
         )
         .unwrap();
-    let history_decoded_reservation_bytes = bundle.store().usage().unwrap().live_history_bytes;
+    let history_decoded_reservation_bytes =
+        bundle.store().usage().unwrap().live_history_bytes - decode_before_history;
+    let decode_after_heap = heap();
+    #[cfg(feature = "storage-heap-profile")]
+    assert!(
+        decode_after_heap["current_bytes"].as_u64().unwrap()
+            - decode_before_heap["current_bytes"].as_u64().unwrap()
+            <= history_decoded_reservation_bytes,
+        "measured live decode exceeds its format-defined reservation"
+    );
     drop(decoded_history);
     drop(inputs);
     drop((sealed, duplicate));
@@ -228,6 +239,7 @@ fn run() {
     let metadata_heap = heap();
     let issuer = bundle.issue_issuer(&core, &input_ref, 1).unwrap();
     let mut comment_times = vec![];
+    let mut comment_syncs = vec![];
     for sequence in 1..=8 {
         let mut envelope = request(&mut bundle, &core, &issuer, sequence, JournalCommand::Undo);
         envelope.action = "comment".into();
@@ -238,12 +250,15 @@ fn run() {
         let b = reference(strokes, RecordKind::OwnedEvidence);
         envelope.comment_text = Some(a.clone());
         envelope.comment_strokes = Some(b.clone());
+        let sync_before = io_observer::sync_profile();
         assert!(matches!(
             timed(&mut comment_times, || bundle
                 .command(&envelope, &core, &input_ref, &[(&a, text), (&b, strokes)])
                 .unwrap()),
             ReceiptLookup::Committed(_)
         ));
+        let sync_after = io_observer::sync_profile();
+        comment_syncs.push(json!({"calls":sync_after.calls-sync_before.calls,"nanoseconds":sync_after.nanoseconds-sync_before.nanoseconds}));
     }
     // Floors use a separate small branch history so every ordered cut is fully exercised.
     let floor_path = root.join("floor.kinewright");
@@ -422,6 +437,6 @@ fn run() {
     drop(destination);
     println!(
         "{}",
-        json!({"schema":1,"profiled":cfg!(feature="storage-heap-profile"),"errors":0,"expected_failed_copies":failed,"baseline_rss":baseline_rss,"final_rss":rss(),"baseline_heap":baseline_heap,"history_heap":history_heap,"restore_heap":restore_heap,"metadata_heap":metadata_heap,"final_heap":heap(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"history":{"encoded_bytes":encoded,"decoded_reservation_bytes":history_decoded_reservation_bytes,"tracks":32,"accepted_commands":120,"undo_entries":history.cursor.undo.len(),"redo_entries":history.cursor.redo.len(),"restore":latencies(&restore_times)},"metadata":{"saves":latencies(&saves),"comments":latencies(&comment_times),"verified_bytes_delta":after_metadata.verified_bytes-before_metadata.verified_bytes},"duplicate":{"before":usage(&before_duplicate),"first":usage(&first),"second":usage(&second)},"floor":{"latencies":latencies(&floor_times),"usage":floor_usage},"source":source_usage,"source_physical":source_physical,"copied":copied_usage,"recovery":{"latencies":latencies(&recover_times),"usage":recovery_usage},"first_save":{"source_overlap":first_overlap,"destination":destination_first,"source_after_last_reader":usage(&monitor().unwrap())}})
+        json!({"schema":1,"profiled":cfg!(feature="storage-heap-profile"),"errors":0,"expected_failed_copies":failed,"baseline_rss":baseline_rss,"final_rss":rss(),"baseline_heap":baseline_heap,"history_heap":history_heap,"restore_heap":restore_heap,"metadata_heap":metadata_heap,"final_heap":heap(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.,"history":{"encoded_bytes":encoded,"decoded_reservation_bytes":history_decoded_reservation_bytes,"decode_before_heap":decode_before_heap,"decode_after_heap":decode_after_heap,"tracks":32,"accepted_commands":120,"undo_entries":history.cursor.undo.len(),"redo_entries":history.cursor.redo.len(),"restore":latencies(&restore_times)},"metadata":{"saves":latencies(&saves),"comments":latencies(&comment_times),"comment_syncs":comment_syncs,"verified_bytes_delta":after_metadata.verified_bytes-before_metadata.verified_bytes},"duplicate":{"before":usage(&before_duplicate),"first":usage(&first),"second":usage(&second)},"floor":{"latencies":latencies(&floor_times),"usage":floor_usage},"source":source_usage,"source_physical":source_physical,"copied":copied_usage,"recovery":{"latencies":latencies(&recover_times),"usage":recovery_usage},"first_save":{"source_overlap":first_overlap,"destination":destination_first,"source_after_last_reader":usage(&monitor().unwrap())}})
     );
 }

@@ -116,7 +116,10 @@ fn prepare_merge(
 
 #[test]
 fn reopened_exact_base_merges_once_with_fresh_runtime_revision() {
-    let temp = TempDirectory::new("ja-s1-durable-base");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-durable-base",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let original = core.export_history().unwrap();
@@ -182,7 +185,10 @@ fn reopened_exact_base_merges_once_with_fresh_runtime_revision() {
 
 #[test]
 fn equal_bytes_new_head_and_equal_counter_other_head_conflict() {
-    let temp = TempDirectory::new("ja-s1-head-conflict");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-head-conflict",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let mut branch = DurableTimelineBranch::fork(&mut bundle, &core, "durable").unwrap();
@@ -242,7 +248,10 @@ fn equal_bytes_new_head_and_equal_counter_other_head_conflict() {
 
 #[test]
 fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
-    let temp = TempDirectory::new("ja-s1-lineage");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-lineage",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let add = Operation::AddSolidClip {
@@ -332,7 +341,10 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
 
 #[test]
 fn merge_lost_reply_preserves_one_undo_entry() {
-    let temp = TempDirectory::new("ja-s1-merge-retry");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-merge-retry",
+    );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let mut branch = DurableTimelineBranch::fork(&mut bundle, &core, "durable").unwrap();

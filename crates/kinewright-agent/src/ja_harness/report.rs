@@ -407,7 +407,10 @@ mod tests {
     use super::*;
     #[test]
     fn exhausted_output_keeps_a_bounded_not_run_receipt() {
-        let temp = kinewright_media::test_support::TempDirectory::new("ja-quota");
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            "ja-quota",
+        );
         let mut report = Report::create(&temp.path("out"), Mode::Baseline).unwrap();
         report
             .set_quota(u64::try_from(CONTROL_BYTES * 2).unwrap())

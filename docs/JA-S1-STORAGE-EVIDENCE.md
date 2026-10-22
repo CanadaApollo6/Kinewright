@@ -1,177 +1,102 @@
 # JA-1 S1 storage evidence
 
-S1 provides Linux bundle storage and bounded synchronous ingress. The numerical
-limits remain provisional under L6. This document records bounded workloads; it
-does not certify a 20 GiB edit, native Windows durability, decoder-open stability,
-GUI fencing or full G15/G20 acceptance.
+The current measurements are the fix-round-1 results in
+[fix-r1.md](reports/ja1-s1/fix-r1.md#l6-paired-measurements) and
+[r1-storage-measurements.json](reports/ja1-s1/r1-storage-measurements.json).
+The original eight-commit measurements remain in
+[storage-measurements.json](reports/ja1-s1/storage-measurements.json) as historical
+evidence. Limits remain provisional; L6 stays open for the lead and its 250 ms
+comment target is unchanged.
 
-## Reproduce the measurements
+## Reproduce
 
-Build `ja_s1_storage_budget` in release mode with `test-util`, seal that executable,
-then build and seal it with `test-util,storage-heap-profile`. Run
-`nice -n 19 python3 -I scripts/ja-s1-measure-storage.py <new-absolute-evidence-dir>`
-after `source scripts/setup-ffmpeg.sh`. The runner expects the two executables at
-`target/ja-s1-measurements/sealed/{ordinary,profiled}`. It refuses to overwrite a
-run, checks binary hashes, asserts the workload outputs, and preserves separate
-JSON, stderr, source identities, CPU counters and compressed allocator profiles.
-Its children inherit the Python runner's low scheduling priority. Run cargo with
-the task's four-job, memory and serialization limits.
+Build and seal the original `0f4f88e` release example with per-comment SyncProfile
+counter snapshots only. Build the current example with `test-util`, then separately
+with `test-util,storage-heap-profile`. Seal them under
+`target/ja-s1-measurements/r1/{before,after,profiled}`. Source FFmpeg in the shell,
+then launch `setsid nohup nice -n 19 python3 -I scripts/ja-s1-fix-r1-measure.py
+<new-absolute-evidence-dir>`. The runner checks sealed binary hashes and runs five
+alternating ordinary before/after pairs, then five separate profiled workloads.
+Each child has a ten-minute timeout. No own build/test overlaps timing.
 
-The ordinary executable uses the system allocator. The profiled executable uses
-the safe global allocator wrapper from the pinned, dev-only `dhat = 0.3.3`.
-The [DHAT profiling API](https://docs.rs/dhat/0.3.3/dhat/) counts actual Rust
-allocator requests, current live allocations and the exact high-water allocation
-count. It does not count foreign allocators or substitute for process RSS. The
-workload uses opaque stored bytes and Core logic; it never opens a media decoder.
-Profiler timings are excluded from the latency results.
+The ordinary release binaries use the system allocator; the separate profiling
+binary uses pinned dev-only DHAT 0.3.3. DHAT measures actual Rust allocation
+requests and live/peak heap, without counting foreign allocators. Kernel RSS,
+physical payload bytes and conservative reservations are reported separately.
+The runner records CPU counters, start/end desktop CPU load, GPU clocks/pstate
+and five-second process CPU contamination samples without changing other work.
 
-Five ordinary/profiled pairs run serially and interleave. Each process starts with
-a new directory. JSON records the RSS baseline and kernel VmHWM, actual allocator
-baseline/history/restore/metadata/whole-run peaks, and conservative store reservation
-counters separately. Native sync-call durations identify the measured IO cost.
-CPU counters include the whole process and its Core actor threads. The shared
-desktop load is recorded before and after; no other project's processes are changed.
+## Fresh paired results
 
-## Workloads and output checks
+| Durable operation | Before median run p50 / p95 | After median run p50 / p95 |
+| --- | ---: | ---: |
+| Metadata save | 175.829 / 188.040 ms | 93.371 / 101.042 ms |
+| Comment | 238.948 / 262.516 ms | 131.511 / 164.736 ms |
 
-- History: 32 tracks, 96 edits followed by 24 undos; 72 undo and 24 redo entries.
-  Five new Core actors restore and compare the complete exported history.
-- Metadata: eight saves of the acknowledged history, then eight durable comments.
-  The 8 MiB retained evidence payload remains pinned. Verification counters confirm
-  the incremental saves do not hash that unchanged large payload.
-- Floors: six ordered floors through durable command receipts. Later saves retire
-  old automatic floor descriptors while the latest descriptor remains.
-- Duplicate bytes: admit the same 8 MiB payload twice and compare unique bytes and
-  object counts. Logical pins do not create a second physical charge.
-- Failure and copy: three injected copy-verification refusals preserve the exact
-  source root and remove the new destination store; a successful complete copy
-  retains the source overlap reservation until destination handoff.
-- Recovery: five full opens restore the exact history and hash the complete retained
-  payload. Incremental-save counters and recovery counters remain separate.
-- First save: copy a 2 MiB session input, keep the old reader after handoff, compare
-  its exact bytes, then verify zero source bytes after the final reader closes.
+Comment p95 ranges are 254.199–312.907 ms before and 161.305–165.546 ms after.
+Each run has eight samples; these are medians/ranges of per-run percentiles,
+not pooled percentiles. All five after runs meet 250 ms in this workload. This
+is a bounded shared-desktop measurement and does not close L6.
 
-The runner checks zero unexpected errors and exactly three intended copy refusals
-per process. On-disk file payload bytes equal the source owner's physical counter.
-Allocated file blocks and the separate lock-file payload are also reported; these
-are not a measurement of filesystem tree or directory overhead.
+Actual sync calls per comment are `[28,24,25,26,26,26,26,26]` before and
+`[20,16,16,16,16,16,16,16]` after, identical across all five pairs. Counts include
+file and directory syncs and next-save maintenance. During B0–B5, object-directory
+barriers coalesce to one per directory; collection executes after acknowledgment
+or before the next publication. The command witness separately asserts no GC or
+full history decode in unchanged-history publication. Required file/root/inventory
+barriers remain. Sync time and decode/counter evidence support the observed
+reduction without attributing unrelated desktop load to the change.
 
-## Measured results
+The unchanged history encodes to 216,346 bytes. Five separate decodes each retain
+640,687 actual Rust allocator bytes under the 3,676,919-byte stable encoded-format
+reservation. Each full-workload allocator peak is 16,259,646 bytes. Median ordinary
+kernel VmHWM is 37,154,816 bytes before and 36,057,088 bytes after; these are whole
+process values, not decode allowances. Profiled VmHWM is 40,865,792–41,185,280 bytes.
+No timing from a profiled run contributes to the latency table.
 
-The completed numerical table and source/binary identities are generated from the
-five-pair run in `docs/reports/ja1-s1/storage-measurements.json`. Per-run p50/p95
-values have eight save/comment samples, six floor samples, and five restore/open
-samples. Headline values are medians and ranges of those five per-run percentiles;
-they are not pooled percentiles and make no before/after speedup claim.
+All 15 processes complete with zero unexpected errors and 45 intended copy
+refusals. The workload restores complete undo/redo, retains an 8 MiB evidence
+payload, advances six ordered floors, copies acknowledged content, performs full
+recovery and first-saves a 2 MiB session input while an old reader remains valid.
+Source bytes become zero after the final reader closes. The raw output compares
+physical payload bytes with the owner's counter and verifies exact source roots
+on failed copies.
 
-| Durable operation | Median run p50 | Median run p95 | Range of run p95 |
-| --- | ---: | ---: | ---: |
-| Metadata save | 172.790 ms | 187.781 ms | 175.849–222.539 ms |
-| Comment | 250.304 ms | 265.138 ms | 253.866–276.095 ms |
-| Core history restore | 1.288 ms | 1.565 ms | 1.361–1.592 ms |
-| Full bundle open | 43.990 ms | 46.778 ms | 44.543–50.496 ms |
-| Ordered floor | 196.475 ms | 214.461 ms | 197.213–228.503 ms |
+After ordinary pair 1, 39 immutable objects, 119 edges and 41 files hold 8,854,750
+charged/on-disk payload bytes; allocated file bytes are 8,986,624 and the lock
+payload is zero. Peak physical bytes are 8,859,145. Eight incremental saves verify
+149,096 bytes without rereading the retained 8 MiB payload. First-save handoff
+holds 2,097,508 source bytes and 2,111,792 destination bytes, then releases all
+source bytes after the last reader. Delayed maintenance conservatively retains
+old/new recovery inventory at B5 until the next inventory/collection barrier.
 
-Five pairs completed with zero unexpected errors and 30 intended copy refusals
-(three in each of ten processes). The provisional ≤250 ms comment target is **not consistently met**:
-median run p95 is 265.138 ms, with 276.095 ms worst run p95.
-No cap was increased and L6 remains open.
+## Identity and scope
 
-The history encodes to 216,346 bytes and reserves
-25,000,775 decoded-history bytes. Actual
-Rust allocator live bytes after export are 637,345;
-its restore-phase global peak is 1,437,927 bytes.
-Whole-workload allocator peak has median 16,448,789 bytes
-(16,448,789–16,448,789). Ordinary-process RSS baseline has median
-5,734,400 bytes;
-median VmHWM is 37,019,648 bytes (36,839,424–37,122,048).
-Allocator peaks, RSS, cumulative allocations and conservative reservations are
-different measurements. The sampled workload fits the admitted limits; it does
-not physically fill default capacities or establish a whole-process allowance.
+Before binary SHA-256:
+`00faaaeee9005727ed7efaf7123538c7954750fb54c810fdfca1721c0aca5b38`.
+After binary SHA-256:
+`9d46c7b2c3a5199df322d9d75d619ef14d4139df054fe77a0dca46a8d893611e`.
+Profiled binary SHA-256:
+`93e4bd1bd13bdd9dc3c2fcff2bc4dd0de50f31f24b3afce74be48d947c4fb0ea`.
+The raw identity records the exact measured source manifest/diff and compiler.
+The later removal of a Linux-only attribute from an agent eval test does not
+change any benchmark dependency; the final binding records this test-only delta. Raw
+logs, outputs, load samples and DHAT profiles are compressed under the main
+checkout's `target/review/ja/s1-evidence/r1/timing/`, outside Git.
 
-In ordinary pair 1 the source has 33 immutable objects,
-95 content edges and 35 files including root/inventory.
-Charged and on-disk payload bytes both equal 8,797,259;
-stat reports 8,908,800 allocated file bytes,
-with a separate 0-byte OS-lock file.
-Source peak physical bytes are 8,859,118,
-peak reserved bytes 8,796,771, and peak decoded
-reservation bytes 142,944,697. These
-reservations include parser scratch and metadata; they are not actual heap.
-Eight incremental saves verify 5,324,982 bytes total,
-without rereading the retained 8 MiB payload. One full recovery verifies
-8,799,682 bytes in 35 calls.
+`realistic_history_saves_every_edit_and_advances_durable_floor` separately saves
+110 edits of a 2,000-track document under a lowered 8 MiB history cap. Every save
+preserves the current edit, the durable floor advances, latest undo survives,
+and full recovery validates all retained receipt checkpoints without retaining
+all decoded archives simultaneously. The default caps are unchanged. Other
+boundary tests use lowered ceilings rather than physically filling 20 GiB or
+10,000 objects. A sparse over-quota orphan tests logical file admission and
+safe retirement; it is not a physical 20 GiB workload.
 
-First-save pair 1 holds 2,097,509 source bytes
-and 2,111,793 destination bytes through handoff.
-The old reader remains valid; source bytes become exactly zero after the final
-reader closes. Complete per-run copy/duplicate/floor/recovery counters remain in
-the JSON report and compressed raw output.
-
-Native sync calls consume median 84.0% of ordinary elapsed time
-(range 83.8–84.5%). Process CPU is
-1.752–1.876 seconds per ordinary workload. The measured limiter
-is file/directory durability barriers in `namespace/linux.rs::sync_file` and
-`sync_directory`. Profiling is separate and slower. Shared-desktop variation is
-retained; this is not evidence of a performance improvement.
-
-Ordinary binary SHA-256: `c711cd179ec0e0593bf6ada2217166b8def6737d15888f602fa445efacfa1c31`.
-Profiled binary SHA-256: `dead4d58a472739fd285b7bdee03b819e039ca2ca13b036b88ada53fe49141f2`.
-Parent HEAD: `0b960f2a98e98bcbbde488e715d3fa978d0633ea` plus the exact modified-source
-manifest and diff hash in the raw measurement directory's `identity.json`.
-Compiler: `rustc 1.99.1 (58cf8f9c3 2026-10-13)`. The final report verifies measured source
-hashes; test/document edits are identified by the commit gate separately.
-
-## Ingress and recovery witnesses
-
-`tests/ja_s1_storage.rs` includes the five required retention/budget tests from
-`tests/support/ja_s1_retention.rs`. They use real temporary namespace/store owners:
-two verified predecessors and one B3 slot; inventory replacement and unlink faults;
-native death after root-file sync; old floor collection with independent branch,
-specialist-base and receipt pins; incremental and full byte verification; and
-boundary/one-beyond ingress with unchanged acknowledged root and Core state.
-
-Lowered ceilings exercise actual control bytes, manual pending admission, command
-bytes, encoded/live branch history, simultaneous history/decode/metadata reservations,
-specialist versions, object count, graph depth, comments, text, points, receipts,
-issuers, owned bytes and copy overlap. These are deterministic boundary tests, not
-physical fills of the default 20 GiB/10,000-object allowances. The synchronous S1
-owner admits one pending manual command; queued GUI/transport producers belong to S2.
-Voice capture/duration and the voice-specific retained-byte producer remain NOT RUN
-under S3; unsupported version/run/task/code producers remain refused. Generic byte
-storage does not certify a voice, decoder or provider result.
-
-The additive `s1-storage-budget.json` fixture runs a native participant against the
-production session owner. Its exact-byte and boundary controls support quota refusal,
-live-reader retention and one-time retirement properties. The old adapter lacks this
-capability and returns NOT RUN. No capability gap is counted as a baseline runtime red.
-
-On writer reopen, the same owner scans pinned managed directories and the exact
-root-specific temporary prefix. Unclassified immutable files remain charged against
-both owned and metadata allowances conservatively, with one physical charge. They
-are not blindly deleted. An expected typed admission verifies both incoming and disk
-bytes before reclassifying the charge. Owner-specific temporary files can retire
-only after safe durable publication; every unlink retains the existing sync barrier.
-Unprovable names, file types or ownership refuse rather than granting cleanup authority.
-
-Automatic predecessor traversal excludes historical automatic inventory edges.
-Independent content, branch, baseline, evidence, receipt and reader pins still retain
-their complete closures. GC also removes retired inventory-edge rows. Prospective
-graph-depth validation includes the incoming object before its file is published.
-
-## Remaining lanes
-
-Linux production storage, native participant/process-death tests and the portable
-crash model are distinct evidence classes. Windows Core compile checks do not prove
-project/native Windows durability. Full MSVC dependency checks, native Windows CI,
-full fast/slow CI, decoder certification and full G15/G20 remain separately NOT RUN.
-Kani's actual project-crate admission result is recorded with the commit report; no
-filesystem or decoder property follows from a bounded arithmetic proof.
-
-The actual project-crate Kani codegen admission probe passed in
-49.810 seconds with a sampled process-tree RSS peak of
-1,823,285,248 bytes (250 ms sampling). This is a compile
-boundary result; **zero proof harnesses ran**. The two §11 candidates remain
-optional and NOT RUN as proofs. No alternate arithmetic implementation or unproved
-harness/workflow was added. Deterministic ingress, crash and mutation witnesses
-supply the executed storage evidence.
+Linux syscall observations, dropped-write CrashFs, process-death witnesses and
+allocator measurements are distinct evidence classes. Native Windows execution,
+Windows durability, hosted fast/slow CI, L4 decoder-open certification, full
+G15/G20, S2 GUI attachment and physical power/device faults remain NOT RUN.
+Earlier Kani codegen evidence is historical and was not rerun here; zero new
+proof harnesses ran. No decoder-open or whole-process memory allowance follows
+from the measured opaque-byte/Core workloads.

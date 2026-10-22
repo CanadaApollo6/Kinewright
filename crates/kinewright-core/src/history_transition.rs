@@ -22,37 +22,7 @@ impl HistoryTransition {
     /// # Errors
     /// Refuses a corrupt cut, a prefix intersecting a retained gesture or a changed redo chain.
     pub fn floor(before: HistorySnapshot, discard_batches: usize) -> Result<Self, HistoryError> {
-        before.encoded_bytes()?;
-        if discard_batches == 0 || discard_batches > before.batches.len() {
-            return Err(HistoryError::Corrupt);
-        }
-        let original =
-            Core::spawn((*before.baseline).clone()).map_err(|_| HistoryError::Corrupt)?;
-        original.restore_history(before.clone())?;
-        drop(original);
-        let prefix = Core::spawn((*before.baseline).clone()).map_err(|_| HistoryError::Corrupt)?;
-        for batch in &before.batches[..discard_batches] {
-            replay(&prefix, batch.command.clone().into())?;
-        }
-        let prefix_history = prefix.export_history()?;
-        drop(prefix);
-        let prefix = prefix_history;
-        let discarded_entries = prefix.cursor.undo.len();
-        if !prefix.cursor.redo.is_empty() || discarded_entries > before.cursor.undo.len() {
-            return Err(HistoryError::Corrupt);
-        }
-        let candidate =
-            Core::spawn((*prefix.document).clone()).map_err(|_| HistoryError::Corrupt)?;
-        for batch in &before.batches[discard_batches..] {
-            replay(&candidate, batch.command.clone().into())?;
-        }
-        let after = candidate.export_history()?;
-        if after.document != before.document
-            || after.cursor.undo != before.cursor.undo[discarded_entries..]
-            || after.cursor.redo != before.cursor.redo
-        {
-            return Err(HistoryError::Corrupt);
-        }
+        let after = crate::actor::floor_history(&before, discard_batches)?;
         Ok(Self { before, after })
     }
 

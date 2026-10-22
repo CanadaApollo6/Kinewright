@@ -31,6 +31,10 @@ pub(crate) fn decode<T: DeserializeOwned>(
     kind: RecordKind,
     fields: &mut BTreeSet<String>,
 ) -> Result<StorageReservation<T>, BundleError> {
+    #[cfg(any(test, feature = "test-util"))]
+    if kind == RecordKind::History {
+        crate::io_observer::note_history_decode();
+    }
     let limits = StorageLimits::default();
     let scratch = StorageReservation::reserve(
         usage,
@@ -376,9 +380,7 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
     }
     let mut verified = BTreeSet::from([root.store_manifest_ref.sha256.clone()]);
     let mut checkpoints = BTreeMap::new();
-    let mut histories = BTreeMap::new();
-    let mut lineages = BTreeMap::new();
-    let mut documents = BTreeMap::new();
+
     let mut indexes = BTreeMap::new();
     let mut input_manifests = BTreeMap::new();
     for reference in &manifest.objects {
@@ -391,13 +393,10 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
         }
         match reference.record_kind {
             RecordKind::Document => {
-                documents.insert(reference.sha256.clone(), admit!(Document));
+                let _value = admit!(Document);
             }
             RecordKind::History => {
-                histories.insert(
-                    reference.sha256.clone(),
-                    std::sync::Arc::new(admit!(HistorySnapshot)),
-                );
+                let _value = admit!(HistorySnapshot);
             }
             RecordKind::BranchCheckpoint => {
                 checkpoints.insert(reference.sha256.clone(), admit!(BranchCheckpoint));
@@ -409,10 +408,7 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                 );
             }
             RecordKind::Lineage => {
-                lineages.insert(
-                    reference.sha256.clone(),
-                    std::sync::Arc::new(admit!(LineageRecord)),
-                );
+                let _value = admit!(LineageRecord);
             }
             RecordKind::SpecialistBase => {
                 let _value = admit!(crate::bundle_records::SpecialistBaseRecord);
@@ -480,29 +476,42 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
     let index = indexes
         .get(&root.branch_index_ref.sha256)
         .ok_or_else(|| BundleError::Corrupt("missing branch index".into()))?;
-    let mut branches = BTreeMap::new();
-    for (id, reference) in index.iter() {
-        let checkpoint = checkpoints
-            .remove(&reference.sha256)
-            .ok_or_else(|| BundleError::Corrupt("missing branch checkpoint".into()))?;
-        let history = histories
-            .get(&checkpoint.history_ref.sha256)
-            .cloned()
-            .ok_or_else(|| BundleError::Corrupt("missing/shared history".into()))?;
-        let lineage = lineages
-            .get(&checkpoint.lineage_ref.sha256)
-            .cloned()
-            .ok_or_else(|| BundleError::Corrupt("missing/shared lineage".into()))?;
-        let document = documents
-            .get(&checkpoint.document_ref.sha256)
-            .ok_or_else(|| BundleError::Corrupt("missing branch document".into()))?;
-        let baseline = documents
-            .get(&checkpoint.baseline_ref.sha256)
-            .ok_or_else(|| BundleError::Corrupt("missing branch baseline".into()))?;
+    // Verify every archived checkpoint, releasing its decode before moving to the next.
+    // Only current branch histories remain resident, with shared hashes charged once.
+    let mut histories: BTreeMap<String, Arc<StorageReservation<HistorySnapshot>>> = BTreeMap::new();
+    let mut lineages: BTreeMap<String, Arc<StorageReservation<LineageRecord>>> = BTreeMap::new();
+    let mut inspect_checkpoint = |id: &BranchId,
+                                  checkpoint: StorageReservation<BranchCheckpoint>,
+                                  active: bool|
+     -> Result<crate::bundle::LoadedBranch, BundleError> {
+        let history = if active && let Some(value) = histories.get(&checkpoint.history_ref.sha256) {
+            Arc::clone(value)
+        } else {
+            Arc::new(read_record::<HistorySnapshot>(
+                &namespace,
+                &checkpoint.history_ref,
+                usage,
+                &mut fields,
+            )?)
+        };
+        let lineage = if active && let Some(value) = lineages.get(&checkpoint.lineage_ref.sha256) {
+            Arc::clone(value)
+        } else {
+            Arc::new(read_record::<LineageRecord>(
+                &namespace,
+                &checkpoint.lineage_ref,
+                usage,
+                &mut fields,
+            )?)
+        };
+        let document =
+            read_record::<Document>(&namespace, &checkpoint.document_ref, usage, &mut fields)?;
+        let baseline =
+            read_record::<Document>(&namespace, &checkpoint.baseline_ref, usage, &mut fields)?;
         if checkpoint.branch_id != *id
             || checkpoint.document_hash != checkpoint.document_ref.sha256
-            || **document != *history.document
-            || **baseline != *history.baseline
+            || *document != *history.document
+            || *baseline != *history.baseline
             || checkpoint.batch_ids.len() != history.batches.len()
             || checkpoint.history_input_manifest_refs.len() != history.batches.len() + 1
             || checkpoint.applied_operations_digest
@@ -515,16 +524,35 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                 "branch history/checkpoint mismatch".into(),
             ));
         }
+        let mut retained_inputs = OwnedInputManifest {
+            project_id: Some(root.project_id.clone()),
+            session_id: None,
+            owner_epoch: 0,
+            entries: vec![],
+        };
         for reference in std::iter::once(&checkpoint.input_manifest_ref)
             .chain(&checkpoint.history_input_manifest_refs)
         {
             let input = input_manifests.get(&reference.sha256).ok_or_else(|| {
                 BundleError::Corrupt("active branch input manifest missing".into())
             })?;
-            if input.project_id.as_ref() != Some(&root.project_id) || input.session_id.is_some() {
+            if (input.project_id.as_ref() != Some(&root.project_id)
+                && (active
+                    || !input
+                        .project_id
+                        .as_ref()
+                        .is_some_and(|p| root.origin_project_ids.contains(p))))
+                || input.session_id.is_some()
+            {
                 return Err(BundleError::Corrupt("active branch input owner".into()));
             }
+            retained_inputs.entries.extend(input.entries.clone());
         }
+        crate::bundle_commit::validate_document_inputs(
+            &history.document,
+            &input_manifests[&checkpoint.input_manifest_ref.sha256],
+        )?;
+        crate::bundle_commit::validate_inputs(&history, &retained_inputs)?;
         // Private candidate replay; no live Core is changed on a damaged branch.
         let core = kinewright_core::Core::spawn((*history.baseline).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -542,7 +570,23 @@ pub(crate) fn read(path: &Path) -> Result<LoadedBundle, BundleError> {
                 "lineage head differs from history".into(),
             ));
         }
-        branches.insert(id.clone(), (checkpoint, history, lineage));
+
+        if active {
+            histories.insert(checkpoint.history_ref.sha256.clone(), Arc::clone(&history));
+            lineages.insert(checkpoint.lineage_ref.sha256.clone(), Arc::clone(&lineage));
+        }
+        Ok((checkpoint, history, lineage))
+    };
+    let mut branches = BTreeMap::new();
+    for (id, reference) in index.iter() {
+        let checkpoint = checkpoints
+            .remove(&reference.sha256)
+            .ok_or_else(|| BundleError::Corrupt("missing branch checkpoint".into()))?;
+        branches.insert(id.clone(), inspect_checkpoint(id, checkpoint, true)?);
+    }
+    for checkpoint in checkpoints.into_values() {
+        let id = checkpoint.branch_id.clone();
+        drop(inspect_checkpoint(&id, checkpoint, false)?);
     }
     let candidates: Vec<_> = branches
         .keys()

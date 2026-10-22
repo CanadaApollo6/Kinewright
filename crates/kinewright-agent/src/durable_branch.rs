@@ -56,8 +56,8 @@ impl DurableTimelineBranch {
             .store()
             .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;
         let branch_id = bundle.fork_branch(&source)?;
-        let (revision, document) = snapshot(live)?;
-        let branch = TimelineBranch::new(name, revision, document)
+        let (revision, _) = snapshot(live)?;
+        let branch = TimelineBranch::new(name, revision, std::sync::Arc::clone(&frozen.document))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         Ok(Self {
             branch_id,

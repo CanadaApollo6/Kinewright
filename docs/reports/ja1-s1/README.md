@@ -19,6 +19,58 @@ native Windows execution. S6 owns native Windows storage-crash certification.
 Decoder-open certification remains L4's separate integration dependency.
 Storage limits remain provisional until L6's workload measurements.
 
+
+## Fix round 1
+
+The current corrections and complete A1–A7, O1–O28, L1/L2 disposition are in
+[fix-r1.md](fix-r1.md). It supersedes the historical implementation notes below
+where behavior or validation changed. Fresh paired measurements are in
+[r1-storage-measurements.json](r1-storage-measurements.json); the current numerical
+interpretation is in [JA-S1-STORAGE-EVIDENCE.md](../../JA-S1-STORAGE-EVIDENCE.md).
+The complete local stricter Linux gate passed, including all five full crate
+targets and the workspace fast tier with TMPDIR unset on tmpfs; classification
+lint and final workspace clippy passed. MSVC Core lib/tests compile passed; the
+project target remains blocked by native dependencies. L6 remains open for the
+lead and its 250 ms target is unchanged.
+
+O11 is deferred: the latent legacy writer authority race belongs to the separate
+legacy authorization path, outside this durable-bundle correction.
+O26 is deferred: recovery of a deleted registered predecessor checkout needs
+separate worktree lifecycle handling; this task retains that existing checkout.
+
+Session storage requires a caller-selected durable parent and refuses tmpfs before
+mutation. S1's desktop unsaved session remains in memory; S2 owns GUI Studio
+attachment. No native Windows runtime, hosted CI, full slow tier, L4 decoder
+certification or physical power-fault result is claimed.
+
+### Fix-round implementation adjustments
+
+History capacity is handled by the existing ordered floor, with the baseline
+execution shared through `kinewright-core/src/actor.rs:546` and the persistence
+owner choosing a bounded suffix in `kinewright-project/src/bundle_commit.rs:820`.
+Core exports the accepted stream; the durable command owner installs the saved
+floor after acknowledgment. This avoids dropping unacknowledged provenance.
+The decode reservation uses encoded-format structure (`store.rs:1420`) and the
+separate allocator calibration in the current measurement report.
+
+Collection is explicit after acknowledgment (`bundle.rs:1031`) and retried
+before the next save. B5 keeps a conservative old/new inventory union until
+maintenance publishes the selected inventory and then unlinks. This supersedes
+the old exact-at-B5 inventory note below without adding another cleanup owner.
+Recovery validates archived receipt checkpoints one at a time and caches only
+active branch histories, so cumulative archives do not exhaust live decode quota.
+
+The stricter gate now includes the actual five legacy app regressions via
+the full app target and the later full workspace gate. The two eval tests split
+portable v3 refusal from portable admitted-legacy rendering; neither assertion was
+removed. Windows remains refusal-only for Studio and needs native CI. The first full
+media run exposed AU6's existing ban on whole-source OS gates in eval; the
+redundant Linux-only attribute on the legacy test was removed. Both rerender
+tests are portable, and the per-commit gate explicitly runs the AU6 inventory
+witness. The failed preliminary attempt is retained separately.
+
+## Historical implementation record
+
 ## Commit ledger
 
 1. Revised routing and Core history: Linux gate passed (`c1-gate-attempt6`);

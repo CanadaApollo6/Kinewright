@@ -116,6 +116,12 @@ pub struct ProjectNamespace {
     root_name: OsString,
     #[cfg(target_os = "linux")]
     directories: RefCell<BTreeMap<PathBuf, File>>,
+    #[cfg(target_os = "linux")]
+    pending_directory_syncs: RefCell<BTreeMap<PathBuf, (File, bool)>>,
+    #[cfg(target_os = "linux")]
+    dirty_object_directories: BTreeMap<PathBuf, File>,
+    #[cfg(target_os = "linux")]
+    batch_objects: bool,
     lock: Option<LockfileHandle>,
     uncertain: bool,
     read_only: bool,
@@ -142,6 +148,14 @@ impl Drop for PreparedDestination {
         }
     }
 }
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "uncertified platform stubs retain the Linux authority API"
+    )
+)]
 impl ProjectNamespace {
     pub(crate) fn physical_files(&self, limit: u64) -> Result<Vec<PhysicalFile>, BundleError> {
         #[cfg(target_os = "linux")]
@@ -173,6 +187,16 @@ impl ProjectNamespace {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = path;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn seal_destination_ancestors(&self) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::seal_destination_ancestors(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
             Err(BundleError::DurabilityUnsupported)
         }
     }
@@ -245,7 +269,46 @@ impl ProjectNamespace {
         }
     }
     pub(crate) fn is_uncertain(&self) -> bool {
-        self.uncertain
+        self.uncertain || {
+            #[cfg(target_os = "linux")]
+            {
+                !self.pending_directory_syncs.borrow().is_empty()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                false
+            }
+        }
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn unsettled_probe(&self) -> bool {
+        self.is_uncertain()
+    }
+    pub(crate) fn object_batch_active(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.batch_objects
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            false
+        }
+    }
+    pub(crate) fn begin_object_batch(&mut self) -> Result<(), BundleError> {
+        self.verify()?;
+        #[cfg(target_os = "linux")]
+        {
+            self.batch_objects = true;
+        }
+        Ok(())
+    }
+    pub(crate) fn finish_object_batch(&mut self) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::finish_object_batch(self)?;
+        }
+        Ok(())
     }
     pub(crate) fn unlink_owned(&mut self, path: &PortablePath) -> Result<(), BundleError> {
         #[cfg(target_os = "linux")]
@@ -310,7 +373,10 @@ impl ProjectNamespace {
         if self.uncertain {
             return Err(BundleError::Unsettled);
         }
-        self.verify_read_authority()
+        self.verify_read_authority()?;
+        #[cfg(target_os = "linux")]
+        linux::finish_directory_barriers(self)?;
+        Ok(())
     }
     pub(crate) fn verify_read_authority(&self) -> Result<(), BundleError> {
         if self.read_only {
@@ -528,7 +594,7 @@ impl ProjectNamespace {
         }
     }
     pub fn release(&mut self) -> Result<(), BundleError> {
-        if self.uncertain {
+        if self.is_uncertain() {
             return Err(BundleError::Unsettled);
         }
         if let Some(lock) = self.lock.take() {

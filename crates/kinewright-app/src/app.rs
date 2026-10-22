@@ -67,22 +67,6 @@ fn inspect_project_document(
     let digest = digest_bytes(admission.raw_bytes());
     Ok((document, admission.read_version(), digest, admission))
 }
-#[cfg(test)]
-pub(crate) fn fixture_source_admission(
-    path: Option<&Path>,
-) -> kinewright_project::bundle::BundleWriteAdmission {
-    path.filter(|p| p.is_file()).map_or_else(
-        kinewright_project::bundle::BundleWriteAdmission::new_document,
-        |p| {
-            kinewright_project::bundle::BundleWriteAdmission::read(p)
-                .expect("raw fixture admission")
-        },
-    )
-}
-
-#[cfg(test)]
-use kinewright_project::load_document;
-
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10692,7 +10676,10 @@ mod in2b_tests {
     )]
     fn save_as_unsupported_source_or_destination_has_zero_mutations() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        let temp = TempDirectory::new("ja-s1-app-admission");
+        let temp = TempDirectory::new_in(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            "ja-s1-app-admission",
+        );
         let recovery = temp.path("recovery");
         fs::create_dir(&recovery).unwrap();
         crate::recovery::with_ja_directory(recovery.clone(), || {
@@ -10746,6 +10733,7 @@ mod in2b_tests {
                     fs::write(&target, bytes).unwrap();
                 }
                 let (mut app, engine) = in2b_harness(Document::default(), None);
+                let before_open = admission_tree(temp.root());
                 let ((), open_trace) =
                     kinewright_project::io_observer::observe(|| app.open_project(&source));
                 assert_eq!(
@@ -10755,6 +10743,11 @@ mod in2b_tests {
                 if app.focused().source_admission.refusal().is_some()
                     || app.focused().source_admission.is_studio()
                 {
+                    assert_eq!(
+                        admission_tree(temp.root()),
+                        before_open,
+                        "read-only open changed filesystem bytes"
+                    );
                     assert!(
                         open_trace.events.is_empty(),
                         "read-only open mutated: {:?}",
@@ -10889,7 +10882,10 @@ mod in2b_tests {
     #[cfg(windows)]
     #[test]
     fn windows_app_save_refusal_precedes_session_and_sidecar_mutation() {
-        let temp = TempDirectory::new("ja-s1-windows-app-refusal");
+        let temp = TempDirectory::new_in(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            "ja-s1-windows-app-refusal",
+        );
         let recovery = temp.path("recovery");
         fs::create_dir(&recovery).unwrap();
         crate::recovery::with_ja_directory(recovery, || {
@@ -13026,7 +13022,11 @@ mod in2b_tests {
         };
         let dir = TempDirectory::new("in2b-item-24");
         let project_path = dir.path("edit.kinewright");
-        fs::write(&project_path, b"{\"timeline\":{}}").expect("the project file writes");
+        fs::write(
+            &project_path,
+            serde_json::to_vec(&Document::default()).unwrap(),
+        )
+        .expect("the project file writes");
         let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
         let envelope = serde_json::json!({
             "format_version": 1,
@@ -13238,7 +13238,11 @@ mod in2b_tests {
 
         let dir = TempDirectory::new("in2b-item-25");
         let project_path = dir.path("edit.kinewright");
-        fs::write(&project_path, b"{\"timeline\":{}}").expect("the project file writes");
+        fs::write(
+            &project_path,
+            serde_json::to_vec(&Document::default()).unwrap(),
+        )
+        .expect("the project file writes");
         let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
         let envelope = serde_json::json!({
             "format_version": 1,
@@ -14118,7 +14122,11 @@ mod in2b_tests {
         };
         let dir = TempDirectory::new("in2b-h7-missing");
         let project_path = dir.path("edit.kinewright");
-        fs::write(&project_path, b"{\"timeline\":{}}").expect("the project file writes");
+        fs::write(
+            &project_path,
+            serde_json::to_vec(&Document::default()).unwrap(),
+        )
+        .expect("the project file writes");
         let digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
         let envelope = serde_json::json!({
             "format_version": 1,
@@ -15755,3 +15763,19 @@ pub(crate) mod ja_observe {
         Ok(result)
     }
 }
+
+#[cfg(test)]
+pub(crate) fn fixture_source_admission(
+    path: Option<&Path>,
+) -> kinewright_project::bundle::BundleWriteAdmission {
+    path.filter(|p| p.is_file()).map_or_else(
+        kinewright_project::bundle::BundleWriteAdmission::new_document,
+        |p| {
+            kinewright_project::bundle::BundleWriteAdmission::read(p)
+                .expect("raw fixture admission")
+        },
+    )
+}
+
+#[cfg(test)]
+use kinewright_project::load_document;

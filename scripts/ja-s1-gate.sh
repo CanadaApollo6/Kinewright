@@ -8,15 +8,13 @@ evidence="${2:?absolute evidence directory}"
 mkdir -p "$evidence"
 source scripts/setup-ffmpeg.sh
 export CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
-export TMPDIR="$PWD/target/ja-s1-tmp"
-mkdir -p "$TMPDIR"
 run() {
     local label="$1"
     shift
     local log="$evidence/$label.log"
     while [[ "$1" == cargo && "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)" -lt 6291456 ]]; do
         echo "Waiting for 6 GiB available before $label"
-        sleep 300
+        sleep 30
     done
     {
         git rev-parse HEAD
@@ -52,7 +50,7 @@ if [[ "$stage" -eq 8 ]]; then
 fi
 run clippy cargo clippy --workspace --all-targets -- -D warnings
 if [[ "${JA_S1_FINAL_HEAD:-0}" == 1 ]]; then
-    mapfile -t touched < <(git diff --name-only 076a96c HEAD -- '*.rs')
+    mapfile -t touched < <( { git diff --name-only 076a96c HEAD -- '*.rs'; git diff --name-only -- '*.rs'; git ls-files --others --exclude-standard -- '*.rs'; } | sort -u)
 else
     mapfile -t touched < <( { git diff --name-only -- '*.rs'; git ls-files --others --exclude-standard -- '*.rs'; } | sort -u)
 fi
@@ -116,6 +114,8 @@ if [[ "$stage" -eq 4 || "$stage" -eq 8 ]]; then
     run_selected I-app cargo test -p kinewright-app --bin kinewright-app app::tests
     run_selected I-app-refusal cargo test -p kinewright-app --bin kinewright-app app::in2b_tests::save_as_unsupported_source_or_destination_has_zero_mutations -- --exact
     run_selected I-eval-refusal cargo test -p kinewright-agent --bin kinewright-eval tests::rerender_refuses_v3_before_projection_or_output -- --exact
+    run_selected AU6-inventory cargo test -p kinewright-media --lib au6_fixtures::au6_declared_test_names_exist_in_their_source_files -- --exact
+    run_selected I-eval-legacy cargo test -p kinewright-agent --bin kinewright-eval tests::rerender_admitted_legacy_reaches_renderer_and_report_writer -- --exact
     run_selected I-project cargo test -p kinewright-app --bin kinewright-app project::tests
 fi
 if [[ "$stage" -ge 5 ]]; then run_selected receipts cargo test -p kinewright-project --features test-util --test ja_s1_receipts; fi

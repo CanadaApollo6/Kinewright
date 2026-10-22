@@ -5,7 +5,10 @@ use std::{path::Path, process::Command};
 
 #[test]
 fn revised_mode_reaches_main_and_native_workers() {
-    let temp = TempDirectory::new("ja-s1-routing");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-routing",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-routing.json");
     let bytes = std::fs::read(&fixture).unwrap();
     let output = temp.path("out");
@@ -68,7 +71,10 @@ fn revised_mode_reaches_main_and_native_workers() {
 #[cfg(target_os = "linux")]
 #[test]
 fn paired_io_baseline_has_successful_refusal_controls_and_literal_reds() {
-    let temp = TempDirectory::new("ja-s1-paired-baseline");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-paired-baseline",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-paired-io.json");
     let output = temp.path("out");
     assert_eq!(
@@ -103,7 +109,10 @@ fn paired_io_baseline_has_successful_refusal_controls_and_literal_reds() {
 #[cfg(target_os = "linux")]
 #[test]
 fn strict_io_protocol_separates_legacy_control_from_bundle_result() {
-    let temp = TempDirectory::new("ja-s1-paired-revised");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-paired-revised",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-paired-io.json");
     let output = temp.path("out");
     assert_eq!(
@@ -139,7 +148,10 @@ fn strict_io_protocol_separates_legacy_control_from_bundle_result() {
 #[cfg(target_os = "linux")]
 #[test]
 fn owned_input_fixture_retains_bytes_and_charges_until_reader_close() {
-    let temp = TempDirectory::new("ja-s1-owned-fixture");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-owned-fixture",
+    );
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-owned-input.json");
     let output = temp.path("out");
@@ -171,7 +183,10 @@ fn owned_input_fixture_retains_bytes_and_charges_until_reader_close() {
 #[cfg(target_os = "linux")]
 #[test]
 fn history_loss_fixture_revised_preserves_one_entry() {
-    let temp = TempDirectory::new("ja-s1-history-revised");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-history-revised",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/history-loss.json");
     let output = temp.path("out");
     assert_eq!(
@@ -203,7 +218,10 @@ fn history_loss_fixture_revised_preserves_one_entry() {
 #[cfg(target_os = "linux")]
 #[test]
 fn comment_observer_persists_exact_bytes_then_missing_receipt() {
-    let temp = TempDirectory::new("ja-s1-comment-baseline");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-comment-baseline",
+    );
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/comment-receipt.json");
     let output = temp.path("out");
@@ -276,7 +294,10 @@ fn strict_io_properties_revised_use_actual_syncs_and_no_fallback() {
 #[cfg(target_os = "linux")]
 #[test]
 fn bundle_migration_fixture_uses_the_real_reader_and_writer() {
-    let temp = TempDirectory::new("ja-s1-migration-fixture");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-migration-fixture",
+    );
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-bundle-migration.json");
     let output = temp.path("out");
@@ -304,7 +325,10 @@ fn bundle_migration_fixture_uses_the_real_reader_and_writer() {
 #[cfg(target_os = "linux")]
 #[test]
 fn reply_retry_fixture_revised_has_one_durable_entry() {
-    let temp = TempDirectory::new("ja-s1-retry-revised");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-retry-revised",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/reply-retry.json");
     let output = temp.path("out");
     let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
@@ -343,7 +367,10 @@ fn reply_retry_fixture_revised_has_one_durable_entry() {
 #[cfg(target_os = "linux")]
 #[test]
 fn comment_receipt_fixture_revised_reconciles_exact_original_result() {
-    let temp = TempDirectory::new("ja-s1-comment-revised");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-comment-revised",
+    );
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/comment-receipt.json");
     let output = temp.path("out");
@@ -412,7 +439,10 @@ fn comment_receipt_fixture_revised_reconciles_exact_original_result() {
 #[cfg(target_os = "linux")]
 #[test]
 fn edit_receipt_restart_reconciles_original_envelope() {
-    let temp = TempDirectory::new("ja-s1-edit-restart");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-edit-restart",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/ja/s1-edit-receipt-restart.json");
     let output = temp.path("out");
@@ -455,7 +485,10 @@ fn edit_receipt_restart_reconciles_original_envelope() {
 #[cfg(target_os = "linux")]
 #[test]
 fn copy_fixture_revised_preserves_owned_graph_and_live_reader() {
-    let temp = TempDirectory::new("ja-s1-native-copy");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-native-copy",
+    );
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-copy-handoff.json");
     let output = temp.path("out");
@@ -514,7 +547,10 @@ fn copy_fixture_revised_preserves_owned_graph_and_live_reader() {
 #[cfg(target_os = "linux")]
 #[test]
 fn budget_fixture_revised_backpressures_and_retires_actual_bytes() {
-    let temp = TempDirectory::new("ja-s1-native-budget");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-s1-native-budget",
+    );
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s1-storage-budget.json");
     let output = temp.path("out");

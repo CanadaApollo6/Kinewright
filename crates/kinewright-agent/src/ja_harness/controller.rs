@@ -903,7 +903,10 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
 pub(super) fn witness_worker_teardown_window() {
     use kinewright_media::test_support::TempDirectory;
     use std::os::unix::fs::PermissionsExt;
-    let temp = TempDirectory::new("ja-worker-teardown");
+    let temp = TempDirectory::new_in(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        "ja-worker-teardown",
+    );
     let executable = temp.path("worker");
     // Fixed test worker: acknowledge EOF, then perform teardown beyond the old
     // reap window. No GPU timing or unavailable-device fallback controls this.
