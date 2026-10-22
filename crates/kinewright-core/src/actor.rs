@@ -156,6 +156,8 @@ enum CoreMessage {
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
     ExportHistory(Sender<Result<HistorySnapshot, HistoryError>>),
+    BeginFloor(crate::HistoryTransition, Sender<Result<(), HistoryError>>),
+    SettleFloor(u64, bool, Sender<Result<(), HistoryError>>),
     RestoreHistory(
         Box<HistorySnapshot>,
         Option<Box<HistorySnapshot>>,
@@ -193,6 +195,34 @@ pub struct Core {
 }
 
 impl Core {
+    /// Retain a validated prefix while preventing Undo from crossing its pending floor.
+    /// # Errors
+    /// Refuses a changed cut, an existing barrier or a disconnected actor before mutation.
+    pub fn begin_history_floor(
+        &self,
+        transition: crate::HistoryTransition,
+    ) -> Result<crate::HistoryFloorBarrier, HistoryError> {
+        let offset = transition.after.floor_offset;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::BeginFloor(transition, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(crate::HistoryFloorBarrier::new(self.clone(), offset))
+    }
+
+    pub(crate) fn settle_history_floor(
+        &self,
+        offset: u64,
+        commit: bool,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::SettleFloor(offset, commit, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
     /// Atomically capture the accepted stream and exact undo/redo/gesture state.
     /// # Errors
     /// Returns an actor-disconnection error. The persistence owner bounds the retained cut.
@@ -354,7 +384,7 @@ impl Core {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct HistoryEntry {
     document: Arc<Document>,
     operations: Vec<Operation>,
@@ -370,7 +400,16 @@ struct HistoryEntry {
 }
 
 #[derive(Clone)]
+struct PendingFloor {
+    offset: u64,
+    discard: usize,
+    depth: usize,
+    baseline: Arc<Document>,
+}
+
+#[derive(Clone)]
 struct CoreState {
+    pending_floor: Option<PendingFloor>,
     floor_offset: u64,
     baseline: Arc<Document>,
     batches: Vec<HistoryBatch>,
@@ -386,6 +425,7 @@ impl CoreState {
     fn new(document: Document, revision: TimelineRevision) -> Self {
         let document = Arc::new(document);
         Self {
+            pending_floor: None,
             floor_offset: 0,
             baseline: Arc::clone(&document),
             batches: Vec::new(),
@@ -554,6 +594,69 @@ impl CoreState {
         Ok(candidate)
     }
 
+    fn begin_floor(&mut self, transition: &crate::HistoryTransition) -> Result<(), HistoryError> {
+        if self.pending_floor.is_some()
+            || self.history() != transition.before
+            || transition.after.floor_offset <= self.floor_offset
+        {
+            return Err(HistoryError::Corrupt);
+        }
+        self.pending_floor = Some(PendingFloor {
+            offset: transition.after.floor_offset,
+            discard: transition.before.batches.len() - transition.after.batches.len(),
+            depth: transition.before.cursor.undo.len() - transition.after.cursor.undo.len(),
+            baseline: Arc::clone(&transition.after.baseline),
+        });
+        Ok(())
+    }
+
+    fn settle_floor(&mut self, offset: u64, commit: bool) -> Result<(), HistoryError> {
+        let Some(pending) = &self.pending_floor else {
+            return Err(HistoryError::Corrupt);
+        };
+        if pending.offset != offset {
+            return Err(HistoryError::Corrupt);
+        }
+        if commit {
+            // The barrier kept the prefix unchanged. Replay only the current suffix
+            // through the ordinary executor, including commands accepted during IO.
+            let mut candidate = Self::new((*pending.baseline).clone(), TimelineRevision(0));
+            candidate.floor_offset = offset;
+            for batch in self
+                .batches
+                .get(pending.discard..)
+                .ok_or(HistoryError::Corrupt)?
+            {
+                if !matches!(
+                    execute_command(&mut candidate, batch.command.clone().into()),
+                    Event::DocumentChanged { .. }
+                ) {
+                    return Err(HistoryError::Corrupt);
+                }
+            }
+            if candidate.document != self.document
+                || candidate.undo
+                    != self
+                        .undo
+                        .get(pending.depth..)
+                        .ok_or(HistoryError::Corrupt)?
+                || candidate.redo != self.redo
+            {
+                return Err(HistoryError::Corrupt);
+            }
+            candidate.revision = TimelineRevision(
+                self.revision
+                    .0
+                    .checked_add(1)
+                    .ok_or(HistoryError::Capacity)?,
+            );
+            *self = candidate;
+        } else {
+            self.pending_floor = None;
+        }
+        Ok(())
+    }
+
     fn increment_revision(&mut self) {
         self.revision = TimelineRevision(
             self.revision
@@ -678,14 +781,35 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
+            CoreMessage::BeginFloor(transition, reply) => {
+                let result = state.begin_floor(&transition);
+                let _ = reply.send(result);
+            }
+            CoreMessage::SettleFloor(offset, commit, reply) => {
+                let result = state.settle_floor(offset, commit);
+                if result.is_ok() && commit {
+                    broadcast(
+                        &mut subscribers,
+                        &Event::DocumentChanged {
+                            doc: Arc::clone(&state.document),
+                            revision: state.revision,
+                            last_op: None,
+                            journal_command: None,
+                            token: None,
+                        },
+                    );
+                }
+                let _ = reply.send(result);
+            }
             CoreMessage::ExportHistory(reply) => {
                 // Publication chooses and records any floor before the owner installs it.
                 let _ = reply.send(Ok(state.history()));
             }
             CoreMessage::RestoreHistory(history, expected, reply) => {
-                let admitted = if expected
-                    .as_deref()
-                    .is_some_and(|before| state.history() != *before)
+                let admitted = if state.pending_floor.is_some()
+                    || expected
+                        .as_deref()
+                        .is_some_and(|before| state.history() != *before)
                 {
                     Err(HistoryError::Corrupt)
                 } else {
@@ -744,16 +868,36 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                 }
             }
             CoreMessage::Command(command) => {
-                let event = execute_command(&mut state, command);
+                let event = execute_actor_command(&mut state, command);
                 broadcast(&mut subscribers, &event);
             }
             CoreMessage::Request(command, reply) => {
-                let event = execute_command(&mut state, command);
+                let event = execute_actor_command(&mut state, command);
                 broadcast(&mut subscribers, &event);
                 let _ = reply.send(event);
             }
         }
     }
+}
+
+fn execute_actor_command(state: &mut CoreState, command: Command) -> Event {
+    if matches!(command, Command::Undo)
+        && state
+            .pending_floor
+            .as_ref()
+            .is_some_and(|pending| state.undo.len() <= pending.depth)
+    {
+        // A blocked Undo is not an accepted journal command: replay after release
+        // must never turn it into an Undo of the retained protected prefix.
+        return Event::DocumentChanged {
+            doc: Arc::clone(&state.document),
+            revision: state.revision,
+            last_op: None,
+            journal_command: None,
+            token: None,
+        };
+    }
+    execute_command(state, command)
 }
 
 fn execute_command(state: &mut CoreState, command: Command) -> Event {

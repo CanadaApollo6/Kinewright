@@ -690,9 +690,7 @@ pub struct ProjectBundle {
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
 }
 pub(crate) struct PendingSave {
-    core: Core,
-    before: HistorySnapshot,
-    branch: BranchId,
+    pub(crate) barrier: Option<kinewright_core::HistoryFloorBarrier>,
     pub(crate) root_sha256: Option<String>,
 }
 impl ProjectBundle {
@@ -973,6 +971,10 @@ impl ProjectBundle {
         admission.require_supported()?;
         if !admission.is_studio() {
             if admission.raw_bytes() != self.admission.raw_bytes() {
+                self.store
+                    .with_namespace(|n| n.reconcile(admission.raw_bytes()))?;
+                self.store.settle_controls()?;
+                self.settle_pending_save(false)?;
                 return Err(BundleError::Corrupt(
                     "unexpected legacy reconciliation root".into(),
                 ));
@@ -980,13 +982,17 @@ impl ProjectBundle {
             self.store
                 .with_namespace(|n| n.reconcile(admission.raw_bytes()))?;
             self.store.settle_controls()?;
-            self.pending_save = None;
+            self.settle_pending_save(false)?;
             self.unsettled = false;
             return Ok(None);
         }
         let loaded = LoadedBundle::read(&path)?;
         let root = loaded.root()?.clone();
         if root.project_id != self.project_id {
+            self.store
+                .with_namespace(|n| n.reconcile(loaded.admission.raw_bytes()))?;
+            self.store.settle_controls()?;
+            self.settle_pending_save(false)?;
             return Err(BundleError::Identity(
                 "reconciliation project identity".into(),
             ));
@@ -1029,15 +1035,11 @@ impl ProjectBundle {
         self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
         self.store.publish_inventory(&self.recovery)?;
         self.store.allow_collection()?;
-        if let Some(pending) = self.pending_save.take()
-            && pending.root_sha256.as_deref()
+        let own_root = self.pending_save.as_ref().is_some_and(|pending| {
+            pending.root_sha256.as_deref()
                 == Some(kinewright_media::sha256_bytes(self.admission.raw_bytes()).as_str())
-            && let Err(error) =
-                self.install_published(&pending.core, pending.before.clone(), &pending.branch)
-        {
-            self.pending_save = Some(pending);
-            return Err(error);
-        }
+        });
+        self.settle_pending_save(own_root)?;
         self.unsettled = false;
         Ok(Some(BundleSaveReport {
             collection,
@@ -1099,13 +1101,12 @@ impl ProjectBundle {
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let id = self.manual_branch_id.clone();
-        self.publish_core(core, before.clone(), &before, inputs, &id)
+        self.publish_core(core, &before, inputs, &id)
     }
 
     pub(crate) fn publish_core(
         &mut self,
         core: &Core,
-        before: HistorySnapshot,
         selected: &HistorySnapshot,
         inputs: &ObjectRef,
         branch: &BranchId,
@@ -1113,63 +1114,83 @@ impl ProjectBundle {
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }
+        let bounded = crate::bundle_commit::select_history(selected, self.store.limits())?;
+        let barrier = pending_floor(core, bounded.floor)?;
+        self.publish_barrier(barrier, selected, &bounded.history, inputs, branch)
+    }
+
+    pub(crate) fn publish_barrier(
+        &mut self,
+        barrier: Option<kinewright_core::HistoryFloorBarrier>,
+        history: &HistorySnapshot,
+        selected: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch: &BranchId,
+    ) -> Result<BundleSaveReport, BundleError> {
         self.pending_save = Some(PendingSave {
-            core: core.clone(),
-            before: before.clone(),
-            branch: branch.clone(),
+            barrier,
             root_sha256: None,
         });
-        let result = crate::bundle_commit::BundleCommit::publish_branch(
-            self, selected, inputs, branch, None,
+        self.publish_pending(history, selected, inputs, branch)
+    }
+
+    pub(crate) fn publish_pending(
+        &mut self,
+        history: &HistorySnapshot,
+        selected: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch: &BranchId,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let result = crate::bundle_commit::BundleCommit::publish_branch_selected(
+            self,
+            history,
+            inputs,
+            branch,
+            None,
+            Some(selected),
         );
         match result {
             Ok(report) => {
-                self.install_published(core, before, branch)?;
-                self.pending_save = None;
+                self.settle_pending_save(true)?;
                 Ok(report)
             }
             Err(error) => {
-                if !self.unsettled {
-                    self.pending_save = None;
+                if self.unsettled
+                    || matches!(
+                        error,
+                        BundleError::DurabilityUnknown | BundleError::Unsettled
+                    )
+                    || self.store.has_unsettled_objects()?
+                {
+                    self.unsettled = true;
+                    if let Some(barrier) =
+                        self.pending_save.as_mut().and_then(|p| p.barrier.as_mut())
+                    {
+                        barrier.retain_until_reconcile();
+                    }
+                } else {
+                    self.settle_pending_save(false)?;
                 }
                 Err(error)
             }
         }
     }
 
-    pub(crate) fn install_published(
-        &mut self,
-        core: &Core,
-        before: HistorySnapshot,
-        branch: &BranchId,
-    ) -> Result<(), BundleError> {
-        let installed = (|| {
-            let published = self.history_cache.get(branch).ok_or_else(|| {
-                BundleError::Corrupt("published history missing from owner".into())
-            })?;
-            if before == ***published {
-                return Ok(());
-            }
-            if before.floor_offset < published.floor_offset {
-                let cut = usize::try_from(published.floor_offset - before.floor_offset)
-                    .map_err(|_| BundleError::Capacity("history floor offset"))?;
-                let floor = kinewright_core::HistoryTransition::floor(before, cut)
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-                if floor.after() != &***published {
-                    return Err(BundleError::Corrupt(
-                        "published floor differs from Core transition".into(),
-                    ));
-                }
-                core.install_history_transition(floor)
+    pub(crate) fn settle_pending_save(&mut self, commit: bool) -> Result<(), BundleError> {
+        if let Some(pending) = &mut self.pending_save
+            && let Some(barrier) = &mut pending.barrier
+        {
+            let result = if commit {
+                barrier.commit()
             } else {
-                core.install_checkpoint(before, (***published).clone())
+                barrier.release()
+            };
+            if result.is_err() {
+                self.unsettled = true;
+                return Err(BundleError::Unsettled);
             }
-            .map_err(|e| BundleError::Corrupt(e.to_string()))
-        })();
-        if installed.is_err() {
-            self.unsettled = true;
-            return Err(BundleError::Unsettled);
         }
+        self.pending_save = None;
         Ok(())
     }
 
@@ -1185,4 +1206,15 @@ impl ProjectBundle {
         };
         self.store.admit_blob(&mut &*bytes, &reference, deps)
     }
+}
+
+/// Install the revocable barrier before destination IO starts.
+pub(crate) fn pending_floor(
+    core: &Core,
+    transition: Option<kinewright_core::HistoryTransition>,
+) -> Result<Option<kinewright_core::HistoryFloorBarrier>, BundleError> {
+    transition
+        .map(|floor| core.begin_history_floor(floor))
+        .transpose()
+        .map_err(|e| BundleError::Corrupt(e.to_string()))
 }

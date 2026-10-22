@@ -121,6 +121,8 @@ else
         cp "$CARGO_TARGET_DIR/debug/$executable" "$sealed/$executable"
         # Every process hashes its executable during setup. Debug sections are not code;
         # exclude them from the sealed artifact instead of extending the frozen deadline.
+        sha256sum "$sealed/$executable" > "$sealed/pre-strip.sha256"
+        strip --version > "$sealed/strip-version.txt"
         strip --strip-all "$sealed/$executable"
         mkdir -p crates/kinewright-project/tests
         observer=crates/kinewright-project/tests/ja_s1_predecessor_format.rs
@@ -166,6 +168,15 @@ for name in ['format-corpus','history-loss','reply-retry','legacy-io']:
 manifest={'source_root':str(source.resolve()),'source_head':base,'binary':str(binary.resolve()),'binary_sha256':hashfile(binary),'source_clean':True,'os':platform.platform(),
           'compiler':subprocess.check_output(['rustc','-Vv'],text=True),'reports':reports,
           'max2_binary':str(control.resolve()),'max2_binary_sha256':hashfile(control),'observer_source_sha256':hashfile(source.parent/'predecessor-format.rs')}
+if platform.system() == 'Linux':
+    manifest['pre_strip_binary_sha256']=(sealed/'pre-strip.sha256').read_text().split()[0]
+    manifest['strip_version']=(sealed/'strip-version.txt').read_text().splitlines()[0]
+    manifest['strip_arguments']=['--strip-all']
+else:
+    manifest['pre_strip_binary_sha256']=hashfile(binary)
+    manifest['strip_version']=None
+    manifest['strip_arguments']=[]
+manifest['build_provenance']='source HEAD and clean tree checked before build and after controls within this script run; run.json source_head identifies its working directory'
 (sealed/'identity.json').write_text(json.dumps(manifest,indent=2)+'\n')
 PY
 if [[ -n "${GITHUB_ENV:-}" ]]; then

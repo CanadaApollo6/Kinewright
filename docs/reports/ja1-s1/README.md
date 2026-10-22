@@ -443,3 +443,15 @@ The frozen predecessor's executable hashes account for the local setup delay; th
 Linux script strips the artifact and emits per-phase diagnostics. Hosted C1 confirmation
 and new native Windows execution remain with the lead. L4, L6 and the existing O11/O26
 deferrals are unchanged. No S2 writer or producer-fencing scope was added.
+
+### Round 4
+
+See [fix-r4.md](fix-r4.md) for the revocable pending floor and production-prefilter witnesses.
+The lead's post-stop ruling replaces irrevocable eager flooring; definite failures retain all history.
+
+- m2 deferred: media-ID reuse through an unverified-source relink still fails closed; content-qualified media synthesis remains app-wiring work.
+- m3 deferred: first-save manifests with two LUTs under one bare ID still refuse at manifest admission; producers must supply the existing content-qualified spelling.
+- m4 deferred: collection reports retain at most 32 per-path attempts and identity refusals halt collection; bounded diagnostics and fail-closed identity handling remain intentional here.
+- m5 corrected: archived `r3-first-copy-own` is a double-install red, not a no-install red; the shared `-own` reds cover omitted installation. Archived `r3-persistent-gc` fails at its observable counter, not at the later continuation assertions. Round 4 does not claim that archived mutant proves continuation.
+- m6 corrected: predecessor `identity.json` now records the pre-strip SHA-256, strip version and arguments. `run.json.source_head` is the run working directory's HEAD; source-to-executable provenance is the clean-source build and checks within the same script invocation, not a hash-inferred source identity.
+- Hosted C1 was reported successful on `9cd2e71` by the lead; fresh round-4 local controls are recorded separately. Native Windows execution and full slow CI remain lead-owned.

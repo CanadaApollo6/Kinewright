@@ -54,6 +54,7 @@ pub use sidecar::{
 // Lock-test scheduling (F3); per-child REV2_HOOK/SIGNALS/EXIT.
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) fn test_hook(point: &str) {
+    io_observer::at_test_hook(point);
     if std::env::var("REV2_HOOK").ok().as_deref() != Some(point) {
         return;
     }

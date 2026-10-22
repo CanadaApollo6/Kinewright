@@ -275,6 +275,17 @@ impl BundleCommit {
         branch_id: &crate::bundle_records::BranchId,
         seed: Option<&LineageRecord>,
     ) -> Result<BundleSaveReport, BundleError> {
+        Self::publish_branch_selected(bundle, history, inputs, branch_id, seed, None)
+    }
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn publish_branch_selected(
+        bundle: &mut ProjectBundle,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch_id: &crate::bundle_records::BranchId,
+        seed: Option<&LineageRecord>,
+        selected: Option<&HistorySnapshot>,
+    ) -> Result<BundleSaveReport, BundleError> {
         if bundle.unsettled {
             return Err(BundleError::Unsettled);
         }
@@ -368,7 +379,9 @@ impl BundleCommit {
                 ));
             }
         }
-        let bounded = if old_history.as_ref().is_some_and(|old| ***old == aligned) {
+        let bounded = if let Some(selected) = selected {
+            selected.clone()
+        } else if old_history.as_ref().is_some_and(|old| ***old == aligned) {
             aligned.clone()
         } else {
             bound_history(&aligned, bundle.store.limits())?
@@ -843,10 +856,22 @@ impl BundleCommit {
         })
     }
 }
+pub(crate) struct BoundedHistory {
+    pub history: HistorySnapshot,
+    pub floor: Option<kinewright_core::HistoryTransition>,
+}
+
 pub(crate) fn bound_history(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<HistorySnapshot, BundleError> {
+    select_history(history, limits).map(|selected| selected.history)
+}
+
+pub(crate) fn select_history(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<BoundedHistory, BundleError> {
     #[cfg(any(test, feature = "test-util"))]
     let started = std::time::Instant::now();
     let result = bound_history_inner(history, limits);
@@ -855,10 +880,14 @@ pub(crate) fn bound_history(
     result
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the conservative prefilter and authoritative fit share one selection policy"
+)]
 fn bound_history_inner(
     history: &HistorySnapshot,
     limits: &crate::storage_budget::StorageLimits,
-) -> Result<HistorySnapshot, BundleError> {
+) -> Result<BoundedHistory, BundleError> {
     let fits = |h: &HistorySnapshot| -> bool {
         let Ok(encoded) = h.encoded_bytes() else {
             return false;
@@ -875,29 +904,46 @@ fn bound_history_inner(
     // Keep the common small checkpoint path direct. For a long session, component
     // costs can reject the original stream without first serializing tens of MiB.
     if history.batches.len() <= 64 && fits(history) {
-        return Ok(history.clone());
+        return Ok(BoundedHistory {
+            history: history.clone(),
+            floor: None,
+        });
     }
     // Independent JSON subtrees give a lower bound without reserializing every suffix.
     // Zeroing counters only shortens their encoding; the final fit/replay remains authoritative.
     let undo = suffix_costs(history.cursor.undo.iter(), limits);
     let redo = suffix_costs(history.cursor.redo.iter(), limits);
+    let zero_undo_counters = history.batches.iter().all(|batch| batch.undo_entries == 0);
     let mut batches = history.batches.clone();
     for batch in &mut batches {
         batch.order = 0;
         batch.undo_entries = 0;
     }
     let batches = suffix_costs(batches.iter(), limits);
+    let minimum_undo = if history.cursor.undo.is_empty() {
+        // Every admissible cut drops zero entries; no excursion adjustment is needed.
+        vec![]
+    } else {
+        let mut costs = vec![usize::MAX; history.batches.len() + 1];
+        for index in (0..history.batches.len()).rev() {
+            costs[index] = costs[index + 1].min(history.batches[index].undo_entries);
+        }
+        costs
+    };
     if history.batches.len() > 64
         && undo[0].saturating_add(redo[0]).saturating_add(batches[0]) <= limits.branch_history_bytes
         && fits(history)
     {
-        return Ok(history.clone());
+        return Ok(BoundedHistory {
+            history: history.clone(),
+            floor: None,
+        });
     }
     let document_cost = record_cost(&*history.document, limits)?;
     let skeleton = serde_json::json!({"floor_offset":1,"baseline":null,"document":null,"batches":[],"cursor":{"undo":[],"redo":[]}});
     // Remove the two null value slots; their actual Document subtrees are added below.
     let overhead = record_cost(&skeleton, limits)?
-        .checked_sub(128)
+        .checked_sub(2 * record_cost(&serde_json::Value::Null, limits)?)
         .ok_or(BundleError::Capacity("history cost"))?;
     let mut baseline_cost: Option<(std::sync::Arc<kinewright_core::Document>, u64)> = None;
     kinewright_core::HistoryTransition::find_floor(
@@ -907,9 +953,12 @@ fn bound_history_inner(
             let Some(undo_cost) = undo.get(dropped) else {
                 return false;
             };
+            // An excursion below the cut rewrites batch counters and effects during
+            // fresh replay. Omit those terms; the exact replay/fit decides the cut.
+            let excursion = dropped > 0 && minimum_undo[cut] < dropped;
             let lower = undo_cost
                 .saturating_add(redo[0])
-                .saturating_add(batches[cut]);
+                .saturating_add(if excursion { 0 } else { batches[cut] });
             if count > kinewright_core::HISTORY_COMMANDS || lower > limits.branch_history_bytes {
                 return false;
             }
@@ -934,22 +983,36 @@ fn bound_history_inner(
                 .saturating_add(overhead)
                 .saturating_add(2 * commas as u64)
                 .saturating_add(2 * u64::from(offset.ilog10()));
-            for (order, batch) in history.batches[cut..].iter().enumerate() {
-                let Some(entries) = batch.undo_entries.checked_sub(dropped) else {
-                    return false;
-                };
-                // Only normalized order and undo count change in an equivalent retained batch.
-                cost = cost.saturating_add(
-                    2 * u64::from(
-                        order.checked_ilog10().unwrap_or(0) + entries.checked_ilog10().unwrap_or(0),
-                    ),
-                );
+            if !excursion && zero_undo_counters {
+                // Orders are 0..count. Each decimal threshold contributes one
+                // extra digit to every later order; the scratch charge is twice that.
+                let mut threshold = 10;
+                while threshold < count {
+                    cost = cost.saturating_add(2 * (count - threshold) as u64);
+                    threshold *= 10;
+                }
+            } else if !excursion {
+                for (order, batch) in history.batches[cut..].iter().enumerate() {
+                    let Some(entries) = batch.undo_entries.checked_sub(dropped) else {
+                        return false;
+                    };
+                    // Only normalized order and undo count change in an equivalent retained batch.
+                    cost = cost.saturating_add(
+                        2 * u64::from(
+                            order.checked_ilog10().unwrap_or(0)
+                                + entries.checked_ilog10().unwrap_or(0),
+                        ),
+                    );
+                }
             }
             cost <= limits.branch_history_bytes
         },
         fits,
     )
-    .map(|transition| transition.after().clone())
+    .map(|transition| BoundedHistory {
+        history: transition.after().clone(),
+        floor: Some(transition),
+    })
     .map_err(|_| BundleError::Capacity("history baseline exceeds branch allowance"))
 }
 
@@ -1306,4 +1369,26 @@ pub(crate) fn serialize_root(
         return Err(BundleError::Corrupt("unstable root serialization".into()));
     }
     Ok((bytes, encoded))
+}
+
+#[cfg(feature = "test-util")]
+/// Exercise the production floor selection with explicit downward limits.
+/// # Errors
+/// Returns the same admission error as a save at these limits.
+pub fn bound_history_probe(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<HistorySnapshot, BundleError> {
+    bound_history(history, limits)
+}
+
+#[cfg(feature = "test-util")]
+/// Charge an actual encoded history using the production record admission.
+/// # Errors
+/// Refuses an invalid or excessive record.
+pub fn history_cost_probe(
+    history: &HistorySnapshot,
+    limits: &crate::storage_budget::StorageLimits,
+) -> Result<u64, BundleError> {
+    record_cost(history, limits)
 }

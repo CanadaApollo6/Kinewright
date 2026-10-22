@@ -1733,3 +1733,6 @@ mod round_three;
 #[cfg(target_os = "linux")]
 #[path = "support/ja_s1_fix_r2.rs"]
 mod round_two;
+
+#[path = "support/ja_s1_fix_r4.rs"]
+mod round_four;

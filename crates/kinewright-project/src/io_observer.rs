@@ -4,6 +4,39 @@ use std::{cell::RefCell, path::PathBuf};
 
 use serde::Serialize;
 
+type Hook = (&'static str, Box<dyn FnMut()>);
+thread_local! { static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
+/// Schedule a real Core command at a production save barrier on this thread.
+/// # Panics
+/// Refuses nesting; the callback and operation may propagate their own panic.
+pub fn at_barrier<T>(
+    point: &'static str,
+    callback: impl FnMut() + 'static,
+    run: impl FnOnce() -> T,
+) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            HOOK.with_borrow_mut(|hook| *hook = None);
+        }
+    }
+    HOOK.with_borrow_mut(|hook| {
+        assert!(hook.is_none());
+        *hook = Some((point, Box::new(callback)));
+    });
+    let _reset = Reset;
+    run()
+}
+pub(crate) fn at_test_hook(point: &str) {
+    HOOK.with_borrow_mut(|hook| {
+        if let Some((expected, callback)) = hook
+            && point == *expected
+        {
+            callback();
+        }
+    });
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct SyncProfile {
     pub calls: u64,

@@ -87,9 +87,15 @@ fn first_save_over_limit(batch_limit: bool) {
         .unwrap();
     let path = temp.path("first.kinewright");
     // A definite failure must preserve the original unsaved stream, including below its future floor.
+    let cold_before = io_observer::history_bound_profile();
     let failed = io_observer::fail_once("copy_verify", || {
         session.first_save(&path, &core, &inputs.reference)
     });
+    let cold = io_observer::history_bound_profile().nanoseconds - cold_before.nanoseconds;
+    eprintln!(
+        "R4_COLD batch_limit={batch_limit} bound_ms={:.3}",
+        std::time::Duration::from_nanos(cold.try_into().unwrap()).as_secs_f64() * 1000.0
+    );
     assert!(failed.is_err());
     assert_eq!(core.export_history().unwrap(), original);
     assert!(!path.exists());

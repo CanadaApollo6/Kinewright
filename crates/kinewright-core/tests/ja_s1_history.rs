@@ -272,50 +272,94 @@ fn checkpoint_install_refuses_a_newer_producer_suffix() {
     assert_eq!(core.export_history().unwrap(), current);
 }
 #[test]
-fn floor_search_matches_exhaustive_nonmonotone_cuts() {
+fn pending_floor_blocks_undo_and_commits_current_suffix() {
     let core = initial();
-    for command in [
-        Command::Do(lock(false)),
-        Command::Undo,
-        Command::Redo,
-        Command::DoBatchCoalesced {
-            coalesce_key: "drag".into(),
-            operations: vec![lock(true)],
-        },
-        Command::DoBatchCoalesced {
-            coalesce_key: "drag".into(),
-            operations: vec![lock(false)],
-        },
-        Command::Undo,
-        Command::Redo,
-    ] {
-        core.request(command).unwrap();
+    for value in [false, true, false, true] {
+        core.request(Command::Do(lock(value))).unwrap();
     }
     let before = core.export_history().unwrap();
-    let mut validity = vec![];
-    for minimum in 1..=before.batches.len() {
-        let expected = (minimum..=before.batches.len())
-            .find_map(|cut| HistoryTransition::floor(before.clone(), cut).ok());
-        let actual =
-            HistoryTransition::find_floor(before.clone(), |cut, _, _| cut >= minimum, |_| true);
-        assert_eq!(
-            actual.as_ref().ok().map(HistoryTransition::after),
-            expected.as_ref().map(HistoryTransition::after)
-        );
-        validity.push(HistoryTransition::floor(before.clone(), minimum).is_ok());
-    }
-    assert!(
-        validity.windows(3).any(|w| w == [true, false, true]),
-        "fixture must include valid-invalid-valid cuts"
+    let transition = HistoryTransition::floor(before.clone(), 2).unwrap();
+    let retained = transition.after().cursor.undo.len();
+    let mut barrier = core.begin_history_floor(transition).unwrap();
+    assert_eq!(
+        core.export_history().unwrap(),
+        before,
+        "barrier must retain entries"
     );
-    let mut corrupt = before.clone();
-    corrupt.batches[0].undo_entries += 1;
-    assert!(HistoryTransition::find_floor(corrupt, |_, _, _| true, |_| true).is_err());
-    let mut corrupt = before;
-    let track = &mut std::sync::Arc::make_mut(&mut corrupt.document).tracks[0];
-    track.sync_lock = !track.sync_lock;
-    assert!(matches!(
-        HistoryTransition::find_floor(corrupt, |_, _, _| false, |_| true),
-        Err(HistoryError::Corrupt)
-    ));
+    for _ in 0..retained {
+        core.request(Command::Undo).unwrap();
+    }
+    let boundary = core.export_history().unwrap();
+    core.request(Command::Undo).unwrap();
+    assert_eq!(
+        core.export_history().unwrap(),
+        boundary,
+        "pending floor must block Undo"
+    );
+    core.request(Command::Redo).unwrap();
+    core.request(Command::Do(lock(false))).unwrap();
+    let current = core.export_history().unwrap();
+    let expected = HistoryTransition::floor(current.clone(), 2)
+        .unwrap()
+        .after()
+        .clone();
+    let revision = || match core.request(Command::Query(Query::Snapshot)).unwrap() {
+        Event::QueryResult(QueryResult::Snapshot { revision, .. }) => revision,
+        _ => panic!("snapshot response"),
+    };
+    let prior = revision();
+    barrier.commit().unwrap();
+    assert_eq!(
+        revision().0,
+        prior.0 + 1,
+        "private replay must not expose extra revisions"
+    );
+    assert_eq!(
+        core.export_history().unwrap(),
+        expected,
+        "commit must use current suffix"
+    );
+}
+
+#[test]
+fn pending_floor_release_restores_entries_and_rejects_a_stale_capture() {
+    let core = initial();
+    for value in [false, true, false] {
+        core.request(Command::Do(lock(value))).unwrap();
+    }
+    core.request(Command::Undo).unwrap();
+    let before = core.export_history().unwrap();
+    let transition = HistoryTransition::floor(before.clone(), 1).unwrap();
+    let mut barrier = core.begin_history_floor(transition).unwrap();
+    assert!(
+        core.restore_history(before.clone()).is_err(),
+        "restore cannot bypass a pending floor"
+    );
+    barrier.release().unwrap();
+    let mut retry_barrier = core
+        .begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap())
+        .unwrap();
+    assert!(
+        barrier.commit().is_err(),
+        "released handle must not commit a retry's floor"
+    );
+    assert!(
+        barrier.release().is_err(),
+        "released handle must not release a retry's floor"
+    );
+    retry_barrier.release().unwrap();
+    assert_eq!(core.export_history().unwrap(), before);
+    for _ in &before.cursor.undo {
+        core.request(Command::Undo).unwrap();
+    }
+    assert_eq!(core.export_history().unwrap().document, before.baseline);
+    for _ in 0..before.cursor.undo.len() + before.cursor.redo.len() {
+        core.request(Command::Redo).unwrap();
+    }
+    assert!(core.export_history().unwrap().cursor.redo.is_empty());
+    let stale = HistoryTransition::floor(before, 1).unwrap();
+    assert!(
+        core.begin_history_floor(stale).is_err(),
+        "capture/install race must refuse before IO"
+    );
 }

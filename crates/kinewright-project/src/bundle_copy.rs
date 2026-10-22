@@ -93,6 +93,7 @@ impl BundleCopy {
                 self.before.inventory.as_deref(),
                 self.before.had_assets,
             )?;
+            destination.settle_pending_save(false)?;
             self.source.reconciled();
             self.status = CopyStatus::DefinitelyUnpublished;
             return Ok(None);
@@ -246,6 +247,17 @@ fn result(
             let uncertain = target.unsettled
                 || target.store.with_namespace(|n| Ok(n.is_uncertain()))?
                 || target.store.has_unsettled_objects()?;
+            if uncertain {
+                if let Some(barrier) = target
+                    .pending_save
+                    .as_mut()
+                    .and_then(|p| p.barrier.as_mut())
+                {
+                    barrier.retain_until_reconcile();
+                }
+            } else {
+                target.settle_pending_save(false)?;
+            }
             if !uncertain
                 && target
                     .store
@@ -475,8 +487,9 @@ impl SessionStore {
         let frozen = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let bounded = crate::bundle_commit::bound_history(&frozen, &limits)?;
-        let history = &bounded;
+        let bounded = crate::bundle_commit::select_history(&frozen, &limits)?;
+        let history = &bounded.history;
+        let barrier = crate::bundle::pending_floor(core, bounded.floor)?;
         let roots = [inputs.clone()];
         let source = self.store.begin_copy(
             &roots,
@@ -489,6 +502,10 @@ impl SessionStore {
             )?,
         )?;
         let (mut target, before, prepared) = destination(path, limits)?;
+        target.pending_save = Some(crate::bundle::PendingSave {
+            barrier,
+            root_sha256: None,
+        });
         let mut map = BTreeMap::new();
         let publication = (|| {
             origins(
@@ -509,7 +526,7 @@ impl SessionStore {
                 target.store.verify(&reference)?;
             }
             let id = target.manual_branch_id.clone();
-            let report = target.publish_core(core, frozen.clone(), history, &rebound, &id)?;
+            let report = target.publish_pending(&frozen, history, &rebound, &id)?;
             Ok(report)
         })();
         result(target, before, prepared, source, map, publication)

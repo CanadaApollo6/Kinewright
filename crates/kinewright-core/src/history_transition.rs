@@ -1,6 +1,58 @@
 //! Validated, actor-installed transitions of a frozen history cut.
 use crate::{Command, Core, Event, HistoryError, HistorySnapshot};
 
+/// Revocable save barrier. Definite failure releases on drop; uncertain publication
+/// retains the barrier until its owner explicitly commits or releases it.
+pub struct HistoryFloorBarrier {
+    core: Core,
+    offset: u64,
+    retain: bool,
+    settled: bool,
+}
+impl HistoryFloorBarrier {
+    pub(crate) const fn new(core: Core, offset: u64) -> Self {
+        Self {
+            core,
+            offset,
+            retain: false,
+            settled: false,
+        }
+    }
+    pub fn retain_until_reconcile(&mut self) {
+        self.retain = true;
+    }
+    /// Commit the floor against Core's current history.
+    /// # Errors
+    /// Returns an error if this barrier no longer matches or Core disconnected.
+    pub fn commit(&mut self) -> Result<(), HistoryError> {
+        if self.settled {
+            return Err(HistoryError::Corrupt);
+        }
+        self.retain = true;
+        self.core.settle_history_floor(self.offset, true)?;
+        self.settled = true;
+        Ok(())
+    }
+    /// Release without discarding any entries.
+    /// # Errors
+    /// Returns an error if this barrier no longer matches or Core disconnected.
+    pub fn release(&mut self) -> Result<(), HistoryError> {
+        if self.settled {
+            return Err(HistoryError::Corrupt);
+        }
+        self.core.settle_history_floor(self.offset, false)?;
+        self.settled = true;
+        Ok(())
+    }
+}
+impl Drop for HistoryFloorBarrier {
+    fn drop(&mut self) {
+        if !self.settled && !self.retain {
+            let _ = self.release();
+        }
+    }
+}
+
 pub struct HistoryTransition {
     pub(crate) before: HistorySnapshot,
     pub(crate) after: HistorySnapshot,
