@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
-    baseline::Baseline,
     protocol::{self, Action, CONTROL_BYTES, Call, LoadedFixture},
     report::{Report, os_start_identity},
+    revised::Adapter,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -86,13 +86,28 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn(exe: &Path, fixture: &Path, root: &Path, name: &str) -> Result<Self, String> {
+    fn spawn(
+        exe: &Path,
+        fixture: &Path,
+        root: &Path,
+        name: &str,
+        mode: protocol::Mode,
+    ) -> Result<Self, String> {
         let mut child = Command::new(exe)
             .args(["--role", "worker", "--fixture"])
             .arg(fixture)
             .arg("--root")
             .arg(root)
-            .args(["--participant", name])
+            .args([
+                "--participant",
+                name,
+                "--mode",
+                if mode == protocol::Mode::Revised {
+                    "revised"
+                } else {
+                    "baseline"
+                },
+            ])
             .env_remove("REV2_HOOK")
             .env_remove("REV2_SIGNALS")
             .env_remove("REV2_EXIT")
@@ -221,7 +236,7 @@ impl Worker {
             .ok_or("worker already reaped")?
             .join()
             .map_err(|_| "worker stderr reader panicked")??;
-        let stderr = report.artifact(&format!("stderr-{}.txt", self.name), &stderr)?;
+        let stderr = report.artifact(&format!("stderr-{}-{pid}.txt", self.name), &stderr)?;
         let result = json!({"pid":pid,"reaped":true,"status":status.to_string(),"killed":kill,"os_children_before_reap":before,"stderr":stderr,
             "guardian_containment":"pending_baseline_witness"});
         report.event(0, &self.name, "process_exit", result.clone())?;
@@ -507,15 +522,36 @@ impl Controller {
             .join("work")
             .canonicalize()
             .map_err(|e| e.to_string())?;
+        if let Err(error) = controller.spawn_participants(loaded, report, &exe, &fixture, &root) {
+            // A participant whose spawn is on the record is reaped on the record too,
+            // even when a later participant's setup fails.
+            return Err(match controller.cleanup(report) {
+                Ok(()) => error,
+                Err(cleanup) => format!("{error}; {cleanup}"),
+            });
+        }
+        controller.sample(report)?;
+        Ok(controller)
+    }
+
+    fn spawn_participants(
+        &mut self,
+        loaded: &LoadedFixture,
+        report: &mut Report,
+        exe: &Path,
+        fixture: &Path,
+        root: &Path,
+    ) -> Result<(), String> {
         for name in &loaded.fixture.initial.participants {
-            if !matches!(name.as_str(), "A" | "B") || controller.workers.contains_key(name) {
+            if !matches!(name.as_str(), "A" | "B") || self.workers.contains_key(name) {
                 return Err("participants must be distinct A/B".into());
             }
             let worker = Worker::spawn(
-                &exe,
+                exe,
                 &fixture.canonicalize().map_err(|e| e.to_string())?,
-                &root,
+                root,
                 name,
+                report.mode,
             )?;
             let ready = worker.receive(0, loaded.fixture.limits.setup_timeout_ms)?;
             if ready["pid"] != worker.child.id()
@@ -524,10 +560,9 @@ impl Controller {
                 return Err("worker birth identity differs from owned process".into());
             }
             report.event(0, name, "process_spawn", ready)?;
-            controller.workers.insert(name.clone(), worker);
+            self.workers.insert(name.clone(), worker);
         }
-        controller.sample(report)?;
-        Ok(controller)
+        Ok(())
     }
 
     pub fn sample(&self, report: &mut Report) -> Result<(), String> {
@@ -576,7 +611,10 @@ impl Controller {
                         a.id == args.action_id
                             && matches!(
                                 a.call,
-                                Call::CoreSend(_) | Call::HeadlessSave(_) | Call::ProjectSave(_)
+                                Call::CoreSend(_)
+                                    | Call::HeadlessSave(_)
+                                    | Call::ProjectSave(_)
+                                    | Call::CommentSubmit(_)
                             )
                     })
                 {
@@ -607,6 +645,44 @@ impl Controller {
                     return Err("barrier was not acknowledged".into());
                 }
                 Ok(Some((json!({"barrier":args.name,"released":true}), true)))
+            }
+            Call::ParticipantRestart(_) => {
+                if self.workers.contains_key(&action.participant)
+                    || !loaded
+                        .fixture
+                        .initial
+                        .participants
+                        .contains(&action.participant)
+                {
+                    return Err("restart requires a retired original fixed participant".into());
+                }
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let fixture = report
+                    .root
+                    .join("frozen/__ja_fixture.json")
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+                let root = report
+                    .root
+                    .join("work")
+                    .canonicalize()
+                    .map_err(|e| e.to_string())?;
+                let worker =
+                    Worker::spawn(&exe, &fixture, &root, &action.participant, report.mode)?;
+                let ready = worker.receive(0, loaded.fixture.limits.setup_timeout_ms)?;
+                if ready["pid"] != worker.child.id()
+                    || ready["os_start_identity"] != json!(os_start_identity(worker.child.id()))
+                {
+                    return Err("restarted worker birth identity differs".into());
+                }
+                report.event(
+                    action.id,
+                    &action.participant,
+                    "process_spawn",
+                    ready.clone(),
+                )?;
+                self.workers.insert(action.participant.clone(), worker);
+                Ok(Some((ready, true)))
             }
             Call::ParticipantExit(_) | Call::ParticipantKill(_) => {
                 let mut worker = self
@@ -731,12 +807,13 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
         {}
         return Ok(0);
     }
-    if args.len() != 8
+    if args.len() != 10
         || args[0] != "--role"
         || args[1] != "worker"
         || args[2] != "--fixture"
         || args[4] != "--root"
         || args[6] != "--participant"
+        || args[8] != "--mode"
     {
         return Err("invalid fixed worker arguments".into());
     }
@@ -746,7 +823,12 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
     if !matches!(participant.as_str(), "A" | "B") {
         return Err("invalid worker identity".into());
     }
-    let mut baseline = Baseline::new(root)?;
+    let mode = match args[9].as_str() {
+        "baseline" => protocol::Mode::Baseline,
+        "revised" => protocol::Mode::Revised,
+        _ => return Err("invalid worker mode".into()),
+    };
+    let mut baseline = Adapter::new(root, mode)?;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut stdout = std::io::stdout().lock();
     write_line(
@@ -805,7 +887,7 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
                     json!({"owned_child_retired":retired,"os_children":os_children(std::process::id())}),
                 )
             }
-            call => baseline.execute(call, &loaded),
+            _ => baseline.execute(&request.action, &loaded),
         };
         let result = result.and_then(|value| {
             let bytes = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
@@ -840,14 +922,24 @@ pub fn worker_cli(args: &[String]) -> Result<i32, String> {
 pub(super) fn witness_worker_teardown_window() {
     use kinewright_media::test_support::TempDirectory;
     use std::os::unix::fs::PermissionsExt;
-    let temp = TempDirectory::new("ja-worker-teardown");
+    let temp = TempDirectory::new_in(
+        &kinewright_media::test_support::workspace_target_dir(),
+        "ja-worker-teardown",
+    );
     let executable = temp.path("worker");
     // Fixed test worker: acknowledge EOF, then perform teardown beyond the old
     // reap window. No GPU timing or unavailable-device fallback controls this.
     fs::write(&executable, b"#!/bin/sh\ncat >/dev/null\nexec sleep 3\n").unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let mut report = Report::create(&temp.path("report"), protocol::Mode::Baseline).unwrap();
-    let mut worker = Worker::spawn(&executable, Path::new("unused"), &report.root, "A").unwrap();
+    let mut worker = Worker::spawn(
+        &executable,
+        Path::new("unused"),
+        &report.root,
+        "A",
+        protocol::Mode::Baseline,
+    )
+    .unwrap();
     let started = Instant::now();
     let result = worker.finish(false, &mut report);
     assert!(

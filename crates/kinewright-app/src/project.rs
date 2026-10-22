@@ -114,6 +114,7 @@ pub(crate) struct ProjectSession {
     pub(crate) document: Arc<Document>,
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
+    pub(crate) source_admission: kinewright_project::bundle::BundleWriteAdmission,
     /// The project-relative LUT store, derived from `project_path` at runtime
     /// and never serialized (CC4 §2.2). `None` for a project that has never
     /// been saved.
@@ -332,6 +333,7 @@ impl ProjectSession {
         id: u64,
         name: impl Into<String>,
         document: Document,
+        source_admission: kinewright_project::bundle::BundleWriteAdmission,
         project_path: Option<PathBuf>,
         playback: &Arc<dyn Playback>,
         analysis: &Arc<dyn Analysis>,
@@ -353,7 +355,11 @@ impl ProjectSession {
         // choice) on every frame while no session is running, so the seed
         // only has to be a valid variant.
         let agent_harness = AgentHarnessChoice::ALL[0];
-        let recovery = if id == 1 {
+        let writable =
+            source_admission.require_supported().is_ok() && !source_admission.is_studio();
+        let recovery = if !writable {
+            Recovery::read_only()
+        } else if id == 1 {
             Recovery::start(&core, project_path.as_deref())
         } else {
             Recovery::start_attached(&core, project_path.as_deref())
@@ -376,7 +382,11 @@ impl ProjectSession {
         // the log handle is shared with the first agent thread below (N4.1):
         // restore requires an empty log and no id may collide with it.
         let loaded = SidecarSession::load(
-            sidecar_mode,
+            if writable {
+                sidecar_mode
+            } else {
+                &SidecarMode::None
+            },
             project_path.as_deref(),
             std::sync::Arc::clone(&incidents),
             TimelineRevision::default(),
@@ -396,10 +406,15 @@ impl ProjectSession {
             document: Arc::clone(&document),
             revision: TimelineRevision::default(),
             project_path,
+            source_admission,
             lut_store,
             lut_store_error,
             agent_project_path: std::sync::Arc::clone(&agent_project_path),
-            sidecar: loaded.session,
+            sidecar: {
+                let mut sidecar = loaded.session;
+                sidecar.sidecar_suspended |= !writable;
+                sidecar
+            },
             loaded_ids,
             loaded_open_ids,
             subject_missing,
@@ -407,7 +422,7 @@ impl ProjectSession {
             format_version,
             // The load only ever suspends for H3 — the recovery cause is
             // set by `apply_restore_request` (N6.1/J5).
-            recovery_suspended: false,
+            recovery_suspended: !writable,
             lut_availability: statuses.into_iter().collect(),
             lut_library: Arc::new(library),
             saved_document: None,
@@ -1810,6 +1825,7 @@ mod tests {
             2,
             "dirty-test",
             document,
+            kinewright_project::bundle::BundleWriteAdmission::new_document(),
             None,
             &playback,
             &analysis,
@@ -2025,6 +2041,7 @@ mod tests {
             id,
             "sidecar-test",
             Document::default(),
+            crate::app::fixture_source_admission((Some(path.to_path_buf())).as_deref()),
             Some(path.to_path_buf()),
             &playback,
             &analysis,
@@ -2690,6 +2707,7 @@ mod tests {
             31,
             "refuse-test",
             Document::default(),
+            crate::app::fixture_source_admission((Some(project.clone())).as_deref()),
             Some(project.clone()),
             &playback,
             &analysis,

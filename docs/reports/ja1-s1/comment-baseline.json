@@ -1,0 +1,229 @@
+{
+  "source_head": "f9f6089d87037e680e85f7551320739f69926ac0",
+  "source_tree": "d5372f02f4fd1aca904a989366afdb4e1080bb90",
+  "source_clean": true,
+  "binary": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/ja-s1-comment-baseline/sealed/kinewright-ja-baseline",
+  "binary_sha256": "fe073fe00f3c57368d3a294b948b2cf8be8f77123f3d59803ea2c81e1d2a3ffc",
+  "fixture_sha256": "a818c18f30eb8dfe98a5528aea6c26d435ff8d40c2c58ac4223abd40032d62e9",
+  "inputs": {
+    "changed-text": {
+      "byte_length": 25,
+      "kind": "independent-opaque-comment-bytes",
+      "relative_file": "s1-comment-changed.txt",
+      "sha256": "7de758b2e023ddf116e6f7fd6a49509a6968540e3acf521b7177aa624aa50c4f"
+    },
+    "lost-strokes": {
+      "byte_length": 48,
+      "kind": "independent-opaque-comment-bytes",
+      "relative_file": "s1-strokes-lost.json",
+      "sha256": "9f72d5e2ada9b0bb353a1b12f8419211f6ace0fe09ccd245bf441cb900a59398"
+    },
+    "lost-text": {
+      "byte_length": 27,
+      "kind": "independent-opaque-comment-bytes",
+      "relative_file": "s1-comment-lost.txt",
+      "sha256": "ff816ac274dd699f0ed0fd345e5495b143891eeae49fde178329e505ae6f8a03"
+    },
+    "retained-strokes": {
+      "byte_length": 32,
+      "kind": "independent-opaque-comment-bytes",
+      "relative_file": "s1-strokes-retained.json",
+      "sha256": "fe1bb5651601ee472eb96473617f02cc731727d5f1216e9e65767f2db4edb46e"
+    },
+    "retained-text": {
+      "byte_length": 27,
+      "kind": "independent-opaque-comment-bytes",
+      "relative_file": "s1-comment-retained.txt",
+      "sha256": "2f4631b3ebd758fa3d2aa875f99d81fbd97a88fd5c988e324cc4dcc48ede0f86"
+    }
+  },
+  "oracles": {
+    "lost-strokes": {
+      "byte_length": 53,
+      "kind": "independent-exact-byte-string-oracle",
+      "relative_file": "s1-oracle-strokes-lost.json",
+      "sha256": "707815be8c62f4f2e66c6370cfcdd41c9ed91e89411494ff9f6cf9d378b22b20"
+    },
+    "lost-text": {
+      "byte_length": 34,
+      "kind": "independent-exact-byte-string-oracle",
+      "relative_file": "s1-oracle-comment-lost.json",
+      "sha256": "0a822fbdeb8c9313087b2d441c67afd8cfe0816c15cc5b6d41bca00969361d59"
+    },
+    "one": {
+      "byte_length": 2,
+      "kind": "independent-scalar-oracle",
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "retained-strokes": {
+      "byte_length": 36,
+      "kind": "independent-exact-byte-string-oracle",
+      "relative_file": "s1-oracle-strokes-retained.json",
+      "sha256": "29fceb1c3c087303c09f85f7986850383039908b7df38fbe9ad3b5de8c09881d"
+    },
+    "retained-text": {
+      "byte_length": 33,
+      "kind": "independent-exact-byte-string-oracle",
+      "relative_file": "s1-oracle-comment-retained.json",
+      "sha256": "8a602ba8cb1d3e84503d80b68b2ecb53012a94b60417dc7f944a4756595171d9"
+    },
+    "true": {
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle",
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74"
+    }
+  },
+  "os": "linux",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "backend": "linux-local-pre-receipt-graph",
+  "scenario_selection": "comment-baseline",
+  "controls": [
+    {
+      "artifact": {
+        "byte_length": 321,
+        "relative_file": "artifacts/assertion-0.json",
+        "sha256": "98fa6333528d3822fff0d71c4913a2156344a50fef56b7c61b9b35f0975a2fee"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "retained-graph-published",
+      "observation": 2,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/durable_graph_published",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 367,
+        "relative_file": "artifacts/assertion-1.json",
+        "sha256": "c5cf6f4c5d91de469c60204138278760b00b0ec474406408761bb3b63cacff37"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "retained-text-exact",
+      "observation": 6,
+      "oracle": "retained-text",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/text_utf8",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 382,
+        "relative_file": "artifacts/assertion-2.json",
+        "sha256": "1bf494feb6bb848f796e264fa0e7caad3a7385b94c0248639167b1b7fd13746c"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "retained-strokes-exact",
+      "observation": 6,
+      "oracle": "retained-strokes",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/strokes_utf8",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 362,
+        "relative_file": "artifacts/assertion-3.json",
+        "sha256": "f1c22daf01e2606dd0c0c7067a23ee9cf2e05207ea119b802fbbb33c98463b0f"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "lost-text-exact",
+      "observation": 11,
+      "oracle": "lost-text",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/text_utf8",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 409,
+        "relative_file": "artifacts/assertion-4.json",
+        "sha256": "0da205693057eee16fbee5de511792c015f5f10283c3015fb5d48b7acd438ed5"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "lost-strokes-exact",
+      "observation": 11,
+      "oracle": "lost-strokes",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/strokes_utf8",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 363,
+        "relative_file": "artifacts/assertion-5.json",
+        "sha256": "c29ad2192f436d39cb37a2bc564d674c16021a1cfcc1df04350556d877a28932"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "retry-text-exact",
+      "observation": 17,
+      "oracle": "lost-text",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/text_utf8",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 410,
+        "relative_file": "artifacts/assertion-6.json",
+        "sha256": "1378b9695cf2328784ff4c4e44b7cb9868764a7b37fe208fd4b4263eedc73eeb"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "retry-strokes-exact",
+      "observation": 17,
+      "oracle": "lost-strokes",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/strokes_utf8",
+      "positive_control": null
+    }
+  ],
+  "literal_missing_result": {
+    "actual": false,
+    "assertion": "actual == independently frozen expected",
+    "comparison": "equal",
+    "disposition": "baseline_red",
+    "evidence_class": "baseline_property",
+    "expected": true,
+    "id": "durable-comment-result-binding",
+    "observation": 17,
+    "oracle": "true",
+    "oracle_pointer": "",
+    "passed": false,
+    "pointer": "/binding_present",
+    "positive_control": "retry-strokes-exact"
+  },
+  "run_directory": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/c4-comment-baseline/run-20261021T155115",
+  "run_sha256": "0346833353d2a859a25bc33080e8b1b2e96e04bdd9f416c14d9a02426e6bba16",
+  "summary_sha256": "74f3ce756950e19a2e89bf93aaec1137bd7f5de1c3bbd347e6506909a585518e",
+  "later_receipt_scenarios": "NOT RUN on this pre-receipt source; preserved in the unchanged fixture"
+}

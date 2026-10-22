@@ -418,7 +418,7 @@ fn evidence_directory() -> PathBuf {
     if let Some(target) = std::env::var_os("CARGO_TARGET_DIR") {
         return PathBuf::from(target).join("color-evidence");
     }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/color-evidence")
+    crate::test_support::workspace_target_dir().join("color-evidence")
 }
 
 pub(crate) fn backend_metadata(backend: &str) -> Value {

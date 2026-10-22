@@ -10,7 +10,7 @@ use crate::{Command, Operation};
 /// serialized operation shape is more useful than adding allocation solely to
 /// equalize in-memory variant sizes.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum JournalCommand {
     Do(Operation),
     DoBatch(Vec<Operation>),

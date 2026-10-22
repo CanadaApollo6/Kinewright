@@ -1,0 +1,139 @@
+{
+  "ordinal": 3,
+  "parent": "02aa625d7ec9b736ee79d3fa23c730665f92d572",
+  "linux_gate": "c3-gate-attempt5",
+  "gates": {
+    "F": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.14s"
+    ],
+    "L": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out; finished in 2.81s"
+    ],
+    "P-generated": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 2.12s"
+    ],
+    "P-media": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1187 filtered out; finished in 3.83s"
+    ],
+    "P-presentation": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 796 filtered out; finished in 0.18s"
+    ],
+    "architecture-agent": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.02s"
+    ],
+    "architecture-app": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.02s"
+    ],
+    "build": [],
+    "classification": [],
+    "clippy": [],
+    "core-history": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "eval-bins": [],
+    "format-app": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 796 filtered out; finished in 0.56s"
+    ],
+    "format-core": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.00s"
+    ],
+    "format-eval": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s"
+    ],
+    "harness-integration": [
+      "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 37.38s"
+    ],
+    "harness-lib": [
+      "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 160.68s"
+    ],
+    "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 20.02s"
+    ],
+    "native_app_bridge_rejects_abnormal_exit_after_completed_report": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 35.14s"
+    ],
+    "native_app_bridge_retains_exercised_control_and_property_failures": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 42.84s"
+    ],
+    "revised": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.40s"
+    ],
+    "rustfmt": [],
+    "storage": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s"
+    ],
+    "test-build": []
+  },
+  "mutations": {
+    "c3-mutations/branch-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.02s"
+    ],
+    "c3-mutations/branch-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.03s"
+    ],
+    "c3-mutations/closure-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.14s"
+    ],
+    "c3-mutations/closure-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.14s"
+    ],
+    "c3-mutations/copy-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.09s"
+    ],
+    "c3-mutations/copy-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.08s"
+    ],
+    "c3-mutations/decoded-lease-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.14s"
+    ],
+    "c3-mutations/decoded-lease-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.14s"
+    ],
+    "c3-mutations/decoded-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.02s"
+    ],
+    "c3-mutations/decoded-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.03s"
+    ],
+    "c3-mutations/dedup-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.08s"
+    ],
+    "c3-mutations/dedup-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.07s"
+    ],
+    "c3-mutations/hash-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.13s"
+    ],
+    "c3-mutations/hash-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.14s"
+    ],
+    "c3-mutations/history-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.01s"
+    ],
+    "c3-mutations/history-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.02s"
+    ],
+    "c3-mutations/live-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.14s"
+    ],
+    "c3-mutations/live-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.14s"
+    ],
+    "c3-mutations/tamper-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.10s"
+    ],
+    "c3-mutations/tamper-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.10s"
+    ]
+  },
+  "source_hashes_match_gate": true,
+  "windows_full_project_agent_cfg_check": "NOT RUN: MSVC native dependency toolchain prerequisite unavailable (attempt/evidence at c2-windows-compile)",
+  "windows_native": "NOT RUN",
+  "decoder_open_certification": "NOT RUN/unavailable (L4); no successful receipt constructor",
+  "root_durability": "not yet implemented; commit 4",
+  "storage_limits": "provisional; decoded admission charges are conservative bounds, not measured heap or RSS",
+  "baseline_flips": [
+    "R2/R3 paired properties remain passing"
+  ],
+  "new_fixture_baseline": "owned-input baseline mode is a capability NOT RUN, not a runtime red"
+}

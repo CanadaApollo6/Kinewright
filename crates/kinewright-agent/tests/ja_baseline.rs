@@ -5,10 +5,18 @@ use std::{path::Path, process::Command};
 
 #[test]
 fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
-    let temp = TempDirectory::new("ja-native");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native",
+    );
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/history-loss.json");
     let mut hashes = Vec::new();
-    for mode in ["baseline", "revised"] {
+    let modes: &[&str] = if cfg!(target_os = "linux") {
+        &["baseline", "revised"]
+    } else {
+        &["baseline"]
+    };
+    for &mode in modes {
         let output = temp.path(mode);
         let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
             .args(["--mode", mode, "--fixture"])
@@ -17,14 +25,15 @@ fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
             .arg(&output)
             .output()
             .unwrap();
+        let expected = i32::from(mode == "baseline");
         assert_eq!(
             result.status.code(),
-            Some(1),
+            Some(expected),
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
         let line: Value = serde_json::from_slice(&result.stdout).unwrap();
-        assert_eq!(line["exit_code"], 1);
+        assert_eq!(line["exit_code"], expected);
         let run: Value =
             serde_json::from_slice(&std::fs::read(output.join("run.json")).unwrap()).unwrap();
         hashes.push(run["fixture_sha256"].clone());
@@ -32,7 +41,11 @@ fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
             serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
         assert_eq!(
             summary["assertions"].as_array().unwrap().last().unwrap()["disposition"],
-            "baseline_red"
+            if mode == "baseline" {
+                "baseline_red"
+            } else {
+                "pass_control"
+            }
         );
         for artifact in summary["artifacts"].as_array().unwrap() {
             let bytes =
@@ -43,7 +56,11 @@ fn native_cli_retains_literal_assertions_and_unchanged_fixture_identity() {
             );
         }
     }
-    assert_eq!(hashes[0], hashes[1]);
+    assert_eq!(hashes[0], kinewright_media::sha256_file(&fixture).unwrap());
+    if cfg!(target_os = "linux") {
+        assert_eq!(hashes[0], hashes[1]);
+    }
+    // Windows native durable-success assertions are NOT RUN; its dedicated refusal wrapper is independent.
 }
 
 fn native_fixture(name: &str, output: &Path, expected: i32) -> Value {
@@ -69,7 +86,10 @@ fn native_fixture(name: &str, output: &Path, expected: i32) -> Value {
 #[test]
 #[cfg(target_os = "linux")]
 fn participants_hold_real_locks_and_reap_their_exact_children() {
-    let temp = TempDirectory::new("ja-processes");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-processes",
+    );
     let output = temp.path("out");
     native_fixture("participants-lock", &output, 0);
     let observation = |id| -> Value {
@@ -112,7 +132,10 @@ fn participants_hold_real_locks_and_reap_their_exact_children() {
 
 #[test]
 fn accepted_edit_reply_loss_and_original_retry_observe_two_undo_entries() {
-    let temp = TempDirectory::new("ja-retry");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-retry",
+    );
     let output = temp.path("out");
     let summary = native_fixture("reply-retry", &output, 1);
     assert!(
@@ -149,7 +172,10 @@ fn accepted_edit_reply_loss_and_original_retry_observe_two_undo_entries() {
 
 #[test]
 fn controller_failure_still_reaps_both_recorded_participants() {
-    let temp = TempDirectory::new("ja-cleanup-failure");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-cleanup-failure",
+    );
     let fixture = temp.path("fixture.json");
     let template =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/participants-lock.json");
@@ -174,6 +200,22 @@ fn controller_failure_still_reaps_both_recorded_participants() {
         serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
     assert_eq!(summary["disposition"], "not_run");
     let events = std::fs::read_to_string(out.join("events.jsonl")).unwrap();
+    // Both participants finish setup (each hashes its own executable) before the
+    // intentional controller failure; a missing spawn is a setup failure, not a reap.
+    let spawned: Vec<Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|e: &Value| e["kind"] == "process_spawn")
+        .collect();
+    assert_eq!(
+        spawned.len(),
+        2,
+        "participants must spawn before the intentional controller failure: {summary}"
+    );
+    eprintln!(
+        "R5_C4 second_spawn_ns={}",
+        spawned.last().unwrap()["elapsed_ns"]
+    );
     let exits = events
         .lines()
         .map(|l| serde_json::from_str::<Value>(l).unwrap())
@@ -184,9 +226,63 @@ fn controller_failure_still_reaps_both_recorded_participants() {
 }
 
 #[test]
+fn setup_failure_after_a_recorded_spawn_still_reaps_it() {
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-setup-partial",
+    );
+    let fixture = temp.path("fixture.json");
+    let template =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/participants-lock.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(template).unwrap()).unwrap();
+    value["lane"] = "portable".into();
+    value["requirements"] = serde_json::json!([]);
+    value["oracles"] = serde_json::json!({});
+    value["actions"] =
+        serde_json::json!([{"id":1,"participant":"missing","action":"core_start","args":{}}]);
+    value["barriers"] = serde_json::json!([]);
+    // The first A spawns and is recorded; the duplicate then fails participant setup.
+    value["initial"]["participants"] = serde_json::json!(["A", "A"]);
+    std::fs::write(&fixture, serde_json::to_vec(&value).unwrap()).unwrap();
+    let out = temp.path("out");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "baseline", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    let events: Vec<Value> = std::fs::read_to_string(out.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds = |kind: &str| {
+        events
+            .iter()
+            .filter(|e| e["kind"] == kind)
+            .collect::<Vec<_>>()
+    };
+    let spawned = kinds("process_spawn");
+    let exits = kinds("process_exit");
+    assert_eq!(spawned.len(), 1, "{events:?}");
+    assert_eq!(
+        exits.len(),
+        1,
+        "a recorded participant must be reaped on the record when later setup fails"
+    );
+    assert_eq!(exits[0]["data"]["reaped"], true);
+    assert_eq!(exits[0]["data"]["pid"], spawned[0]["data"]["pid"]);
+}
+
+#[test]
 #[cfg(unix)]
 fn native_deadline_interrupts_pending_confirmation_and_reaps_fixture() {
-    let temp = TempDirectory::new("ja-native-deadline");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native-deadline",
+    );
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja");
     for entry in std::fs::read_dir(&fixtures).unwrap() {
         let path = entry.unwrap().path();
@@ -274,7 +370,10 @@ fn native_app_bridge_retains_exercised_control_and_property_failures() {
         "build and supply the actual App test executable"
     );
     for class in ["control", "baseline_property"] {
-        let temp = TempDirectory::new("ja-native-app-failure");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-native-app-failure",
+        );
         let root = copied_fixtures(&temp);
         let file = root.join("app-coalesced-paint.json");
         let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -372,7 +471,10 @@ fn native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two() {
         std::env::var_os("JA_HARNESS_APP_TEST_BINARY").is_some(),
         "build and supply the actual App test executable"
     );
-    let temp = TempDirectory::new("ja-native-app-setup");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native-app-setup",
+    );
     let root = copied_fixtures(&temp);
     let file = root.join("app-coalesced-paint.json");
     let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -411,7 +513,10 @@ fn native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two() {
 fn native_app_bridge_rejects_abnormal_exit_after_completed_report() {
     assert!(std::env::var_os("JA_HARNESS_APP_TEST_BINARY").is_some());
     for inner_exit in [0, 1] {
-        let temp = TempDirectory::new("ja-native-app-abnormal");
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+            "ja-native-app-abnormal",
+        );
         let root = copied_fixtures(&temp);
         let file = root.join("app-coalesced-paint.json");
         if inner_exit == 1 {
@@ -483,7 +588,10 @@ fn native_app_bridge_rejects_abnormal_exit_after_completed_report() {
 
 #[test]
 fn native_source_identity_is_repository_wide_from_root_and_crate_cwd() {
-    let temp = TempDirectory::new("ja-native-source");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-native-source",
+    );
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let repo = crate_root.parent().unwrap().parent().unwrap();
     let fixture = crate_root.join("tests/fixtures/ja/history-loss.json");
@@ -526,7 +634,10 @@ fn native_source_identity_is_repository_wide_from_root_and_crate_cwd() {
 #[test]
 #[cfg(target_os = "linux")]
 fn refused_participant_kill_records_the_graceful_exit_and_reap() {
-    let temp = TempDirectory::new("ja-refused-kill");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-refused-kill",
+    );
     let root = copied_fixtures(&temp);
     let file = root.join("participants-lock.json");
     let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -561,7 +672,10 @@ fn refused_participant_kill_records_the_graceful_exit_and_reap() {
 fn unexpected_controller_exit_reaps_a_recorded_stopped_worker_before_return() {
     use rustix::process::{Pid, Signal, kill_process};
     use std::time::{Duration, Instant};
-    let temp = TempDirectory::new("ja-unexpected-exit");
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-unexpected-exit",
+    );
     let root = copied_fixtures(&temp);
     let file = root.join("recording-loopback.json");
     let mut fixture: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();

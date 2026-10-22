@@ -1,0 +1,224 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s1-bundle-migration",
+  "gate_ids": [
+    "JA1.G1",
+    "JA1.G2",
+    "JA1.G3"
+  ],
+  "lane": "linux-native",
+  "requirements": [],
+  "inputs": {
+    "legacy": {
+      "relative_file": "s1-migration-input.kinewright",
+      "sha256": "f58de3aaad5211ead878b265cceba464363bc142e1661abea91c8f55b61ace77",
+      "byte_length": 107,
+      "kind": "project"
+    },
+    "edit": {
+      "relative_file": "command-add-track.json",
+      "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6",
+      "byte_length": 157,
+      "kind": "current-command"
+    },
+    "sample-root": {
+      "relative_file": "s1-v3-bundle/studio.kinewright",
+      "sha256": "876e2abb35287567c43a4b62f811fdd377ed9295f7a16709fa88335883960567",
+      "byte_length": 1846,
+      "kind": "v3-bundle-root"
+    },
+    "sample-object-4": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
+      "sha256": "3cc43207a536a3dcd75d437bacb7cdc75aac389ae0de62eef49527b12ed6b513",
+      "byte_length": 11029,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-5": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
+      "sha256": "55e5136c4c659b8ba0b43c864004ab4ebdf7ade1c1a922e53092accf56dc8ae3",
+      "byte_length": 121,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-6": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
+      "sha256": "6686ed835609d3dc5efd329a98f1c1cf52a1232e54fb429c1bd352427531feb4",
+      "byte_length": 1377,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-7": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
+      "sha256": "892feec1fb180e54e9f416183ece48a1de4e848a251427c47d213091b6da9d44",
+      "byte_length": 167,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-8": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
+      "sha256": "b6c200060aeef0f76f6c1d27b72f31476555151a3ede8502c536f97fb512e5ec",
+      "byte_length": 2624,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-9": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
+      "sha256": "e1173be1e900f687221964ed163309d0571b7579e7f78e6d811cee590a99a59c",
+      "byte_length": 765,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-10": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
+      "sha256": "f51304efe9a3e0ad66af5141617bd76c1742f3fc1796b38d5f71b3910d796454",
+      "byte_length": 96,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-11": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/objects/f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
+      "sha256": "f8db7b57d54166b97ff29a01d0c4651bbe106139f306c64919f174c56682c0ad",
+      "byte_length": 730,
+      "kind": "v3-bundle-object"
+    },
+    "sample-object-13": {
+      "relative_file": "s1-v3-bundle/studio.kinewright-assets/studio/recovery/inventory",
+      "sha256": "6840caac33a6b8d900a352e2a4f2a640ba18c9792e071dd0abeb8c40d78dbbc8",
+      "byte_length": 230,
+      "kind": "v3-bundle-object"
+    },
+    "portable-crash-model": {
+      "relative_file": "s1-crash-model.json",
+      "sha256": "94dbd68d59d6ff905dd1100271e86b8dbab2cd2949b52688bff91b842ad2b1eb",
+      "byte_length": 92643,
+      "kind": "portable-dropped-write-model-input"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "bundle_fixture_probe",
+      "args": {
+        "input": "sample-root"
+      }
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "complete-sample-graph-valid",
+        "observation": 1,
+        "pointer": "/graph_verified",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "sample-admission-read-only",
+        "observation": 1,
+        "pointer": "/read_only_admission",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "project_load",
+      "args": {
+        "input": "legacy"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "core_send",
+      "args": {
+        "input": "edit"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "project_save",
+      "args": {
+        "path": "loaded.kinewright"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "migration-full-writer-bytes",
+        "observation": 6,
+        "pointer": "/writer_bytes_equal",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "project_reopen",
+      "args": {
+        "path": "loaded.kinewright"
+      }
+    },
+    {
+      "id": 9,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "migration-document-exact",
+        "observation": 8,
+        "pointer": "/same_document",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 10,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "migration-retains-history",
+        "observation": 8,
+        "pointer": "/history/undo_count",
+        "oracle": "one",
+        "evidence_class": "baseline_property",
+        "positive_control": "migration-document-exact"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    },
+    "one": {
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "byte_length": 2,
+      "kind": "independent-scalar-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 67108864,
+    "output_bytes": 67108864,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

@@ -13,6 +13,7 @@ mod color_status;
 mod copilot;
 mod cursor;
 mod drivers;
+mod durable_branch;
 /// The eval harness. Gated with the fixture data it consumes: `eval.rs`
 /// imports `kinewright_core::au6_scenarios` at module scope, which only
 /// exists under core's `test-util`, so a build of this crate with
@@ -54,6 +55,7 @@ pub use branch::{
 pub use copilot::{COPILOT_SANDBOX_NOTICE, CopilotDriver, copilot_models};
 pub use cursor::{CURSOR_SANDBOX_NOTICE, CursorAcpDriver, cursor_models};
 pub use drivers::{CODEX_SANDBOX_NOTICE, ClaudeCodeDriver, CodexDriver};
+pub use durable_branch::DurableTimelineBranch;
 pub use harness::{HARNESS_KEYS, harness_driver};
 pub use models::{
     CLAUDE_ULTRACODE, ModelChoice, ServiceTier, claude_models, codex_default_model, codex_models,

@@ -265,6 +265,11 @@ pub struct LockfileHandle {
 }
 
 impl LockfileHandle {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn resolved_identity(&self) -> &Path {
+        &self.identity
+    }
+
     /// Confirm the handle still owns what it claimed, before every headless
     /// save and every discovery re-publish; `LockLost` means no write may
     /// follow. J3 (both OSes): the claimed spelling must still resolve to
@@ -317,7 +322,9 @@ impl LockfileHandle {
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("release_after_read");
         let removed = match read {
-            DiscoveryRead::Owner(owner) if owner.claim_id == self.claim.claim_id => {
+            DiscoveryRead::Owner(owner)
+                if owner.claim_id == self.claim.claim_id && self.verify().is_ok() =>
+            {
                 fs::remove_file(&self.discovery)
             }
             // N4: absent — nothing of ours; a successor may publish now.

@@ -844,12 +844,61 @@ fn parse_audio_tail_contract(value: &str) -> Result<EvalAudioTailSpec, EvalError
 /// the top-level `format_version` through core's reader first. A batch tool
 /// has no incident log to note into; erroring out beats the silent downgrade
 /// `from_slice::<Document>` would otherwise perform.
+#[allow(clippy::items_after_statements)]
 fn check_saved_document_format(bytes: &[u8]) -> Result<(), EvalError> {
     let read = project_format_version(bytes);
     if read > PROJECT_FORMAT_VERSION {
         return Err(EvalError::Output(format!(
             "newer format_version {read} > {PROJECT_FORMAT_VERSION}"
         )));
+    }
+    if read >= 3 {
+        return Err(EvalError::Output(
+            "Studio v3 requires bundle-aware rerendering".into(),
+        ));
+    }
+    use serde::de::{DeserializeSeed, Error, IgnoredAny, MapAccess, Visitor};
+    struct Header;
+    impl<'de> DeserializeSeed<'de> for Header {
+        type Value = bool;
+        fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+            d.deserialize_map(self)
+        }
+    }
+    impl<'de> Visitor<'de> for Header {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("project envelope")
+        }
+        fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<bool, M::Error> {
+            let mut keys = std::collections::BTreeSet::new();
+            let mut studio = false;
+            while let Some(key) = map.next_key::<String>()? {
+                if key.len() > 256 || keys.len() >= 10_000 || !keys.insert(key.clone()) {
+                    return Err(M::Error::custom("ambiguous/unbounded envelope"));
+                }
+                studio |= key == "studio";
+                if key == "format_version" {
+                    let _: u32 = map.next_value()?;
+                } else {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+            Ok(studio)
+        }
+    }
+    if bytes.len() > 64 * 1024 * 1024 {
+        return Err(EvalError::Output("project envelope byte cap".into()));
+    }
+    let mut parser = serde_json::Deserializer::from_slice(bytes);
+    let studio = Header
+        .deserialize(&mut parser)
+        .map_err(|e| EvalError::Output(e.to_string()))?;
+    parser.end().map_err(|e| EvalError::Output(e.to_string()))?;
+    if studio {
+        return Err(EvalError::Output(
+            "Studio envelope requires bundle-aware rerendering".into(),
+        ));
     }
     Ok(())
 }
@@ -5264,7 +5313,7 @@ mod tests {
         assert!(check_saved_document_format(br#"{"format_version": 2}"#).is_ok());
         let error = check_saved_document_format(br#"{"format_version": 999}"#).unwrap_err();
         assert!(
-            format!("{error}").contains("newer format_version 999 > 2"),
+            format!("{error}").contains("newer format_version 999 > 3"),
             "unexpected refusal text: {error}"
         );
         // N5/G2: the boundary is exact — v3 refuses (MO2 R7: 2 is the
@@ -5272,16 +5321,22 @@ mod tests {
         // past-u32 oversize refuse through N4/F9's saturation, naming the
         // saturated version.
         for (bytes, named) in [
-            (&br#"{"format_version": 3}"#[..], "3"),
             (&br#"{"format_version": 4294967295}"#[..], "4294967295"),
             (&br#"{"format_version": 99999999999}"#[..], "4294967295"),
         ] {
             let error = check_saved_document_format(bytes).unwrap_err();
             assert!(
-                format!("{error}").contains(&format!("newer format_version {named} > 2")),
+                format!("{error}").contains(&format!("newer format_version {named} > 3")),
                 "unexpected refusal text for {named}: {error}"
             );
         }
+
+        assert!(
+            check_saved_document_format(br#"{"format_version":3}"#)
+                .unwrap_err()
+                .to_string()
+                .contains("bundle-aware")
+        );
 
         // The gate is wired into the rerender path: a newer file on disk
         // refuses before parsing, so minimal bytes suffice.
@@ -5298,11 +5353,47 @@ mod tests {
         };
         let error = rerender_document(&document_path, &options).unwrap_err();
         assert!(
-            format!("{error}").contains("newer format_version 999 > 2"),
+            format!("{error}").contains("newer format_version 999 > 3"),
             "unexpected rerender refusal text: {error}"
         );
         std::fs::remove_file(&document_path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn rerender_refuses_v3_before_projection_or_output() {
+        let temp = kinewright_media::test_support::TempDirectory::new("ja-s1-eval-v3");
+        let source = temp.path("studio.kinewright");
+        let output = temp.path("output");
+        let bytes = include_bytes!("../../tests/fixtures/ja/s1-v3-bundle/studio.kinewright");
+        let file: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(file["format_version"], 3);
+        assert!(serde_json::from_value::<Document>(file).is_ok());
+        fs::write(&source, bytes).unwrap();
+        let options = Options {
+            artifact_directory: Some(output.clone()),
+            ..Options::defaults()
+        };
+        let error = rerender_document(&source, &options).unwrap_err();
+        assert!(error.to_string().contains("bundle-aware"));
+        assert!(!output.exists());
+        assert_eq!(fs::read(&source).unwrap(), bytes);
+    }
+
+    #[test]
+    fn rerender_admitted_legacy_reaches_renderer_and_report_writer() {
+        let temp = kinewright_media::test_support::TempDirectory::new("ja-s1-eval-legacy");
+        let source = temp.path("legacy.kinewright");
+        let output = temp.path("output");
+        let options = Options {
+            artifact_directory: Some(output.clone()),
+            ..Options::defaults()
+        };
+        let legacy = serde_json::to_vec(&Document::default()).unwrap();
+        check_saved_document_format(&legacy).unwrap();
+        fs::write(&source, legacy).unwrap();
+        assert!(rerender_document(&source, &options).is_ok());
+        assert!(output.join("rerender-report.json").is_file());
     }
 
     #[test]

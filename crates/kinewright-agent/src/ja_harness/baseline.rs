@@ -307,6 +307,15 @@ impl Baseline {
         let path = self.output_path(relative)?;
         let (revision, document) = self.snapshot()?;
         let digest = fs::read(&path).map_or_else(|_| String::new(), |b| digest_bytes(&b));
+        let admission = if path.exists() {
+            kinewright_project::bundle::BundleWriteAdmission::read(&path)
+                .map_err(|e| e.to_string())?
+        } else {
+            kinewright_project::bundle::BundleWriteAdmission::new_document()
+        };
+        admission
+            .authorize_legacy_write(&path)
+            .map_err(|e| e.to_string())?;
         let mut loaded = SidecarSession::load(
             &SidecarMode::Load {
                 project_digest: digest.clone(),
@@ -323,6 +332,7 @@ impl Baseline {
         let (result, trace) = io_observer::observe(|| {
             kinewright_project::save_headless(
                 &document,
+                &admission,
                 &path,
                 None,
                 &mut loaded,
@@ -445,7 +455,7 @@ impl Drop for Baseline {
     }
 }
 
-fn history_value(core: &Core) -> Result<Value, String> {
+pub(super) fn history_value(core: &Core) -> Result<Value, String> {
     let history = core.observe_history().map_err(|e| e.to_string())?;
     Ok(json!({"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history}))
 }

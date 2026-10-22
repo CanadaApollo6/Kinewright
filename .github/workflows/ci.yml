@@ -48,6 +48,7 @@ jobs:
 
   windows:
     name: Windows workspace
+    timeout-minutes: 60
     runs-on: windows-latest
 
     steps:
@@ -75,6 +76,10 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --check
+
+      - name: Prepare sealed JA S1 predecessor controls
+        shell: bash
+        run: bash scripts/ja-s1-predecessor-controls.sh
 
       - name: Provision FFmpeg, test (fast tier), and lint
         shell: pwsh
@@ -140,6 +145,7 @@ jobs:
 
   linux:
     name: Linux workspace
+    timeout-minutes: 60
     runs-on: ubuntu-latest
 
     steps:
@@ -169,6 +175,10 @@ jobs:
         run: |
           python3 scripts/slow_tests.py lint
           python3 scripts/slow_tests_selftest.py
+
+      - name: Prepare sealed JA S1 predecessor controls
+        shell: bash
+        run: bash scripts/ja-s1-predecessor-controls.sh
 
       - name: Provision FFmpeg, build, test (fast tier), and lint
         run: |

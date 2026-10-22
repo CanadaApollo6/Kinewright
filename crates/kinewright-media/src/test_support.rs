@@ -17,6 +17,30 @@ use crate::FfmpegMediaEngine;
 
 pub struct TempDirectory(PathBuf);
 
+/// Durable fixture root with no parent-traversal components on either desktop OS.
+///
+/// # Panics
+/// Panics if the crate is no longer inside this workspace's crates directory.
+#[must_use]
+pub fn workspace_target_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("workspace root")
+        .join("target")
+}
+
+#[test]
+fn workspace_target_dir_is_absolute_without_parent_components() {
+    let root = workspace_target_dir();
+    assert!(root.is_absolute());
+    assert!(
+        !root
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    );
+}
+
 impl TempDirectory {
     /// Create a uniquely named temporary directory for one test fixture.
     ///
@@ -25,7 +49,16 @@ impl TempDirectory {
     /// Panics if the operating system cannot create the directory.
     #[must_use]
     pub fn new(label: &str) -> Self {
-        let path = std::env::temp_dir().join(unique_stem(label));
+        Self::new_in(&std::env::temp_dir(), label)
+    }
+
+    /// Create a fixture under a caller-selected filesystem (for durable storage tests).
+    ///
+    /// # Panics
+    /// Panics if the fixture directory cannot be created.
+    #[must_use]
+    pub fn new_in(parent: &Path, label: &str) -> Self {
+        let path = parent.join(unique_stem(label));
         fs::create_dir_all(&path).expect("temporary test directory should be created");
         Self(path)
     }

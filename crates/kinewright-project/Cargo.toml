@@ -10,7 +10,8 @@ repository.workspace = true
 # Test-only IO seams (`SidecarWriter::set_rename_hook`): the app's IN2B tests
 # drive them cross-crate, so they ride the same gate the app already enables
 # on core and media.
-test-util = []
+test-util = ["kinewright-media/test-util"]
+storage-heap-profile = []
 
 [dependencies]
 crossbeam-channel.workspace = true
@@ -27,9 +28,17 @@ serde_json.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
+dhat = "=0.3.3"
 # The sidecar round-trip tests persist through `TempDirectory`.
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
+
+[[example]]
+name = "ja_s1_storage_budget"
+required-features = ["test-util"]
 
 [lints]
 workspace = true

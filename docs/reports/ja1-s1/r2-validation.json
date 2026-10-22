@@ -1,0 +1,813 @@
+{
+  "base_head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+  "evidence_directory": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/r2",
+  "gate_directory": "final-gate-3",
+  "rust_source_count": 263,
+  "rust_snapshot_sha256": "42136bb9e499923affed2853b7b2968e16f9abf96b5469dded9cfc3794261135",
+  "code_files_checked_against_initial_gate_log": 37,
+  "mutation_pairs": 33,
+  "mutation_runs": 66,
+  "mutation_round_1_pairs": 17,
+  "mutation_round_2_pairs": 16,
+  "diagnostic_omission_pair": "behavioral red and restored green; separate from Rust matrix",
+  "ja_s1_fix_r1_sha256": "27da8d73f97fd04b2113faa50b83280200c9bc51bf93274895a6b15920cdcd17",
+  "all_gate_rust_sources_match_final": true,
+  "all_mutation_restored_rust_sources_match_final": true,
+  "TMPDIR": "unset",
+  "python_niceness": 19,
+  "cargo_build_jobs": 4,
+  "rust_test_threads": 4,
+  "media_full_crate_test_threads": 1,
+  "predecessor_controls": {
+    "format-corpus": {
+      "exit": 0,
+      "disposition": "observed",
+      "missing_requirements": null
+    },
+    "history-loss": {
+      "exit": 1,
+      "disposition": "observed",
+      "missing_requirements": null
+    },
+    "legacy-io": {
+      "exit": 1,
+      "disposition": "observed",
+      "missing_requirements": null
+    },
+    "reply-retry": {
+      "exit": 1,
+      "disposition": "observed",
+      "missing_requirements": null
+    }
+  },
+  "predecessor_final_lines": [
+    "running 1 test",
+    "test pinned_max2_format_controls ... ok",
+    "",
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "",
+    "{\"exit_code\":0,\"output\":\"/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/r2/final-gate-3/predecessor-controls/controls-6VqHjwgl/format-corpus\",\"protocol\":\"kinewright.ja-harness\",\"protocol_version\":1}",
+    "{\"exit_code\":1,\"output\":\"/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/r2/final-gate-3/predecessor-controls/controls-6VqHjwgl/history-loss\",\"protocol\":\"kinewright.ja-harness\",\"protocol_version\":1}",
+    "{\"exit_code\":1,\"output\":\"/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/r2/final-gate-3/predecessor-controls/controls-6VqHjwgl/reply-retry\",\"protocol\":\"kinewright.ja-harness\",\"protocol_version\":1}",
+    "{\"exit_code\":1,\"output\":\"/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/r2/final-gate-3/predecessor-controls/controls-6VqHjwgl/legacy-io\",\"protocol\":\"kinewright.ja-harness\",\"protocol_version\":1}"
+  ],
+  "workspace_fast_final_lines": [
+    "",
+    "   Doc-tests kinewright_media",
+    "",
+    "running 0 tests",
+    "",
+    "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "",
+    "   Doc-tests kinewright_project",
+    "",
+    "running 0 tests",
+    "",
+    "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+    "",
+    "fast tier on linux skipped exactly the 50 manifest tests and 54 allowlisted ignores (ci/ignored-tests.txt), each observed, nothing else"
+  ],
+  "results": [
+    {
+      "label": "predecessor",
+      "command": [
+        "bash",
+        "scripts/ja-s1-predecessor-controls.sh",
+        "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/r2/final-gate-3/predecessor-controls"
+      ],
+      "exit": 0,
+      "seconds": 26.5535407490097,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "per-commit",
+      "command": [
+        "bash",
+        "scripts/ja-s1-gate.sh",
+        "8",
+        "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/r2/final-gate-3/per-commit"
+      ],
+      "exit": 0,
+      "seconds": 724.8974646050046,
+      "summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.02s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 802 filtered out; finished in 0.02s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 546 filtered out; finished in 0.01s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 802 filtered out; finished in 0.02s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 39.20s",
+        "test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 101.00s",
+        "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 154.67s",
+        "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 28.42s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 34.97s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 16.99s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 35.26s",
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 308 filtered out; finished in 0.00s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 647 filtered out; finished in 0.00s",
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.62s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 311 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 9.09s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 0.00s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 798 filtered out; finished in 0.39s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1188 filtered out; finished in 2.94s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 798 filtered out; finished in 0.12s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 1.13s",
+        "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.01s",
+        "test result: ok. 53 passed; 0 failed; 1 ignored; 0 measured; 84 filtered out; finished in 4.94s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 787 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 802 filtered out; finished in 1.62s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1197 filtered out; finished in 0.86s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 0.23s",
+        "test result: ok. 42 passed; 0 failed; 1 ignored; 0 measured; 760 filtered out; finished in 0.03s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 55.61s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.12s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.05s"
+      ],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 295,
+        "failed": 0,
+        "ignored": 5
+      }
+    },
+    {
+      "label": "windows-core",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "check",
+        "-p",
+        "kinewright-core",
+        "--features",
+        "test-util",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--lib",
+        "--tests"
+      ],
+      "exit": 0,
+      "seconds": 12.586609070000122,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "windows-app",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "check",
+        "-p",
+        "kinewright-app",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--tests"
+      ],
+      "exit": 101,
+      "seconds": 25.740107781995903,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "NOT RUN: native MSVC dependency prerequisite",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "windows-project",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "check",
+        "-p",
+        "kinewright-project",
+        "--features",
+        "test-util",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        "--lib",
+        "--tests"
+      ],
+      "exit": 101,
+      "seconds": 12.113692190003349,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "NOT RUN: native MSVC dependency prerequisite",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "kinewright-core",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-core",
+        "--features",
+        "test-util"
+      ],
+      "exit": 0,
+      "seconds": 17.955141768004978,
+      "summaries": [
+        "test result: ok. 311 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.65s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.26s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 113 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 790,
+        "failed": 0,
+        "ignored": 1
+      }
+    },
+    {
+      "label": "kinewright-project",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-project",
+        "--features",
+        "test-util"
+      ],
+      "exit": 0,
+      "seconds": 200.44956238799205,
+      "summaries": [
+        "test result: ok. 136 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 12.54s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.41s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.60s",
+        "test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 106.16s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 195,
+        "failed": 0,
+        "ignored": 2
+      }
+    },
+    {
+      "label": "kinewright-agent",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-agent",
+        "--features",
+        "eval-harness"
+      ],
+      "exit": 0,
+      "seconds": 170.9050543790072,
+      "summaries": [
+        "test result: ok. 649 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 51.81s",
+        "test result: ok. 42 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.78s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 28.02s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 38.82s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.17s",
+        "test result: ok. 76 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 22.07s",
+        "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 801,
+        "failed": 0,
+        "ignored": 26
+      }
+    },
+    {
+      "label": "kinewright-app",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-app"
+      ],
+      "exit": 0,
+      "seconds": 41.48702039298951,
+      "summaries": [
+        "test result: ok. 798 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 19.22s"
+      ],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 798,
+        "failed": 0,
+        "ignored": 5
+      }
+    },
+    {
+      "label": "kinewright-media",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "test",
+        "-p",
+        "kinewright-media",
+        "--features",
+        "test-util",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "seconds": 1228.0513402409997,
+      "summaries": [
+        "test result: ok. 1133 passed; 0 failed; 65 ignored; 0 measured; 0 filtered out; finished in 1177.57s",
+        "test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 23.36s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.15s",
+        "test result: ok. 14 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 2.79s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 1164,
+        "failed": 0,
+        "ignored": 70
+      }
+    },
+    {
+      "label": "workspace-fast",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "python3",
+        "-I",
+        "scripts/slow_tests.py",
+        "fast"
+      ],
+      "exit": 0,
+      "seconds": 792.7605336150009,
+      "summaries": [
+        "test result: ok. 649 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 53.83s",
+        "test result: ok. 42 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.74s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 27.52s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 36.77s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.60s",
+        "test result: ok. 76 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 22.19s",
+        "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 798 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 20.19s",
+        "test result: ok. 311 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.59s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 59 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.96s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+        "test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 65 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s",
+        "test result: ok. 113 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 1133 passed; 0 failed; 65 ignored; 0 measured; 0 filtered out; finished in 376.73s",
+        "test result: ok. 4 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 22.08s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.76s",
+        "test result: ok. 14 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 1.04s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 136 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 13.43s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.58s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 55.28s",
+        "test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 101.88s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 3748,
+        "failed": 0,
+        "ignored": 104
+      }
+    },
+    {
+      "label": "classification",
+      "command": [
+        "nice",
+        "-n",
+        "19",
+        "python3",
+        "-I",
+        "scripts/slow_tests.py",
+        "lint"
+      ],
+      "exit": 0,
+      "seconds": 0.1896347000001697,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "clippy-final",
+      "command": [
+        "nice",
+        "-n",
+        "10",
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit": 0,
+      "seconds": 18.4288907309965,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "actionlint",
+      "command": [
+        "actionlint",
+        ".github/workflows/ci.yml"
+      ],
+      "exit": 0,
+      "seconds": 0.07855057700362522,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "shell-syntax",
+      "command": [
+        "bash",
+        "-n",
+        "scripts/ja-s1-gate.sh",
+        "scripts/ja-s1-predecessor-controls.sh"
+      ],
+      "exit": 0,
+      "seconds": 0.002508678997401148,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    },
+    {
+      "label": "frozen-fixtures",
+      "command": [
+        "git",
+        "diff",
+        "--exit-code",
+        "099fdd0",
+        "--",
+        "crates/kinewright-agent/tests/fixtures/ja",
+        ".gitattributes"
+      ],
+      "exit": 0,
+      "seconds": 0.0030565839988412336,
+      "summaries": [],
+      "head": "099fdd0b47492b45984f89be2916057ebadd3f13",
+      "status": "passed",
+      "counts": {
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0
+      }
+    }
+  ],
+  "not_run": [
+    "Native Windows execution",
+    "Windows app/project test cfg compilation (native MSVC prerequisites)",
+    "Windows clippy",
+    "Full slow tier",
+    "S2 Studio GUI/host attachment",
+    "L4 decoder-open certification",
+    "Physical device/power fault certification",
+    "Fresh round-2 L6 timing/allocator measurements"
+  ],
+  "deferred": [
+    "C1/N3 hosted not_run root cause; bounded diagnostic prepared",
+    "N4 floor-search optimization; nonmonotonic cuts",
+    "Previously accepted O11/O26",
+    "L6 lead-owned latency target"
+  ],
+  "per_commit_steps": [
+    {
+      "label": "AU6-inventory",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_media-660972b8662fc555 au6_fixtures::au6_declared_test_names_exist_in_their_source_files --exact",
+      "exit": 0
+    },
+    {
+      "label": "F",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_project-7f8bef23db13bbd2 --exact project::tests::r1_save_bytes_are_byte_identical_pre_post_cutover project::tests::v2_stamps_only_when_used project::tests::mo2_inactive_features_still_stamp_v2 project::tests::mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite project::tests::project_atomic_write_falls_back_when_rename_is_refused project::tests::mo2_old_readers_distinguish_parse_validation_and_advisory",
+      "exit": 0
+    },
+    {
+      "label": "H",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_core-000046d0dab8c13b --exact actor::tests::applied_operations_follow_undo_and_redo_instead_of_the_append_only_log actor::tests::batch_broadcasts_once_appends_each_op_and_undoes_as_one_snapshot actor::tests::coalesced_batches_under_one_key_form_a_single_undo_entry actor::tests::coalesced_history_replays_faithfully_through_applied_operations",
+      "exit": 0
+    },
+    {
+      "label": "I-app-refusal",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_app-3c672e6226da0a2e app::in2b_tests::save_as_unsupported_source_or_destination_has_zero_mutations --exact",
+      "exit": 0
+    },
+    {
+      "label": "I-app",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_app-3c672e6226da0a2e app::tests",
+      "exit": 0
+    },
+    {
+      "label": "I-eval-legacy",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_eval-a359acb5bd2aa484 tests::rerender_admitted_legacy_reaches_renderer_and_report_writer --exact",
+      "exit": 0
+    },
+    {
+      "label": "I-eval-refusal",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_eval-a359acb5bd2aa484 tests::rerender_refuses_v3_before_projection_or_output --exact",
+      "exit": 0
+    },
+    {
+      "label": "I-headless",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_project-7f8bef23db13bbd2 headless::tests",
+      "exit": 0
+    },
+    {
+      "label": "I-lock",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_project-7f8bef23db13bbd2 lockfile::race_tests",
+      "exit": 0
+    },
+    {
+      "label": "I-project",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_app-3c672e6226da0a2e project::tests",
+      "exit": 0
+    },
+    {
+      "label": "L",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_project-7f8bef23db13bbd2 --exact lockfile::tests::r19_second_acquire_refuses_while_held lockfile::tests::r19_release_frees_the_lock_for_a_clean_reacquire lockfile::tests::f4_symlink_alias_shares_one_lock lockfile::tests::g9_fd_check_detects_a_swapped_object lockfile::race_tests::guard_missing_discovery_with_held_lock lockfile::race_tests::guard_alias_spellings_race_one_owner lockfile::race_tests::h7_stale_same_endpoint_release_spares_the_successor lockfile::race_tests::j3_link_retargeted_after_acquire_refuses_the_next_save headless::tests::headless_save_preserves_an_unreplayed_journal headless::tests::g3_headless_occupied_save_as_preserves_and_pairs headless::tests::f6_failed_project_write_restores_the_prior_sidecar",
+      "exit": 0
+    },
+    {
+      "label": "M",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_agent-ce8d58a6bbe05b27 --exact branch::tests::sibling_branches_diverge_without_touching_live_state branch::tests::merge_is_atomic_and_rejects_a_stale_base branch::tests::cherry_pick_preserves_branch_order_and_validates_indices_first",
+      "exit": 0
+    },
+    {
+      "label": "P-generated",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/generated_media-bde739075a4abdce --test-threads=1 --exact two_track_effect_export_matches_preview_after_h264_redecode title_export_pixels_match_preview_after_h264_redecode cancelled_export_writes_no_output",
+      "exit": 0
+    },
+    {
+      "label": "P-media",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_media-660972b8662fc555 --test-threads=1 --exact engine::tests::i8_media_0 engine::tests::i8_media_1 engine::tests::i8_media_2 engine::tests::i8_media_3 engine::tests::i8_media_real_audio engine::tests::only_a_current_stamped_failure_stops_playback engine::tests::a_request_issued_before_a_new_document_is_superseded_not_relabelled engine::tests::an_idle_engine_holds_no_preview_reader_or_decoder engine::tests::dropping_the_engine_stops_the_preview_thread engine::tests::sync_decoders_counts_open_decoders_until_teardown",
+      "exit": 0
+    },
+    {
+      "label": "P-presentation",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_app-3c672e6226da0a2e --exact presenter::tests::the_marker_marks_what_is_bound_when_it_paints presenter::tests::a_marker_that_never_paints_is_never_acked presenter::tests::the_real_paint_callback_acks_only_painted_images presenter::tests::seeded_interleavings_bind_and_ack_only_current_frames recovery::tests::journal_round_trip_preserves_agent_ops_and_undo_redo_history",
+      "exit": 0
+    },
+    {
+      "label": "agent-no-default-check",
+      "command": "cargo check -p kinewright-agent --lib --no-default-features",
+      "exit": 0
+    },
+    {
+      "label": "agent-no-default",
+      "command": "cargo build -p kinewright-agent --no-default-features",
+      "exit": 0
+    },
+    {
+      "label": "app-no-default-check",
+      "command": "cargo check -p kinewright-app --bin kinewright-app --no-default-features",
+      "exit": 0
+    },
+    {
+      "label": "app-no-default",
+      "command": "cargo build -p kinewright-app --no-default-features",
+      "exit": 0
+    },
+    {
+      "label": "architecture-agent-normal",
+      "command": "cargo test -p kinewright-agent --lib --no-default-features -- session::tests::in2_the_agent_crate_has_one_agent_event_loop --exact",
+      "exit": 0
+    },
+    {
+      "label": "architecture-agent",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_agent-ce8d58a6bbe05b27 session::tests::in2_the_agent_crate_has_one_agent_event_loop --exact",
+      "exit": 0
+    },
+    {
+      "label": "architecture-app-normal",
+      "command": "cargo test -p kinewright-app --bin kinewright-app --no-default-features -- investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call --exact",
+      "exit": 0
+    },
+    {
+      "label": "architecture-app",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_app-3c672e6226da0a2e investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call --exact",
+      "exit": 0
+    },
+    {
+      "label": "branches",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_s1_branches-ae6f542e69d802cf",
+      "exit": 0
+    },
+    {
+      "label": "build",
+      "command": "cargo build --workspace",
+      "exit": 0
+    },
+    {
+      "label": "classification",
+      "command": "nice -n 19 python3 -I scripts/slow_tests.py lint",
+      "exit": 0
+    },
+    {
+      "label": "clippy",
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exit": 0
+    },
+    {
+      "label": "copy",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_s1_copy-6a183a4dd8918ad3",
+      "exit": 0
+    },
+    {
+      "label": "core-history",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_s1_history-6fe9d375001479bc",
+      "exit": 0
+    },
+    {
+      "label": "eval-bins",
+      "command": "cargo build -p kinewright-agent --features eval-harness --bins",
+      "exit": 0
+    },
+    {
+      "label": "format-app",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_app-3c672e6226da0a2e --exact project::tests::can_overwrite_save_gates_on_the_read_version project::tests::in2b_v1_project_bytes_are_identical app::in2b_tests::in2b_a_newer_file_opens_with_one_incident_and_no_overwrite app::in2b_tests::in2b_startup_missing_media_aggregate_is_transient app::in2b_tests::in2b_open_time_aggregates_are_all_transient",
+      "exit": 0
+    },
+    {
+      "label": "format-core",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_core-000046d0dab8c13b model::tests::project_format_version_reads_the_top_level_key --exact",
+      "exit": 0
+    },
+    {
+      "label": "format-eval",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_eval-a359acb5bd2aa484 tests::in2b_eval_refuses_a_newer_file_and_reads_v1_as_before --exact",
+      "exit": 0
+    },
+    {
+      "label": "harness-integration",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_baseline-cedfb9be346871d1",
+      "exit": 0
+    },
+    {
+      "label": "harness-lib",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/kinewright_agent-ce8d58a6bbe05b27 ja_harness:: --test-threads=1",
+      "exit": 0
+    },
+    {
+      "label": "heap-example-check",
+      "command": "cargo check -p kinewright-project --features test-util\\,storage-heap-profile --example ja_s1_storage_budget",
+      "exit": 0
+    },
+    {
+      "label": "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_baseline-cedfb9be346871d1 native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two --ignored --exact",
+      "exit": 0
+    },
+    {
+      "label": "native_app_bridge_rejects_abnormal_exit_after_completed_report",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_baseline-cedfb9be346871d1 native_app_bridge_rejects_abnormal_exit_after_completed_report --ignored --exact",
+      "exit": 0
+    },
+    {
+      "label": "native_app_bridge_retains_exercised_control_and_property_failures",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_baseline-cedfb9be346871d1 native_app_bridge_retains_exercised_control_and_property_failures --ignored --exact",
+      "exit": 0
+    },
+    {
+      "label": "project-no-default-check",
+      "command": "cargo check -p kinewright-project --no-default-features",
+      "exit": 0
+    },
+    {
+      "label": "project-no-default",
+      "command": "cargo build -p kinewright-project --no-default-features",
+      "exit": 0
+    },
+    {
+      "label": "receipts",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_s1_receipts-20d8ae3797958fd0",
+      "exit": 0
+    },
+    {
+      "label": "revised",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_s1-6ab22a0a3971bf86",
+      "exit": 0
+    },
+    {
+      "label": "rustfmt",
+      "command": "rustfmt --edition 2024 --config skip_children=true --check crates/kinewright-agent/src/bin/kinewright-eval.rs crates/kinewright-agent/src/durable_branch.rs crates/kinewright-agent/src/ja_harness/baseline.rs crates/kinewright-agent/src/ja_harness/budget_observer.rs crates/kinewright-agent/src/ja_harness/controller.rs crates/kinewright-agent/src/ja_harness/copy_observer.rs crates/kinewright-agent/src/ja_harness/mod.rs crates/kinewright-agent/src/ja_harness/protocol.rs crates/kinewright-agent/src/ja_harness/receipt_observer.rs crates/kinewright-agent/src/ja_harness/report.rs crates/kinewright-agent/src/ja_harness/revised.rs crates/kinewright-agent/src/ja_harness/supervision.rs crates/kinewright-agent/src/lib.rs crates/kinewright-agent/tests/ja_baseline.rs crates/kinewright-agent/tests/ja_s1.rs crates/kinewright-agent/tests/ja_s1_branches.rs crates/kinewright-app/src/app.rs crates/kinewright-app/src/ja_s1_app_tests.rs crates/kinewright-app/src/project.rs crates/kinewright-app/src/recovery.rs crates/kinewright-core/src/actor.rs crates/kinewright-core/src/history.rs crates/kinewright-core/src/history_transition.rs crates/kinewright-core/src/journal.rs crates/kinewright-core/src/lib.rs crates/kinewright-core/src/model.rs crates/kinewright-core/src/operation.rs crates/kinewright-core/tests/ja_s1_history.rs crates/kinewright-media/src/cc1_fixtures.rs crates/kinewright-media/src/lib.rs crates/kinewright-media/src/sha256.rs crates/kinewright-media/src/test_support.rs crates/kinewright-project/examples/ja_s1_storage_budget.rs crates/kinewright-project/src/aw1_race_tests.rs crates/kinewright-project/src/bundle.rs crates/kinewright-project/src/bundle_branch.rs crates/kinewright-project/src/bundle_commit.rs crates/kinewright-project/src/bundle_copy.rs crates/kinewright-project/src/bundle_records.rs crates/kinewright-project/src/bundle_recovery.rs crates/kinewright-project/src/headless.rs crates/kinewright-project/src/io_observer.rs crates/kinewright-project/src/lib.rs crates/kinewright-project/src/lockfile.rs crates/kinewright-project/src/namespace/linux.rs crates/kinewright-project/src/namespace/mod.rs crates/kinewright-project/src/namespace/windows.rs crates/kinewright-project/src/owned_inputs.rs crates/kinewright-project/src/project.rs crates/kinewright-project/src/receipts.rs crates/kinewright-project/src/session.rs crates/kinewright-project/src/sidecar.rs crates/kinewright-project/src/storage_budget.rs crates/kinewright-project/src/store.rs crates/kinewright-project/tests/ja_s1_copy.rs crates/kinewright-project/tests/ja_s1_receipts.rs crates/kinewright-project/tests/ja_s1_storage.rs crates/kinewright-project/tests/support/ja_s1_fix_r1.rs crates/kinewright-project/tests/support/ja_s1_fix_r2.rs crates/kinewright-project/tests/support/ja_s1_retention.rs",
+      "exit": 0
+    },
+    {
+      "label": "storage",
+      "command": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/debug/deps/ja_s1_storage-eda6334787730569",
+      "exit": 0
+    },
+    {
+      "label": "test-build",
+      "command": "cargo test -p kinewright-core -p kinewright-project -p kinewright-agent -p kinewright-app --features kinewright-agent/eval-harness\\,kinewright-project/test-util --lib --bins --test ja_s1_history --test ja_baseline --test ja_s1 --no-run --message-format=json --test ja_s1_storage --test ja_s1_receipts --test ja_s1_branches --test ja_s1_copy -p kinewright-media --test generated_media",
+      "exit": 0
+    }
+  ]
+}

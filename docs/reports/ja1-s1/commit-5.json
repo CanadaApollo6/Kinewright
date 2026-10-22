@@ -1,0 +1,131 @@
+{
+  "ordinal": 5,
+  "parent": "f9f6089d87037e680e85f7551320739f69926ac0",
+  "linux_gate": "c5-gate1",
+  "gates": {
+    "F": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 16.91s"
+    ],
+    "H": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 308 filtered out; finished in 0.01s"
+    ],
+    "L": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 3.81s"
+    ],
+    "architecture-agent": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.01s"
+    ],
+    "architecture-app": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.03s"
+    ],
+    "build": [],
+    "classification": [],
+    "clippy": [],
+    "core-history": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "eval-bins": [],
+    "format-app": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 797 filtered out; finished in 0.69s"
+    ],
+    "format-core": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 311 filtered out; finished in 0.00s"
+    ],
+    "format-eval": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s"
+    ],
+    "harness-integration": [
+      "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 52.35s"
+    ],
+    "harness-lib": [
+      "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 216.49s"
+    ],
+    "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 28.29s"
+    ],
+    "native_app_bridge_rejects_abnormal_exit_after_completed_report": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 67.21s"
+    ],
+    "native_app_bridge_retains_exercised_control_and_property_failures": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 57.81s"
+    ],
+    "receipts": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 31.36s"
+    ],
+    "revised": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 51.85s"
+    ],
+    "rustfmt": [],
+    "storage": [
+      "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.81s"
+    ],
+    "test-build": []
+  },
+  "gate_command_count": 23,
+  "test_summary_count": 17,
+  "selected_passes_including_overlapping_selections": 101,
+  "mutations_directory": "c5-receipt-mutations",
+  "mutations": {
+    "ack-unknown-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.96s"
+    ],
+    "ack-unknown-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.04s"
+    ],
+    "comment-result-binding-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 10 filtered out; finished in 27.28s"
+    ],
+    "comment-result-binding-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 26.16s"
+    ],
+    "drop-retired-exact-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.61s"
+    ],
+    "drop-retired-exact-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.59s"
+    ],
+    "evict-issuer-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 24.70s"
+    ],
+    "evict-issuer-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 25.65s"
+    ],
+    "ignore-digest-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.56s"
+    ],
+    "ignore-digest-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.62s"
+    ],
+    "replay-retired-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.63s"
+    ],
+    "replay-retired-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.57s"
+    ],
+    "stale-before-lookup-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.31s"
+    ],
+    "stale-before-lookup-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.24s"
+    ]
+  },
+  "windows_native": "NOT RUN; lead CI lane",
+  "windows_full_cfg": "NOT RUN; native MSVC cross-build prerequisites unavailable",
+  "full_fast_and_slow_ci": "NOT RUN; no push authorized",
+  "decoder_open_certification": "NOT RUN; L4 integration dependency",
+  "comment_baseline": {
+    "record": "comment-baseline.json",
+    "clean_source": "f9f6089d87037e680e85f7551320739f69926ac0",
+    "binary_sha256": "fe073fe00f3c57368d3a294b948b2cf8be8f77123f3d59803ea2c81e1d2a3ffc",
+    "comparison": "same frozen fixture and independent byte oracles; historical C4 baseline red, fresh native revised pass"
+  },
+  "native_revised": [
+    "unchanged reply-retry: retained control, lost reply, original retry, one durable undo entry",
+    "unchanged comment-receipt: exact persisted text/strokes, retained/lost replies, native restart, original old epoch, changed digest, retired exact result and retired_unresolved",
+    "additive edit-receipt-restart: two actual A workers, original old-epoch envelope and exact original receipt, no additional entry"
+  ],
+  "mutation_pairs": 7,
+  "ignored_not_passed": [
+    "three on-demand App bridges are ignored by default but explicitly provisioned and passed independently in this gate"
+  ]
+}

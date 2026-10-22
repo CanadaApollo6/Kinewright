@@ -1,0 +1,126 @@
+{
+  "ordinal": 2,
+  "parent": "5bc776de0f3f9ee4818a342dcd9146a4e92631ab",
+  "linux_gate": "c2-gate-attempt4",
+  "gates": {
+    "F": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.11s"
+    ],
+    "L": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 126 filtered out; finished in 2.49s"
+    ],
+    "architecture-agent": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.01s"
+    ],
+    "architecture-app": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.03s"
+    ],
+    "build": [],
+    "classification": [],
+    "clippy": [],
+    "core-history": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "eval-bins": [],
+    "format-app": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 796 filtered out; finished in 0.57s"
+    ],
+    "format-core": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.00s"
+    ],
+    "format-eval": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s"
+    ],
+    "harness-integration": [
+      "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 40.34s"
+    ],
+    "harness-lib": [
+      "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 160.78s"
+    ],
+    "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 22.52s"
+    ],
+    "native_app_bridge_rejects_abnormal_exit_after_completed_report": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 38.33s"
+    ],
+    "native_app_bridge_retains_exercised_control_and_property_failures": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 42.37s"
+    ],
+    "revised": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.00s"
+    ],
+    "rustfmt": [],
+    "storage": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s"
+    ],
+    "test-build": []
+  },
+  "mutations": {
+    "c2-mutations-final/alias-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ],
+    "c2-mutations-final/alias-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.12s"
+    ],
+    "c2-mutations-final/ancestors-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.04s"
+    ],
+    "c2-mutations-final/ancestors-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.08s"
+    ],
+    "c2-mutations-final/fallback-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.04s"
+    ],
+    "c2-mutations-final/fallback-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.04s"
+    ],
+    "c2-mutations-final/object-directory-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.08s"
+    ],
+    "c2-mutations-final/object-directory-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.09s"
+    ],
+    "c2-mutations-final/object-file-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.08s"
+    ],
+    "c2-mutations-final/object-file-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.09s"
+    ],
+    "c2-mutations-final/paths-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ],
+    "c2-mutations-final/paths-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ],
+    "c2-mutations-final/release-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.02s"
+    ],
+    "c2-mutations-final/release-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.02s"
+    ],
+    "c2-mutations-final/root-file-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.08s"
+    ],
+    "c2-mutations-final/root-file-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.09s"
+    ],
+    "c2-mutations-final/root-sync-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.09s"
+    ],
+    "c2-mutations-final/root-sync-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.08s"
+    ]
+  },
+  "source_hashes_match_gate": true,
+  "windows_namespace_stable_std_api_compile": "passed (isolated API subset; real windows.rs and bundle.rs)",
+  "windows_full_project_agent_cfg_check": "NOT RUN: attempted; aws-lc-sys native MSVC cross-toolchain prerequisite failure, cargo exit 101",
+  "windows_native": "NOT RUN",
+  "baseline_flips": [
+    "R2 paired directory-sync property",
+    "R3 paired no-fallback property",
+    "paired refused-root exactness"
+  ],
+  "fixture_sha256": "221a6fd7c5156cf1aec42baa4d2d1cc9869c8d0192129ee3e520c3a8f058e9c2",
+  "compatible_baseline_source": "5bc776de0f3f9ee4818a342dcd9146a4e92631ab",
+  "full_graph_durability": "pending commit 4"
+}

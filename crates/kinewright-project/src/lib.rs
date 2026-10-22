@@ -2,10 +2,23 @@
 //! from the app in AW1 S1 (zero logic change except the named
 //! [`SidecarSession`] extraction delta).
 
+pub mod bundle;
+mod bundle_branch;
+pub mod bundle_commit;
+pub mod bundle_copy;
+pub mod bundle_records;
+pub mod bundle_recovery;
+mod history_save;
+pub mod owned_inputs;
+pub mod receipts;
+pub mod storage_budget;
+pub mod store;
+
 pub mod headless;
 #[cfg(any(test, feature = "test-util"))]
 pub mod io_observer;
 pub mod lockfile;
+pub mod namespace;
 pub mod project;
 pub mod recovery;
 pub mod session;
@@ -42,6 +55,7 @@ pub use sidecar::{
 // Lock-test scheduling (F3); per-child REV2_HOOK/SIGNALS/EXIT.
 #[cfg(any(test, feature = "test-util"))]
 pub(crate) fn test_hook(point: &str) {
+    io_observer::at_test_hook(point);
     if std::env::var("REV2_HOOK").ok().as_deref() != Some(point) {
         return;
     }

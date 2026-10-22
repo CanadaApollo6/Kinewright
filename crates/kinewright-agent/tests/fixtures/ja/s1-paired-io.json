@@ -1,0 +1,172 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s1-paired-io",
+  "gate_ids": [
+    "JA1.G1"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {
+    "normal": {
+      "relative_file": "s1-normal-root.bin",
+      "sha256": "f0e09e8a76e3535a39e970da05d05ad04275b8dfbc34f67e4e34871410b9cf91",
+      "byte_length": 27,
+      "kind": "independent-root-bytes"
+    },
+    "attempt": {
+      "relative_file": "s1-attempted-root.bin",
+      "sha256": "0918aec71e050d4f60123ceed075d0dd58eea981db9f195b267f9ea79fb56d08",
+      "byte_length": 52,
+      "kind": "independent-root-bytes"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "strict_save",
+      "args": {
+        "path": "edit.kinewright",
+        "input": "normal"
+      }
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "changed-save-exact-bytes",
+        "observation": 1,
+        "pointer": "/writer_bytes_equal",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "strict_rename_refusal",
+      "args": {
+        "path": "edit.kinewright",
+        "input": "attempt"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "refusal_reached",
+        "observation": 3,
+        "pointer": "/refusal_reached",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "refusal_injected",
+        "observation": 3,
+        "pointer": "/refusal_injected",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "attempted_bytes_equal",
+        "observation": 3,
+        "pointer": "/attempted_bytes_equal",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "strict-parent-directory-sync",
+        "observation": 1,
+        "pointer": "/directory_sync_observed",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "changed-save-exact-bytes"
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "strict-write-no-in-place-fallback",
+        "observation": 3,
+        "pointer": "/in_place_fallback_observed",
+        "oracle": "false",
+        "evidence_class": "baseline_property",
+        "positive_control": "attempted_bytes_equal"
+      }
+    },
+    {
+      "id": 9,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "refused-root-exact",
+        "observation": 3,
+        "pointer": "/root_preserved",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "refusal_injected"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    },
+    "temp": {
+      "relative_file": "oracle-temp-write.json",
+      "sha256": "7fcb9fa4636cba075c1f4cfa0a857b9c0b1a23e2da890ab704d09b415f92425c",
+      "byte_length": 27,
+      "kind": "independent-scalar-oracle"
+    },
+    "false": {
+      "relative_file": "oracle-false.json",
+      "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0",
+      "byte_length": 6,
+      "kind": "independent-scalar-oracle"
+    },
+    "directory-sync-trace": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "IO-trace vocabulary: S1 must emit directory_sync from the exact parent-directory sync call site; not a syscall oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

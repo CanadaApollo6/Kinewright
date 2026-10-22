@@ -1,11 +1,18 @@
 //! Job A's eval-only baseline CLI and assertion runner.
 #![allow(clippy::missing_errors_doc)]
 pub mod baseline;
+#[cfg(target_os = "linux")]
+mod budget_observer;
 pub mod controller;
+#[cfg(target_os = "linux")]
+mod copy_observer;
 pub mod media_observer;
 pub mod protocol;
+#[cfg(target_os = "linux")]
+mod receipt_observer;
 pub mod recording;
 pub mod report;
+pub mod revised;
 mod supervision;
 
 use std::{collections::BTreeMap, path::Path, time::Instant};
@@ -25,8 +32,7 @@ fn cleanup_timeout_ms(fixture: &protocol::Fixture) -> u64 {
     (workers + 1) * MEDIA_TEARDOWN_MS + workers * WORKER_REAP_MS + fixture.limits.setup_timeout_ms
 }
 
-/// Run a fixture unchanged in either mode. Revised currently uses the same
-/// production adapter; it does not invent successor behavior.
+/// Run a fixture unchanged through the selected production adapter.
 pub fn run(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
     run_with_observer(fixture_path, output, mode, &mut |_, _, _| Ok(None))
 }
@@ -42,13 +48,24 @@ pub fn run_with_observer(
     observer: &mut Observer<'_>,
 ) -> Result<i32, String> {
     let report = Report::create(output, mode)?;
-    run_report(fixture_path, observer, report)
+    run_report(fixture_path, observer, report, None)
+}
+
+pub fn run_comment_baseline(fixture_path: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
+    let report = Report::create(output, mode)?;
+    run_report(
+        fixture_path,
+        &mut |_, _, _| Ok(None),
+        report,
+        Some("comment-baseline"),
+    )
 }
 
 fn run_report(
     fixture_path: &Path,
     observer: &mut Observer<'_>,
     mut report: Report,
+    selection: Option<&str>,
 ) -> Result<i32, String> {
     if std::env::var_os("JA_HARNESS_DEADLINE_FILE").is_some() {
         supervision::validate_reserved(&report.root)?;
@@ -64,7 +81,7 @@ fn run_report(
     let loaded = match protocol::load(fixture_path) {
         Ok(loaded) => loaded,
         Err(error) => {
-            report.header(None)?;
+            report.header(None, selection)?;
             if let Ok(bytes) = protocol::read_bounded(fixture_path, protocol::INDEX_BYTES) {
                 let identity = json!({"sha256":kinewright_media::sha256_bytes(&bytes),"byte_length":bytes.len()});
                 if let Err(reason) = report.artifact("invalid-fixture.json", &bytes) {
@@ -81,8 +98,17 @@ fn run_report(
     };
     let result = (|| {
         report.set_quota(loaded.fixture.limits.output_bytes)?;
-        report.header(Some(&loaded))?;
-        execute(&loaded, &mut report, observer)
+        report.header(Some(&loaded), selection)?;
+        if let Some(selection) = selection {
+            if selection != "comment-baseline"
+                || loaded.fixture.fixture_id != "comment-receipt"
+                || report.mode != Mode::Baseline
+            {
+                return Err("invalid pre-receipt scenario selection".into());
+            }
+            report.event(0,"controller","scenario_selection",json!({"selection":selection,"scope":"exact-byte save, lost reply, restart and literal missing binding; later receipt scenarios pending"}))?;
+        }
+        execute(&loaded, &mut report, observer, selection)
     })();
     report.finish(
         Some(&loaded.fixture),
@@ -94,10 +120,11 @@ fn execute(
     loaded: &LoadedFixture,
     report: &mut Report,
     extension: &mut Observer<'_>,
+    selection: Option<&str>,
 ) -> Result<(), String> {
     supervision::heartbeat(0, "setup", loaded.fixture.limits.setup_timeout_ms)?;
     prerequisites(&loaded.fixture)?;
-    let mut adapter = baseline::Baseline::new(&report.root.join("work"))?;
+    let mut adapter = revised::Adapter::new(&report.root.join("work"), report.mode)?;
     let mut controller = controller::Controller::new(loaded, report)?;
     let mut observed = BTreeMap::new();
     let mut media = media_observer::MediaObserver::default();
@@ -112,6 +139,12 @@ fn execute(
             match &action.call {
                 Call::AssertObserved(assertion) => {
                     assert_observed(assertion, loaded, &observed, report)?;
+                    if selection == Some("comment-baseline")
+                        && assertion.id == "durable-comment-result-binding"
+                    {
+                        report.pending.push(json!({"disposition":"not_run","selection":"comment-baseline","later_scenarios":["old-epoch-receipt-reconciliation","changed-payload","retired-exact-result","retired-unresolved"],"reason":"pre-receipt source"}));
+                        break;
+                    }
                     if report
                         .assertions
                         .last()
@@ -127,7 +160,7 @@ fn execute(
                     report.pending.push(pending.clone());
                     report.event(action.id, &action.participant, "pending", pending)?;
                 }
-                call => {
+                _ => {
                     let routed = controller.dispatch(action, loaded, &observed, report)?;
                     let dispatched = if routed.is_some() {
                         routed
@@ -139,12 +172,12 @@ fn execute(
                         break;
                     } else {
                         media
-                            .execute(action, &mut adapter, report)?
+                            .execute(action, &mut adapter.baseline, report)?
                             .map(|value| (value, true))
                     };
                     let (observation, delivered) = match dispatched {
                         Some(result) => result,
-                        None => (adapter.execute(call, loaded)?, true),
+                        None => (adapter.execute(action, loaded)?, true),
                     };
                     let delivered = delivered && controller.deliver_reply(action.id);
                     let adapter_ns = started.elapsed().as_nanos().to_string();
@@ -308,7 +341,16 @@ pub fn cli() -> Result<i32, String> {
     if args.first().is_some_and(|a| a == "--role") {
         return controller::worker_cli(&args);
     }
-    if args.len() != 6 || args[0] != "--mode" || args[2] != "--fixture" || args[4] != "--output" {
+    let selection = if args.len() == 8 && args[6] == "--scenario" && args[7] == "comment-baseline" {
+        Some("comment-baseline")
+    } else {
+        None
+    };
+    if (args.len() != 6 && selection.is_none())
+        || args[0] != "--mode"
+        || args[2] != "--fixture"
+        || args[4] != "--output"
+    {
         return Err("usage: kinewright-ja-baseline --mode baseline|revised --fixture FILE --output NEW_DIRECTORY".into());
     }
     let mode = match args[1].as_str() {
@@ -320,9 +362,14 @@ pub fn cli() -> Result<i32, String> {
         let root = Path::new(&args[5]);
         supervision::validate_reserved(root)?;
         let report = Report::create_reserved(root, mode)?;
-        return run_report(Path::new(&args[3]), &mut |_, _, _| Ok(None), report);
+        return run_report(
+            Path::new(&args[3]),
+            &mut |_, _, _| Ok(None),
+            report,
+            selection,
+        );
     }
-    let exit = supervision::run(Path::new(&args[3]), Path::new(&args[5]), mode)?;
+    let exit = supervision::run(Path::new(&args[3]), Path::new(&args[5]), mode, selection)?;
     println!(
         "{}",
         json!({"protocol":protocol::PROTOCOL,"protocol_version":1,"exit_code":exit,"output":args[5]})
@@ -351,7 +398,10 @@ mod tests {
 
     #[test]
     fn edit_save_reopen_has_literal_history_loss_after_successful_control() {
-        let temp = TempDirectory::new("ja-history");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-history",
+        );
         let out = output(&temp, "history");
         assert_eq!(
             run(&fixtures().join("history-loss.json"), &out, Mode::Baseline).unwrap(),
@@ -372,7 +422,10 @@ mod tests {
 
     #[test]
     fn current_io_control_precedes_missing_directory_sync_assertion() {
-        let temp = TempDirectory::new("ja-io");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-io",
+        );
         let out = output(&temp, "io");
         assert_eq!(
             run(&fixtures().join("legacy-io.json"), &out, Mode::Baseline).unwrap(),
@@ -401,7 +454,15 @@ mod tests {
             "branches-current",
             "clip-id-reuse",
         ] {
-            let temp = TempDirectory::new("ja-controls");
+            let temp = TempDirectory::new_in(
+                &kinewright_media::test_support::workspace_target_dir(),
+                "ja-controls",
+            );
+            if name == "format-corpus" {
+                kinewright_project::project::predecessor_format_controls(&temp.path("predecessor"))
+                    .expect("actual pinned max-2 controls");
+                continue;
+            }
             assert_eq!(
                 run(
                     &fixtures().join(format!("{name}.json")),
@@ -416,7 +477,10 @@ mod tests {
 
     #[test]
     fn recording_forwards_real_loopback_sessions_and_confirmation() {
-        let temp = TempDirectory::new("ja-recording");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-recording",
+        );
         let out = output(&temp, "recording");
         assert_eq!(
             run(
@@ -458,7 +522,10 @@ mod tests {
 
     #[test]
     fn a_test_executable_cannot_silently_substitute_for_the_native_worker() {
-        let temp = TempDirectory::new("ja-missing-worker");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-missing-worker",
+        );
         assert_eq!(
             run(
                 &fixtures().join("reply-retry.json"),
@@ -488,7 +555,10 @@ mod tests {
             ("practice-not-run", 2),
             ("windows-not-run", 2),
         ] {
-            let temp = TempDirectory::new("ja-disposition");
+            let temp = TempDirectory::new_in(
+                &kinewright_media::test_support::workspace_target_dir(),
+                "ja-disposition",
+            );
             let out = temp.path("out");
             assert_eq!(
                 run(
@@ -524,7 +594,10 @@ mod tests {
 
     #[test]
     fn loopback_fixture_admission_cannot_write_to_an_external_path() {
-        let temp = TempDirectory::new("ja-loopback-path");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-loopback-path",
+        );
         copy_fixtures(temp.root());
         let mut fixture: Value = serde_json::from_slice(
             &std::fs::read(fixtures().join("recording-loopback.json")).unwrap(),
@@ -554,7 +627,10 @@ mod tests {
 
     #[test]
     fn input_roles_cannot_alias_the_oracle_namespace() {
-        let temp = TempDirectory::new("ja-role-collision");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-role-collision",
+        );
         copy_fixtures(temp.root());
         let mut fixture: Value =
             serde_json::from_slice(&std::fs::read(fixtures().join("history-loss.json")).unwrap())
@@ -580,7 +656,10 @@ mod tests {
 
     #[test]
     fn media_adapter_refuses_a_non_main_participant_before_execution() {
-        let temp = TempDirectory::new("ja-media-participant");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-media-participant",
+        );
         copy_fixtures(temp.root());
         let mut fixture: Value = serde_json::from_slice(
             &std::fs::read(fixtures().join("media-shared-control.json")).unwrap(),
@@ -604,7 +683,10 @@ mod tests {
 
     #[test]
     fn main_adapter_uses_shared_reply_drop_and_retry_validation() {
-        let temp = TempDirectory::new("ja-main-dispatch");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-main-dispatch",
+        );
         copy_fixtures(temp.root());
         let mut fixture: Value =
             serde_json::from_slice(&std::fs::read(fixtures().join("reply-retry.json")).unwrap())
@@ -663,7 +745,10 @@ mod tests {
 
     #[test]
     fn repeated_media_actions_retain_distinct_complete_artifacts() {
-        let temp = TempDirectory::new("ja-media-repeat");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-media-repeat",
+        );
         let out = output(&temp, "repeated-media");
         assert_eq!(
             run(
@@ -719,7 +804,10 @@ mod tests {
             ),
             ("prerequisite", json!({"requirements":["device:missing"]})),
         ] {
-            let temp = TempDirectory::new("ja-setup");
+            let temp = TempDirectory::new_in(
+                &kinewright_media::test_support::workspace_target_dir(),
+                "ja-setup",
+            );
             let mut fixture: Value = serde_json::from_slice(
                 &std::fs::read(fixtures().join("history-loss.json")).unwrap(),
             )
@@ -765,7 +853,10 @@ mod tests {
 
     #[test]
     fn failed_positive_control_has_control_failed_summary_and_exit_one() {
-        let temp = TempDirectory::new("ja-control-failed");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-control-failed",
+        );
         let directory = temp.path("fixtures");
         std::fs::create_dir(&directory).unwrap();
         copy_fixtures(&directory);
@@ -809,15 +900,23 @@ mod tests {
             "project_reopen",
             "inspect_files",
             "legacy_rename_refusal",
+            "strict_save",
+            "strict_rename_refusal",
             "lock_acquire",
             "headless_save",
             "media_export",
             "media_decode",
         ] {
             for path in ["../escape", "/absolute"] {
-                let temp = TempDirectory::new("ja-path-admission");
+                let temp = TempDirectory::new_in(
+                    &kinewright_media::test_support::workspace_target_dir(),
+                    "ja-path-admission",
+                );
                 let mut fixture = source.clone();
                 let mut args = json!({"path":path});
+                if name.starts_with("strict_") {
+                    args["input"] = json!("unused");
+                }
                 if name == "media_decode" {
                     args["at"] = json!(0);
                 }
@@ -866,7 +965,10 @@ mod tests {
 
     #[test]
     fn duplicate_oversize_and_guarded_undo_are_not_run() {
-        let temp = TempDirectory::new("ja-protocol");
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "ja-protocol",
+        );
         copy_fixtures(temp.root());
         let raw = std::fs::read_to_string(fixtures().join("edit-undo-redo.json")).unwrap();
         let mut oversize: Value = serde_json::from_str(&raw).unwrap();

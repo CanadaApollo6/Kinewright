@@ -5,7 +5,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{BatchError, Clip, ClipId, Document, JournalCommand, OpError, Operation, apply_batch};
+use crate::{BatchError, Clip, ClipId, Document, JournalCommand, OpError, Operation};
+use crate::{
+    GestureBoundary, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
+    OperationIdentityEffect,
+};
 
 /// Monotonic identity for one authoritative runtime timeline state.
 ///
@@ -105,6 +109,9 @@ pub enum QueryResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    UndoBlockedBySave {
+        floor_offset: u64,
+    },
     DocumentChanged {
         doc: Arc<Document>,
         revision: TimelineRevision,
@@ -151,6 +158,21 @@ enum CoreMessage {
     Command(Command),
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
+    ExportHistory(Sender<Result<HistorySnapshot, HistoryError>>),
+    BeginFloor(crate::HistoryTransition, Sender<Result<u64, HistoryError>>),
+    PendingFloor(Sender<Option<crate::PendingHistorySave>>),
+    TagFloor(
+        u64,
+        Option<crate::HistorySaveTag>,
+        bool,
+        Sender<Result<(), HistoryError>>,
+    ),
+    SettleFloor(u64, bool, Sender<Result<(), HistoryError>>),
+    RestoreHistory(
+        Box<HistorySnapshot>,
+        Option<Box<HistorySnapshot>>,
+        Sender<Result<(), HistoryError>>,
+    ),
     #[cfg(any(test, feature = "test-util"))]
     ObserveHistory(Sender<HistoryObservation>),
 }
@@ -180,9 +202,155 @@ pub struct HistoryEntryObservation {
 #[derive(Clone)]
 pub struct Core {
     sender: Sender<CoreMessage>,
+    history_owner: Arc<std::sync::Mutex<Option<std::any::TypeId>>>,
 }
 
 impl Core {
+    /// Bind the persistence owner to its private proof type for this actor's lifetime.
+    /// An owner supplies its own unforgeable proof; clones cannot bind a different type.
+    /// # Errors
+    /// Refuses a different owner or a poisoned capability binding.
+    pub fn history_save_owner<P: 'static>(
+        &self,
+        _proof: &P,
+    ) -> Result<crate::HistorySaveOwner<P>, HistoryError> {
+        let mut owner = self
+            .history_owner
+            .lock()
+            .map_err(|_| HistoryError::BarrierInvariant)?;
+        let requested = std::any::TypeId::of::<P>();
+        if owner.is_some_and(|existing| existing != requested) {
+            return Err(HistoryError::BarrierInvariant);
+        }
+        *owner = Some(requested);
+        Ok(crate::HistorySaveOwner::new(self.clone()))
+    }
+
+    /// Retain a validated prefix while preventing Undo from crossing its pending floor.
+    /// # Errors
+    /// Refuses a changed cut, an existing barrier or a disconnected actor before mutation.
+    pub(crate) fn begin_history_floor(
+        &self,
+        transition: crate::HistoryTransition,
+    ) -> Result<u64, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::BeginFloor(transition, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        let id = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(id)
+    }
+
+    /// Read the current save ticket without filesystem IO.
+    /// # Errors
+    /// Returns an actor-disconnection error.
+    pub fn pending_history_save(&self) -> Result<Option<crate::PendingHistorySave>, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::PendingFloor(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)
+    }
+
+    /// Settle a ticket after the persistence owner reconciles its tagged root.
+    /// # Errors
+    /// Refuses an unknown ticket or a disconnected actor.
+    pub(crate) fn settle_history_save(
+        &self,
+        pending: &crate::PendingHistorySave,
+        commit: bool,
+    ) -> Result<(), HistoryError> {
+        self.settle_history_floor(pending.id, commit)
+    }
+
+    pub(crate) fn tag_history_floor(
+        &self,
+        id: u64,
+        tag: Option<crate::HistorySaveTag>,
+        ready: bool,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::TagFloor(id, tag, ready, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    pub(crate) fn settle_history_floor(
+        &self,
+        offset: u64,
+        commit: bool,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::SettleFloor(offset, commit, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Atomically capture the accepted stream and exact undo/redo/gesture state.
+    /// # Errors
+    /// Returns an actor-disconnection error. The persistence owner bounds the retained cut.
+    pub fn export_history(&self) -> Result<HistorySnapshot, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ExportHistory(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Validate by replay in a private state, then atomically install it.
+    /// Runtime revisions are freshly assigned and never restored from disk.
+    /// # Errors
+    /// Refuses corrupt, excessive or disconnected histories without changing this Core.
+    pub fn restore_history(&self, history: HistorySnapshot) -> Result<(), HistoryError> {
+        history.encoded_bytes()?;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(Box::new(history), None, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Install an acknowledged checkpoint only at the exact frozen producer cut.
+    /// # Errors
+    /// Refuses a newer suffix, corrupt candidate or disconnected actor without replacing it.
+    pub fn install_checkpoint(
+        &self,
+        before: HistorySnapshot,
+        after: HistorySnapshot,
+    ) -> Result<(), HistoryError> {
+        after.encoded_bytes()?;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(
+                Box::new(after),
+                Some(Box::new(before)),
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
+    /// Install one validated floor or recovery-close only at its exact current cut.
+    /// # Errors
+    /// Refuses a changed cut, corrupt candidate or disconnected actor atomically.
+    pub fn install_history_transition(
+        &self,
+        transition: crate::HistoryTransition,
+    ) -> Result<(), HistoryError> {
+        transition.after.encoded_bytes()?;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(
+                Box::new(transition.after),
+                Some(Box::new(transition.before)),
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
     /// Observe private history on the actor thread without changing it.
     /// # Errors
     /// Returns an error if the actor has stopped.
@@ -234,7 +402,10 @@ impl Core {
             .name("kinewright-core".to_owned())
             .spawn(move || run_actor(&receiver, CoreState::new(initial_document, revision)))
             .expect("failed to spawn Core actor");
-        Ok(Self { sender })
+        Ok(Self {
+            sender,
+            history_owner: Arc::new(std::sync::Mutex::new(None)),
+        })
     }
 
     /// Queue a command for the core actor.
@@ -281,7 +452,7 @@ impl Core {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct HistoryEntry {
     document: Arc<Document>,
     operations: Vec<Operation>,
@@ -296,7 +467,23 @@ struct HistoryEntry {
     coalesce_key: Option<String>,
 }
 
+#[derive(Clone)]
+struct PendingFloor {
+    save: crate::PendingHistorySave,
+    offset: u64,
+    discard: usize,
+    depth: usize,
+    baseline: Arc<Document>,
+}
+
+#[derive(Clone)]
 struct CoreState {
+    next_floor_id: u64,
+    pending_floor: Option<PendingFloor>,
+    floor_offset: u64,
+    baseline: Arc<Document>,
+    batches: Vec<HistoryBatch>,
+    identity_effects: Vec<OperationIdentityEffect>,
     document: Arc<Document>,
     revision: TimelineRevision,
     undo: Vec<HistoryEntry>,
@@ -306,8 +493,15 @@ struct CoreState {
 
 impl CoreState {
     fn new(document: Document, revision: TimelineRevision) -> Self {
+        let document = Arc::new(document);
         Self {
-            document: Arc::new(document),
+            next_floor_id: 0,
+            pending_floor: None,
+            floor_offset: 0,
+            baseline: Arc::clone(&document),
+            batches: Vec::new(),
+            identity_effects: Vec::new(),
+            document,
             revision,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -318,7 +512,13 @@ impl CoreState {
     fn do_operation(&mut self, operation: Operation) -> Result<Arc<Document>, OpError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        operation.apply(&mut after)?;
+        let effects =
+            crate::operation::apply_batch_observed(&mut after, std::slice::from_ref(&operation))
+                .map_err(|error| match error {
+                    BatchError::OperationFailed { error, .. } => error,
+                    BatchError::Empty => unreachable!(),
+                })?;
+        self.identity_effects = effects;
         self.undo.push(HistoryEntry {
             document: before,
             operations: vec![operation.clone()],
@@ -334,7 +534,7 @@ impl CoreState {
     fn do_batch(&mut self, operations: Vec<Operation>) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        apply_batch(&mut after, &operations)?;
+        self.identity_effects = crate::operation::apply_batch_observed(&mut after, &operations)?;
         self.undo.push(HistoryEntry {
             document: before,
             operations: operations.clone(),
@@ -360,7 +560,7 @@ impl CoreState {
     ) -> Result<Arc<Document>, BatchError> {
         let before = Arc::clone(&self.document);
         let mut after = (*before).clone();
-        apply_batch(&mut after, &operations)?;
+        self.identity_effects = crate::operation::apply_batch_observed(&mut after, &operations)?;
         match self.undo.last_mut() {
             Some(entry) if entry.coalesce_key.as_deref() == Some(coalesce_key) => {
                 entry.operations.extend(operations.iter().cloned());
@@ -426,6 +626,147 @@ impl CoreState {
         }
     }
 
+    fn history(&self) -> HistorySnapshot {
+        let entry = |e: &HistoryEntry| GestureBoundary {
+            document: Arc::clone(&e.document),
+            operations: e.operations.clone(),
+            coalesce_key: e.coalesce_key.clone(),
+        };
+        HistorySnapshot {
+            floor_offset: self.floor_offset,
+            baseline: Arc::clone(&self.baseline),
+            document: Arc::clone(&self.document),
+            batches: self.batches.clone(),
+            cursor: HistoryCursor {
+                undo: self.undo.iter().map(entry).collect(),
+                redo: self.redo.iter().map(entry).collect(),
+            },
+        }
+    }
+
+    fn restore(snapshot: &HistorySnapshot) -> Result<Self, HistoryError> {
+        snapshot
+            .baseline
+            .validate()
+            .map_err(|_| HistoryError::Corrupt)?;
+        let mut candidate = Self::new((*snapshot.baseline).clone(), TimelineRevision(0));
+        for batch in &snapshot.batches {
+            if !matches!(
+                execute_command(&mut candidate, batch.command.clone().into()),
+                Event::DocumentChanged { .. }
+            ) {
+                return Err(HistoryError::Corrupt);
+            }
+        }
+        candidate.floor_offset = snapshot.floor_offset;
+        if candidate.history() != *snapshot {
+            return Err(HistoryError::Corrupt);
+        }
+        Ok(candidate)
+    }
+
+    fn begin_floor(&mut self, transition: &crate::HistoryTransition) -> Result<u64, HistoryError> {
+        if let Some(pending) = &self.pending_floor {
+            // An in-flight save is ordinary contention. A settleable ticket must have been
+            // reconciled by the persistence owner first, so reaching it here is internal.
+            return Err(if pending.save.ready {
+                HistoryError::BarrierInvariant
+            } else {
+                HistoryError::SaveInProgress
+            });
+        }
+        if self.history() != transition.before {
+            return Err(HistoryError::CaptureChanged);
+        }
+        if transition.after.floor_offset <= self.floor_offset {
+            return Err(HistoryError::BarrierInvariant);
+        }
+        let id = self
+            .next_floor_id
+            .checked_add(1)
+            .ok_or(HistoryError::Capacity)?;
+        self.next_floor_id = id;
+        self.pending_floor = Some(PendingFloor {
+            save: crate::PendingHistorySave {
+                id,
+                tag: None,
+                ready: false,
+            },
+            offset: transition.after.floor_offset,
+            discard: transition.before.batches.len() - transition.after.batches.len(),
+            depth: transition.before.cursor.undo.len() - transition.after.cursor.undo.len(),
+            baseline: Arc::clone(&transition.after.baseline),
+        });
+        Ok(id)
+    }
+
+    fn settle_floor(&mut self, id: u64, commit: bool) -> Result<(), HistoryError> {
+        // A previous owner may finish after a fresh owner already reconciled its ticket.
+        // Tickets are never reused, even when the same floor is selected again.
+        if id <= self.next_floor_id && self.pending_floor.as_ref().is_none_or(|p| p.save.id != id) {
+            return Ok(());
+        }
+        let pending = self
+            .pending_floor
+            .as_ref()
+            .ok_or(HistoryError::BarrierInvariant)?;
+        if pending.save.id != id {
+            return Err(HistoryError::BarrierInvariant);
+        }
+        let offset = pending.offset;
+        let baseline = Arc::clone(&pending.baseline);
+        let discard = pending.discard;
+        let depth = pending.depth;
+        let result = (|| {
+            if commit {
+                #[cfg(any(test, feature = "test-util"))]
+                let started = std::time::Instant::now();
+                // The barrier kept the prefix unchanged. Replay only the current suffix
+                // through the ordinary executor, including commands accepted during IO.
+                let mut candidate = Self::new((*baseline).clone(), TimelineRevision(0));
+                candidate.floor_offset = offset;
+                for batch in self.batches.get(discard..).ok_or(HistoryError::Corrupt)? {
+                    if !matches!(
+                        execute_command(&mut candidate, batch.command.clone().into()),
+                        Event::DocumentChanged { .. }
+                    ) {
+                        return Err(HistoryError::Corrupt);
+                    }
+                }
+                if candidate.document != self.document
+                    || candidate.undo != self.undo.get(depth..).ok_or(HistoryError::Corrupt)?
+                    || candidate.redo != self.redo
+                {
+                    return Err(HistoryError::Corrupt);
+                }
+                candidate.revision = TimelineRevision(
+                    self.revision
+                        .0
+                        .checked_add(1)
+                        .ok_or(HistoryError::Capacity)?,
+                );
+                candidate.next_floor_id = self.next_floor_id;
+                #[cfg(any(test, feature = "test-util"))]
+                if std::env::var_os("JA_S1_COMMIT_TIMING").is_some() {
+                    eprintln!(
+                        "R5_ACTOR_COMMIT batches={} elapsed_us={}",
+                        candidate.batches.len(),
+                        started.elapsed().as_micros()
+                    );
+                }
+                *self = candidate;
+            } else {
+                self.pending_floor = None;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.pending_floor = None;
+            return Err(HistoryError::CommitInvariant);
+        }
+        result
+    }
+
     fn increment_revision(&mut self) {
         self.revision = TimelineRevision(
             self.revision
@@ -436,10 +777,203 @@ impl CoreState {
     }
 }
 
+pub(crate) fn floor_history(
+    before: &HistorySnapshot,
+    discard: usize,
+) -> Result<HistorySnapshot, HistoryError> {
+    if discard == 0 || discard > before.batches.len() {
+        return Err(HistoryError::Corrupt);
+    }
+    CoreState::restore(before)?;
+    let mut prefix = CoreState::new((*before.baseline).clone(), TimelineRevision(0));
+    for batch in &before.batches[..discard] {
+        if !matches!(
+            execute_command(&mut prefix, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    floor_from_prefix(before, discard, &prefix)
+}
+
+pub(crate) fn find_floor_history(
+    before: &HistorySnapshot,
+    mut may_fit: impl FnMut(usize, usize, &Arc<Document>) -> bool,
+    mut accepts: impl FnMut(&HistorySnapshot) -> bool,
+) -> Result<HistorySnapshot, HistoryError> {
+    before
+        .baseline
+        .validate()
+        .map_err(|_| HistoryError::Corrupt)?;
+    let mut prefix = CoreState::new((*before.baseline).clone(), TimelineRevision(0));
+    for (index, batch) in before.batches.iter().enumerate() {
+        if !matches!(
+            execute_command(&mut prefix, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) {
+            return Err(HistoryError::Corrupt);
+        }
+        if prefix.batches.last() != Some(batch) {
+            return Err(HistoryError::Corrupt);
+        }
+        let discard = index + 1;
+        if prefix.redo.is_empty()
+            && may_fit(discard, prefix.undo.len(), &prefix.document)
+            && let Ok(after) = floor_from_prefix(before, discard, &prefix)
+            && accepts(&after)
+        {
+            // Finish validation from the already replayed prefix rather than replaying it again.
+            let mut complete = prefix.clone();
+            for batch in &before.batches[discard..] {
+                if !matches!(
+                    execute_command(&mut complete, batch.command.clone().into()),
+                    Event::DocumentChanged { .. }
+                ) {
+                    return Err(HistoryError::Corrupt);
+                }
+            }
+            complete.floor_offset = before.floor_offset;
+            if complete.history() != *before {
+                return Err(HistoryError::Corrupt);
+            }
+            return Ok(after);
+        }
+    }
+    prefix.floor_offset = before.floor_offset;
+    if prefix.history() != *before {
+        return Err(HistoryError::Corrupt);
+    }
+    Err(HistoryError::Capacity)
+}
+
+fn floor_from_prefix(
+    before: &HistorySnapshot,
+    discard: usize,
+    prefix: &CoreState,
+) -> Result<HistorySnapshot, HistoryError> {
+    let dropped = prefix.undo.len();
+    if !prefix.redo.is_empty()
+        || dropped > before.cursor.undo.len()
+        || (dropped == before.cursor.undo.len()
+            && before
+                .cursor
+                .undo
+                .last()
+                .is_some_and(|entry| entry.coalesce_key.is_some()))
+    {
+        return Err(HistoryError::Corrupt);
+    }
+    let mut suffix = CoreState::new((*prefix.document).clone(), TimelineRevision(0));
+    for batch in &before.batches[discard..] {
+        if !matches!(
+            execute_command(&mut suffix, batch.command.clone().into()),
+            Event::DocumentChanged { .. }
+        ) {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    let mut after = suffix.history();
+    if after.document != before.document
+        || after.cursor.undo != before.cursor.undo[dropped..]
+        || after.cursor.redo != before.cursor.redo
+    {
+        return Err(HistoryError::Corrupt);
+    }
+    after.floor_offset = before
+        .floor_offset
+        .checked_add(discard as u64)
+        .ok_or(HistoryError::Capacity)?;
+    Ok(after)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one actor dispatch owns history and save tickets"
+)]
 fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
+            CoreMessage::PendingFloor(reply) => {
+                let _ = reply.send(state.pending_floor.as_ref().map(|p| p.save.clone()));
+            }
+            CoreMessage::TagFloor(id, tag, ready, reply) => {
+                let result = match state.pending_floor.as_mut() {
+                    Some(pending) if pending.save.id == id => {
+                        if let Some(tag) = tag {
+                            pending.save.tag = Some(tag);
+                        }
+                        if ready && pending.save.tag.is_none() {
+                            Err(HistoryError::BarrierInvariant)
+                        } else {
+                            pending.save.ready = ready;
+                            Ok(())
+                        }
+                    }
+                    _ => Err(HistoryError::BarrierInvariant),
+                };
+                let _ = reply.send(result);
+            }
+            CoreMessage::BeginFloor(transition, reply) => {
+                let result = state.begin_floor(&transition);
+                let _ = reply.send(result);
+            }
+            CoreMessage::SettleFloor(offset, commit, reply) => {
+                let result = state.settle_floor(offset, commit);
+                if result.is_ok() && commit {
+                    broadcast(
+                        &mut subscribers,
+                        &Event::DocumentChanged {
+                            doc: Arc::clone(&state.document),
+                            revision: state.revision,
+                            last_op: None,
+                            journal_command: None,
+                            token: None,
+                        },
+                    );
+                }
+                let _ = reply.send(result);
+            }
+            CoreMessage::ExportHistory(reply) => {
+                // Publication chooses and records any floor before the owner installs it.
+                let _ = reply.send(Ok(state.history()));
+            }
+            CoreMessage::RestoreHistory(history, expected, reply) => {
+                let admitted = if state.pending_floor.is_some() {
+                    Err(HistoryError::SaveInProgress)
+                } else if expected
+                    .as_deref()
+                    .is_some_and(|before| state.history() != *before)
+                {
+                    Err(HistoryError::Corrupt)
+                } else {
+                    CoreState::restore(&history)
+                };
+                let result = admitted.and_then(|mut candidate| {
+                    candidate.next_floor_id = state.next_floor_id;
+                    candidate.revision = TimelineRevision(
+                        state
+                            .revision
+                            .0
+                            .checked_add(1)
+                            .ok_or(HistoryError::Capacity)?,
+                    );
+                    state = candidate;
+                    broadcast(
+                        &mut subscribers,
+                        &Event::DocumentChanged {
+                            doc: Arc::clone(&state.document),
+                            revision: state.revision,
+                            last_op: None,
+                            journal_command: None,
+                            token: None,
+                        },
+                    );
+                    Ok(())
+                });
+                let _ = reply.send(result);
+            }
             #[cfg(any(test, feature = "test-util"))]
             CoreMessage::ObserveHistory(reply) => {
                 let observe = |entry: &HistoryEntry| HistoryEntryObservation {
@@ -470,11 +1004,11 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                 }
             }
             CoreMessage::Command(command) => {
-                let event = execute_command(&mut state, command);
+                let event = execute_actor_command(&mut state, command);
                 broadcast(&mut subscribers, &event);
             }
             CoreMessage::Request(command, reply) => {
-                let event = execute_command(&mut state, command);
+                let event = execute_actor_command(&mut state, command);
                 broadcast(&mut subscribers, &event);
                 let _ = reply.send(event);
             }
@@ -482,7 +1016,42 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     }
 }
 
+fn execute_actor_command(state: &mut CoreState, command: Command) -> Event {
+    if matches!(command, Command::Undo)
+        && state
+            .pending_floor
+            .as_ref()
+            .is_some_and(|pending| state.undo.len() <= pending.depth)
+    {
+        // A blocked Undo is not an accepted journal command: replay after release
+        // must never turn it into an Undo of the retained protected prefix.
+        return Event::UndoBlockedBySave {
+            floor_offset: state.pending_floor.as_ref().unwrap().offset,
+        };
+    }
+    execute_command(state, command)
+}
+
 fn execute_command(state: &mut CoreState, command: Command) -> Event {
+    state.identity_effects.clear();
+    let event = execute_command_inner(state, command);
+    if let Event::DocumentChanged {
+        journal_command: Some(command),
+        ..
+    } = &event
+    {
+        state.batches.push(HistoryBatch {
+            order: state.batches.len() as u64,
+            command: command.clone(),
+            identity_effects: std::mem::take(&mut state.identity_effects),
+            undo_entries: state.undo.len(),
+            redo_entries: state.redo.len(),
+        });
+    }
+    event
+}
+
+fn execute_command_inner(state: &mut CoreState, command: Command) -> Event {
     match command {
         Command::Do(operation) => execute_operation(state, operation, None),
         Command::DoBatch(operations) => execute_batch(state, operations),
@@ -608,6 +1177,7 @@ fn broadcast(subscribers: &mut Vec<Sender<Event>>, event: &Event) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apply_batch;
     use crate::{
         AssetId, Clip, ClipContent, ClipId, ColorBitDepth, ColorDescription, ColorMatrix,
         ColorPrimaries, ColorProvenance, ColorRange, ColorTransfer, ColorWhitePoint, Effect,

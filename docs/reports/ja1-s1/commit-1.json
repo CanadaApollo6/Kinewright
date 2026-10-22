@@ -1,0 +1,105 @@
+{
+  "ordinal": 1,
+  "parent": "076a96c922b2f05984df4bb839ad7cf0900e6183",
+  "linux_gate": "c1-gate-attempt6",
+  "gates": {
+    "F": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 131 filtered out; finished in 0.11s"
+    ],
+    "H": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 307 filtered out; finished in 0.00s"
+    ],
+    "M": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 647 filtered out; finished in 0.00s"
+    ],
+    "architecture-agent": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.03s"
+    ],
+    "architecture-app": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 800 filtered out; finished in 0.03s"
+    ],
+    "build": [],
+    "classification": [],
+    "clippy": [],
+    "core-history": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "eval-bins": [],
+    "format-app": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 796 filtered out; finished in 0.59s"
+    ],
+    "format-core": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 310 filtered out; finished in 0.00s"
+    ],
+    "format-eval": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 44 filtered out; finished in 0.00s"
+    ],
+    "harness-integration": [
+      "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 28.94s"
+    ],
+    "harness-lib": [
+      "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 140.41s"
+    ],
+    "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 16.20s"
+    ],
+    "native_app_bridge_rejects_abnormal_exit_after_completed_report": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 46.66s"
+    ],
+    "native_app_bridge_retains_exercised_control_and_property_failures": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 37.21s"
+    ],
+    "revised": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.37s"
+    ],
+    "rustfmt": [],
+    "test-build": []
+  },
+  "mutations": {
+    "c1-mutations/batch-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/batch-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/corrupt-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/corrupt-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/gesture-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/gesture-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/identity-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/identity-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/redo-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+    ],
+    "c1-mutations/redo-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.01s"
+    ],
+    "c1-adapter-mutations/hook-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.07s"
+    ],
+    "c1-adapter-mutations/hook-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.09s"
+    ],
+    "c1-adapter-mutations/routing-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 13.56s"
+    ],
+    "c1-adapter-mutations/routing-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 12.71s"
+    ]
+  },
+  "windows_native": "NOT RUN",
+  "windows_core_optional_check": "passed cargo check for installed x86_64-pc-windows-msvc target; c1-windows-core.log.gz; source 5bc776d Core unchanged",
+  "baseline_flips": []
+}

@@ -1,0 +1,482 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "comment-receipt",
+  "gate_ids": [
+    "JA1.G1",
+    "JA1.G1-R"
+  ],
+  "lane": "linux-native",
+  "requirements": [],
+  "inputs": {
+    "retained-text": {
+      "relative_file": "s1-comment-retained.txt",
+      "sha256": "2f4631b3ebd758fa3d2aa875f99d81fbd97a88fd5c988e324cc4dcc48ede0f86",
+      "byte_length": 27,
+      "kind": "independent-opaque-comment-bytes"
+    },
+    "retained-strokes": {
+      "relative_file": "s1-strokes-retained.json",
+      "sha256": "fe1bb5651601ee472eb96473617f02cc731727d5f1216e9e65767f2db4edb46e",
+      "byte_length": 32,
+      "kind": "independent-opaque-comment-bytes"
+    },
+    "lost-text": {
+      "relative_file": "s1-comment-lost.txt",
+      "sha256": "ff816ac274dd699f0ed0fd345e5495b143891eeae49fde178329e505ae6f8a03",
+      "byte_length": 27,
+      "kind": "independent-opaque-comment-bytes"
+    },
+    "lost-strokes": {
+      "relative_file": "s1-strokes-lost.json",
+      "sha256": "9f72d5e2ada9b0bb353a1b12f8419211f6ace0fe09ccd245bf441cb900a59398",
+      "byte_length": 48,
+      "kind": "independent-opaque-comment-bytes"
+    },
+    "changed-text": {
+      "relative_file": "s1-comment-changed.txt",
+      "sha256": "7de758b2e023ddf116e6f7fd6a49509a6968540e3acf521b7177aa624aa50c4f",
+      "byte_length": 25,
+      "kind": "independent-opaque-comment-bytes"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": [
+      "A"
+    ]
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "A",
+      "action": "core_start",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "A",
+      "action": "comment_submit",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "retained",
+        "text": "retained-text",
+        "strokes": "retained-strokes"
+      }
+    },
+    {
+      "id": 3,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retained-graph-published",
+        "observation": 2,
+        "pointer": "/durable_graph_published",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 4,
+      "participant": "A",
+      "action": "participant_exit",
+      "args": {}
+    },
+    {
+      "id": 5,
+      "participant": "A",
+      "action": "participant_restart",
+      "args": {}
+    },
+    {
+      "id": 6,
+      "participant": "A",
+      "action": "comment_inspect",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "retained",
+        "text": "retained-text",
+        "strokes": "retained-strokes"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retained-text-exact",
+        "observation": 6,
+        "pointer": "/text_utf8",
+        "oracle": "retained-text",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 8,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retained-strokes-exact",
+        "observation": 6,
+        "pointer": "/strokes_utf8",
+        "oracle": "retained-strokes",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 9,
+      "participant": "controller",
+      "action": "drop_reply",
+      "args": {
+        "action_id": 10
+      }
+    },
+    {
+      "id": 10,
+      "participant": "A",
+      "action": "comment_submit",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "lost",
+        "text": "lost-text",
+        "strokes": "lost-strokes"
+      }
+    },
+    {
+      "id": 11,
+      "participant": "A",
+      "action": "comment_inspect",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "lost",
+        "text": "lost-text",
+        "strokes": "lost-strokes"
+      }
+    },
+    {
+      "id": 12,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "lost-text-exact",
+        "observation": 11,
+        "pointer": "/text_utf8",
+        "oracle": "lost-text",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 13,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "lost-strokes-exact",
+        "observation": 11,
+        "pointer": "/strokes_utf8",
+        "oracle": "lost-strokes",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 14,
+      "participant": "A",
+      "action": "participant_exit",
+      "args": {}
+    },
+    {
+      "id": 15,
+      "participant": "A",
+      "action": "participant_restart",
+      "args": {}
+    },
+    {
+      "id": 16,
+      "participant": "A",
+      "action": "comment_submit",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "lost-retry",
+        "text": "lost-text",
+        "strokes": "lost-strokes",
+        "original": "lost"
+      }
+    },
+    {
+      "id": 17,
+      "participant": "A",
+      "action": "comment_inspect",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "lost",
+        "text": "lost-text",
+        "strokes": "lost-strokes"
+      }
+    },
+    {
+      "id": 18,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retry-text-exact",
+        "observation": 17,
+        "pointer": "/text_utf8",
+        "oracle": "lost-text",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 19,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retry-strokes-exact",
+        "observation": 17,
+        "pointer": "/strokes_utf8",
+        "oracle": "lost-strokes",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 20,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "durable-comment-result-binding",
+        "observation": 17,
+        "pointer": "/binding_present",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "retry-strokes-exact"
+      }
+    },
+    {
+      "id": 21,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "old-epoch-original-envelope-reconciled",
+        "observation": 16,
+        "pointer": "/reconciled_old_epoch",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 22,
+      "participant": "A",
+      "action": "comment_submit",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "changed-lost",
+        "text": "changed-text",
+        "strokes": "lost-strokes",
+        "original": "lost"
+      }
+    },
+    {
+      "id": 23,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "same-id-changed-comment-conflict",
+        "observation": 22,
+        "pointer": "/id_payload_conflict",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 24,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "changed-comment-no-mutation",
+        "observation": 22,
+        "pointer": "/root_unchanged",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 25,
+      "participant": "A",
+      "action": "comment_retire",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "lost",
+        "rotations": 0
+      }
+    },
+    {
+      "id": 26,
+      "participant": "A",
+      "action": "comment_submit",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "retired-exact",
+        "text": "lost-text",
+        "strokes": "lost-strokes",
+        "original": "lost"
+      }
+    },
+    {
+      "id": 27,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retired-original-result-resolved",
+        "observation": 26,
+        "pointer": "/resolved_original_result",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 28,
+      "participant": "A",
+      "action": "comment_inspect",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "lost",
+        "text": "lost-text",
+        "strokes": "lost-strokes"
+      }
+    },
+    {
+      "id": 29,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retired-comment-single-original-record",
+        "observation": 28,
+        "pointer": "/record_count",
+        "oracle": "one",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 30,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retired-text-still-exact",
+        "observation": 28,
+        "pointer": "/text_utf8",
+        "oracle": "lost-text",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 31,
+      "participant": "A",
+      "action": "comment_rotate",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "lost",
+        "rotations": 3
+      }
+    },
+    {
+      "id": 32,
+      "participant": "A",
+      "action": "comment_submit",
+      "args": {
+        "path": "comments.kinewright",
+        "request": "retired-unresolved",
+        "text": "lost-text",
+        "strokes": "lost-strokes",
+        "original": "lost"
+      }
+    },
+    {
+      "id": 33,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retired-unresolved-does-not-reapply",
+        "observation": 32,
+        "pointer": "/retired_unresolved",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 34,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retired-unresolved-no-mutation",
+        "observation": 32,
+        "pointer": "/root_unchanged",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 35,
+      "participant": "A",
+      "action": "participant_exit",
+      "args": {}
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "retained-text": {
+      "relative_file": "s1-oracle-comment-retained.json",
+      "sha256": "8a602ba8cb1d3e84503d80b68b2ecb53012a94b60417dc7f944a4756595171d9",
+      "byte_length": 33,
+      "kind": "independent-exact-byte-string-oracle"
+    },
+    "retained-strokes": {
+      "relative_file": "s1-oracle-strokes-retained.json",
+      "sha256": "29fceb1c3c087303c09f85f7986850383039908b7df38fbe9ad3b5de8c09881d",
+      "byte_length": 36,
+      "kind": "independent-exact-byte-string-oracle"
+    },
+    "lost-text": {
+      "relative_file": "s1-oracle-comment-lost.json",
+      "sha256": "0a822fbdeb8c9313087b2d441c67afd8cfe0816c15cc5b6d41bca00969361d59",
+      "byte_length": 34,
+      "kind": "independent-exact-byte-string-oracle"
+    },
+    "lost-strokes": {
+      "relative_file": "s1-oracle-strokes-lost.json",
+      "sha256": "707815be8c62f4f2e66c6370cfcdd41c9ed91e89411494ff9f6cf9d378b22b20",
+      "byte_length": 53,
+      "kind": "independent-exact-byte-string-oracle"
+    },
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    },
+    "one": {
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "byte_length": 2,
+      "kind": "independent-scalar-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 33554432,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

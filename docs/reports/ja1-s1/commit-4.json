@@ -1,0 +1,225 @@
+{
+  "ordinal": 4,
+  "parent": "96bcf9347a3f9b329ebf570a293afe8547f523a2",
+  "linux_gate": "c4-resume-gate7",
+  "gates": {
+    "F": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 9.11s"
+    ],
+    "H": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 308 filtered out; finished in 0.00s"
+    ],
+    "I-app-refusal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 1.64s"
+    ],
+    "I-app": [
+      "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 786 filtered out; finished in 0.00s"
+    ],
+    "I-eval-refusal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.22s"
+    ],
+    "I-headless": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.11s"
+    ],
+    "I-lock": [
+      "test result: ok. 53 passed; 0 failed; 1 ignored; 0 measured; 84 filtered out; finished in 90.74s"
+    ],
+    "I-project": [
+      "test result: ok. 42 passed; 0 failed; 1 ignored; 0 measured; 759 filtered out; finished in 0.35s"
+    ],
+    "L": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 2.21s"
+    ],
+    "P-generated": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 1.17s"
+    ],
+    "P-media": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1187 filtered out; finished in 3.18s"
+    ],
+    "P-presentation": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 797 filtered out; finished in 0.12s"
+    ],
+    "architecture-agent": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.02s"
+    ],
+    "architecture-app": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.03s"
+    ],
+    "build": [],
+    "classification": [],
+    "clippy": [],
+    "core-history": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "eval-bins": [],
+    "format-app": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 797 filtered out; finished in 0.39s"
+    ],
+    "format-core": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 311 filtered out; finished in 0.00s"
+    ],
+    "format-eval": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s"
+    ],
+    "harness-integration": [
+      "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 26.36s"
+    ],
+    "harness-lib": [
+      "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 152.61s"
+    ],
+    "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 16.62s"
+    ],
+    "native_app_bridge_rejects_abnormal_exit_after_completed_report": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 34.27s"
+    ],
+    "native_app_bridge_retains_exercised_control_and_property_failures": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 33.63s"
+    ],
+    "revised": [
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.20s"
+    ],
+    "rustfmt": [],
+    "storage": [
+      "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.13s"
+    ],
+    "test-build": []
+  },
+  "compiled_source_hashes_match_gate": true,
+  "mutations_directory": "c4-resume-mutations-final",
+  "mutations": {
+    "B1-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.24s"
+    ],
+    "B1-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.33s"
+    ],
+    "B2-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.22s"
+    ],
+    "B2-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.32s"
+    ],
+    "B3-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.31s"
+    ],
+    "B3-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.32s"
+    ],
+    "B4-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.31s"
+    ],
+    "B4-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.33s"
+    ],
+    "B5-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.30s"
+    ],
+    "B5-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.32s"
+    ],
+    "ancestor-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.31s"
+    ],
+    "ancestor-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.31s"
+    ],
+    "app-source-destination-admission-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.27s"
+    ],
+    "app-source-destination-admission-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 1.56s"
+    ],
+    "backup-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.28s"
+    ],
+    "backup-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.41s"
+    ],
+    "comment-baseline-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 17.66s"
+    ],
+    "comment-baseline-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 17.61s"
+    ],
+    "corrupt-history-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.26s"
+    ],
+    "corrupt-history-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.25s"
+    ],
+    "eval-v3-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.22s"
+    ],
+    "eval-v3-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.16s"
+    ],
+    "history-reopen-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 4.63s"
+    ],
+    "history-reopen-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 4.71s"
+    ],
+    "source-destination-admission-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.03s"
+    ],
+    "source-destination-admission-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 137 filtered out; finished in 0.04s"
+    ],
+    "support-api-red.log.gz": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.26s"
+    ],
+    "support-api-restored.log.gz": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.27s"
+    ]
+  },
+  "predecessor": {
+    "source_root": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/ja-s1-predecessor/source",
+    "source_head": "076a96c922b2f05984df4bb839ad7cf0900e6183",
+    "binary": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/ja-s1-predecessor/sealed/kinewright-ja-baseline",
+    "binary_sha256": "e928aab1f8f9640d96d2e9558e64ebb8faec93797a8f242bb2f0da2be3be0cb6",
+    "source_clean": true,
+    "os": "Linux-7.2.8-9-omarchy-x86_64-with-glibc2.44",
+    "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "reports": {
+      "format-corpus": {
+        "run_sha256": "9cd30c29f526820eae4eb8f068b9c27a96a852d41722d0c053f5c0b41e22827c",
+        "fixture_sha256": "f53ae88d6d9e75606b46614b6ebe522578fbddebb35fe1152a091ef39feadb02",
+        "output": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/c4-resume-predecessor/controls-XMSfibI1/format-corpus"
+      },
+      "history-loss": {
+        "run_sha256": "162e6551017cc68d54e133021068f9ff65c31de748f1dadb0e74da561752a40c",
+        "fixture_sha256": "04a27d0104a44e3d246c73cb899e9fa9fbde8b9763981d2c525cdf3a590b7b81",
+        "output": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/c4-resume-predecessor/controls-XMSfibI1/history-loss"
+      },
+      "reply-retry": {
+        "run_sha256": "004c7f46f0e7b9aeac734a737f506f99e1bed16d5c2219a13e40557840105fd8",
+        "fixture_sha256": "13dedb1ed3fc7a467cff88e865eef6cae4ab9dfe1229c92d60ea6720df837831",
+        "output": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/c4-resume-predecessor/controls-XMSfibI1/reply-retry"
+      },
+      "legacy-io": {
+        "run_sha256": "38d77c90c11f7de167fd96b3410708dcbd6709a443938cfff8b7d0f862378b66",
+        "fixture_sha256": "68d55f261e2c2213623b6d0c68f1970c1c92d3f115bd2d2a2ca731eb93aeaa20",
+        "output": "/home/riels/Projects/Personal/Kinewright/target/review/ja/s1-evidence/c4-resume-predecessor/controls-XMSfibI1/legacy-io"
+      }
+    },
+    "max2_binary": "/home/riels/.t3/worktrees/Kinewright/t3-5e39b056/target/ja-s1-predecessor/sealed/max2-control",
+    "max2_binary_sha256": "5d7f501461ae4c609d92f1abcea50309cb5dd9ec94f64d3b96224236c0e01a90",
+    "observer_source_sha256": "c39ad8eb3b79f4ad92aac8139bd0a2e178cba183fdb7b23f528957203cb98149"
+  },
+  "windows_full_project_agent_cfg_check": "NOT RUN: attempted; aws-lc-sys cannot use the unavailable native MSVC build prerequisites",
+  "windows_native": "NOT RUN",
+  "portable_model": "fresh Linux production IO and dropped-write replay; frozen component-based input enables the separate portable replay lane",
+  "ignored_not_passed": [
+    "lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed (S2 GUI journal owner)",
+    "project::tests::mo2_old_reader_corpus (manual older MO2 reader programme)"
+  ],
+  "baseline_flips": [
+    "R1: unchanged history-loss.json passes Linux revised native publication/reopen; baseline mode retains its literal red",
+    "R2/R3: paired IO properties remain passing, original contradictory legacy-io.json is not a whole-fixture pass"
+  ],
+  "comment_baseline": "successful exact-byte controls and literal missing-result red; clean commit-4 seal is recorded separately before receipt work",
+  "decoder_open_certification": "NOT RUN; L4 remains open",
+  "storage_limits": "provisional; L6 measurement is commit 8",
+  "windows_core_compile_only": "PASS: cargo check -p kinewright-core --tests --target x86_64-pc-windows-msvc; no native execution"
+}

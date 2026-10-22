@@ -26,6 +26,8 @@ mod creator;
 mod delivery;
 mod editorial;
 mod effect;
+mod history;
+mod history_transition;
 mod incident;
 mod journal;
 mod media;
@@ -38,6 +40,10 @@ mod time;
 mod title;
 mod transcript_edit;
 mod transition;
+
+pub use history_transition::{
+    HistoryFloorBarrier, HistorySaveOwner, HistorySaveTag, HistoryTransition, PendingHistorySave,
+};
 
 pub use actor::{
     Command, CommandToken, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,
@@ -191,6 +197,10 @@ pub use effect::{
     managed_color_node_count, matte_capable, matte_parameter_names, matte_parameters,
     matte_window_parameter_names, matte_window_parameters, scale_to_frame_fit,
 };
+pub use history::{
+    GestureBoundary, HISTORY_COMMANDS, HistoryBatch, HistoryCursor, HistoryError, HistorySnapshot,
+    OperationIdentityEffect,
+};
 pub use incident::{
     ColorQcIncident, DeliveryColorIncident, DeliveryVerificationIncident, INVESTIGATOR_ALLOWLIST,
     INVESTIGATOR_EXPLANATION_CEILING_BYTES, INVESTIGATOR_MAX_PROPOSAL_OPERATIONS, Incident,
@@ -239,6 +249,9 @@ pub use model::{
     TRACK_MIX_PAN_MIN, Track, TrackId, TrackKind, TrackMix, Transition,
     chain_lookahead_milliseconds, clip_effective_fps, envelope_coalesce_key,
     project_format_version, track_automation_coalesce_key, validate_lut_asset,
+};
+pub use model::{
+    clip_support_fields, document_support_fields, history_support_fields, operation_support_fields,
 };
 pub use multicam::{
     ReframeFocusBounds, SpeakerAngleAssignment, SpeakerMulticamCut, SpeakerMulticamError,

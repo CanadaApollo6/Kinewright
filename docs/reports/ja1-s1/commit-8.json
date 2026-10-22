@@ -1,0 +1,232 @@
+{
+  "ordinal": 8,
+  "parent": "0b960f2a98e98bcbbde488e715d3fa978d0633ea",
+  "linux_gate": "c8-gate3",
+  "gates": {
+    "F": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 9.01s"
+    ],
+    "H": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 308 filtered out; finished in 0.00s"
+    ],
+    "I-app-refusal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 1.54s"
+    ],
+    "I-app": [
+      "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 786 filtered out; finished in 0.00s"
+    ],
+    "I-eval-refusal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.19s"
+    ],
+    "I-headless": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 0.11s"
+    ],
+    "I-lock": [
+      "test result: ok. 53 passed; 0 failed; 1 ignored; 0 measured; 84 filtered out; finished in 88.35s"
+    ],
+    "I-project": [
+      "test result: ok. 42 passed; 0 failed; 1 ignored; 0 measured; 759 filtered out; finished in 0.33s"
+    ],
+    "L": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 2.05s"
+    ],
+    "M": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 647 filtered out; finished in 0.00s"
+    ],
+    "P-generated": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 1.06s"
+    ],
+    "P-media": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1187 filtered out; finished in 2.94s"
+    ],
+    "P-presentation": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 797 filtered out; finished in 0.14s"
+    ],
+    "agent-no-default-check": [],
+    "agent-no-default": [],
+    "app-no-default-check": [],
+    "app-no-default": [],
+    "architecture-agent-normal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 546 filtered out; finished in 0.02s"
+    ],
+    "architecture-agent": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.02s"
+    ],
+    "architecture-app-normal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.02s"
+    ],
+    "architecture-app": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.02s"
+    ],
+    "branches": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.04s"
+    ],
+    "build": [],
+    "classification": [],
+    "clippy": [],
+    "copy": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.00s"
+    ],
+    "core-history": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    ],
+    "eval-bins": [],
+    "format-app": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 797 filtered out; finished in 0.37s"
+    ],
+    "format-core": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 311 filtered out; finished in 0.00s"
+    ],
+    "format-eval": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s"
+    ],
+    "harness-integration": [
+      "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 27.34s"
+    ],
+    "harness-lib": [
+      "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 145.80s"
+    ],
+    "heap-example-check": [],
+    "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 16.79s"
+    ],
+    "native_app_bridge_rejects_abnormal_exit_after_completed_report": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 34.48s"
+    ],
+    "native_app_bridge_retains_exercised_control_and_property_failures": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 33.85s"
+    ],
+    "project-no-default-check": [],
+    "project-no-default": [],
+    "receipts": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.19s"
+    ],
+    "revised": [
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 35.56s"
+    ],
+    "rustfmt": [],
+    "storage": [
+      "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.94s"
+    ],
+    "test-build": []
+  },
+  "gate_command_count": 44,
+  "test_summary_count": 31,
+  "selected_passes_including_overlapping_selections": 267,
+  "mutations_directory": "c8-retention-mutations-final2",
+  "mutations": {
+    "combined-metadata-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.14s"
+    ],
+    "combined-metadata-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.22s"
+    ],
+    "control-cap-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 3.98s"
+    ],
+    "control-cap-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.21s"
+    ],
+    "copy-overlap-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.38s"
+    ],
+    "copy-overlap-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.11s"
+    ],
+    "double-retirement-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.15s"
+    ],
+    "double-retirement-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.38s"
+    ],
+    "full-recovery-hash-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.93s"
+    ],
+    "full-recovery-hash-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.94s"
+    ],
+    "inventory-barrier-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 1.33s"
+    ],
+    "inventory-barrier-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 9.50s"
+    ],
+    "live-pin-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.15s"
+    ],
+    "live-pin-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.15s"
+    ],
+    "physical-recovery-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 3.67s"
+    ],
+    "physical-recovery-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 9.66s"
+    ],
+    "prospective-depth-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.35s"
+    ],
+    "prospective-depth-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.07s"
+    ],
+    "recursive-inventory-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 0.69s"
+    ],
+    "recursive-inventory-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 2.94s"
+    ],
+    "retained-floors-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 5.92s"
+    ],
+    "retained-floors-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 5.76s"
+    ],
+    "temporary-retirement-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 8.84s"
+    ],
+    "temporary-retirement-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 9.31s"
+    ]
+  },
+  "windows_native": "NOT RUN; lead CI lane",
+  "windows_full_cfg": "NOT RUN; native MSVC cross-build prerequisites unavailable",
+  "full_fast_and_slow_ci": "NOT RUN; no push authorized",
+  "decoder_open_certification": "NOT RUN; L4 integration dependency",
+  "windows_core_compile_only": "PASSED: cargo check -p kinewright-core --tests --target x86_64-pc-windows-msvc",
+  "kani_codegen_boundary": {
+    "command": [
+      "nice",
+      "-n",
+      "10",
+      "cargo",
+      "kani",
+      "--only-codegen",
+      "--lib",
+      "-p",
+      "kinewright-project"
+    ],
+    "status": 0,
+    "wall_seconds": 49.80951331499091,
+    "sampled_group_rss_peak_bytes": 1823285248,
+    "sample_period_seconds": 0.25,
+    "bound_stop": null,
+    "proofs_run": false
+  },
+  "kani_proofs": "NOT RUN; optional candidates, zero proof harnesses executed",
+  "combined_metadata_baseline": "c8-resume/combined-metadata-baseline.log.gz: actual one-byte over-admission; restored green and final targeted mutation pair retained",
+  "ignored_not_passed": [
+    "lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed (S2 GUI journal owner)",
+    "project::tests::mo2_old_reader_corpus (manual older MO2 reader programme)"
+  ],
+  "storage_measurements": {
+    "directory": "c8-measurements/final-five-pairs",
+    "source_hashes_match_final_implementation": true,
+    "binary_sha256": {
+      "ordinary": "c711cd179ec0e0593bf6ada2217166b8def6737d15888f602fa445efacfa1c31",
+      "profiled": "dead4d58a472739fd285b7bdee03b819e039ca2ca13b036b88ada53fe49141f2"
+    },
+    "pair_count": 5,
+    "unexpected_errors": 0,
+    "limits": "provisional; no increases; default capacities not physically filled"
+  }
+}

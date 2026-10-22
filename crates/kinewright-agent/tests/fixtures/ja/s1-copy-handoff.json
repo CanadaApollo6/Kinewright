@@ -1,0 +1,160 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s1-copy-handoff",
+  "gate_ids": [
+    "JA1.G3",
+    "JA1.G15"
+  ],
+  "lane": "linux-native",
+  "requirements": [],
+  "inputs": {
+    "lut": {
+      "relative_file": "s1-copy-lut.cube",
+      "sha256": "7d37bfe015b3ffc749b8d7b6c5d7487f4fc67770eaf3fd63bc2fee1fb5d519e5",
+      "byte_length": 80,
+      "kind": "independent-owned-lut-bytes"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": [
+      "A"
+    ]
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "A",
+      "action": "bundle_copy_probe",
+      "args": {
+        "input": "lut"
+      }
+    },
+    {
+      "id": 2,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "stored_bytes_equal",
+        "observation": 1,
+        "pointer": "/stored_bytes_equal",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 3,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "failure_preserves_undo",
+        "observation": 1,
+        "pointer": "/failure_preserves_undo",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 4,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "copy_before_root",
+        "observation": 1,
+        "pointer": "/copy_before_root",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "stored_bytes_equal"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "reader_survives_handoff",
+        "observation": 1,
+        "pointer": "/reader_survives_handoff",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "stored_bytes_equal"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "retired_exactly_once",
+        "observation": 1,
+        "pointer": "/retired_exactly_once",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "stored_bytes_equal"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "new_owner_binding",
+        "observation": 1,
+        "pointer": "/new_owner_binding",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "stored_bytes_equal"
+      }
+    },
+    {
+      "id": 8,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "history_reopened_exactly",
+        "observation": 1,
+        "pointer": "/history_reopened_exactly",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "stored_bytes_equal"
+      }
+    },
+    {
+      "id": 9,
+      "participant": "controller",
+      "action": "assert_observed",
+      "args": {
+        "id": "decoder_certification_unavailable",
+        "observation": 1,
+        "pointer": "/decoder_certification_unavailable",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 10,
+      "participant": "A",
+      "action": "participant_exit",
+      "args": {}
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  }
+}

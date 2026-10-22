@@ -1,0 +1,164 @@
+{
+  "ordinal": 7,
+  "parent": "437b24c1d1b7ddc337a045606a976b3479d71501",
+  "linux_gate": "c7-gate1",
+  "gates": {
+    "F": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 9.02s"
+    ],
+    "H": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 308 filtered out; finished in 0.00s"
+    ],
+    "L": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 127 filtered out; finished in 2.03s"
+    ],
+    "M": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 647 filtered out; finished in 0.00s"
+    ],
+    "P-generated": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 1.07s"
+    ],
+    "P-media": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1187 filtered out; finished in 3.09s"
+    ],
+    "P-presentation": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 797 filtered out; finished in 0.16s"
+    ],
+    "agent-no-default-check": [],
+    "agent-no-default": [],
+    "app-no-default-check": [],
+    "app-no-default": [],
+    "architecture-agent-normal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 546 filtered out; finished in 0.01s"
+    ],
+    "architecture-agent": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 649 filtered out; finished in 0.01s"
+    ],
+    "architecture-app-normal": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.02s"
+    ],
+    "architecture-app": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 801 filtered out; finished in 0.02s"
+    ],
+    "branches": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.03s"
+    ],
+    "build": [],
+    "classification": [],
+    "clippy": [],
+    "copy": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.09s"
+    ],
+    "core-history": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    ],
+    "eval-bins": [],
+    "format-app": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 797 filtered out; finished in 0.36s"
+    ],
+    "format-core": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 311 filtered out; finished in 0.00s"
+    ],
+    "format-eval": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 45 filtered out; finished in 0.00s"
+    ],
+    "harness-integration": [
+      "test result: ok. 8 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 26.89s"
+    ],
+    "harness-lib": [
+      "test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 141.10s"
+    ],
+    "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 16.48s"
+    ],
+    "native_app_bridge_rejects_abnormal_exit_after_completed_report": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 33.99s"
+    ],
+    "native_app_bridge_retains_exercised_control_and_property_failures": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 33.91s"
+    ],
+    "receipts": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.71s"
+    ],
+    "revised": [
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 33.60s"
+    ],
+    "rustfmt": [],
+    "storage": [
+      "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.16s"
+    ],
+    "test-build": []
+  },
+  "gate_command_count": 35,
+  "test_summary_count": 25,
+  "selected_passes_including_overlapping_selections": 137,
+  "mutations_directory": "c7-copy-mutations",
+  "mutations": {
+    "alias-parent-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.65s",
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.12s"
+    ],
+    "alias-parent-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.19s"
+    ],
+    "archived-inventory-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.43s"
+    ],
+    "archived-inventory-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.82s"
+    ],
+    "copy-before-claim-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.93s"
+    ],
+    "copy-before-claim-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.82s"
+    ],
+    "copy-rehash-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.63s",
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.19s"
+    ],
+    "copy-rehash-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.28s"
+    ],
+    "evidence-closure-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.34s"
+    ],
+    "evidence-closure-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.61s"
+    ],
+    "foreign-store-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.05s"
+    ],
+    "foreign-store-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.20s"
+    ],
+    "lut-closure-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.12s"
+    ],
+    "lut-closure-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.70s"
+    ],
+    "rollback-inventory-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.13s"
+    ],
+    "rollback-inventory-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 2.81s"
+    ],
+    "source-pin-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.57s"
+    ],
+    "source-pin-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.95s"
+    ],
+    "unknown-handoff-red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.04s"
+    ],
+    "unknown-handoff-restored": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 1.91s"
+    ]
+  },
+  "windows_native": "NOT RUN; lead CI lane",
+  "windows_full_cfg": "NOT RUN; native MSVC cross-build prerequisites unavailable",
+  "full_fast_and_slow_ci": "NOT RUN; no push authorized",
+  "decoder_open_certification": "NOT RUN; L4 integration dependency"
+}

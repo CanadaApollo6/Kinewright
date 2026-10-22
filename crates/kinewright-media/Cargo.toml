@@ -17,6 +17,7 @@ test-util = ["kinewright-core/test-util"]
 slow-tests = []
 
 [dependencies]
+kinewright-hash = { path = "../kinewright-hash" }
 ab_glyph.workspace = true
 cpal.workspace = true
 crossbeam-channel.workspace = true

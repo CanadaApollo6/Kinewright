@@ -73,6 +73,9 @@ impl ProjectSaveReport {
 /// somewhere usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectSaveError {
+    UnsupportedBundle {
+        notice: String,
+    },
     Serialize(String),
     Write(String),
     /// Overwrite-save refused: the session read a newer file (`IN2B` §4
@@ -106,6 +109,7 @@ pub enum ProjectSaveError {
 impl std::fmt::Display for ProjectSaveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::UnsupportedBundle { notice } => formatter.write_str(notice),
             Self::Serialize(reason) => {
                 write!(formatter, "could not serialize the project: {reason}")
             }
@@ -147,7 +151,8 @@ impl ProjectSaveError {
             // `NewerFormat`). A refusal must never open an incident — they
             // share the save-failure code only so the type stays total.
             // `SessionNotLoaded` is headless-only; the app never observes it.
-            Self::Serialize(_)
+            Self::UnsupportedBundle { .. }
+            | Self::Serialize(_)
             | Self::Write(_)
             | Self::SaveAsRequired { .. }
             | Self::PathOpenElsewhere { .. }
@@ -240,6 +245,8 @@ fn is_v1(version: &u32) -> bool {
 pub struct ProjectFile {
     #[serde(default = "v1", skip_serializing_if = "is_v1")]
     pub format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub studio: Option<crate::bundle::StudioRoot>,
     #[serde(flatten)]
     pub document: Document,
 }
@@ -247,10 +254,8 @@ pub struct ProjectFile {
 /// Whether the session that read `read_version` may save over its own file
 /// (`IN2B` §4 rule 3): at most the maximum version this build supports.
 ///
-/// Newer files open (rule 4) but never overwrite: the in-memory document has
-/// already lost the newer writer's fields at parse, and overwriting would
-/// launder that loss into the original. Save As stays enabled — the loss goes
-/// into a new file the person chose, with the card explaining.
+/// This numeric ceiling is combined with retained raw support admission at every save.
+/// Unsupported sources remain read-only, including generic Save As.
 #[must_use]
 pub fn can_overwrite_save(read_version: u32) -> bool {
     read_version <= PROJECT_FORMAT_VERSION
@@ -273,7 +278,7 @@ pub fn project_newer_format_observation(
         IncidentSubject::Project,
         format!(
             "this project was written by a newer Kinewright (format_version {read_version}); \
-             saving over it is disabled — use Save As"
+             Save and Save As are disabled; this source is read-only"
         ),
         revision,
     );
@@ -378,6 +383,17 @@ pub fn canonical_project_identity(path: &Path) -> Result<PathBuf, ProjectIdentit
 /// disjuncts here (N6 R-B), never a rival predicate.
 #[must_use]
 pub fn min_required_format_version(document: &Document) -> u32 {
+    required_format_version(document, None)
+}
+/// One required-version union for the retained bundle and legacy empty-bundle route.
+#[must_use]
+pub fn required_format_version(
+    document: &Document,
+    studio: Option<&crate::bundle::StudioRoot>,
+) -> u32 {
+    if studio.is_some() {
+        return 3;
+    }
     let uses_v2 = document
         .tracks
         .iter()
@@ -405,6 +421,7 @@ pub fn min_required_format_version(document: &Document) -> u32 {
 /// Returns `ProjectSaveError::Serialize` when the document does not serialise.
 pub fn serialize_project_document(document: &Document) -> Result<String, ProjectSaveError> {
     let file = ProjectFile {
+        studio: None,
         format_version: min_required_format_version(document),
         document: document.clone(),
     };
@@ -451,7 +468,10 @@ pub fn observe_refused_rename(path: &Path, contents: &[u8]) -> std::io::Result<(
     write_file_atomic_with_rename(
         path,
         contents,
-        Some(&|_, _| {
+        Some(&|temp, target| {
+            let attempted = fs::read(temp)?;
+            crate::io_observer::note_bytes("rename_refusal_hook", target, Some(&attempted));
+            crate::io_observer::note("rename_refusal_injected", target);
             Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "S0 injected rename refusal",
@@ -545,6 +565,11 @@ pub fn write_project_bytes(
     path: &Path,
     previous_store: Option<&LutStore>,
 ) -> Result<ProjectSaveReport, ProjectSaveError> {
+    let incoming = crate::bundle::BundleWriteAdmission::from_bytes(None, json.as_bytes().to_vec())
+        .map_err(|error| ProjectSaveError::UnsupportedBundle {
+            notice: error.to_string(),
+        })?;
+    incoming.authorize_legacy_write(path)?;
     write_file_atomic(path, json.as_bytes())
         .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
     #[cfg(any(test, feature = "test-util"))]
@@ -588,13 +613,137 @@ pub fn write_project_bytes(
 /// # Errors
 /// Returns the read, parse, or validation failure as a string.
 pub fn load_document(path: &Path) -> Result<(Document, u32, String), String> {
-    let bytes = fs::read(path).map_err(|error| error.to_string())?;
-    let file: ProjectFile = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-    file.document
-        .validate()
-        .map_err(|error| error.to_string())?;
-    let digest = digest_bytes(&bytes);
-    Ok((file.document, file.format_version, digest))
+    let admission = crate::bundle::BundleWriteAdmission::read(path).map_err(|e| e.to_string())?;
+    let document = admission.legacy_document().map_err(|e| e.to_string())?;
+    document.validate().map_err(|e| e.to_string())?;
+    Ok((
+        document,
+        admission.read_version(),
+        digest_bytes(admission.raw_bytes()),
+    ))
+}
+
+/// Run the sealed actual max-2 executable, with its literal observer and frozen S0 corpus.
+/// # Errors
+/// Missing or mismatched source/binary prerequisites, abnormal exit, empty tests or failed controls refuse.
+#[cfg(any(test, feature = "test-util"))]
+#[allow(
+    clippy::too_many_lines,
+    reason = "verify source and both sealed predecessor executables before inspecting their reports"
+)]
+pub fn predecessor_format_controls(output: &Path) -> Result<(), String> {
+    let fallback = kinewright_media::test_support::workspace_target_dir()
+        .join("ja-s1-predecessor/sealed")
+        .join(if cfg!(windows) {
+            "kinewright-ja-baseline.exe"
+        } else {
+            "kinewright-ja-baseline"
+        });
+    let binary = std::env::var_os("JA_S1_PREDECESSOR_BINARY").map_or(fallback, PathBuf::from);
+    let binary = binary.canonicalize().map_err(|e|format!("NOT RUN: sealed predecessor prerequisite: {e}; run scripts/ja-s1-predecessor-controls.sh"))?;
+    let identity: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            binary
+                .parent()
+                .ok_or("predecessor has no parent")?
+                .join("identity.json"),
+        )
+        .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let base = "076a96c922b2f05984df4bb839ad7cf0900e6183";
+    if identity["source_head"] != base
+        || identity["binary_sha256"]
+            != kinewright_media::sha256_file(&binary).map_err(|e| e.to_string())?
+        || PathBuf::from(
+            identity["binary"]
+                .as_str()
+                .ok_or("missing predecessor path")?,
+        )
+        .canonicalize()
+        .map_err(|e| e.to_string())?
+            != binary
+    {
+        return Err("NOT RUN: predecessor source/artifact identity differs".into());
+    }
+    let source_root = PathBuf::from(
+        identity["source_root"]
+            .as_str()
+            .ok_or("NOT RUN: predecessor source root missing")?,
+    )
+    .canonicalize()
+    .map_err(|e| e.to_string())?;
+    let source_head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&source_root)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !source_head.status.success() || String::from_utf8_lossy(&source_head.stdout).trim() != base
+    {
+        return Err("NOT RUN: predecessor checkout identity differs".into());
+    }
+    fs::create_dir(output).map_err(|e| e.to_string())?;
+    let control = PathBuf::from(
+        identity["max2_binary"]
+            .as_str()
+            .ok_or("NOT RUN: missing literal max-2 observer")?,
+    );
+    if kinewright_media::sha256_file(&control).map_err(|e| e.to_string())?
+        != identity["max2_binary_sha256"]
+    {
+        return Err("NOT RUN: literal observer hash differs".into());
+    }
+    let result = std::process::Command::new(&control)
+        .args(["--exact", "pinned_max2_format_controls"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !result.status.success()
+        || !String::from_utf8_lossy(&result.stdout).contains("1 passed; 0 failed; 0 ignored")
+    {
+        return Err(format!(
+            "literal max-2 observer failed: {} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kinewright-agent/tests/fixtures/ja/format-corpus.json");
+    let result = std::process::Command::new(&binary)
+        .current_dir(&source_root)
+        .args(["--mode", "baseline", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(output.join("format-corpus"))
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !result.status.success() {
+        return Err(format!(
+            "predecessor format corpus failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    let run: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("format-corpus/run.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if run["source_head"] != base
+        || run["binary_sha256"] != identity["binary_sha256"]
+        || run["fixture_sha256"]
+            != kinewright_media::sha256_file(&fixture).map_err(|e| e.to_string())?
+    {
+        return Err("predecessor run identity differs".into());
+    }
+    let summary: serde_json::Value = serde_json::from_slice(
+        &fs::read(output.join("format-corpus/summary.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if !summary["assertions"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty() && a.iter().all(|a| a["passed"] == true))
+    {
+        return Err("predecessor literal format controls did not pass".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1055,118 +1204,57 @@ mod tests {
         }
     }
 
-    /// MO2 R7 old-reader behaviour, simulated with a v3 file against this
-    /// reader: unknown content fails at parse; an unknown transition parses
-    /// then fails validation; an otherwise parseable newer file opens
-    /// advisory with its version, and overwrite-save is refused.
+    /// Successor support admission; literal max-2 reader behavior is exercised by the pinned executable.
     #[test]
     fn mo2_old_readers_distinguish_parse_validation_and_advisory() {
-        use kinewright_core::{OpError, Operation, TimeCode, TrackId, Transition};
-        let mut doc = mo2_v1_document();
-        let first = doc.tracks[0].clips[0].id;
-        for op in [
-            Operation::AddAdjustmentClip {
-                track: TrackId(1),
-                timeline_start: TimeCode(240),
-                duration: TimeCode(30),
-                effects: Vec::new(),
-            },
-            Operation::AddTransition {
-                clip: first,
-                transition: Transition {
-                    name: "push_left".to_owned(),
-                    duration: TimeCode(10),
-                },
-            },
-        ] {
-            op.apply(&mut doc).expect("the MO2 feature applies");
-        }
-        let v2 = serialize_project_document(&doc).expect("v2 serialises");
-        let newer = v2.replace("\"format_version\": 2", "\"format_version\": 3");
-        let dir = TempDirectory::new("mo2-old-readers");
-        let load = |name: &str, bytes: &str| {
-            let path = dir.path(name);
-            fs::write(&path, bytes).expect("the file writes");
+        let directory = TempDirectory::new("ja-s1-supported-legacy");
+        let doc = mo2_v1_document();
+        let source = serialize_project_document(&doc).unwrap();
+        let path = directory.path("legacy.kinewright");
+        fs::write(&path, &source).unwrap();
+        assert_eq!(load_document(&path).unwrap().0, doc);
+        let mut raw = serde_json::to_value(&doc).unwrap();
+        raw["tracks"][0]["clips"][0]["content"] = serde_json::json!("hologram");
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert!(
             load_document(&path)
-        };
-
-        let error = load(
-            "content.kinewright",
-            &newer.replace("\"adjustment\"", "\"hologram\""),
-        )
-        .expect_err("unknown content fails");
-        assert!(error.contains("unknown variant `hologram`"), "{error}");
-
-        let error = load(
-            "transition.kinewright",
-            &newer.replace("push_left", "iris_open"),
-        )
-        .expect_err("an unknown transition fails");
-        assert_eq!(
-            error,
-            OpError::UnknownTransition("iris_open".to_owned()).to_string()
+                .unwrap_err()
+                .contains("unsupported variant")
         );
-
-        let (opened, version, _) =
-            load("advisory.kinewright", &newer).expect("a parseable newer file opens");
-        assert!(opened == doc, "the newer file keeps its content");
-        assert_eq!(version, 3, "the newer file reports its version");
-        assert!(!can_overwrite_save(version), "overwrite-save refuses");
-        assert!(can_overwrite_save(2) && can_overwrite_save(1));
+        let mut raw = serde_json::to_value(&doc).unwrap();
+        raw["tracks"][0]["clips"][0]["transition_in"] =
+            serde_json::json!({"name":"iris_open","duration":10});
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert!(load_document(&path).unwrap_err().contains("iris_open"));
+        let mut raw = serde_json::to_value(&doc).unwrap();
+        raw["format_version"] = serde_json::json!(PROJECT_FORMAT_VERSION + 1);
+        fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
+        assert!(
+            load_document(&path)
+                .unwrap_err()
+                .contains("exceeds supported")
+        );
+        assert!(can_overwrite_save(3));
+        assert!(!can_overwrite_save(4));
     }
 
-    /// MO2 R7 blend-only old reader (review 2 S5, lead ruling N10), simulated
-    /// against this reader: the real f241aa5 reader opens a blend-only v2
-    /// file, silently drops the `blend_mode` field it does not know, and
-    /// refuses overwrite only because the retained file version is newer.
-    /// Here a v3 file carries a clip field this build does not know: it
-    /// opens advisory with version 3, the field is gone from the document
-    /// and from any re-save (which would even stamp a lower version), and
-    /// overwrite-save is refused, so the loss never launders into the file.
-    /// The real two-build check is `scripts/mo2-old-reader-check.sh`.
+    /// Unknown blend fields now refuse before projection. Historical loss is a pinned predecessor witness.
     #[test]
     fn mo2_old_reader_drops_an_unknown_blend_and_refuses_overwrite() {
-        let (_, blended, carrier) = mo2_feature_documents()
+        let (_, blended, _) = mo2_feature_documents()
             .into_iter()
             .find(|(name, ..)| *name == "blend")
-            .expect("the blend feature");
-        let v2 = serialize_project_document(&blended).expect("v2 serialises");
-        assert!(v2.starts_with("{\n  \"format_version\": 2,"));
-        assert_eq!(v2.matches("\"blend_mode\": \"screen\"").count(), 1);
-        let newer = v2
-            .replace("\"format_version\": 2", "\"format_version\": 3")
+            .unwrap();
+        let bytes = serialize_project_document(&blended)
+            .unwrap()
             .replace("\"blend_mode\": \"screen\"", "\"future_blend\": \"screen\"");
-        let dir = TempDirectory::new("mo2-old-reader-blend");
-        let path = dir.path("blend.kinewright");
-        fs::write(&path, &newer).expect("the file writes");
-
-        let (opened, version, _) = load_document(&path).expect("a parseable newer file opens");
-        assert_eq!(version, 3, "the retained version is the file's");
-        let mut dropped = blended.clone();
-        dropped
-            .tracks
-            .iter_mut()
-            .flat_map(|track| &mut track.clips)
-            .find(|clip| clip.id == carrier)
-            .expect("carrier")
-            .blend_mode = kinewright_core::BlendMode::Normal;
-        assert_eq!(opened, dropped, "the unknown blend is dropped at parse");
-        let resaved = serialize_project_document(&opened).expect("re-serialises");
-        assert!(!resaved.contains("future_blend") && !resaved.contains("blend_mode"));
-        assert_eq!(
-            min_required_format_version(&opened),
-            1,
-            "what survives the drop would stamp an older version"
-        );
-        assert!(
-            !can_overwrite_save(version),
-            "the retained newer version refuses overwrite"
-        );
-        assert_eq!(
-            fs::read_to_string(&path).expect("reads"),
-            newer,
-            "opening leaves the source bytes untouched"
-        );
+        let directory = TempDirectory::new("ja-s1-unknown-blend");
+        let path = directory.path("edit.kinewright");
+        fs::write(&path, &bytes).unwrap();
+        assert!(load_document(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes.as_bytes());
+        predecessor_format_controls(&directory.path("predecessor"))
+            .expect("actual max-2 loss/refusal controls");
     }
 
     /// The head half of `scripts/mo2-old-reader-check.sh` (review 2 S5, lead
