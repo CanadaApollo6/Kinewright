@@ -517,7 +517,7 @@ class ManifestLint(unittest.TestCase):
     def test_manifest_scope_must_match_the_source_marker_in_both_directions(self):
         for scope, condition in (("any", 'not(feature = "slow-tests")'),
                                  ("windows", 'all(windows, not(feature = "slow-tests"))'),
-                                 ("linux", 'all(linux, not(feature = "slow-tests"))')):
+                                 ("linux", 'all(target_os = "linux", not(feature = "slow-tests"))')):
             marker = f'#[cfg_attr({condition}, ignore = "{st.REASON}")]'
             for listed_scope in ("any", "windows", "linux"):
                 with self.subTest(marker_scope=scope, manifest_scope=listed_scope):

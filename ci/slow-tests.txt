@@ -16,7 +16,7 @@
 # Each `any` test carries, right after its `#[test]`:
 #   #[cfg_attr(not(feature = "slow-tests"), ignore = "slow tier: cargo test --features slow-tests")]
 # An OS-scoped marker instead uses `all(windows, not(feature = "slow-tests"))`
-# (or linux) as its cfg_attr condition. Both slow tiers run the whole manifest.
+# (or target_os = "linux") as its cfg_attr condition. Both slow tiers run the whole manifest.
 # `python3 scripts/slow_tests.py lint` fails CI if this file and those markers
 # disagree in either direction; the fast job also checks that the tests it
 # ignored with that reason are exactly those for its OS and that every other skipped test is in

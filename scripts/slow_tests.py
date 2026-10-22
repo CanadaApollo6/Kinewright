@@ -29,7 +29,7 @@ which makes a plain `cargo test` skip it. Enabling the crate's `slow-tests`
 feature makes it an ordinary test again, so `cargo test -- --ignored` would
 run only the hardware (NVIDIA) lanes; the slow tier therefore selects its
 tests by exact name from the manifest instead. An OS-scoped test uses
-`all(windows, not(feature = "slow-tests"))` (or linux) as its cfg_attr condition.
+`all(windows, not(feature = "slow-tests"))` (or target_os = "linux") as its cfg_attr condition.
 On the other OS, the fast tier must observe it passing. Both slow tiers run
 the whole manifest, including OS-scoped entries.
 
@@ -54,7 +54,7 @@ REASON = "slow tier: cargo test --features slow-tests"
 # The marker, tolerant of rustfmt wrapping it over several lines.
 MARKER = re.compile(
     r'#\[cfg_attr\(\s*(?:not\(feature = "slow-tests"\)|'
-    r'all\(\s*(?P<os>linux|windows),\s*not\(feature = "slow-tests"\)\s*\)),\s*'
+    r'all\(\s*(?:target_os = "(?P<linux>linux)"|(?P<windows>windows)),\s*not\(feature = "slow-tests"\)\s*\)),\s*'
     r'ignore = "' + re.escape(REASON) + r'"\s*,?\s*\)\]'
 )
 ATTRIBUTE_OR_COMMENT = re.compile(r"\s*(?:#\[[^\]]*\]|//[^\n]*)")
@@ -269,7 +269,8 @@ def marked_tests() -> set[tuple[str, str, str]]:
             rel = path.relative_to(ROOT).as_posix()
             if not named:
                 sys.exit(f"{rel}: a slow-tier marker is not followed by a test function")
-            found.add((rel, named.group(1), match.group("os") or "any"))
+            scope = match.group("linux") or match.group("windows") or "any"
+            found.add((rel, named.group(1), scope))
     marker_count = sum(
         len(MARKER.findall(p.read_text(encoding="utf-8")))
         for p in (ROOT / "crates").rglob("*.rs")
