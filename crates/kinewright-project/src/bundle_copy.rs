@@ -8,7 +8,7 @@ use crate::{
     storage_budget::StorageLimits,
     store::{ProjectStore, SourceCopyHold},
 };
-use kinewright_core::HistorySnapshot;
+use kinewright_core::{Core, HistorySnapshot};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -40,6 +40,7 @@ pub struct BundleCopy {
     before: DestinationBefore,
     status: CopyStatus,
     input_rebindings: BTreeMap<ObjectRef, ObjectRef>,
+    handoff: Option<(Core, HistorySnapshot)>,
 }
 impl BundleCopy {
     #[must_use]
@@ -100,6 +101,10 @@ impl BundleCopy {
         let report = destination
             .reconcile()?
             .ok_or_else(|| BundleError::Corrupt("copy did not publish a Studio root".into()))?;
+        if let Some((core, before)) = &self.handoff {
+            let id = destination.manual_branch_id.clone();
+            destination.install_published(core, before.clone(), &id)?;
+        }
         self.source.reconciled();
         self.status = CopyStatus::Committed(report.clone());
         Ok(Some(report))
@@ -239,6 +244,7 @@ fn result(
     mut source: SourceCopyHold,
     rebindings: BTreeMap<ObjectRef, ObjectRef>,
     publication: Result<BundleSaveReport, BundleError>,
+    handoff: Option<(Core, HistorySnapshot)>,
 ) -> Result<BundleCopy, BundleError> {
     let status = match publication {
         Ok(report) => CopyStatus::Committed(report),
@@ -269,6 +275,7 @@ fn result(
         before,
         status,
         input_rebindings: rebindings,
+        handoff,
     })
 }
 fn frozen_size(store: &ProjectStore, roots: &[ObjectRef], extra: u64) -> Result<u64, BundleError> {
@@ -292,6 +299,17 @@ impl ProjectBundle {
     ) -> Result<SaveAsOutcome, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
+        }
+        // A frozen copy preserves every acknowledged checkpoint exactly. A lower
+        // destination allowance cannot silently choose a different live undo floor.
+        for id in self.branches.keys() {
+            let history = self.branch_history(id)?;
+            let bounded = crate::bundle_commit::bound_history(&history, &limits)?;
+            if bounded != *history {
+                return Err(BundleError::Capacity(
+                    "copy history exceeds destination allowance",
+                ));
+            }
         }
         self.store.with_namespace(|n| n.verify())?;
         {
@@ -404,9 +422,9 @@ impl ProjectBundle {
             let inputs = target.branches[&target.manual_branch_id]
                 .input_manifest_ref
                 .clone();
-            target.save(&history, &inputs)
+            crate::bundle_commit::BundleCommit::publish(&mut target, &history, &inputs)
         })();
-        result(target, before, prepared, source, map, publication)
+        result(target, before, prepared, source, map, publication, None)
             .map(|copy| SaveAsOutcome::Copied(Box::new(copy)))
     }
 }
@@ -448,20 +466,22 @@ impl SessionStore {
     pub fn first_save(
         &mut self,
         destination: &Path,
-        history: &HistorySnapshot,
+        core: &Core,
         inputs: &ObjectRef,
     ) -> Result<BundleCopy, BundleError> {
-        self.first_save_with_limits(destination, history, inputs, StorageLimits::default())
+        self.first_save_with_limits(destination, core, inputs, StorageLimits::default())
     }
     pub fn first_save_with_limits(
         &mut self,
         path: &Path,
-        history: &HistorySnapshot,
+        core: &Core,
         inputs: &ObjectRef,
         limits: StorageLimits,
     ) -> Result<BundleCopy, BundleError> {
-        let bounded = crate::bundle_commit::bound_history(history, &limits)?;
-        let history = &bounded;
+        let frozen = core
+            .export_history()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let history = &frozen;
         history
             .encoded_bytes()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -496,8 +516,20 @@ impl SessionStore {
             for reference in target.store.closure(&roots)? {
                 target.store.verify(&reference)?;
             }
-            target.save(history, &rebound)
+            let report =
+                crate::bundle_commit::BundleCommit::publish(&mut target, history, &rebound)?;
+            let id = target.manual_branch_id.clone();
+            target.install_published(core, frozen.clone(), &id)?;
+            Ok(report)
         })();
-        result(target, before, prepared, source, map, publication)
+        result(
+            target,
+            before,
+            prepared,
+            source,
+            map,
+            publication,
+            Some((core.clone(), frozen)),
+        )
     }
 }

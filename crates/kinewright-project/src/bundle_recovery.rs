@@ -19,6 +19,122 @@ use std::{
 pub(crate) fn inventory_path() -> Result<PortablePath, BundleError> {
     PortablePath::new(Path::new("studio/recovery/inventory"))
 }
+/// Extend the selected graph with the durable B3 inventory's content closure.
+/// Archived automatic inventories are excluded by the same walk used on ordinary recovery.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one bounded inventory graph adoption before any residual deletion"
+)]
+pub(crate) fn retain_inventory_graph(
+    namespace: &ProjectNamespace,
+    retained: &mut StoreManifest,
+    verified: &mut BTreeSet<String>,
+    usage: &Arc<Mutex<StorageUsage>>,
+) -> Result<(), BundleError> {
+    let Some(bytes) = namespace.read(&inventory_path()?, StorageLimits::default().control_bytes)?
+    else {
+        return Ok(());
+    };
+    let inventory: StorageReservation<crate::store::RecoveryInventory> = decode(
+        &bytes,
+        usage,
+        RecordKind::RootCheckpoint,
+        &mut BTreeSet::new(),
+    )?;
+    inventory.validate()?;
+    for reference in inventory.references() {
+        if verified.contains(&reference.sha256) {
+            continue;
+        }
+        let (bytes, _charge) = read_bytes(namespace, &reference, usage)?;
+        let admission = BundleWriteAdmission::from_bytes(None, bytes)?;
+        admission.require_supported()?;
+        let Some(root) = admission.data.file.as_ref().and_then(|f| f.studio.as_ref()) else {
+            // A pre-migration backup has no child graph.
+            retained
+                .dependencies
+                .insert(reference.sha256.clone(), vec![]);
+            retained.objects.push(reference.clone());
+            verified.insert(reference.sha256);
+            continue;
+        };
+        let manifest = read_record::<StoreManifest>(
+            namespace,
+            &root.store_manifest_ref,
+            usage,
+            &mut BTreeSet::new(),
+        )?;
+        let mut objects: BTreeMap<_, _> = manifest
+            .objects
+            .iter()
+            .map(|r| (r.sha256.clone(), r.clone()))
+            .collect();
+        objects.insert(
+            root.store_manifest_ref.sha256.clone(),
+            root.store_manifest_ref.clone(),
+        );
+        let mut found = BTreeSet::new();
+        for child in root.references() {
+            walk(
+                &child,
+                &objects,
+                &manifest,
+                &mut BTreeSet::new(),
+                &mut BTreeSet::new(),
+                &mut found,
+                false,
+                0,
+            )?;
+        }
+        if retained
+            .objects
+            .len()
+            .checked_add(found.iter().filter(|h| !verified.contains(*h)).count() + 1)
+            .is_none_or(|n| n as u64 > StorageLimits::default().objects)
+        {
+            return Err(BundleError::Capacity("recovery inventory object overlap"));
+        }
+        for hash in found {
+            let object = &objects[&hash];
+            if verified.contains(&hash) {
+                continue;
+            }
+            ProjectStore::verify_in_namespace(namespace, object, usage, &StorageLimits::default())?;
+            let dependencies = if *object == root.store_manifest_ref {
+                manifest.durable_pins.clone()
+            } else {
+                manifest
+                    .dependencies
+                    .get(&hash)
+                    .cloned()
+                    .ok_or_else(|| BundleError::Corrupt("inventory content edge row".into()))?
+            };
+            retained.dependencies.insert(hash.clone(), dependencies);
+            let inventory_edges = if *object == root.store_manifest_ref {
+                manifest.recovery.references()
+            } else {
+                manifest
+                    .inventory_dependencies
+                    .get(&hash)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+            if !inventory_edges.is_empty() {
+                retained
+                    .inventory_dependencies
+                    .insert(hash.clone(), inventory_edges);
+            }
+            retained.objects.push(object.clone());
+            verified.insert(hash);
+        }
+        retained
+            .dependencies
+            .insert(reference.sha256.clone(), root.references());
+        retained.objects.push(reference.clone());
+        verified.insert(reference.sha256);
+    }
+    Ok(())
+}
 pub(crate) fn supported_apis() -> BTreeMap<String, u32> {
     [("bundle", 1), ("core-history", 1), ("owned-inputs", 1)]
         .into_iter()

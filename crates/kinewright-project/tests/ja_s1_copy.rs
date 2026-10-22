@@ -165,9 +165,7 @@ fn named(path: &Path) -> (Core, ProjectBundle, ObjectRef, BTreeMap<String, Vec<u
     };
     let inputs = bundle.admit_inputs(&manifest).unwrap();
     let reference = inputs.reference.clone();
-    bundle
-        .save(&core.export_history().unwrap(), &reference)
-        .unwrap();
+    bundle.save(&core, &reference).unwrap();
     (core, bundle, reference, exact)
 }
 fn copied(outcome: SaveAsOutcome) -> BundleCopy {
@@ -187,7 +185,7 @@ fn byte_session(
     SessionStore,
     kinewright_project::store::SealedObject,
     OwnedInputRef,
-    HistorySnapshot,
+    Core,
 ) {
     let mut session = SessionStore::create(parent, StorageLimits::default()).unwrap();
     let request = InputRequest {
@@ -207,10 +205,7 @@ fn byte_session(
         .store_mut()
         .admit_input(&request, &mut Cursor::new(bytes))
         .unwrap();
-    let history = Core::spawn(Document::default())
-        .unwrap()
-        .export_history()
-        .unwrap();
+    let history = Core::spawn(Document::default()).unwrap();
     (session, sealed, reference, history)
 }
 fn reopen(path: &Path) -> (Core, ProjectBundle) {
@@ -394,7 +389,7 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
         }),
     );
     let candidate_history = candidate_core.export_history().unwrap();
-    bundle.save_branch(&candidate, &candidate_history).unwrap();
+    bundle.save_branch(&candidate, &candidate_core).unwrap();
     let base = SpecialistBaseRecord {
         target_branch: manual,
         base_head: base_checkpoint.head_id,
@@ -533,7 +528,11 @@ fn save_as_contention_preserves_source_and_destination_graphs() {
     let a = temp.path("a.kinewright");
     let b = temp.path("b.kinewright");
     let (_, mut first, _, exact) = named(&a);
-    let (_, second, _, _) = named(&b);
+    let (second_core, mut second, second_inputs, _) = named(&b);
+    // A failed copy must also preserve the prior conservative recovery inventory.
+    for _ in 0..4 {
+        second.save(&second_core, &second_inputs).unwrap();
+    }
     let before_a = graph(&a);
     let before_b = graph(&b);
     let start = Instant::now();
@@ -730,7 +729,7 @@ fn first_save_failure_undo_live_reader() {
     let usage = session.store().usage_handle();
     let physical = usage().unwrap().physical_bytes;
     let failed = io_observer::fail_once("copy_object", || {
-        session.first_save(&path, &history, &input_ref)
+        session.first_save(&path, &core, &input_ref)
     });
     assert!(matches!(failed, Err(BundleError::Io(_))));
     assert!(!path.exists());
@@ -743,7 +742,7 @@ fn first_save_failure_undo_live_reader() {
     assert_eq!(continued.cursor, history.cursor);
     let history = continued;
     reader.seek(SeekFrom::Start(0)).unwrap();
-    let copy = session.first_save(&path, &history, &input_ref).unwrap();
+    let copy = session.first_save(&path, &core, &input_ref).unwrap();
     assert!(usage().unwrap().reserved_copy_bytes > 0);
     let rebound = copy.rebound_input(&source_ref).unwrap();
     assert_ne!(rebound.manifest_ref, source_ref.manifest_ref);

@@ -593,9 +593,7 @@ mod durable_bundle {
         let mut bundle =
             ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
         let inputs = bundle.empty_inputs().unwrap();
-        bundle
-            .save(&core.export_history().unwrap(), &inputs.reference)
-            .unwrap();
+        bundle.save(&core, &inputs.reference).unwrap();
         drop(inputs);
         (core, bundle)
     }
@@ -1071,11 +1069,7 @@ mod durable_bundle {
                 locked: iteration % 2 == 0,
             }))
             .unwrap();
-            let (_, trace) = io_observer::observe(|| {
-                bundle
-                    .save(&core.export_history().unwrap(), &inputs)
-                    .unwrap()
-            });
+            let (_, trace) = io_observer::observe(|| bundle.save(&core, &inputs).unwrap());
             assert!(!trace.overflowed);
             events.extend(trace.events);
             roots.insert(kinewright_media::sha256_file(&path).unwrap());
@@ -1249,9 +1243,7 @@ mod durable_bundle {
                     entries,
                 })
                 .unwrap();
-            let report = bundle
-                .save(&core.export_history().unwrap(), &inputs.reference)
-                .unwrap();
+            let report = bundle.save(&core, &inputs.reference).unwrap();
             assert_eq!(
                 fs::read(&path).unwrap(),
                 *bundle.serialized_root().unwrap(),
@@ -1501,9 +1493,7 @@ mod durable_bundle {
             }))
             .unwrap();
             let inputs = bundle.empty_inputs().unwrap();
-            bundle
-                .save(&core.export_history().unwrap(), &inputs.reference)
-                .unwrap();
+            bundle.save(&core, &inputs.reference).unwrap();
             panic!("recorded publication hook was never reached");
         }
         for point in [
@@ -1631,9 +1621,7 @@ mod durable_bundle {
         let id = bundle.project_id().clone();
         let branch = bundle.manual_branch_id().clone();
         let inputs = bundle.empty_inputs().unwrap();
-        let report = bundle
-            .save(&core.export_history().unwrap(), &inputs.reference)
-            .unwrap();
+        let report = bundle.save(&core, &inputs.reference).unwrap();
         assert_eq!(report.generation, 1);
         drop(inputs);
         drop(bundle);
@@ -1654,9 +1642,7 @@ mod durable_bundle {
         let backup_path = temp.path(&format!("edit.kinewright-assets/studio/objects/{backup}"));
         assert_eq!(fs::read(&backup_path).unwrap(), bytes);
         let inputs = bundle.empty_inputs().unwrap();
-        bundle
-            .save(&core.export_history().unwrap(), &inputs.reference)
-            .unwrap();
+        bundle.save(&core, &inputs.reference).unwrap();
         drop(inputs);
         drop(bundle);
         assert_eq!(fs::read(&backup_path).unwrap(), bytes);
@@ -1720,7 +1706,7 @@ fn windows_portable_fixtures_refuse_durability_without_mutation() {
         let sidecar = kinewright_project::sidecar_path_for_project(Some(&path)).unwrap();
         fs::write(&sidecar, b"unchanged sidecar bytes").unwrap();
         let (result, trace) = io_observer::observe(|| {
-            save_headless_bundle(&path, BundleWriteAdmission::new_document(), &frozen, None)
+            save_headless_bundle(&path, BundleWriteAdmission::new_document(), &core, None)
         });
         assert!(matches!(result, Err(BundleError::DurabilityUnsupported)));
         assert!(trace.events.is_empty());
@@ -1741,3 +1727,6 @@ mod final_head;
 #[cfg(target_os = "linux")]
 #[path = "support/ja_s1_retention.rs"]
 mod retention;
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s1_fix_r2.rs"]
+mod round_two;

@@ -50,9 +50,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let reference = inputs.reference.clone();
-    bundle
-        .save(&core.export_history().unwrap(), &reference)
-        .unwrap();
+    bundle.save(&core, &reference).unwrap();
     (core, bundle, reference)
 }
 fn reopen(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
@@ -204,9 +202,7 @@ fn equal_bytes_new_head_and_equal_counter_other_head_conflict() {
     let legacy = TimelineBranch::new("counter-only", old_counter, same_document.clone()).unwrap();
     apply(&legacy.core(), Command::Do(lock(true)));
     apply(&core, Command::Do(lock(false)));
-    bundle
-        .save(&core.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&core, &inputs).unwrap();
     let current = bundle.checkpoint(bundle.manual_branch_id()).unwrap();
     assert_eq!(current.document_hash, original.document_hash);
     assert_ne!(current.head_id, original.head_id);
@@ -261,9 +257,7 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
         color: SolidColor::default(),
     };
     apply(&core, Command::Do(add.clone()));
-    bundle
-        .save(&core.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&core, &inputs).unwrap();
     let manual = bundle.manual_branch_id().clone();
     let origin = bundle.branch_lineage(&manual).unwrap().current[&ClipId(1)].clone();
     let a = bundle.fork_branch(&manual).unwrap();
@@ -282,9 +276,7 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
         &first,
         Command::DoBatch(vec![Operation::DeleteClip { clip: ClipId(1) }, add]),
     );
-    bundle
-        .save_branch(&a, &first.export_history().unwrap())
-        .unwrap();
+    bundle.save_branch(&a, &first).unwrap();
     let reused = bundle.branch_lineage(&a).unwrap().current[&ClipId(1)].clone();
     assert_ne!(reused, origin);
     let split = Command::Do(Operation::SplitClip {
@@ -292,22 +284,16 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
         at: TimeCode(15),
     });
     apply(&first, split.clone());
-    bundle
-        .save_branch(&a, &first.export_history().unwrap())
-        .unwrap();
+    bundle.save_branch(&a, &first).unwrap();
     let child = bundle.branch_lineage(&a).unwrap().current[&ClipId(2)].clone();
     apply(&second, split);
-    bundle
-        .save_branch(&b, &second.export_history().unwrap())
-        .unwrap();
+    bundle.save_branch(&b, &second).unwrap();
     assert_ne!(
         child,
         bundle.branch_lineage(&b).unwrap().current[&ClipId(2)]
     );
     apply(&first, Command::Undo);
-    bundle
-        .save_branch(&a, &first.export_history().unwrap())
-        .unwrap();
+    bundle.save_branch(&a, &first).unwrap();
     let undone = bundle.branch_lineage(&a).unwrap();
     assert_eq!(undone.current[&ClipId(1)], reused);
     assert!(undone.split_ancestry.is_empty());
@@ -322,9 +308,7 @@ fn restored_lineage_tracks_siblings_reuse_and_undone_splits() {
     let before = bundle.branch_lineage(&a).unwrap().current.clone();
     assert_eq!(before[&ClipId(1)], reused);
     apply(&first, Command::Redo);
-    bundle
-        .save_branch(&a, &first.export_history().unwrap())
-        .unwrap();
+    bundle.save_branch(&a, &first).unwrap();
     assert_eq!(
         bundle.branch_lineage(&a).unwrap().current[&ClipId(2)],
         child
@@ -508,4 +492,87 @@ fn exercise_floor_and_close(path: &Path) {
         2
     );
     assert_eq!(core.export_history().unwrap().cursor.undo.len(), 1);
+}
+
+#[test]
+fn floored_specialist_reopens_original_full_delta_and_merges_once() {
+    let temp = TempDirectory::new_in(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "r2-specialist-floor",
+    );
+    let path = temp.path("edit.kinewright");
+    let document = Document {
+        tracks: (1..=200)
+            .map(|id| Track {
+                id: TrackId(id),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            })
+            .collect(),
+        ..Document::default()
+    };
+    let live = Core::spawn(document).unwrap();
+    let mut owner = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+    let inputs = owner.empty_inputs().unwrap().reference.clone();
+    owner.save(&live, &inputs).unwrap();
+    owner
+        .restrict_limits_probe(kinewright_project::storage_budget::StorageLimits {
+            branch_history_bytes: 1 << 20,
+            ..Default::default()
+        })
+        .unwrap();
+    let mut specialist =
+        DurableTimelineBranch::fork(&mut owner, &live, "floor specialist").unwrap();
+    for i in 0..40 {
+        apply(&specialist.core(), Command::Do(lock(i % 2 == 0)));
+    }
+    let proposal = specialist.core().export_history().unwrap().document;
+    let reference = specialist.persist(&mut owner).unwrap();
+    let branch = specialist.branch_id().clone();
+    let history = specialist.core().export_history().unwrap();
+    assert!(
+        history.floor_offset > 0,
+        "specialist did not cross the history bound"
+    );
+    assert_eq!(history, *owner.branch_history(&branch).unwrap());
+    assert_eq!(
+        specialist.base().full_applied_delta.len(),
+        40,
+        "floor truncated the merge delta"
+    );
+    drop(specialist);
+    drop(owner);
+    drop(live);
+    let (live, mut owner, inputs) = reopen(&path);
+    let mut specialist = DurableTimelineBranch::reopen(&owner, branch, &reference, "reopened")
+        .expect("floor made the persisted specialist unreopenable");
+    assert_eq!(specialist.core().export_history().unwrap(), history);
+    apply(&specialist.core(), Command::Do(lock(true)));
+    apply(&specialist.core(), Command::Undo);
+    let reference = specialist.persist(&mut owner).unwrap();
+    assert_eq!(specialist.base().full_applied_delta.len(), 40);
+    assert_eq!(
+        specialist.core().export_history().unwrap().document,
+        proposal
+    );
+    let issuer = owner.issue_issuer(&live, &inputs, 1).unwrap();
+    let envelope = specialist
+        .merge_envelope(
+            &owner,
+            &live,
+            CommandId {
+                issuer,
+                sequence: 1,
+            },
+        )
+        .unwrap();
+    let result = committed(specialist.merge(&mut owner, &live, &envelope).unwrap());
+    assert_eq!(
+        committed(specialist.merge(&mut owner, &live, &envelope).unwrap()),
+        result
+    );
+    assert_eq!(live.export_history().unwrap().document, proposal);
+    assert_eq!(live.export_history().unwrap().cursor.undo.len(), 1);
+    owner.store().verify(&reference).unwrap();
 }

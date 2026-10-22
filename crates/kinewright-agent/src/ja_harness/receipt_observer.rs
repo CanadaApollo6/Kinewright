@@ -47,12 +47,7 @@ impl Adapter {
         }
         let inputs = bundle.empty_inputs().map_err(|e| e.to_string())?;
         let reference = inputs.reference.clone();
-        bundle
-            .save(
-                &core.export_history().map_err(|e| e.to_string())?,
-                &reference,
-            )
-            .map_err(|e| e.to_string())?;
+        bundle.save(&core, &reference).map_err(|e| e.to_string())?;
         Ok(reference)
     }
     pub(super) fn receipt_edit(
@@ -292,9 +287,7 @@ impl Adapter {
             .retire_issuer(&request.id.issuer, forget, &core, &inputs)
             .map_err(|e| e.to_string())?;
         for _ in 0..args.rotations {
-            bundle
-                .save(&core.export_history().map_err(|e| e.to_string())?, &inputs)
-                .map_err(|e| e.to_string())?;
+            bundle.save(&core, &inputs).map_err(|e| e.to_string())?;
         }
         Ok(json!({"retired":true,"forgotten":forget,"rotations":args.rotations}))
     }

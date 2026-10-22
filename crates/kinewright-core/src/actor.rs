@@ -217,6 +217,26 @@ impl Core {
         receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
 
+    /// Install an acknowledged checkpoint only at the exact frozen producer cut.
+    /// # Errors
+    /// Refuses a newer suffix, corrupt candidate or disconnected actor without replacing it.
+    pub fn install_checkpoint(
+        &self,
+        before: HistorySnapshot,
+        after: HistorySnapshot,
+    ) -> Result<(), HistoryError> {
+        after.encoded_bytes()?;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(
+                Box::new(after),
+                Some(Box::new(before)),
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+
     /// Install one validated floor or recovery-close only at its exact current cut.
     /// # Errors
     /// Refuses a changed cut, corrupt candidate or disconnected actor atomically.

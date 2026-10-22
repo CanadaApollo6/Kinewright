@@ -41,9 +41,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
     let sealed = bundle.empty_inputs().unwrap();
     let inputs = sealed.reference.clone();
-    bundle
-        .save(&core.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&core, &inputs).unwrap();
     drop(sealed);
     (core, bundle, inputs)
 }
@@ -182,9 +180,7 @@ fn recovery_inventory_retains_two_predecessors_and_one_staging_slot() {
     for i in 0..12 {
         previous.push(fs::read(&path).unwrap());
         apply(&core, Command::Do(lock(i % 2 == 0)));
-        bundle
-            .save(&core.export_history().unwrap(), &inputs)
-            .unwrap();
+        bundle.save(&core, &inputs).unwrap();
         let m = manifest(&path, &bundle);
         assert_eq!(m.recovery.predecessors.len(), previous.len().min(2));
         assert!(m.recovery.staging.is_none());
@@ -202,11 +198,7 @@ fn recovery_inventory_retains_two_predecessors_and_one_staging_slot() {
     }
     let before = fs::read(&path).unwrap();
     apply(&core, Command::Do(lock(false)));
-    assert!(
-        io_observer::fail_once("root_before_publish", || bundle
-            .save(&core.export_history().unwrap(), &inputs))
-        .is_err()
-    );
+    assert!(io_observer::fail_once("root_before_publish", || bundle.save(&core, &inputs)).is_err());
     assert_eq!(fs::read(&path).unwrap(), before);
     let staged = inventory(&path);
     assert_eq!(staged.predecessors.len(), 2);
@@ -218,9 +210,7 @@ fn recovery_inventory_retains_two_predecessors_and_one_staging_slot() {
         bundle.store().usage().unwrap().physical_bytes,
         physical_payload(&path)
     );
-    bundle
-        .save(&restored.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&restored, &inputs).unwrap();
     // Retirement inventory/GC now finish after acknowledgment rather than delaying it.
     bundle.collect_after_ack().unwrap();
     assert!(inventory(&path).staging.is_none());
@@ -237,9 +227,7 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
         let path = PathBuf::from(path);
         let (core, mut bundle, inputs) = reopen(&path);
         apply(&core, Command::Do(lock(false)));
-        bundle
-            .save(&core.export_history().unwrap(), &inputs)
-            .unwrap();
+        bundle.save(&core, &inputs).unwrap();
         panic!("crash cut not reached");
     }
     super::durable_bundle::model_inventory_retirement_cuts();
@@ -258,18 +246,33 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
         let (core, mut bundle, inputs) = setup(&path);
         for i in 0..4 {
             apply(&core, Command::Do(lock(i % 2 == 0)));
-            bundle
-                .save(&core.export_history().unwrap(), &inputs)
-                .unwrap();
+            bundle.save(&core, &inputs).unwrap();
         }
         let acknowledged = core.export_history().unwrap();
         let root = fs::read(&path).unwrap();
         let predecessors = manifest(&path, &bundle).recovery.predecessors;
         apply(&core, Command::Do(lock(false)));
-        let result = io_observer::fail_once(fault, || {
-            bundle.save(&core.export_history().unwrap(), &inputs)
-        });
-        assert!(result.is_err(), "fault was not exercised: {fault}");
+        let (result, trace) =
+            io_observer::observe(|| io_observer::fail_once(fault, || bundle.save(&core, &inputs)));
+        assert!(
+            trace
+                .events
+                .iter()
+                .any(|e| e.operation == "injected_failure"),
+            "fault was not exercised: {fault}"
+        );
+        if matches!(fault, "inventory_before_rename" | "inventory_after_rename") {
+            assert!(
+                result.is_err(),
+                "uncertain inventory publication admitted a new save: {fault}"
+            );
+        } else {
+            assert!(
+                result.is_ok(),
+                "definite maintenance failure blocked a save: {fault}"
+            );
+            assert!(bundle.collection_error().is_some());
+        }
         drop(bundle);
         let loaded = LoadedBundle::read(&path).unwrap();
         let restored = Core::spawn(Document::default()).unwrap();
@@ -290,9 +293,7 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
         assert_eq!(usage.physical_bytes, physical_payload(&path));
         assert!(!usage.damaged_accounting);
         let inputs = bundle.root().unwrap().input_manifest_ref.clone();
-        bundle
-            .save(&restored.export_history().unwrap(), &inputs)
-            .unwrap();
+        bundle.save(&restored, &inputs).unwrap();
         assert_eq!(
             bundle.store().usage().unwrap().physical_bytes,
             physical_payload(&path)
@@ -345,7 +346,7 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
     let before = bundle.store().usage().unwrap();
     assert!(before.unclassified_bytes > 0);
     assert_eq!(before.physical_bytes, physical_payload(&path));
-    bundle.save(&acknowledged, &inputs).unwrap();
+    bundle.save(&restored, &inputs).unwrap();
     assert!(
         root_temporaries.iter().all(|p| !p.exists()),
         "the owner-specific root temporary did not retire"
@@ -381,9 +382,7 @@ fn inventory_retirement_crash_preserves_required_predecessors() {
         before.unclassified_bytes - orphan.len() as u64
     );
     bundle.store().verify(&orphan_ref).unwrap();
-    bundle
-        .save(&restored.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&restored, &inputs).unwrap();
     drop(sealed);
     bundle.collect_after_ack().unwrap();
     assert!(!object_path(&path, &orphan_ref).exists());
@@ -442,9 +441,7 @@ fn old_floor_collection_keeps_independent_branch_version_and_receipt_pins() {
         );
     }
     for _ in 0..4 {
-        bundle
-            .save(&core.export_history().unwrap(), &inputs)
-            .unwrap();
+        bundle.save(&core, &inputs).unwrap();
     }
     assert_eq!(
         bundle
@@ -488,15 +485,11 @@ fn metadata_commit_verifies_new_bytes_but_recovery_verifies_full_graph() {
         .admit_blob(&mut Cursor::new(&bytes), &object, &[])
         .unwrap();
     bundle.retain_evidence(&object).unwrap();
-    bundle
-        .save(&core.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&core, &inputs).unwrap();
     drop(sealed);
     let before = bundle.store().usage().unwrap();
     apply(&core, Command::Do(lock(false)));
-    bundle
-        .save(&core.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&core, &inputs).unwrap();
     let after = bundle.store().usage().unwrap();
     assert!(after.verified_calls > before.verified_calls);
     assert!(
@@ -702,7 +695,7 @@ fn version_and_control_caps(temp: &TempDirectory) {
         let mut limits = StorageLimits::default();
         limits.control_bytes = before.len() as u64 - delta;
         bundle.restrict_limits_probe(limits).unwrap();
-        let result = bundle.save(&core.export_history().unwrap(), &inputs);
+        let result = bundle.save(&core, &inputs);
         assert_eq!(result.is_ok(), delta == 0);
         if delta == 1 {
             assert_eq!(fs::read(&path).unwrap(), before);

@@ -43,9 +43,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
-    bundle
-        .save(&core.export_history().unwrap(), &input_ref)
-        .unwrap();
+    bundle.save(&core, &input_ref).unwrap();
     (core, bundle, input_ref)
 }
 #[test]
@@ -220,7 +218,7 @@ fn reused_lut_id_retains_both_content_identities_through_first_save_and_recovery
     let bad = session.admit_inputs(&manifest(vec![wrong])).unwrap();
     let path = temp.path("bad.kinewright");
     assert!(
-        session.first_save(&path, &history, &bad.reference).is_err(),
+        session.first_save(&path, &core, &bad.reference).is_err(),
         "missing LUT A must refuse before publication"
     );
     assert!(!path.exists());
@@ -228,7 +226,7 @@ fn reused_lut_id_retains_both_content_identities_through_first_save_and_recovery
     let good = session.admit_inputs(&good_manifest).unwrap();
     let destination = temp.path("saved.kinewright");
     let copy = session
-        .first_save(&destination, &history, &good.reference)
+        .first_save(&destination, &core, &good.reference)
         .unwrap();
     let owner = copy
         .into_destination()
@@ -255,7 +253,7 @@ fn reused_lut_id_retains_both_content_identities_through_first_save_and_recovery
         .unwrap();
     let root_before = fs::read(&destination).unwrap();
     assert!(
-        owner.save(&history, &incomplete.reference).is_err(),
+        owner.save(&restored, &incomplete.reference).is_err(),
         "current LUT B borrowed its identity from a historical context instead of its active manifest"
     );
     assert_eq!(fs::read(&destination).unwrap(), root_before);
@@ -276,9 +274,8 @@ fn ambiguous_rename_error_requires_reconciliation() {
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
     let before = fs::read(&path).unwrap();
-    let history = core.export_history().unwrap();
     let outcome = io_observer::fail_once("root_rename_io", || {
-        BundleCommit::run(&mut bundle, &history, &inputs)
+        BundleCommit::run(&mut bundle, &core, &inputs)
     });
     assert!(
         matches!(outcome, CommitOutcome::DurabilityUnknown),
@@ -286,7 +283,7 @@ fn ambiguous_rename_error_requires_reconciliation() {
     );
     assert_eq!(fs::read(&path).unwrap(), before);
     bundle.reconcile().unwrap();
-    bundle.save(&history, &inputs).unwrap();
+    bundle.save(&core, &inputs).unwrap();
 }
 #[test]
 fn post_ack_gc_failure_never_changes_committed_outcome_and_retries() {
@@ -301,15 +298,12 @@ fn post_ack_gc_failure_never_changes_committed_outcome_and_retries() {
                 locked: i % 2 == 0,
             },
         );
-        bundle
-            .save(&core.export_history().unwrap(), &inputs)
-            .unwrap();
+        bundle.save(&core, &inputs).unwrap();
     }
     bundle.collect_after_ack().unwrap();
-    let history = core.export_history().unwrap();
     let (outcome, trace) = io_observer::observe(|| {
         io_observer::fail_once("gc_before_unlink", || {
-            BundleCommit::run(&mut bundle, &history, &inputs)
+            BundleCommit::run(&mut bundle, &core, &inputs)
         })
     });
     let CommitOutcome::Committed(report) = outcome else {
@@ -341,7 +335,7 @@ fn post_ack_gc_failure_never_changes_committed_outcome_and_retries() {
         report.generation
     );
     bundle.collect_after_ack().unwrap();
-    bundle.save(&history, &inputs).unwrap();
+    bundle.save(&core, &inputs).unwrap();
 }
 #[test]
 fn realistic_history_saves_every_edit_and_advances_durable_floor() {
@@ -361,9 +355,7 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
     let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
-    bundle
-        .save(&core.export_history().unwrap(), &input_ref)
-        .unwrap();
+    bundle.save(&core, &input_ref).unwrap();
     drop(inputs);
     // Lower the real ingress bound so this witness crosses it repeatedly without filling 32 MiB.
     let limits = StorageLimits {
@@ -459,13 +451,15 @@ fn baseline_change_is_not_a_continuation_of_a_zero_batch_checkpoint() {
     doc.resolution = (1280, 720);
     history.baseline = std::sync::Arc::new(doc);
     history.document = history.baseline.clone();
+    core.restore_history(history.clone()).unwrap();
     assert!(
-        bundle.save(&history, &inputs).is_err(),
+        bundle.save(&core, &inputs).is_err(),
         "different baseline accepted as a continuation"
     );
     history.floor_offset = 1;
+    core.restore_history(history).unwrap();
     assert!(
-        bundle.save(&history, &inputs).is_err(),
+        bundle.save(&core, &inputs).is_err(),
         "unproved floor offset bypassed baseline continuity"
     );
 }
@@ -532,11 +526,7 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
         let branch = bundle.manual_branch_id().clone();
         let core = Core::spawn(admission.legacy_document().unwrap()).unwrap();
         let inputs = bundle.empty_inputs().unwrap();
-        assert!(
-            io_observer::fail_once(failure, || bundle
-                .save(&core.export_history().unwrap(), &inputs.reference))
-            .is_err()
-        );
+        assert!(io_observer::fail_once(failure, || bundle.save(&core, &inputs.reference)).is_err());
         if failure == "root_before_publish" {
             assert_eq!(fs::read(&path).unwrap(), bytes);
             assert!(
@@ -551,9 +541,7 @@ fn migration_retries_b3_lost_b5_and_corrupt_backup_without_duplicate_identity() 
         assert_eq!(retry.project_id(), &id);
         assert_eq!(retry.manual_branch_id(), &branch);
         let inputs = retry.empty_inputs().unwrap();
-        retry
-            .save(&core.export_history().unwrap(), &inputs.reference)
-            .unwrap();
+        retry.save(&core, &inputs.reference).unwrap();
         retry.collect_after_ack().unwrap();
         let inventory: serde_json::Value = serde_json::from_slice(
             &fs::read(

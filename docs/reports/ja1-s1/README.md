@@ -414,3 +414,22 @@ streaming scratch remained live. `store.rs:329` now includes live decoded bytes 
 the checked metadata sum before object publication. The exact-boundary control and
 one-beyond refusal have a preserved baseline red and restored green; the twelfth
 mutation removes that guard. This repairs the existing cap rather than raising it.
+
+### Round 2
+
+The round-2 dispositions and source-bound validation are in [fix-r2.md](fix-r2.md).
+N4 is deferred: valid floor cuts depend on Undo/Redo and gesture boundaries; no
+monotonic binary-search predicate or improved cold-save bound is established here.
+C1 remains runner-dependent until the next hosted failing control supplies the
+new bounded `disposition`/`missing_requirements` diagnostic. L6 remains open;
+round-1 latency figures are historical and were not remeasured at this head.
+
+The inherited retirement assertion now distinguishes definite cleanup failure
+from namespace uncertainty for N6
+(`crates/kinewright-project/tests/support/ja_s1_retention.rs:263`). The Linux
+app/session witness is included at `crates/kinewright-app/src/app.rs:10882` to
+respect the existing AU6 source inventory. N5's cutoff required staging-only
+rollback eligibility in the existing collector
+(`crates/kinewright-project/src/store.rs:2425`), preserving exact pre-copy
+inventory bytes. These integration adjustments and their witnesses are detailed
+in the round-2 report.

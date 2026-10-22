@@ -98,6 +98,7 @@ impl BundleCommit {
         let mut before = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let original = before.clone();
         if let Some(checkpoint) = bundle.branches.get(&bundle.manual_branch_id) {
             let acknowledged =
                 if let Some(cached) = bundle.history_cache.get(&bundle.manual_branch_id) {
@@ -235,21 +236,21 @@ impl BundleCommit {
                     BundleError::Corrupt("published history missing from owner".into())
                 })?,
         );
-        if **published != before {
-            core.restore_history((**published).clone())
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        if **published != original
+            && core
+                .install_checkpoint(original, (**published).clone())
+                .is_err()
+        {
+            bundle.unsettled = true;
+            return Err(BundleError::Unsettled);
         }
         bundle.receipt_lookup(envelope)
     }
-    pub fn run(
-        bundle: &mut ProjectBundle,
-        history: &HistorySnapshot,
-        inputs: &ObjectRef,
-    ) -> CommitOutcome {
+    pub fn run(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> CommitOutcome {
         if bundle.pending_command.is_some() {
             return CommitOutcome::DefinitelyUnpublished(BundleError::Unsettled);
         }
-        match Self::publish(bundle, history, inputs) {
+        match bundle.save(core, inputs) {
             Ok(report) => CommitOutcome::Committed(report),
             Err(BundleError::DurabilityUnknown | BundleError::Unsettled) => {
                 CommitOutcome::DurabilityUnknown
@@ -291,8 +292,17 @@ impl BundleCommit {
         if !bundle
             .store
             .with_namespace(|n| Ok(n.object_batch_active()))?
+            && let Err(error) = bundle.collect_after_ack()
         {
-            bundle.collect_after_ack()?;
+            // Namespace uncertainty still fences publication; ordinary unlink failures retry.
+            bundle.store.with_namespace(|n| n.verify())?;
+            if matches!(
+                error,
+                BundleError::Unsettled | BundleError::DurabilityUnknown
+            ) {
+                return Err(error);
+            }
+            crate::namespace::note("gc_retry_pending", &bundle.store.resolved_root()?);
         }
         let prior = bundle.branches.get(branch_id).cloned();
         let old_history = if let Some(prior) = &prior {
@@ -400,7 +410,6 @@ impl BundleCommit {
                 retained_manifest.entries.extend(old.entries.clone());
             }
         }
-        validate_inputs(&checked, &retained_manifest)?;
         let floor_discard = old_history
             .as_ref()
             .map(|old| {
@@ -416,6 +425,29 @@ impl BundleCommit {
             })
             .transpose()?
             .filter(|n| *n > 0);
+        let mut contexts = prior
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.history_input_manifest_refs.clone());
+        if contexts.is_empty() {
+            contexts.push(inputs.clone());
+        }
+        while contexts.len() < checked.batches.len() + floor_discard.unwrap_or(0) + 1 {
+            contexts.push(inputs.clone());
+        }
+        let floor_inputs = if let Some(discard) = floor_discard {
+            contexts = contexts
+                .get(discard..)
+                .ok_or_else(|| BundleError::Corrupt("floor input-context cut".into()))?
+                .to_vec();
+            // The boundary document can precede the input context of a multi-edit save.
+            // Give the retained checkpoint its own exact owned graph before validating it.
+            retain_history_inputs(&checked, &mut retained_manifest);
+            validate_inputs(&checked, &retained_manifest)?;
+            Some(retained_manifest)
+        } else {
+            validate_inputs(&checked, &retained_manifest)?;
+            None
+        };
         let mut batch_ids = prior
             .as_ref()
             .map_or_else(Vec::new, |p| p.batch_ids.clone());
@@ -511,20 +543,8 @@ impl BundleCommit {
                 seal!(&lineage),
             )
         };
-        let mut contexts = prior
-            .as_ref()
-            .map_or_else(Vec::new, |p| p.history_input_manifest_refs.clone());
-        if contexts.is_empty() {
-            contexts.push(inputs.clone());
-        }
-        while contexts.len() < checked.batches.len() + floor_discard.unwrap_or(0) + 1 {
-            contexts.push(inputs.clone());
-        }
-        if let Some(discard) = floor_discard {
-            contexts = contexts
-                .get(discard..)
-                .ok_or_else(|| BundleError::Corrupt("floor input-context cut".into()))?
-                .to_vec();
+        if let Some(floor_inputs) = floor_inputs {
+            contexts[0] = seal!(&floor_inputs);
         }
         let checkpoint = BranchCheckpoint {
             branch_id: branch_id.clone(),
@@ -884,6 +904,43 @@ pub(crate) fn validate_inputs(
     }
     Ok(())
 }
+fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut OwnedInputManifest) {
+    let documents: Vec<_> = std::iter::once(&history.baseline)
+        .chain(std::iter::once(&history.document))
+        .chain(
+            history
+                .cursor
+                .undo
+                .iter()
+                .chain(&history.cursor.redo)
+                .map(|e| &e.document),
+        )
+        .collect();
+    manifest.entries.retain(|entry| {
+        documents.iter().any(|document| {
+            document
+                .media_pool
+                .iter()
+                .any(|a| entry.entry_id == format!("media:{}", a.id.0))
+                || document.lut_assets.iter().any(|a| {
+                    (entry.entry_id == format!("lut:{}", a.id.0)
+                        || entry.entry_id == format!("lut:{}:{}", a.id.0, a.sha256))
+                        && entry.object.sha256 == a.sha256
+                        && entry.object.byte_length == a.byte_len
+                })
+                || (entry.entry_id == "font:Inter"
+                    && document
+                        .tracks
+                        .iter()
+                        .flat_map(|t| &t.clips)
+                        .any(|c| matches!(c.content, kinewright_core::ClipContent::Title(_))))
+        })
+    });
+    let mut seen = BTreeSet::new();
+    manifest
+        .entries
+        .retain(|e| seen.insert((e.entry_id.clone(), e.object.clone())));
+}
 pub(crate) fn validate_document_inputs(
     document: &kinewright_core::Document,
     manifest: &OwnedInputManifest,
@@ -973,18 +1030,16 @@ pub(crate) fn lineage(
     for (batch, id) in history.batches.iter().zip(batches) {
         match &batch.command {
             JournalCommand::Undo => {
-                let previous = undo
-                    .pop()
-                    .ok_or_else(|| BundleError::Corrupt("lineage undo underflow".into()))?;
-                redo.push(current);
-                current = previous;
+                if let Some(previous) = undo.pop() {
+                    redo.push(current);
+                    current = previous;
+                }
             }
             JournalCommand::Redo => {
-                let next = redo
-                    .pop()
-                    .ok_or_else(|| BundleError::Corrupt("lineage redo underflow".into()))?;
-                undo.push(current);
-                current = next;
+                if let Some(next) = redo.pop() {
+                    undo.push(current);
+                    current = next;
+                }
             }
             _ => {
                 let before = current.clone();

@@ -26,9 +26,7 @@ fn setup(path: &Path) -> (Core, ProjectBundle, ObjectRef) {
     let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let reference = inputs.reference.clone();
-    bundle
-        .save(&core.export_history().unwrap(), &reference)
-        .unwrap();
+    bundle.save(&core, &reference).unwrap();
     drop(inputs);
     (core, bundle, reference)
 }
@@ -159,9 +157,7 @@ fn edit_and_comment_lost_replies_reconcile_before_stale_admission() {
         .admit_input(&input_request, &mut std::io::Cursor::new(source))
         .unwrap();
     let inputs = sealed.reference.clone();
-    bundle
-        .save(&core.export_history().unwrap(), &inputs)
-        .unwrap();
+    bundle.save(&core, &inputs).unwrap();
     drop(sealed);
     let edit = envelope(&mut bundle, &core, &inputs);
     let original = committed(bundle.command(&edit, &core, &inputs, &[]).unwrap());
@@ -256,9 +252,7 @@ fn retired_exact_evidence_resolves_original_edit_and_comment_results() {
         .retire_issuer(&edit.id.issuer, false, &core, &inputs)
         .unwrap();
     for _ in 0..3 {
-        bundle
-            .save(&core.export_history().unwrap(), &inputs)
-            .unwrap();
+        bundle.save(&core, &inputs).unwrap();
     }
     assert_eq!(
         committed(bundle.command(&edit, &core, &inputs, &[]).unwrap()),
@@ -313,9 +307,7 @@ fn retired_unresolved_never_reapplies_or_acknowledges() {
         "exact predecessor result must immediately be labelled retired"
     );
     for _ in 0..3 {
-        bundle
-            .save(&core.export_history().unwrap(), &inputs)
-            .unwrap();
+        bundle.save(&core, &inputs).unwrap();
     }
     let history = core.export_history().unwrap();
     let disk = inventory(temp.root());

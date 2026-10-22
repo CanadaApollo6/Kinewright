@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn exhausted_output_keeps_a_bounded_not_run_receipt() {
         let temp = kinewright_media::test_support::TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-quota",
         );
         let mut report = Report::create(&temp.path("out"), Mode::Baseline).unwrap();

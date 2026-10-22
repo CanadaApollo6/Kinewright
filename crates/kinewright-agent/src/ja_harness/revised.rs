@@ -150,11 +150,7 @@ impl Adapter {
 
             Call::ProjectSave(args) if self.mode == Mode::Revised => {
                 let path = self.baseline.root.join(&args.path);
-                let history = self
-                    .baseline
-                    .core()?
-                    .export_history()
-                    .map_err(|e| e.to_string())?;
+                let core = self.baseline.core()?.clone();
                 if self.bundle.is_none() {
                     let admission = if path.is_file() {
                         kinewright_project::bundle::BundleWriteAdmission::read(&path)
@@ -176,7 +172,7 @@ impl Adapter {
                 }
                 let inputs = bundle.empty_inputs().map_err(|e| e.to_string())?;
                 let (result, trace) =
-                    io_observer::observe(|| bundle.save(&history, &inputs.reference));
+                    io_observer::observe(|| bundle.save(&core, &inputs.reference));
                 let result = result.map_err(|e| e.to_string())?;
                 let expected = bundle.serialized_root().map_err(|e| e.to_string())?;
                 let actual = fs::read(&path).map_err(|e| e.to_string())?;
@@ -444,11 +440,7 @@ impl Adapter {
                 "changed-payload receipt scenario unavailable before receipts; NOT RUN".into(),
             );
         }
-        let history = self
-            .baseline
-            .core()?
-            .export_history()
-            .map_err(|e| e.to_string())?;
+        let core = self.baseline.core()?.clone();
         let bundle = self.bundle.as_mut().ok_or("comment bundle")?;
         let text_object = bundle
             .store_mut()
@@ -498,7 +490,7 @@ impl Adapter {
             },
             |s| s.reference.clone(),
         );
-        let saved = bundle.save(&history, &inputs).map_err(|e| e.to_string())?;
+        let saved = bundle.save(&core, &inputs).map_err(|e| e.to_string())?;
         drop(sealed);
         drop(text_object);
         drop(strokes_object);

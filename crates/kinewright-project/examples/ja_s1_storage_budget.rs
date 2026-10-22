@@ -204,7 +204,7 @@ fn run() {
     bundle.retain_evidence(&object).unwrap();
     let inputs = bundle.empty_inputs().unwrap();
     let input_ref = inputs.reference.clone();
-    bundle.save(&history, &input_ref).unwrap();
+    bundle.save(&core, &input_ref).unwrap();
     let decode_before_heap = heap();
     let decode_before_history = bundle.store().usage().unwrap().live_history_bytes;
     let decoded_history = bundle
@@ -232,7 +232,7 @@ fn run() {
     let mut saves = vec![];
     let before_metadata = bundle.store().usage().unwrap();
     for _ in 0..8 {
-        timed(&mut saves, || bundle.save(&history, &input_ref).unwrap());
+        timed(&mut saves, || bundle.save(&core, &input_ref).unwrap());
     }
     let after_metadata = bundle.store().usage().unwrap();
     assert!(after_metadata.verified_bytes - before_metadata.verified_bytes < object.byte_length);
@@ -274,9 +274,7 @@ fn run() {
         ProjectBundle::activate(&floor_path, BundleWriteAdmission::new_document()).unwrap();
     let inputs = floors.empty_inputs().unwrap();
     let floor_inputs = inputs.reference.clone();
-    floors
-        .save(&floor_core.export_history().unwrap(), &floor_inputs)
-        .unwrap();
+    floors.save(&floor_core, &floor_inputs).unwrap();
     drop(inputs);
     let floor_issuer = floors.issue_issuer(&floor_core, &floor_inputs, 1).unwrap();
     let mut floor_times = vec![];
@@ -324,9 +322,7 @@ fn run() {
         ));
     }
     for _ in 0..3 {
-        floors
-            .save(&floor_core.export_history().unwrap(), &floor_inputs)
-            .unwrap();
+        floors.save(&floor_core, &floor_inputs).unwrap();
     }
     assert_eq!(
         floors
@@ -408,10 +404,7 @@ fn run() {
     };
     let mut reader = session.store().lease_input(&original).unwrap();
     let monitor = session.store().usage_handle();
-    let empty = Core::spawn(Document::default())
-        .unwrap()
-        .export_history()
-        .unwrap();
+    let empty = Core::spawn(Document::default()).unwrap();
     let copy = session
         .first_save(
             &root.join("first.kinewright"),

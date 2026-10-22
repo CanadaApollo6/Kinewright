@@ -127,14 +127,14 @@ impl Adapter {
         let before = monitor().map_err(error)?;
         let path = self.baseline.root.join("copied.kinewright");
         let failed = io_observer::fail_once("copy_object", || {
-            session.first_save(&path, &frozen, &sealed.reference)
+            session.first_save(&path, &core, &sealed.reference)
         });
         let failure_preserved = failed.is_err()
             && !path.exists()
             && core.export_history().map_err(error)? == frozen
             && monitor().map_err(error)?.reserved_copy_bytes == 0;
         let (copy, trace) =
-            io_observer::observe(|| session.first_save(&path, &frozen, &sealed.reference));
+            io_observer::observe(|| session.first_save(&path, &core, &sealed.reference));
         let copy = copy.map_err(error)?;
         let overlap = monitor().map_err(error)?.reserved_copy_bytes;
         let rebound_lut = copy.rebound_input(&lut_ref).map_err(error)?;

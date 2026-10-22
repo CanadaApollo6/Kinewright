@@ -127,46 +127,59 @@ def mutate(source, name):
         return replace(source, '        if active {\n            histories.insert', '        if true {\n            histories.insert')
     raise AssertionError(name)
 
-selected = sys.argv[2:] or list(cases)
-def interrupted(signum, _frame):
-    raise SystemExit(f"interrupted by signal {signum}")
-signal.signal(signal.SIGTERM, interrupted)
-rows = json.loads((out/'results.json').read_text()) if (out/'results.json').exists() else []
-for name in selected:
-    file, target, witness = cases[name]
-    path=Path(file)
-    original=path.read_text()
-    modified=mutate(original, name)
-    assert modified != original, name
-    try:
-        for phase, content in [("red", modified), ("restored", original)]:
-            path.write_text(content)
-            while int(next(l.split()[1] for l in Path('/proc/meminfo').read_text().splitlines() if l.startswith('MemAvailable:'))) < 6291456:
-                print(f'{name}: waiting for 6 GiB', flush=True)
-                time.sleep(30)
-            package, feature = ('kinewright-agent','eval-harness') if name == 'paired-io-production-fallback' else ('kinewright-project','test-util')
-            if name == 'original-app-regressions':
-                filters=['app::in1_tests::in1b_the_production_half_reader_is_line_ending_agnostic','app::in1_tests::in1b_the_unavailable_look_list_is_one_incident_with_a_joined_observed','app::in2b_tests::in2b_first_dedup_into_loaded_joins_opened_and_second_does_not','app::in2b_tests::in2b_load_starts_no_session_and_presses_queue','app::in2b_tests::in2b_investigate_refuses_a_missing_subject']
-                args=['nice','-n','19','cargo','test','-p','kinewright-app','--bin','kinewright-app','--','--exact',*filters]
-            else:
-                args=['nice','-n','19','cargo','test','-p',package,'--features',feature,'--test',target,witness,'--','--exact']
-            identity={'head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), 'diff_sha256':hashlib.sha256(subprocess.check_output(['git','diff','--binary'])).hexdigest(), 'file_sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'command':args}
-            result=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
-            output=result.stdout
-            binaries=re.findall(r'Running [^\n]+ \(([^)]+)\)',output)
-            assert binaries, (name, phase, output[-6000:])
-            identity['witness_sources_sha256']={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('crates/kinewright-project/tests').rglob('ja_s1*.rs')}
-            identity['binary_sha256']=hashlib.sha256(Path(binaries[-1]).read_bytes()).hexdigest()
-            with gzip.open(out/f'{name}-{phase}.log.gz','wt') as log:
-                log.write(json.dumps(identity)+'\n'+output)
-            summaries=re.findall(r'^test result: .+$',output,re.M)
-            count=5 if name=='original-app-regressions' else 1
-            expected=f'FAILED. 0 passed; {count} failed;' if phase=='red' else f'ok. {count} passed; 0 failed;'
-            assert result.returncode == (101 if phase=='red' else 0) and expected in summaries[-1], (name,phase,summaries,output[-6000:])
-            if name == 'alias-after-acquisition' and phase == 'red':
-                assert 'assertion `left == right` failed' in output, 'alias mutation failed before the byte property'
-            rows.append({'mutation':name,'phase':phase,'witness':witness,'summary':summaries[-1],**identity})
-            print(name,phase,summaries[-1],flush=True)
-    finally:
-        path.write_text(original)
-    (out/'results.json').write_text(json.dumps(rows,indent=2)+'\n')
+def run_cases(selected, mutator=mutate):
+    def interrupted(signum, _frame):
+        raise SystemExit(f"interrupted by signal {signum}")
+    signal.signal(signal.SIGTERM, interrupted)
+    rows = json.loads((out/'results.json').read_text()) if (out/'results.json').exists() else []
+    for name in selected:
+        file, target, witness = cases[name]
+        path=Path(file)
+        original=path.read_text()
+        modified=mutator(original, name)
+        assert modified != original, name
+        try:
+            for phase, content in [("red", modified), ("restored", original)]:
+                path.write_text(content)
+                wait_started = time.monotonic()
+                while int(next(l.split()[1] for l in Path('/proc/meminfo').read_text().splitlines() if l.startswith('MemAvailable:'))) < 6291456:
+                    if time.monotonic() - wait_started > 7200: raise SystemExit('memory blocked for over two hours')
+                    print(f'{name}: waiting for 6 GiB', flush=True)
+                    time.sleep(30)
+                memory = subprocess.check_output(['free', '-g'], text=True)
+                assert int(next(l.split()[6] for l in memory.splitlines() if l.startswith('Mem:'))) >= 6
+                package, feature = ('kinewright-agent','eval-harness') if name == 'paired-io-production-fallback' else ('kinewright-project','test-util')
+                if target == 'ja_s1_branches': package, feature = 'kinewright-agent', 'eval-harness'
+                if name == 'original-app-regressions':
+                    filters=['app::in1_tests::in1b_the_production_half_reader_is_line_ending_agnostic','app::in1_tests::in1b_the_unavailable_look_list_is_one_incident_with_a_joined_observed','app::in2b_tests::in2b_first_dedup_into_loaded_joins_opened_and_second_does_not','app::in2b_tests::in2b_load_starts_no_session_and_presses_queue','app::in2b_tests::in2b_investigate_refuses_a_missing_subject']
+                    args=['nice','-n','10','cargo','test','-p','kinewright-app','--bin','kinewright-app','--','--exact',*filters]
+                elif target in ('app-bin', 'media-lib', 'core-history'):
+                    package = {'app-bin':'kinewright-app','media-lib':'kinewright-media','core-history':'kinewright-core'}[target]
+                    selector = ['--bin','kinewright-app'] if target == 'app-bin' else ['--lib'] if target == 'media-lib' else ['--test','ja_s1_history']
+                    args = ['nice','-n','10','cargo','test','-p',package,*selector,witness,'--','--exact']
+                else:
+                    args=['nice','-n','10','cargo','test','-p',package,'--features',feature,'--test',target,witness,'--','--exact']
+                identity={'head':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(), 'diff_sha256':hashlib.sha256(subprocess.check_output(['git','diff','--binary'])).hexdigest(), 'file_sha256':hashlib.sha256(path.read_bytes()).hexdigest(), 'command':args, 'memory':memory, 'baseline_file_sha256':hashlib.sha256(original.encode()).hexdigest()}
+                result=subprocess.run(args,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+                output=result.stdout
+                binaries=re.findall(r'Running [^\n]+ \(([^)]+)\)',output)
+                assert binaries, (name, phase, output[-6000:])
+                identity['witness_sources_sha256']={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in Path('crates').rglob('*.rs') if 'target' not in p.parts}
+                identity['binary_sha256']=hashlib.sha256(Path(binaries[-1]).read_bytes()).hexdigest()
+                with gzip.open(out/f'{name}-{phase}.log.gz','wt') as log:
+                    log.write(json.dumps(identity)+'\n'+output)
+                summaries=re.findall(r'^test result: .+$',output,re.M)
+                count=5 if name=='original-app-regressions' else 1
+                expected=f'FAILED. 0 passed; {count} failed;' if phase=='red' else f'ok. {count} passed; 0 failed;'
+                assert result.returncode == (101 if phase=='red' else 0) and expected in summaries[-1], (name,phase,summaries,output[-6000:])
+                if name == 'alias-after-acquisition' and phase == 'red':
+                    assert 'assertion `left == right` failed' in output, 'alias mutation failed before the byte property'
+                rows.append({'mutation':name,'phase':phase,'witness':witness,'summary':summaries[-1],**identity})
+                print(name,phase,summaries[-1],flush=True)
+        finally:
+            path.write_text(original)
+        (out/'results.json').write_text(json.dumps(rows,indent=2)+'\n')
+
+
+if __name__ == "__main__":
+    run_cases(sys.argv[2:] or list(cases))

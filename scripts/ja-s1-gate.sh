@@ -12,10 +12,13 @@ run() {
     local label="$1"
     shift
     local log="$evidence/$label.log"
+    local memory_wait=$SECONDS
     while [[ "$1" == cargo && "$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)" -lt 6291456 ]]; do
+        if (( SECONDS - memory_wait > 7200 )); then echo "Memory blocked for over two hours" >&2; return 1; fi
         echo "Waiting for 6 GiB available before $label"
         sleep 30
     done
+    free -g
     {
         git rev-parse HEAD
         if [[ -x "$1" ]]; then sha256sum "$1"; fi
@@ -30,7 +33,7 @@ run() {
         rg '^test result:' "$log" || true
         gzip "$log"
     else
-        tail -n 65 "$log"
+        tail -n 65 "$log" | cut -c 1-512
         gzip "$log"
         return 1
     fi

@@ -632,8 +632,8 @@ pub fn load_document(path: &Path) -> Result<(Document, u32, String), String> {
     reason = "verify source and both sealed predecessor executables before inspecting their reports"
 )]
 pub fn predecessor_format_controls(output: &Path) -> Result<(), String> {
-    let fallback = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/ja-s1-predecessor/sealed")
+    let fallback = kinewright_media::test_support::workspace_target_dir()
+        .join("ja-s1-predecessor/sealed")
         .join(if cfg!(windows) {
             "kinewright-ja-baseline.exe"
         } else {

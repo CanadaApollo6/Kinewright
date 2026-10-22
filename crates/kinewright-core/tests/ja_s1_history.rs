@@ -255,3 +255,19 @@ fn recovery_close_follows_suffix_equivalence() {
     }
     assert_eq!(recovered.export_history().unwrap().cursor.undo.len(), 3);
 }
+
+#[test]
+fn checkpoint_install_refuses_a_newer_producer_suffix() {
+    let core = initial();
+    apply(&core, Command::Do(lock(false)));
+    let before = core.export_history().unwrap();
+    let floor = HistoryTransition::floor(before.clone(), 1).unwrap();
+    apply(&core, Command::Do(lock(true)));
+    let current = core.export_history().unwrap();
+    assert!(
+        core.install_checkpoint(before, floor.after().clone())
+            .is_err(),
+        "checkpoint overwrote a newer accepted suffix"
+    );
+    assert_eq!(core.export_history().unwrap(), current);
+}

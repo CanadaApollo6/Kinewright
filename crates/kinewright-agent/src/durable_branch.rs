@@ -16,6 +16,7 @@ pub struct DurableTimelineBranch {
     branch_id: BranchId,
     branch: TimelineBranch,
     base: SpecialistBaseRecord,
+    baseline_delta: Vec<kinewright_core::Operation>,
     pin: StorePin,
 }
 
@@ -63,6 +64,7 @@ impl DurableTimelineBranch {
             branch_id,
             branch,
             base,
+            baseline_delta: vec![],
             pin,
         })
     }
@@ -86,8 +88,19 @@ impl DurableTimelineBranch {
             .core()
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        bundle.save_branch(&self.branch_id, &frozen)?;
-        self.base.full_applied_delta = frozen.applied_operations();
+        let mut full_delta = self.baseline_delta.clone();
+        full_delta.extend(frozen.applied_operations());
+        bundle.save_branch(&self.branch_id, &self.branch.core())?;
+        self.base.full_applied_delta = full_delta;
+        self.baseline_delta = specialist_floor_delta(
+            bundle,
+            &self.base,
+            &self
+                .branch
+                .core()
+                .export_history()
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+        )?;
         let reference = bundle.retain_specialist_base(&self.base)?;
         self.pin = bundle.store().pin(&[
             reference.clone(),
@@ -120,13 +133,7 @@ impl DurableTimelineBranch {
             .store()
             .read_record::<Document>(&base.original_baseline_ref)?;
         let history = bundle.branch_history(&branch_id)?;
-        if history.baseline != Arc::new((*baseline).clone())
-            || history.applied_operations() != base.full_applied_delta
-        {
-            return Err(BundleError::Corrupt(
-                "frozen specialist delta differs from checkpoint".into(),
-            ));
-        }
+        let baseline_delta = specialist_floor_delta(bundle, &base, &history)?;
         let branch = TimelineBranch::new(name, TimelineRevision(0), Arc::new((*baseline).clone()))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         branch
@@ -140,6 +147,7 @@ impl DurableTimelineBranch {
             branch_id,
             branch,
             base: (*base).clone(),
+            baseline_delta,
             pin,
         })
     }
@@ -173,7 +181,9 @@ impl DurableTimelineBranch {
             .core()
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        if frozen.applied_operations() != self.base.full_applied_delta {
+        let mut full_delta = self.baseline_delta.clone();
+        full_delta.extend(frozen.applied_operations());
+        if full_delta != self.base.full_applied_delta {
             return Err(BundleError::Unsupported(
                 "specialist changed after freezing".into(),
             ));
@@ -227,4 +237,54 @@ impl DurableTimelineBranch {
             .clone();
         bundle.command(envelope, live, &inputs, &[])
     }
+}
+
+/// The original base and full proposal are independent of the bounded undo checkpoint.
+fn specialist_floor_delta(
+    bundle: &ProjectBundle,
+    base: &SpecialistBaseRecord,
+    history: &kinewright_core::HistorySnapshot,
+) -> Result<Vec<kinewright_core::Operation>, BundleError> {
+    let retained = history.applied_operations();
+    let split = base
+        .full_applied_delta
+        .len()
+        .checked_sub(retained.len())
+        .filter(|split| base.full_applied_delta[*split..] == retained)
+        .ok_or_else(|| {
+            BundleError::Corrupt("frozen specialist delta differs from checkpoint".into())
+        })?;
+    let baseline = bundle
+        .store()
+        .read_record::<Document>(&base.original_baseline_ref)?;
+    let check =
+        Core::spawn((*baseline).clone()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+    for (ops, expected) in [
+        (&base.full_applied_delta[..split], &history.baseline),
+        (&retained[..], &history.document),
+    ] {
+        if !ops.is_empty()
+            && !matches!(
+                check
+                    .request(Command::DoBatch(ops.to_vec()))
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                Event::DocumentChanged { .. }
+            )
+        {
+            return Err(BundleError::Corrupt(
+                "specialist proposal replay refused".into(),
+            ));
+        }
+        if check
+            .export_history()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+            .document
+            != *expected
+        {
+            return Err(BundleError::Corrupt(
+                "specialist proposal differs from checkpoint".into(),
+            ));
+        }
+    }
+    Ok(base.full_applied_delta[..split].to_vec())
 }

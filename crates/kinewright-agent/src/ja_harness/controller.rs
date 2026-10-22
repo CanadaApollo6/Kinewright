@@ -904,7 +904,7 @@ pub(super) fn witness_worker_teardown_window() {
     use kinewright_media::test_support::TempDirectory;
     use std::os::unix::fs::PermissionsExt;
     let temp = TempDirectory::new_in(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        &kinewright_media::test_support::workspace_target_dir(),
         "ja-worker-teardown",
     );
     let executable = temp.path("worker");

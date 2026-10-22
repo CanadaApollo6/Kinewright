@@ -13,6 +13,11 @@ finish() {
     local status=$?
     if [[ "$status" -ne 0 ]]; then
         for log in "$evidence"/*.log; do [[ ! -f "$log" ]] || tail -n 80 "$log"; done
+        if [[ "${OS:-}" == Windows_NT ]]; then
+            python -I "$repo/scripts/ja-s1-control-diagnostics.py" "$controls" || true
+        else
+            nice -n 19 python3 -I "$repo/scripts/ja-s1-control-diagnostics.py" "$controls" || true
+        fi
     fi
     find "$evidence" -maxdepth 1 -type f -name '*.log' -exec gzip -f {} +
     return "$status"
@@ -131,7 +136,10 @@ else
             nice -n 10 "$sealed/$executable" --mode baseline --fixture "crates/kinewright-agent/tests/fixtures/ja/$fixture.json" --output "$controls/$fixture"
             result=$?
             set -e
-            [[ "$result" -eq "$expected" ]]
+            if [[ "$result" -ne "$expected" ]]; then
+                echo "$fixture exited $result, expected $expected" >&2
+                exit 1
+            fi
         done
     ) > "$evidence/build-controls.log" 2>&1
 fi

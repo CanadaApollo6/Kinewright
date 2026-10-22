@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn edit_save_reopen_has_literal_history_loss_after_successful_control() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-history",
         );
         let out = output(&temp, "history");
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn current_io_control_precedes_missing_directory_sync_assertion() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-io",
         );
         let out = output(&temp, "io");
@@ -455,7 +455,7 @@ mod tests {
             "clip-id-reuse",
         ] {
             let temp = TempDirectory::new_in(
-                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                &kinewright_media::test_support::workspace_target_dir(),
                 "ja-controls",
             );
             if name == "format-corpus" {
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn recording_forwards_real_loopback_sessions_and_confirmation() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-recording",
         );
         let out = output(&temp, "recording");
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn a_test_executable_cannot_silently_substitute_for_the_native_worker() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-missing-worker",
         );
         assert_eq!(
@@ -556,7 +556,7 @@ mod tests {
             ("windows-not-run", 2),
         ] {
             let temp = TempDirectory::new_in(
-                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                &kinewright_media::test_support::workspace_target_dir(),
                 "ja-disposition",
             );
             let out = temp.path("out");
@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn loopback_fixture_admission_cannot_write_to_an_external_path() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-loopback-path",
         );
         copy_fixtures(temp.root());
@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn input_roles_cannot_alias_the_oracle_namespace() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-role-collision",
         );
         copy_fixtures(temp.root());
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn media_adapter_refuses_a_non_main_participant_before_execution() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-media-participant",
         );
         copy_fixtures(temp.root());
@@ -684,7 +684,7 @@ mod tests {
     #[test]
     fn main_adapter_uses_shared_reply_drop_and_retry_validation() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-main-dispatch",
         );
         copy_fixtures(temp.root());
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn repeated_media_actions_retain_distinct_complete_artifacts() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-media-repeat",
         );
         let out = output(&temp, "repeated-media");
@@ -805,7 +805,7 @@ mod tests {
             ("prerequisite", json!({"requirements":["device:missing"]})),
         ] {
             let temp = TempDirectory::new_in(
-                &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                &kinewright_media::test_support::workspace_target_dir(),
                 "ja-setup",
             );
             let mut fixture: Value = serde_json::from_slice(
@@ -854,7 +854,7 @@ mod tests {
     #[test]
     fn failed_positive_control_has_control_failed_summary_and_exit_one() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-control-failed",
         );
         let directory = temp.path("fixtures");
@@ -909,7 +909,7 @@ mod tests {
         ] {
             for path in ["../escape", "/absolute"] {
                 let temp = TempDirectory::new_in(
-                    &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                    &kinewright_media::test_support::workspace_target_dir(),
                     "ja-path-admission",
                 );
                 let mut fixture = source.clone();
@@ -966,7 +966,7 @@ mod tests {
     #[test]
     fn duplicate_oversize_and_guarded_undo_are_not_run() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-protocol",
         );
         copy_fixtures(temp.root());

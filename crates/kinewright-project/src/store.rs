@@ -55,6 +55,7 @@ struct Ledger {
     verified: BTreeSet<String>,
     support_fields: BTreeMap<String, StorageReservation<BTreeSet<String>>>,
     committed: Vec<ObjectRef>,
+    acknowledged_objects: BTreeSet<String>,
     mirrors: Vec<(ObjectRef, PortablePath)>,
     can_collect: bool,
     metadata_sizes: BTreeMap<String, u64>,
@@ -135,6 +136,7 @@ impl ProjectStore {
                     verified: BTreeSet::new(),
                     support_fields: BTreeMap::new(),
                     committed: vec![],
+                    acknowledged_objects: BTreeSet::new(),
                     mirrors: vec![],
                     can_collect,
                     metadata_sizes: BTreeMap::new(),
@@ -861,7 +863,9 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
             .objects
             .iter()
             .filter(|(h, _)| {
-                ledger.pins.get(*h).copied().unwrap_or(0) == 0 && !durable.contains_key(*h)
+                ledger.pins.get(*h).copied().unwrap_or(0) == 0
+                    && !durable.contains_key(*h)
+                    && (ledger.committed.is_empty() || ledger.acknowledged_objects.contains(*h))
             })
             .map(|(h, (r, d))| {
                 (
@@ -1583,13 +1587,23 @@ impl ProjectStore {
         manifest_ref: &ObjectRef,
         verified: &BTreeSet<String>,
         usage: Arc<Mutex<StorageUsage>>,
+        limits: StorageLimits,
     ) -> Result<Self, BundleError> {
+        let mut retained = manifest.clone();
+        let mut verified = verified.clone();
+        crate::bundle_recovery::retain_inventory_graph(
+            &namespace,
+            &mut retained,
+            &mut verified,
+            &usage,
+        )?;
+        let manifest = &retained;
         if manifest.project_id.as_ref() != Some(&project_id) || manifest.session_id.is_some() {
             return Err(BundleError::Identity(
                 "store owner differs from root".into(),
             ));
         }
-        let mut store = Self::new(namespace, Some(project_id), None, StorageLimits::default())?;
+        let mut store = Self::new(namespace, Some(project_id), None, limits)?;
         let inner = Arc::get_mut(&mut store.inner)
             .ok_or_else(|| BundleError::Identity("store already shared".into()))?;
         inner.usage = usage;
@@ -1764,6 +1778,12 @@ impl ProjectStore {
             .lock()
             .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
         ledger.committed = roots.to_vec();
+        ledger.acknowledged_objects = ledger
+            .objects
+            .keys()
+            .chain(ledger.unclassified.keys())
+            .cloned()
+            .collect();
         ledger.can_collect = false;
         Ok(pin)
     }
@@ -2396,10 +2416,46 @@ impl ProjectStore {
         })?;
         self.settle_controls()?;
         self.allow_collection()?;
-        self.collect_unpublished()?;
+        self.collect_copy_staging()?;
         if !had_assets {
             self.with_namespace(ProjectNamespace::cleanup_empty_copy_store)?;
         }
         Ok(())
+    }
+    fn collect_copy_staging(&mut self) -> Result<(), BundleError> {
+        let (acknowledged, unclassified, temporaries) = {
+            let mut ledger = self
+                .inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+            let acknowledged = std::mem::take(&mut ledger.acknowledged_objects);
+            // Only this failed copy's new names may disappear. Even an older
+            // unreachable file may still belong to the restored B3 inventory.
+            ledger.acknowledged_objects = ledger
+                .objects
+                .keys()
+                .filter(|hash| !acknowledged.contains(*hash))
+                .cloned()
+                .collect();
+            (
+                acknowledged,
+                std::mem::take(&mut ledger.unclassified),
+                std::mem::take(&mut ledger.temporaries),
+            )
+        };
+        let result = self.collect_unpublished();
+        let mut ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        ledger.acknowledged_objects = acknowledged;
+        ledger.unclassified = unclassified;
+        ledger.temporaries = temporaries;
+        // Releasing the failed copy owner must not run ordinary maintenance on
+        // the exact prior inventory that rollback just restored.
+        ledger.can_collect = false;
+        result.map(|_| ())
     }
 }

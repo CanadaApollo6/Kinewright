@@ -142,15 +142,15 @@ pub fn save_headless(
 pub fn save_headless_bundle(
     path: &Path,
     admission: crate::bundle::BundleWriteAdmission,
-    history: &kinewright_core::HistorySnapshot,
+    core: &kinewright_core::Core,
     inputs: Option<&crate::bundle_records::ObjectRef>,
 ) -> Result<crate::bundle::BundleSaveReport, crate::bundle::BundleError> {
     let mut bundle = crate::bundle::ProjectBundle::activate(path, admission)?;
     if let Some(reference) = inputs {
-        bundle.save(history, reference)
+        bundle.save(core, reference)
     } else {
         let manifest = bundle.empty_inputs()?;
-        bundle.save(history, &manifest.reference)
+        bundle.save(core, &manifest.reference)
     }
 }
 

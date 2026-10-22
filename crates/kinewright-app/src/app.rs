@@ -10677,7 +10677,7 @@ mod in2b_tests {
     fn save_as_unsupported_source_or_destination_has_zero_mutations() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-s1-app-admission",
         );
         let recovery = temp.path("recovery");
@@ -10879,11 +10879,13 @@ mod in2b_tests {
         });
     }
 
+    include!("ja_s1_app_tests.rs");
+
     #[cfg(windows)]
     #[test]
     fn windows_app_save_refusal_precedes_session_and_sidecar_mutation() {
         let temp = TempDirectory::new_in(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            &kinewright_media::test_support::workspace_target_dir(),
             "ja-s1-windows-app-refusal",
         );
         let recovery = temp.path("recovery");

@@ -341,12 +341,7 @@ impl ProjectBundle {
                 retired: false,
             },
         );
-        let result = self.save(
-            &core
-                .export_history()
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            inputs,
-        );
+        let result = self.save(core, inputs);
         if let Err(error) = result {
             if !self.unsettled {
                 self.issuers.remove(&id);
@@ -446,12 +441,7 @@ impl ProjectBundle {
                 BundleError::Corrupt("issuer disappeared during owner operation".into())
             })?
             .reconciled_high_water = through;
-        if let Err(error) = self.save(
-            &core
-                .export_history()
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            inputs,
-        ) {
+        if let Err(error) = self.save(core, inputs) {
             if !self.unsettled {
                 self.issuers.insert(id.clone(), old);
             }
@@ -506,12 +496,7 @@ impl ProjectBundle {
         {
             self.issuers.remove(id);
         }
-        if let Err(error) = self.save(
-            &core
-                .export_history()
-                .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            inputs,
-        ) {
+        if let Err(error) = self.save(core, inputs) {
             if !self.unsettled {
                 self.receipts = prior;
                 self.issuers.insert(id.clone(), old);

@@ -590,7 +590,17 @@ impl LoadedBundle {
         core.restore_history((**branch.1).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))
     }
-    pub fn into_writer(mut self) -> Result<ProjectBundle, BundleError> {
+    pub fn into_writer(self) -> Result<ProjectBundle, BundleError> {
+        self.claim_writer(StorageLimits::default())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_writer_with_limits_probe(
+        self,
+        limits: StorageLimits,
+    ) -> Result<ProjectBundle, BundleError> {
+        self.claim_writer(limits)
+    }
+    fn claim_writer(mut self, limits: StorageLimits) -> Result<ProjectBundle, BundleError> {
         let root = self.root()?.clone();
         self.namespace.claim()?;
         if self.namespace.read_root()?.as_deref() != Some(self.admission.raw_bytes()) {
@@ -606,6 +616,7 @@ impl LoadedBundle {
             &root.store_manifest_ref,
             &self.verified,
             Arc::clone(&self.admission.data.usage),
+            limits,
         )?;
         let history_cache = self
             .branches
@@ -644,6 +655,7 @@ impl LoadedBundle {
                 .map_or_else(BTreeMap::new, |v| (**v).clone()),
             pending_command: None,
             pending_result: None,
+            last_collection_error: None,
         };
         bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
         Ok(bundle)
@@ -652,6 +664,7 @@ impl LoadedBundle {
 
 /// One synchronous named-bundle owner. It accepts frozen Core exports, never live snapshots assembled piecemeal.
 pub struct ProjectBundle {
+    pub(crate) last_collection_error: Option<String>,
     pub(crate) store: ProjectStore,
     pub(crate) project_id: ProjectId,
     pub(crate) origin_project_ids: Vec<ProjectId>,
@@ -844,6 +857,7 @@ impl ProjectBundle {
                 issuers: BTreeMap::new(),
                 pending_command: None,
                 pending_result: None,
+                last_collection_error: None,
             })
         }
     }
@@ -1029,6 +1043,16 @@ impl ProjectBundle {
     /// Retire the preceding save's unreachable objects after its acknowledgment.
     /// This also runs on the next save/open, so interrupted maintenance is retried.
     pub fn collect_after_ack(&mut self) -> Result<u64, BundleError> {
+        let result = self.collect_after_ack_inner();
+        self.last_collection_error = result.as_ref().err().map(ToString::to_string);
+        result
+    }
+    /// The last maintenance failure is retained until collection succeeds.
+    #[must_use]
+    pub fn collection_error(&self) -> Option<&str> {
+        self.last_collection_error.as_deref()
+    }
+    fn collect_after_ack_inner(&mut self) -> Result<u64, BundleError> {
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }
@@ -1043,14 +1067,57 @@ impl ProjectBundle {
     }
     pub fn save(
         &mut self,
-        history: &HistorySnapshot,
+        core: &Core,
         inputs: &ObjectRef,
     ) -> Result<BundleSaveReport, BundleError> {
         if self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
-        crate::bundle_commit::BundleCommit::publish(self, history, inputs)
+        let before = core
+            .export_history()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let report = crate::bundle_commit::BundleCommit::publish(self, &before, inputs)?;
+        let id = self.manual_branch_id.clone();
+        self.install_published(core, before, &id)?;
+        Ok(report)
     }
+
+    pub(crate) fn install_published(
+        &mut self,
+        core: &Core,
+        before: HistorySnapshot,
+        branch: &BranchId,
+    ) -> Result<(), BundleError> {
+        let installed = (|| {
+            let published = self.history_cache.get(branch).ok_or_else(|| {
+                BundleError::Corrupt("published history missing from owner".into())
+            })?;
+            if before == ***published {
+                return Ok(());
+            }
+            if before.floor_offset < published.floor_offset {
+                let cut = usize::try_from(published.floor_offset - before.floor_offset)
+                    .map_err(|_| BundleError::Capacity("history floor offset"))?;
+                let floor = kinewright_core::HistoryTransition::floor(before, cut)
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                if floor.after() != &***published {
+                    return Err(BundleError::Corrupt(
+                        "published floor differs from Core transition".into(),
+                    ));
+                }
+                core.install_history_transition(floor)
+            } else {
+                core.install_checkpoint(before, (***published).clone())
+            }
+            .map_err(|e| BundleError::Corrupt(e.to_string()))
+        })();
+        if installed.is_err() {
+            self.unsettled = true;
+            return Err(BundleError::Unsettled);
+        }
+        Ok(())
+    }
+
     pub(crate) fn admit_root_checkpoint(
         &mut self,
         bytes: &[u8],

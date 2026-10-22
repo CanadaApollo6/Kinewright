@@ -137,13 +137,18 @@ impl ProjectBundle {
     pub fn save_branch(
         &mut self,
         id: &BranchId,
-        history: &HistorySnapshot,
+        core: &Core,
     ) -> Result<BundleSaveReport, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
         let inputs = self.checkpoint(id)?.input_manifest_ref.clone();
-        BundleCommit::publish_branch(self, history, &inputs, id, None)
+        let before = core
+            .export_history()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let report = BundleCommit::publish_branch(self, &before, &inputs, id, None)?;
+        self.install_published(core, before, id)?;
+        Ok(report)
     }
     /// Persist the full frozen delta independently of subsequent manual floors.
     pub fn retain_specialist_base(
@@ -169,7 +174,7 @@ impl ProjectBundle {
         let id = self.manual_branch_id.clone();
         let inputs = self.checkpoint(&id)?.input_manifest_ref.clone();
         let history = self.branch_history(&id)?;
-        self.save(&history, &inputs)?;
+        BundleCommit::publish(self, &history, &inputs)?;
         Ok(reference)
     }
 }
