@@ -1,25 +1,47 @@
 //! Validated, actor-installed transitions of a frozen history cut.
+#![allow(clippy::missing_errors_doc)]
 use crate::{Command, Core, Event, HistoryError, HistorySnapshot};
+
+/// Runtime reconciliation identity supplied by the persistence owner. Core does no IO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistorySaveTag {
+    pub destination: std::path::PathBuf,
+    pub parent_device: u64,
+    pub parent_inode: u64,
+    pub root_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingHistorySave {
+    pub id: u64,
+    pub tag: Option<HistorySaveTag>,
+    pub ready: bool,
+}
 
 /// Revocable save barrier. Definite failure releases on drop; uncertain publication
 /// retains the barrier until its owner explicitly commits or releases it.
 pub struct HistoryFloorBarrier {
     core: Core,
-    offset: u64,
+    id: u64,
     retain: bool,
     settled: bool,
 }
 impl HistoryFloorBarrier {
-    pub(crate) const fn new(core: Core, offset: u64) -> Self {
+    pub(crate) const fn new(core: Core, id: u64) -> Self {
         Self {
             core,
-            offset,
+            id,
             retain: false,
             settled: false,
         }
     }
-    pub fn retain_until_reconcile(&mut self) {
+    pub fn retain_until_reconcile(&mut self) -> Result<(), HistoryError> {
+        self.core.tag_history_floor(self.id, None, true)?;
         self.retain = true;
+        Ok(())
+    }
+    pub fn tag_publication(&self, tag: HistorySaveTag) -> Result<(), HistoryError> {
+        self.core.tag_history_floor(self.id, Some(tag), false)
     }
     /// Commit the floor against Core's current history.
     /// # Errors
@@ -29,7 +51,7 @@ impl HistoryFloorBarrier {
             return Err(HistoryError::Corrupt);
         }
         self.retain = true;
-        self.core.settle_history_floor(self.offset, true)?;
+        self.core.settle_history_floor(self.id, true)?;
         self.settled = true;
         Ok(())
     }
@@ -40,7 +62,7 @@ impl HistoryFloorBarrier {
         if self.settled {
             return Err(HistoryError::Corrupt);
         }
-        self.core.settle_history_floor(self.offset, false)?;
+        self.core.settle_history_floor(self.id, false)?;
         self.settled = true;
         Ok(())
     }

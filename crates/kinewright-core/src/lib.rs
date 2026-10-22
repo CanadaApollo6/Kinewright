@@ -41,7 +41,9 @@ mod title;
 mod transcript_edit;
 mod transition;
 
-pub use history_transition::{HistoryFloorBarrier, HistoryTransition};
+pub use history_transition::{
+    HistoryFloorBarrier, HistorySaveTag, HistoryTransition, PendingHistorySave,
+};
 
 pub use actor::{
     Command, CommandToken, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,

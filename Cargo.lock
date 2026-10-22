@@ -2364,6 +2364,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kinewright-hash"
+version = "0.1.0"
+
+[[package]]
 name = "kinewright-media"
 version = "0.1.0"
 dependencies = [
@@ -2374,6 +2378,7 @@ dependencies = [
  "ffmpeg-next",
  "half",
  "kinewright-core",
+ "kinewright-hash",
  "kinewright-media",
  "pollster",
  "reqwest",

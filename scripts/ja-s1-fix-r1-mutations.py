@@ -149,7 +149,7 @@ def run_cases(selected, mutator=mutate):
                 memory = subprocess.check_output(['free', '-g'], text=True)
                 assert int(next(l.split()[6] for l in memory.splitlines() if l.startswith('Mem:'))) >= 6
                 package, feature = ('kinewright-agent','eval-harness') if name == 'paired-io-production-fallback' else ('kinewright-project','test-util')
-                if target == 'ja_s1_branches': package, feature = 'kinewright-agent', 'eval-harness'
+                if target in ('ja_s1_branches', 'ja_baseline'): package, feature = 'kinewright-agent', 'eval-harness'
                 if name == 'original-app-regressions':
                     filters=['app::in1_tests::in1b_the_production_half_reader_is_line_ending_agnostic','app::in1_tests::in1b_the_unavailable_look_list_is_one_incident_with_a_joined_observed','app::in2b_tests::in2b_first_dedup_into_loaded_joins_opened_and_second_does_not','app::in2b_tests::in2b_load_starts_no_session_and_presses_queue','app::in2b_tests::in2b_investigate_refuses_a_missing_subject']
                     args=['nice','-n','10','cargo','test','-p','kinewright-app','--bin','kinewright-app','--','--exact',*filters]

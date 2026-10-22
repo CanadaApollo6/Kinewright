@@ -522,14 +522,34 @@ impl Controller {
             .join("work")
             .canonicalize()
             .map_err(|e| e.to_string())?;
+        if let Err(error) = controller.spawn_participants(loaded, report, &exe, &fixture, &root) {
+            // A participant whose spawn is on the record is reaped on the record too,
+            // even when a later participant's setup fails.
+            return Err(match controller.cleanup(report) {
+                Ok(()) => error,
+                Err(cleanup) => format!("{error}; {cleanup}"),
+            });
+        }
+        controller.sample(report)?;
+        Ok(controller)
+    }
+
+    fn spawn_participants(
+        &mut self,
+        loaded: &LoadedFixture,
+        report: &mut Report,
+        exe: &Path,
+        fixture: &Path,
+        root: &Path,
+    ) -> Result<(), String> {
         for name in &loaded.fixture.initial.participants {
-            if !matches!(name.as_str(), "A" | "B") || controller.workers.contains_key(name) {
+            if !matches!(name.as_str(), "A" | "B") || self.workers.contains_key(name) {
                 return Err("participants must be distinct A/B".into());
             }
             let worker = Worker::spawn(
-                &exe,
+                exe,
                 &fixture.canonicalize().map_err(|e| e.to_string())?,
-                &root,
+                root,
                 name,
                 report.mode,
             )?;
@@ -540,10 +560,9 @@ impl Controller {
                 return Err("worker birth identity differs from owned process".into());
             }
             report.event(0, name, "process_spawn", ready)?;
-            controller.workers.insert(name.clone(), worker);
+            self.workers.insert(name.clone(), worker);
         }
-        controller.sample(report)?;
-        Ok(controller)
+        Ok(())
     }
 
     pub fn sample(&self, report: &mut Report) -> Result<(), String> {

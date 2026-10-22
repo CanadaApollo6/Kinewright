@@ -1103,6 +1103,7 @@ mod tests {
                 } => {
                     panic!("fixture revision conflict: expected {expected:?}, actual {actual:?}")
                 }
+                Event::UndoBlockedBySave { .. } => panic!("fixture Undo blocked by a save"),
                 Event::QueryResult(_) => panic!("unexpected query result"),
             }
         }

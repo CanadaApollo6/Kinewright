@@ -42,6 +42,7 @@ impl BundleCommit {
         blobs: &[(&ObjectRef, &[u8])],
     ) -> Result<ReceiptLookup, BundleError> {
         use kinewright_core::{Command, Event, Query, QueryResult};
+        crate::bundle::reconcile_core_save(core)?;
         let lookup = bundle.receipt_lookup(envelope)?;
         if lookup != ReceiptLookup::Absent {
             return Ok(lookup);
@@ -286,6 +287,7 @@ impl BundleCommit {
         seed: Option<&LineageRecord>,
         selected: Option<&HistorySnapshot>,
     ) -> Result<BundleSaveReport, BundleError> {
+        bundle.publication_tag = None;
         if bundle.unsettled {
             return Err(BundleError::Unsettled);
         }
@@ -380,6 +382,9 @@ impl BundleCommit {
             }
         }
         let bounded = if let Some(selected) = selected {
+            if selected.floor_offset < aligned.floor_offset {
+                return Err(BundleError::HistoryBarrierInvariant);
+            }
             selected.clone()
         } else if old_history.as_ref().is_some_and(|old| ***old == aligned) {
             aligned.clone()
@@ -811,8 +816,26 @@ impl BundleCommit {
         crate::io_observer::check_failure("root_before_publish", &bundle.store.resolved_root()?)?;
         let saved_path = bundle.store.resolved_root()?;
         let collection = bundle.store.collection_status()?;
+        let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
+        bundle.publication_tag = Some(kinewright_core::HistorySaveTag {
+            destination: identity.resolved_root,
+            parent_device: identity.parent_device,
+            parent_inode: identity.parent_inode,
+            root_sha256: kinewright_media::sha256_bytes(next_admission.raw_bytes()),
+        });
         if let Some(pending) = &mut bundle.pending_save {
             pending.root_sha256 = Some(kinewright_media::sha256_bytes(next_admission.raw_bytes()));
+            if let Some(barrier) = &pending.barrier {
+                let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
+                barrier
+                    .tag_publication(kinewright_core::HistorySaveTag {
+                        destination: identity.resolved_root,
+                        parent_device: identity.parent_device,
+                        parent_inode: identity.parent_inode,
+                        root_sha256: pending.root_sha256.clone().unwrap(),
+                    })
+                    .map_err(crate::bundle::history_error)?;
+            }
         }
         if let Err(error) = bundle.store.publish_root(next_admission.raw_bytes()) {
             if bundle.store.with_namespace(|n| Ok(n.is_uncertain()))? {
@@ -1058,8 +1081,6 @@ fn barrier(bundle: &ProjectBundle, barrier: CommitBarrier) -> Result<(), BundleE
         CommitBarrier::B5 => "bundle_B5",
     };
     crate::namespace::note(label, &path);
-    #[cfg(any(test, feature = "test-util"))]
-    crate::test_hook(label);
     Ok(())
 }
 pub(crate) fn validate_inputs(

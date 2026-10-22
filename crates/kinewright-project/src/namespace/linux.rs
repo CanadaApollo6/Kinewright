@@ -810,6 +810,9 @@ pub(super) fn finish_object_batch(namespace: &mut ProjectNamespace) -> Result<()
     let paths: Vec<_> = namespace.dirty_object_directories.keys().cloned().collect();
     for path in paths {
         namespace.uncertain = true;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("object_directory_sync", &path)
+            .map_err(|_| BundleError::DurabilityUnknown)?;
         sync_directory(&namespace.dirty_object_directories[&path], &path)
             .map_err(|_| BundleError::DurabilityUnknown)?;
         namespace.dirty_object_directories.remove(&path);
@@ -1036,6 +1039,24 @@ pub(super) fn reconcile(
     expected: &[u8],
 ) -> Result<(), BundleError> {
     reconcile_copy_root(namespace, Some(expected))
+}
+pub(super) fn seal_observed_root(
+    namespace: &ProjectNamespace,
+    expected: Option<&[u8]>,
+) -> Result<(), BundleError> {
+    verify_parent(namespace)?;
+    if namespace.read_root()?.as_deref() != expected {
+        return Err(BundleError::DurabilityUnknown);
+    }
+    sync_directory(
+        &namespace.parent,
+        namespace.identity.resolved_root.parent().unwrap(),
+    )?;
+    verify_parent(namespace)?;
+    if namespace.read_root()?.as_deref() != expected {
+        return Err(BundleError::DurabilityUnknown);
+    }
+    Ok(())
 }
 pub(super) fn reconcile_copy_root(
     namespace: &mut ProjectNamespace,

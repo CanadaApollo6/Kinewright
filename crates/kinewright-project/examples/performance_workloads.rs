@@ -565,6 +565,7 @@ fn expect_document_changed(event: Event, what: &str) -> Result<Arc<Document>, Bo
         } => Err(
             format!("{what} hit a revision conflict: expected {expected}, actual {actual}").into(),
         ),
+        Event::UndoBlockedBySave { .. } => Err(format!("{what} is blocked by a save").into()),
         Event::QueryResult(_) => Err(format!("{what} returned a query result").into()),
     }
 }

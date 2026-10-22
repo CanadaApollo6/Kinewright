@@ -506,6 +506,7 @@ impl ProjectBundle {
         Ok(())
     }
     pub fn reconcile_command(&mut self, core: &Core) -> Result<(), BundleError> {
+        crate::bundle::reconcile_core_save(core)?;
         self.reconcile()?;
         let checkpoint = self
             .branches

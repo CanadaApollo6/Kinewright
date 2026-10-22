@@ -60,6 +60,12 @@ pub struct HistorySnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HistoryError {
+    #[error("history changed during save selection; retry the save")]
+    CaptureChanged,
+    #[error("another save of this history is still in progress; retry after it finishes")]
+    SaveInProgress,
+    #[error("internal history barrier invariant")]
+    BarrierInvariant,
     #[error("history exceeds its bounded admission")]
     Capacity,
     #[error("history replay differs from the retained checkpoint")]

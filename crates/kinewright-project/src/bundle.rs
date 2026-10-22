@@ -9,6 +9,10 @@ pub enum BundleError {
     Contention(String),
     DurabilityUnsupported,
     DurabilityUnknown,
+    DurabilityUnknownAt(PathBuf),
+    HistoryChanged,
+    SaveInProgress,
+    HistoryBarrierInvariant,
     Capacity(&'static str),
     Unsupported(String),
     Corrupt(String),
@@ -22,6 +26,14 @@ impl fmt::Display for BundleError {
             Self::Contention(e) => write!(f, "contention: {e}"),
             Self::DurabilityUnsupported => f.write_str("durability_unsupported"),
             Self::DurabilityUnknown => f.write_str("durability_unknown"),
+            Self::DurabilityUnknownAt(path) => write!(
+                f,
+                "durability_unknown: {}; retry when the destination is readable",
+                path.display()
+            ),
+            Self::HistoryChanged => f.write_str("history_changed: retry the save"),
+            Self::SaveInProgress => f.write_str("save_in_progress: retry after the current save"),
+            Self::HistoryBarrierInvariant => f.write_str("internal_history_barrier_invariant"),
             Self::Capacity(e) => write!(f, "storage_backpressure: {e}"),
             Self::Unsupported(e) => write!(f, "unsupported_bundle: {e}"),
             Self::Corrupt(e) => write!(f, "damaged_bundle: {e}"),
@@ -584,6 +596,7 @@ impl LoadedBundle {
     }
     /// Replays through Core only after the complete graph and support set were checked.
     pub fn restore_manual(&self, core: &Core) -> Result<(), BundleError> {
+        reconcile_core_save(core)?;
         let branch = self
             .branches
             .get(&self.root()?.manual_branch_id)
@@ -658,6 +671,8 @@ impl LoadedBundle {
             pending_result: None,
             last_collection_error: None,
             pending_save: None,
+            pending_copy_source: None,
+            publication_tag: None,
         };
         bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
         Ok(bundle)
@@ -666,7 +681,9 @@ impl LoadedBundle {
 
 /// One synchronous named-bundle owner. It accepts frozen Core exports, never live snapshots assembled piecemeal.
 pub struct ProjectBundle {
+    pub(crate) publication_tag: Option<kinewright_core::HistorySaveTag>,
     pub(crate) pending_save: Option<PendingSave>,
+    pub(crate) pending_copy_source: Option<crate::bundle_copy::PendingCopySource>,
     pub(crate) last_collection_error: Option<String>,
     pub(crate) store: ProjectStore,
     pub(crate) project_id: ProjectId,
@@ -690,6 +707,7 @@ pub struct ProjectBundle {
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
 }
 pub(crate) struct PendingSave {
+    pub(crate) core: Core,
     pub(crate) barrier: Option<kinewright_core::HistoryFloorBarrier>,
     pub(crate) root_sha256: Option<String>,
 }
@@ -866,6 +884,8 @@ impl ProjectBundle {
                 pending_result: None,
                 last_collection_error: None,
                 pending_save: None,
+                pending_copy_source: None,
+                publication_tag: None,
             })
         }
     }
@@ -878,7 +898,9 @@ impl ProjectBundle {
         self.store_mut()?;
         drop(self.durable.take());
         let result = self.store.restrict_copy_limits(limits);
-        self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
+        if self.root.is_some() {
+            self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
+        }
         result
     }
     #[must_use]
@@ -957,16 +979,22 @@ impl ProjectBundle {
     }
     /// Validate the exact published graph, complete its parent barrier, then clear unknown publication.
     pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        if let Some(pending) = &self.pending_save {
+            reconcile_core_save(&pending.core)?;
+        }
         self.unsettled = true;
         let collection = self.store.collection_status()?;
+        self.store.settle_object_writes()?;
+        // An object-directory sync with an unknown outcome is retried before settling.
+        self.store
+            .with_namespace(ProjectNamespace::finish_object_batch)?;
         if self.store.has_unsettled_objects()? {
             return Err(BundleError::Unsettled);
         }
         let path = self.store.resolved_root()?;
-        let bytes = self
-            .store
-            .with_namespace(|n| n.read_root())?
-            .ok_or_else(|| BundleError::Corrupt("missing reconciliation root".into()))?;
+        let Some(bytes) = self.store.with_namespace(|n| n.read_root())? else {
+            return self.settle_absent_root();
+        };
         let admission = BundleWriteAdmission::from_bytes(Some(path.clone()), bytes)?;
         admission.require_supported()?;
         if !admission.is_studio() {
@@ -1051,6 +1079,17 @@ impl ProjectBundle {
             byte_length: self.admission.raw_bytes().len() as u64,
         }))
     }
+    fn settle_absent_root(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        if self.root.is_some() {
+            // Only a never-published owner can confirm absence as its original root.
+            return Err(BundleError::Corrupt("missing reconciliation root".into()));
+        }
+        self.store.with_namespace(|n| n.reconcile_copy_root(None))?;
+        self.store.settle_controls()?;
+        self.settle_pending_save(false)?;
+        self.unsettled = false;
+        Ok(None)
+    }
     pub fn serialized_root(&self) -> Result<StorageReservation<Vec<u8>>, BundleError> {
         let root = self
             .root
@@ -1094,6 +1133,11 @@ impl ProjectBundle {
         core: &Core,
         inputs: &ObjectRef,
     ) -> Result<BundleSaveReport, BundleError> {
+        reconcile_core_save(core)?;
+        crate::bundle_copy::settle_copy_source(&mut self.pending_copy_source)?;
+        if self.unsettled {
+            self.reconcile()?;
+        }
         if self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
@@ -1111,16 +1155,50 @@ impl ProjectBundle {
         inputs: &ObjectRef,
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
+        reconcile_core_save(core)?;
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }
-        let bounded = crate::bundle_commit::select_history(selected, self.store.limits())?;
-        let barrier = pending_floor(core, bounded.floor)?;
-        self.publish_barrier(barrier, selected, &bounded.history, inputs, branch)
+        let mut aligned = selected.clone();
+        if let Some(prior) = self.branches.get(branch) {
+            let durable = self
+                .store
+                .read_record::<HistorySnapshot>(&prior.history_ref)?;
+            if aligned.floor_offset < durable.floor_offset {
+                aligned = kinewright_core::HistoryTransition::floor(
+                    selected.clone(),
+                    usize::try_from(durable.floor_offset - selected.floor_offset)
+                        .map_err(|_| BundleError::Capacity("floor offset"))?,
+                )
+                .map_err(history_error)?
+                .after()
+                .clone();
+            }
+        }
+        let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?;
+        let transition = if aligned.floor_offset == selected.floor_offset {
+            bounded.floor
+        } else if bounded.history.floor_offset > selected.floor_offset {
+            Some(
+                kinewright_core::HistoryTransition::floor(
+                    selected.clone(),
+                    usize::try_from(bounded.history.floor_offset - selected.floor_offset)
+                        .map_err(|_| BundleError::Capacity("floor offset"))?,
+                )
+                .map_err(history_error)?,
+            )
+        } else {
+            None
+        };
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("history_selected");
+        let barrier = pending_floor(core, transition)?;
+        self.publish_barrier(core, barrier, selected, &bounded.history, inputs, branch)
     }
 
     pub(crate) fn publish_barrier(
         &mut self,
+        core: &Core,
         barrier: Option<kinewright_core::HistoryFloorBarrier>,
         history: &HistorySnapshot,
         selected: &HistorySnapshot,
@@ -1128,6 +1206,7 @@ impl ProjectBundle {
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
         self.pending_save = Some(PendingSave {
+            core: core.clone(),
             barrier,
             root_sha256: None,
         });
@@ -1155,21 +1234,25 @@ impl ProjectBundle {
                 Ok(report)
             }
             Err(error) => {
-                if self.unsettled
-                    || matches!(
-                        error,
-                        BundleError::DurabilityUnknown | BundleError::Unsettled
-                    )
-                    || self.store.has_unsettled_objects()?
+                if self
+                    .pending_save
+                    .as_ref()
+                    .is_some_and(|p| p.root_sha256.is_some())
+                    && self.unsettled
                 {
                     self.unsettled = true;
                     if let Some(barrier) =
                         self.pending_save.as_mut().and_then(|p| p.barrier.as_mut())
                     {
-                        barrier.retain_until_reconcile();
+                        barrier.retain_until_reconcile().map_err(history_error)?;
                     }
                 } else {
                     self.settle_pending_save(false)?;
+                }
+                if self.store.with_namespace(|n| Ok(n.is_uncertain()))?
+                    || self.store.has_unsettled_objects()?
+                {
+                    self.unsettled = true;
                 }
                 Err(error)
             }
@@ -1216,5 +1299,61 @@ pub(crate) fn pending_floor(
     transition
         .map(|floor| core.begin_history_floor(floor))
         .transpose()
-        .map_err(|e| BundleError::Corrupt(e.to_string()))
+        .map_err(history_error)
+}
+
+pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError {
+    match error {
+        kinewright_core::HistoryError::CaptureChanged => BundleError::HistoryChanged,
+        kinewright_core::HistoryError::BarrierInvariant => BundleError::HistoryBarrierInvariant,
+        kinewright_core::HistoryError::SaveInProgress => BundleError::SaveInProgress,
+        other => BundleError::Corrupt(other.to_string()),
+    }
+}
+
+/// Reconcile an orphan independently of the old store's object reservation ledger.
+pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
+    let Some(pending) = core.pending_history_save().map_err(history_error)? else {
+        return Ok(());
+    };
+    if !pending.ready {
+        return Err(BundleError::SaveInProgress);
+    }
+    let tag = pending
+        .tag
+        .as_ref()
+        .ok_or(BundleError::HistoryBarrierInvariant)?;
+    let commit = reconcile_save_tag(tag)?;
+    core.settle_history_save(&pending, commit)
+        .map_err(history_error)
+}
+
+pub(crate) fn reconcile_save_tag(
+    tag: &kinewright_core::HistorySaveTag,
+) -> Result<bool, BundleError> {
+    let read = || -> Result<bool, BundleError> {
+        let namespace = ProjectNamespace::inspect(&tag.destination)?;
+        let identity = namespace.identity();
+        let bytes = namespace.read_root()?;
+        // A readable destination whose parent is no longer the tagged directory cannot
+        // hold this attempt's root: a definite release, never a commit.
+        let tagged_parent = identity.resolved_root == tag.destination
+            && identity.parent_device == tag.parent_device
+            && identity.parent_inode == tag.parent_inode;
+        let own = tagged_parent
+            && bytes
+                .as_ref()
+                .is_some_and(|bytes| kinewright_media::sha256_bytes(bytes) == tag.root_sha256);
+        if own {
+            let loaded = LoadedBundle::read(&tag.destination)?;
+            if loaded.namespace.identity() != identity
+                || Some(loaded.admission.raw_bytes()) != bytes.as_deref()
+            {
+                return Err(BundleError::Identity("reconciliation root changed".into()));
+            }
+        }
+        namespace.seal_observed_root(bytes.as_deref())?;
+        Ok(own)
+    };
+    read().map_err(|_| BundleError::DurabilityUnknownAt(tag.destination.clone()))
 }

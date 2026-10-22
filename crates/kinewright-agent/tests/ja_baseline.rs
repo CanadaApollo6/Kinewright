@@ -200,6 +200,22 @@ fn controller_failure_still_reaps_both_recorded_participants() {
         serde_json::from_slice(&std::fs::read(out.join("summary.json")).unwrap()).unwrap();
     assert_eq!(summary["disposition"], "not_run");
     let events = std::fs::read_to_string(out.join("events.jsonl")).unwrap();
+    // Both participants finish setup (each hashes its own executable) before the
+    // intentional controller failure; a missing spawn is a setup failure, not a reap.
+    let spawned: Vec<Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|e: &Value| e["kind"] == "process_spawn")
+        .collect();
+    assert_eq!(
+        spawned.len(),
+        2,
+        "participants must spawn before the intentional controller failure: {summary}"
+    );
+    eprintln!(
+        "R5_C4 second_spawn_ns={}",
+        spawned.last().unwrap()["elapsed_ns"]
+    );
     let exits = events
         .lines()
         .map(|l| serde_json::from_str::<Value>(l).unwrap())
@@ -207,6 +223,57 @@ fn controller_failure_still_reaps_both_recorded_participants() {
         .collect::<Vec<_>>();
     assert_eq!(exits.len(), 2);
     assert!(exits.iter().all(|e| e["data"]["reaped"] == true));
+}
+
+#[test]
+fn setup_failure_after_a_recorded_spawn_still_reaps_it() {
+    let temp = TempDirectory::new_in(
+        std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "ja-setup-partial",
+    );
+    let fixture = temp.path("fixture.json");
+    let template =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/participants-lock.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(template).unwrap()).unwrap();
+    value["lane"] = "portable".into();
+    value["requirements"] = serde_json::json!([]);
+    value["oracles"] = serde_json::json!({});
+    value["actions"] =
+        serde_json::json!([{"id":1,"participant":"missing","action":"core_start","args":{}}]);
+    value["barriers"] = serde_json::json!([]);
+    // The first A spawns and is recorded; the duplicate then fails participant setup.
+    value["initial"]["participants"] = serde_json::json!(["A", "A"]);
+    std::fs::write(&fixture, serde_json::to_vec(&value).unwrap()).unwrap();
+    let out = temp.path("out");
+    let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+        .args(["--mode", "baseline", "--fixture"])
+        .arg(&fixture)
+        .arg("--output")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    let events: Vec<Value> = std::fs::read_to_string(out.join("events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let kinds = |kind: &str| {
+        events
+            .iter()
+            .filter(|e| e["kind"] == kind)
+            .collect::<Vec<_>>()
+    };
+    let spawned = kinds("process_spawn");
+    let exits = kinds("process_exit");
+    assert_eq!(spawned.len(), 1, "{events:?}");
+    assert_eq!(
+        exits.len(),
+        1,
+        "a recorded participant must be reaped on the record when later setup fails"
+    );
+    assert_eq!(exits[0]["data"]["reaped"], true);
+    assert_eq!(exits[0]["data"]["pid"], spawned[0]["data"]["pid"]);
 }
 
 #[test]

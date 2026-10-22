@@ -290,7 +290,10 @@ fn pending_floor_blocks_undo_and_commits_current_suffix() {
         core.request(Command::Undo).unwrap();
     }
     let boundary = core.export_history().unwrap();
-    core.request(Command::Undo).unwrap();
+    assert!(matches!(
+        core.request(Command::Undo).unwrap(),
+        Event::UndoBlockedBySave { floor_offset: 2 }
+    ));
     assert_eq!(
         core.export_history().unwrap(),
         boundary,
@@ -362,4 +365,46 @@ fn pending_floor_release_restores_entries_and_rejects_a_stale_capture() {
         core.begin_history_floor(stale).is_err(),
         "capture/install race must refuse before IO"
     );
+}
+
+#[test]
+fn second_barrier_is_an_internal_invariant_and_stale_owners_are_harmless() {
+    let core = initial();
+    for locked in [false, true, false] {
+        core.request(Command::Do(lock(locked))).unwrap();
+    }
+    let before = core.export_history().unwrap();
+    let mut first = core
+        .begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap())
+        .unwrap();
+    assert!(matches!(
+        core.begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap()),
+        Err(HistoryError::SaveInProgress)
+    ));
+    first.retain_until_reconcile().unwrap();
+    assert!(matches!(
+        core.begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap()),
+        Err(HistoryError::BarrierInvariant)
+    ));
+    let ticket = core.pending_history_save().unwrap().unwrap();
+    assert!(ticket.ready);
+    let mut unknown = ticket.clone();
+    unknown.id = u64::MAX;
+    assert!(matches!(
+        core.settle_history_save(&unknown, false),
+        Err(HistoryError::BarrierInvariant)
+    ));
+    assert_eq!(core.pending_history_save().unwrap(), Some(ticket.clone()));
+    core.settle_history_save(&ticket, false).unwrap();
+    let mut second = core
+        .begin_history_floor(HistoryTransition::floor(before.clone(), 1).unwrap())
+        .unwrap();
+    assert_ne!(ticket.id, core.pending_history_save().unwrap().unwrap().id);
+    first.release().unwrap();
+    assert!(
+        core.pending_history_save().unwrap().is_some(),
+        "stale owner released a new barrier"
+    );
+    second.release().unwrap();
+    assert_eq!(core.export_history().unwrap(), before);
 }

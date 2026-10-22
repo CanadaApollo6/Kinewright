@@ -109,6 +109,9 @@ pub enum QueryResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    UndoBlockedBySave {
+        floor_offset: u64,
+    },
     DocumentChanged {
         doc: Arc<Document>,
         revision: TimelineRevision,
@@ -156,7 +159,14 @@ enum CoreMessage {
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
     ExportHistory(Sender<Result<HistorySnapshot, HistoryError>>),
-    BeginFloor(crate::HistoryTransition, Sender<Result<(), HistoryError>>),
+    BeginFloor(crate::HistoryTransition, Sender<Result<u64, HistoryError>>),
+    PendingFloor(Sender<Option<crate::PendingHistorySave>>),
+    TagFloor(
+        u64,
+        Option<crate::HistorySaveTag>,
+        bool,
+        Sender<Result<(), HistoryError>>,
+    ),
     SettleFloor(u64, bool, Sender<Result<(), HistoryError>>),
     RestoreHistory(
         Box<HistorySnapshot>,
@@ -202,13 +212,47 @@ impl Core {
         &self,
         transition: crate::HistoryTransition,
     ) -> Result<crate::HistoryFloorBarrier, HistoryError> {
-        let offset = transition.after.floor_offset;
         let (reply, receiver) = unbounded();
         self.sender
             .send(CoreMessage::BeginFloor(transition, reply))
             .map_err(|_| HistoryError::Disconnected)?;
-        receiver.recv().map_err(|_| HistoryError::Disconnected)??;
-        Ok(crate::HistoryFloorBarrier::new(self.clone(), offset))
+        let id = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(crate::HistoryFloorBarrier::new(self.clone(), id))
+    }
+
+    /// Read the current save ticket without filesystem IO.
+    /// # Errors
+    /// Returns an actor-disconnection error.
+    pub fn pending_history_save(&self) -> Result<Option<crate::PendingHistorySave>, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::PendingFloor(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)
+    }
+
+    /// Settle a ticket after the persistence owner reconciles its tagged root.
+    /// # Errors
+    /// Refuses an unknown ticket or a disconnected actor.
+    pub fn settle_history_save(
+        &self,
+        pending: &crate::PendingHistorySave,
+        commit: bool,
+    ) -> Result<(), HistoryError> {
+        self.settle_history_floor(pending.id, commit)
+    }
+
+    pub(crate) fn tag_history_floor(
+        &self,
+        id: u64,
+        tag: Option<crate::HistorySaveTag>,
+        ready: bool,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::TagFloor(id, tag, ready, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
 
     pub(crate) fn settle_history_floor(
@@ -401,6 +445,7 @@ struct HistoryEntry {
 
 #[derive(Clone)]
 struct PendingFloor {
+    save: crate::PendingHistorySave,
     offset: u64,
     discard: usize,
     depth: usize,
@@ -409,6 +454,7 @@ struct PendingFloor {
 
 #[derive(Clone)]
 struct CoreState {
+    next_floor_id: u64,
     pending_floor: Option<PendingFloor>,
     floor_offset: u64,
     baseline: Arc<Document>,
@@ -425,6 +471,7 @@ impl CoreState {
     fn new(document: Document, revision: TimelineRevision) -> Self {
         let document = Arc::new(document);
         Self {
+            next_floor_id: 0,
             pending_floor: None,
             floor_offset: 0,
             baseline: Arc::clone(&document),
@@ -594,30 +641,58 @@ impl CoreState {
         Ok(candidate)
     }
 
-    fn begin_floor(&mut self, transition: &crate::HistoryTransition) -> Result<(), HistoryError> {
-        if self.pending_floor.is_some()
-            || self.history() != transition.before
-            || transition.after.floor_offset <= self.floor_offset
-        {
-            return Err(HistoryError::Corrupt);
+    fn begin_floor(&mut self, transition: &crate::HistoryTransition) -> Result<u64, HistoryError> {
+        if let Some(pending) = &self.pending_floor {
+            // An in-flight save is ordinary contention. A settleable ticket must have been
+            // reconciled by the persistence owner first, so reaching it here is internal.
+            return Err(if pending.save.ready {
+                HistoryError::BarrierInvariant
+            } else {
+                HistoryError::SaveInProgress
+            });
         }
+        if self.history() != transition.before {
+            return Err(HistoryError::CaptureChanged);
+        }
+        if transition.after.floor_offset <= self.floor_offset {
+            return Err(HistoryError::BarrierInvariant);
+        }
+        let id = self
+            .next_floor_id
+            .checked_add(1)
+            .ok_or(HistoryError::Capacity)?;
+        self.next_floor_id = id;
         self.pending_floor = Some(PendingFloor {
+            save: crate::PendingHistorySave {
+                id,
+                tag: None,
+                ready: false,
+            },
             offset: transition.after.floor_offset,
             discard: transition.before.batches.len() - transition.after.batches.len(),
             depth: transition.before.cursor.undo.len() - transition.after.cursor.undo.len(),
             baseline: Arc::clone(&transition.after.baseline),
         });
-        Ok(())
+        Ok(id)
     }
 
-    fn settle_floor(&mut self, offset: u64, commit: bool) -> Result<(), HistoryError> {
-        let Some(pending) = &self.pending_floor else {
-            return Err(HistoryError::Corrupt);
-        };
-        if pending.offset != offset {
-            return Err(HistoryError::Corrupt);
+    fn settle_floor(&mut self, id: u64, commit: bool) -> Result<(), HistoryError> {
+        // A previous owner may finish after a fresh owner already reconciled its ticket.
+        // Tickets are never reused, even when the same floor is selected again.
+        if id <= self.next_floor_id && self.pending_floor.as_ref().is_none_or(|p| p.save.id != id) {
+            return Ok(());
         }
+        let pending = self
+            .pending_floor
+            .as_ref()
+            .ok_or(HistoryError::BarrierInvariant)?;
+        if pending.save.id != id {
+            return Err(HistoryError::BarrierInvariant);
+        }
+        let offset = pending.offset;
         if commit {
+            #[cfg(any(test, feature = "test-util"))]
+            let started = std::time::Instant::now();
             // The barrier kept the prefix unchanged. Replay only the current suffix
             // through the ordinary executor, including commands accepted during IO.
             let mut candidate = Self::new((*pending.baseline).clone(), TimelineRevision(0));
@@ -650,6 +725,15 @@ impl CoreState {
                     .checked_add(1)
                     .ok_or(HistoryError::Capacity)?,
             );
+            candidate.next_floor_id = self.next_floor_id;
+            #[cfg(any(test, feature = "test-util"))]
+            if std::env::var_os("JA_S1_COMMIT_TIMING").is_some() {
+                eprintln!(
+                    "R5_ACTOR_COMMIT batches={} elapsed_us={}",
+                    candidate.batches.len(),
+                    started.elapsed().as_micros()
+                );
+            }
             *self = candidate;
         } else {
             self.pending_floor = None;
@@ -777,10 +861,30 @@ fn floor_from_prefix(
     Ok(after)
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one actor dispatch owns history and save tickets"
+)]
 fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     while let Ok(message) = receiver.recv() {
         match message {
+            CoreMessage::PendingFloor(reply) => {
+                let _ = reply.send(state.pending_floor.as_ref().map(|p| p.save.clone()));
+            }
+            CoreMessage::TagFloor(id, tag, ready, reply) => {
+                let result = match state.pending_floor.as_mut() {
+                    Some(pending) if pending.save.id == id => {
+                        if let Some(tag) = tag {
+                            pending.save.tag = Some(tag);
+                        }
+                        pending.save.ready = ready;
+                        Ok(())
+                    }
+                    _ => Err(HistoryError::BarrierInvariant),
+                };
+                let _ = reply.send(result);
+            }
             CoreMessage::BeginFloor(transition, reply) => {
                 let result = state.begin_floor(&transition);
                 let _ = reply.send(result);
@@ -816,6 +920,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                     CoreState::restore(&history)
                 };
                 let result = admitted.and_then(|mut candidate| {
+                    candidate.next_floor_id = state.next_floor_id;
                     candidate.revision = TimelineRevision(
                         state
                             .revision
@@ -889,12 +994,8 @@ fn execute_actor_command(state: &mut CoreState, command: Command) -> Event {
     {
         // A blocked Undo is not an accepted journal command: replay after release
         // must never turn it into an Undo of the retained protected prefix.
-        return Event::DocumentChanged {
-            doc: Arc::clone(&state.document),
-            revision: state.revision,
-            last_op: None,
-            journal_command: None,
-            token: None,
+        return Event::UndoBlockedBySave {
+            floor_offset: state.pending_floor.as_ref().unwrap().offset,
         };
     }
     execute_command(state, command)

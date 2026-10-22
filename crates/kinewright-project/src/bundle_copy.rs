@@ -12,6 +12,7 @@ use kinewright_core::Core;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
+    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, Clone)]
@@ -35,13 +36,41 @@ struct DestinationBefore {
 #[must_use]
 pub struct BundleCopy {
     destination: Option<ProjectBundle>,
-    source: SourceCopyHold,
+    source: Arc<Mutex<SourceCopyHold>>,
     _prepared: PreparedDestination,
     before: DestinationBefore,
     status: CopyStatus,
     input_rebindings: BTreeMap<ObjectRef, ObjectRef>,
+    tag: Option<kinewright_core::HistorySaveTag>,
+}
+pub(crate) struct PendingCopySource {
+    tag: kinewright_core::HistorySaveTag,
+    source: Arc<Mutex<SourceCopyHold>>,
+}
+pub(crate) fn settle_copy_source(
+    pending: &mut Option<PendingCopySource>,
+) -> Result<(), BundleError> {
+    if let Some(hold) = pending {
+        crate::bundle::reconcile_save_tag(&hold.tag)?;
+        hold.source
+            .lock()
+            .map_err(|_| BundleError::Capacity("copy source poisoned"))?
+            .reconciled();
+    }
+    *pending = None;
+    Ok(())
 }
 impl BundleCopy {
+    fn pending_source(&self) -> Option<PendingCopySource> {
+        if !matches!(self.status, CopyStatus::DurabilityUnknown) {
+            return None;
+        }
+        self.tag.clone().map(|tag| PendingCopySource {
+            tag,
+            source: Arc::clone(&self.source),
+        })
+    }
+
     #[must_use]
     pub const fn status(&self) -> &CopyStatus {
         &self.status
@@ -86,22 +115,36 @@ impl BundleCopy {
             .destination
             .as_mut()
             .ok_or_else(|| BundleError::Corrupt("copy owner missing".into()))?;
+        if let Some(pending) = &destination.pending_save {
+            crate::bundle::reconcile_core_save(&pending.core)?;
+        }
+        if let Some(tag) = &self.tag {
+            crate::bundle::reconcile_save_tag(tag)?;
+        }
         let actual = destination.store.with_namespace(|n| n.read_root())?;
         if actual == self.before.root {
+            destination.settle_pending_save(false)?;
+            destination.store.settle_object_writes()?;
             destination.store.rollback_copy(
                 self.before.root.as_deref(),
                 self.before.inventory.as_deref(),
                 self.before.had_assets,
             )?;
             destination.settle_pending_save(false)?;
-            self.source.reconciled();
+            self.source
+                .lock()
+                .map_err(|_| BundleError::Capacity("copy source poisoned"))?
+                .reconciled();
             self.status = CopyStatus::DefinitelyUnpublished;
             return Ok(None);
         }
         let report = destination
             .reconcile()?
             .ok_or_else(|| BundleError::Corrupt("copy did not publish a Studio root".into()))?;
-        self.source.reconciled();
+        self.source
+            .lock()
+            .map_err(|_| BundleError::Capacity("copy source poisoned"))?
+            .reconciled();
         self.status = CopyStatus::Committed(report.clone());
         Ok(Some(report))
     }
@@ -247,13 +290,16 @@ fn result(
             let uncertain = target.unsettled
                 || target.store.with_namespace(|n| Ok(n.is_uncertain()))?
                 || target.store.has_unsettled_objects()?;
-            if uncertain {
+            let root_unknown = uncertain && target.publication_tag.is_some() && target.unsettled;
+            if root_unknown {
                 if let Some(barrier) = target
                     .pending_save
                     .as_mut()
                     .and_then(|p| p.barrier.as_mut())
                 {
-                    barrier.retain_until_reconcile();
+                    barrier
+                        .retain_until_reconcile()
+                        .map_err(crate::bundle::history_error)?;
                 }
             } else {
                 target.settle_pending_save(false)?;
@@ -270,13 +316,17 @@ fn result(
             {
                 return Err(error);
             }
-            source.mark_uncertain()?;
+            if root_unknown {
+                source.mark_uncertain()?;
+            }
             CopyStatus::DurabilityUnknown
         }
     };
+    let tag = target.publication_tag.clone();
     Ok(BundleCopy {
+        tag,
         destination: Some(target),
-        source,
+        source: Arc::new(Mutex::new(source)),
         _prepared: prepared,
         before,
         status,
@@ -302,7 +352,14 @@ impl ProjectBundle {
         path: &Path,
         limits: StorageLimits,
     ) -> Result<SaveAsOutcome, BundleError> {
-        if self.unsettled || self.pending_command.is_some() {
+        if let Some(pending) = &self.pending_save {
+            crate::bundle::reconcile_core_save(&pending.core)?;
+        }
+        settle_copy_source(&mut self.pending_copy_source)?;
+        if self.unsettled {
+            self.reconcile()?;
+        }
+        if self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
         // A frozen copy preserves every acknowledged checkpoint exactly. A lower
@@ -430,13 +487,15 @@ impl ProjectBundle {
                 .clone();
             crate::bundle_commit::BundleCommit::publish(&mut target, &history, &inputs)
         })();
-        result(target, before, prepared, source, map, publication)
-            .map(|copy| SaveAsOutcome::Copied(Box::new(copy)))
+        let copy = result(target, before, prepared, source, map, publication)?;
+        self.pending_copy_source = copy.pending_source();
+        Ok(SaveAsOutcome::Copied(Box::new(copy)))
     }
 }
 pub struct SessionStore {
     store: ProjectStore,
     session_id: SessionId,
+    pending_copy_source: Option<PendingCopySource>,
 }
 impl SessionStore {
     pub fn create(parent: &Path, limits: StorageLimits) -> Result<Self, BundleError> {
@@ -444,7 +503,11 @@ impl SessionStore {
         let session_id = SessionId::fresh()?;
         let namespace = ProjectNamespace::create_session(parent, &session_id)?;
         let store = ProjectStore::new(namespace, None, Some(session_id.clone()), limits)?;
-        Ok(Self { store, session_id })
+        Ok(Self {
+            store,
+            session_id,
+            pending_copy_source: None,
+        })
     }
     #[must_use]
     pub fn session_id(&self) -> &SessionId {
@@ -484,6 +547,8 @@ impl SessionStore {
         inputs: &ObjectRef,
         limits: StorageLimits,
     ) -> Result<BundleCopy, BundleError> {
+        crate::bundle::reconcile_core_save(core)?;
+        settle_copy_source(&mut self.pending_copy_source)?;
         let frozen = core
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
@@ -503,6 +568,7 @@ impl SessionStore {
         )?;
         let (mut target, before, prepared) = destination(path, limits)?;
         target.pending_save = Some(crate::bundle::PendingSave {
+            core: core.clone(),
             barrier,
             root_sha256: None,
         });
@@ -529,6 +595,8 @@ impl SessionStore {
             let report = target.publish_pending(&frozen, history, &rebound, &id)?;
             Ok(report)
         })();
-        result(target, before, prepared, source, map, publication)
+        let copy = result(target, before, prepared, source, map, publication)?;
+        self.pending_copy_source = copy.pending_source();
+        Ok(copy)
     }
 }

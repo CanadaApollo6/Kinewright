@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/kinewright-hash",
     "crates/kinewright-core",
     "crates/kinewright-media",
     "crates/kinewright-agent",
@@ -80,3 +81,10 @@ incremental = false
 debug = 0
 incremental = false
 strip = "debuginfo"
+
+# Executable identity hashing is on the harness's fixed setup deadline.
+[profile.dev.package.kinewright-hash]
+opt-level = 3
+
+[profile.test.package.kinewright-hash]
+opt-level = 3

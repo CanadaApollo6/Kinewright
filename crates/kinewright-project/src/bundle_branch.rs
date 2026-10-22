@@ -139,6 +139,11 @@ impl ProjectBundle {
         id: &BranchId,
         core: &Core,
     ) -> Result<BundleSaveReport, BundleError> {
+        crate::bundle::reconcile_core_save(core)?;
+        crate::bundle_copy::settle_copy_source(&mut self.pending_copy_source)?;
+        if self.unsettled {
+            self.reconcile()?;
+        }
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }

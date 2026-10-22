@@ -455,3 +455,25 @@ The lead's post-stop ruling replaces irrevocable eager flooring; definite failur
 - m5 corrected: archived `r3-first-copy-own` is a double-install red, not a no-install red; the shared `-own` reds cover omitted installation. Archived `r3-persistent-gc` fails at its observable counter, not at the later continuation assertions. Round 4 does not claim that archived mutant proves continuation.
 - m6 corrected: predecessor `identity.json` now records the pre-strip SHA-256, strip version and arguments. `run.json.source_head` is the run working directory's HEAD; source-to-executable provenance is the clean-source build and checks within the same script invocation, not a hash-inferred source identity.
 - Hosted C1 was reported successful on `9cd2e71` by the lead; fresh round-4 local controls are recorded separately. Native Windows execution and full slow CI remain lead-owned.
+
+### Round 5
+
+See [fix-r5.md](fix-r5.md) for the amended ruling's exact-destination reconciliation,
+pre-B5 release, orphaned-ticket settlement, readable/unreadable Save As, floor
+alignment, typed selection/Undo refusals, mutation pairs and setup/replay timings.
+Core stores runtime reconciliation values and performs no filesystem IO. The
+existing source hold remains reachable until its copy destination is reconciled.
+
+Round 5 also adds these, each with its own mutation pair:
+
+- `SaveInProgress`, a retryable refusal of a second barrier while a save is in flight.
+- A readable tagged path whose parent was moved or recreated counts as a definite release.
+- A previously published owner never accepts a vanished root as unpublished.
+- `ProjectBundle::reconcile` retries outstanding object-directory syncs.
+- A test-only `object_directory_sync` fault point.
+- The harness reaps a recorded participant on the record when a later participant's setup fails.
+
+C4 explicitly authorizes the small `kinewright-hash` workspace crate, an exception
+to the original plan's no-new-crate rule. It contains the existing SHA implementation
+and adds no third-party dependency. The predecessor source and setup deadlines stay
+frozen. Existing m2/m3/m4, L4/L6 and S2/S6 boundaries remain unchanged.

@@ -123,7 +123,9 @@ else
         # exclude them from the sealed artifact instead of extending the frozen deadline.
         sha256sum "$sealed/$executable" > "$sealed/pre-strip.sha256"
         strip --version > "$sealed/strip-version.txt"
-        strip --strip-all "$sealed/$executable"
+        strip_arguments=(--strip-all)
+        printf '%s\n' "${strip_arguments[@]}" > "$sealed/strip-arguments.txt"
+        strip "${strip_arguments[@]}" "$sealed/$executable"
         mkdir -p crates/kinewright-project/tests
         observer=crates/kinewright-project/tests/ja_s1_predecessor_format.rs
         cp "$scratch/predecessor-format.rs" "$observer"
@@ -171,7 +173,7 @@ manifest={'source_root':str(source.resolve()),'source_head':base,'binary':str(bi
 if platform.system() == 'Linux':
     manifest['pre_strip_binary_sha256']=(sealed/'pre-strip.sha256').read_text().split()[0]
     manifest['strip_version']=(sealed/'strip-version.txt').read_text().splitlines()[0]
-    manifest['strip_arguments']=['--strip-all']
+    manifest['strip_arguments']=(sealed/'strip-arguments.txt').read_text().splitlines()
 else:
     manifest['pre_strip_binary_sha256']=hashfile(binary)
     manifest['strip_version']=None

@@ -2283,7 +2283,9 @@ impl KinewrightApp {
                 self.stash_refused_if_eligible(project_index, &observation, op);
                 self.note_observation(observation);
             }
-            Event::BatchRejected { .. } | Event::QueryResult(_) => {}
+            Event::UndoBlockedBySave { .. }
+            | Event::BatchRejected { .. }
+            | Event::QueryResult(_) => {}
         }
     }
 
@@ -2850,6 +2852,9 @@ impl KinewrightApp {
                 // Every router decision this event carries is made in
                 // `note_core_event_for_router`, including the conflict note
                 // `reconcile_router_sends` reads (review-final B1).
+                Event::UndoBlockedBySave { .. } => {
+                    self.status = "Undo is waiting for the save to finish. Retry after the destination is reconciled.".into();
+                }
                 Event::RevisionConflict { .. } | Event::QueryResult(_) => {}
             }
         }

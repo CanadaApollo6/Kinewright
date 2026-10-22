@@ -412,6 +412,17 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
+    pub(crate) fn seal_observed_root(&self, expected: Option<&[u8]>) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::seal_observed_root(self, expected)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = expected;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub(crate) fn verify_admitted_root(&self, expected: &[u8]) -> Result<(), BundleError> {
         self.verify()?;
         #[cfg(target_os = "linux")]

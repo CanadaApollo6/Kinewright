@@ -334,7 +334,10 @@ fn command_lands_mid_save_above_pending_floor() {
                 apply(&moving, Command::Undo);
             }
             let boundary = moving.export_history().unwrap();
-            apply(&moving, Command::Undo);
+            assert!(matches!(
+                moving.request(Command::Undo).unwrap(),
+                Event::UndoBlockedBySave { .. }
+            ));
             assert_eq!(
                 moving.export_history().unwrap(),
                 boundary,

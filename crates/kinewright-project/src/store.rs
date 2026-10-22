@@ -2073,6 +2073,27 @@ impl ProjectStore {
     }
 }
 impl ProjectStore {
+    /// Finish uncertain object namespace barriers and account residual bytes before
+    /// releasing their staging reservations. This does not decide any Core floor.
+    pub(crate) fn settle_object_writes(&mut self) -> Result<(), BundleError> {
+        if !self.has_unsettled_objects()? {
+            return Ok(());
+        }
+        self.with_namespace(|n| {
+            let root = n.read_root()?;
+            n.reconcile_copy_root(root.as_deref())?;
+            // Retry the object-directory syncs whose outcome was unknown.
+            n.finish_object_batch()
+        })?;
+        self.account_residuals(false)?;
+        self.inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .pending
+            .clear();
+        self.settle_controls()
+    }
     pub(crate) fn settle_controls(&mut self) -> Result<(), BundleError> {
         let mut ledger = self
             .inner
@@ -2316,6 +2337,13 @@ impl SourceCopyHold {
     }
     pub(crate) fn reconciled(&mut self) {
         self.uncertain = false;
+        if let Ok(ledger) = self.pin.inner.ledger.lock()
+            && ledger.pending.is_empty()
+            && ledger.pending_controls.is_empty()
+            && let Ok(mut usage) = self.pin.inner.usage.lock()
+        {
+            usage.unsettled = false;
+        }
     }
 }
 impl Drop for SourceCopyHold {
