@@ -110,6 +110,13 @@ impl<'de> serde::Deserialize<'de> for PortablePath {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RootReplaceBoundary {
     NeverAttempted,
+    #[cfg_attr(
+        not(target_os = "linux"),
+        allow(
+            dead_code,
+            reason = "only the Linux namespace can observe a definite rename refusal"
+        )
+    )]
     DefinitelyRefused,
     Unknown,
 }
