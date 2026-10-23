@@ -1017,6 +1017,38 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-rescue-source",
+      "relative_file": "s2-rescue-source.json",
+      "sha256": "b51010406dcb95128a331e4e8672a17c71bb934c0fd2203249812552f464e8b1",
+      "byte_length": 1446,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-rescue-slots",
+      "relative_file": "s2-rescue-slots.json",
+      "sha256": "1397d863879401e7bb5ba3c68ad2ff540e27ac709a474efba4d40ef5e2622352",
+      "byte_length": 1468,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

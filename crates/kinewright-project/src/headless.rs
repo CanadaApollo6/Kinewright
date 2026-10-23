@@ -145,13 +145,8 @@ pub fn save_headless_bundle(
     core: &kinewright_core::Core,
     inputs: Option<&crate::bundle_records::ObjectRef>,
 ) -> Result<crate::bundle::BundleSaveReport, crate::bundle::BundleError> {
-    let mut bundle = crate::bundle::ProjectBundle::activate(path, admission)?;
-    if let Some(reference) = inputs {
-        bundle.save(core, reference)
-    } else {
-        let manifest = bundle.empty_inputs()?;
-        bundle.save(core, &manifest.reference)
-    }
+    crate::editing_session::Ja1EditingSession::activate(path, admission, core, inputs)?
+        .save_active()
 }
 
 #[cfg(test)]

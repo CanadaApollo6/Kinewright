@@ -1,9 +1,33 @@
-//! C2 production controls only: no rescue publication or UI handoff is claimed.
+//! C2/C3 production controls: no rescue publication or UI handoff is claimed.
 #![cfg(feature = "test-util")]
 #![allow(clippy::too_many_lines)]
 use kinewright_core::{
     Command, Core, CoreMutationRefusal, Document, Event, Operation, Track, TrackId, TrackKind,
 };
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s2_c3.rs"]
+mod c3;
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn c3_unsupported_new_context_refuses_before_source_mutation() {
+    use kinewright_media::test_support::TempDirectory;
+    let temp = TempDirectory::new("c3-unsupported");
+    let core = Core::spawn(document()).unwrap();
+    let (result, trace) = kinewright_project::io_observer::observe(|| {
+        kinewright_project::editing_session::Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            kinewright_project::storage_budget::StorageLimits::default(),
+        )
+    });
+    assert!(matches!(
+        result,
+        Err(kinewright_project::bundle::BundleError::DurabilityUnsupported)
+    ));
+    assert!(trace.events.is_empty());
+    assert_eq!(std::fs::read_dir(temp.root()).unwrap().count(), 0);
+}
 
 fn document() -> Document {
     Document {

@@ -14,6 +14,141 @@ const DIR: OFlags = OFlags::RDONLY
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
 
+pub(super) fn inspect_rescue_destination(
+    path: &Path,
+    sources: &[&ProjectNamespace],
+) -> Result<super::DestinationInspection, BundleError> {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                PortablePath::new(Path::new(name))?;
+            }
+            _ => {
+                return Err(BundleError::Identity(
+                    "unresolved rescue destination".into(),
+                ));
+            }
+        }
+    }
+    // A rescue destination is fresh, including its store. Inspecting never creates a lock.
+    let mut assets = path
+        .file_stem()
+        .ok_or_else(|| BundleError::Identity("rescue filename".into()))?
+        .to_os_string();
+    assets.push(".kinewright-assets");
+    for candidate in [path.clone(), path.with_file_name(assets)] {
+        match std::fs::symlink_metadata(candidate) {
+            Ok(_) => return Err(BundleError::Identity("occupied rescue destination".into())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut ancestor = path
+        .parent()
+        .ok_or_else(|| BundleError::Identity("rescue parent".into()))?
+        .to_path_buf();
+    loop {
+        match std::fs::symlink_metadata(&ancestor) {
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                ancestor = ancestor
+                    .parent()
+                    .ok_or_else(|| BundleError::Identity("rescue ancestor".into()))?
+                    .to_path_buf();
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let parent = pin_directory(&ancestor)?;
+    check_profile(&parent)?;
+    let inspection = super::DestinationInspection {
+        path,
+        ancestor,
+        parent,
+    };
+    rescue_separation(&inspection, sources)?;
+    note("rescue_separation_inspect", &inspection.path);
+    Ok(inspection)
+}
+
+fn overlaps(a: &Path, b: &Path) -> bool {
+    a.starts_with(b) || b.starts_with(a)
+}
+
+fn rescue_separation(
+    inspection: &super::DestinationInspection,
+    sources: &[&ProjectNamespace],
+) -> Result<(), BundleError> {
+    let mut candidate_ancestors = vec![];
+    let mut ancestor = Some(inspection.ancestor.as_path());
+    while let Some(path) = ancestor {
+        candidate_ancestors.push(fs::fstat(&pin_directory(path)?)?);
+        ancestor = path.parent();
+    }
+    for source in sources {
+        let root = &source.identity.resolved_root;
+        let base = root
+            .parent()
+            .ok_or_else(|| BundleError::Identity("retained parent".into()))?;
+        let assets = base.join(asset_name(source)?);
+        let lost_parent = verify_parent(source).is_err();
+        let protected = if source.session.is_some() || lost_parent {
+            base
+        } else {
+            root
+        };
+        if overlaps(&inspection.path, protected) || overlaps(&inspection.path, &assets) {
+            return Err(BundleError::Identity(
+                "rescue overlaps a retained namespace".into(),
+            ));
+        }
+        // Spellings alone cannot detect bind mounts or aliases of retained asset directories.
+        let mut identities = source
+            .directories
+            .borrow()
+            .values()
+            .map(fs::fstat)
+            .collect::<Result<Vec<_>, _>>()?;
+        if source.session.is_some() || lost_parent {
+            identities.push(fs::fstat(&source.parent)?);
+        }
+        if identities.iter().any(|held| {
+            candidate_ancestors
+                .iter()
+                .any(|current| current.st_dev == held.st_dev && current.st_ino == held.st_ino)
+        }) {
+            return Err(BundleError::Identity(
+                "rescue aliases retained native storage".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn revalidate_rescue_destination(
+    inspection: &super::DestinationInspection,
+    sources: &[&ProjectNamespace],
+) -> Result<(), BundleError> {
+    let current = inspect_rescue_destination(&inspection.path, sources)?;
+    let held = fs::fstat(&inspection.parent)?;
+    let actual = fs::fstat(&current.parent)?;
+    if current.ancestor != inspection.ancestor
+        || held.st_dev != actual.st_dev
+        || held.st_ino != actual.st_ino
+    {
+        return Err(BundleError::Identity(
+            "rescue destination parent changed".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn asset_name(namespace: &ProjectNamespace) -> Result<std::ffi::OsString, BundleError> {
     let mut name = namespace
         .identity
@@ -301,6 +436,7 @@ pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
         },
         parent,
         session: None,
+        probe_failure: std::cell::RefCell::default(),
         root_name,
         lock: None,
         directories: std::cell::RefCell::new(std::collections::BTreeMap::new()),
@@ -794,6 +930,10 @@ pub(super) fn finish_directory_barriers(namespace: &ProjectNamespace) -> Result<
     paths.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     for path in paths {
         let (handle, parent) = &pending[&path];
+        namespace.probe_operation(
+            crate::bundle_rescue::ReconcilePhase::Barrier,
+            "sync admitted directory",
+        );
         #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::check_failure(
             if *parent {
@@ -803,10 +943,10 @@ pub(super) fn finish_directory_barriers(namespace: &ProjectNamespace) -> Result<
             },
             &path,
         )
-        .map_err(|_| BundleError::DurabilityUnknown)?;
+        .map_err(|error| namespace.probe_uncertainty(error.into()))?;
         #[cfg(not(any(test, feature = "test-util")))]
         let _ = parent;
-        sync_directory(handle, &path).map_err(|_| BundleError::DurabilityUnknown)?;
+        sync_directory(handle, &path).map_err(|error| namespace.probe_uncertainty(error))?;
         pending.remove(&path);
     }
     Ok(())
@@ -828,11 +968,15 @@ pub(super) fn finish_object_batch(namespace: &mut ProjectNamespace) -> Result<()
     let paths: Vec<_> = namespace.dirty_object_directories.keys().cloned().collect();
     for path in paths {
         namespace.uncertain = true;
+        namespace.probe_operation(
+            crate::bundle_rescue::ReconcilePhase::Barrier,
+            "sync owned object directory",
+        );
         #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::check_failure("object_directory_sync", &path)
-            .map_err(|_| BundleError::DurabilityUnknown)?;
+            .map_err(|error| namespace.probe_uncertainty(error.into()))?;
         sync_directory(&namespace.dirty_object_directories[&path], &path)
-            .map_err(|_| BundleError::DurabilityUnknown)?;
+            .map_err(|error| namespace.probe_uncertainty(error))?;
         namespace.dirty_object_directories.remove(&path);
         namespace.uncertain = false;
     }
@@ -841,6 +985,8 @@ pub(super) fn finish_object_batch(namespace: &mut ProjectNamespace) -> Result<()
 }
 
 fn sync_directory(directory: &File, observed: &Path) -> Result<(), BundleError> {
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::check_failure("directory_sync_native", observed)?;
     #[cfg(any(test, feature = "test-util"))]
     crate::io_observer::measure_sync(|| fs::fsync(directory))?;
     #[cfg(not(any(test, feature = "test-util")))]
@@ -959,6 +1105,7 @@ pub(super) fn create_session(
         },
         parent,
         root_name: "session.kinewright".into(),
+        probe_failure: std::cell::RefCell::default(),
         directories: std::cell::RefCell::default(),
         lock: None,
         pending_directory_syncs: std::cell::RefCell::default(),
@@ -1083,11 +1230,23 @@ pub(super) fn reconcile_copy_root(
 ) -> Result<(), BundleError> {
     namespace.uncertain = false;
     let result = (|| {
+        namespace.probe_operation(
+            crate::bundle_rescue::ReconcilePhase::Barrier,
+            "verify publication barriers",
+        );
         namespace.verify()?;
+        namespace.probe_operation(
+            crate::bundle_rescue::ReconcilePhase::RootRead,
+            "verify observed root",
+        );
         if namespace.read_root()?.as_deref() != expected {
             return Err(BundleError::Corrupt("reconciliation root changed".into()));
         }
         if let Some(temporary) = &namespace.pending_root_cleanup {
+            namespace.probe_operation(
+                crate::bundle_rescue::ReconcilePhase::Cleanup,
+                "remove root temporary",
+            );
             #[cfg(any(test, feature = "test-util"))]
             crate::io_observer::check_failure(
                 "root_cleanup_unlink",
@@ -1098,6 +1257,10 @@ pub(super) fn reconcile_copy_root(
                 Err(error) => return Err(error.into()),
             }
         }
+        namespace.probe_operation(
+            crate::bundle_rescue::ReconcilePhase::Barrier,
+            "sync root namespace",
+        );
         sync_directory(
             &namespace.parent,
             namespace.identity.resolved_root.parent().unwrap(),

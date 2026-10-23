@@ -76,6 +76,90 @@ pub(crate) fn settle_copy_source(
     Ok(())
 }
 impl BundleCopy {
+    pub(crate) fn rebound_manifest(&self, source: &ObjectRef) -> Result<ObjectRef, BundleError> {
+        self.input_rebindings
+            .get(source)
+            .cloned()
+            .ok_or_else(|| BundleError::Identity("manifest outside frozen copy".into()))
+    }
+    pub(crate) fn source_manifest(&self, rebound: &ObjectRef) -> Result<ObjectRef, BundleError> {
+        self.input_rebindings
+            .iter()
+            .find_map(|(source, target)| (target == rebound).then(|| source.clone()))
+            .ok_or_else(|| BundleError::Identity("manifest outside retained source".into()))
+    }
+    pub(crate) fn destination_owner(&self) -> Result<&ProjectBundle, BundleError> {
+        self.destination
+            .as_ref()
+            .ok_or_else(|| BundleError::Identity("missing retained writer".into()))
+    }
+    /// A retained owner never rolls back or consumes its namespace/source on settlement.
+    pub(crate) fn reconcile_retained(
+        &mut self,
+        live: &Core,
+    ) -> Result<Option<BundleSaveReport>, BundleError> {
+        let destination = self
+            .destination
+            .as_mut()
+            .ok_or_else(|| BundleError::Identity("missing retained writer".into()))?;
+        destination.store.with_namespace(|n| {
+            n.probe_retained_namespace()?;
+            n.verify_read_authority()
+        })?;
+        let actual = destination.store.with_namespace(|n| n.read_root())?;
+        if actual == self.before.root
+            && !matches!(
+                self.status,
+                CopyStatus::Committed(_) | CopyStatus::CommittedWithError { .. }
+            )
+        {
+            destination
+                .store
+                .with_namespace(|n| n.reconcile_copy_root(actual.as_deref()))?;
+            destination.store.settle_object_writes()?;
+            destination.store.settle_controls()?;
+            destination.settle_destination_ticket(Some(live))?;
+            destination.unsettled = false;
+            destination.publication_state = crate::bundle::PublicationState::DefinitelyRefused;
+            destination.publication_tag = None;
+            self.source
+                .lock()
+                .map_err(|_| BundleError::Capacity("copy source poisoned"))?
+                .reconciled();
+            self.status = CopyStatus::DefinitelyUnpublished;
+            return Ok(None);
+        }
+        self.reconcile_destination_policy(Some(live), true)
+    }
+    /// Serialized non-consuming borrow: the original copy, ancestor claim and source stay owned.
+    pub(crate) fn save_retained(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+    ) -> Result<BundleSaveReport, BundleError> {
+        self.reconcile_retained(core)?;
+        let destination = self
+            .destination
+            .as_mut()
+            .ok_or_else(|| BundleError::Identity("missing retained writer".into()))?;
+        let _inputs = destination.store.pin(std::slice::from_ref(inputs))?;
+        let result = destination.save(core, inputs);
+        match &result {
+            Ok(report) => self.status = CopyStatus::Committed(report.clone()),
+            Err(_)
+                if destination.publication_state() == crate::bundle::PublicationState::Unknown =>
+            {
+                self.tag.clone_from(&destination.publication_tag);
+                self.source
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("copy source poisoned"))?
+                    .mark_uncertain()?;
+                self.status = CopyStatus::DurabilityUnknown;
+            }
+            _ => {}
+        }
+        result
+    }
     fn pending_source(&self) -> Option<PendingCopySource> {
         if !matches!(
             self.status,
@@ -154,6 +238,13 @@ impl BundleCopy {
         &mut self,
         live: Option<&Core>,
     ) -> Result<Option<BundleSaveReport>, BundleError> {
+        self.reconcile_destination_policy(live, false)
+    }
+    fn reconcile_destination_policy(
+        &mut self,
+        live: Option<&Core>,
+        retained: bool,
+    ) -> Result<Option<BundleSaveReport>, BundleError> {
         if matches!(
             self.status,
             CopyStatus::Committed(_) | CopyStatus::DefinitelyUnpublished
@@ -172,7 +263,7 @@ impl BundleCopy {
             .destination
             .as_mut()
             .ok_or_else(|| BundleError::Corrupt("copy owner missing".into()))?;
-        if let Some(tag) = &self.tag {
+        if !retained && let Some(tag) = &self.tag {
             crate::bundle::reconcile_save_tag(tag)?;
         }
         let actual = destination.store.with_namespace(|n| n.read_root())?;

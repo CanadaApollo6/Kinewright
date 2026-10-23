@@ -647,3 +647,52 @@ fn s2_additive_core_seal_fixture_observes_retained_clone_mutation() {
         assert_eq!(observed["sealed_refuses_mutation"], mode == Mode::Revised);
     }
 }
+
+#[cfg(target_os = "linux")]
+fn c3_fixture(name: &str) {
+    use kinewright_agent::ja_harness::protocol::Mode;
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-c3-fixture");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/fixtures/ja/{name}.json"));
+    for mode in [Mode::Baseline, Mode::Revised] {
+        let output = temp.path(if mode == Mode::Baseline {
+            "baseline"
+        } else {
+            "revised"
+        });
+        let result = kinewright_agent::ja_harness::run(&fixture, &output, mode).unwrap();
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+        assert_eq!(result, 0, "{summary}");
+        assert_eq!(
+            summary["pending"].as_array().unwrap().len(),
+            usize::from(mode == Mode::Baseline)
+        );
+        assert_eq!(
+            summary["assertions"].as_array().unwrap().len(),
+            if mode == Mode::Baseline { 1 } else { 2 }
+        );
+        assert!(
+            summary["assertions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["passed"] == true)
+        );
+        let observation: Value = serde_json::from_slice(
+            &std::fs::read(output.join("artifacts/observation-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(observation["rescue_publication"], false);
+    }
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn s2_additive_source_fixture_observes_actual_lifecycle_owners() {
+    c3_fixture("s2-rescue-source");
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn s2_additive_slots_fixture_observes_ordinary_save_at_four_slots() {
+    c3_fixture("s2-rescue-slots");
+}

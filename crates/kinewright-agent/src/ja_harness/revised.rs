@@ -36,6 +36,20 @@ impl Adapter {
     ) -> Result<Value, String> {
         let call = &action.call;
         match call {
+            Call::S2RescueSourceProbe(_) | Call::S2RescueSlotsProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::rescue_owners(
+                        &self.baseline.root,
+                        self.mode == Mode::Revised,
+                        matches!(call, Call::S2RescueSlotsProbe(_)),
+                    )
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C3 durable source/slot observer requires Linux; NOT RUN".into())
+                }
+            }
             Call::S2CoreSealProbe(_) => super::s2_observer::core_seal(self.mode == Mode::Revised),
             Call::S2SavePhaseProbe(_) => {
                 #[cfg(target_os = "linux")]

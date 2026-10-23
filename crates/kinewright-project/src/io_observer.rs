@@ -200,6 +200,24 @@ pub fn observe<T>(run: impl FnOnce() -> T) -> (T, IoTrace) {
 }
 
 thread_local! { static FAILURE: RefCell<Option<&'static str>> = const {RefCell::new(None)}; }
+thread_local! { static NATIVE_FAILURE: RefCell<Option<(&'static str, i32)>> = const {RefCell::new(None)}; }
+/// Inject one native cause at a real adapter boundary inside a private fixture root.
+/// # Panics
+/// Refuses nested native fault scopes.
+pub fn fail_native_once<T>(operation: &'static str, errno: i32, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NATIVE_FAILURE.with_borrow_mut(|f| *f = None);
+        }
+    }
+    NATIVE_FAILURE.with_borrow_mut(|f| {
+        assert!(f.is_none());
+        *f = Some((operation, errno));
+    });
+    let _reset = Reset;
+    run()
+}
 thread_local! { static PATH_FAILURE: RefCell<Option<(&'static str, PathBuf)>> = const {RefCell::new(None)}; }
 /// Keep one file undeletable for the entire scope, including every retry.
 /// # Panics
@@ -239,6 +257,17 @@ pub(crate) fn check_failure(
     operation: &'static str,
     path: &std::path::Path,
 ) -> std::io::Result<()> {
+    let native = NATIVE_FAILURE.with_borrow_mut(|failure| {
+        if failure.as_ref().is_some_and(|(op, _)| *op == operation) {
+            failure.take().map(|(_, errno)| errno)
+        } else {
+            None
+        }
+    });
+    if let Some(errno) = native {
+        note("injected_native_failure", path);
+        return Err(std::io::Error::from_raw_os_error(errno));
+    }
     let fail = FAILURE.with_borrow_mut(|failure| {
         if *failure == Some(operation) {
             *failure = None;

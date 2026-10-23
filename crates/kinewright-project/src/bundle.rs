@@ -4,6 +4,7 @@ use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum BundleError {
+    RescueMissingOwnedBytes(Box<crate::bundle_rescue::RescueMissingOwnedBytes>),
     CoreMutationRefused(kinewright_core::CoreMutationRefusal),
     Io(io::Error),
     Identity(String),
@@ -24,6 +25,7 @@ pub enum BundleError {
 impl fmt::Display for BundleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RescueMissingOwnedBytes(e) => e.fmt(f),
             Self::CoreMutationRefused(reason) => reason.fmt(f),
             Self::Io(e) => e.fmt(f),
             Self::Identity(e) => write!(f, "identity_refused: {e}"),
@@ -49,7 +51,15 @@ impl fmt::Display for BundleError {
         }
     }
 }
-impl std::error::Error for BundleError {}
+impl std::error::Error for BundleError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            Self::RescueMissingOwnedBytes(error) => Some(error.as_ref()),
+            _ => None,
+        }
+    }
+}
 impl From<io::Error> for BundleError {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
@@ -1589,7 +1599,13 @@ fn reconcile_save_tag_policy(
         namespace.seal_observed_root(bytes.as_deref())?;
         Ok(own)
     };
-    read().map_err(|_| BundleError::DurabilityUnknownAt(tag.destination.clone()))
+    read().map_err(|error| {
+        if continuous && matches!(error, BundleError::Io(_)) {
+            error
+        } else {
+            BundleError::DurabilityUnknownAt(tag.destination.clone())
+        }
+    })
 }
 
 /// Retained attempt release requires continuity; a changed parent is still unknown.

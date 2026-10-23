@@ -111,6 +111,8 @@ pub enum Call {
     AdapterStatus(Empty),
     S2SavePhaseProbe(Empty),
     S2CoreSealProbe(Empty),
+    S2RescueSourceProbe(Empty),
+    S2RescueSlotsProbe(Empty),
     OwnedInputProbe(InputArgs),
     BundleCopyProbe(InputArgs),
     BundleBudgetProbe(InputArgs),
@@ -315,6 +317,8 @@ pub enum Comparison {
 pub enum EvidenceClass {
     Control,
     BaselineProperty,
+    /// A new surface with no predecessor endpoint; baseline retains a pending witness.
+    RevisedProperty,
 }
 
 /// Already captured immutable fixture bytes and verified input/oracle bytes.

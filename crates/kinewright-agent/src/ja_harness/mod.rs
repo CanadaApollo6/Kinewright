@@ -276,13 +276,20 @@ fn assert_observed(
     if report.assertions.iter().any(|old| old["id"] == a.id) {
         return Err("duplicate assertion id".into());
     }
-    if a.evidence_class == EvidenceClass::BaselineProperty {
+    if matches!(
+        a.evidence_class,
+        EvidenceClass::BaselineProperty | EvidenceClass::RevisedProperty
+    ) {
         require_control(
             a.positive_control
                 .as_deref()
                 .ok_or("baseline property needs a positive control")?,
             report,
         )?;
+    }
+    if a.evidence_class == EvidenceClass::RevisedProperty && report.mode == Mode::Baseline {
+        report.pending.push(json!({"id":a.id, "disposition":"pending_baseline_witness", "reason":"new lifecycle surface", "positive_control":a.positive_control}));
+        return Ok(());
     }
     let actual = observations
         .get(&a.observation)

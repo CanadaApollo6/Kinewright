@@ -106,6 +106,212 @@ pub struct SealedObject {
     pin: StorePin,
 }
 
+/// Unforgeable access to a verified, pinned closure under its original store owner.
+/// No caller locator or external hint is accepted by reads.
+pub struct RetainedReadAdmission {
+    hold: Arc<SourceCopyHold>,
+    objects: StorageReservation<Vec<ObjectRef>>,
+}
+struct RetainedReadLease {
+    file: File,
+    _hold: Arc<SourceCopyHold>,
+    _charge: StorageReservation,
+}
+impl Read for RetainedReadLease {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+impl Seek for RetainedReadLease {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+impl RetainedReadAdmission {
+    #[must_use]
+    pub fn objects(&self) -> &[ObjectRef] {
+        &self.objects
+    }
+    pub fn open(&self, reference: &ObjectRef) -> Result<impl Read + Seek + use<>, BundleError> {
+        if !self.objects.contains(reference) {
+            return Err(BundleError::Identity(
+                "object outside retained admission".into(),
+            ));
+        }
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        let path = ProjectStore::object_path(reference)?;
+        crate::namespace::note("rescue_permission_read", path.as_path());
+        let charge = store.reserve_copy_read(0, 256, 0, false, true)?;
+        let file = store.open_copy_source(reference, true)?;
+        Ok(RetainedReadLease {
+            file,
+            _hold: Arc::clone(&self.hold),
+            _charge: charge,
+        })
+    }
+}
+impl ProjectStore {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn retention_probe(&self) -> Result<(u64, BTreeMap<String, u64>), BundleError> {
+        let ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        Ok((ledger.copy_holds, ledger.pins.clone()))
+    }
+    pub(crate) fn reserve_retained_capture(
+        &self,
+        bytes: &[u8],
+    ) -> Result<StorageReservation, BundleError> {
+        let decoded = preflight_record(bytes, self.limits())?;
+        self.reserve_copy_read(0, decoded, decoded, false, true)
+    }
+    pub(crate) fn reserve_capture_scratch(&self) -> Result<StorageReservation, BundleError> {
+        self.reserve_copy_read(0, self.limits().decoded_record_bytes, 0, false, true)
+    }
+    pub fn inspect_rescue_destination(
+        path: &Path,
+        stores: &[&Self],
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        let mut stores = stores.to_vec();
+        stores.sort_by_key(|store| Arc::as_ptr(&store.inner));
+        stores.dedup_by(|a, b| Arc::ptr_eq(&a.inner, &b.inner));
+        let guards = stores
+            .iter()
+            .map(|s| {
+                s.inner
+                    .namespace
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("namespace poisoned"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        crate::namespace::DestinationInspection::inspect(
+            path,
+            &guards.iter().map(|g| &**g).collect::<Vec<_>>(),
+        )
+    }
+    pub fn revalidate_rescue_destination(
+        inspection: &crate::namespace::DestinationInspection,
+        stores: &[&Self],
+    ) -> Result<(), BundleError> {
+        let mut stores = stores.to_vec();
+        stores.sort_by_key(|store| Arc::as_ptr(&store.inner));
+        stores.dedup_by(|a, b| Arc::ptr_eq(&a.inner, &b.inner));
+        let guards = stores
+            .iter()
+            .map(|s| {
+                s.inner
+                    .namespace
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("namespace poisoned"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        inspection.revalidate(&guards.iter().map(|g| &**g).collect::<Vec<_>>())
+    }
+    /// Diagnose each retaining role independently, then page a bounded frozen result.
+    pub fn diagnose_retained_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        offset: usize,
+        page: usize,
+    ) -> Result<crate::bundle_rescue::RescueMissingOwnedBytes, BundleError> {
+        use crate::bundle_rescue::RescueMissingOwnedBytes;
+        if roots.len() as u64 > self.limits().objects || page == 0 || page > 32 {
+            return Err(BundleError::Capacity("rescue diagnostic page"));
+        }
+        let mut uses = BTreeMap::<ObjectRef, BTreeSet<_>>::new();
+        let mut working = Vec::new();
+        let mut complete = true;
+        let mut missing = BTreeMap::new();
+        for (root, role) in roots {
+            match self.closure(std::slice::from_ref(root)) {
+                Ok(objects) => {
+                    let additions = objects
+                        .iter()
+                        .filter(|object| {
+                            !uses.get(*object).is_some_and(|roles| roles.contains(role))
+                        })
+                        .count();
+                    working.push(self.reserve_copy_read(
+                        0,
+                        additions as u64 * 1024,
+                        0,
+                        false,
+                        true,
+                    )?);
+                    for object in objects {
+                        uses.entry(object).or_default().insert(role.clone());
+                    }
+                }
+                Err(error) => {
+                    working.push(self.reserve_copy_read(0, 1024, 0, false, true)?);
+                    complete = false;
+                    uses.entry(root.clone()).or_default().insert(role.clone());
+                    missing.insert(root.clone(), error.to_string());
+                }
+            }
+        }
+        for object in uses.keys() {
+            if missing.contains_key(object) {
+                continue;
+            }
+            if let Err(error) = self.open_copy_source(object, true) {
+                if !object.record_kind.is_owned_bytes() {
+                    complete = false;
+                }
+                missing.insert(object.clone(), format!("retained object read: {error}"));
+            }
+        }
+        let total = missing.len();
+        let entries = missing
+            .into_iter()
+            .skip(offset)
+            .take(page)
+            .map(|(object, cause)| {
+                let roles = uses
+                    .remove(&object)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                (object, roles, cause)
+            })
+            .collect::<Vec<_>>();
+        let end = offset.saturating_add(entries.len());
+        Ok(RescueMissingOwnedBytes {
+            omitted: total.saturating_sub(entries.len()),
+            next: (end < total).then_some(end),
+            entries,
+            dependencies_complete: complete,
+        })
+    }
+    pub fn admit_retained_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+    ) -> Result<RetainedReadAdmission, BundleError> {
+        let diagnostic = self.diagnose_retained_reads(roots, 0, 32)?;
+        if !diagnostic.entries.is_empty() || !diagnostic.dependencies_complete {
+            return Err(BundleError::RescueMissingOwnedBytes(Box::new(diagnostic)));
+        }
+        let roots = roots.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
+        let objects = self.closure(&roots)?;
+        let bytes = objects.iter().try_fold(0_u64, |n, r| {
+            n.checked_add(r.byte_length)
+                .ok_or(BundleError::Capacity("retained source bytes"))
+        })?;
+        let objects = self
+            .reserve_copy_read(0, objects.len() as u64 * 256, 0, false, true)?
+            .hold(objects);
+        let hold = self.begin_copy_source(&roots, bytes, true)?;
+        Ok(RetainedReadAdmission {
+            hold: Arc::new(hold),
+            objects,
+        })
+    }
+}
+
 impl SealedObject {
     #[must_use]
     pub fn into_pin(self) -> StorePin {

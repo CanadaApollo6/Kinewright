@@ -1,5 +1,22 @@
 # JA-1 S2 C1: publication phase, cleanup and fresh-open admission
 
+C3 adds project-local lifecycle ownership, retained read admission, structured probes,
+read-only namespace separation, rescue-slot accounting and non-consuming A writer reuse.
+The [C3 report](c3.md) records its exact scope, owner table, gates, mutation pairs and lane
+limits. C3 keeps first-save absent reconciliation's staged graph under the retained writer
+instead of ordinary copy rollback so L3 can save again through the same namespace.
+The implementation is at `crates/kinewright-project/src/bundle_copy.rs:97` and
+`crates/kinewright-project/src/editing_session.rs:359`. Rescue publication remains C5.
+
+C3's final Linux gate passed all 51 command rows: 525 selected outcomes, 516 executed
+passes, zero failures and nine existing ignores marked NOT RUN. All 47 mutation
+red/restored-green pairs passed with complete source restoration. Only two additive
+S0 fixtures receive pending-baseline to revised-pass credit; all 88 previous fixture/oracle
+files and 27 previous index entries are unchanged. The sealed 12-save rerun averaged
+224.993 ms beside C2's recorded 250.8 ms, with zero history decodes. This is one C3 run,
+not an interleaved speedup result. Installed Windows project/agent checks both stopped
+in native dependencies at missing Windows C headers; native C3 Windows/CI is NOT RUN.
+
 C1 only, based on main `cb4f6e2586974fbd7da1ba935e7c4e77390aeca0`. No C2 actor gates,
 rescue lifecycle, host, UI recovery or new persistent format/certificate is introduced.
 
@@ -193,3 +210,13 @@ recorded 243.323 ms. Both fresh lanes had zero history decodes; peak production 
 were 135,717,260 and 135,717,257 bytes. Other desktop CPU load was observed in both lanes.
 The report retains all raw summaries, exact CoreMessage/handle audit, NOT RUN lanes and source
 binding. Evidence is under `.review/ja/s2-evidence/c2/`; no logs or binaries are committed.
+
+C3 returns a private owned retained-read lease at
+`crates/kinewright-project/src/store.rs:115` so an issued reader keeps the real pin
+and charge across context Close. Native exact-ticket IO errors remain typed at
+`crates/kinewright-project/src/bundle.rs:1603`. These small ownership and diagnostic
+adjustments are documented as C3 plan details in the report.
+
+The C3 older-root first-save witness uses a compatible independently admitted baseline
+at `crates/kinewright-project/tests/support/ja_s2_c3.rs:1156`. Unrelated Studio histories
+correctly fail the existing continuation guard; that production rule remains intact.

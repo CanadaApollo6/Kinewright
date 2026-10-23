@@ -8,6 +8,8 @@ pub mod bundle_commit;
 pub mod bundle_copy;
 pub mod bundle_records;
 pub mod bundle_recovery;
+pub mod bundle_rescue;
+pub mod editing_session;
 mod history_save;
 pub use history_save::{AttemptBinding, ProjectAttachment};
 pub mod owned_inputs;

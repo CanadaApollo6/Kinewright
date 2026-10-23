@@ -17,6 +17,51 @@ pub struct NamespaceIdentity {
     pub parent_inode: u64,
 }
 
+/// Read-only, pinned admission. Creating parents or claiming a writer is a later operation.
+pub struct DestinationInspection {
+    path: PathBuf,
+    #[cfg(target_os = "linux")]
+    ancestor: PathBuf,
+    #[cfg(target_os = "linux")]
+    parent: File,
+}
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        clippy::unused_self,
+        clippy::unnecessary_wraps,
+        reason = "uncertified profiles retain the Linux read-only refusal API"
+    )
+)]
+impl DestinationInspection {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    pub(crate) fn inspect(path: &Path, sources: &[&ProjectNamespace]) -> Result<Self, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::inspect_rescue_destination(path, sources)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, sources);
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn revalidate(&self, sources: &[&ProjectNamespace]) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::revalidate_rescue_destination(self, sources)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = sources;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityProfile {
     LinuxLocal,
@@ -139,6 +184,8 @@ pub struct ProjectNamespace {
     #[cfg(target_os = "linux")]
     parent: File,
     #[cfg(target_os = "linux")]
+    probe_failure: RefCell<Option<ProbeFailure>>,
+    #[cfg(target_os = "linux")]
     session: Option<(File, OsString)>,
     #[cfg(target_os = "linux")]
     root_name: OsString,
@@ -156,6 +203,12 @@ pub struct ProjectNamespace {
     uncertain: bool,
     read_only: bool,
 }
+#[cfg(target_os = "linux")]
+type ProbeFailure = (
+    crate::bundle_rescue::ReconcilePhase,
+    &'static str,
+    Option<BundleError>,
+);
 
 #[derive(Debug, Clone)]
 pub(crate) struct PhysicalFile {
@@ -187,6 +240,60 @@ impl Drop for PreparedDestination {
     )
 )]
 impl ProjectNamespace {
+    pub(crate) fn probe_retained_namespace(&self) -> Result<(), BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::verify_parent(self)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    pub(crate) fn clear_probe_failure(&self) {
+        #[cfg(target_os = "linux")]
+        self.probe_failure.replace(None);
+    }
+    #[cfg(all(target_os = "linux", any(test, feature = "test-util")))]
+    pub(crate) fn defer_parent_barrier_probe(&self) -> Result<(), BundleError> {
+        self.pending_directory_syncs.borrow_mut().insert(
+            self.identity
+                .resolved_root
+                .parent()
+                .ok_or(BundleError::HistoryBarrierInvariant)?
+                .to_path_buf(),
+            (self.parent.try_clone()?, true),
+        );
+        Ok(())
+    }
+    #[cfg(target_os = "linux")]
+    fn probe_operation(
+        &self,
+        phase: crate::bundle_rescue::ReconcilePhase,
+        operation: &'static str,
+    ) {
+        self.probe_failure.replace(Some((phase, operation, None)));
+    }
+    #[cfg(target_os = "linux")]
+    fn probe_uncertainty(&self, error: BundleError) -> BundleError {
+        if let Some((_, _, original)) = &mut *self.probe_failure.borrow_mut() {
+            *original = Some(error);
+        }
+        BundleError::DurabilityUnknown
+    }
+    pub(crate) fn take_probe_failure(
+        &self,
+        error: BundleError,
+    ) -> (
+        Option<(crate::bundle_rescue::ReconcilePhase, &'static str)>,
+        BundleError,
+    ) {
+        #[cfg(target_os = "linux")]
+        if let Some((phase, operation, original)) = self.probe_failure.take() {
+            return (Some((phase, operation)), original.unwrap_or(error));
+        }
+        (None, error)
+    }
     pub(crate) fn physical_files(&self, limit: u64) -> Result<Vec<PhysicalFile>, BundleError> {
         #[cfg(target_os = "linux")]
         {
