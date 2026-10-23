@@ -141,6 +141,7 @@ mod tests {
         assert_eq!(core.export_history().unwrap(), empty);
     }
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn w05_seal_checks_cut_and_all_mutation_paths() {
         let core = Core::spawn(crate::Document::default()).unwrap();
         let retained = core.clone();
@@ -160,6 +161,19 @@ mod tests {
                 ..
             }
         ));
+        let frozen = Err(history_error(CoreMutationRefusal::Frozen));
+        assert_eq!(owner.restore_history(&Proof, cut.history().clone()), frozen);
+        assert_eq!(
+            owner.install_checkpoint(&Proof, cut.history().clone(), cut.history().clone()),
+            frozen
+        );
+        assert_eq!(
+            owner.install_history_transition(
+                &Proof,
+                HistoryTransition::floor(cut.history().clone(), 1).unwrap()
+            ),
+            frozen
+        );
         owner.seal(&Proof, &cut).unwrap();
         let history = core.export_history().unwrap();
         let revision = cut.revision();

@@ -297,6 +297,53 @@ impl BundleCommit {
         seed: Option<&LineageRecord>,
         selected: Option<&HistorySnapshot>,
     ) -> Result<BundleSaveReport, BundleError> {
+        Self::publish_branch_impl(bundle, history, inputs, branch_id, seed, selected, None)
+    }
+    pub(crate) fn publish_selection(
+        bundle: &mut ProjectBundle,
+        selection: &crate::bundle_switch::PreparedProjectSelection,
+    ) -> Result<BundleSaveReport, BundleError> {
+        Self::publish_branch_impl(
+            bundle,
+            &selection.restore.history,
+            &selection.restore.checkpoint.input_manifest_ref,
+            &selection.target_branch,
+            Some(&selection.restore.lineage),
+            Some(&selection.restore.history),
+            Some(selection),
+        )
+    }
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    fn publish_branch_impl(
+        bundle: &mut ProjectBundle,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch_id: &crate::bundle_records::BranchId,
+        seed: Option<&LineageRecord>,
+        selected: Option<&HistorySnapshot>,
+        selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let existing_selection = selection.is_some_and(|selected| {
+            matches!(
+                selected.target(),
+                crate::bundle_recovery::RecoverySelection::WorkingBranch(_)
+            )
+        });
+        let manual_branch_id = selection.map_or_else(
+            || bundle.manual_branch_id.clone(),
+            |s| s.target_branch.clone(),
+        );
+        let old_switch = bundle
+            .root
+            .as_ref()
+            .map_or(0, |r| r.manual_switch_generation);
+        let switch_generation = if selection.is_some() {
+            old_switch
+                .checked_add(1)
+                .ok_or(BundleError::Capacity("manual switch generation"))?
+        } else {
+            old_switch
+        };
         bundle.publication_state = crate::bundle::PublicationState::NeverAttempted;
         bundle.publication_tag = None;
         if bundle.unsettled {
@@ -328,9 +375,13 @@ impl BundleCommit {
             }
             crate::namespace::note("gc_retry_pending", &bundle.store.resolved_root()?);
         }
-        let prior = bundle.branches.get(branch_id).cloned();
+        let prior = selection
+            .map(|s| s.restore.checkpoint.clone())
+            .or_else(|| bundle.branches.get(branch_id).cloned());
         let old_history = if let Some(prior) = &prior {
-            Some(if let Some(cached) = bundle.cached_history(branch_id) {
+            Some(if let Some(selection) = selection {
+                std::sync::Arc::clone(&selection.restore.history)
+            } else if let Some(cached) = bundle.cached_history(branch_id) {
                 std::sync::Arc::clone(cached)
             } else {
                 std::sync::Arc::new(
@@ -430,7 +481,13 @@ impl BundleCommit {
             std::sync::Arc::new(checked)
         };
         let manifest = bundle.store.read_input_manifest(inputs)?;
-        if manifest.project_id.as_ref() != Some(&bundle.project_id) || manifest.session_id.is_some()
+        let historical_input_owner = switch_generation != 0
+            && manifest
+                .project_id
+                .as_ref()
+                .is_some_and(|id| bundle.origin_project_ids.contains(id));
+        if (manifest.project_id.as_ref() != Some(&bundle.project_id) && !historical_input_owner)
+            || manifest.session_id.is_some()
         {
             return Err(BundleError::Identity("current input manifest owner".into()));
         }
@@ -513,6 +570,7 @@ impl BundleCommit {
                 &prefix,
                 &all_batch_ids[..discard],
                 old_lineage.as_deref(),
+                old_lineage.as_deref(),
             )?;
             Some(LineageRecord {
                 branch_origin: branch_id.clone(),
@@ -530,6 +588,7 @@ impl BundleCommit {
             &checked,
             &batch_ids,
             floor_seed.as_ref().or(seed).or(old_lineage.as_deref()),
+            old_lineage.as_deref().or(seed),
         )?;
         let generation = bundle
             .generation
@@ -540,6 +599,7 @@ impl BundleCommit {
                 .as_ref()
                 .is_some_and(|p| p.input_manifest_ref == *inputs);
         let head_id = if unchanged
+            && (selection.is_none() || existing_selection)
             && bundle
                 .pending_command
                 .as_ref()
@@ -579,40 +639,50 @@ impl BundleCommit {
         if let Some(floor_inputs) = floor_inputs {
             contexts[0] = seal!(&floor_inputs);
         }
-        let checkpoint = BranchCheckpoint {
-            branch_id: branch_id.clone(),
-            head_id: head_id.clone(),
-            document_hash: document_ref.sha256.clone(),
-            document_ref,
-            baseline_ref,
-            history_ref,
-            lineage_ref,
-            input_manifest_ref: inputs.clone(),
-            history_input_manifest_refs: contexts,
-            batch_ids,
-            applied_operations_digest: kinewright_media::sha256_bytes(
-                &serde_json::to_vec(&checked.applied_operations())
-                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            ),
-            checkpoint_generation: generation,
-            floor_generation: if floor_discard.is_some() {
-                prior
+        let checkpoint = if existing_selection {
+            prior.clone().ok_or_else(|| {
+                BundleError::Corrupt("missing existing selection checkpoint".into())
+            })?
+        } else {
+            BranchCheckpoint {
+                branch_id: branch_id.clone(),
+                head_id: head_id.clone(),
+                document_hash: document_ref.sha256.clone(),
+                document_ref,
+                baseline_ref,
+                history_ref,
+                lineage_ref,
+                input_manifest_ref: inputs.clone(),
+                history_input_manifest_refs: contexts,
+                batch_ids,
+                applied_operations_digest: kinewright_media::sha256_bytes(
+                    &serde_json::to_vec(&checked.applied_operations())
+                        .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+                ),
+                checkpoint_generation: generation,
+                floor_generation: if floor_discard.is_some() {
+                    prior
+                        .as_ref()
+                        .map_or(0, |p| p.floor_generation)
+                        .checked_add(1)
+                        .ok_or(BundleError::Capacity("floor generation"))?
+                } else {
+                    prior.as_ref().map_or(0, |p| p.floor_generation)
+                },
+                command_cut: bundle
+                    .pending_command
                     .as_ref()
-                    .map_or(0, |p| p.floor_generation)
-                    .checked_add(1)
-                    .ok_or(BundleError::Capacity("floor generation"))?
-            } else {
-                prior.as_ref().map_or(0, |p| p.floor_generation)
-            },
-            command_cut: bundle
-                .pending_command
-                .as_ref()
-                .map(|e| e.id.clone())
-                .or_else(|| prior.as_ref().and_then(|p| p.command_cut.clone())),
-            predecessor: prior.as_ref().map(|p| p.head_id.clone()),
-            take_map_revision_ref: None,
+                    .map(|e| e.id.clone())
+                    .or_else(|| prior.as_ref().and_then(|p| p.command_cut.clone())),
+                predecessor: prior.as_ref().map(|p| p.head_id.clone()),
+                take_map_revision_ref: None,
+            }
         };
-        let checkpoint_ref = seal!(&checkpoint);
+        let checkpoint_ref = if existing_selection {
+            bundle.checkpoint_reference(branch_id)?
+        } else {
+            seal!(&checkpoint)
+        };
         let mut branches = bundle.branches.clone();
         branches.insert(branch_id.clone(), checkpoint);
         let mut branch_index: BTreeMap<_, _> = if let Some(root) = bundle.root.as_ref() {
@@ -714,7 +784,7 @@ impl BundleCommit {
                 .clone()
                 .unwrap_or_else(|| ReceiptResult::Edit {
                     checkpoint_ref: checkpoint_ref.clone(),
-                    batch_id: branches[&bundle.manual_branch_id].batch_ids.last().cloned(),
+                    batch_id: branches[&manual_branch_id].batch_ids.last().cloned(),
                 });
             if matches!(result, ReceiptResult::Comment { .. }) {
                 receipts.comments = receipts
@@ -750,21 +820,25 @@ impl BundleCommit {
         };
         let mut roots = vec![
             branch_index_ref.clone(),
-            branches[&bundle.manual_branch_id]
-                .input_manifest_ref
-                .clone(),
+            branches[&manual_branch_id].input_manifest_ref.clone(),
         ];
         roots.extend(receipt_index_ref.clone());
         roots.extend(issuer_state_ref.clone());
         let mut inventory = SupportInventory {
             required_fields: BTreeSet::new(),
             required_kinds: BTreeSet::new(),
-            required_apis: crate::bundle_recovery::supported_apis(),
+            required_apis: crate::bundle_recovery::base_apis(),
         };
         let mut retained = roots.clone();
         retained.extend(evidence.clone());
         retained.extend(recovery.references());
         inventory.required_fields = bundle.store.support_fields(&retained)?;
+        let closure = bundle.store.closure(&retained)?;
+        let roles = bundle.store.evidence_roles(&closure)?;
+        let requires_switch =
+            switch_generation != 0 || bundle.store.has_archived_manual_switch(&closure)?;
+        inventory.required_apis =
+            crate::rescue_record::required_apis(u64::from(requires_switch), !roles.is_empty());
         let store_manifest = bundle.store.selected_manifest(
             &roots,
             &evidence,
@@ -779,11 +853,11 @@ impl BundleCommit {
             origin_session_ids: bundle.origin_session_ids.clone(),
             generation,
             creation_brief_ref: None,
-            manual_branch_id: bundle.manual_branch_id.clone(),
-            manual_switch_generation: 0,
+            manual_branch_id: manual_branch_id.clone(),
+            manual_switch_generation: switch_generation,
             candidate_branch_ids: branches
                 .keys()
-                .filter(|id| **id != bundle.manual_branch_id)
+                .filter(|id| **id != manual_branch_id)
                 .cloned()
                 .collect(),
             branch_index_ref,
@@ -791,9 +865,7 @@ impl BundleCommit {
             feedback_index_ref: None,
             run_index_ref: None,
             claim_index_ref: None,
-            input_manifest_ref: branches[&bundle.manual_branch_id]
-                .input_manifest_ref
-                .clone(),
+            input_manifest_ref: branches[&manual_branch_id].input_manifest_ref.clone(),
             receipt_index_ref,
             issuer_state_ref,
             store_manifest_ref,
@@ -807,14 +879,15 @@ impl BundleCommit {
             bundle.store.publish_inventory(&staged)?;
         }
         barrier(bundle, CommitBarrier::B3)?;
-        let manual_history =
-            if *branch_id == bundle.manual_branch_id {
-                None
-            } else {
-                Some(bundle.store.read_record::<HistorySnapshot>(
-                    &branches[&bundle.manual_branch_id].history_ref,
-                )?)
-            };
+        let manual_history = if *branch_id == manual_branch_id {
+            None
+        } else {
+            Some(
+                bundle
+                    .store
+                    .read_record::<HistorySnapshot>(&branches[&manual_branch_id].history_ref)?,
+            )
+        };
         let manual_document = manual_history
             .as_ref()
             .map_or(&checked.document, |h| &h.document);
@@ -884,6 +957,7 @@ impl BundleCommit {
         let tail = (|| -> Result<(), BundleError> {
             bundle.evidence = evidence;
             bundle.receipts = receipts;
+            bundle.manual_branch_id = manual_branch_id.clone();
             bundle.root = Some(root);
             bundle.branches = branches;
             bundle.history_cache.insert(
@@ -1264,6 +1338,7 @@ pub(crate) fn lineage(
     history: &HistorySnapshot,
     batches: &[BatchId],
     old: Option<&LineageRecord>,
+    origin_history: Option<&LineageRecord>,
 ) -> Result<LineageRecord, BundleError> {
     let seed = BatchId::fresh()?;
     let baseline: BTreeMap<ClipId, OccurrenceId> = if let Some(old) = old {
@@ -1287,12 +1362,30 @@ pub(crate) fn lineage(
             })
             .collect()
     };
+    let origins: BTreeMap<_, _> = old
+        .into_iter()
+        .chain(origin_history)
+        .flat_map(|old| {
+            old.baseline
+                .values()
+                .chain(old.current.values())
+                .chain(old.undo.iter().flat_map(|m| m.values()))
+                .chain(old.redo.iter().flat_map(|m| m.values()))
+                .chain(
+                    old.split_ancestry
+                        .iter()
+                        .flat_map(|(child, parent, _)| [child, parent]),
+                )
+        })
+        .map(|o| (o.creation_batch_id.clone(), o.branch_origin.clone()))
+        .collect();
     let mut current = baseline.clone();
     let mut undo = vec![];
     let mut redo = vec![];
     let mut split_ancestry =
         old.map_or_else(Vec::new, |old| ancestry(&baseline, &old.split_ancestry));
     for (batch, id) in history.batches.iter().zip(batches) {
+        let origin = origins.get(id).unwrap_or(branch);
         match &batch.command {
             JournalCommand::Undo => {
                 if let Some(previous) = undo.pop() {
@@ -1323,7 +1416,7 @@ pub(crate) fn lineage(
                         current.insert(
                             *created,
                             OccurrenceId {
-                                branch_origin: branch.clone(),
+                                branch_origin: origin.clone(),
                                 creation_batch_id: id.clone(),
                                 result_ordinal: ordinal,
                             },
@@ -1332,7 +1425,7 @@ pub(crate) fn lineage(
                     }
                     for child in &effect.split_results {
                         let occurrence = OccurrenceId {
-                            branch_origin: branch.clone(),
+                            branch_origin: origin.clone(),
                             creation_batch_id: id.clone(),
                             result_ordinal: ordinal,
                         };

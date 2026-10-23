@@ -185,6 +185,7 @@ pub enum ReceiptLookup {
     Committed(CommandReceipt),
     Retired(CommandReceipt),
     RetiredUnresolved,
+    UnresolvedOrigin,
     IdPayloadConflict,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +351,13 @@ impl ProjectBundle {
         }
         Ok(id)
     }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn clear_current_receipt_details_probe(&mut self) {
+        self.receipts = ReceiptLedger::default();
+        for issuer in self.issuers.values_mut() {
+            issuer.retired = true;
+        }
+    }
     pub fn receipt_lookup(&self, envelope: &CommandEnvelope) -> Result<ReceiptLookup, BundleError> {
         self.store.with_namespace(|n| n.verify_read_authority())?;
         let digest = envelope.digest()?;
@@ -362,11 +370,19 @@ impl ProjectBundle {
                 ReceiptLookup::IdPayloadConflict
             });
         }
+        let records = self.rescue_records()?;
+        for record in &records {
+            if let Some(result) = record.lookup(&envelope.id, &digest) {
+                return Ok(result);
+            }
+        }
         let current = self.receipts.lookup(&envelope.id, &digest);
         if current != ReceiptLookup::Absent {
             return Ok(current);
         }
-        for reference in &self.recovery.predecessors {
+        let mut recovery = self.recovery.predecessors.clone();
+        recovery.extend(records.iter().filter_map(|r| r.acknowledged_root.clone()));
+        for reference in &recovery {
             let _encoded = self.store.reserve(0, reference.byte_length, 0, false)?;
             let mut file = self.store.open_verified(reference)?;
             let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;

@@ -696,3 +696,9 @@ fn s2_additive_source_fixture_observes_actual_lifecycle_owners() {
 fn s2_additive_slots_fixture_observes_ordinary_save_at_four_slots() {
     c3_fixture("s2-rescue-slots");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2_additive_recovery_fixture_observes_local_selection() {
+    c3_fixture("s2-rescue-recovery");
+}

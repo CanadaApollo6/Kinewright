@@ -148,7 +148,7 @@ impl StudioRoot {
         {
             return Err(BundleError::Capacity("project origins"));
         }
-        if self.generation == 0 || self.manual_switch_generation != 0 {
+        if self.generation == 0 || self.manual_switch_generation >= self.generation {
             return Err(BundleError::Unsupported(
                 "unsupported Studio generation/switch state".into(),
             ));
@@ -1219,6 +1219,7 @@ impl ProjectBundle {
             .collect();
         self.origin_project_ids.clone_from(&root.origin_project_ids);
         self.origin_session_ids.clone_from(&root.origin_session_ids);
+        self.manual_branch_id = root.manual_branch_id.clone();
         self.generation = root.generation;
         self.recovery = loaded.manifest.recovery.clone();
         self.store.replace_verified_memo(loaded.memo)?;
@@ -1534,12 +1535,22 @@ pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError
 /// Reconcile an orphan independently of the old store's object reservation ledger.
 pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
     crate::history_save::bind(core).map_err(history_error)?;
-    if core.attachment_state().map_err(history_error)? == kinewright_core::AttachmentState::Sealed {
-        return Err(history_error(
-            kinewright_core::HistoryError::MutationRefused(
-                kinewright_core::CoreMutationRefusal::Sealed,
-            ),
-        ));
+    match core.attachment_state().map_err(history_error)? {
+        kinewright_core::AttachmentState::Live => {}
+        kinewright_core::AttachmentState::Frozen => {
+            return Err(history_error(
+                kinewright_core::HistoryError::MutationRefused(
+                    kinewright_core::CoreMutationRefusal::Frozen,
+                ),
+            ));
+        }
+        kinewright_core::AttachmentState::Sealed => {
+            return Err(history_error(
+                kinewright_core::HistoryError::MutationRefused(
+                    kinewright_core::CoreMutationRefusal::Sealed,
+                ),
+            ));
+        }
     }
     let Some(pending) = core.pending_history_save().map_err(history_error)? else {
         return Ok(());

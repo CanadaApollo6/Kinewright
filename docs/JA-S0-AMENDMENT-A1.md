@@ -363,6 +363,56 @@ apart from the separately charged B overlap/cleanup. If the final closure, recor
 available recovery roots or simultaneous copies cannot fit, return a typed capacity/missing-
 object refusal. A conditional preview is never a guaranteed-success claim.
 
+
+### Binding S2 revision 7 qualification: local recovery and L1
+
+[JA-1 §5.4](JA1-STUDIO-ORCHESTRATION.md#54-local-recovery-selection-and-rescue-contracts-s2-revision-7)
+is the binding local selection, session-pin, frozen-rescue, retirement, registered-session
+and availability contract. It supersedes earlier P/exact pre-floor copy and editable
+paused-state rulings. Ordinary Save on L precedes one frozen selection of R at g+1;
+normal select_history and its disclosed floor apply. There is no retained-manual role,
+read-only working branch, exact-retention bypass or editable durable-no-activation state.
+
+Final L1 supersedes this document's earlier exact-root retention wording only for inherited
+rescue linkage. Convert only that linkage to provenance and rebuild its required containers,
+manifests and root. Keep the source root SHA as provenance and label "rebound recovery
+point". Recovered Document, baseline, batches/history/cursor/Undo/Redo/gesture, input payloads
+and identities remain exact. Independent evidence and receipts remain required even when
+they still retain an older object. New B activation authority belongs to the wrapper/runtime.
+Full checkpoint-edge validation still applies. A graph-valid, fully rehashed non-linkage
+Document, batch or input change must fail the exact preservation oracle.
+
+Pin the verified selected root/checkpoint's complete closure with ordinary StorePin at
+prepare, before ordinary Save. Resolve by SHA, never automatic-list position. Keep the same
+pin/target through rotation, collection, unknown outcomes and quota retirement/retry.
+Existing-target retry requires current index membership and expected head; never resurrect
+an ID. Exclude that target from offers and direct retirement. Also exclude live attached
+sessions, unsaved edits and specialist base/target dependencies until save/close, fencing
+and eligibility recheck. Ja1EditingSession registers every durable session create/reopen
+with DurableBranchSessionGuard before edits; no usable unregistered route may bypass it.
+
+During either unresolved local-recovery publication, rescue uses the existing frozen O cut.
+Cancel/failure/refusal/unknown B leaves O frozen. Immediate verified rescue seals O,
+irrevocably abandons R and activates fresh B; late A is destination-only. This qualifies
+only A1's ordinary resume rule. It never changes newer B edits or Saved/dirty/association.
+
+Before preview, rescue handoff, Close and every destination change, disclose whether the
+chosen point is still durably listed. If held only in-session, abandoning lets it go;
+warn in advance if preliminary Save will rotate it out. Refuse Save As/open-another-project
+while prepared. Require explicit disclosed abandonment first, only with no unresolved root
+publication. Rescue may proceed with its disclosed irreversible handoff. If B lacks the
+point, say so; during selection unknown say A keeps it only if selection completed. A crash
+can lose a session-only selected point: this is an accepted limit, not durable retention.
+Unavailable storage also needs the warning that Rescue copy preserves work if A never
+returns and Close may discard its only accessible in-session copy. Never label Close safe.
+
+Format 3 and the two-predecessor validator/rotation remain. Raw nonzero switch generation
+requires manual-switch@1; actual rescue role/schema requires rescue-copy@1. Cross-check
+actual requirements and declarations as a supported subset before mutation. Generic
+OwnedEvidence is insufficient. Generation-zero ordinary v3 remains a positive control.
+Shared L/R occurrence tuples, batch IDs and split ancestry survive first and later ordinary
+saves and floors. Only genuinely new events get the accepting branch's origin.
+
 ## 5. Session retention and editing after success
 
 **Originating session and owner.** The originating session is one app editing context from

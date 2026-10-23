@@ -28,6 +28,8 @@ pub struct StoreManifest {
     pub recovery: RecoveryInventory,
     pub required_fields: BTreeSet<String>,
     pub required_apis: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evidence_roles: BTreeMap<String, String>,
     pub required_kinds: BTreeSet<RecordKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mirrors: Vec<(ObjectRef, PortablePath)>,
@@ -1007,6 +1009,7 @@ impl ProjectStore {
             recovery: RecoveryInventory::default(),
             required_fields: BTreeSet::new(),
             required_apis: BTreeMap::new(),
+            evidence_roles: BTreeMap::new(),
             required_kinds: ledger
                 .objects
                 .values()
@@ -2109,6 +2112,56 @@ impl ProjectStore {
         store.account_residuals(true)?;
         Ok(store)
     }
+    pub(crate) fn has_archived_manual_switch(
+        &self,
+        objects: &[ObjectRef],
+    ) -> Result<bool, BundleError> {
+        #[derive(Deserialize)]
+        struct RootCapabilities {
+            studio: Option<StudioCapabilities>,
+        }
+        #[derive(Deserialize)]
+        struct StudioCapabilities {
+            manual_switch_generation: u64,
+        }
+        for reference in objects
+            .iter()
+            .filter(|r| r.record_kind == RecordKind::RootCheckpoint)
+        {
+            let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
+            let bytes = crate::bundle_recovery::bounded_bytes(
+                self.open_verified(reference)?,
+                reference.byte_length,
+            )?;
+            // Derive the raw requirement without allocating another Document. The shared
+            // publication reader still fully admits every archived root before B5.
+            let capabilities: RootCapabilities =
+                serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if capabilities
+                .studio
+                .as_ref()
+                .is_some_and(|r| r.manual_switch_generation != 0)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub(crate) fn evidence_roles(
+        &self,
+        objects: &[ObjectRef],
+    ) -> Result<BTreeMap<String, String>, BundleError> {
+        let mut roles = BTreeMap::new();
+        for reference in objects.iter().filter(|r| {
+            r.record_kind == RecordKind::OwnedEvidence
+                && r.byte_length <= crate::rescue_record::PROVENANCE_BYTES as u64
+        }) {
+            if let Some(record) = crate::rescue_record::parse(&self.read_evidence(reference)?)? {
+                roles.insert(reference.sha256.clone(), record.role);
+            }
+        }
+        Ok(roles)
+    }
     pub(crate) fn selected_manifest(
         &self,
         roots: &[ObjectRef],
@@ -2121,6 +2174,7 @@ impl ProjectStore {
         all.extend_from_slice(pins);
         all.extend(recovery.references());
         let objects = self.closure(&all)?;
+        let evidence_roles = self.evidence_roles(&objects)?;
         let ledger = self
             .inner
             .ledger
@@ -2153,6 +2207,7 @@ impl ProjectStore {
                 .chain(std::iter::once(RecordKind::StoreManifest))
                 .collect(),
             required_apis: inventory.required_apis.clone(),
+            evidence_roles,
             mirrors: ledger
                 .mirrors
                 .iter()

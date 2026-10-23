@@ -1,4 +1,15 @@
-# JA-1 S2 C1: publication phase, cleanup and fresh-open admission
+# JA-1 S2 implementation reports
+
+C4 adds rescue records, strict L1 restore, selected-target session pins and frozen local
+selection, with shared ordinary branch/floor lineage identity. The [C4 report](c4.md)
+contains all raw summaries, 48 final-source mutation pairs, additive S0 evidence and lane limits.
+Its final Linux gate has 539 selected outcomes, 530 executed passes,
+zero failures and 9 existing ignores marked NOT RUN. C4's measured save mean is
+333.4 ms beside archived C3's 225.0 ms and contemporaneous C3's 317.2 ms;
+all alternating lanes saw other load. Both builds retain zero history decodes and the same
+decoded-charge peak. Core MSVC check passes; project/agent native prerequisites block their
+cross-checks. Native Windows/CI remains NOT RUN. C5 lifecycle/rescue publication is not started.
+The selected point's session-pin crash window remains an explicitly disclosed accepted limit.
 
 C3 adds project-local lifecycle ownership, retained read admission, structured probes,
 read-only namespace separation, rescue-slot accounting and non-consuming A writer reuse.
@@ -91,6 +102,15 @@ is blocked, not passed. Native Windows builds/clippy/fast/refusal execution and 
 added CI minutes remain NOT RUN. No toolchains or Windows SDK were installed.
 
 ## Deviations
+
+C4 also touches Core's actor admission, beyond the C4 project/agent file inventory.
+At C3, `crates/kinewright-core/src/actor.rs:1124-1138` rejected Sealed restores but allowed
+a bound owner to install a checkpoint/floor while Frozen. C4's local-selection witness
+reached that real mutation during unknown selection. The smallest faithful fix rejects
+RestoreHistory while Frozen inside the actor; exact-ticket settlement remains separate.
+The C4 report records its mutation pair and the required CORE/MEDIA-PINS gate results.
+This implements C4's explicit frozen save/floor contract rather than deferring the hole.
+
 
 No functional scope expansion is intended. The common brief's historical design-only
 role is superseded by the explicit C1 implementation task. The task-specific `nice -n 10`

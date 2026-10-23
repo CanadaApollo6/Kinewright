@@ -289,3 +289,158 @@ fn specialist_floor_delta(
     }
     Ok(base.full_applied_delta[..split].to_vec())
 }
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one end-to-end shared-prefix and floor identity oracle"
+    )]
+    fn w13_shared_prefix_occurrence_identity_survives_branch_saves() {
+        use super::*;
+        use kinewright_core::*;
+        use kinewright_media::test_support::TempDirectory;
+        use kinewright_project::{
+            bundle::{BundleWriteAdmission, LoadedBundle},
+            bundle_recovery::RecoverySelection,
+            bundle_switch::ProjectSelectionResult,
+        };
+        let temp = TempDirectory::new_in(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/c4-test-roots")
+                .as_path(),
+            "c4-specialist",
+        );
+        let path = temp.path("branches.kinewright");
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let apply = |core: &Core, command| {
+            assert!(matches!(
+                core.request(command).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+        };
+        apply(
+            &core,
+            Command::Do(Operation::AddSolidClip {
+                track: TrackId(1),
+                timeline_start: TimeCode(0),
+                duration: TimeCode(30),
+                color: SolidColor::default(),
+            }),
+        );
+        apply(
+            &core,
+            Command::Do(Operation::SplitClip {
+                clip: ClipId(1),
+                at: TimeCode(15),
+            }),
+        );
+        apply(&core, Command::Undo);
+        apply(&core, Command::Redo);
+        let mut bundle =
+            ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+        let inputs = bundle.empty_inputs().unwrap().reference.clone();
+        bundle.save(&core, &inputs).unwrap();
+        let left = bundle.manual_branch_id().clone();
+        let original = (*bundle.branch_lineage(&left).unwrap()).clone();
+        let ids = bundle.checkpoint(&left).unwrap().batch_ids.clone();
+        let mut specialist = DurableTimelineBranch::fork(&mut bundle, &core, "writable").unwrap();
+        apply(
+            &specialist.core(),
+            Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }),
+        );
+        specialist.persist(&mut bundle).unwrap();
+        assert_eq!(
+            bundle
+                .branch_lineage(specialist.branch_id())
+                .unwrap()
+                .baseline,
+            original.current
+        );
+        let manifest = bundle
+            .store()
+            .read_record::<kinewright_project::store::StoreManifest>(
+                &bundle.root().unwrap().store_manifest_ref,
+            )
+            .unwrap();
+        let target = manifest.recovery.predecessors[0].clone();
+        drop(manifest);
+        let mut prepared = bundle
+            .prepare_project_selection(
+                &core,
+                RecoverySelection::Checkpoint {
+                    root: target,
+                    branch: left.clone(),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            bundle.publish_project_selection(&mut prepared, &core),
+            ProjectSelectionResult::Activated(_)
+        ));
+        let right = prepared.target_branch().clone();
+        let active = prepared.core();
+        apply(
+            &active,
+            Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }),
+        );
+        bundle.save(&active, &inputs).unwrap();
+        assert_eq!(
+            &bundle.checkpoint(&right).unwrap().batch_ids[..ids.len()],
+            &ids
+        );
+        let restored = bundle.branch_lineage(&right).unwrap();
+        assert_eq!(restored.current, original.current);
+        assert_eq!(restored.split_ancestry, original.split_ancestry);
+        drop(restored);
+        let history = active.export_history().unwrap();
+        bundle
+            .attach_core(&active)
+            .unwrap()
+            .install_history_transition(HistoryTransition::floor(history, 1).unwrap())
+            .unwrap();
+        bundle.save(&active, &inputs).unwrap();
+        let floored = bundle.branch_lineage(&right).unwrap();
+        assert_eq!(floored.baseline, original.undo[1]);
+        assert_eq!(floored.current, original.current);
+        assert_eq!(floored.split_ancestry, original.split_ancestry);
+        drop(floored);
+        let loaded = LoadedBundle::read(&path).unwrap();
+        assert_eq!(loaded.root().unwrap().manual_branch_id, right);
+        let fresh = Core::spawn(Document::default()).unwrap();
+        loaded.restore_manual(&fresh).unwrap();
+        assert_eq!(
+            fresh.export_history().unwrap(),
+            active.export_history().unwrap()
+        );
+    }
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn w13_shared_prefix_occurrence_identity_survives_branch_saves() {
+        let root = std::env::temp_dir().join("ja1-c4-refusal.kinewright");
+        assert!(matches!(
+            kinewright_project::bundle::ProjectBundle::activate(
+                &root,
+                kinewright_project::bundle::BundleWriteAdmission::new_document()
+            ),
+            Err(kinewright_project::bundle::BundleError::DurabilityUnsupported)
+        ));
+    }
+}

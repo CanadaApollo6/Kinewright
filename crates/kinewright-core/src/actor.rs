@@ -1123,6 +1123,8 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
             CoreMessage::RestoreHistory(requested, history, expected, reply) => {
                 let admitted = if attachment == AttachmentState::Sealed {
                     Err(HistoryError::MutationRefused(CoreMutationRefusal::Sealed))
+                } else if attachment == AttachmentState::Frozen {
+                    Err(HistoryError::MutationRefused(CoreMutationRefusal::Frozen))
                 } else if state.pending_floor.is_some() {
                     Err(HistoryError::SaveInProgress)
                 } else if owner.is_some() && owner != requested {

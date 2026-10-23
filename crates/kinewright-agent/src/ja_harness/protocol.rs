@@ -113,6 +113,7 @@ pub enum Call {
     S2CoreSealProbe(Empty),
     S2RescueSourceProbe(Empty),
     S2RescueSlotsProbe(Empty),
+    S2RescueRecoveryProbe(Empty),
     OwnedInputProbe(InputArgs),
     BundleCopyProbe(InputArgs),
     BundleBudgetProbe(InputArgs),

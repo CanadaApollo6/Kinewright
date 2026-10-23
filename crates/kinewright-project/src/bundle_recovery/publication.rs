@@ -1,8 +1,8 @@
 //! Session-local verified identities supply costs, never current-branch membership.
 use super::{
     account_graph_storage, check_encoded_record, compare_declared_edges, compare_edges,
-    decoded_reservations, inspect_checkpoints, read_record, supported_apis, validate_archived_root,
-    walk,
+    decoded_reservations, inspect_checkpoints, read_record, validate_archived_root,
+    validate_evidence, validate_manifest_apis, walk,
 };
 use crate::{
     bundle::{BundleError, BundleWriteAdmission},
@@ -123,7 +123,13 @@ impl VerifiedIdentityMemo {
             reference.clone(),
             RecordCost {
                 decoded,
-                fields: fields.or_else(|| (!needs_fields).then(BTreeSet::new)),
+                fields: fields
+                    .or_else(|| {
+                        self.records
+                            .get(reference)
+                            .and_then(|prior| prior.fields.clone())
+                    })
+                    .or_else(|| (!needs_fields).then(BTreeSet::new)),
                 dependencies: record.dependencies(),
                 inventory_dependencies: record.inventory_dependencies(),
             },
@@ -287,10 +293,10 @@ pub(super) fn validate(
     if manifest.project_id.as_ref() != Some(&root.project_id)
         || manifest.session_id.is_some()
         || manifest.generation != root.generation
-        || manifest.required_apis != supported_apis()
     {
         return Err(BundleError::Corrupt("publication store binding".into()));
     }
+    validate_manifest_apis(&manifest, root.manual_switch_generation)?;
     account_graph_storage(namespace, &admission, &manifest, limits, Some(memo))?;
     let mut objects: BTreeMap<_, _> = manifest
         .objects
@@ -407,9 +413,7 @@ pub(super) fn validate(
             }
             RecordKind::StoreManifest => {
                 let value = control!(StoreManifest);
-                if value.required_apis != supported_apis() {
-                    return Err(BundleError::Unsupported("historical API inventory".into()));
-                }
+                validate_manifest_apis(&value, 0)?;
             }
             RecordKind::RootCheckpoint => {
                 validate_archived_root(
@@ -420,6 +424,9 @@ pub(super) fn validate(
                     &manifest,
                     limits,
                 )?;
+            }
+            RecordKind::OwnedEvidence => {
+                validate_evidence(namespace, reference, usage, &manifest, limits)?;
             }
             kind if kind.is_owned_bytes() => {
                 memo.verify_identity(namespace, reference, usage, limits)?;

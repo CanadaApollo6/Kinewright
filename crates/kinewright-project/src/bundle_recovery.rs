@@ -18,7 +18,9 @@ use std::{
 };
 
 mod publication;
+mod restore;
 pub(crate) use publication::VerifiedIdentityMemo;
+pub use restore::{PreparedCheckpointRestore, RecoverySelection, verify_projection_payloads};
 
 pub(crate) fn inventory_path() -> Result<PortablePath, BundleError> {
     PortablePath::new(Path::new("studio/recovery/inventory"))
@@ -161,11 +163,78 @@ fn retain_inventory_graph_with_memo(
     }
     Ok(())
 }
-pub(crate) fn supported_apis() -> BTreeMap<String, u32> {
+pub(crate) fn base_apis() -> BTreeMap<String, u32> {
     [("bundle", 1), ("core-history", 1), ("owned-inputs", 1)]
         .into_iter()
         .map(|(k, v)| (k.into(), v))
         .collect()
+}
+pub(crate) fn supported_apis() -> BTreeMap<String, u32> {
+    let mut apis = base_apis();
+    apis.insert("manual-switch".into(), 1);
+    apis.insert("rescue-copy".into(), 1);
+    #[cfg(any(test, feature = "test-util"))]
+    MASKED_API.with(|mask| {
+        if let Some(key) = mask.borrow().as_ref() {
+            apis.remove(key);
+        }
+    });
+    apis
+}
+pub(crate) fn validate_manifest_apis(
+    manifest: &StoreManifest,
+    generation: u64,
+) -> Result<(), BundleError> {
+    for (hash, role) in &manifest.evidence_roles {
+        if role != crate::rescue_record::RESCUE_ROLE
+            || !manifest
+                .objects
+                .iter()
+                .any(|r| r.sha256 == *hash && r.record_kind == RecordKind::OwnedEvidence)
+        {
+            return Err(BundleError::Unsupported("evidence attachment role".into()));
+        }
+    }
+    crate::rescue_record::check_apis(
+        &manifest.required_apis,
+        &crate::rescue_record::required_apis(generation, !manifest.evidence_roles.is_empty()),
+    )
+}
+pub(crate) fn validate_evidence(
+    namespace: &ProjectNamespace,
+    reference: &ObjectRef,
+    usage: &Arc<Mutex<StorageUsage>>,
+    manifest: &StoreManifest,
+    limits: &StorageLimits,
+) -> Result<(), BundleError> {
+    #[derive(serde::Deserialize)]
+    struct RoleProbe {
+        #[serde(default, deserialize_with = "role_present")]
+        role: bool,
+    }
+    fn role_present<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+        <serde::de::IgnoredAny as serde::Deserialize>::deserialize(d).map(|_| true)
+    }
+
+    if reference.byte_length > crate::rescue_record::PROVENANCE_BYTES as u64 {
+        if manifest.evidence_roles.contains_key(&reference.sha256) {
+            return Err(BundleError::Capacity("rescue provenance"));
+        }
+        // A missing attachment declaration cannot hide an oversized raw rescue role.
+        // Deserialize only key presence, skipping large payloads without a Value tree.
+        let (bytes, _charge) = read_bytes(namespace, reference, usage, limits)?;
+        if serde_json::from_slice::<RoleProbe>(&bytes).is_ok_and(|probe| probe.role) {
+            return Err(BundleError::Capacity("rescue provenance"));
+        }
+        return Ok(());
+    }
+    let (bytes, _charge) = read_bytes(namespace, reference, usage, limits)?;
+    let record = crate::rescue_record::parse(&bytes)?;
+    crate::rescue_record::validate_attachment(reference, record.as_ref(), manifest)?;
+    if record.is_some() && manifest.required_apis.get("rescue-copy") != Some(&1) {
+        return Err(BundleError::Unsupported("rescue-copy declaration".into()));
+    }
+    Ok(())
 }
 pub(crate) fn decode<T: DeserializeOwned>(
     bytes: &[u8],
@@ -529,6 +598,12 @@ fn validate_archived_root(
         BundleWriteAdmission::from_bytes_with_limits(None, bytes, Arc::clone(usage), limits)?;
     prior.require_supported()?;
     fields.extend(prior.data.inventory.required_fields.iter().cloned());
+    if let Some(root) = prior.data.file.as_ref().and_then(|f| f.studio.as_ref()) {
+        crate::rescue_record::check_apis(
+            &manifest.required_apis,
+            &crate::rescue_record::required_apis(root.manual_switch_generation, false),
+        )?;
+    }
     let expected = prior
         .data
         .file
@@ -648,9 +723,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             "root/store identity or generation mismatch".into(),
         ));
     }
-    if manifest.required_apis != supported_apis() {
-        return Err(BundleError::Unsupported("required API inventory".into()));
-    }
+    validate_manifest_apis(&manifest, root.manual_switch_generation)?;
     account_graph_storage(namespace, &admission, &manifest, limits, None)?;
     let mut objects = BTreeMap::new();
     for reference in &manifest.objects {
@@ -775,9 +848,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
 
             RecordKind::StoreManifest => {
                 let value = admit!(StoreManifest);
-                if value.required_apis != supported_apis() {
-                    return Err(BundleError::Unsupported("historical API inventory".into()));
-                }
+                validate_manifest_apis(&value, 0)?;
             }
             RecordKind::RootCheckpoint => {
                 validate_archived_root(
@@ -788,6 +859,9 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                     &manifest,
                     limits,
                 )?;
+            }
+            RecordKind::OwnedEvidence => {
+                validate_evidence(namespace, reference, usage, &manifest, limits)?;
             }
             kind if kind.is_owned_bytes() => {
                 memo.verify_identity(namespace, reference, usage, limits)?;
@@ -877,7 +951,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                 BundleError::Corrupt("active branch input manifest missing".into())
             })?;
             if (input.project_id.as_ref() != Some(&root.project_id)
-                && (active
+                && ((active && root.manual_switch_generation == 0)
                     || !input
                         .project_id
                         .as_ref()
@@ -952,7 +1026,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
     let inventory = SupportInventory {
         required_fields: fields,
         required_kinds: kinds,
-        required_apis: supported_apis(),
+        required_apis: manifest.required_apis.clone(),
     };
     let receipts = root
         .receipt_index_ref
@@ -1169,4 +1243,19 @@ pub fn assess(path: &Path) -> Result<RecoveryAssessment, BundleError> {
         branches,
         verified_document_bytes,
     })
+}
+
+#[cfg(any(test, feature = "test-util"))]
+thread_local! { static MASKED_API: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(any(test, feature = "test-util"))]
+pub fn without_api_probe<T>(name: &str, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            MASKED_API.with(|mask| *mask.borrow_mut() = None);
+        }
+    }
+    MASKED_API.with(|mask| *mask.borrow_mut() = Some(name.into()));
+    let _reset = Reset;
+    run()
 }

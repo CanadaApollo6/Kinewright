@@ -257,3 +257,40 @@ pub(super) fn core_seal(revised: bool) -> Result<Value, String> {
         "surface":if revised { "sealed actor" } else { "retained clone without seal" }}),
     )
 }
+
+#[cfg(target_os = "linux")]
+pub(super) fn rescue_recovery(root: &Path, revised: bool) -> Result<Value, String> {
+    use kinewright_project::{
+        bundle_recovery::RecoverySelection, bundle_switch::ProjectSelectionResult,
+    };
+    let run = || -> Result<Value, BundleError> {
+        let path = root.join("recovery.kinewright");
+        let core =
+            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let mut bundle = ProjectBundle::activate(&path, BundleWriteAdmission::new_document())?;
+        let inputs = bundle.empty_inputs()?.reference.clone();
+        bundle.save(&core, &inputs)?;
+        let control =
+            LoadedBundle::read(&path)?.root()?.manual_branch_id == *bundle.manual_branch_id();
+        if !revised {
+            return Ok(
+                json!({"control_reopened":control,"surface":"pending_baseline_witness","rescue_publication":false}),
+            );
+        }
+        let left = bundle.manual_branch_id().clone();
+        let other = bundle.fork_branch(&left)?;
+        let target_ref = bundle.checkpoint_reference(&other)?;
+        let target_head = bundle.checkpoint(&other)?.head_id.clone();
+        let mut selected = bundle
+            .prepare_project_selection(&core, RecoverySelection::WorkingBranch(other.clone()))?;
+        let activated = matches!(
+            bundle.publish_project_selection(&mut selected, &core),
+            ProjectSelectionResult::Activated(_)
+        );
+        let loaded = LoadedBundle::read(&path)?;
+        Ok(
+            json!({"control_reopened":control,"selection_mapping":activated && loaded.root()?.manual_branch_id == other && loaded.root()?.manual_switch_generation == 1 && bundle.checkpoint_reference(&other)? == target_ref && bundle.checkpoint(&other)?.head_id == target_head,"rescue_publication":false}),
+        )
+    };
+    run().map_err(|e| e.to_string())
+}

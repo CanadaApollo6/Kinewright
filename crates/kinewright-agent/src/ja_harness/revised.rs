@@ -36,6 +36,19 @@ impl Adapter {
     ) -> Result<Value, String> {
         let call = &action.call;
         match call {
+            Call::S2RescueRecoveryProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::rescue_recovery(
+                        &self.baseline.root,
+                        self.mode == Mode::Revised,
+                    )
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C4 durable selection observer requires Linux; NOT RUN".into())
+                }
+            }
             Call::S2RescueSourceProbe(_) | Call::S2RescueSlotsProbe(_) => {
                 #[cfg(target_os = "linux")]
                 {
