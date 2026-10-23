@@ -484,3 +484,7 @@ A permanently unreadable tagged destination blocks further saves of that session
 including Save As elsewhere. Every entry stays in memory and nothing is lost while
 the session lives. An exit requires an S0 amendment, which the lead will raise
 separately; round 6 does not add an abandon action.
+A1 specifies S2 rescue; unavailable until implemented and gated.
+The recorded changed-parent release is the S1 rule, and last-reader retirement is ordinary-handoff evidence;
+for rescue-retained A, A1 §6 instead preserves unknown state on unproved remount identity or B/descendant bytes.
+Unreadable-graph equality still proves neither commit nor release.

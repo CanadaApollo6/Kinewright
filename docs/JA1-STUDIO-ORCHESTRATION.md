@@ -158,6 +158,8 @@ The earliest undo point is visible. An active specialist's base and full applied
 fills. Every acknowledged undo/redo/gesture or floor update gets a durable HeadId, even when document bytes are unchanged. Merge proposal
 capture revokes the task, drains admitted commands, then reads head/history/lineage while quiescent (`branch.rs:211–245` currently queries head and operations
 separately). An accepted full proposal becomes one candidate undo entry and one receipt, with lineage in the same durable commit.
+A1 rescue-selection floors belong only to B's fresh actor and preserve this ordered equivalence and gesture baseline. Later reconciliation may settle only
+that same attempt's already-selected ticket on the live, unsealed Core under A1 §5; it cannot impose another floor or restore/install history.
 
 ### 4.3 Versions, adoption and inputs
 
@@ -254,6 +256,7 @@ without delete sharing, rejects reparse points and uses their pinned namespace f
 replacement's own required sharing while pinning its parents. Hard-linked ambiguous project roots are refused until a single canonical ownership identity can be
 proved; aliases resolving to the same root attach to the same host. Path swapping may refuse or remain bound to the original claimed target; it may never
 redirect writes into another project. G3/G4 assert referenced asset bytes too.
+A1 rescue retains these identity-bound, pinned-IO obligations through admission, publication and cleanup.
 
 ### 5.3 Save As, portable paths and recovery
 
@@ -268,6 +271,13 @@ With both authorities held, copy required objects exclusively to destination sta
 object reachable from the destination's prior root. Publish the new destination root last, with its own durable previous-root checkpoint. Interrupted copies
 leave source/prior destination exact; leftovers are unreachable and reclaimed only under destination authority. Successful copies get a new ProjectId with
 historical origin IDs; copied runs are paused, carry no live lease/endpoint/credentials, and never duplicate source tasks.
+
+A1 rescue permits only its separately consented selected-history trim and unavailable-source-recovery omission, in A1 §4's order, with the complete closure
+recomputed and verified. B must be separate by native path and pinned namespace identity from every retained destination and the temporary root, including
+exclusion of an absent/changed/unproved mount-parent subtree before any creation. The originating `Ja1EditingSession` retains rescue sources, authorities,
+pins, charges and temporary bytes until explicit Close/exit, across switches, reconciliation and reader retirement. Only immediate verified success and a
+validated handoff attach editing to B's fresh Core/authority and seal A's actor. Unknown B resumes the original dirty edit; a late B commit never switches
+editing. Ordinary same-project aliases remain normal-save/no-op; rescue aliases refuse. See S0 §4.3 and the A1 design record.
 
 Store paths as validated relative components and native `PathBuf` at IO boundaries. Preserve case/Unicode; refuse traversal, separators/device/drive prefixes,
 Windows reserved names and destination case collisions. Non-UTF-8 external names import under hash names with display labels. Absolute external locators are
@@ -336,6 +346,7 @@ published is **`durability_unknown`**, not failed/rolled-back. Reconcile observe
 again. Sharing violations pause without fallback. The current `project.rs:498–503` truncate-write fallback is forbidden for Studio. Acknowledged graph
 corruption blocks resume; never silently fall back and call lost acknowledged work recovered. Recovery presents the prior valid root honestly. G1 distinguishes
 process death from storage crash: SIGKILL cannot establish persistence of filesystem metadata.
+A1 permits explicit independent rescue after eligible refused reconciliation. It acknowledges B only; A's pending command/effect is excluded and named as unresolved, never reapplied or acknowledged there. Later rescue-retained destination reconciliation updates that destination's receipt/pending state and may settle only its own exact ticket on the live, unsealed Core under A1 §5. It never restores/installs/replaces acknowledged history or imposes another floor on any Core; sealed A's ticket remains. Disclose observed contents while current edits remain unchanged. A subsequent explicit save is a separately admitted successor and must disclose omission of an agent effect known committed at A.
 
 ### 6.2 Receipt precedence and bounded reconciliation
 
@@ -369,6 +380,9 @@ unresolved-client evidence and retired digest bindings within that admission cap
 Clients acknowledge their reconciled high-water, allowing compaction. Closed issuer IDs are never accepted for mutation, even after their high-water detail is
 removed; unknown IDs must undergo fresh owner issuance, never self-register. Run/attempt counters persist across restarts. G1-R tests edit AND comment lost
 replies, payload mismatch, expired issuers, retired receipts and bounded issuer retention.
+For A1, resolve unresolved-origin lookup before fresh-command admission: the original ID/digest returns typed unresolved-origin status, never absent,
+success or enqueue permission; a different digest conflicts. Preserve receipt precedence and these caps. Rescue-record compaction never turns an unknown
+or retired ID into absent or grants execution authority; unavailable old detail remains unresolved/retired.
 
 ### 6.3 The named cleanup owner and resumption
 
@@ -712,6 +726,10 @@ its project-content graph, then rebuild the bounded inventory on restore. Keep t
 legacy-backup retirement. Delivered/pinned versions, retained working branches, unresolved receipt/recovery evidence, active readers/jobs and their reachable
 histories remain independent pins; never discard those to meet the automatic-root count. Unsettled publication or reader/pin/space conflicts pause retirement/
 admission. The object/byte caps still apply, so manual floors do not silently retain every old automatic checkpoint forever.
+A1 keeps this two-predecessor limit, validator, ordinary rotation and nonrecursive checkpoint rule unchanged, with no v3 format-counter change. Its R_ack
+is one dedicated optional recovery reference in the durably pinned `rescue_copy_v1` record, an independent pin with complete B-owned content closure.
+B open/recovery validates that reference, its declared content edge and complete closure. Ordinary rotation/compaction cannot retire it; S0 §4.3's binding
+one-level retention and explicit, disclosed person-initiated retirement ruling governs later rescue generations and release through the ordinary collector.
 
 G20 measures GUI, host, guardian and each real provider/Whisper child RSS separately and together; record per-process peaks and sampled simultaneous aggregate
 without calling the sum of nonconcurrent peaks a simultaneous peak. Include VRAM, owned-input copy/verification, restore, transient history clones, repeated
