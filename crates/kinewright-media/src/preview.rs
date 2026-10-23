@@ -3303,24 +3303,55 @@ pub(crate) mod tests {
     /// S-3 [S2c] (C-5): a backward drag's frames, refills and hits alike,
     /// composite to a fresh seek's bytes. Only a step to a frame not
     /// resident seeks (a refill of B = 16, from the clip's in-point at
-    /// most), and a step inside the window, either way, decodes nothing.
+    /// most). Once the window is converted, a step inside it in either
+    /// direction decodes nothing.
     #[test]
     fn a_backward_drag_matches_fresh_seeks_and_refills_once_per_window() {
+        check_backward_drag(false);
+    }
+
+    /// R57: if 5 is posted before 6 converts, 6 leaves the pass even though
+    /// it is inside the held [0, 12] bounds. Reversing to 6 then seeks.
+    #[test]
+    fn a_backward_drag_reseeks_a_discarded_unconverted_frame() {
+        check_backward_drag(true);
+    }
+
+    fn check_backward_drag(delay_window: bool) {
         // One track: testsrc2 0..30 (in-point 0), smptebars 30..60 (in 7).
         let workload = crate::perf_fixtures::cuts((160, 90), 60, 1, 2, 30);
         let document = Arc::new(workload.0.clone());
         let (mut preview, frames) = test_preview(Arc::new(SharedClock::new()));
+        preview.lane.freeze_reader_clock();
         let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
         };
         let resolution = scale.output_resolution(document.resolution);
         let mut seeked = Vec::new();
+        let mut release_window = None;
         let path = [40, 39, 38, 35, 31, 30, 29, 28, 20, 14, 13, 12, 5, 6];
         for (seq, at) in (1..).zip(path) {
+            if delay_window && at == 12 {
+                // Keep 6 unconverted until 5's plan discards it. Holding
+                // 11 also covers R57's exception for a conversion in flight.
+                let (release, held) = bounded::<()>(0);
+                *preview.lane.hold_at.lock().expect("hold") = Some((11, held));
+                release_window = Some(release);
+            }
+            let release = if at == 5 {
+                release_window
+                    .take()
+                    .map(|release| release_backward_window_at_five(&preview.lane, release))
+            } else {
+                None
+            };
             let before = preview.lane.counters().stats.reader_seeks;
             let job = job(&document, JobKind::Paused(TimeCode(at)), stamp(1, seq));
             preview.run_paused(&job, 0);
+            if let Some(release) = release {
+                release.join().expect("the delayed conversion was released");
+            }
             assert!(preview.lane.take_failures().is_empty(), "frame {at}");
             let shown = frames.try_recv().expect("published");
             let expected = reference.render_live(
@@ -3338,10 +3369,75 @@ pub(crate) mod tests {
             if preview.lane.counters().stats.reader_seeks > before {
                 seeked.push(at);
             }
+            if !delay_window && at == 12 {
+                // R53 publishes 12 before the window finishes. R57 drops
+                // unconverted frames above the next target (5), so the
+                // later forward hit at 6 requires a fully resident window.
+                wait_until(&preview.lane, plan_settled);
+                let state = preview.lane.lock();
+                let slot = state
+                    .readers
+                    .slots
+                    .iter()
+                    .find(|slot| slot.plan.required.contains(&12))
+                    .expect("12's reader");
+                let resident = state.readers.ring_times(&slot.key);
+                assert!((0..=12).all(|t| resident.contains(&t)), "{resident:?}");
+            }
         }
         // 40 opens; 39 refills smptebars [7, 16]; 29 opens testsrc2; 28
         // refills [13, 28]; 12 refills [0, 12].
-        assert_eq!(seeked, [40, 39, 29, 28, 12]);
+        let expected = if delay_window {
+            // R57 discarded 6 before it could convert.
+            &[40, 39, 29, 28, 12, 6][..]
+        } else {
+            &[40, 39, 29, 28, 12][..]
+        };
+        assert_eq!(seeked, expected);
+    }
+
+    /// Hold 11 until 5's plan has discarded 6, without waiting on wall time.
+    fn release_backward_window_at_five(lane: &Arc<Lane>, release: Sender<()>) -> JoinHandle<()> {
+        wait_until(lane, |state| decoding_at(state, 11));
+        let id = {
+            let state = lane.lock();
+            let slot = state
+                .readers
+                .slots
+                .iter()
+                .find(|slot| slot.plan.required.contains(&12))
+                .expect("12's reader");
+            assert_eq!(slot.plan.window, Some((0, 12)));
+            assert!(state.readers.retaining(slot.id).contains(&6));
+            assert!(!state.readers.ring_times(&slot.key).contains(&6));
+            slot.id
+        };
+        let (planned, applied) = bounded(1);
+        *lane.plan_posted.lock().expect("plan posted") = Some(planned);
+        let lane = Arc::clone(lane);
+        thread::spawn(move || {
+            assert_eq!(
+                applied.recv_timeout(Duration::from_secs(60)),
+                Ok((5, 0)),
+                "apply 5's plan while 11 is in flight"
+            );
+            {
+                let state = lane.lock();
+                let slot = state
+                    .readers
+                    .slots
+                    .iter()
+                    .find(|slot| slot.id == id)
+                    .expect("the same reader");
+                assert_eq!(slot.plan.window, None, "a continuation, not a refill");
+                assert_eq!(slot.plan.required.iter().min(), Some(&0));
+                assert_eq!(slot.plan.required.iter().max(), Some(&5));
+                assert!(!slot.plan.required.contains(&6));
+                assert!(!state.readers.retaining(id).contains(&6));
+                assert!(!state.readers.ring_times(&slot.key).contains(&6));
+            }
+            drop(release);
+        })
     }
 
     /// S-3 [S2c]: only a paused job holds a backward window: the same
