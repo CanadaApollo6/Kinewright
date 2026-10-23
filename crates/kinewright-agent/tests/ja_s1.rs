@@ -624,3 +624,26 @@ fn s2_additive_phase_cleanup_fixture_observes_real_save_outcomes() {
         );
     }
 }
+
+#[test]
+fn s2_additive_core_seal_fixture_observes_retained_clone_mutation() {
+    use kinewright_agent::ja_harness::protocol::Mode;
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-seal-fixture");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s2-core-seal.json");
+    for (mode, expected, name) in [
+        (Mode::Baseline, 1, "baseline"),
+        (Mode::Revised, 0, "revised"),
+    ] {
+        let output = temp.path(name);
+        let result = kinewright_agent::ja_harness::run(&fixture, &output, mode).unwrap();
+        let summary = std::fs::read_to_string(output.join("summary.json")).unwrap();
+        assert_eq!(result, expected, "{summary}");
+        let observed: Value = serde_json::from_slice(
+            &std::fs::read(output.join("artifacts/observation-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(observed["control_edit_accepted"], true);
+        assert_eq!(observed["continued_edit_accepted"], mode == Mode::Baseline);
+        assert_eq!(observed["sealed_refuses_mutation"], mode == Mode::Revised);
+    }
+}

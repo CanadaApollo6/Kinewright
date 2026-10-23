@@ -133,7 +133,34 @@ impl BundleCopy {
         }
         Err(Box::new(self))
     }
+    #[must_use]
+    pub fn pending_attempt(&self) -> Option<crate::AttemptBinding> {
+        self.destination.as_ref()?.pending_attempt()
+    }
+    pub fn attach_core(&self, core: &Core) -> Result<crate::ProjectAttachment, BundleError> {
+        self.destination
+            .as_ref()
+            .ok_or_else(|| BundleError::Corrupt("copy owner missing".into()))?
+            .attach_core(core)
+    }
     pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        let original = self
+            .destination
+            .as_ref()
+            .and_then(|d| d.pending_save.as_ref().map(|p| p.core.clone()));
+        self.reconcile_destination(original.as_ref())
+    }
+    pub fn reconcile_destination(
+        &mut self,
+        live: Option<&Core>,
+    ) -> Result<Option<BundleSaveReport>, BundleError> {
+        if matches!(
+            self.status,
+            CopyStatus::Committed(_) | CopyStatus::DefinitelyUnpublished
+        ) && let Some(destination) = &mut self.destination
+        {
+            destination.settle_destination_ticket(live)?;
+        }
         match &self.status {
             CopyStatus::Committed(report) => return Ok(Some(report.clone())),
             CopyStatus::DefinitelyUnpublished => return Ok(None),
@@ -145,9 +172,6 @@ impl BundleCopy {
             .destination
             .as_mut()
             .ok_or_else(|| BundleError::Corrupt("copy owner missing".into()))?;
-        if let Some(pending) = &destination.pending_save {
-            crate::bundle::reconcile_core_save(&pending.core)?;
-        }
         if let Some(tag) = &self.tag {
             crate::bundle::reconcile_save_tag(tag)?;
         }
@@ -160,14 +184,14 @@ impl BundleCopy {
             ));
         }
         if actual == self.before.root {
-            destination.settle_pending_save(false)?;
+            destination.settle_destination_ticket(live)?;
             destination.store.settle_object_writes()?;
             destination.store.rollback_copy(
                 self.before.root.as_deref(),
                 self.before.inventory.as_deref(),
                 self.before.had_assets,
             )?;
-            destination.settle_pending_save(false)?;
+            destination.settle_destination_ticket(live)?;
             self.source
                 .lock()
                 .map_err(|_| BundleError::Capacity("copy source poisoned"))?
@@ -175,9 +199,22 @@ impl BundleCopy {
             self.status = CopyStatus::DefinitelyUnpublished;
             return Ok(None);
         }
-        let report = destination
-            .reconcile()?
-            .ok_or_else(|| BundleError::Corrupt("copy did not publish a Studio root".into()))?;
+        let report = match destination.reconcile_destination(live) {
+            Ok(Some(report)) => report,
+            Ok(None) => {
+                return Err(BundleError::Corrupt(
+                    "copy did not publish a Studio root".into(),
+                ));
+            }
+            Err(error) => {
+                if destination.publication_state() == crate::bundle::PublicationState::Committed {
+                    self.status = CopyStatus::CommittedWithError {
+                        diagnostic: error.to_string(),
+                    };
+                }
+                return Err(error);
+            }
+        };
         self.source
             .lock()
             .map_err(|_| BundleError::Capacity("copy source poisoned"))?
@@ -593,6 +630,10 @@ pub struct SessionStore {
     pending_copy_source: Option<PendingCopySource>,
 }
 impl SessionStore {
+    /// Bind a newly created unsaved edit before distributing handles.
+    pub fn attach_core(&self, core: &Core) -> Result<crate::ProjectAttachment, BundleError> {
+        crate::history_save::ProjectAttachment::new(core).map_err(crate::bundle::history_error)
+    }
     pub fn create(parent: &Path, limits: StorageLimits) -> Result<Self, BundleError> {
         limits.validate()?;
         let session_id = SessionId::fresh()?;

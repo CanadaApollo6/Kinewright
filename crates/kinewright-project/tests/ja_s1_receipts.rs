@@ -395,7 +395,9 @@ fn ambiguous_commit_keeps_pending_until_receipt_reconciliation() {
         bundle.command(&request, &core, &inputs, &[]).unwrap(),
         ReceiptLookup::Pending
     );
-    bundle.reconcile_command(&core).unwrap();
+    bundle
+        .install_reconciled_command(&core, before.clone())
+        .unwrap();
     let result = committed(bundle.command(&request, &core, &inputs, &[]).unwrap());
     assert!(matches!(result.result, ReceiptResult::Edit { .. }));
     assert_eq!(core.export_history().unwrap().cursor.undo.len(), 2);

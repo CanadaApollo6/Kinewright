@@ -60,6 +60,7 @@ impl DurableTimelineBranch {
         let (revision, _) = snapshot(live)?;
         let branch = TimelineBranch::new(name, revision, std::sync::Arc::clone(&frozen.document))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        bundle.attach_core(&branch.core())?;
         Ok(Self {
             branch_id,
             branch,
@@ -136,8 +137,8 @@ impl DurableTimelineBranch {
         let baseline_delta = specialist_floor_delta(bundle, &base, &history)?;
         let branch = TimelineBranch::new(name, TimelineRevision(0), Arc::new((*baseline).clone()))
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        branch
-            .core()
+        bundle
+            .attach_core(&branch.core())?
             .restore_history((*history).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let pin = bundle

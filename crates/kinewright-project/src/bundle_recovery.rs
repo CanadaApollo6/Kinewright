@@ -905,7 +905,9 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
         )?;
         let core = kinewright_core::Core::spawn((*history.baseline).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        core.restore_history((**history).clone())
+        crate::history_save::ProjectAttachment::new(&core)
+            .map_err(crate::bundle::history_error)?
+            .restore_history((**history).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         if lineage.current.keys().copied().collect::<BTreeSet<_>>()
             != history
@@ -1146,7 +1148,9 @@ pub fn assess(path: &Path) -> Result<RecoveryAssessment, BundleError> {
             Ok(history) => {
                 let core = kinewright_core::Core::spawn((*history.baseline).clone())
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-                core.restore_history((*history).clone())
+                crate::history_save::ProjectAttachment::new(&core)
+                    .map_err(crate::bundle::history_error)?
+                    .restore_history((*history).clone())
                     .err()
                     .map(|e| e.to_string())
             }

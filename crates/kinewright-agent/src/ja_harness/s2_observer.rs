@@ -1,7 +1,8 @@
 //! C1 observations of ordinary production save outcomes, identical in both harness modes.
-use kinewright_core::{
-    Command, Core, Document, Event, Operation, TimelineRevision, Track, TrackId, TrackKind,
-};
+#[cfg(target_os = "linux")]
+use kinewright_core::TimelineRevision;
+use kinewright_core::{Command, Core, Document, Event, Operation, Track, TrackId, TrackKind};
+#[cfg(target_os = "linux")]
 use kinewright_project::{
     bundle::{BundleError, BundleWriteAdmission, LoadedBundle, ProjectBundle, PublicationState},
     bundle_commit::{BundleCommit, CommitOutcome},
@@ -11,11 +12,14 @@ use kinewright_project::{
     storage_budget::StorageLimits,
 };
 use serde_json::{Value, json};
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
+#[cfg(target_os = "linux")]
 pub(super) fn save_phase_cleanup(root: &Path) -> Result<Value, String> {
     observe(root).map_err(|e| e.to_string())
 }
+#[cfg(target_os = "linux")]
 fn observe(root: &Path) -> Result<Value, BundleError> {
     let path = root.join("phase.kinewright");
     let document = Document {
@@ -93,5 +97,48 @@ fn observe(root: &Path) -> Result<Value, BundleError> {
         "phase_preserved":phase_preserved, "phase":super::report::publication_phase(phase),
         "outcome":format!("{outcome:?}"), "cleanup_classified":cleanup_classified,
         "cleanup_diagnostic":cleanup_diagnostic, "cleanup_root_absent":!cleanup.exists()}),
+    )
+}
+
+/// The baseline observes retained-handle editability; it never pretends to call a seal.
+pub(super) fn core_seal(revised: bool) -> Result<Value, String> {
+    struct ObserverProof;
+    let core = Core::spawn(Document::default()).map_err(|e| e.to_string())?;
+    let retained = core.clone();
+    let operation = |id| Operation::AddTrack {
+        track: Track {
+            id: TrackId(id),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        },
+    };
+    let control = matches!(
+        retained
+            .request(Command::Do(operation(1)))
+            .map_err(|e| e.to_string())?,
+        Event::DocumentChanged { .. }
+    );
+    if revised {
+        let attachment = core
+            .history_save_owner(&ObserverProof)
+            .map_err(|e| e.to_string())?;
+        let cut = attachment
+            .freeze(&ObserverProof)
+            .map_err(|e| e.to_string())?;
+        attachment
+            .seal(&ObserverProof, &cut)
+            .map_err(|e| e.to_string())?;
+    }
+    let before = core.export_history().map_err(|e| e.to_string())?;
+    let result = retained
+        .request(Command::Do(operation(2)))
+        .map_err(|e| e.to_string())?;
+    let unchanged = core.export_history().map_err(|e| e.to_string())? == before;
+    Ok(
+        json!({"backend":"production-core", "control_edit_accepted":control,
+        "sealed_refuses_mutation":matches!(result, Event::MutationRefused { reason: kinewright_core::CoreMutationRefusal::Sealed, .. }) && unchanged,
+        "continued_edit_accepted":matches!(result, Event::DocumentChanged { .. }),
+        "surface":if revised { "sealed actor" } else { "retained clone without seal" }}),
     )
 }

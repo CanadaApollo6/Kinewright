@@ -156,3 +156,40 @@ measured at `ab69312ef41a22565d26a413a5a5d33d689e6d6d` is unchanged by the
 final report-only amendment; the final binding verifies that identity. The absent-time
 setup failure, earlier timer without `-I`, and deliberately stopped partial gate are
 retained and excluded from final acceptance.
+
+
+## C2: actor attachment and destination settlement
+
+[C2 verification report](c2.md) records the eager proof binding, actor-side mutation/freeze/seal gates,
+exact original actor/ticket/tag destination settlement, and the separate authorized ordinary install.
+C2 only is implemented on parent `ea4d719`; C3/lifecycle, rescue publication and App handoff remain
+later work. The preceding C1 report is retained as historical evidence.
+
+The final Linux gate completed 50 command rows: 505 selected outcomes, 496 executed passes,
+zero failures and nine existing ignored outcomes explicitly NOT RUN. All 31 targeted mutation
+red/restored-green pairs passed with complete source restoration. All 87 original fixture files
+and 26 original index entries remain unchanged; only additive `s2-core-seal.json` receives C2
+actor-level baseline-red/revised-pass credit. Native Windows/CI on C2 is NOT RUN. The installed
+Windows target checks Core/all-targets successfully; project/agent/App are blocked in native
+C dependency build scripts (missing Windows errno.h / incompatible compiler pthread types).
+
+Deviations and gate discoveries, with source evidence: typed Event required the exhaustive App
+router/drain (`app.rs:2286`, `:2856`), recovery-test replay (`recovery.rs:1107`) and performance
+example (`performance_workloads.rs:569`) updates. Bound setup/install callers use the authorized
+capability; standalone unbound setup remains available. A runtime-only previous-root SHA binds
+retained older-root release; it adds no persisted format. Reconciliation records known commit
+before Core settlement (`bundle.rs:1221`) and carries copy committed-with-error (`bundle_copy.rs:202`).
+The unchanged S1 vanished-root oracle caught C2 retaining its ticket too long: `bundle.rs:1242`
+now permits only exact lossless release under continuity while preserving the owner's missing-root
+refusal; `:1553` distinguishes absence from a different nonempty root. No assertion was weakened
+and no global fetch-current-ticket fallback returned. A transient existing lock-race fairness
+failure passed its exact rerun and final full library selection, with no lock change. Native FFmpeg
+stderr interleaving required separate gate stream capture (`ja1-s2-c2-gate.sh:29`); the complete
+gate reran successfully. The sealed max-2 predecessor was SHA-verified and its pinned source
+checkout recreated; its controls ran fresh, without claiming a new predecessor build.
+
+Fresh paired small-save means were 251.841 ms at C1 and 250.843 ms at C2 (0.9960x), next to C1's
+recorded 243.323 ms. Both fresh lanes had zero history decodes; peak production decoded charges
+were 135,717,260 and 135,717,257 bytes. Other desktop CPU load was observed in both lanes.
+The report retains all raw summaries, exact CoreMessage/handle audit, NOT RUN lanes and source
+binding. Evidence is under `.review/ja/s2-evidence/c2/`; no logs or binaries are committed.

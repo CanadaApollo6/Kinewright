@@ -36,6 +36,7 @@ impl Adapter {
     ) -> Result<Value, String> {
         let call = &action.call;
         match call {
+            Call::S2CoreSealProbe(_) => super::s2_observer::core_seal(self.mode == Mode::Revised),
             Call::S2SavePhaseProbe(_) => {
                 #[cfg(target_os = "linux")]
                 {

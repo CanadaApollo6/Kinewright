@@ -433,7 +433,11 @@ fn selected_floor_never_precedes_the_durable_floor() {
     owner.save(&core, &input).unwrap();
     let durable = core.export_history().unwrap();
     assert!(durable.floor_offset > 0);
-    core.restore_history(original).unwrap();
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(original)
+        .unwrap();
     // A larger cap would otherwise select the untrimmed cut below the durable floor.
     owner
         .restrict_limits_probe(StorageLimits::default())
@@ -529,7 +533,11 @@ fn ordinary_save_object_uncertainty_releases_then_new_owner_saves() {
         io_observer::fail_path("object_directory_sync", objects, || owner.reconcile()).is_err()
     );
     every_entry(&core, &before);
-    core.restore_history(before.clone()).unwrap();
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(before.clone())
+        .unwrap();
     drop(owner);
     let mut owner = reopen(&path);
     owner.save(&core, &input).unwrap();

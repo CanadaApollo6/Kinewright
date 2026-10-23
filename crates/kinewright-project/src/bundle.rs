@@ -4,6 +4,7 @@ use std::{fmt, io};
 
 #[derive(Debug)]
 pub enum BundleError {
+    CoreMutationRefused(kinewright_core::CoreMutationRefusal),
     Io(io::Error),
     Identity(String),
     Contention(String),
@@ -23,6 +24,7 @@ pub enum BundleError {
 impl fmt::Display for BundleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::CoreMutationRefused(reason) => reason.fmt(f),
             Self::Io(e) => e.fmt(f),
             Self::Identity(e) => write!(f, "identity_refused: {e}"),
             Self::Contention(e) => write!(f, "contention: {e}"),
@@ -633,7 +635,9 @@ impl<N> LoadedBundle<N> {
             .branches
             .get(&self.root()?.manual_branch_id)
             .ok_or_else(|| BundleError::Corrupt("missing manual branch".into()))?;
-        core.restore_history((**branch.1).clone())
+        crate::history_save::ProjectAttachment::new(core)
+            .map_err(history_error)?
+            .restore_history((**branch.1).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))
     }
 }
@@ -776,6 +780,23 @@ pub(crate) struct PendingSave {
     pub(crate) root_sha256: Option<String>,
 }
 impl ProjectBundle {
+    /// Bind before exposing a project actor; the private proof gates every history install.
+    pub fn attach_core(&self, core: &Core) -> Result<crate::ProjectAttachment, BundleError> {
+        crate::history_save::ProjectAttachment::new(core).map_err(history_error)
+    }
+    #[must_use]
+    pub fn pending_attempt(&self) -> Option<crate::AttemptBinding> {
+        self.pending_save
+            .as_ref()?
+            .barrier
+            .as_ref()
+            .map(crate::history_save::FloorBarrier::attempt)
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn has_pending_command_probe(&self) -> bool {
+        self.pending_command.is_some() || self.pending_result.is_some()
+    }
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn has_publication_tag_probe(&self) -> bool {
@@ -1087,11 +1108,25 @@ impl ProjectBundle {
         reason = "one reconciliation refreshes destination authority, graph and runtime state together"
     )]
     pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        let original = self
+            .pending_save
+            .as_ref()
+            .map(|pending| pending.core.clone());
+        self.reconcile_destination(original.as_ref())
+    }
+    /// Refresh only this destination; optional live actor permits its exact own-ticket settlement.
+    #[allow(clippy::too_many_lines)]
+    pub fn reconcile_destination(
+        &mut self,
+        live: Option<&Core>,
+    ) -> Result<Option<BundleSaveReport>, BundleError> {
         #[cfg(any(test, feature = "test-util"))]
         self.store.clear_verified_memo()?;
         crate::namespace::note("bundle_reconcile", &self.store.resolved_root()?);
-        if let Some(pending) = &self.pending_save {
-            reconcile_core_save(&pending.core)?;
+        if let (Some(live), Some(attempt)) = (live, self.pending_attempt())
+            && live.actor_identity() != attempt.actor()
+        {
+            return Err(BundleError::HistoryBarrierInvariant);
         }
         self.unsettled = true;
         let collection = self.store.collection_status()?;
@@ -1104,7 +1139,7 @@ impl ProjectBundle {
         }
         let path = self.store.resolved_root()?;
         let Some(bytes) = self.store.with_namespace(|n| n.read_root())? else {
-            return self.settle_absent_root();
+            return self.settle_absent_root(live);
         };
         let admission = BundleWriteAdmission::from_bytes(Some(path.clone()), bytes)?;
         admission.require_supported()?;
@@ -1113,7 +1148,7 @@ impl ProjectBundle {
                 self.store
                     .with_namespace(|n| n.reconcile(admission.raw_bytes()))?;
                 self.store.settle_controls()?;
-                self.settle_pending_save(false)?;
+                self.settle_destination_ticket(live)?;
                 return Err(BundleError::Corrupt(
                     "unexpected legacy reconciliation root".into(),
                 ));
@@ -1121,7 +1156,7 @@ impl ProjectBundle {
             self.store
                 .with_namespace(|n| n.reconcile(admission.raw_bytes()))?;
             self.store.settle_controls()?;
-            self.settle_pending_save(false)?;
+            self.settle_destination_ticket(live)?;
             self.unsettled = false;
             return Ok(None);
         }
@@ -1131,7 +1166,7 @@ impl ProjectBundle {
             self.store
                 .with_namespace(|n| n.reconcile(loaded.admission.raw_bytes()))?;
             self.store.settle_controls()?;
-            self.settle_pending_save(false)?;
+            self.settle_destination_ticket(live)?;
             return Err(BundleError::Identity(
                 "reconciliation project identity".into(),
             ));
@@ -1183,11 +1218,6 @@ impl ProjectBundle {
         self.durable = Some(self.store.mark_committed(&self.root_references()?)?);
         self.store.publish_inventory(&self.recovery)?;
         self.store.allow_collection()?;
-        let own_root = self.pending_save.as_ref().is_some_and(|pending| {
-            pending.root_sha256.as_deref()
-                == Some(kinewright_media::sha256_bytes(self.admission.raw_bytes()).as_str())
-        });
-        self.settle_pending_save(own_root)?;
         let observed_own = self.publication_tag.as_ref().is_some_and(|tag| {
             tag.root_sha256 == kinewright_media::sha256_bytes(self.admission.raw_bytes())
         });
@@ -1196,6 +1226,7 @@ impl ProjectBundle {
         } else if self.publication_state == PublicationState::Unknown {
             self.publication_state = PublicationState::DefinitelyRefused;
         }
+        self.settle_destination_ticket(live)?;
         self.publication_tag = None;
         self.unsettled = false;
         Ok(Some(BundleSaveReport {
@@ -1208,14 +1239,19 @@ impl ProjectBundle {
             byte_length: self.admission.raw_bytes().len() as u64,
         }))
     }
-    fn settle_absent_root(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+    fn settle_absent_root(
+        &mut self,
+        live: Option<&Core>,
+    ) -> Result<Option<BundleSaveReport>, BundleError> {
         if self.root.is_some() {
-            // Only a never-published owner can confirm absence as its original root.
+            // A missing acknowledged graph still refuses this owner. Its own live
+            // ticket may independently release losslessly under namespace continuity.
+            self.settle_destination_ticket(live)?;
             return Err(BundleError::Corrupt("missing reconciliation root".into()));
         }
         self.store.with_namespace(|n| n.reconcile_copy_root(None))?;
         self.store.settle_controls()?;
-        self.settle_pending_save(false)?;
+        self.settle_destination_ticket(live)?;
         if self.publication_state == PublicationState::Unknown {
             self.publication_state = PublicationState::DefinitelyRefused;
         }
@@ -1401,6 +1437,29 @@ impl ProjectBundle {
         }
     }
 
+    pub(crate) fn settle_destination_ticket(
+        &mut self,
+        live: Option<&Core>,
+    ) -> Result<(), BundleError> {
+        let Some(attempt) = self.pending_attempt() else {
+            self.pending_save = None;
+            return Ok(());
+        };
+        if let Some(live) = live {
+            let attachment = self.attach_core(live)?;
+            if attachment.settle_attempt(&attempt)?
+                || (live.actor_identity() == attempt.actor()
+                    && live
+                        .pending_history_save()
+                        .map_err(history_error)?
+                        .is_none())
+            {
+                self.pending_save = None;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn settle_pending_save(&mut self, commit: bool) -> Result<(), BundleError> {
         if let Some(pending) = &mut self.pending_save
             && let Some(barrier) = &mut pending.barrier
@@ -1451,6 +1510,9 @@ pub(crate) fn pending_floor(
 
 pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError {
     match error {
+        kinewright_core::HistoryError::MutationRefused(reason) => {
+            BundleError::CoreMutationRefused(reason)
+        }
         kinewright_core::HistoryError::CaptureChanged => BundleError::HistoryChanged,
         kinewright_core::HistoryError::BarrierInvariant => BundleError::HistoryBarrierInvariant,
         kinewright_core::HistoryError::SaveInProgress => BundleError::SaveInProgress,
@@ -1462,6 +1524,13 @@ pub(crate) fn history_error(error: kinewright_core::HistoryError) -> BundleError
 /// Reconcile an orphan independently of the old store's object reservation ledger.
 pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
     crate::history_save::bind(core).map_err(history_error)?;
+    if core.attachment_state().map_err(history_error)? == kinewright_core::AttachmentState::Sealed {
+        return Err(history_error(
+            kinewright_core::HistoryError::MutationRefused(
+                kinewright_core::CoreMutationRefusal::Sealed,
+            ),
+        ));
+    }
     let Some(pending) = core.pending_history_save().map_err(history_error)? else {
         return Ok(());
     };
@@ -1479,6 +1548,12 @@ pub(crate) fn reconcile_core_save(core: &Core) -> Result<(), BundleError> {
 pub(crate) fn reconcile_save_tag(
     tag: &kinewright_core::HistorySaveTag,
 ) -> Result<bool, BundleError> {
+    reconcile_save_tag_policy(tag, false)
+}
+fn reconcile_save_tag_policy(
+    tag: &kinewright_core::HistorySaveTag,
+    continuous: bool,
+) -> Result<bool, BundleError> {
     let read = || -> Result<bool, BundleError> {
         let namespace = ProjectNamespace::inspect(&tag.destination)?;
         let identity = namespace.identity();
@@ -1488,6 +1563,17 @@ pub(crate) fn reconcile_save_tag(
         let tagged_parent = identity.resolved_root == tag.destination
             && identity.parent_device == tag.parent_device
             && identity.parent_inode == tag.parent_inode;
+        let hash = bytes.as_deref().map(kinewright_media::sha256_bytes);
+        if continuous
+            && (!tagged_parent
+                || (hash.is_some()
+                    && hash.as_deref() != Some(&tag.root_sha256)
+                    && hash != tag.previous_root_sha256))
+        {
+            return Err(BundleError::Identity(
+                "retained attempt continuity/root mismatch".into(),
+            ));
+        }
         let own = tagged_parent
             && bytes
                 .as_ref()
@@ -1504,4 +1590,11 @@ pub(crate) fn reconcile_save_tag(
         Ok(own)
     };
     read().map_err(|_| BundleError::DurabilityUnknownAt(tag.destination.clone()))
+}
+
+/// Retained attempt release requires continuity; a changed parent is still unknown.
+pub(crate) fn reconcile_save_tag_continuous(
+    tag: &kinewright_core::HistorySaveTag,
+) -> Result<bool, BundleError> {
+    reconcile_save_tag_policy(tag, true)
 }

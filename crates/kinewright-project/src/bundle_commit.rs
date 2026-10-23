@@ -156,7 +156,8 @@ impl BundleCommit {
         } else {
             let candidate = Core::spawn((*before.baseline).clone())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            candidate
+            let attachment = bundle.attach_core(&candidate)?;
+            attachment
                 .restore_history(before.clone())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             if let Some(transition) = &envelope.transition {
@@ -171,7 +172,7 @@ impl BundleCommit {
                         })?;
                 let install =
                     crate::bundle_branch::transition(transition, checkpoint, before.clone())?;
-                candidate
+                attachment
                     .install_history_transition(install)
                     .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             } else if let Some(command) = &envelope.command {
@@ -235,7 +236,8 @@ impl BundleCommit {
                 || BundleError::Corrupt("published history missing from owner".into()),
             )?);
         if **published != original
-            && core
+            && bundle
+                .attach_core(core)?
                 .install_checkpoint(original, (**published).clone())
                 .is_err()
         {
@@ -421,7 +423,9 @@ impl BundleCommit {
                 )?)?;
             let core = Core::spawn((*checked.baseline).clone())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-            core.restore_history((*checked).clone())
+            bundle
+                .attach_core(&core)?
+                .restore_history((*checked).clone())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             std::sync::Arc::new(checked)
         };
@@ -833,11 +837,16 @@ impl BundleCommit {
             parent_device: identity.parent_device,
             parent_inode: identity.parent_inode,
             root_sha256: kinewright_media::sha256_bytes(next_admission.raw_bytes()),
+            previous_root_sha256: if bundle.admission.raw_bytes().is_empty() {
+                None
+            } else {
+                Some(kinewright_media::sha256_bytes(bundle.admission.raw_bytes()))
+            },
         };
         #[cfg(any(test, feature = "test-util"))]
         crate::io_observer::check_failure("floor_tag_prepare", &saved_path)?;
-        if let Some(pending) = &bundle.pending_save
-            && let Some(barrier) = &pending.barrier
+        if let Some(pending) = &mut bundle.pending_save
+            && let Some(barrier) = &mut pending.barrier
         {
             barrier
                 .tag_publication(tag.clone())

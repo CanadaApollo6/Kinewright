@@ -1,6 +1,10 @@
 //! Pure project state, edit operations, history, and subsystem contracts.
 
 mod actor;
+mod attachment;
+pub use attachment::{
+    AcceptedCut, ActorIdentity, AttachmentState, CoreAttachment, CoreMutationRefusal,
+};
 mod agent;
 /// AU6 §2's scenario authority: the five audio workflows' documents,
 /// operations, budgets and pins.

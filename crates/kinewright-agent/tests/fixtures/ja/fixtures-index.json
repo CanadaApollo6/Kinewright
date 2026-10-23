@@ -1001,6 +1001,22 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-core-seal",
+      "relative_file": "s2-core-seal.json",
+      "sha256": "64cbb0fdc2d3f37558d1043a30e053a14f3618a71adf75f4860cf6b27ef9857f",
+      "byte_length": 1454,
+      "expected_baseline_process_exit": 1,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

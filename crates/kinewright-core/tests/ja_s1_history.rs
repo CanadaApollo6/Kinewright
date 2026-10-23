@@ -5,6 +5,7 @@ fn owner(core: &Core) -> HistorySaveOwner<TestProof> {
 }
 fn tag() -> HistorySaveTag {
     HistorySaveTag {
+        previous_root_sha256: None,
         destination: "test.kinewright".into(),
         parent_device: 1,
         parent_inode: 1,
@@ -529,7 +530,7 @@ fn another_proof_type_cannot_take_over_a_history_save_owner() {
     );
     assert_eq!(core.pending_history_save().unwrap(), ticket);
     barrier.release().unwrap();
-    core.restore_history(before).unwrap();
+    owner(&core).restore_history(&TestProof, before).unwrap();
     assert!(
         matches!(
             core.history_save_owner(&ForgedProof),

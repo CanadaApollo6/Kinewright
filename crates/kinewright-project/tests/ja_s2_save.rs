@@ -542,7 +542,9 @@ mod linux {
                     .is_err()
             );
             assert_eq!(owner.publication_state(), PublicationState::Unknown);
-            owner.reconcile_command(&core).unwrap();
+            owner
+                .install_reconciled_command(&core, core.export_history().unwrap())
+                .unwrap();
             let lookup = owner.receipt_lookup(&envelope).unwrap();
             assert_eq!(
                 matches!(lookup, ReceiptLookup::Committed(_)),

@@ -110,6 +110,7 @@ pub struct Action {
 pub enum Call {
     AdapterStatus(Empty),
     S2SavePhaseProbe(Empty),
+    S2CoreSealProbe(Empty),
     OwnedInputProbe(InputArgs),
     BundleCopyProbe(InputArgs),
     BundleBudgetProbe(InputArgs),

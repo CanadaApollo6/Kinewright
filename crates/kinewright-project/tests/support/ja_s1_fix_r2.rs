@@ -262,7 +262,10 @@ fn floor_retains_lut_context_across_multi_edit_save_reuse_and_retirement() {
     let empty = owner.empty_inputs().unwrap();
     owner.save(&core, &empty.reference).unwrap();
     let before = core.export_history().unwrap();
-    core.install_history_transition(HistoryTransition::floor(before, 2).unwrap())
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .install_history_transition(HistoryTransition::floor(before, 2).unwrap())
         .unwrap();
     owner.save(&core, &empty.reference).unwrap();
     drop(a);
@@ -445,7 +448,10 @@ fn over_quota_reopen_keeps_inventory_only_owned_graph_until_retirement() {
     );
     owner.save(&core, &inputs).unwrap();
     let history = core.export_history().unwrap();
-    core.install_history_transition(HistoryTransition::floor(history, 2).unwrap())
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .install_history_transition(HistoryTransition::floor(history, 2).unwrap())
         .unwrap();
     owner.save(&core, &inputs).unwrap();
     owner.save(&core, &inputs).unwrap();
@@ -534,7 +540,11 @@ fn no_edit_comment_repairs_the_original_core_cut_after_floor_reconciliation() {
     let durable = core.export_history().unwrap();
     assert!(durable.floor_offset > original.floor_offset);
     // An interrupted installation may leave the caller at its original accepted cut.
-    core.restore_history(original).unwrap();
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(original)
+        .unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
         core.request(Command::Query(Query::Snapshot)).unwrap()
     else {

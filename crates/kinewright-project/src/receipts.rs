@@ -505,9 +505,21 @@ impl ProjectBundle {
         }
         Ok(())
     }
+    /// Receipt/pending settlement never installs a destination checkpoint on the live actor.
     pub fn reconcile_command(&mut self, core: &Core) -> Result<(), BundleError> {
-        crate::bundle::reconcile_core_save(core)?;
-        self.reconcile()?;
+        self.reconcile_destination(Some(core))?;
+        self.pending_command = None;
+        self.pending_result = None;
+        Ok(())
+    }
+    /// Explicit ordinary attachment operation, separate from destination reconciliation.
+    pub fn install_reconciled_command(
+        &mut self,
+        core: &Core,
+        before: HistorySnapshot,
+    ) -> Result<(), BundleError> {
+        let attachment = self.attach_core(core)?;
+        self.reconcile_command(core)?;
         let checkpoint = self
             .branches
             .get(&self.manual_branch_id)
@@ -515,11 +527,9 @@ impl ProjectBundle {
         let history = self
             .store
             .read_record::<HistorySnapshot>(&checkpoint.history_ref)?;
-        core.restore_history((*history).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        self.pending_command = None;
-        self.pending_result = None;
-        Ok(())
+        attachment
+            .install_checkpoint(before, (*history).clone())
+            .map_err(crate::bundle::history_error)
     }
 }
 

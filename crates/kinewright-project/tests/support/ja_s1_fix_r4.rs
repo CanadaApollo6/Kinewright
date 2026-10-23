@@ -493,7 +493,11 @@ fn exact_cap_saves_and_one_byte_over_floors_one_more_step() {
         let inputs = owner.empty_inputs().unwrap().reference.clone();
         owner.save(&core, &inputs).unwrap();
         owner.restrict_limits_probe(limits).unwrap();
-        core.restore_history(history.clone()).unwrap();
+        owner
+            .attach_core(&core)
+            .unwrap()
+            .restore_history(history.clone())
+            .unwrap();
         owner
             .save(&core, &inputs)
             .expect("exact-cap bounded history must save");
