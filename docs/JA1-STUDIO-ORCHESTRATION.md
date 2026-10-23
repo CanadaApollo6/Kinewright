@@ -318,6 +318,26 @@ evidence and newly created directories:
 6. **B5 commit point:** strictly replace the root inside its pinned filesystem namespace; sync the root directory/namespace barrier. Only after success
    acknowledge durable edits/comments, Saved or Delivered. Notify from a later durable event.
 
+**Fresh-open publication invariant (JA-1 S2 C1).** Every root publication must admit its exact
+candidate graph as an independent fresh reader under the same effective `StorageLimits`, before B5.
+The shared reader/publisher traversal in `bundle_recovery.rs` enumerates all current BranchIndex
+histories and charges each exact verified history hash once, including histories absent from the
+writer cache. It also applies control, metadata, decoded scratch/replay peaks, archived/recovery
+traversal, raw support, graph depth/object count, owned-byte and complete-closure checks. Encoded
+length is not decoded cost. This corrects S1's ordinary multi-branch Save/Save As under-accounting;
+cache residency is a performance choice. The operation-local empty-reader calculation is not added
+to the writer's physical ledger; actual execution still reserves its own overlap. Save, branch save,
+fork, first save/copy and evidence/receipt/floor publications share the root boundary. Refusal
+preserves the authoritative root, live edits and exact floor-ticket semantics. Reconciliation checks
+the observed graph under those same limits. No later-save headroom or persistent fit certificate is
+created; every later candidate is admitted afresh. An in-session accounting memo may reuse costs
+recorded from already decoded and verified objects, keyed by exact ObjectRef (SHA-256, kind,
+length) and the entire effective limit profile. Misses take the same exact reader decode/preflight
+path; encoded length never estimates an unseen history. Discard affected facts at explicit
+re-verification and discard the memo when namespace continuity is not proved. The memo contains
+no decoded histories, persistent accounting or reservation, and its presence never determines
+which candidate branches count.
+
 Linux's proposed local-filesystem adapter uses `fsync` files, no-replace object publication and `renameat` for the root, plus directory `fsync` at B2/B3/B5.
 Storage and filesystem must honor flushes. Windows's named replacement primitive is **`MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`**, same
 volume, never COPY_ALLOWED or in-place write; flush file contents with `FlushFileBuffers`. The Windows namespace adapter must implement B2/B3/B5, not treat file

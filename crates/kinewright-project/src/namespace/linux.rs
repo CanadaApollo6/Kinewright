@@ -503,6 +503,7 @@ pub(super) fn replace_inner(
             note("root_rename_refused", &namespace.identity.resolved_root);
             // Permission refusal is definite; other errors can leave publication ambiguous.
             if error != rustix::io::Errno::ACCESS {
+                namespace.pending_root_cleanup = Some(name.clone());
                 namespace.uncertain = true;
                 return Err(BundleError::DurabilityUnknown);
             }
@@ -539,7 +540,7 @@ pub(super) fn replace_inner(
         namespace.uncertain = true;
         return Err(super::RootReplaceFailure {
             boundary,
-            error: BundleError::DurabilityUnknown,
+            error: BundleError::CleanupPending(staged.as_ref().err().unwrap().to_string()),
         });
     }
     staged.map_err(|error| super::RootReplaceFailure { boundary, error })

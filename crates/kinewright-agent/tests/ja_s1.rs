@@ -592,3 +592,35 @@ fn budget_fixture_revised_backpressures_and_retires_actual_bytes() {
             .any(|e| e["kind"] == "process_spawn" && e["participant"] == "A")
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2_additive_phase_cleanup_fixture_observes_real_save_outcomes() {
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-phase-fixture");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s2-save-phase-cleanup.json");
+    for mode in [
+        kinewright_agent::ja_harness::protocol::Mode::Baseline,
+        kinewright_agent::ja_harness::protocol::Mode::Revised,
+    ] {
+        let output = temp.path(
+            if mode == kinewright_agent::ja_harness::protocol::Mode::Baseline {
+                "baseline"
+            } else {
+                "revised"
+            },
+        );
+        let result = kinewright_agent::ja_harness::run(&fixture, &output, mode).unwrap();
+        let summary = std::fs::read_to_string(output.join("summary.json")).unwrap();
+        assert_eq!(result, 0, "{summary}");
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["assertions"].as_array().unwrap().len(), 4);
+        assert!(
+            summary["assertions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["passed"] == true)
+        );
+    }
+}

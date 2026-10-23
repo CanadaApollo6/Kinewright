@@ -20,6 +20,14 @@ pub enum CopyStatus {
     Committed(BundleSaveReport),
     DurabilityUnknown,
     DefinitelyUnpublished,
+    /// Save failed before root publication; its owner still has temporary cleanup to retry.
+    CleanupPending {
+        diagnostic: String,
+    },
+    /// The root is durable, but Core/accounting settlement still needs reconciliation.
+    CommittedWithError {
+        diagnostic: String,
+    },
 }
 pub enum SaveAsOutcome {
     SameProject(BundleSaveReport),
@@ -69,7 +77,10 @@ pub(crate) fn settle_copy_source(
 }
 impl BundleCopy {
     fn pending_source(&self) -> Option<PendingCopySource> {
-        if !matches!(self.status, CopyStatus::DurabilityUnknown) {
+        if !matches!(
+            self.status,
+            CopyStatus::DurabilityUnknown | CopyStatus::CommittedWithError { .. }
+        ) {
             return None;
         }
         self.tag.clone().map(|tag| PendingCopySource {
@@ -126,7 +137,9 @@ impl BundleCopy {
         match &self.status {
             CopyStatus::Committed(report) => return Ok(Some(report.clone())),
             CopyStatus::DefinitelyUnpublished => return Ok(None),
-            CopyStatus::DurabilityUnknown => {}
+            CopyStatus::DurabilityUnknown
+            | CopyStatus::CleanupPending { .. }
+            | CopyStatus::CommittedWithError { .. } => {}
         }
         let destination = self
             .destination
@@ -139,6 +152,13 @@ impl BundleCopy {
             crate::bundle::reconcile_save_tag(tag)?;
         }
         let actual = destination.store.with_namespace(|n| n.read_root())?;
+        if matches!(self.status, CopyStatus::CommittedWithError { .. })
+            && actual == self.before.root
+        {
+            return Err(BundleError::Corrupt(
+                "durably committed copy root disappeared or was replaced".into(),
+            ));
+        }
         if actual == self.before.root {
             destination.settle_pending_save(false)?;
             destination.store.settle_object_writes()?;
@@ -307,7 +327,8 @@ fn result(
             let uncertain = target.unsettled
                 || target.store.with_namespace(|n| Ok(n.is_uncertain()))?
                 || target.store.has_unsettled_objects()?;
-            let root_unknown = uncertain && target.publication_tag.is_some() && target.unsettled;
+            let root_unknown = target.publication_state == crate::bundle::PublicationState::Unknown;
+            let committed = target.publication_state == crate::bundle::PublicationState::Committed;
             if root_unknown {
                 if let Some(barrier) = target
                     .pending_save
@@ -318,7 +339,7 @@ fn result(
                         .retain_until_reconcile()
                         .map_err(crate::bundle::history_error)?;
                 }
-            } else {
+            } else if !committed {
                 target.settle_pending_save(false)?;
             }
             if !uncertain
@@ -333,10 +354,28 @@ fn result(
             {
                 return Err(error);
             }
-            if root_unknown {
+            if root_unknown || committed {
                 source.mark_uncertain()?;
             }
-            CopyStatus::DurabilityUnknown
+            if committed {
+                CopyStatus::CommittedWithError {
+                    diagnostic: error.to_string(),
+                }
+            } else if root_unknown {
+                CopyStatus::DurabilityUnknown
+            } else {
+                let diagnostic = match &error {
+                    BundleError::CleanupPending(detail) => {
+                        format!("save failed; cleanup pending: {detail}")
+                    }
+                    BundleError::DurabilityUnknown | BundleError::Unsettled => {
+                        "save failed; cleanup pending: staged store writes need reconciliation"
+                            .into()
+                    }
+                    other => format!("save failed; cleanup pending: {other}"),
+                };
+                CopyStatus::CleanupPending { diagnostic }
+            }
         }
     };
     let tag = target.publication_tag.clone();
@@ -369,11 +408,22 @@ impl ProjectBundle {
         path: &Path,
         limits: StorageLimits,
     ) -> Result<SaveAsOutcome, BundleError> {
+        // Only a definitely unpublished root with cleanup uncertainty may use retained reads.
+        // Unknown roots and pending commands still require their ordinary reconciliation.
+        let cleanup_only = self.cleanup_pending()
+            && matches!(
+                self.publication_state,
+                crate::bundle::PublicationState::NeverAttempted
+                    | crate::bundle::PublicationState::DefinitelyRefused
+            )
+            && self.pending_save.is_none()
+            && self.pending_command.is_none()
+            && self.root.is_some();
         if let Some(pending) = &self.pending_save {
             crate::bundle::reconcile_core_save(&pending.core)?;
         }
         settle_copy_source(&mut self.pending_copy_source)?;
-        if self.unsettled {
+        if self.unsettled && !cleanup_only {
             self.reconcile()?;
         }
         if self.pending_command.is_some() {
@@ -382,7 +432,12 @@ impl ProjectBundle {
         // A frozen copy preserves every acknowledged checkpoint exactly. A lower
         // destination allowance cannot silently choose a different live undo floor.
         for id in self.branches.keys() {
-            let history = self.branch_history(id)?;
+            let history = self
+                .store
+                .read_copy_record::<kinewright_core::HistorySnapshot>(
+                    &self.branches[id].history_ref,
+                    cleanup_only,
+                )?;
             let bounded = crate::bundle_commit::bound_history(&history, &limits)?;
             if bounded != *history {
                 return Err(BundleError::Capacity(
@@ -390,17 +445,27 @@ impl ProjectBundle {
                 ));
             }
         }
-        self.store.with_namespace(|n| n.verify())?;
-        {
-            let _source_root =
+        if !cleanup_only {
+            self.store.with_namespace(|n| n.verify())?;
+            {
+                let _source_root =
+                    self.store
+                        .reserve(0, self.admission.raw_bytes().len() as u64, 0, false)?;
                 self.store
-                    .reserve(0, self.admission.raw_bytes().len() as u64, 0, false)?;
-            self.store
-                .with_namespace(|n| n.verify_admitted_root(self.admission.raw_bytes()))?;
+                    .with_namespace(|n| n.verify_admitted_root(self.admission.raw_bytes()))?;
+            }
         }
         let resolved = crate::canonical_project_identity(path)
             .map_err(|e| BundleError::Identity(e.to_string()))?;
+        if cleanup_only && resolved.try_exists()? {
+            return Err(BundleError::Identity(
+                "cleanup-only copy requires a fresh destination".into(),
+            ));
+        }
         if resolved == self.store.resolved_root()? {
+            if cleanup_only {
+                return Err(BundleError::Unsettled);
+            }
             let root = self
                 .root
                 .as_ref()
@@ -419,11 +484,17 @@ impl ProjectBundle {
             }));
         }
         let roots = self.root_references()?;
-        let source = self.store.begin_copy(
+        let source = self.store.begin_copy_source(
             &roots,
             frozen_size(&self.store, &roots, self.admission.raw_bytes().len() as u64)?,
+            cleanup_only,
         )?;
         let (mut target, before, prepared) = destination(path, limits)?;
+        if cleanup_only && before.root.is_some() {
+            return Err(BundleError::Identity(
+                "cleanup-only destination appeared during admission".into(),
+            ));
+        }
         let mut map = BTreeMap::new();
         let publication = (|| {
             origins(
@@ -432,7 +503,9 @@ impl ProjectBundle {
                 std::iter::once(self.project_id.clone()).chain(self.origin_project_ids.clone()),
                 self.origin_session_ids.clone(),
             )?;
-            target.store.copy_graph_from(&self.store, &roots)?;
+            target
+                .store
+                .copy_graph_from_source(&self.store, &roots, cleanup_only)?;
             #[cfg(any(test, feature = "test-util"))]
             crate::io_observer::check_failure("copy_backup", &prepared.path)?;
             let snapshot = target.admit_root_checkpoint(self.admission.raw_bytes(), &roots)?;
@@ -498,7 +571,12 @@ impl ProjectBundle {
             for reference in target.store.closure(&roots)? {
                 target.store.verify(&reference)?;
             }
-            let history = self.branch_history(&self.manual_branch_id)?;
+            let history = self
+                .store
+                .read_copy_record::<kinewright_core::HistorySnapshot>(
+                    &self.branches[&self.manual_branch_id].history_ref,
+                    cleanup_only,
+                )?;
             let inputs = target.branches[&target.manual_branch_id]
                 .input_manifest_ref
                 .clone();

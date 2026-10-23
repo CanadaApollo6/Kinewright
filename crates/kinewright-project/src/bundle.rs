@@ -14,6 +14,7 @@ pub enum BundleError {
     SaveInProgress,
     HistoryBarrierInvariant,
     HistoryCommitInvariant,
+    CleanupPending(String),
     Capacity(&'static str),
     Unsupported(String),
     Corrupt(String),
@@ -38,6 +39,7 @@ impl fmt::Display for BundleError {
             Self::HistoryCommitInvariant => {
                 f.write_str("internal_history_commit_invariant: ticket released")
             }
+            Self::CleanupPending(e) => write!(f, "save failed; cleanup pending: {e}"),
             Self::Capacity(e) => write!(f, "storage_backpressure: {e}"),
             Self::Unsupported(e) => write!(f, "unsupported_bundle: {e}"),
             Self::Corrupt(e) => write!(f, "damaged_bundle: {e}"),
@@ -292,9 +294,25 @@ impl BundleWriteAdmission {
         bytes: Vec<u8>,
         usage: Arc<Mutex<StorageUsage>>,
     ) -> Result<Self, BundleError> {
+        Self::from_bytes_with_limits(source, bytes, usage, &StorageLimits::default())
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "raw admission uses the reader's effective limits"
+    )]
+    pub(crate) fn from_bytes_with_limits(
+        source: Option<PathBuf>,
+        bytes: Vec<u8>,
+        usage: Arc<Mutex<StorageUsage>>,
+        limits: &StorageLimits,
+    ) -> Result<Self, BundleError> {
+        if bytes.len() as u64 > limits.control_bytes
+            && kinewright_core::project_format_version(&bytes) == 3
+        {
+            return Err(BundleError::Capacity("root envelope bytes"));
+        }
         let mut probe = serde_json::Deserializer::from_slice(&bytes);
         let legacy = legacy_envelope(&mut probe)?;
-        let limits = StorageLimits::default();
         let holds = if legacy {
             // v1/v2 keep their pre-S1 size contract. Studio quotas apply only to Studio roots.
             let mut scan_limits = limits.clone();
@@ -304,7 +322,7 @@ impl BundleWriteAdmission {
         } else {
             let encoded = StorageReservation::reserve(
                 &usage,
-                &limits,
+                limits,
                 0,
                 bytes.len() as u64,
                 0,
@@ -313,24 +331,17 @@ impl BundleWriteAdmission {
             )?;
             let preflight = StorageReservation::reserve(
                 &usage,
-                &limits,
+                limits,
                 0,
                 limits.decoded_record_bytes,
                 0,
                 false,
                 u64::MAX,
             )?;
-            let decoded_charge = crate::store::preflight_record(&bytes, &limits)?;
+            let decoded_charge = crate::store::preflight_record(&bytes, limits)?;
             drop(preflight);
-            let value_charge = StorageReservation::reserve(
-                &usage,
-                &limits,
-                0,
-                decoded_charge,
-                0,
-                false,
-                u64::MAX,
-            )?;
+            let value_charge =
+                StorageReservation::reserve(&usage, limits, 0, decoded_charge, 0, false, u64::MAX)?;
             vec![encoded, value_charge]
         };
         let mut raw: serde_json::Value =
@@ -564,9 +575,11 @@ pub(crate) type LoadedBranch = (
     Arc<StorageReservation<LineageRecord>>,
 );
 
-pub struct LoadedBundle {
+pub struct LoadedBundle<N = ProjectNamespace> {
+    pub(crate) memo: crate::bundle_recovery::VerifiedIdentityMemo,
+    pub(crate) limits: StorageLimits,
     pub(crate) admission: BundleWriteAdmission,
-    pub(crate) namespace: ProjectNamespace,
+    pub(crate) namespace: N,
     pub(crate) manifest: StorageReservation<StoreManifest>,
     pub(crate) branches: BTreeMap<BranchId, LoadedBranch>,
     pub(crate) verified: BTreeSet<String>,
@@ -579,6 +592,21 @@ pub struct LoadedBundle {
 impl LoadedBundle {
     pub fn read(path: &Path) -> Result<Self, BundleError> {
         crate::bundle_recovery::read(path)
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn read_with_limits_probe(path: &Path, limits: StorageLimits) -> Result<Self, BundleError> {
+        crate::bundle_recovery::read_with_limits(path, limits)
+    }
+}
+impl<N> LoadedBundle<N> {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn usage_probe(&self) -> Result<StorageUsage, BundleError> {
+        self.admission
+            .data
+            .usage
+            .lock()
+            .map(|s| s.clone())
+            .map_err(|_| BundleError::Capacity("usage poisoned"))
     }
     #[must_use]
     pub fn admission(&self) -> &BundleWriteAdmission {
@@ -608,15 +636,20 @@ impl LoadedBundle {
         core.restore_history((**branch.1).clone())
             .map_err(|e| BundleError::Corrupt(e.to_string()))
     }
+}
+impl LoadedBundle {
     pub fn into_writer(self) -> Result<ProjectBundle, BundleError> {
-        self.claim_writer(StorageLimits::default())
+        let limits = self.limits.clone();
+        self.claim_writer(limits)
     }
     #[cfg(any(test, feature = "test-util"))]
     pub fn into_writer_with_limits_probe(
         self,
         limits: StorageLimits,
     ) -> Result<ProjectBundle, BundleError> {
-        self.claim_writer(limits)
+        let bytes = self.admission.raw_bytes().to_vec();
+        crate::bundle_recovery::read_graph(self.namespace, bytes, limits.clone())?
+            .claim_writer(limits)
     }
     fn claim_writer(mut self, limits: StorageLimits) -> Result<ProjectBundle, BundleError> {
         let root = self.root()?.clone();
@@ -636,6 +669,7 @@ impl LoadedBundle {
             Arc::clone(&self.admission.data.usage),
             limits,
         )?;
+        store.replace_verified_memo(self.memo)?;
         let history_cache = self
             .branches
             .iter()
@@ -685,6 +719,7 @@ impl LoadedBundle {
             pending_save: None,
             pending_copy_source: None,
             publication_tag: None,
+            publication_state: PublicationState::NeverAttempted,
         };
         bundle.durable = Some(bundle.store.mark_committed(&bundle.root_references()?)?);
         Ok(bundle)
@@ -697,8 +732,19 @@ pub(crate) struct CachedHistory {
     pub(crate) history: Arc<StorageReservation<HistorySnapshot>>,
 }
 
+/// Root publication phase, independent of temporary cleanup and Core settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PublicationState {
+    #[default]
+    NeverAttempted,
+    DefinitelyRefused,
+    Unknown,
+    Committed,
+}
+
 /// One synchronous named-bundle owner. It accepts frozen Core exports, never live snapshots assembled piecemeal.
 pub struct ProjectBundle {
+    pub(crate) publication_state: PublicationState,
     pub(crate) publication_tag: Option<kinewright_core::HistorySaveTag>,
     pub(crate) pending_save: Option<PendingSave>,
     pub(crate) pending_copy_source: Option<crate::bundle_copy::PendingCopySource>,
@@ -730,6 +776,29 @@ pub(crate) struct PendingSave {
     pub(crate) root_sha256: Option<String>,
 }
 impl ProjectBundle {
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn has_publication_tag_probe(&self) -> bool {
+        self.publication_tag.is_some()
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn branches_probe(&self) -> &BTreeMap<BranchId, BranchCheckpoint> {
+        &self.branches
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn cached_branch_count_probe(&self) -> usize {
+        self.history_cache.len()
+    }
+    #[must_use]
+    pub const fn publication_state(&self) -> PublicationState {
+        self.publication_state
+    }
+    #[must_use]
+    pub fn cleanup_pending(&self) -> bool {
+        self.publication_tag.is_none() && self.unsettled
+    }
     /// Explicit activation. Existing Studio state is resumed without minting another manual branch.
     #[allow(
         clippy::too_many_lines,
@@ -904,6 +973,7 @@ impl ProjectBundle {
                 pending_save: None,
                 pending_copy_source: None,
                 publication_tag: None,
+                publication_state: PublicationState::NeverAttempted,
             })
         }
     }
@@ -1017,6 +1087,9 @@ impl ProjectBundle {
         reason = "one reconciliation refreshes destination authority, graph and runtime state together"
     )]
     pub fn reconcile(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        self.store.clear_verified_memo()?;
+        crate::namespace::note("bundle_reconcile", &self.store.resolved_root()?);
         if let Some(pending) = &self.pending_save {
             reconcile_core_save(&pending.core)?;
         }
@@ -1052,7 +1125,7 @@ impl ProjectBundle {
             self.unsettled = false;
             return Ok(None);
         }
-        let loaded = LoadedBundle::read(&path)?;
+        let loaded = crate::bundle_recovery::read_with_limits(&path, self.store.limits().clone())?;
         let root = loaded.root()?.clone();
         if root.project_id != self.project_id {
             self.store
@@ -1103,6 +1176,7 @@ impl ProjectBundle {
         self.origin_session_ids.clone_from(&root.origin_session_ids);
         self.generation = root.generation;
         self.recovery = loaded.manifest.recovery.clone();
+        self.store.replace_verified_memo(loaded.memo)?;
         self.inventory = loaded.inventory;
         self.root = Some(root);
         self.admission = loaded.admission;
@@ -1114,6 +1188,15 @@ impl ProjectBundle {
                 == Some(kinewright_media::sha256_bytes(self.admission.raw_bytes()).as_str())
         });
         self.settle_pending_save(own_root)?;
+        let observed_own = self.publication_tag.as_ref().is_some_and(|tag| {
+            tag.root_sha256 == kinewright_media::sha256_bytes(self.admission.raw_bytes())
+        });
+        if observed_own {
+            self.publication_state = PublicationState::Committed;
+        } else if self.publication_state == PublicationState::Unknown {
+            self.publication_state = PublicationState::DefinitelyRefused;
+        }
+        self.publication_tag = None;
         self.unsettled = false;
         Ok(Some(BundleSaveReport {
             collection,
@@ -1133,6 +1216,10 @@ impl ProjectBundle {
         self.store.with_namespace(|n| n.reconcile_copy_root(None))?;
         self.store.settle_controls()?;
         self.settle_pending_save(false)?;
+        if self.publication_state == PublicationState::Unknown {
+            self.publication_state = PublicationState::DefinitelyRefused;
+        }
+        self.publication_tag = None;
         self.unsettled = false;
         Ok(None)
     }
@@ -1179,11 +1266,15 @@ impl ProjectBundle {
         core: &Core,
         inputs: &ObjectRef,
     ) -> Result<BundleSaveReport, BundleError> {
+        if !self.unsettled {
+            self.publication_state = PublicationState::NeverAttempted;
+        }
         reconcile_core_save(core)?;
         crate::bundle_copy::settle_copy_source(&mut self.pending_copy_source)?;
         if self.unsettled {
             self.reconcile()?;
         }
+        self.publication_state = PublicationState::NeverAttempted;
         if self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
@@ -1314,6 +1405,10 @@ impl ProjectBundle {
         if let Some(pending) = &mut self.pending_save
             && let Some(barrier) = &mut pending.barrier
         {
+            #[cfg(any(test, feature = "test-util"))]
+            if commit {
+                crate::test_hook("before_floor_commit");
+            }
             let result = if commit {
                 barrier.commit()
             } else {

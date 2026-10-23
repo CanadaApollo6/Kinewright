@@ -91,10 +91,39 @@ jobs:
           # `cargo test` is reported as success.
           $ErrorActionPreference = 'Stop'
           & .\scripts\setup-ffmpeg.ps1
-          # `cargo test` compiles the workspace with cfg(test). A separate
-          # `cargo build --workspace` on windows-latest is several minutes of
-          # MSVC work the test step then repeats. Linux keeps the extra build
-          # for the readelf soname gate on the non-test binary.
+          if ($LASTEXITCODE -ne 0) { throw "setup-ffmpeg.ps1 exited $LASTEXITCODE" }
+          $buildTimes = @()
+          $clock = [System.Diagnostics.Stopwatch]::StartNew()
+          cargo build --workspace
+          if ($LASTEXITCODE -ne 0) { throw "cargo build --workspace exited $LASTEXITCODE" }
+          $clock.Stop()
+          $buildTimes += @{ command = 'cargo build --workspace'; seconds = $clock.Elapsed.TotalSeconds }
+          $clock.Restart()
+          cargo build -p kinewright-agent --no-default-features --lib
+          if ($LASTEXITCODE -ne 0) { throw "cargo build agent shipping library exited $LASTEXITCODE" }
+          $clock.Stop()
+          $buildTimes += @{ command = 'cargo build -p kinewright-agent --no-default-features --lib'; seconds = $clock.Elapsed.TotalSeconds }
+          $clock.Restart()
+          cargo build -p kinewright-app --no-default-features --bin kinewright-app
+          if ($LASTEXITCODE -ne 0) { throw "cargo build app shipping binary exited $LASTEXITCODE" }
+          $clock.Stop()
+          $buildTimes += @{ command = 'cargo build -p kinewright-app --no-default-features --bin kinewright-app'; seconds = $clock.Elapsed.TotalSeconds }
+          $rustVersion = rustc -Vv
+          if ($LASTEXITCODE -ne 0) { throw "rustc -Vv exited $LASTEXITCODE" }
+          $totalSeconds = ($buildTimes | Measure-Object -Property seconds -Sum).Sum
+          @{
+            head_sha = '${{ github.sha }}'
+            ci_url = '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+            runner_os = $env:RUNNER_OS
+            runner_image = $env:ImageOS
+            runner_image_version = $env:ImageVersion
+            toolchain = ($rustVersion -join "`n")
+            cache_state = 'Swatinem/rust-cache@v2; see Cache Rust step for restore hit/miss'
+            commands = $buildTimes
+            extra_build_minutes = $totalSeconds / 60
+            timeout_minutes = 60
+          } | ConvertTo-Json -Depth 4 | Tee-Object -FilePath "$env:RUNNER_TEMP/ja1-c1-windows-build-times.json"
+          "JA-1 C1 added builds: $($totalSeconds / 60) minutes" >> $env:GITHUB_STEP_SUMMARY
           # slow_tests.py runs `cargo test --workspace` (the slow tests are
           # ignored without their feature) and fails unless the tests it
           # skipped are exactly ci/slow-tests.txt plus the ignores that
@@ -103,6 +132,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "slow_tests.py fast (cargo test --workspace) exited $LASTEXITCODE" }
           cargo clippy --workspace --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw "cargo clippy --workspace --all-targets exited $LASTEXITCODE" }
+
+      - name: Retain JA-1 Windows build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ja1-c1-windows-build-times-${{ github.sha }}
+          path: ${{ runner.temp }}/ja1-c1-windows-build-times.json
+          if-no-files-found: warn
 
   windows-slow:
     name: Windows slow tier

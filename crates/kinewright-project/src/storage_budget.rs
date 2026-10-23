@@ -3,7 +3,7 @@
 use crate::bundle::BundleError;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageLimits {
     pub control_bytes: u64,
     pub pending_commands: u64,
@@ -79,6 +79,27 @@ impl StorageLimits {
     }
 }
 
+/// Shared physical metadata accounting for reader admission and store adoption.
+pub(crate) fn object_metadata_charge(
+    reference: &crate::bundle_records::ObjectRef,
+    edges: usize,
+) -> Result<u64, BundleError> {
+    256_u64
+        .checked_add(
+            (edges as u64)
+                .checked_mul(160)
+                .ok_or(BundleError::Capacity("edge overflow"))?,
+        )
+        .and_then(|n| {
+            n.checked_add(if reference.record_kind.is_owned_bytes() {
+                0
+            } else {
+                reference.byte_length
+            })
+        })
+        .ok_or(BundleError::Capacity("metadata overflow"))
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct StorageUsage {
     pub physical_bytes: u64,
@@ -97,6 +118,7 @@ pub struct StorageUsage {
     pub peak_physical_bytes: u64,
     pub peak_reserved_bytes: u64,
     pub peak_decoded_bytes: u64,
+    pub peak_live_history_bytes: u64,
     pub damaged_accounting: bool,
     pub unsettled: bool,
 }
@@ -120,10 +142,26 @@ impl StorageReservation {
         copy: bool,
         free: u64,
     ) -> Result<Self, BundleError> {
+        Self::reserve_for_retained_read(usage, limits, bytes, decoded, history, copy, free, false)
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "same physical ledger and limits; only read admission may tolerate cleanup uncertainty"
+    )]
+    pub(crate) fn reserve_for_retained_read(
+        usage: &Arc<Mutex<StorageUsage>>,
+        limits: &StorageLimits,
+        bytes: u64,
+        decoded: u64,
+        history: u64,
+        copy: bool,
+        free: u64,
+        cleanup_only: bool,
+    ) -> Result<Self, BundleError> {
         let mut state = usage
             .lock()
             .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
-        if state.unsettled {
+        if state.unsettled && !cleanup_only {
             return Err(BundleError::Unsettled);
         }
         if state.damaged_accounting {
@@ -152,16 +190,24 @@ impl StorageReservation {
             .live_history_bytes
             .checked_add(history)
             .ok_or(BundleError::Capacity("history overflow"))?;
-        if reserved > free
-            || physical > allowance
-            || decoded > limits.decoded_record_bytes
-            || state
-                .metadata_bytes
-                .checked_add(decoded_total)
-                .is_none_or(|n| n > limits.metadata_bytes)
-            || history_total > limits.live_history_bytes
+        if reserved > free {
+            return Err(BundleError::Capacity("disk reserve"));
+        }
+        if physical > allowance {
+            return Err(BundleError::Capacity("physical overlap bytes"));
+        }
+        if decoded > limits.decoded_record_bytes {
+            return Err(BundleError::Capacity("decoded record bytes"));
+        }
+        if state
+            .metadata_bytes
+            .checked_add(decoded_total)
+            .is_none_or(|n| n > limits.metadata_bytes)
         {
-            return Err(BundleError::Capacity("simultaneous bytes or disk reserve"));
+            return Err(BundleError::Capacity("metadata and decoded bytes"));
+        }
+        if history_total > limits.live_history_bytes {
+            return Err(BundleError::Capacity("live history bytes"));
         }
         if !copy
             && state
@@ -197,6 +243,7 @@ impl StorageReservation {
         state.reserved_copy_bytes = reserved_copies;
         state.decoded_bytes = decoded_total;
         state.live_history_bytes = history_total;
+        state.peak_live_history_bytes = state.peak_live_history_bytes.max(history_total);
         state.peak_reserved_bytes = state.peak_reserved_bytes.max(reserved);
         state.peak_decoded_bytes = state.peak_decoded_bytes.max(decoded_total);
         Ok(Self {
@@ -210,6 +257,10 @@ impl StorageReservation {
         })
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) const fn reserved_bytes_probe(&self) -> u64 {
+        self.bytes
+    }
     /// An uncertain on-disk stage stays charged after authority teardown.
     pub(crate) fn retain_charge(mut self) {
         self.active = false;
@@ -274,6 +325,26 @@ impl StorageReservation {
         state.peak_physical_bytes = state.peak_physical_bytes.max(physical);
         self.active = false;
         Ok(())
+    }
+}
+impl<T> StorageReservation<T> {
+    pub(crate) fn map<U>(mut self, transform: impl FnOnce(T) -> U) -> StorageReservation<U> {
+        let value = transform(self.value.take().expect("reservation owns value"));
+        let mapped = StorageReservation {
+            value: Some(value),
+            usage: Arc::clone(&self.usage),
+            bytes: self.bytes,
+            decoded: self.decoded,
+            history: self.history,
+            copy: self.copy,
+            active: self.active,
+        };
+        self.active = false;
+        mapped
+    }
+
+    pub(crate) const fn decoded_charge(&self) -> u64 {
+        self.decoded
     }
 }
 impl<T> std::ops::Deref for StorageReservation<T> {

@@ -36,6 +36,16 @@ impl Adapter {
     ) -> Result<Value, String> {
         let call = &action.call;
         match call {
+            Call::S2SavePhaseProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::save_phase_cleanup(&self.baseline.root)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C1 durable phase observer requires Linux; NOT RUN".into())
+                }
+            }
             Call::CoreSend(args)
                 if self.mode == Mode::Revised
                     && matches!(

@@ -136,7 +136,7 @@ fn pre_b5_object_uncertainty_releases_and_same_session_retries() {
         session.first_save_with_limits(&path, &core, &input, limits())
     })
     .unwrap();
-    assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
+    assert!(matches!(copy.status(), CopyStatus::CleanupPending { .. }));
     assert!(!path.exists());
     assert!(
         core.pending_history_save().unwrap().is_none(),
@@ -169,7 +169,7 @@ fn object_uncertainty_owner_drop_reopen_saves_without_losing_edits() {
         session.first_save_with_limits(&path, &core, &input, limits())
     })
     .unwrap();
-    assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
+    assert!(matches!(copy.status(), CopyStatus::CleanupPending { .. }));
     assert!(core.pending_history_save().unwrap().is_none());
     assert_eq!(core.export_history().unwrap(), before);
     assert!(io_observer::fail_path("directory_child_sync", &objects, || copy.reconcile()).is_err());

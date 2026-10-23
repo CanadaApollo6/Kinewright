@@ -474,6 +474,8 @@ fn over_quota_reopen_keeps_inventory_only_owned_graph_until_retirement() {
     drop(owner);
     let limits = StorageLimits {
         metadata_bytes: 8 << 20,
+        // Fresh open now uses this effective profile, including bounded decode scratch.
+        decoded_record_bytes: 4 << 20,
         ..StorageLimits::default()
     };
     let (writer, trace) = io_observer::observe(|| {

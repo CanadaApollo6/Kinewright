@@ -29,6 +29,7 @@ pub enum CommitOutcome {
     Committed(BundleSaveReport),
     DefinitelyUnpublished(BundleError),
     DurabilityUnknown,
+    CommittedWithError(BundleError),
 }
 pub struct BundleCommit;
 impl BundleCommit {
@@ -245,11 +246,22 @@ impl BundleCommit {
     }
     pub fn run(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> CommitOutcome {
         if bundle.pending_command.is_some() {
-            return CommitOutcome::DefinitelyUnpublished(BundleError::Unsettled);
+            return match bundle.publication_state {
+                crate::bundle::PublicationState::Unknown => CommitOutcome::DurabilityUnknown,
+                crate::bundle::PublicationState::Committed => {
+                    CommitOutcome::CommittedWithError(BundleError::Unsettled)
+                }
+                _ => CommitOutcome::DefinitelyUnpublished(BundleError::Unsettled),
+            };
         }
         match bundle.save(core, inputs) {
             Ok(report) => CommitOutcome::Committed(report),
-            Err(BundleError::DurabilityUnknown | BundleError::Unsettled) => {
+            Err(error)
+                if bundle.publication_state == crate::bundle::PublicationState::Committed =>
+            {
+                CommitOutcome::CommittedWithError(error)
+            }
+            Err(_) if bundle.publication_state == crate::bundle::PublicationState::Unknown => {
                 CommitOutcome::DurabilityUnknown
             }
             Err(error) => CommitOutcome::DefinitelyUnpublished(error),
@@ -283,6 +295,7 @@ impl BundleCommit {
         seed: Option<&LineageRecord>,
         selected: Option<&HistorySnapshot>,
     ) -> Result<BundleSaveReport, BundleError> {
+        bundle.publication_state = crate::bundle::PublicationState::NeverAttempted;
         bundle.publication_tag = None;
         if bundle.unsettled {
             return Err(BundleError::Unsettled);
@@ -398,6 +411,7 @@ impl BundleCommit {
                 &bundle.store.usage_arc(),
                 RecordKind::History,
                 &mut support,
+                bundle.store.limits(),
             )?;
             let _replay = bundle
                 .store
@@ -801,10 +815,11 @@ impl BundleCommit {
             .as_ref()
             .map_or(&checked.document, |h| &h.document);
         let (bytes, _encoded_root) = serialize_root(&bundle.store, manual_document, &root)?;
-        let next_admission = BundleWriteAdmission::from_bytes_using(
+        let next_admission = BundleWriteAdmission::from_bytes_with_limits(
             Some(bundle.store.resolved_root()?),
             bytes,
             bundle.store.usage_arc(),
+            bundle.store.limits(),
         )?;
         next_admission.require_supported()?;
         bundle.store.closure(&root.references())?;
@@ -813,31 +828,40 @@ impl BundleCommit {
         let saved_path = bundle.store.resolved_root()?;
         let collection = bundle.store.collection_status()?;
         let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
-        bundle.publication_tag = Some(kinewright_core::HistorySaveTag {
+        let tag = kinewright_core::HistorySaveTag {
             destination: identity.resolved_root,
             parent_device: identity.parent_device,
             parent_inode: identity.parent_inode,
             root_sha256: kinewright_media::sha256_bytes(next_admission.raw_bytes()),
-        });
+        };
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("floor_tag_prepare", &saved_path)?;
+        if let Some(pending) = &bundle.pending_save
+            && let Some(barrier) = &pending.barrier
+        {
+            barrier
+                .tag_publication(tag.clone())
+                .map_err(crate::bundle::history_error)?;
+        }
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("floor_tag_complete", &saved_path)?;
+        // Publish the owner tag only after every fallible preparation step succeeds.
+        bundle.publication_tag = Some(tag.clone());
         if let Some(pending) = &mut bundle.pending_save {
-            pending.root_sha256 = Some(kinewright_media::sha256_bytes(next_admission.raw_bytes()));
-            if let Some(barrier) = &pending.barrier {
-                let identity = bundle.store.with_namespace(|n| Ok(n.identity().clone()))?;
-                barrier
-                    .tag_publication(kinewright_core::HistorySaveTag {
-                        destination: identity.resolved_root,
-                        parent_device: identity.parent_device,
-                        parent_inode: identity.parent_inode,
-                        root_sha256: pending.root_sha256.clone().unwrap(),
-                    })
-                    .map_err(crate::bundle::history_error)?;
-            }
+            pending.root_sha256 = Some(tag.root_sha256);
         }
         if let Err(failure) = bundle.store.publish_root(next_admission.raw_bytes()) {
             if failure.boundary == crate::namespace::RootReplaceBoundary::Unknown {
+                bundle.publication_state = crate::bundle::PublicationState::Unknown;
                 bundle.unsettled = true;
                 return Err(BundleError::DurabilityUnknown);
             }
+            bundle.publication_state =
+                if failure.boundary == crate::namespace::RootReplaceBoundary::DefinitelyRefused {
+                    crate::bundle::PublicationState::DefinitelyRefused
+                } else {
+                    crate::bundle::PublicationState::NeverAttempted
+                };
             // Cleanup may still be uncertain, but it cannot have published this root.
             bundle.publication_tag = None;
             if let Some(pending) = &mut bundle.pending_save {
@@ -845,6 +869,7 @@ impl BundleCommit {
             }
             return Err(failure.error);
         }
+        bundle.publication_state = crate::bundle::PublicationState::Committed;
         // Publication is monotonic: any fallible tail is unsettled, never a definite rollback.
         bundle.unsettled = true;
         let tail = (|| -> Result<(), BundleError> {

@@ -259,3 +259,24 @@ pub(crate) fn check_failure(
         Ok(())
     }
 }
+
+thread_local! { static PUBLICATION_USAGE: RefCell<crate::storage_budget::StorageUsage> = RefCell::new(crate::storage_budget::StorageUsage::default()); }
+pub(crate) fn note_publication_usage(usage: &crate::storage_budget::StorageUsage) {
+    PUBLICATION_USAGE.with_borrow_mut(|value| *value = usage.clone());
+}
+#[must_use]
+pub fn publication_usage() -> crate::storage_budget::StorageUsage {
+    PUBLICATION_USAGE.with_borrow(Clone::clone)
+}
+
+thread_local! { static PUBLICATION_FIT: RefCell<SyncProfile> = const { RefCell::new(SyncProfile { calls: 0, nanoseconds: 0 }) }; }
+pub(crate) fn note_publication_fit(duration: std::time::Duration) {
+    PUBLICATION_FIT.with_borrow_mut(|profile| {
+        profile.calls += 1;
+        profile.nanoseconds += duration.as_nanos();
+    });
+}
+#[must_use]
+pub fn publication_fit_profile() -> SyncProfile {
+    PUBLICATION_FIT.with_borrow(Clone::clone)
+}

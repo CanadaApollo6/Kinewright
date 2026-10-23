@@ -985,6 +985,22 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-save-phase-cleanup",
+      "relative_file": "s2-save-phase-cleanup.json",
+      "sha256": "15dc3aa5e732ec1835cc49605f27fe3a704ed0adef8c671656dab33896d16c60",
+      "byte_length": 2095,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

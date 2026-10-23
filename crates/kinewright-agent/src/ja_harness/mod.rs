@@ -13,6 +13,8 @@ mod receipt_observer;
 pub mod recording;
 pub mod report;
 pub mod revised;
+#[cfg(target_os = "linux")]
+mod s2_observer;
 mod supervision;
 
 use std::{collections::BTreeMap, path::Path, time::Instant};

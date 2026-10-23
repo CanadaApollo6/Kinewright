@@ -373,6 +373,20 @@ selected closure while preserving prior-destination protection.
 
 ### 4.3 Unsaved session and first-save ownership handoff
 
+Every root publication, including ordinary Save, branch save/fork, first save, Save As and
+evidence/receipt/floor changes, must pass the exact candidate fresh-open invariant in JA-1 §6.1
+under the same effective `StorageLimits` before root replacement. Shared production reader/publisher
+accounting includes all current branch histories (only exact verified hashes deduplicate), temporary
+decode/replay and archived/recovery peaks, raw support and complete owned closure. A sparse writer
+cache cannot authorize publication. This closes the existing S1 multi-branch exposure without a
+second persistent ledger or future-save allowance; actual execution reservations remain separate.
+A refusal preserves the old root and live history/ticket semantics. Reconciliation validates the
+observed root under the same limits before acknowledgement. An in-session verified-identity
+accounting memo may supply unchanged costs under JA-1 §6.1, keyed by the exact ObjectRef and
+complete effective limit profile. Misses decode/preflight exactly; namespace discontinuity and
+explicit re-verification invalidate affected facts. Memo membership never selects current branches,
+and the memo adds no persistent ledger, decoded history residency or reservation.
+
 **Owner/stage:** the project/JA-1 owner implements this lifecycle in JA-1 S1's common store
 and bundle-publication primitives; AW2 P1a consumes them for code/font admission. It does
 not wait for a scheduler or create an AW2 store lifecycle. AW2 R12 already requires a
