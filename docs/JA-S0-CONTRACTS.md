@@ -42,6 +42,12 @@ one finished-video watch; automated results cannot certify publishability
 (`docs/PRODUCT-BRIEF-2026-10.md:43`, `docs/PRODUCT-BRIEF-2026-10.md:56`,
 `docs/PRODUCT-BRIEF-2026-10.md:202`). No new intake interview is required.
 
+**Amendment A1 (2026-10-22).** Independent rescue copy is specified in the approved
+[design record](JA-S0-AMENDMENT-A1.md) (A1 rev5), whose §§2–7 are normative
+A1 rules referenced below. Rescue is specified but **not implemented until JA-1 S2 lands
+and is gated**. The bounded R_ack retention ruling in §4.3 governs the design record's
+older-record retention wording.
+
 ## 2. Person-visible workflow and responsibility boundaries
 
 Riel supplies the script, recordings, exports and reference material. The agent shows one
@@ -118,6 +124,7 @@ produced later still uses the S1 graph/publication machinery.
 | Version snapshot/index and annotations | Immutable document/head/input/script/data/style refs, parent/run/review refs; separately mutable name/pin annotations. Unreviewed snapshots cannot assert Delivered | JA-1; S3 snapshot, S5 Delivered; `docs/JA1-STUDIO-ORCHESTRATION.md:164`, `docs/JA1-STUDIO-ORCHESTRATION.md:820` |
 | Command receipt and issuer state | Issuer/sequence, canonical digest, original target/epoch/expected state, outcome/result identities/generation; high-water, retirement and unresolved evidence. Switch results include old/new branches, heads, checkpoints and switch generation, never a live lease | JA-1; S1, switch extension S2; `docs/JA1-STUDIO-ORCHESTRATION.md:340`, `docs/JA1-STUDIO-ORCHESTRATION.md:225` |
 | Store manifest / recovery inventory | Verified object identities, dependency edges, required field/kind/API inventory and durable pins; current root, two verified predecessors, one B3 staging slot and distinct pre-migration backup. Recovery inventories do not recursively retain predecessors | JA-1; S1; `docs/JA1-STUDIO-ORCHESTRATION.md:120`, `docs/JA1-STUDIO-ORCHESTRATION.md:328`, `docs/JA1-STUDIO-ORCHESTRATION.md:704` |
+| `rescue_copy_v1` | Recognized schema/role on root-reachable `OwnedEvidence` in `durable_pins`; B/session/origin and full/selected capture bindings; one dedicated optional R_ack `RootCheckpoint` content edge with complete B-owned closure and reopen/recovery semantics; bounded exact omitted-recovery identities/SHAs/causes, unresolved destination-attempt/command identities and bounded warning provenance. R_ack retention is one level with explicit retirement under §4.3 | JA-1 owner; S2 first writer; Amendment A1 §§4, 7 |
 | Feedback packet/revisions/batch | Original displayed version/head/document/input, frame/rational fps, raster/orientation/geometry basis, exact text/strokes, optional hit/occurrence/source/beat, frame proof, voice ref, chosen transcript revision; immutable submitted batches | JA-1; S3; `docs/JA1-STUDIO-ORCHESTRATION.md:424` |
 | CommentResolution/disposition | Original packet and exact candidate head; separate temporal and spatial result/evidence, unresolved/removal disposition; status/tombstone never deletes original evidence | JA-1; S3; `docs/JA1-STUDIO-ORCHESTRATION.md:449` |
 | Run/plan/task/attempt records | State transitions, short plan, assumptions/questions, task scopes/bases/grants, requested/resolved connector/model/options, counters/deadlines, usage event identities and bounded findings/responses/continuation refs | JA-1; S4; `docs/JA1-STUDIO-ORCHESTRATION.md:478`, `docs/JA1-STUDIO-ORCHESTRATION.md:495`, `docs/JA1-STUDIO-ORCHESTRATION.md:516` |
@@ -183,6 +190,12 @@ inventory against the actual raw fields and graph, so omitting a declaration can
 a resource. These are store-manifest/record validation tags within v3, not another format
 counter or minimum-version predicate (`docs/JA1-STUDIO-ORCHESTRATION.md:120`). Recognizing
 an AW2/JA-2 tag does not expose a usable clip/effect before its renderer and gates land.
+
+Apply this raw-field/graph-derived required field/kind/API admission to `rescue_copy_v1`,
+its declared role/schema and `rescue-copy@1` API. Cross-check the dedicated checkpoint
+reference against actual content edges and validate its complete closure. Generic opaque
+evidence support is insufficient. Missing/mismatched declarations or unsupported semantics
+refuse writes/resume at callers before mutation; no second version predicate.
 
 When production v3 support lands, raise the one core `PROJECT_FORMAT_VERSION` ceiling to 3.
 Do not change the recovery-journal envelope version; its writer ceiling becomes 3 and
@@ -275,6 +288,7 @@ AssemblyBinding and its inventories. Undo/redo, recovery, Save As and retained v
 traverse these same edges under the existing object/metadata caps; quota exhaustion pauses
 admission, never silently drops evidence (`docs/JA1-STUDIO-ORCHESTRATION.md:704`,
 `docs/JA4-TAKE-CHOICE.md:243`).
+A1's separately consented B-only history trim and omission of unavailable source recovery roots may remove only edges exclusive to those selections; all remaining independent evidence edges stay required. Its bounded rescue-provenance transformation may replace older warning records with a counted unresolved summary, never independent receipt/evidence roots or current-selection omissions. Quota exhaustion alone authorizes no silent loss.
 
 Relink, damage repair, retranscription/correction, script/candidate/range or validation-profile
 changes invalidate dependent eligibility and consumer/review keys for the successor. Publish
@@ -337,6 +351,7 @@ claims, plans and running exports retain their dependency closure. Owner death r
 cleanup/reader reconciliation; EOF or missing discovery is not retirement proof
 (`docs/JA1-STUDIO-ORCHESTRATION.md:605`, `docs/JA1-STUDIO-ORCHESTRATION.md:704`,
 `docs/JA2-PERSON-SEPARATION.md:281`).
+A1 rescue preserves the complete closure of its selected history, with only §4.3's disclosed B-only oldest-first trim, and includes A's last acknowledged-root checkpoint by default when one exists in the rescue record's one dedicated recovery-reference slot, with complete closure and reopen/recovery validation, outside the unchanged two-predecessor inventory. Rescue may, with explicit consent, omit unavailable source recovery roots and records them. Record each omitted root's identity, root SHA and unavailability cause as provenance; never omit an available root or any dependency still needed by current state, selected history or independent roots. Evaluate full-history omission alone before offering Undo loss, and offer omission alone if it fits and is self-contained. Recompute closure after omission.
 
 Missing/changed bytes produce damaged/unavailable state and block affected review/resume or
 enabled output. Preserve the original identity/evidence. Relink and regeneration create
@@ -352,6 +367,9 @@ destination root last. New ProjectId, historical origin IDs and paused runs tran
 live leases/grants/credentials. Source/prior destination remain exact on interrupted copy.
 Use JA-1's root/pin collector; no JA-2 or AW2 independent collector
 (`docs/JA1-STUDIO-ORCHESTRATION.md:258`, `docs/JA2-PERSON-SEPARATION.md:335`).
+A1 rescue uses §4.3's separately consented selected-history trim and unavailable-source-
+recovery omission choices, in A1 §4's order, and copies/verifies the recomputed complete
+selected closure while preserving prior-destination protection.
 
 ### 4.3 Unsaved session and first-save ownership handoff
 
@@ -364,6 +382,11 @@ store for an unsaved project, so it does not already implement this handoff
 (`docs/AW2-CODE-GENERATED-CLIPS.md:425`, `docs/JA1-STUDIO-ORCHESTRATION.md:181`,
 `docs/JA1-STUDIO-ORCHESTRATION.md:746`,
 `crates/kinewright-project/src/project.rs:195`).
+
+For A1, S2 adds the JA-1 `Ja1EditingSession` lifecycle owner to the existing app editing
+context, shared by agent/headless entry points. The originating session runs from New/Open
+through explicit Close or exit; rescue handoffs and ordinary focus/project switches do not
+end it or reset its slots. Closing a destination status view is not session teardown.
 
 An unnamed edit has one session owner with an exclusive temporary root, pinned handles and
 session/epoch-scoped authority. It uses the same reserve/write/seal/pin/retire primitives,
@@ -380,6 +403,11 @@ store mutation, including parent creation under the existing pinned-parent claim
 Contention refuses without changing the edit or destination. Reserve the simultaneous
 source/destination/staging/root/backup overlap before copying (§4.2;
 `docs/JA1-STUDIO-ORCHESTRATION.md:260`).
+For A1 rescue, exact history and required source closure admit only A1 §4's separately
+consented B-only oldest-first trim and unavailable-recovery omission, in its stated order.
+Keep the capture frozen through the initial outcome and validated handoff, acquire authority
+before any mutation, and copy/verify the complete final selected closure. Prior-destination
+protection remains mandatory; unknown B resumes the original dirty edit.
 
 Copy/verify the complete required closure, including code/fonts/render outputs, source
 inputs, retained undo/redo and reachable bundle evidence, into destination-owned objects.
@@ -389,6 +417,7 @@ the destination root last through B5. Only verified durable success can acknowle
 and transfer the active named-project writer association to the destination authority.
 Do not transfer serialized live leases; issue destination-bound authority for subsequent
 work (`docs/JA1-STUDIO-ORCHESTRATION.md:267`, `docs/JA1-STUDIO-ORCHESTRATION.md:287`).
+Only immediately verified A1 success with validated handoff seals A's actor and associates editing with B's fresh authority/Core. Unknown B keeps the original dirty edit; later B commit is a capture copy and never changes active editing. A's authority/Core and pending state remain session-owned; no A authority transfers. Reconciliation of a rescue-retained destination settles its receipt/pending state and may only settle that same attempt's own ticket on the live, unsealed Core through A1 §5's S1 exact-ticket path, preserving content, post-floor Undo and Redo. No other floor, restore, install or history replacement on any Core is allowed; sealed A's ticket stays until session end. A separate B open is read-only while its owner is retained; an editable open requires explicit release of B's completed destination owner after proven commit.
 
 Retain source leases, pins and physical charges until the handoff succeeds **and** every
 reader still using the temporary store retires. A live proof/export may finish on its exact
@@ -396,14 +425,90 @@ source handles; it cannot publish into a new epoch by relabelling its result. Tr
 ownership/accounting without a missing pin, duplicate charge for the same physical object
 or early deletion; charge distinct simultaneous copies. Retire temporary bytes exactly once
 through the same owner after the last reader, not merely after root publication.
+A1 overrides this ordinary retirement: the same `Ja1EditingSession` owner retains all
+rescue source holds, pins, charges and temporary-store bytes until originating-session end,
+even through handoffs, switches, reconciliation and last-reader retirement. Four slots limit
+rescue-retained attempts only; ordinary saves retain ordinary S0 rules. Previews, re-probes
+and cancel consume nothing. After the second probe and all required explicit consent,
+source adoption and source-slot consumption are atomic with the first B mutation. Explicit
+release of proven-committed B's completed destination owner permits a separate editable open
+without retiring rescue source holds or refunding consumed slots.
 
 A refused or failed copy/verification/prepublication first save preserves the usable unsaved
 edit, undo/redo, reader handles and source pins; any prior destination root/assets remain
 intact. Release only this attempt's destination claims/staging when safe; retry from the
-same usable session. If replacement or its barrier has an uncertain outcome, classify it
-as `durability_unknown`, retain both authorities/pins and reconcile the exact root/receipt
-before success or another attempt. An uncertain publication is not a reported failed save
-or proof of rollback (`docs/JA1-STUDIO-ORCHESTRATION.md:334`).
+same usable session. If replacement or its barrier has an uncertain outcome at A, classify it as
+`durability_unknown` and retain both authorities/pins. Reconcile A's exact root/receipt
+and required durability before acknowledging A, writing there again, or another ordinary
+save/copy attempt from that unresolved owner. An uncertain publication is not a reported
+failed save or proof of rollback (`docs/JA1-STUDIO-ORCHESTRATION.md:334`).
+
+Exception A1: after an eligible failed reconciliation and a fresh selection-time probe,
+the person may explicitly choose **Save rescue copy** to fresh, independent B. Writes require
+btrfs, ext4, or XFS; Windows writes stay refused. First-save sources remain in the local
+temporary store. Opened-A rescue requires every selected owned byte to remain readable
+through retained handles/local state and hash-verified. Otherwise return A1 §3's missing-object
+refusal. B must be separate by native path
+and pinned namespace identity from every retained destination and the session temporary
+store. B receives a fresh ProjectId, fresh destination authority, and a genuinely separate
+Core actor. Historical origins remain; A's authority never transfers to B.
+
+Freeze the accepted live edit and all required history/input/lineage/evidence roots at one
+cut. Full history, a checkpoint of A's last acknowledged root when one exists, and all
+selected source recovery roots are the default. A1 §4 first evaluates whether omission
+alone makes B fit and be self-contained; if so, offer it without an Undo-trim preview.
+Only otherwise offer an eligible oldest-first history trim, alone or with separately
+consented omission of exactly unavailable source recovery roots, recorded by identity,
+root SHA and cause as provenance. Available recovery roots and all objects still needed by current state, selected
+history or independent roots remain required. Recompute, copy and verify the complete
+closure of the final selected roots, including LUTs, before B5-last publication. R_ack is
+one dedicated recovery reference in the durably pinned rescue record, with its complete
+content closure in B; it never occupies a third automatic-predecessor entry. B validates
+and offers this recoverable root on reopen (§4). A durable, root-reachable rescue record binds
+the full capture, B's selected result and disclosed loss, and A's unknown publication and
+pending-command identities. B has no graph edge to A or to temporary-store paths.
+
+Only a rescue verified durably successful at the time of its initial outcome can switch
+editing to B's fresh authority/Core. Seal A's actor against all editing handles at that
+handoff; editing and ordinary saves then continue in B. If B returns unknown, resume the
+original dirty edit associated with A. A later B commit only records/shows a rescue copy as
+of its capture; it never switches the active edit, even if histories happen to match.
+The originating editing session's JA-1 owner retains A's original owner/Core, attempt/tag
+and settlement status, authorities, source leases, pins, physical charges, and all source
+temporary-store bytes until that session ends, even after reader retirement or independent
+A reconciliation. Only §5 may settle the live attempt's own ticket/barrier; sealed A's
+ticket/barrier stays until session end.
+A stays independently reconcilable; B's success never settles A. Reconciliation of any
+rescue-retained destination settles its own receipt/pending state. Its sole permitted Core
+operation is S1 exact-ticket settlement of that same attempt's ticket on the live, unsealed
+Core, after its own destination proof (§5). Commit replays current edits and preserves
+content, post-floor Undo and Redo. Sealed A's ticket stays until session end. No other floor,
+restore, install or history replacement is allowed on any Core. Report the destination
+contents while preserving current edits, dirty/Saved baseline and writer association.
+Cancel, failure, or an uncertain B changes none of
+A's Core, ticket, floor, histories, or holds.
+
+An unknown publication at B gets its own tag, Core state, and independent holds, with no
+Saved message or destination writer exposed. Explicit rescue to C may follow under the
+same rules. Four rescue-retained uncertain-publication slots belong to the originating
+editing session (§5). Previews and admission use provisional reservations only. After the
+second probe and all required explicit consent, atomically adopt A's unknown attempt into
+rescue retention and consume its source slot when the first B mutation begins. Preview,
+re-probe, cancel and any abort before mutation consume nothing. Reserve the destination
+slot at that boundary; it is consumed only if the rescue-destination outcome is unknown.
+Verified rescue success and definite refusal return the destination reservation.
+Ordinary saves never reserve or consume a rescue slot; a later unknown ordinary attempt
+counts only when adopted as the source of a new explicit rescue. Consumed slots remain
+consumed until session end, even after settlement. Existing byte/object/metadata and
+cleanup quotas still apply. No hold is evicted to admit another attempt.
+
+**Binding A1 R_ack retention ruling.** R_ack retention is bounded at one level: each rescue
+record carries only its own R_ack as a pinned recoverable root. When a later rescue starts
+from a session whose active project is itself a rescue copy, that project's own R_ack
+becomes provenance only (identity, root SHA) in the new record, not a nested pinned root.
+The person may also explicitly retire a rescue copy's R_ack ("Forget the older recovery
+point from A"); retirement unpins it and its closure through the ordinary collector, is
+disclosed, and is never automatic.
 
 **LUT scope:** every new bundle write, including first save and Save As, applies
 copy-before-root to the **whole owned graph, including LUTs**. AW2 R12's narrower asset rule
@@ -414,6 +519,7 @@ control, not as permission for bundle IO to inherit it
 `crates/kinewright-project/src/project.rs:516`). The shared later
 `first_save_failure_undo_live_reader` witness belongs to AW2 G11 and JA-1 G3 (§8.3).
 S0 freezes these contracts and witness slots only; it implements none of this lifecycle.
+A1 never exempts a dependency still reachable from the final selected roots; rescue remains S2 work.
 
 ## 5. JA-3 typed editorial handoffs
 
@@ -856,12 +962,13 @@ controls; the new production seams and all red/green results remain pending.
    undone/redone content. Inject destination contention and copy/verification/quota/faults
    before root publication. Each definite failure must retain the original usable edit,
    undo/redo, source handles/pins and exact prior destination root/assets; retry succeeds
-   without reimporting from mutable external paths. After successful handoff, keep the
+   without reimporting from mutable external paths. After successful ordinary handoff, keep the
    source alive while the old reader finishes; inspect its actual handles/output and exact
    pin/charge retirement, then reclaim temporary bytes only after reader retirement.
    Cache clear cannot remove required undo/reader assets. Inject a B5 outcome ambiguity
    separately: require `durability_unknown`, a wholly old/new graph and reconciliation
-   before acknowledgment/retry, not a fictitious failed-save rollback. Later mutations copy
+   before acknowledgment or retry at that destination; A1 independent rescue has separate S2 witnesses.
+   Do not report a fictitious failed-save rollback. Later mutations copy
    before destination authority, omit an undo/LUT dependency, publish before verification,
    or retire a source reader pin early; each gets its own targeted red/restored green.
    Ordinary existing save/undo/reader controls can run in S0, but absent Code support or
