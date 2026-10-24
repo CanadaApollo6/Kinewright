@@ -758,3 +758,36 @@ fn unexpected_controller_exit_reaps_a_recorded_stopped_worker_before_return() {
     assert_eq!(summary["exit_code"], 2);
     assert_eq!(summary["disposition"], "not_run");
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn c7_writer_identity_fixture_uses_real_alias_save() {
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "c7-alias-fixture");
+    for mode in ["baseline", "revised"] {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s2-writer-identity.json");
+        let output = temp.path(mode);
+        let result = Command::new(env!("CARGO_BIN_EXE_kinewright-ja-baseline"))
+            .args(["--mode", mode, "--fixture"])
+            .arg(fixture)
+            .arg("--output")
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+        assert!(
+            summary["assertions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["passed"] == true)
+        );
+    }
+}

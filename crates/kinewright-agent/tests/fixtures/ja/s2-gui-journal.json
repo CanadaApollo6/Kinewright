@@ -1,0 +1,73 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s2-gui-journal",
+  "gate_ids": [
+    "JA1.G4"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {
+    "control": {
+      "relative_file": "s2-gui-journal-control.json",
+      "sha256": "d93ceec3462e1502399a88aaeb0edeedbede16e9522789fb4224bd7263d8644e",
+      "byte_length": 57,
+      "kind": "input"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "app_fixture",
+      "args": {
+        "input": "control"
+      }
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "control_appended",
+        "observation": 1,
+        "pointer": "/control_appended",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "post_scan_excluded",
+        "observation": 1,
+        "pointer": "/post_scan_excluded",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "control_appended"
+      }
+    }
+  ],
+  "barriers": [],
+  "limits": {
+    "input_bytes": 262144,
+    "output_bytes": 16777216,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  },
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    }
+  }
+}

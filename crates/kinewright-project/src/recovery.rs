@@ -354,6 +354,27 @@ pub(crate) fn pending_journal_for_identity(
             pending.push(journal);
         }
     }
+    #[cfg(any(test, feature = "test-util"))]
+    crate::test_hook("journal_after_scan");
+    // Reopen the directory after the scan and directly probe every matching
+    // allocator suffix. The held writer lock excludes legitimate new writers.
+    for entry in fs::read_dir(recovery_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| {
+            journal_name_matches_for(&base, name)
+                || journal_name_matches_for(&legacy, name)
+                || ordinary_base
+                    .as_deref()
+                    .is_some_and(|base| journal_name_matches_for(base, name))
+        }) {
+            match fs::symlink_metadata(entry.path()) {
+                Ok(_) => pending.push(entry.path()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
     // N1: `read_dir` can miss an entry renamed in mid-scan, so the exact
     // names are probed directly too — any type refuses, as in H4.
     for name in [Some(&base), Some(&legacy), ordinary_base.as_ref()]

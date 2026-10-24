@@ -79,7 +79,7 @@ kinewright_media pf1_harness::pf1_rss_child crates/kinewright-media/src/pf1_g15.
 kinewright_media pf1_harness::pf1_seek_baseline crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-seek lane: manual release seek-latency measurement; run with --release --ignored
 
 # kinewright_project
-kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # INHERITED GAP: known journal-lock defect (S5 obligation: journal writers must hold the lock); unskip once fixed
+kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # Historical direct filesystem injection bypasses authority; C7 real GUI writer witness covers production exclusion
 kinewright_project project::tests::mo2_old_reader_corpus crates/kinewright-project/src/project.rs any on-demand  # manual pre-land check: scripts/mo2-old-reader-check.sh
 
 # new_harness_e2e

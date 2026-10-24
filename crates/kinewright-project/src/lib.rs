@@ -22,6 +22,7 @@ pub mod store;
 pub mod headless;
 #[cfg(any(test, feature = "test-util"))]
 pub mod io_observer;
+pub mod legacy_io;
 pub mod lockfile;
 pub mod namespace;
 pub mod project;

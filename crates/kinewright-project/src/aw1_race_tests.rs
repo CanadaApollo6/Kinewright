@@ -9,7 +9,8 @@
 //! names of the findings in rereview-aw1-s01-race.md: each describes a
 //! defect of the 503d221 baseline (history, not current behaviour), asserts
 //! the fixed contract, and is a green regression pin since its fix commit.
-//! The one exception is the `#[ignore]`d S5 obligation, which is still open.
+//! The ignored direct filesystem injection remains historical evidence; C7
+//! separately exercises the authority-bound production GUI writer.
 //! `RACE_ITERS` overrides the default 200 iterations.
 //!
 //! Mounted from lockfile.rs as a child module (`#[path]`) so it can reach the
@@ -1185,13 +1186,11 @@ fn guard_journal_appearing_before_the_scan_refuses() {
     }
 }
 
-/// AF3 TOCTOU, open half: a journal created after the scan (by a writer
-/// that does not hold the project lock — today's GUI `JournalWriter`, which
-/// S5 has not yet put under the lock) is never seen: the claimant owns with
-/// a pending journal on disk. AF3's refusal is only as strong as the rule
-/// that journal writers hold the lock. Ignored until S5 wires the GUI lock.
+/// Historical uncooperative filesystem injection after the owner's final scan.
+/// C7's real GUI `JournalWriter` now claims authority and cannot reproduce this
+/// premise. Keep this direct-write defect and its assertion as historical evidence.
 #[test]
-#[ignore = "S5 obligation: journal writers must hold the lock"]
+#[ignore = "historical uncooperative journal injection; C7 covers the real GUI writer"]
 fn defect_journal_appearing_after_the_scan_is_missed() {
     let mut missed = Vec::new();
     for shape in ["base", "suffix", "alias"] {

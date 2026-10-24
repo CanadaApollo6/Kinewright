@@ -313,6 +313,16 @@ Freeze these conceptual boundary types now, without adding production Rust types
 | `DerivedResult` | Project/session identity, epoch/job/source/recipe/intent identity, measured bytes, sealed output refs and coverage. A candidate result is not an edit bind. |
 | `SuccessorEvidence` | Old and new identities, reason (relink, damage repair, retranscription or deliberate regeneration), dependency invalidations and expected head/bound-resource identity. |
 
+C7's legacy callers retain one resolved project lock and native IO parents through
+project, sidecar, asset-copy and GUI journal operations. Recorder and queued-writer
+lifetimes retain that actual authority. A changed alias or lost lock cannot authorize
+another namespace. Startup journal decisions use writer authority, unreplayed journals
+survive headless Save, and final probes include suffixed names. Pending startup decisions
+retain the scanned native parent and exact bytes; changed journals cannot be retired by
+an earlier decision. Post-restore retirement executes at the active writer. These are local G4
+obligations; they do not establish C8 host or Windows Studio durability acceptance.
+The original legacy truncate-fallback contradiction remains historical S0 evidence.
+
 The JA-1 host is the **single writer** of the authoritative manifest/index/root; before
 first save, the same project-store primitives have one session owner as frozen in §4.3.
 It reserves and copies/clones to exclusive owned storage while hashing, checks requested

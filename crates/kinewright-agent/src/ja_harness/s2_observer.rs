@@ -352,3 +352,95 @@ pub(super) fn rescue_publication(root: &Path, revised: bool) -> Result<Value, St
     };
     run().map_err(|e| e.to_string())
 }
+
+/// Calls the real legacy save in either mode; no writer semantics live here.
+#[cfg(target_os = "linux")]
+pub(super) fn writer_identity(root: &Path) -> Result<Value, String> {
+    use kinewright_project::{
+        LockMode, SidecarMode, SidecarSession, acquire_project_lock_with_policy, save_headless,
+    };
+    use std::{
+        fs,
+        sync::{Arc, RwLock},
+        time::{Duration, Instant},
+    };
+    let a = root.join("writer-a.kinewright");
+    let b = root.join("writer-b.kinewright");
+    let recovery = root.join("writer-recovery");
+    fs::create_dir(&recovery).map_err(|e| e.to_string())?;
+    let document = |mark| Document {
+        tracks: vec![Track {
+            id: TrackId(mark),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    };
+    let bytes =
+        |duration| kinewright_project::serialize_project_document(&document(duration)).unwrap();
+    fs::write(&a, bytes(11)).map_err(|e| e.to_string())?;
+    fs::write(&b, bytes(22)).map_err(|e| e.to_string())?;
+    let owner =
+        acquire_project_lock_with_policy(&a, LockMode::Headless, "", &recovery, 1, Duration::ZERO)
+            .map_err(|e| e.to_string())?;
+    let mut session = SidecarSession::load(
+        &SidecarMode::Load {
+            project_digest: String::new(),
+        },
+        Some(&a),
+        Arc::new(RwLock::new(kinewright_core::IncidentLog::with_start(
+            Instant::now(),
+            None,
+        ))),
+        kinewright_core::TimelineRevision::default(),
+        None,
+        None,
+    )
+    .session;
+    save_headless(
+        &document(33),
+        &BundleWriteAdmission::new_document(),
+        &a,
+        None,
+        &mut session,
+        "",
+        kinewright_core::TimelineRevision::default(),
+        &recovery,
+        Some(&owner.handle),
+    )
+    .map_err(|e| e.to_string())?;
+    let control_reopened = kinewright_project::load_document(&a)?.0 == document(33);
+    let alias = root.join("writer-current.kinewright");
+    std::os::unix::fs::symlink(&a, &alias).map_err(|e| e.to_string())?;
+    let target = alias.clone();
+    let next = b.clone();
+    let result = io_observer::at_barrier(
+        "legacy_save_verified",
+        move || {
+            fs::remove_file(&target).unwrap();
+            std::os::unix::fs::symlink(&next, &target).unwrap();
+        },
+        || {
+            save_headless(
+                &document(44),
+                &BundleWriteAdmission::new_document(),
+                &alias,
+                None,
+                &mut session,
+                "",
+                kinewright_core::TimelineRevision::default(),
+                &recovery,
+                Some(&owner.handle),
+            )
+        },
+    );
+    let alias_preserved = result.is_ok()
+        && fs::read(&a).map_err(|e| e.to_string())? == bytes(44).as_bytes()
+        && fs::read(&b).map_err(|e| e.to_string())? == bytes(22).as_bytes()
+        && !b.with_extension("kinewright-incidents").exists()
+        && !b.with_extension("kinewright-assets").exists();
+    drop(session);
+    owner.handle.release().map_err(|e| e.to_string())?;
+    Ok(json!({"control_reopened": control_reopened, "alias_preserved": alias_preserved}))
+}

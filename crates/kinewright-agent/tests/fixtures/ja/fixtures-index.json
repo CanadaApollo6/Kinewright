@@ -1104,6 +1104,45 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-writer-identity",
+      "relative_file": "s2-writer-identity.json",
+      "sha256": "d143fde6344af42222073d05206d5f80e35128e320c39b605d772ad96b28866d",
+      "byte_length": 1437,
+      "expected_baseline_process_exit": 1,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-gui-journal",
+      "relative_file": "s2-gui-journal.json",
+      "sha256": "33b38e557389603e11c6378a0739bcf4b4e4a6d69d73c981aa337105ae31e4dc",
+      "byte_length": 1667,
+      "expected_baseline_process_exit": 1,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-gui-journal-control.json",
+          "sha256": "d93ceec3462e1502399a88aaeb0edeedbede16e9522789fb4224bd7263d8644e",
+          "byte_length": 57,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

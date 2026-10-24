@@ -385,3 +385,48 @@ Windows `errno.h`; native Windows and hosted slow acceptance remain NOT RUN. Pai
 are C5 230.294 and fix1 230.469 ms/save (1.0008x), beside archived C5 230.9 ms/save.
 Production code, normative contracts and all 95 JA fixture files are unchanged. The original
 C6 record remains archived evidence; superseded/interrupted fix runs earn no acceptance.
+
+## C7 writer and journal identity
+
+[C7 report](c7.md) and [rerunnable C7 gate](c7-gate.sh). C7 only on `4952851`,
+branch `ja1/s2`; one local commit, no push. Source/SHA binding and raw evidence are under
+`.review/ja/s2-evidence/c7/`.
+
+Final Linux gate: 67 passing command rows, 29 nonempty selections, 630 selected,
+620 executed passes and 10 explicit ignores. Complete workspace fast with
+`--no-fail-fast`: 3,948 passed, 107 ignored, zero failed; verifier passed. Final runtime
+mutations: 18 semantic mutations, 20 red/restored-green pairs, exact source restoration.
+Both additive S0 properties were literal parent reds after successful controls and
+pass on current source in both modes. `participants-lock` stays positive; 94 old fixture
+files and 32 old index rows are unchanged.
+
+Paired means (five alternating runs per source, 60 saves each): pristine `4952851`
+343.319 ms/save; C7 355.802 ms/save (+3.64%). Ranges overlap; exact rank-sum p=0.6905,
+so the timing comparison is inconclusive at this sample size. Every measured save
+committed with zero history decodes. Shared workstation load is retained, not gated.
+The installed MSVC cross-check was attempted for all four touched crates/all targets:
+blocked in native dependencies, including missing Windows `errno.h`. Native Windows
+and exact-SHA hosted slow lanes remain NOT RUN for the lead. No workflow changed.
+
+Implementation details and deviations:
+
+- `docs/JA1-STUDIO-ORCHESTRATION.md:181`: Tracked §5 states real legacy/GUI authority, native IO parents, queued lifetime, exact startup decision identity and suffix/release obligations. Host remains C8.
+- `docs/JA-S0-CONTRACTS.md:316`: Tracked §4.1 records the same local G4 ownership/handoff contract and preserves historical S0 fallback evidence. A1 is unchanged.
+- `crates/kinewright-project/src/legacy_io.rs:11`: The existing Studio namespace refuses Windows durable activation. A narrow legacy directory capability preserves the separate legacy IO profile: Linux fd paths; Windows ancestor deny-delete pins and reparse refusal. This is the plan’s namespace-owned legacy IO, not a second bundle publisher.
+- `crates/kinewright-media/src/lut_store.rs:583`: Existing LUT validation/copy logic accepts pinned source/destination luts directories; needed to preserve asset identity without duplicating the copier.
+- `crates/kinewright-project/src/sidecar.rs:484`: Queued jobs retain the actual shared lock; joined acknowledgements drop the job capability before waking the caller.
+- `crates/kinewright-app/src/recovery.rs:1186`: Explicit close joins the recorder and retires its journal before relinquishing authority. Closed objects clear their old path so Drop cannot delete a successor journal.
+- `crates/kinewright-app/src/app.rs:1834`: A restored copy may be suspended while the original project owns the writer. Retirement routes to that real owner, using the scanned pending decision.
+- `crates/kinewright-app/src/recovery.rs:1196`: Eight legacy tests constructed private RestoreRequests directly. Their setup now captures the real startup scan before requesting restore; every existing assertion remains.
+- `crates/kinewright-app/src/project.rs:1903`: Legacy reopen setup now performs actual close. The second corrupt-sidecar injection happens after close; the stale-write test shares the real authority and closes its reopened session before reopening the original.
+- `crates/kinewright-project/src/aw1_race_tests.rs:1194`: Historical ignored defect assertion preserved; classification alone changes, with the existing allowlist row updated.
+- `crates/kinewright-project/tests/ja_s2_writer.rs:113`: The actual save child loads the owner-resolved stem and real project digest, asserts readiness, classifies saved versus typed LockLost, and captures stderr privately. This removes precondition/formatting false results without deleting graph assertions.
+- `scripts/ja1-s2-c7-mutations.py:56`: The alias mutant retains the new sidecar capability while restoring only caller-path project IO; its validator requires the foreign-graph assertion and both fixture modes with successful controls.
+
+The historical post-scan defect retains its assertions and ignore. The output-format
+repair captures child stderr; the strengthened alias setup uses the resolved sidecar
+stem, actual digest and typed outcomes. Earlier weak/development results are excluded.
+Eight direct RestoreRequest tests now capture the real startup scan; existing assertions
+remain. Opus r2 N2 at `crates/kinewright-project/src/editing_session/rescue.rs:293`, `:318-323` is deferred to C12:
+C7 leaves that file unchanged. No C8 host/auth/roots/manual-stream implementation or
+independent review round was started. Only report/README delivery notes follow testing.

@@ -1,0 +1,64 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s2-writer-identity",
+  "gate_ids": [
+    "JA1.G4"
+  ],
+  "lane": "linux-native",
+  "requirements": [],
+  "inputs": {},
+  "initial": {
+    "revision": 0,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "s2_writer_identity_probe",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "control_reopened",
+        "observation": 1,
+        "pointer": "/control_reopened",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "alias_preserved",
+        "observation": 1,
+        "pointer": "/alias_preserved",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "control_reopened"
+      }
+    }
+  ],
+  "barriers": [],
+  "limits": {
+    "input_bytes": 262144,
+    "output_bytes": 16777216,
+    "action_timeout_ms": 30000,
+    "setup_timeout_ms": 30000
+  },
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    }
+  }
+}

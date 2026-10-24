@@ -27,7 +27,7 @@ use kinewright_project::{
     can_overwrite_save, canonical_session_key, derive_lut_store, digest_bytes,
     min_required_format_version, project_newer_format_observation, refuse_sidecar,
     rollback_sidecar_write, serialize_project_document, sidecar_path_for_project,
-    sidecar_write_failed_observation, snapshot_sidecar_rollback, write_project_bytes,
+    sidecar_write_failed_observation, snapshot_sidecar_rollback,
 };
 
 use crate::{
@@ -893,6 +893,15 @@ impl KinewrightApp {
         if self.focused().ja1_job.is_some() {
             return;
         }
+        let was_legacy = !self.focused().source_admission.is_studio();
+        if was_legacy {
+            if let Err(error) = self.focused_mut().flush_incidents_if_changed() {
+                self.status = error.to_string();
+                return;
+            }
+            self.focused_mut().recovery.stop_for_studio();
+            self.focused_mut().sidecar.authority = None;
+        }
         let result = (|| {
             let session = self.focused();
             session
@@ -942,7 +951,18 @@ impl KinewrightApp {
                     .set_document(Arc::clone(&self.focused().document));
                 self.status = "Studio recovery and rescue enabled for this editing context.".into();
             }
-            Err(error) => self.status = error,
+            Err(error) => {
+                if was_legacy {
+                    let session = self.focused_mut();
+                    session
+                        .recovery
+                        .attach(&session.core, session.project_path.as_deref());
+                    session.sidecar.authority = session.recovery.writer();
+                    session.sidecar.sidecar_suspended |=
+                        session.project_path.is_some() && session.sidecar.authority.is_none();
+                }
+                self.status = error;
+            }
         }
     }
     fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
@@ -1210,6 +1230,16 @@ impl KinewrightApp {
         if !save_as && let Some(notice) = self.overwrite_save_refusal() {
             return Err(ProjectSaveError::SaveAsRequired { notice });
         }
+        let writer = self
+            .focused()
+            .recovery
+            .writer_for(Some(path))
+            .map_err(ProjectSaveError::Write)?
+            .ok_or_else(|| ProjectSaveError::Write("missing legacy writer".into()))?;
+        writer.verify().map_err(|_| ProjectSaveError::LockLost {
+            path: path.to_path_buf(),
+        })?;
+        let path = writer.resolved_identity();
         let document = Arc::clone(&self.focused().document);
         let previous_store = self.focused().lut_store.clone();
         // The live investigator mutes travel in the saved bytes (IN2 §2.4).
@@ -1265,6 +1295,8 @@ impl KinewrightApp {
         // *until Save As* (§2 rule 10, N2/S-13) — the Save As flush below is
         // the first write the new stem is owed, and `flush_incidents`
         // skips while suspended.
+        let old_writer = self.focused().sidecar.authority.clone();
+        self.focused_mut().sidecar.authority = Some(writer.clone());
         let old_path = self.focused().project_path.clone();
         let was_suspended = self.focused().sidecar_suspended;
         let was_recovery_suspended = self.focused().recovery_suspended;
@@ -1299,11 +1331,14 @@ impl KinewrightApp {
             // save (nothing of ours landed, so no rollback runs — a
             // concurrent stem is left alone): never an unpaired success.
             Ok(FlushOutcome::Occupied) => {
-                let stem = sidecar_path_for_project(self.focused().project_path.as_deref())
+                let _stem = sidecar_path_for_project(self.focused().project_path.as_deref())
                     .expect("an occupied flush derived its stem");
-                let moved = match refuse_sidecar(&stem) {
+                let moved = match refuse_sidecar(
+                    &sidecar_path_for_project(Some(&writer.io_path())).expect("sidecar filename"),
+                ) {
                     Ok(moved) => moved,
                     Err(error) => {
+                        self.focused_mut().sidecar.authority = old_writer;
                         self.focused_mut().project_path = old_path;
                         self.focused_mut().sidecar_suspended = was_suspended;
                         self.focused_mut().recovery_suspended = was_recovery_suspended;
@@ -1324,6 +1359,7 @@ impl KinewrightApp {
                         ));
                     }
                     Ok(_) => {
+                        self.focused_mut().sidecar.authority = old_writer;
                         self.focused_mut().project_path = old_path;
                         self.focused_mut().sidecar_suspended = was_suspended;
                         self.focused_mut().recovery_suspended = was_recovery_suspended;
@@ -1337,10 +1373,16 @@ impl KinewrightApp {
             }
             Ok(_) => {}
         }
-        let report = match write_project_bytes(&json, to_write, path, previous_store.as_ref()) {
+        let report = match kinewright_project::project::write_project_bytes_owned(
+            &json,
+            to_write,
+            &writer,
+            previous_store.as_ref(),
+        ) {
             Ok(report) => report,
             Err(error) => {
                 rollback_sidecar_write(rollback_snapshot, self.focused_mut());
+                self.focused_mut().sidecar.authority = old_writer;
                 self.focused_mut().project_path = old_path;
                 self.focused_mut().sidecar_suspended = was_suspended;
                 self.focused_mut().recovery_suspended = was_recovery_suspended;
@@ -1486,9 +1528,11 @@ impl KinewrightApp {
         let library = session.rebuild_lut_library();
         session.publish_project_path_to_agents();
         let core = session.core.clone();
-        session
-            .recovery
-            .checkpoint(&core, session.project_path.as_deref());
+        session.recovery.checkpoint_owned(
+            &core,
+            session.project_path.as_deref(),
+            session.sidecar.authority.clone(),
+        );
         self.lut_publisher.set_lut_library(library);
     }
 
@@ -1787,6 +1831,14 @@ impl KinewrightApp {
             return;
         }
         let journal_path = request.journal_path;
+        let retirement_owner = request.project_path.as_deref().and_then(|path| {
+            let identity = kinewright_project::canonical_project_identity(path).ok()?;
+            self.projects.iter().position(|session| {
+                session.recovery.writer().is_some_and(|writer| {
+                    writer.resolved_identity() == identity && writer.verify().is_ok()
+                })
+            })
+        });
         let name = project_name(request.project_path.as_deref(), "Recovered project");
         let suspended = request
             .project_path
@@ -1815,7 +1867,15 @@ impl KinewrightApp {
                 for asset in assets {
                     self.request_asset_analysis(asset);
                 }
-                self.projects[0].recovery.consume_pending(&journal_path);
+                let owner = retirement_owner.unwrap_or(self.focused_project);
+                if owner == 0 {
+                    self.projects[0].recovery.consume_pending(&journal_path);
+                } else {
+                    let (earlier, active) = self.projects.split_at_mut(owner);
+                    earlier[0]
+                        .recovery
+                        .consume_pending_by(&journal_path, &active[0].recovery);
+                }
             });
         // `IN1b` §5.7, Appendix B row 28: the third log-bypassing sink.
         // A failed restore used to be a bare status string; it is now a
@@ -11419,11 +11479,7 @@ mod in2b_tests {
     }
 
     fn in2b_shutdown_session(session: &mut ProjectSession) {
-        for thread in &mut session.threads {
-            if let Some(server) = thread.mcp_server.take() {
-                server.shutdown();
-            }
-        }
+        session.stop_threads("project closed");
     }
 
     /// Observe `count` distinct open incidents into a session's log, at
@@ -11652,6 +11708,7 @@ mod in2b_tests {
         };
         assert_eq!(written.written_open, 3);
         assert_eq!(written.written_resolved, 2);
+        in2b_shutdown_session(&mut reopened);
 
         // B-5 gate box: a save during an in-flight background write leaves
         // the save's digest pair, never the stale job's bytes.
@@ -11662,7 +11719,18 @@ mod in2b_tests {
             "aaaaaaaaaaaaaaaa",
         )
         .expect("the stale snapshot builds");
-        app.sidecar_writer.submit(sidecar.clone(), stale);
+        let owner = app.projects[0]
+            .recovery
+            .writer_for(Some(&project_path))
+            .expect("the closed project reacquires")
+            .expect("named project");
+        let session = &mut app.projects[0];
+        session.sidecar.authority = Some(owner.clone());
+        session
+            .recovery
+            .checkpoint_owned(&session.core, Some(&project_path), Some(owner.clone()));
+        app.sidecar_writer
+            .submit_owned(sidecar.clone(), stale, Some(&owner));
         app.write_project(&project_path).expect("the save succeeds");
         let landed_digest = digest_bytes(&fs::read(&project_path).expect("the project reads"));
         let SidecarLoad::Current(landed) = load_sidecar(&sidecar) else {
@@ -11671,7 +11739,6 @@ mod in2b_tests {
         assert_eq!(landed.project_digest, landed_digest);
         assert_ne!(landed.project_digest, "aaaaaaaaaaaaaaaa");
 
-        in2b_shutdown_session(&mut reopened);
         in2b_shutdown(&mut app);
     }
 
@@ -12078,6 +12145,9 @@ mod in2b_tests {
         // history digest-less with revisions rebased — and suspends sidecar
         // writes, because the target path is already open.
         let projects_before = app.projects.len();
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&journal_path);
         app.apply_restore_request(RestoreRequest {
             document: recovered,
             project_path: Some(project_path.clone()),
@@ -12157,6 +12227,9 @@ mod in2b_tests {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len();
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&cross_path);
         app.apply_restore_request(RestoreRequest {
             document: Document::default(),
             project_path: Some(project_path.clone()),
@@ -14139,6 +14212,9 @@ mod in2b_tests {
             journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
         )
         .expect("the journal writes");
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&journal_path);
         app.apply_restore_request(RestoreRequest {
             document: recovered,
             project_path: Some(project_path.clone()),
@@ -14213,6 +14289,9 @@ mod in2b_tests {
             label: "the unsaved edit".to_owned(),
             color_token: 0,
         });
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&journal_path);
         app.apply_restore_request(RestoreRequest {
             document: recovered,
             project_path: Some(project_path.clone()),
@@ -14269,6 +14348,9 @@ mod in2b_tests {
             journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
         )
         .expect("the journal writes");
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&journal_path);
         app.apply_restore_request(RestoreRequest {
             document: Document::default(),
             project_path: Some(project_path.clone()),
@@ -14611,6 +14693,9 @@ mod in2b_tests {
             journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
         )
         .expect("the journal writes");
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&journal_path);
         app.apply_restore_request(RestoreRequest {
             document: Document::default(),
             project_path: Some(project_path.clone()),
@@ -15162,6 +15247,9 @@ mod in2b_tests {
             journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
         )
         .expect("the journal writes");
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&journal_path);
         app.apply_restore_request(RestoreRequest {
             document: Document::default(),
             project_path: Some(project_path.clone()),
@@ -15270,6 +15358,9 @@ mod in2b_tests {
             journal_fixture_bytes(&project_path, PROJECT_FORMAT_VERSION, &Document::default()),
         )
         .expect("the journal writes");
+        app.projects[0]
+            .recovery
+            .capture_pending_for_test(&journal_path);
         app.apply_restore_request(RestoreRequest {
             document: Document::default(),
             project_path: Some(project_path.clone()),

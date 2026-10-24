@@ -360,6 +360,12 @@ impl ProjectSession {
         let agent_harness = AgentHarnessChoice::ALL[0];
         let writable =
             source_admission.require_supported().is_ok() && !source_admission.is_studio();
+        // Open already resolved the source once. Claim and journal that identity,
+        // even if the original caller alias was repointed before session creation.
+        let project_path = source_admission
+            .source()
+            .map(Path::to_path_buf)
+            .or(project_path);
         let recovery = if !writable {
             Recovery::read_only()
         } else if id == 1 {
@@ -368,10 +374,14 @@ impl ProjectSession {
             Recovery::start_attached(&core, project_path.as_deref())
         };
         let document = Arc::new(document);
-        let (lut_store, lut_store_error) = match derive_lut_store(project_path.as_deref()) {
-            Ok(store) => (store, None),
-            Err(reason) => (None, Some(reason)),
-        };
+        let writer_identity = recovery
+            .writer()
+            .map(|writer| writer.resolved_identity().to_path_buf());
+        let (lut_store, lut_store_error) =
+            match derive_lut_store(writer_identity.as_deref().or(project_path.as_deref())) {
+                Ok(store) => (store, None),
+                Err(reason) => (None, Some(reason)),
+            };
         let (library, statuses) = LutLibrary::build(&document.lut_assets, lut_store.as_ref());
         let agent_project_path: ProjectPathHandle =
             std::sync::Arc::new(std::sync::RwLock::new(project_path.clone()));
@@ -384,7 +394,7 @@ impl ProjectSession {
         // The open-time history load runs here, before any note and before
         // the log handle is shared with the first agent thread below (N4.1):
         // restore requires an empty log and no id may collide with it.
-        let loaded = SidecarSession::load(
+        let loaded = SidecarSession::load_owned(
             if writable {
                 sidecar_mode
             } else {
@@ -395,6 +405,7 @@ impl ProjectSession {
             TimelineRevision::default(),
             sidecar_writer,
             refuse_rename,
+            recovery.writer(),
         );
         // Restored ids snapshot before the session exists (`IN2B` §3 rules 9,
         // 11, 12, 17): the log holds only restored entries, so every entry
@@ -743,7 +754,12 @@ impl ProjectSession {
                 confirmations.reject_all(reason);
             }
             thread.pending_confirmations.clear();
+            if let Some(server) = thread.mcp_server.take() {
+                server.shutdown();
+            }
         }
+        self.recovery.close();
+        self.sidecar.authority = None;
     }
 }
 
@@ -1885,11 +1901,7 @@ mod tests {
     }
 
     fn shutdown_test_session(session: &mut ProjectSession) {
-        for thread in &mut session.threads {
-            if let Some(server) = thread.mcp_server.take() {
-                server.shutdown();
-            }
-        }
+        session.stop_threads("project closed");
     }
 
     #[test]
@@ -2247,8 +2259,8 @@ mod tests {
         assert!(!corrupt_sidecar.exists(), "the refused file moves away");
         assert_eq!(fs::read(&bak).expect("bak reads"), b"{ truncated");
         // A second refusal lands `.bak.1`, leaving `.bak` byte-identical.
-        fs::write(&corrupt_sidecar, b"truncated again").expect("the second torn sidecar writes");
         shutdown_test_session(&mut session);
+        fs::write(&corrupt_sidecar, b"truncated again").expect("the second torn sidecar writes");
         let mut session = sidecar_session(23, &corrupt_project);
         let mut bak1_name = corrupt_sidecar.as_os_str().to_owned();
         bak1_name.push(".bak.1");

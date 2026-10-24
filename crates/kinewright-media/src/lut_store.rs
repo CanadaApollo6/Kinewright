@@ -577,35 +577,78 @@ impl LutStore {
             .collect()
     }
 
+    /// Copy with source and destination LUT directories held by the project writer.
+    /// The caller retains both native directory handles for this synchronous call.
+    #[must_use]
+    pub fn copy_to_pinned_luts(
+        &self,
+        other: &Self,
+        assets: &[LutAsset],
+        source: &Path,
+        destination: &Path,
+    ) -> Vec<(LutAssetId, Result<(), MediaError>)> {
+        assets
+            .iter()
+            .map(|asset| {
+                (
+                    asset.id,
+                    self.copy_one_at(other, asset, Some((source, destination))),
+                )
+            })
+            .collect()
+    }
+
     fn copy_one(&self, other: &Self, asset: &LutAsset) -> Result<(), MediaError> {
-        self.copy_one_file(other, asset).map_err(|error| {
-            // `IN1b` N4/CR-D1: a store refusal crosses as `MediaError::Store`
-            // now, and as `MediaError::Backend` only when it came from
-            // somewhere other than this module's own `From` impl. Both carry
-            // the rendered reason this wrapper quotes back under `observed`.
-            let (MediaError::Store {
-                message: reason, ..
-            }
-            | MediaError::Backend(reason)) = &error
-            else {
-                return error;
-            };
-            LutStoreError::new(
-                LutStoreErrorCode::LutStoreCopyFailed,
-                format!("could not copy LUT asset {} into the new store", asset.id),
-            )
-            .with_observed(reason)
-            .into()
-        })
+        self.copy_one_at(other, asset, None)
+    }
+
+    fn copy_one_at(
+        &self,
+        other: &Self,
+        asset: &LutAsset,
+        directories: Option<(&Path, &Path)>,
+    ) -> Result<(), MediaError> {
+        self.copy_one_file(other, asset, directories)
+            .map_err(|error| {
+                // `IN1b` N4/CR-D1: a store refusal crosses as `MediaError::Store`
+                // now, and as `MediaError::Backend` only when it came from
+                // somewhere other than this module's own `From` impl. Both carry
+                // the rendered reason this wrapper quotes back under `observed`.
+                let (MediaError::Store {
+                    message: reason, ..
+                }
+                | MediaError::Backend(reason)) = &error
+                else {
+                    return error;
+                };
+                LutStoreError::new(
+                    LutStoreErrorCode::LutStoreCopyFailed,
+                    format!("could not copy LUT asset {} into the new store", asset.id),
+                )
+                .with_observed(reason)
+                .into()
+            })
     }
 
     /// The copy itself, reporting the underlying typed failure.
-    fn copy_one_file(&self, other: &Self, asset: &LutAsset) -> Result<(), MediaError> {
+    fn copy_one_file(
+        &self,
+        other: &Self,
+        asset: &LutAsset,
+        directories: Option<(&Path, &Path)>,
+    ) -> Result<(), MediaError> {
         if matches!(asset.source, LutAssetSource::Builtin { .. }) || self.root == other.root {
             return Ok(());
         }
         let source = self.path_for(&asset.sha256)?;
         let destination = other.path_for(&asset.sha256)?;
+        let (source, destination) = match directories {
+            Some((from, to)) => (
+                from.join(source.file_name().expect("validated LUT name")),
+                to.join(destination.file_name().expect("validated LUT name")),
+            ),
+            None => (source, destination),
+        };
         let bytes = read_regular_file(&source).map_err(|error| {
             // Built typed and converted, rather than rendered into a
             // `MediaError::Backend` string by hand, so the code reaches
@@ -629,7 +672,11 @@ impl LutStore {
             .with_allowed(&asset.sha256)
             .into());
         }
-        other.write_store_file(&destination, &bytes, &observed)
+        if let Some((_, directory)) = directories {
+            Self::write_store_file_in(directory, &destination, &bytes, &observed)
+        } else {
+            other.write_store_file(&destination, &bytes, &observed)
+        }
     }
 
     /// Write `bytes` to `destination` unless a correctly hashed file is already
@@ -649,9 +696,18 @@ impl LutStore {
     ) -> Result<(), MediaError> {
         let directory = self.luts_dir();
         check_store_directory(self.root())?;
-        check_store_directory(&directory)?;
+        Self::write_store_file_in(&directory, destination, bytes, sha256)
+    }
+
+    fn write_store_file_in(
+        directory: &Path,
+        destination: &Path,
+        bytes: &[u8],
+        sha256: &str,
+    ) -> Result<(), MediaError> {
+        check_store_directory(directory)?;
         check_store_entry(destination)?;
-        fs::create_dir_all(&directory).map_err(|error| {
+        fs::create_dir_all(directory).map_err(|error| {
             MediaError::from(LutStoreError::new(
                 LutStoreErrorCode::LutStoreWriteFailed,
                 format!(

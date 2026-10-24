@@ -99,11 +99,14 @@ struct JournalHeader {
 }
 
 struct JournalWriter {
+    authority: Option<kinewright_project::LockfileHandle>,
+    _directory: kinewright_project::legacy_io::PinnedDirectory,
     file: File,
     sync_each_record: bool,
 }
 
 impl JournalWriter {
+    #[cfg(test)]
     fn create(
         path: &Path,
         project_path: Option<&Path>,
@@ -112,38 +115,80 @@ impl JournalWriter {
         Self::create_with_sync(path, project_path, initial_document, true)
     }
 
+    #[cfg(test)]
     fn create_with_sync(
         path: &Path,
         project_path: Option<&Path>,
         initial_document: &Document,
         sync_each_record: bool,
     ) -> Result<Self, String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| {
-                format!(
-                    "could not create recovery directory {}: {error}",
-                    parent.display()
+        let authority = project_path
+            .map(|project| {
+                kinewright_project::lockfile::acquire_gui_project_lock(
+                    project,
+                    path.parent().unwrap_or(Path::new(".")),
                 )
-            })?;
+                .map(|owner| owner.handle)
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        Self::create_owned(
+            path,
+            project_path,
+            initial_document,
+            sync_each_record,
+            authority,
+            None,
+        )
+    }
+
+    fn create_owned(
+        path: &Path,
+        project_path: Option<&Path>,
+        initial_document: &Document,
+        sync_each_record: bool,
+        authority: Option<kinewright_project::LockfileHandle>,
+        directory: Option<kinewright_project::legacy_io::PinnedDirectory>,
+    ) -> Result<Self, String> {
+        if let Some(writer) = &authority {
+            writer.verify().map_err(|e| e.to_string())?;
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(path)
-            .map_err(|error| {
-                format!(
-                    "could not create recovery journal {}: {error}",
-                    path.display()
-                )
-            })?;
+        if project_path.is_some() && authority.is_none() {
+            return Err("named journal requires writer authority".into());
+        }
+        let directory = if let Some(directory) = directory {
+            directory
+        } else {
+            let parent = path.parent().unwrap_or(Path::new("."));
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            kinewright_project::legacy_io::PinnedDirectory::open(parent)
+                .map_err(|e| e.to_string())?
+        };
+        let owned_path = directory
+            .io_path()
+            .join(path.file_name().ok_or("journal filename")?);
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        // LockFileEx would prevent read-only journal inspection on Windows.
+        // Deny deletion while the recorder lives; named writes also hold the project lock.
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 3);
+        let mut file = options.open(&owned_path).map_err(|error| {
+            format!(
+                "could not create recovery journal {}: {error}",
+                path.display()
+            )
+        })?;
+        kinewright_project::legacy_io::lock_journal(&file).map_err(|e| e.to_string())?;
         // G5: new headers persist the absolute canonical identity, so the
         // takeover scan never has to guess which spelling a relative header
         // meant — legacy relative headers stay readable but never claim.
         let header = serde_json::to_vec(&JournalHeader {
             format_version: FORMAT_VERSION,
             // H5: a path with no identity writes no header path (never claims).
-            project_path: project_path.and_then(|path| canonical_project_identity(path).ok()),
+            project_path: authority
+                .as_ref()
+                .map(|writer| writer.resolved_identity().to_path_buf()),
             writer_format_version: PROJECT_FORMAT_VERSION,
             initial_document: initial_document.clone(),
         })
@@ -155,12 +200,17 @@ impl JournalWriter {
             .and_then(|()| file.sync_all())
             .map_err(|error| format!("could not initialize recovery journal: {error}"))?;
         Ok(Self {
+            authority,
+            _directory: directory,
             file,
             sync_each_record,
         })
     }
 
     fn append(&mut self, command: &JournalCommand) -> Result<(), String> {
+        if let Some(writer) = &self.authority {
+            writer.verify().map_err(|e| e.to_string())?;
+        }
         let encoded = serde_json::to_vec(command)
             .map_err(|error| format!("could not serialize recovery command: {error}"))?;
         self.file
@@ -423,11 +473,33 @@ struct Recorder {
 }
 
 impl Recorder {
+    #[cfg(test)]
     fn start(
         core: &Core,
         path: &Path,
         project_path: Option<&Path>,
         runtime_error: Arc<Mutex<Option<String>>>,
+    ) -> Result<Self, String> {
+        let authority = project_path
+            .map(|project| {
+                kinewright_project::lockfile::acquire_gui_project_lock(
+                    project,
+                    path.parent().unwrap_or(Path::new(".")),
+                )
+                .map(|owner| owner.handle)
+            })
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        Self::start_owned(core, path, project_path, runtime_error, authority, None)
+    }
+
+    fn start_owned(
+        core: &Core,
+        path: &Path,
+        project_path: Option<&Path>,
+        runtime_error: Arc<Mutex<Option<String>>>,
+        authority: Option<kinewright_project::LockfileHandle>,
+        directory: Option<kinewright_project::legacy_io::PinnedDirectory>,
     ) -> Result<Self, String> {
         let events = core
             .subscribe()
@@ -445,7 +517,14 @@ impl Recorder {
                 ));
             }
         };
-        let writer = JournalWriter::create(path, project_path, &initial_document)?;
+        let writer = JournalWriter::create_owned(
+            path,
+            project_path,
+            &initial_document,
+            true,
+            authority,
+            directory,
+        )?;
         let (control, controls) = unbounded();
         let worker = thread::Builder::new()
             .name("kinewright-recovery".to_owned())
@@ -577,6 +656,8 @@ enum PendingState {
 
 /// One journal found on disk at startup, awaiting a restore/discard decision.
 struct PendingJournal {
+    directory: Option<kinewright_project::legacy_io::PinnedDirectory>,
+    sha256: Option<String>,
     journal_path: PathBuf,
     project_path: Option<PathBuf>,
     state: PendingState,
@@ -641,6 +722,8 @@ pub(crate) struct RestoreRequest {
 
 /// App-owned recovery lifecycle. All filesystem and UI behavior stays here.
 pub(crate) struct Recovery {
+    authority: Option<kinewright_project::LockfileHandle>,
+    directory_owner: Option<kinewright_project::legacy_io::PinnedDirectory>,
     directory: PathBuf,
     path: PathBuf,
     recorder: Option<Recorder>,
@@ -651,6 +734,8 @@ pub(crate) struct Recovery {
 impl Recovery {
     pub(crate) fn read_only() -> Self {
         Self {
+            authority: None,
+            directory_owner: None,
             directory: PathBuf::new(),
             path: PathBuf::new(),
             recorder: None,
@@ -686,8 +771,15 @@ impl Recovery {
         if let Some(error) = lock_unpoisoned(&self.runtime_error).clone() {
             return Err(error);
         }
-        let bytes =
-            kinewright_agent::ja_harness::protocol::read_bounded(&self.path, 64 * 1024 * 1024)?;
+        let bytes = kinewright_agent::ja_harness::protocol::read_bounded(
+            &self
+                .directory_owner
+                .as_ref()
+                .ok_or("journal directory unavailable")?
+                .io_path()
+                .join(self.path.file_name().ok_or("journal filename")?),
+            64 * 1024 * 1024,
+        )?;
         let parsed = parse_journal(&bytes).map_err(|e| e.reason)?;
         let observed = serde_json::json!({"path":self.path,"writer_format_version":parsed.writer_format_version,
             "initial_document":parsed.initial_document,"commands":parsed.commands.iter().map(|c| &c.command).collect::<Vec<_>>(),
@@ -712,6 +804,8 @@ impl Recovery {
     ) -> Self {
         let runtime_error = Arc::new(Mutex::new(None));
         let mut recovery = Self {
+            authority: None,
+            directory_owner: None,
             path: directory.join("uninitialized.journal"),
             directory,
             recorder: None,
@@ -726,27 +820,129 @@ impl Recovery {
     /// current snapshot. Core's initial subscription event makes this race-free
     /// with edits from the agent server.
     pub(crate) fn attach(&mut self, core: &Core, project_path: Option<&Path>) {
+        let writer = match self.writer_for(project_path) {
+            Ok(writer) => writer,
+            Err(error) => {
+                *lock_unpoisoned(&self.runtime_error) = Some(error);
+                return;
+            }
+        };
+        self.attach_owned(core, project_path, writer);
+    }
+
+    pub(crate) fn writer(&self) -> Option<kinewright_project::LockfileHandle> {
+        self.authority.clone()
+    }
+
+    pub(crate) fn writer_for(
+        &self,
+        path: Option<&Path>,
+    ) -> Result<Option<kinewright_project::LockfileHandle>, String> {
+        let Some(path) = path else {
+            return Ok(None);
+        };
+        let identity = canonical_project_identity(path).map_err(|e| e.to_string())?;
+        if let Some(writer) = &self.authority
+            && writer.resolved_identity() == identity
+        {
+            writer.verify().map_err(|e| e.to_string())?;
+            return Ok(Some(writer.clone()));
+        }
+        kinewright_project::lockfile::acquire_gui_project_lock(path, &self.directory)
+            .map(|owner| Some(owner.handle))
+            .map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn checkpoint_owned(
+        &mut self,
+        core: &Core,
+        project_path: Option<&Path>,
+        writer: Option<kinewright_project::LockfileHandle>,
+    ) {
+        self.attach_owned(core, project_path, writer);
+    }
+
+    fn attach_owned(
+        &mut self,
+        core: &Core,
+        project_path: Option<&Path>,
+        writer: Option<kinewright_project::LockfileHandle>,
+    ) {
+        if project_path.is_some() && writer.is_none() {
+            *lock_unpoisoned(&self.runtime_error) =
+                Some("named journal requires writer authority".into());
+            return;
+        }
+        if writer
+            .as_ref()
+            .is_some_and(|writer| writer.verify().is_err())
+        {
+            *lock_unpoisoned(&self.runtime_error) =
+                Some("journal writer authority was lost".into());
+            return;
+        }
         #[cfg(test)]
         if let Some(path) = project_path {
             kinewright_project::io_observer::mutation_attempt("journal_attach_enter", path);
         }
+        let identity = writer
+            .as_ref()
+            .map(|writer| writer.resolved_identity().to_path_buf());
+        let project_path = identity.as_deref().or(project_path);
+        if self.directory_owner.is_none() {
+            if let Err(error) = fs::create_dir_all(&self.directory) {
+                *lock_unpoisoned(&self.runtime_error) = Some(error.to_string());
+                return;
+            }
+            match fs::canonicalize(&self.directory)
+                .and_then(|path| kinewright_project::legacy_io::PinnedDirectory::open(&path))
+            {
+                Ok(directory) => self.directory_owner = Some(directory),
+                Err(error) => {
+                    *lock_unpoisoned(&self.runtime_error) = Some(error.to_string());
+                    return;
+                }
+            }
+        }
         self.stop_active();
-        let reserved: Vec<&Path> = self
+        let directory = self
+            .directory_owner
+            .as_ref()
+            .expect("admitted journal directory");
+        let io_directory = directory.io_path();
+        let reserved_paths = self
             .pending
             .iter()
-            .map(|entry| entry.journal_path.as_path())
-            .collect();
-        let target = allocate_journal_path(&self.directory, project_path, &self.path, &reserved);
-        if target != self.path {
-            self.remove_journal();
-            self.path = target;
-        }
+            .filter_map(|entry| {
+                entry
+                    .journal_path
+                    .file_name()
+                    .map(|name| io_directory.join(name))
+            })
+            .collect::<Vec<_>>();
+        let reserved = reserved_paths
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let current = self
+            .path
+            .file_name()
+            .map_or_else(PathBuf::new, |name| io_directory.join(name));
+        let target = allocate_journal_path(&io_directory, project_path, &current, &reserved);
+        let target = self
+            .directory
+            .join(target.file_name().expect("allocated journal filename"));
+        self.remove_journal();
+        self.path = target;
+        self.authority = writer;
         *lock_unpoisoned(&self.runtime_error) = None;
-        match Recorder::start(
+        match Recorder::start_owned(
             core,
             &self.path,
             project_path,
             Arc::clone(&self.runtime_error),
+            self.authority.clone(),
+            self.directory_owner.clone(),
         ) {
             Ok(recorder) => {
                 self.recorder = Some(recorder);
@@ -760,6 +956,7 @@ impl Recovery {
     /// Saving establishes a new baseline (and, on first save or save-as,
     /// migrates the journal to the project's name), so a later crash only
     /// offers edits made after the successful save.
+    #[cfg(test)]
     pub(crate) fn checkpoint(&mut self, core: &Core, project_path: Option<&Path>) {
         self.attach(core, project_path);
     }
@@ -869,8 +1066,9 @@ impl Recovery {
         }
 
         if let Some(index) = discard {
-            let entry = self.pending.remove(index);
-            remove_file_best_effort(&entry.journal_path, &self.runtime_error);
+            if self.remove_pending(&self.pending[index]) {
+                self.pending.remove(index);
+            }
             return outcome;
         }
         if let Some(index) = restore {
@@ -890,9 +1088,78 @@ impl Recovery {
 
     /// A chosen restore landed: the crash journal has served its purpose.
     pub(crate) fn consume_pending(&mut self, journal_path: &Path) {
-        self.pending
-            .retain(|entry| entry.journal_path != journal_path);
-        remove_file_best_effort(journal_path, &self.runtime_error);
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|entry| entry.journal_path == journal_path)
+            && self.remove_pending(&self.pending[index])
+        {
+            self.pending.remove(index);
+        }
+    }
+
+    /// Execute retirement at the actual active owner, retaining the scanned source identity.
+    pub(crate) fn consume_pending_by(&mut self, journal_path: &Path, owner: &Self) {
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|entry| entry.journal_path == journal_path)
+            && owner.remove_pending(&self.pending[index])
+        {
+            self.pending.remove(index);
+        }
+    }
+
+    fn remove_pending(&self, entry: &PendingJournal) -> bool {
+        let result = (|| -> Result<(), String> {
+            use std::io::Read as _;
+            let project = entry.project_path.as_deref();
+            let _owner = self.writer_for(project)?;
+            let directory = entry
+                .directory
+                .as_ref()
+                .ok_or("journal directory identity is unavailable")?;
+            let path = directory
+                .io_path()
+                .join(entry.journal_path.file_name().ok_or("journal filename")?);
+            if !fs::symlink_metadata(&path)
+                .map_err(|e| e.to_string())?
+                .is_file()
+            {
+                return Err("journal is not a regular file".into());
+            }
+            let mut file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|e| e.to_string())?;
+            kinewright_project::legacy_io::lock_journal(&file).map_err(|e| e.to_string())?;
+            let mut bytes = vec![];
+            file.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            if entry.sha256.as_deref() != Some(&kinewright_media::sha256_bytes(&bytes)) {
+                return Err(
+                    "journal changed after the recovery scan; scan it again before discarding"
+                        .into(),
+                );
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt as _;
+                let opened = file.metadata().map_err(|e| e.to_string())?;
+                let current = fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+                if opened.dev() != current.dev() || opened.ino() != current.ino() {
+                    return Err("journal file identity changed".into());
+                }
+            }
+            fs::remove_file(&path).map_err(|e| e.to_string())
+        })();
+        match result {
+            Ok(()) => true,
+            Err(error) => {
+                *lock_unpoisoned(&self.runtime_error) = Some(error);
+                false
+            }
+        }
     }
 
     /// A cross-version restore was refused (`IN2B` §4 rule 5): drop the
@@ -914,16 +1181,49 @@ impl Recovery {
             recorder.shutdown();
         }
     }
+
+    /// Close finishes journal IO before relinquishing the project's writer capability.
+    pub(crate) fn close(&mut self) {
+        self.stop_active();
+        self.remove_journal();
+        if let Some(writer) = self.authority.take() {
+            let _ = writer.release();
+        }
+        self.path = PathBuf::new();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_pending_for_test(&mut self, journal_path: &Path) {
+        let entries = scan_directory(journal_path.parent().expect("journal parent"));
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.journal_path == journal_path)
+            .expect("the real startup scan recognizes the fixture journal");
+        self.pending.push(entry);
+    }
     /// Studio uses the bundle's owner. Preserve any legacy journal for explicit recovery.
     pub(crate) fn stop_for_studio(&mut self) {
         self.stop_active();
+        self.authority = None;
+        self.path = PathBuf::new();
     }
 
     fn remove_journal(&self) {
         if self.path.as_os_str().is_empty() {
             return;
         }
-        remove_file_best_effort(&self.path, &self.runtime_error);
+        if self
+            .authority
+            .as_ref()
+            .is_some_and(|writer| writer.verify().is_err())
+        {
+            return;
+        }
+        if let Some(directory) = &self.directory_owner
+            && let Some(name) = self.path.file_name()
+        {
+            remove_file_best_effort(&directory.io_path().join(name), &self.runtime_error);
+        }
     }
 }
 
@@ -947,32 +1247,54 @@ fn remove_file_best_effort(path: &Path, runtime_error: &Arc<Mutex<Option<String>
 
 /// Every journal found on disk, in deterministic name order.
 fn scan_directory(directory: &Path) -> Vec<PendingJournal> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Vec::new();
+    let Ok(resolved) = fs::canonicalize(directory) else {
+        return vec![];
     };
-    let mut paths: Vec<PathBuf> = entries
+    let Ok(owner) = kinewright_project::legacy_io::PinnedDirectory::open(&resolved) else {
+        return vec![];
+    };
+    let Ok(entries) = fs::read_dir(owner.io_path()) else {
+        return vec![];
+    };
+    let mut names = entries
         .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
+        .map(|entry| entry.file_name())
+        .filter(|name| {
+            Path::new(name)
+                .extension()
                 .is_some_and(|extension| extension == "journal")
         })
-        .collect();
-    paths.sort();
-    paths
+        .collect::<Vec<_>>();
+    names.sort();
+    names
         .into_iter()
-        .filter_map(|journal_path| match inspect_path(&journal_path) {
-            Inspection::Missing => None,
-            Inspection::Recoverable(report) => Some(PendingJournal {
-                project_path: report.project_path.clone(),
-                journal_path,
-                state: PendingState::Recoverable(report),
-            }),
-            Inspection::Unusable(damage) => Some(PendingJournal {
-                journal_path,
-                project_path: None,
-                state: PendingState::Unusable(damage),
-            }),
+        .filter_map(|name| {
+            let path = owner.io_path().join(&name);
+            let (inspection, sha256) = match fs::read(&path) {
+                Ok(bytes) => (
+                    inspect_bytes(&bytes),
+                    Some(kinewright_media::sha256_bytes(&bytes)),
+                ),
+                Err(_) => (inspect_path(&path), None),
+            };
+            let journal_path = directory.join(name);
+            match inspection {
+                Inspection::Missing => None,
+                Inspection::Recoverable(report) => Some(PendingJournal {
+                    directory: Some(owner.clone()),
+                    sha256,
+                    project_path: report.project_path.clone(),
+                    journal_path,
+                    state: PendingState::Recoverable(report),
+                }),
+                Inspection::Unusable(damage) => Some(PendingJournal {
+                    directory: Some(owner.clone()),
+                    sha256,
+                    project_path: None,
+                    journal_path,
+                    state: PendingState::Unusable(damage),
+                }),
+            }
         })
         .collect()
 }
@@ -995,6 +1317,10 @@ fn damage_description(damage: &Damage) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::items_after_test_module,
+    reason = "architecture scans require test-only waiting helpers after this module"
+)]
 mod tests {
     use std::{
         path::PathBuf,
@@ -1922,6 +2248,8 @@ mod tests {
             outcome
         };
         let idle = || Recovery {
+            authority: None,
+            directory_owner: None,
             directory: PathBuf::from("recovery"),
             path: PathBuf::from("recovery").join("active.journal"),
             recorder: None,
@@ -1929,6 +2257,8 @@ mod tests {
             runtime_error: Arc::new(Mutex::new(None)),
         };
         let pending = |state| PendingJournal {
+            directory: None,
+            sha256: None,
             journal_path: PathBuf::from("pending.journal"),
             project_path: None,
             state,
@@ -1993,4 +2323,282 @@ mod tests {
             Some("no directory"),
         );
     }
+}
+
+/// Actual `JournalWriter` observation, shared by the C7 witness and additive S0 fixture.
+/// This helper also compiles against the predecessor's unchanged GUI writer.
+#[cfg(test)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one GUI observation with a successful recorder control and three exclusion cases"
+)]
+pub(crate) fn g04_gui_journal_observation() -> Result<serde_json::Value, String> {
+    use kinewright_media::test_support::TempDirectory;
+    use kinewright_project::{LockMode, LockfileError, acquire_project_lock_with_policy};
+    let root = kinewright_media::test_support::workspace_target_dir();
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let temp = TempDirectory::new_in(&root, "c7-real-gui");
+    let project = temp.path("project.kinewright");
+    let document = Document::default();
+    let bytes = kinewright_project::serialize_project_document(&document).unwrap();
+    fs::write(&project, &bytes).unwrap();
+    let directory = temp.path("recovery");
+    fs::create_dir(&directory).unwrap();
+    let core = Core::spawn(document).unwrap();
+    let control = Recovery::start_attached_in(directory.clone(), &core, Some(&project));
+    core.request(kinewright_core::Command::Undo).unwrap();
+    control
+        .recorder
+        .as_ref()
+        .ok_or("control recorder unavailable")?
+        .flush()?;
+    let parsed = parse_journal(&fs::read(&control.path).unwrap()).map_err(|e| e.reason)?;
+    let control_appended = parsed.project_path.as_deref().is_some_and(|recorded| {
+        canonical_project_identity(recorded).ok() == canonical_project_identity(&project).ok()
+    }) && parsed.commands.len() == 1
+        && parsed.commands[0].command == JournalCommand::Undo;
+    let mut startup_pending = scan_directory(&directory);
+    drop(control);
+    let mut excluded = true;
+    for shape in ["base", "suffix", "alias"] {
+        let attempted = Arc::new(Mutex::new(false));
+        let observed = Arc::clone(&attempted);
+        let named = if shape == "alias" {
+            project
+                .parent()
+                .unwrap()
+                .join(".")
+                .join(project.file_name().unwrap())
+        } else {
+            project.clone()
+        };
+        let recovery_directory = directory.clone();
+        let reserved = if shape == "suffix" {
+            std::mem::take(&mut startup_pending)
+        } else {
+            vec![]
+        };
+        let pending_slot = Arc::new(Mutex::new(Some(reserved)));
+        let owner = kinewright_project::io_observer::at_barrier(
+            "after_flock_before_publish",
+            move || {
+                let named = named.clone();
+                let directory = recovery_directory.clone();
+                let pending_slot = Arc::clone(&pending_slot);
+                let created = std::thread::spawn(move || {
+                    let pending = pending_slot.lock().unwrap().take().unwrap();
+                    let core = Core::spawn(Document::default()).unwrap();
+                    let writer =
+                        Recovery::start_with_pending(directory, &core, Some(&named), pending);
+                    let created = writer.recorder.is_some();
+                    drop(writer);
+                    created
+                })
+                .join()
+                .unwrap();
+                *observed.lock().unwrap() = created;
+            },
+            || {
+                acquire_project_lock_with_policy(
+                    &project,
+                    LockMode::Headless,
+                    "",
+                    &directory,
+                    1,
+                    Duration::ZERO,
+                )
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        excluded &= !*attempted.lock().unwrap();
+        let discovery = fs::read(&owner.handle.discovery).unwrap();
+        assert!(matches!(
+            acquire_project_lock_with_policy(
+                &project,
+                LockMode::Headless,
+                "",
+                &directory,
+                1,
+                Duration::ZERO
+            ),
+            Err(LockfileError::Contention { .. })
+        ));
+        assert_eq!(fs::read(&owner.handle.discovery).unwrap(), discovery);
+        owner.handle.release().unwrap();
+    }
+    Ok(
+        serde_json::json!({"control_appended": control_appended, "post_scan_excluded": excluded,
+        "project_unchanged": fs::read(&project).unwrap() == bytes.as_bytes()}),
+    )
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn g04_gui_lost_authority() {
+    use kinewright_media::test_support::TempDirectory;
+    let root = kinewright_media::test_support::workspace_target_dir();
+    fs::create_dir_all(&root).unwrap();
+    let temp = TempDirectory::new_in(&root, "c7-gui-lost");
+    let project = temp.path("project.kinewright");
+    fs::write(
+        &project,
+        kinewright_project::serialize_project_document(&Document::default()).unwrap(),
+    )
+    .unwrap();
+    let core = Core::spawn(Document::default()).unwrap();
+    let mut recovery = Recovery::start_attached_in(temp.path("recovery"), &core, Some(&project));
+    recovery.recorder.as_ref().unwrap().flush().unwrap();
+    let journal = recovery.path.clone();
+    let before = fs::read(&journal).unwrap();
+    let lost = recovery.writer().unwrap();
+    fs::remove_file(&lost.path).unwrap();
+    let successor =
+        kinewright_project::lockfile::acquire_gui_project_lock(&project, &recovery.directory)
+            .unwrap();
+    let discovery = fs::read(&successor.handle.discovery).unwrap();
+    core.request(kinewright_core::Command::Undo).unwrap();
+    let _ = recovery.recorder.as_ref().unwrap().flush();
+    assert!(lock_unpoisoned(&recovery.runtime_error).is_some());
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        before,
+        "lost journal authority cannot append or flush"
+    );
+    let files = |directory: &Path| {
+        let mut files = fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|e| e == "journal"))
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    };
+    let original = files(&recovery.directory);
+    recovery.pending.push(PendingJournal {
+        directory: recovery.directory_owner.clone(),
+        sha256: Some(kinewright_media::sha256_bytes(&before)),
+        journal_path: journal.clone(),
+        project_path: Some(project.clone()),
+        state: PendingState::Unusable(Damage {
+            offset: 0,
+            ignored_bytes: 0,
+            reason: "preserved older journal".into(),
+        }),
+    });
+    recovery.checkpoint_owned(&core, Some(&project), Some(lost));
+    assert_eq!(
+        files(&recovery.directory),
+        original,
+        "lost authority cannot create a successor journal"
+    );
+    recovery.consume_pending(&journal);
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        before,
+        "startup retirement requires the current project authority"
+    );
+    drop(recovery);
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        before,
+        "lost authority cannot retire the existing journal"
+    );
+    assert_eq!(fs::read(&successor.handle.discovery).unwrap(), discovery);
+    successor.handle.release().unwrap();
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn g04_gui_directory_stays_pinned() {
+    use kinewright_media::test_support::TempDirectory;
+    let root = kinewright_media::test_support::workspace_target_dir();
+    fs::create_dir_all(&root).unwrap();
+    let temp = TempDirectory::new_in(&root, "c7-gui-directory");
+    let project = temp.path("project.kinewright");
+    fs::write(
+        &project,
+        kinewright_project::serialize_project_document(&Document::default()).unwrap(),
+    )
+    .unwrap();
+    let core = Core::spawn(Document::default()).unwrap();
+    let directory = temp.path("recovery");
+    let mut recovery = Recovery::start_attached_in(directory.clone(), &core, Some(&project));
+    recovery.recorder.as_ref().unwrap().flush().unwrap();
+    let held = temp.path("held-recovery");
+    fs::rename(&directory, &held).unwrap();
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("sentinel"), b"unrelated directory").unwrap();
+    core.request(kinewright_core::Command::Undo).unwrap();
+    recovery.checkpoint(&core, Some(&project));
+    recovery.recorder.as_ref().unwrap().flush().unwrap();
+    let name = recovery.path.file_name().unwrap();
+    assert!(
+        held.join(name).exists(),
+        "checkpoint remains beneath the original admitted directory"
+    );
+    assert!(
+        !directory.join(name).exists(),
+        "replacement recovery directory is never written"
+    );
+    drop(recovery);
+    assert_eq!(
+        fs::read(directory.join("sentinel")).unwrap(),
+        b"unrelated directory"
+    );
+    assert!(fs::read_dir(&held).unwrap().next().is_none());
+}
+
+#[cfg(all(test, unix))]
+pub(crate) fn g04_startup_retirement_keeps_scanned_identity() {
+    use kinewright_media::test_support::TempDirectory;
+    let root = kinewright_media::test_support::workspace_target_dir();
+    fs::create_dir_all(&root).unwrap();
+    let temp = TempDirectory::new_in(&root, "c7-startup-pin");
+    let project = temp.path("project.kinewright");
+    fs::write(
+        &project,
+        kinewright_project::serialize_project_document(&Document::default()).unwrap(),
+    )
+    .unwrap();
+    let directory = temp.path("recovery");
+    fs::create_dir(&directory).unwrap();
+    let journal = directory.join(kinewright_project::journal_file_name(&project));
+    let control = JournalWriter::create(&journal, Some(&project), &Document::default()).unwrap();
+    drop(control);
+    let core = Core::spawn(Document::default()).unwrap();
+    let mut recovery =
+        Recovery::start_with_pending(directory.clone(), &core, None, scan_directory(&directory));
+    let captured = fs::read(&journal).unwrap();
+    let held = temp.path("held-recovery");
+    fs::rename(&directory, &held).unwrap();
+    fs::create_dir(&directory).unwrap();
+    let replacement = directory.join(journal.file_name().unwrap());
+    fs::write(&replacement, &captured).unwrap();
+    recovery.consume_pending(&journal);
+    assert_eq!(
+        fs::read(&replacement).unwrap(),
+        captured,
+        "startup retirement stays in the scanned native directory"
+    );
+    assert!(!held.join(journal.file_name().unwrap()).exists());
+    drop(recovery);
+
+    // A later writer's changed journal cannot be discarded by an earlier decision.
+    fs::remove_file(&replacement).unwrap();
+    fs::write(&journal, &captured).unwrap();
+    let mut recovery =
+        Recovery::start_with_pending(directory.clone(), &core, None, scan_directory(&directory));
+    let mut changed = captured;
+    changed.extend_from_slice(b"null\n");
+    fs::write(&journal, &changed).unwrap();
+    recovery.consume_pending(&journal);
+    assert_eq!(
+        fs::read(&journal).unwrap(),
+        changed,
+        "changed bytes are preserved for a new explicit decision"
+    );
+    assert!(
+        recovery
+            .pending
+            .iter()
+            .any(|entry| entry.journal_path == journal)
+    );
 }

@@ -17,6 +17,8 @@ struct AppControl {
     at: i64,
     #[serde(default)]
     rescue: bool,
+    #[serde(default)]
+    writer_journal: bool,
 }
 
 fn observe(
@@ -31,6 +33,9 @@ fn observe(
         ja_harness::baseline::input(loaded, &args.input)?,
     )?)
     .map_err(|e| e.to_string())?;
+    if control.writer_journal {
+        return crate::recovery::g04_gui_journal_observation().map(Some);
+    }
     if control.rescue {
         #[cfg(target_os = "linux")]
         return Ok(Some(crate::ja1_attachment::tests::observe_s2(
@@ -124,5 +129,21 @@ mod tests {
             2
         );
         assert!(observation["durable_version_id"].is_null());
+    }
+    #[test]
+    fn gui_journal_additive_fixture_uses_real_recorder() {
+        let root = kinewright_media::test_support::workspace_target_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "c7-gui-fixture");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../kinewright-agent/tests/fixtures/ja/s2-gui-journal.json");
+        for mode in [Mode::Baseline, Mode::Revised] {
+            let output = temp.path(if mode == Mode::Baseline {
+                "baseline"
+            } else {
+                "revised"
+            });
+            assert_eq!(run(&fixture, &output, mode).unwrap(), 0);
+        }
     }
 }

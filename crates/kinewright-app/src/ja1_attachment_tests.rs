@@ -849,3 +849,35 @@ fn r2_studio_dirty_polls_cache_authoritative_history_changes() {
 fn r8_worker_panic_status_matches_dropped_attachment() {
     crate::app::ja1_review_worker_panic_witness();
 }
+
+#[test]
+fn g04_real_gui_journal_cannot_appear_after_owner_scan() {
+    let observed = crate::recovery::g04_gui_journal_observation().unwrap();
+    assert_eq!(
+        observed["control_appended"], true,
+        "real named GUI journal control must append"
+    );
+    assert_eq!(observed["project_unchanged"], true);
+    assert_eq!(
+        observed["post_scan_excluded"], true,
+        "a real GUI writer must not create any base, suffix or alias-header journal after the owner's scan"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn g04_gui_journal_lost_authority_refuses_create_append_and_retire() {
+    crate::recovery::g04_gui_lost_authority();
+}
+
+#[cfg(unix)]
+#[test]
+fn g04_gui_journal_directory_remains_pinned_across_checkpoint() {
+    crate::recovery::g04_gui_directory_stays_pinned();
+}
+
+#[cfg(unix)]
+#[test]
+fn g04_startup_journal_retirement_uses_scanned_parent_and_bytes() {
+    crate::recovery::g04_startup_retirement_keeps_scanned_identity();
+}

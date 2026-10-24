@@ -178,6 +178,23 @@ inputs mark a cut damaged; relink creates successor evidence. This is a required
 
 ## 5. Writer authority, manual GUI and Save As
 
+C7 binds the legacy GUI and headless writer to one resolved project identity before
+mutation. Its shared lock capability retains the native parent and remains alive in
+journal recorders and queued sidecar jobs. Project, incident sidecar, LUT copy and
+journal IO use admitted directory handles; caller aliases are never resolved again
+after verification. Legacy permission/sharing fallback semantics remain confined to
+legacy IO. Studio still uses its existing strict bundle publisher.
+
+Every named GUI journal create, append, flush, checkpoint and retirement needs the
+same real project authority. Startup restore/discard also takes that authority and
+uses the journal file profile. Pending decisions retain their scanned native directory
+and exact byte digest; changed bytes require a new decision. The active writer executes
+post-restore retirement using that retained identity. Unreplayed data survives a headless save. The final recovery
+probe includes allocator suffixes, and release checks the original claim plus lock
+file identity before removing discovery. Missing discovery never permits takeover
+of a held lock. C7 supplies local participants only; host activation and transport
+remain C8. Native Windows Studio durability remains unsupported.
+
 ### 5.1 A fenced local manual Core
 
 The host holds the project OS lock and pinned store/root handles. Acquire it on Studio activation before authorizing any writer. A legacy GUI checkpoints

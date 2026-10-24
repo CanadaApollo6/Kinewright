@@ -509,13 +509,22 @@ fn write_file_atomic_with_rename(
     contents: &[u8],
     rename: Option<&RefuseRename>,
 ) -> std::io::Result<()> {
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    write_file_at(&target, path, contents, rename)
+}
+
+pub(crate) fn write_file_at(
+    target: &Path,
+    fallback: &Path,
+    contents: &[u8],
+    rename: Option<&RefuseRename>,
+) -> std::io::Result<()> {
     // The write targets the symlink's resolved path — the temp lands
     // beside the real file and the rename replaces it, so the link
     // itself survives the save. An unresolvable path writes as given.
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // The temp inherits the existing file's permissions, so the mode
     // survives the inode swap. A first save keeps fresh-file perms.
-    let permissions = fs::metadata(&target).ok().map(|file| file.permissions());
+    let permissions = fs::metadata(target).ok().map(|file| file.permissions());
     let mut temp = target.as_os_str().to_owned();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = PathBuf::from(temp);
@@ -531,23 +540,23 @@ fn write_file_atomic_with_rename(
         return Err(error);
     }
     let renamed = match rename {
-        Some(hook) => hook(&temp, &target),
-        None => fs::rename(&temp, &target),
+        Some(hook) => hook(&temp, target),
+        None => fs::rename(&temp, target),
     };
     if let Err(error) = renamed {
         let _ = fs::remove_file(&temp);
         if is_permission_or_sharing(&error) {
-            let result = fs::write(path, contents);
+            let result = fs::write(fallback, contents);
             #[cfg(any(test, feature = "test-util"))]
             if result.is_ok() {
-                crate::io_observer::note("in_place_fallback", path);
+                crate::io_observer::note("in_place_fallback", fallback);
             }
             return result;
         }
         return Err(error);
     }
     #[cfg(any(test, feature = "test-util"))]
-    crate::io_observer::note("rename", &target);
+    crate::io_observer::note("rename", target);
     Ok(())
 }
 
@@ -565,13 +574,56 @@ pub fn write_project_bytes(
     path: &Path,
     previous_store: Option<&LutStore>,
 ) -> Result<ProjectSaveReport, ProjectSaveError> {
+    write_project_bytes_at(json, document, path, previous_store, None)
+}
+
+/// Write through the real lock's pinned parent, including sidecar/asset siblings.
+/// # Errors
+/// Returns a lost-authority or ordinary legacy write failure.
+pub fn write_project_bytes_owned(
+    json: &str,
+    document: &Document,
+    writer: &crate::LockfileHandle,
+    previous_store: Option<&LutStore>,
+) -> Result<ProjectSaveReport, ProjectSaveError> {
+    writer.verify().map_err(|_| ProjectSaveError::LockLost {
+        path: writer.resolved_identity().to_path_buf(),
+    })?;
+    #[cfg(any(test, feature = "test-util"))]
+    crate::test_hook("legacy_writer_verified");
+    let mut report = write_project_bytes_at(
+        json,
+        document,
+        &writer.io_path(),
+        previous_store,
+        Some(writer.resolved_identity()),
+    )?;
+    report.path = writer.resolved_identity().to_path_buf();
+    report.lut_store_root = report
+        .lut_store_root
+        .map(|_| report.path.with_extension("kinewright-assets"));
+    Ok(report)
+}
+
+fn write_project_bytes_at(
+    json: &str,
+    document: &Document,
+    path: &Path,
+    previous_store: Option<&LutStore>,
+    pinned_identity: Option<&Path>,
+) -> Result<ProjectSaveReport, ProjectSaveError> {
+    let pinned = pinned_identity.is_some();
     let incoming = crate::bundle::BundleWriteAdmission::from_bytes(None, json.as_bytes().to_vec())
         .map_err(|error| ProjectSaveError::UnsupportedBundle {
             notice: error.to_string(),
         })?;
     incoming.authorize_legacy_write(path)?;
-    write_file_atomic(path, json.as_bytes())
-        .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
+    (if pinned {
+        write_file_at(path, path, json.as_bytes(), None)
+    } else {
+        write_file_atomic(path, json.as_bytes())
+    })
+    .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
     #[cfg(any(test, feature = "test-util"))]
     crate::io_observer::note("project_published", path);
     let (next_store, lut_store_error) = match derive_lut_store(Some(path)) {
@@ -579,7 +631,13 @@ pub fn write_project_bytes(
         Err(reason) => (None, Some(reason)),
     };
     let store_root_changed = match (previous_store, next_store.as_ref()) {
-        (Some(previous), Some(next)) => previous.root() != next.root(),
+        (Some(previous), Some(next)) => {
+            previous.root()
+                != pinned_identity.map_or_else(
+                    || next.root().to_path_buf(),
+                    |path| path.with_extension("kinewright-assets"),
+                )
+        }
         (None, Some(_)) => true,
         _ => false,
     };
@@ -587,7 +645,51 @@ pub fn write_project_bytes(
     if let (Some(previous), Some(next)) = (previous_store, next_store.as_ref())
         && store_root_changed
     {
-        for (asset, result) in previous.copy_to(next, &document.lut_assets) {
+        let copied = if pinned
+            && document.lut_assets.iter().any(|asset| {
+                matches!(
+                    asset.source,
+                    kinewright_core::LutAssetSource::Imported { .. }
+                )
+            }) {
+            let copy = (|| -> std::io::Result<_> {
+                let source_root = crate::legacy_io::PinnedDirectory::open(previous.root())?;
+                let source =
+                    crate::legacy_io::PinnedDirectory::open(&source_root.io_path().join("luts"))?;
+                fs::create_dir_all(next.root())?;
+                let destination_root = crate::legacy_io::PinnedDirectory::open(next.root())?;
+                fs::create_dir_all(destination_root.io_path().join("luts"))?;
+                let destination = crate::legacy_io::PinnedDirectory::open(
+                    &destination_root.io_path().join("luts"),
+                )?;
+                #[cfg(any(test, feature = "test-util"))]
+                crate::test_hook("legacy_assets_pinned");
+                Ok(previous.copy_to_pinned_luts(
+                    next,
+                    &document.lut_assets,
+                    &source.io_path(),
+                    &destination.io_path().join("."),
+                ))
+            })();
+            match copy {
+                Ok(copied) => copied,
+                Err(error) => document
+                    .lut_assets
+                    .iter()
+                    .map(|asset| {
+                        (
+                            asset.id,
+                            Err(kinewright_core::MediaError::Backend(format!(
+                                "lut_store_copy_failed: {error}"
+                            ))),
+                        )
+                    })
+                    .collect(),
+            }
+        } else {
+            previous.copy_to(next, &document.lut_assets)
+        };
+        for (asset, result) in copied {
             if let Err(error) = result {
                 lut_store_copy_failed.push((asset, error.to_string()));
             }

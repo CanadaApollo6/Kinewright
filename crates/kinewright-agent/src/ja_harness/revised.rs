@@ -76,6 +76,16 @@ impl Adapter {
                     Err("C3 durable source/slot observer requires Linux; NOT RUN".into())
                 }
             }
+            Call::S2WriterIdentityProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::writer_identity(&self.baseline.root)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C7 alias observer requires Linux; NOT RUN".into())
+                }
+            }
             Call::S2CoreSealProbe(_) => super::s2_observer::core_seal(self.mode == Mode::Revised),
             Call::S2SavePhaseProbe(_) => {
                 #[cfg(target_os = "linux")]
