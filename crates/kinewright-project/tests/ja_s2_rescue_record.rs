@@ -1093,3 +1093,11 @@ fn w14_raw_switch_structure_and_ordinary_v3_backward_control() {
         assert!(!path.exists());
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s2_c5_recovery.rs"]
+mod c5;
+
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s2_c5_pressure.rs"]
+mod c5_pressure;

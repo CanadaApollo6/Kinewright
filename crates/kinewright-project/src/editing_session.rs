@@ -20,6 +20,11 @@ use crate::{
 };
 use kinewright_core::{Core, HistorySaveTag};
 use std::path::{Path, PathBuf};
+mod durable;
+mod recovery;
+mod rescue;
+mod rescue_selection;
+pub use durable::{DurableBranchSessionGuard, specialist_floor_delta_from_baseline};
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);
 
 pub struct ActiveAssociation {
@@ -41,6 +46,12 @@ pub enum RetainedDestination {
     FirstSave(Box<BundleCopy>),
 }
 impl RetainedDestination {
+    fn bundle_mut(&mut self) -> Result<&mut ProjectBundle, BundleError> {
+        match self {
+            Self::Named(bundle) => Ok(bundle),
+            Self::FirstSave(copy) => copy.destination_owner_mut(),
+        }
+    }
     fn bundle(&self) -> Result<&ProjectBundle, BundleError> {
         match self {
             Self::Named(bundle) => Ok(bundle),
@@ -73,7 +84,10 @@ pub struct RetainedAttempt {
     state: PublicationState,
     pub(crate) tag: HistorySaveTag,
     pub(crate) core: Core,
-    pub(crate) capture: StorageReservation<FrozenRescueCapture>,
+    pub(crate) capture: std::sync::Arc<StorageReservation<FrozenRescueCapture>>,
+    pub(crate) project_id: crate::bundle_records::ProjectId,
+    pub(crate) pending_command:
+        Option<(crate::receipts::CommandId, crate::receipts::CommandDigest)>,
     pub(crate) ticket: Option<crate::AttemptBinding>,
 }
 #[derive(Default)]
@@ -170,8 +184,15 @@ pub struct Ja1EditingSession {
     source: Option<SessionStore>,
     destination: Option<RetainedDestination>,
     inputs: ObjectRef,
+    input_leases: Vec<crate::owned_inputs::OwnedInputLease>,
     association: Option<ActiveAssociation>,
     rescue: RescueSessionState,
+    prepared: Option<crate::bundle_switch::PreparedProjectSelection>,
+    recovery_save_pending: bool,
+    selection_result: Option<(crate::bundle_recovery::RecoverySelection, BundleSaveReport)>,
+    durable_sessions: Vec<durable::RegisteredSession>,
+    retained_destinations: Vec<(RetainedDestination, Core)>,
+    originating_session: crate::bundle_records::SessionId,
 }
 impl Ja1EditingSession {
     pub fn new(parent: &Path, core: &Core, limits: StorageLimits) -> Result<Self, BundleError> {
@@ -192,8 +213,15 @@ impl Ja1EditingSession {
             source: Some(source),
             destination: None,
             inputs,
+            input_leases: vec![],
             association: None,
             rescue: RescueSessionState::default(),
+            prepared: None,
+            recovery_save_pending: false,
+            selection_result: None,
+            durable_sessions: vec![],
+            retained_destinations: vec![],
+            originating_session: crate::bundle_records::SessionId::fresh()?,
         })
     }
     pub fn activate(
@@ -237,8 +265,15 @@ impl Ja1EditingSession {
             source: None,
             destination: Some(RetainedDestination::Named(Box::new(bundle))),
             inputs,
+            input_leases: vec![],
             association: Some(ActiveAssociation { path, saved: None }),
             rescue: RescueSessionState::default(),
+            prepared: None,
+            recovery_save_pending: false,
+            selection_result: None,
+            durable_sessions: vec![],
+            retained_destinations: vec![],
+            originating_session: crate::bundle_records::SessionId::fresh()?,
         })
     }
     #[must_use]
@@ -319,12 +354,10 @@ impl Ja1EditingSession {
                 )],
             ));
         }
-        let mut roots = bundle
-            .root_references()?
+        let roots = Self::rescue_required_roots(bundle)?
             .into_iter()
             .map(|r| (r, MissingOwnedUse::Manifest))
-            .collect::<Vec<_>>();
-        roots.push((self.inputs.clone(), MissingOwnedUse::Current));
+            .collect();
         Ok((&bundle.store, roots))
     }
     pub fn first_save(
@@ -390,13 +423,42 @@ impl Ja1EditingSession {
         }
         Ok(())
     }
+    fn core_for_destination(&self, bundle: &ProjectBundle, default: Option<&Core>) -> Option<Core> {
+        let eligible = |core: &&Core| {
+            core.attachment_state()
+                .is_ok_and(|state| state != kinewright_core::AttachmentState::Sealed)
+        };
+        let Some(attempt) = bundle.pending_attempt() else {
+            return default.filter(eligible).cloned();
+        };
+        if let Some(core) = default
+            .filter(eligible)
+            .filter(|core| core.actor_identity() == attempt.actor())
+        {
+            return Some(core.clone());
+        }
+        self.durable_sessions
+            .iter()
+            .filter(|registered| registered.guard.epoch == bundle.store.owner_epoch())
+            .map(|registered| registered.guard.core())
+            .find(|core| eligible(core) && core.actor_identity() == attempt.actor())
+            .cloned()
+    }
     pub fn reconcile_active(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        let live = self.core_for_destination(self.active_bundle()?, Some(&self.core));
         let destination = self
             .destination
             .as_mut()
             .ok_or(BundleError::HistoryBarrierInvariant)?;
         let tag = destination.bundle()?.publication_tag.clone();
-        let result = destination.reconcile(&self.core);
+        let result = if let Some(live) = live {
+            destination.reconcile(&live)
+        } else {
+            match destination {
+                RetainedDestination::Named(bundle) => bundle.reconcile_destination(None),
+                RetainedDestination::FirstSave(copy) => copy.reconcile_destination(None),
+            }
+        };
         if let Some(tag) = tag {
             self.rescue
                 .settle(&tag, destination.bundle()?.publication_state());
@@ -536,6 +598,9 @@ impl Ja1EditingSession {
         if let Some(source) = &self.source {
             stores.push(source.store());
         }
+        for (owner, _) in &self.retained_destinations {
+            stores.push(owner.bundle()?.store());
+        }
         ProjectStore::inspect_rescue_destination(path, &stores)
     }
     /// C3's accounting adapter. It does no B publication and is never a shipping rescue action.
@@ -573,6 +638,12 @@ impl Ja1EditingSession {
         ProjectStore::revalidate_rescue_destination(destination, &stores)?;
         let tag = capture.tag.clone();
         let ticket = current.pending_attempt();
+        let project_id = current.project_id().clone();
+        let pending_command = current
+            .pending_command
+            .as_ref()
+            .map(|e| e.digest().map(|d| (e.id.clone(), d)))
+            .transpose()?;
         let retained = self
             .rescue
             .attempts
@@ -590,8 +661,10 @@ impl Ja1EditingSession {
                 state: PublicationState::Unknown,
                 tag,
                 core: self.core.clone(),
-                capture,
+                capture: std::sync::Arc::new(capture),
                 ticket,
+                project_id,
+                pending_command,
             });
         }
         self.rescue.slots.finish(reservation, unknown)?;
@@ -622,5 +695,41 @@ impl Ja1EditingSession {
     #[cfg(any(test, feature = "test-util"))]
     pub fn set_slots_probe(&mut self, slots: RescueSlots) {
         self.rescue.slots = slots;
+    }
+}
+
+impl Drop for Ja1EditingSession {
+    fn drop(&mut self) {
+        let fence = |core: &Core| {
+            if let Ok(owner) = ProjectAttachment::new(core)
+                && let Ok(cut) = owner.freeze()
+            {
+                let _ = owner.seal(&cut);
+            }
+        };
+        fence(&self.core);
+        for registration in &self.durable_sessions {
+            fence(registration.guard.core());
+        }
+        for (_, core) in &self.retained_destinations {
+            fence(core);
+        }
+        // Only source reuse ends here. Destination tags, outcomes and uncertain staging
+        // keep their ordinary namespace policy; outstanding reader Arcs still own pins.
+        let close = |owner: &mut RetainedDestination| match owner {
+            RetainedDestination::Named(bundle) => {
+                crate::bundle_copy::close_copy_source(&mut bundle.pending_copy_source);
+            }
+            RetainedDestination::FirstSave(copy) => copy.close_originating_context(),
+        };
+        if let Some(owner) = &mut self.destination {
+            close(owner);
+        }
+        for (owner, _) in &mut self.retained_destinations {
+            close(owner);
+        }
+        if let Some(source) = &mut self.source {
+            source.close_originating_context();
+        }
     }
 }

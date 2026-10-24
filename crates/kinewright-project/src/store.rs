@@ -220,6 +220,23 @@ impl ProjectStore {
         offset: usize,
         page: usize,
     ) -> Result<crate::bundle_rescue::RescueMissingOwnedBytes, BundleError> {
+        self.diagnose_retained_selection(roots, offset, page, true)
+    }
+    pub(crate) fn diagnose_retained_content_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        offset: usize,
+        page: usize,
+    ) -> Result<crate::bundle_rescue::RescueMissingOwnedBytes, BundleError> {
+        self.diagnose_retained_selection(roots, offset, page, false)
+    }
+    fn diagnose_retained_selection(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        offset: usize,
+        page: usize,
+        inventory: bool,
+    ) -> Result<crate::bundle_rescue::RescueMissingOwnedBytes, BundleError> {
         use crate::bundle_rescue::RescueMissingOwnedBytes;
         if roots.len() as u64 > self.limits().objects || page == 0 || page > 32 {
             return Err(BundleError::Capacity("rescue diagnostic page"));
@@ -229,7 +246,7 @@ impl ProjectStore {
         let mut complete = true;
         let mut missing = BTreeMap::new();
         for (root, role) in roots {
-            match self.closure(std::slice::from_ref(root)) {
+            match self.closure_with_inventory(std::slice::from_ref(root), inventory) {
                 Ok(objects) => {
                     let additions = objects
                         .iter()
@@ -293,12 +310,25 @@ impl ProjectStore {
         &self,
         roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
     ) -> Result<RetainedReadAdmission, BundleError> {
-        let diagnostic = self.diagnose_retained_reads(roots, 0, 32)?;
+        self.admit_retained_selection(roots, true)
+    }
+    pub(crate) fn admit_retained_content_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+    ) -> Result<RetainedReadAdmission, BundleError> {
+        self.admit_retained_selection(roots, false)
+    }
+    fn admit_retained_selection(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        inventory: bool,
+    ) -> Result<RetainedReadAdmission, BundleError> {
+        let diagnostic = self.diagnose_retained_selection(roots, 0, 32, inventory)?;
         if !diagnostic.entries.is_empty() || !diagnostic.dependencies_complete {
             return Err(BundleError::RescueMissingOwnedBytes(Box::new(diagnostic)));
         }
         let roots = roots.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
-        let objects = self.closure(&roots)?;
+        let objects = self.closure_with_inventory(&roots, inventory)?;
         let bytes = objects.iter().try_fold(0_u64, |n, r| {
             n.checked_add(r.byte_length)
                 .ok_or(BundleError::Capacity("retained source bytes"))
@@ -847,7 +877,7 @@ impl ProjectStore {
     pub fn closure(&self, roots: &[ObjectRef]) -> Result<Vec<ObjectRef>, BundleError> {
         self.closure_with_inventory(roots, true)
     }
-    fn closure_with_inventory(
+    pub(crate) fn closure_with_inventory(
         &self,
         roots: &[ObjectRef],
         include_inventory: bool,
@@ -2651,14 +2681,21 @@ impl ProjectStore {
         &self,
         reference: &ObjectRef,
     ) -> Result<StorageReservation<Vec<u8>>, BundleError> {
+        self.read_copy_evidence(reference, false)
+    }
+    pub(crate) fn read_copy_evidence(
+        &self,
+        reference: &ObjectRef,
+        retained: bool,
+    ) -> Result<StorageReservation<Vec<u8>>, BundleError> {
         if reference.record_kind != RecordKind::OwnedEvidence
             || reference.byte_length > self.limits().control_bytes
         {
             return Err(BundleError::Capacity("evidence snapshot"));
         }
         let _pin = self.pin(std::slice::from_ref(reference))?;
-        let charge = self.reserve(0, reference.byte_length, 0, false)?;
-        let file = self.open_verified(reference)?;
+        let charge = self.reserve_copy_read(0, reference.byte_length, 0, false, retained)?;
+        let file = self.open_copy_source(reference, retained)?;
         let bytes = crate::bundle_recovery::bounded_bytes(file, reference.byte_length)?;
         if bytes.len() as u64 != reference.byte_length {
             return Err(BundleError::Corrupt(
@@ -2778,9 +2815,56 @@ impl ProjectStore {
         roots: &[ObjectRef],
         cleanup_only: bool,
     ) -> Result<(), BundleError> {
+        self.copy_selected_graph(source, roots, cleanup_only, true)
+    }
+    /// Check the destination profile while the retained source is still read-only.
+    pub(crate) fn admit_rescue_record_profile(
+        &self,
+        reference: &ObjectRef,
+        limits: &StorageLimits,
+    ) -> Result<(), BundleError> {
+        let cap = match reference.record_kind {
+            RecordKind::History => limits.branch_history_bytes,
+            RecordKind::RootCheckpoint | RecordKind::OwnedEvidence => limits.control_bytes,
+            _ if reference.record_kind.is_owned_bytes() => return Ok(()),
+            _ => limits.decoded_record_bytes,
+        };
+        if reference.byte_length > cap {
+            return Err(BundleError::Capacity("rescue encoded record"));
+        }
+        if reference.record_kind == RecordKind::OwnedEvidence {
+            return Ok(());
+        }
+        let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, true)?;
+        let bytes = crate::bundle_recovery::bounded_bytes(
+            self.open_copy_source(reference, true)?,
+            reference.byte_length,
+        )?;
+        let _decoded =
+            self.reserve_copy_read(0, self.limits().decoded_record_bytes, 0, false, true)?;
+        let charge = preflight_record(&bytes, limits)?;
+        if reference.record_kind == RecordKind::History && charge > limits.branch_history_bytes {
+            return Err(BundleError::Capacity("rescue decoded branch history"));
+        }
+        Ok(())
+    }
+    pub(crate) fn copy_rescue_graph(
+        &mut self,
+        source: &ProjectStore,
+        roots: &[ObjectRef],
+    ) -> Result<(), BundleError> {
+        self.copy_selected_graph(source, roots, true, false)
+    }
+    fn copy_selected_graph(
+        &mut self,
+        source: &ProjectStore,
+        roots: &[ObjectRef],
+        cleanup_only: bool,
+        inventory: bool,
+    ) -> Result<(), BundleError> {
         let _working =
             source.reserve_copy_read(0, source.usage()?.metadata_bytes, 0, false, cleanup_only)?;
-        let selected = source.closure(roots)?;
+        let selected = source.closure_with_inventory(roots, inventory)?;
         let manifest = source.manifest()?;
         let mut remaining: BTreeMap<_, _> = selected
             .into_iter()
@@ -2830,6 +2914,11 @@ impl ProjectStore {
     }
 }
 impl SourceCopyHold {
+    /// Context teardown ends source reuse, without proving any destination outcome.
+    pub(crate) fn close_originating_context(&mut self) {
+        self.uncertain = false;
+    }
+
     pub(crate) const fn requires_reconciliation(&self) -> bool {
         self.uncertain
     }

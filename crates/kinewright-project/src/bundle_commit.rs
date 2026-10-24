@@ -297,7 +297,9 @@ impl BundleCommit {
         seed: Option<&LineageRecord>,
         selected: Option<&HistorySnapshot>,
     ) -> Result<BundleSaveReport, BundleError> {
-        Self::publish_branch_impl(bundle, history, inputs, branch_id, seed, selected, None)
+        Self::publish_branch_impl(
+            bundle, history, inputs, branch_id, seed, selected, None, false, None,
+        )
     }
     pub(crate) fn publish_selection(
         bundle: &mut ProjectBundle,
@@ -311,6 +313,46 @@ impl BundleCommit {
             Some(&selection.restore.lineage),
             Some(&selection.restore.history),
             Some(selection),
+            false,
+            None,
+        )
+    }
+    pub(crate) fn publish_maintenance(
+        bundle: &mut ProjectBundle,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let branch = bundle.manual_branch_id.clone();
+        let history = bundle.branch_history(&branch)?;
+        let inputs = bundle.checkpoint(&branch)?.input_manifest_ref.clone();
+        Self::publish_branch_impl(
+            bundle,
+            &history,
+            &inputs,
+            &branch,
+            None,
+            Some(&history),
+            None,
+            true,
+            None,
+        )
+    }
+    pub(crate) fn publish_rescue(
+        bundle: &mut ProjectBundle,
+        history: &HistorySnapshot,
+        inputs: &ObjectRef,
+        source: &ProjectBundle,
+        contexts: &[ObjectRef],
+    ) -> Result<BundleSaveReport, BundleError> {
+        let id = bundle.manual_branch_id.clone();
+        Self::publish_branch_impl(
+            bundle,
+            history,
+            inputs,
+            &id,
+            None,
+            Some(history),
+            None,
+            false,
+            Some((source, contexts)),
         )
     }
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -322,13 +364,16 @@ impl BundleCommit {
         seed: Option<&LineageRecord>,
         selected: Option<&HistorySnapshot>,
         selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
+        metadata_only: bool,
+        rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
     ) -> Result<BundleSaveReport, BundleError> {
-        let existing_selection = selection.is_some_and(|selected| {
-            matches!(
-                selected.target(),
-                crate::bundle_recovery::RecoverySelection::WorkingBranch(_)
-            )
-        });
+        let existing_selection = metadata_only
+            || selection.is_some_and(|selected| {
+                matches!(
+                    selected.target(),
+                    crate::bundle_recovery::RecoverySelection::WorkingBranch(_)
+                )
+            });
         let manual_branch_id = selection.map_or_else(
             || bundle.manual_branch_id.clone(),
             |s| s.target_branch.clone(),
@@ -377,10 +422,19 @@ impl BundleCommit {
         }
         let prior = selection
             .map(|s| s.restore.checkpoint.clone())
+            .or_else(|| {
+                rescue_source.and_then(|(source, _)| source.branches.get(branch_id).cloned())
+            })
             .or_else(|| bundle.branches.get(branch_id).cloned());
         let old_history = if let Some(prior) = &prior {
             Some(if let Some(selection) = selection {
                 std::sync::Arc::clone(&selection.restore.history)
+            } else if let Some((source, _)) = rescue_source {
+                std::sync::Arc::new(
+                    source
+                        .store
+                        .read_copy_record::<HistorySnapshot>(&prior.history_ref, true)?,
+                )
             } else if let Some(cached) = bundle.cached_history(branch_id) {
                 std::sync::Arc::clone(cached)
             } else {
@@ -495,7 +549,13 @@ impl BundleCommit {
         let mut retained_manifest = (*manifest).clone();
         if let Some(prior) = &prior {
             for reference in &prior.history_input_manifest_refs {
-                let old = bundle.store.read_input_manifest(reference)?;
+                let old = if let Some((source, _)) = rescue_source {
+                    source
+                        .store
+                        .read_copy_record::<OwnedInputManifest>(reference, true)?
+                } else {
+                    bundle.store.read_input_manifest(reference)?
+                };
                 retained_manifest.entries.extend(old.entries.clone());
             }
         }
@@ -514,9 +574,14 @@ impl BundleCommit {
             })
             .transpose()?
             .filter(|n| *n > 0);
-        let mut contexts = prior
-            .as_ref()
-            .map_or_else(Vec::new, |p| p.history_input_manifest_refs.clone());
+        let mut contexts = rescue_source.map_or_else(
+            || {
+                prior
+                    .as_ref()
+                    .map_or_else(Vec::new, |p| p.history_input_manifest_refs.clone())
+            },
+            |(_, contexts)| contexts.to_vec(),
+        );
         if contexts.is_empty() {
             contexts.push(inputs.clone());
         }
@@ -554,7 +619,15 @@ impl BundleCommit {
         }
         let old_lineage = prior
             .as_ref()
-            .map(|p| bundle.store.read_record::<LineageRecord>(&p.lineage_ref))
+            .map(|p| {
+                if let Some((source, _)) = rescue_source {
+                    source
+                        .store
+                        .read_copy_record::<LineageRecord>(&p.lineage_ref, true)
+                } else {
+                    bundle.store.read_record::<LineageRecord>(&p.lineage_ref)
+                }
+            })
             .transpose()?;
         let floor_seed = if let Some(discard) = floor_discard {
             let old = if aligned.floor_offset < checked.floor_offset {
@@ -696,6 +769,7 @@ impl BundleCommit {
             BTreeMap::new()
         };
         let preceding_checkpoint_ref = branch_index.get(branch_id).cloned();
+        branch_index.retain(|id, _| branches.contains_key(id));
         branch_index.insert(branch_id.clone(), checkpoint_ref.clone());
         let mut evidence = bundle.evidence.clone();
         if let Some(envelope) = bundle.pending_command.as_ref()
@@ -1216,7 +1290,7 @@ pub(crate) fn validate_inputs(
     }
     Ok(())
 }
-fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut OwnedInputManifest) {
+pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut OwnedInputManifest) {
     let documents: Vec<_> = std::iter::once(&history.baseline)
         .chain(std::iter::once(&history.document))
         .chain(

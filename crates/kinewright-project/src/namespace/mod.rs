@@ -327,6 +327,20 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported)
         }
     }
+    pub(crate) fn prepare_rescue_destination(
+        inspection: &DestinationInspection,
+        on_mutation: &mut dyn FnMut() -> Result<(), BundleError>,
+    ) -> Result<PreparedDestination, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::prepare_destination_admitted(inspection.path(), Some(inspection), on_mutation)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (inspection, on_mutation);
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub(crate) fn seal_destination_ancestors(&self) -> Result<(), BundleError> {
         #[cfg(target_os = "linux")]
         {

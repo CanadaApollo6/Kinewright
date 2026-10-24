@@ -36,6 +36,19 @@ impl Adapter {
     ) -> Result<Value, String> {
         let call = &action.call;
         match call {
+            Call::S2RescuePublicationProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::rescue_publication(
+                        &self.baseline.root,
+                        self.mode == Mode::Revised,
+                    )
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C5 durable rescue publication observer requires Linux; NOT RUN".into())
+                }
+            }
             Call::S2RescueRecoveryProbe(_) => {
                 #[cfg(target_os = "linux")]
                 {

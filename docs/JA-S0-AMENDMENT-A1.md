@@ -413,6 +413,29 @@ OwnedEvidence is insufficient. Generation-zero ordinary v3 remains a positive co
 Shared L/R occurrence tuples, batch IDs and split ancestry survive first and later ordinary
 saves and floors. Only genuinely new events get the accepting branch's origin.
 
+C5 selects and copies the content closure separately from automatic recovery inventories.
+Every retained recovery role is added explicitly, with R_ack outside the unchanged pair
+of automatic predecessors. Only unavailable recovery roles may be omitted. Full-history
+omission is tried before the ordinary oldest-first floor. Trim and omission require
+separate consent bound to the capture, selected history, omitted roots and target limits.
+The rebuilt source manifests never restore an omitted recovery edge. Independent roots
+and all inputs needed by current content, Redo and the retained floor remain mandatory.
+
+The mutation boundary is the first destination lock claim or missing-parent creation.
+Read-only preview, inspection and cancelled consent consume no source or destination slot.
+Every unknown destination retains its own copy owner. After immediate B activation, a
+later unknown save on that same retained copy is reconciled as its new attempt, rather
+than returning the original copy's earlier committed status. On whole-context Close,
+actors are fenced before source reuse ends. Actual readers defer source cleanup; this
+teardown does not prove any unknown destination absent or change its captured outcome.
+
+Registered specialists keep their original namespace owner when the manual actor moves
+to B. A late proof can settle only that original specialist's own ticket while it remains
+live. It cannot change B, activate a capture copy or call the sealed manual A. The full
+proposal is retained with its branch checkpoint in the same publication, independently
+of the bounded Undo floor. Context Close names any such session with unresolved or
+unsaved work before ending its retention.
+
 ## 5. Session retention and editing after success
 
 **Originating session and owner.** The originating session is one app editing context from

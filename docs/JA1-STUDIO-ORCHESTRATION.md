@@ -430,6 +430,30 @@ DurableBranchSessionGuard before accepting edits. Keep registration through save
 and fencing, with no usable unregistered constructor or raw mutable-bundle escape.
 C5 owns this registration witness; C6 has no production App durable-session credit.
 
+The owner retains the registered Core, base, pin and charged registration after the caller
+drops its guard or branch object. Dropping a guard never discards accepted edits. The agent
+close route first persists the complete proposal, then freezes the exact saved history and
+seals every Core handle before unregistering. A direct owner close refuses an unsaved suffix
+and names the required persist step. A racing edit between persist and freeze also refuses.
+Creation and reopen allocate a private actor inside the owner. Registration precedes
+the first returned Core handle. These checks use the same
+owner that lists and removes branches.
+
+A guard keeps the epoch of its actual namespace owner across Save As and rescue. A live
+specialist created at A continues to use A's retained writer after manual editing moves
+to B. Its guard cannot write B or block removal of an independent B branch copy. A late
+A proof may settle that specialist's exact original ticket while its actor remains live;
+it never changes B or calls a sealed manual actor or a never-active capture actor.
+Close names each registered session with accepted unsaved work or an unresolved save.
+
+Registered persist freezes that specialist's accepted cut, computes the full proposal
+with Core's existing floor and replay rules, and stages its SpecialistBaseRecord before
+publishing the branch checkpoint. Both belong to one existing root transaction. The
+owner keeps a charged capture of the last proposed cut so an unknown Save followed by
+its exact floor settlement and a newer suffix preserves the complete original proposal.
+The owner uses its canonical registration even when the caller holds an older guard
+clone. This capture is session metadata for the specialist, not another recovery point.
+
 Explicit retirement confirms exact branch/content/history loss and expected root, then
 publishes removal of only that current index entry under the same fresh-open guard.
 Use the existing collector after acknowledgment and reader safety. Independent evidence,
@@ -458,6 +482,25 @@ accessible in-session copy and must never be labelled safe. Keep reconcile/rescu
 and the freeze after failed rescue. Close also discloses session-only target loss and,
 while selection is unresolved, that A keeps it only if selection completed. Closing a
 status view is not context Close, recovery or proof of absence.
+
+C5's frozen Save permission belongs to the bound editing owner and exact accepted cut.
+It calls the ordinary selector and exact-ticket publisher. `recovery_save_disclosure`
+reports that selector's exact oldest-Undo loss before the action. Public Save and alternate
+handles still refuse Frozen actors. Selection activation moves its already prepared
+attachment, input context and history digest after sealing O.
+
+A rescue preview walks the selected content closure without recursively importing an
+archived root's automatic inventory. It then adds each retained recovery role explicitly.
+This preserves R_ack and both automatic predecessors while allowing separately consented
+unavailable-only omissions. The copier uses that same closure. An archival manifest cannot
+reintroduce an omitted role. Independent evidence, receipts, Redo and required inputs
+remain mandatory. Source adoption and the destination reservation occur at the actual
+first namespace mutation, including a lock claim or missing-parent creation.
+
+Whole-context Close fences active, registered and retained actors before ending source
+reuse. Each copy owner keeps its own namespace, source reads, pins and charges until its
+readers finish. Ending source reuse permits temporary-source cleanup. It does not resolve
+any destination's unknown publication or permit a late copy to activate.
 
 ## 6. Durability, receipts and host-death recovery
 

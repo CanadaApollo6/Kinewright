@@ -294,3 +294,61 @@ pub(super) fn rescue_recovery(root: &Path, revised: bool) -> Result<Value, Strin
     };
     run().map_err(|e| e.to_string())
 }
+
+#[cfg(target_os = "linux")]
+pub(super) fn rescue_publication(root: &Path, revised: bool) -> Result<Value, String> {
+    use kinewright_project::{
+        bundle_copy::CopyStatus, editing_session::Ja1EditingSession, storage_budget::StorageLimits,
+    };
+    let run = || -> Result<Value, BundleError> {
+        let core =
+            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let control_path = root.join("control.kinewright");
+        let mut control =
+            ProjectBundle::activate(&control_path, BundleWriteAdmission::new_document())?;
+        let input = control.empty_inputs()?.reference.clone();
+        control.save(&core, &input)?;
+        let reopened = LoadedBundle::read(&control_path)?.root().is_ok();
+        drop(control);
+        if !revised {
+            return Ok(json!({"control_reopened":reopened,"surface":"pending_baseline_witness"}));
+        }
+        let source = root.join("origin/a.kinewright");
+        let destination = root.join("rescue.kinewright");
+        let mut session = Ja1EditingSession::new(root, &core, StorageLimits::default())?;
+        let status = io_observer::fail_once("root_parent_sync", || {
+            session.first_save(&source, StorageLimits::default())
+        })?;
+        if !matches!(status, CopyStatus::DurabilityUnknown) {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        std::fs::rename(root.join("origin"), root.join("unavailable-origin"))?;
+        let offer = session.probe_active()?.ok_or(BundleError::HistoryChanged)?;
+        let capture = session
+            .prepare_rescue(&offer)?
+            .ok_or(BundleError::HistoryChanged)?;
+        let selection = session.preview_rescue(capture, StorageLimits::default())?;
+        let consent = selection.consent();
+        let inspection = session.inspect_rescue_destination(&destination)?;
+        let outcome = session.rescue(selection, &consent, &inspection)?;
+        let separate = core.actor_identity() != session.core().actor_identity();
+        let sealed = core
+            .attachment_state()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+            == kinewright_core::AttachmentState::Sealed;
+        let expected = session
+            .core()
+            .export_history()
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        drop(session);
+        drop(core);
+        let loaded = LoadedBundle::read(&destination)?;
+        let fresh =
+            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        loaded.restore_manual(&fresh)?;
+        Ok(
+            json!({"control_reopened":reopened,"rescue_publication":outcome.activated && separate && sealed && fresh.export_history().map_err(|e|BundleError::Corrupt(e.to_string()))?==expected}),
+        )
+    };
+    run().map_err(|e| e.to_string())
+}

@@ -1065,6 +1065,22 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-rescue-publication",
+      "relative_file": "s2-rescue-publication.json",
+      "sha256": "9b453f9d6087a4c9658394481cd7d68dfa1b420e8c6cb3350149265a36fb4070",
+      "byte_length": 1474,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

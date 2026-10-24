@@ -16,6 +16,8 @@ pub enum RecoverySelection {
     Checkpoint { root: ObjectRef, branch: BranchId },
 }
 pub struct PreparedCheckpointRestore {
+    pub(crate) attachment: crate::ProjectAttachment,
+    pub(crate) history_digest: String,
     pub(crate) core: Core,
     pub(crate) checkpoint: BranchCheckpoint,
     pub(crate) history: std::sync::Arc<crate::storage_budget::StorageReservation<HistorySnapshot>>,
@@ -161,7 +163,13 @@ impl ProjectBundle {
             .attach_core(&core)?
             .freeze()
             .map_err(crate::bundle::history_error)?;
+        let attachment = self.attach_core(&core)?;
+        let history_digest = kinewright_media::sha256_bytes(
+            &serde_json::to_vec(&*history).map_err(|e| BundleError::Corrupt(e.to_string()))?,
+        );
         Ok(PreparedCheckpointRestore {
+            attachment,
+            history_digest,
             core,
             cut,
             input_leases,

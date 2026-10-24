@@ -239,6 +239,24 @@ pub fn fail_path<T>(operation: &'static str, path: &std::path::Path, run: impl F
 /// Inject one operation error in a fixture-owned temporary namespace.
 /// # Panics
 /// Refuses nested fault scopes. Unwinding clears the scope.
+pub fn fail_nth<T>(operation: &'static str, occurrence: usize, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NTH_FAILURE.with_borrow_mut(|f| *f = None);
+        }
+    }
+    NTH_FAILURE.with_borrow_mut(|f| {
+        assert!(f.is_none() && occurrence > 0);
+        *f = Some((operation, occurrence));
+    });
+    let _reset = Reset;
+    run()
+}
+thread_local! { static NTH_FAILURE: RefCell<Option<(&'static str, usize)>> = const {RefCell::new(None)}; }
+/// Inject one failure. Unwinding clears the scope.
+/// # Panics
+/// Refuses nested failure scopes.
 pub fn fail_once<T>(operation: &'static str, run: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {
@@ -257,6 +275,22 @@ pub(crate) fn check_failure(
     operation: &'static str,
     path: &std::path::Path,
 ) -> std::io::Result<()> {
+    let nth = NTH_FAILURE.with_borrow_mut(|f| {
+        if let Some((op, count)) = f.as_mut()
+            && *op == operation
+        {
+            *count -= 1;
+            if *count == 0 {
+                *f = None;
+                return true;
+            }
+        }
+        false
+    });
+    if nth {
+        note("injected_failure", path);
+        return Err(std::io::Error::other(format!("injected nth {operation}")));
+    }
     let native = NATIVE_FAILURE.with_borrow_mut(|failure| {
         if failure.as_ref().is_some_and(|(op, _)| *op == operation) {
             failure.take().map(|(_, errno)| errno)

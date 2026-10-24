@@ -218,6 +218,14 @@ fn reject_case_collision(directory: &File, name: &std::ffi::OsStr) -> Result<(),
     reason = "one no-follow ancestor claim through pinned destination-parent creation"
 )]
 pub(super) fn prepare_destination(path: &Path) -> Result<super::PreparedDestination, BundleError> {
+    prepare_destination_admitted(path, None, &mut || Ok(()))
+}
+#[allow(clippy::too_many_lines)]
+pub(super) fn prepare_destination_admitted(
+    path: &Path,
+    inspection: Option<&super::DestinationInspection>,
+    on_mutation: &mut dyn FnMut() -> Result<(), BundleError>,
+) -> Result<super::PreparedDestination, BundleError> {
     for component in path.components() {
         match component {
             Component::Normal(name) => {
@@ -263,9 +271,23 @@ pub(super) fn prepare_destination(path: &Path) -> Result<super::PreparedDestinat
     let mut actual = ancestor.canonicalize()?;
     let mut parent = pin_directory(&actual)?;
     check_profile(&parent)?;
+    if let Some(inspection) = inspection {
+        let held = fs::fstat(&inspection.parent)?;
+        let actual_parent = fs::fstat(&parent)?;
+        if resolved != inspection.path
+            || actual != inspection.ancestor
+            || held.st_dev != actual_parent.st_dev
+            || held.st_ino != actual_parent.st_ino
+        {
+            return Err(BundleError::Identity(
+                "rescue pinned ancestor changed before mutation".into(),
+            ));
+        }
+    }
     let claim = if missing.is_empty() {
         None
     } else {
+        on_mutation()?;
         let digest = kinewright_media::sha256_bytes(resolved.as_os_str().as_encoded_bytes());
         let claim = acquire(&actual.join(format!(".ja-s1-copy-parent-{digest}.kinewright")))?;
         let held = fs::fstat(&parent)?;

@@ -1,14 +1,30 @@
 # JA-1 S2 implementation reports
 
-C4 adds rescue records, strict L1 restore, selected-target session pins and frozen local
+C5 composes local recovery, rescue publication/handoff and durable-session registration
+under `Ja1EditingSession`. The [C5 report](c5.md) records 58 passing Linux command rows,
+563 expected/selected outcomes, 554 executed passes, nine existing ignores marked NOT RUN,
+and all 68 runtime mutation red/restored-green pairs. The complete workspace fast tier
+also passed: 3,885 passes, zero failures and 104 expected ignores. Only the additive rescue
+publication property receives S0 credit; prior fixture/oracle bytes and index entries remain.
+
+Five alternating lanes per revision measured C4 at 232.287 ms/save and C5 at
+230.925 ms/save (0.9941x), beside archived C4's 333.4 ms. Both fresh sides retain zero
+history decodes; no other process exceeded 20 percent CPU in the sampled lanes. This is
+an observed paired ratio, not a causal comparison with the archived run. Project/agent
+MSVC cross-checks both stopped in native dependencies at missing Windows `errno.h`.
+Native Windows/hosted CI, full slow and physical-device acceptance remain NOT RUN.
+C5 stops before App/C6+ integration. The session-pin crash window remains an explicitly
+disclosed accepted limit.
+
+C4 added rescue records, strict L1 restore, selected-target session pins and frozen local
 selection, with shared ordinary branch/floor lineage identity. The [C4 report](c4.md)
 contains all raw summaries, 48 final-source mutation pairs, additive S0 evidence and lane limits.
-Its final Linux gate has 539 selected outcomes, 530 executed passes,
+Its local final Linux gate had 539 selected outcomes, 530 executed passes,
 zero failures and 9 existing ignores marked NOT RUN. C4's measured save mean is
 333.4 ms beside archived C3's 225.0 ms and contemporaneous C3's 317.2 ms;
 all alternating lanes saw other load. Both builds retain zero history decodes and the same
-decoded-charge peak. Core MSVC check passes; project/agent native prerequisites block their
-cross-checks. Native Windows/CI remains NOT RUN. C5 lifecycle/rescue publication is not started.
+decoded-charge peak. That local report recorded a passing Core MSVC check and blocked
+project/agent native prerequisites; native Windows/CI was NOT RUN in that local report.
 The selected point's session-pin crash window remains an explicitly disclosed accepted limit.
 
 C3 adds project-local lifecycle ownership, retained read admission, structured probes,
@@ -240,3 +256,38 @@ adjustments are documented as C3 plan details in the report.
 The C3 older-root first-save witness uses a compatible independently admitted baseline
 at `crates/kinewright-project/tests/support/ja_s2_c3.rs:1156`. Unrelated Studio histories
 correctly fail the existing continuation guard; that production rule remains intact.
+
+## C5 integration details and deviations
+
+C5 keeps C4's single selection engine and the shared ordinary publisher/collector. No
+App/C6+ implementation, P, editable pause, Continue, special headroom or new ledger is added.
+The complete report records these integration refinements with their runtime witnesses:
+
+- A retained copy's later unknown Save must refresh its attempt status instead of returning
+  its original committed-copy status (`crates/kinewright-project/src/bundle_copy.rs:123`).
+- Content-only rescue traversal explicitly adds recovery roles; target record profiles are
+  admitted before destination mutation, so archival inventories cannot reintroduce an
+  omitted root (`crates/kinewright-project/src/editing_session/rescue_selection.rs:177`).
+- Context Close fences actors before ending source reuse. Actual readers retain ownership;
+  teardown proves no destination absent (`crates/kinewright-project/src/editing_session.rs:701`).
+- Durable creation/reopen must allocate private actors before exposing registered handles
+  (`crates/kinewright-project/src/editing_session/durable.rs:98`). Guards route through their
+  original namespace epoch after rescue (`crates/kinewright-project/src/editing_session/durable.rs:36`);
+  they cannot write B or block its independent
+  branch copy.
+- The full specialist proposal and bounded checkpoint publish atomically. Charged canonical
+  cuts preserve the original prefix through exact floor settlement, accepted suffixes and
+  stale guard clones (`crates/kinewright-project/src/editing_session/durable.rs:292`,
+  `crates/kinewright-project/src/bundle_branch.rs:157`). This reuses Core's existing replay.
+- Late A may settle only its exact original live registered actor's ticket; sealed manual A
+  and never-active captures stay status-only (`crates/kinewright-project/src/editing_session.rs:426`).
+
+The pressure witness calibrates its exact-fit limit on the same writer's actual root
+(`crates/kinewright-project/tests/support/ja_s2_c5_pressure.rs:165`), rather than assuming
+random BranchId ordering in another fixture yields an identical byte peak. The frozen
+failure witness includes an actual missing-parent creation failure
+(`crates/kinewright-project/tests/support/ja_s2_c5_recovery.rs:524`),
+and the recopy witness independently asserts the published R_ack edge
+(`crates/kinewright-project/tests/support/ja_s2_c5_rescue.rs:542`). Earlier weak/compile-only
+mutation attempts and development gates
+are excluded; `mutations-sealed/` contains the complete final 68-pair unchanged-source run.

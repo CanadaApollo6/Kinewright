@@ -287,6 +287,9 @@ impl FrozenRescueCapture {
 pub struct RescueConsent {
     pub(crate) tag: HistorySaveTag,
     pub(crate) digest: String,
+    pub(crate) selected: Option<String>,
+    pub(crate) trim: bool,
+    pub(crate) omission: bool,
 }
 impl FrozenRescueCapture {
     #[must_use]
@@ -294,6 +297,9 @@ impl FrozenRescueCapture {
         RescueConsent {
             tag: self.tag.clone(),
             digest: self.digest.clone(),
+            selected: None,
+            trim: false,
+            omission: false,
         }
     }
     pub fn check_consent(&self, consent: &RescueConsent) -> Result<(), BundleError> {
@@ -302,4 +308,69 @@ impl FrozenRescueCapture {
         }
         Ok(())
     }
+}
+
+/// Read-only preview. Separate consent is required for each disclosed loss.
+pub struct RescueSelection {
+    pub(crate) capture: crate::storage_budget::StorageReservation<FrozenRescueCapture>,
+    pub(crate) history: kinewright_core::HistorySnapshot,
+    pub(crate) limits: crate::storage_budget::StorageLimits,
+    pub(crate) selected_digest: String,
+    pub(crate) removed_undo: u64,
+    pub(crate) omissions: Vec<crate::rescue_record::RecoveryOmission>,
+    pub(crate) roots: Vec<ObjectRef>,
+    pub(crate) _reads: crate::store::RetainedReadAdmission,
+}
+impl RescueSelection {
+    #[must_use]
+    pub fn removed_undo(&self) -> u64 {
+        self.removed_undo
+    }
+    #[must_use]
+    pub fn omissions(&self) -> &[crate::rescue_record::RecoveryOmission] {
+        &self.omissions
+    }
+    #[must_use]
+    pub fn consent(&self) -> RescueConsent {
+        let mut consent = self.capture.consent();
+        consent.selected = Some(self.selected_digest.clone());
+        consent
+    }
+    pub fn consent_trim(&self, consent: &mut RescueConsent) -> Result<(), BundleError> {
+        self.check_identity(consent)?;
+        consent.trim = true;
+        Ok(())
+    }
+    pub fn consent_omission(&self, consent: &mut RescueConsent) -> Result<(), BundleError> {
+        self.check_identity(consent)?;
+        if self.removed_undo > 0 && !consent.trim {
+            return Err(BundleError::HistoryChanged);
+        }
+        consent.omission = true;
+        Ok(())
+    }
+    fn check_identity(&self, consent: &RescueConsent) -> Result<(), BundleError> {
+        self.capture.check_consent(consent)?;
+        if consent.selected.as_ref() != Some(&self.selected_digest) {
+            return Err(BundleError::HistoryChanged);
+        }
+        Ok(())
+    }
+    pub(crate) fn check_consent(&self, consent: &RescueConsent) -> Result<(), BundleError> {
+        self.check_identity(consent)?;
+        if (self.removed_undo > 0 && !consent.trim)
+            || (!self.omissions.is_empty() && !consent.omission)
+        {
+            return Err(BundleError::Identity(
+                "separate consent required for Undo loss and unavailable recovery omissions".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+#[derive(Debug)]
+pub struct RescueOutcome {
+    pub status: crate::bundle_copy::CopyStatus,
+    pub activated: bool,
+    pub disclosure: String,
 }

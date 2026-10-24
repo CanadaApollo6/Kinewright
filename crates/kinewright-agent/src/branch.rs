@@ -129,6 +129,14 @@ impl BranchError {
 }
 
 impl TimelineBranch {
+    pub(crate) fn from_registered(name: &str, base_document: Arc<Document>, core: Core) -> Self {
+        Self {
+            name: name.into(),
+            base_revision: TimelineRevision(0),
+            base_document,
+            core,
+        }
+    }
     /// Create an empty edit lineage from one immutable live-project snapshot.
     ///
     /// # Errors

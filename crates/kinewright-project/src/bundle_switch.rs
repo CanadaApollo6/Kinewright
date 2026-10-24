@@ -34,6 +34,12 @@ pub enum ProjectSelectionResult {
     CommittedWithError(BundleError),
 }
 impl PreparedProjectSelection {
+    pub(crate) const fn publication_started(&self) -> bool {
+        self.published_root.is_some()
+    }
+    pub(crate) fn protects_branch(&self, branch: &BranchId) -> bool {
+        self.existing_head.is_some() && &self.target_branch == branch
+    }
     #[must_use]
     pub const fn target_branch(&self) -> &BranchId {
         &self.target_branch

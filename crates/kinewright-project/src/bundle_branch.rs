@@ -154,7 +154,7 @@ impl ProjectBundle {
         self.publish_core(core, &before, &inputs, id)
     }
     /// Persist the full frozen delta independently of subsequent manual floors.
-    pub fn retain_specialist_base(
+    pub(crate) fn stage_specialist_base(
         &mut self,
         base: &SpecialistBaseRecord,
     ) -> Result<ObjectRef, BundleError> {
@@ -174,6 +174,13 @@ impl ProjectBundle {
             self.evidence.push(reference.clone());
             self.pending_evidence.push(sealed.into_pin());
         }
+        Ok(reference)
+    }
+    pub fn retain_specialist_base(
+        &mut self,
+        base: &SpecialistBaseRecord,
+    ) -> Result<ObjectRef, BundleError> {
+        let reference = self.stage_specialist_base(base)?;
         let id = self.manual_branch_id.clone();
         let inputs = self.checkpoint(&id)?.input_manifest_ref.clone();
         let history = self.branch_history(&id)?;

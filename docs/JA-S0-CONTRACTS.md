@@ -585,6 +585,19 @@ OwnedEvidence is insufficient. Generation-zero ordinary v3 remains a positive co
 Shared L/R occurrence tuples, batch IDs and split ancestry survive first and later ordinary
 saves and floors. Only genuinely new events get the accepting branch's origin.
 
+C5 implements these local outcomes in `Ja1EditingSession`. Its frozen ordinary Save is
+bound to the existing accepted cut; other Save handles still refuse. Durable-session
+registrations retain the Core, specialist base and pins even after caller guard drop.
+Closing through the agent persists first, then freezes and seals before unregistering.
+A direct owner close refuses an unpersisted suffix. Retirement rechecks the same registry.
+Guards retain their original namespace epoch through rescue. Their persist and exact-ticket
+reconciliation use that retained owner. B's copied branch is independent of an A guard.
+The full specialist proposal and its branch checkpoint publish in one root. Charged
+captures preserve the proposal through a later proven floor and accepted suffix. Close
+also discloses unresolved or unsaved registered sessions in retained destinations.
+The additive `s2-rescue-publication.json` observes real first-save uncertainty, a fresh B
+actor, sealed A and independent B reopen. The absent baseline rescue API remains pending.
+
 ## 5. JA-3 typed editorial handoffs
 
 ### 5.1 Songbird v1 input and dataset addresses

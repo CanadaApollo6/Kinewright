@@ -1340,6 +1340,50 @@ impl ProjectBundle {
         branch: &BranchId,
     ) -> Result<BundleSaveReport, BundleError> {
         reconcile_core_save(core)?;
+        self.publish_core_admitted(core, selected, inputs, branch)
+    }
+
+    /// Only the local lifecycle can save its exact frozen cut. Public saves still refuse Frozen.
+    pub(crate) fn save_frozen(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+        cut: &kinewright_core::AcceptedCut,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let branch = self.manual_branch_id.clone();
+        self.save_frozen_branch(core, inputs, cut, &branch)
+    }
+    pub(crate) fn save_frozen_branch(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+        cut: &kinewright_core::AcceptedCut,
+        branch: &BranchId,
+    ) -> Result<BundleSaveReport, BundleError> {
+        let owner = self.attach_core(core)?;
+        if core.attachment_state().map_err(history_error)?
+            != kinewright_core::AttachmentState::Frozen
+            || owner.capture().map_err(history_error)? != *cut
+            || self.unsettled
+            || self.pending_command.is_some()
+            || core
+                .pending_history_save()
+                .map_err(history_error)?
+                .is_some()
+        {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
+        crate::bundle_copy::settle_copy_source(&mut self.pending_copy_source)?;
+        self.publish_core_admitted(core, cut.history(), inputs, branch)
+    }
+
+    fn publish_core_admitted(
+        &mut self,
+        core: &Core,
+        selected: &HistorySnapshot,
+        inputs: &ObjectRef,
+        branch: &BranchId,
+    ) -> Result<BundleSaveReport, BundleError> {
         if self.unsettled {
             return Err(BundleError::Unsettled);
         }

@@ -544,3 +544,7 @@ mod linux {
         assert_eq!(core.export_history().unwrap(), before);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "support/ja_s2_c5_rescue.rs"]
+mod c5;

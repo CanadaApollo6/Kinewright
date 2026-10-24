@@ -55,6 +55,13 @@ pub(crate) struct PendingCopySource {
     tag: kinewright_core::HistorySaveTag,
     source: Arc<Mutex<SourceCopyHold>>,
 }
+pub(crate) fn close_copy_source(pending: &mut Option<PendingCopySource>) {
+    if let Some(pending) = pending
+        && let Ok(mut source) = pending.source.lock()
+    {
+        source.close_originating_context();
+    }
+}
 pub(crate) fn settle_copy_source(
     pending: &mut Option<PendingCopySource>,
 ) -> Result<(), BundleError> {
@@ -76,6 +83,12 @@ pub(crate) fn settle_copy_source(
     Ok(())
 }
 impl BundleCopy {
+    pub(crate) fn close_originating_context(&mut self) {
+        if let Ok(mut source) = self.source.lock() {
+            source.close_originating_context();
+        }
+    }
+
     pub(crate) fn rebound_manifest(&self, source: &ObjectRef) -> Result<ObjectRef, BundleError> {
         self.input_rebindings
             .get(source)
@@ -93,6 +106,11 @@ impl BundleCopy {
             .as_ref()
             .ok_or_else(|| BundleError::Identity("missing retained writer".into()))
     }
+    pub(crate) fn destination_owner_mut(&mut self) -> Result<&mut ProjectBundle, BundleError> {
+        self.destination
+            .as_mut()
+            .ok_or_else(|| BundleError::Identity("missing retained writer".into()))
+    }
     /// A retained owner never rolls back or consumes its namespace/source on settlement.
     pub(crate) fn reconcile_retained(
         &mut self,
@@ -102,6 +120,16 @@ impl BundleCopy {
             .destination
             .as_mut()
             .ok_or_else(|| BundleError::Identity("missing retained writer".into()))?;
+        if destination.unsettled
+            && destination.publication_state() == crate::bundle::PublicationState::Unknown
+        {
+            self.tag.clone_from(&destination.publication_tag);
+            self.status = CopyStatus::DurabilityUnknown;
+            self.source
+                .lock()
+                .map_err(|_| BundleError::Capacity("copy source poisoned"))?
+                .mark_uncertain()?;
+        }
         destination.store.with_namespace(|n| {
             n.probe_retained_namespace()?;
             n.verify_read_authority()
@@ -319,8 +347,20 @@ fn destination(
     path: &Path,
     limits: StorageLimits,
 ) -> Result<(ProjectBundle, DestinationBefore, PreparedDestination), BundleError> {
+    destination_admitted(path, limits, None, &mut || Ok(()))
+}
+fn destination_admitted(
+    path: &Path,
+    limits: StorageLimits,
+    inspection: Option<&crate::namespace::DestinationInspection>,
+    on_mutation: &mut dyn FnMut() -> Result<(), BundleError>,
+) -> Result<(ProjectBundle, DestinationBefore, PreparedDestination), BundleError> {
     limits.validate()?;
-    let prepared = ProjectNamespace::prepare_destination(path)?;
+    let prepared = if let Some(inspection) = inspection {
+        ProjectNamespace::prepare_rescue_destination(inspection, on_mutation)?
+    } else {
+        ProjectNamespace::prepare_destination(path)?
+    };
     let namespace = ProjectNamespace::inspect(&prepared.path)?;
     namespace.matches_destination(&prepared)?;
     let root = namespace.read_root()?;
@@ -334,6 +374,11 @@ fn destination(
     if had_assets && !admission.is_studio() {
         return Err(BundleError::Identity(
             "unbound foreign destination store".into(),
+        ));
+    }
+    if inspection.is_some() && (root.is_some() || had_assets) {
+        return Err(BundleError::Identity(
+            "rescue destination is occupied".into(),
         ));
     }
     namespace.probe_copy_contention()?;
@@ -350,6 +395,9 @@ fn destination(
     }
     #[cfg(any(test, feature = "test-util"))]
     crate::test_hook("copy_destination_pinned");
+    if inspection.is_some() {
+        on_mutation()?;
+    }
     let mut target = ProjectBundle::activate_copy(&prepared.path, admission, &prepared)?;
     if had_assets
         && target.store.with_namespace(|n| {
@@ -429,17 +477,21 @@ fn rewrite_inputs(
         return Ok(rebound.clone());
     }
     let original = target.store.read_input_manifest(reference)?;
+    let result = rebind_inputs(target, &original)?;
+    map.insert(reference.clone(), result.clone());
+    Ok(result)
+}
+fn rebind_inputs(
+    target: &mut ProjectBundle,
+    original: &OwnedInputManifest,
+) -> Result<ObjectRef, BundleError> {
     let rebound = OwnedInputManifest {
         project_id: Some(target.project_id.clone()),
         session_id: None,
         owner_epoch: target.store.owner_epoch(),
         entries: original.entries.clone(),
     };
-    let sealed = target.store.admit_record(&rebound)?;
-    let result = sealed.reference.clone();
-    map.insert(reference.clone(), result.clone());
-    drop(sealed);
-    Ok(result)
+    Ok(target.store.admit_record(&rebound)?.reference.clone())
 }
 fn result(
     mut target: ProjectBundle,
@@ -721,6 +773,10 @@ pub struct SessionStore {
     pending_copy_source: Option<PendingCopySource>,
 }
 impl SessionStore {
+    pub(crate) fn close_originating_context(&mut self) {
+        close_copy_source(&mut self.pending_copy_source);
+    }
+
     /// Bind a newly created unsaved edit before distributing handles.
     pub fn attach_core(&self, core: &Core) -> Result<crate::ProjectAttachment, BundleError> {
         crate::history_save::ProjectAttachment::new(core).map_err(crate::bundle::history_error)
@@ -826,4 +882,216 @@ impl SessionStore {
         self.pending_copy_source = copy.pending_source();
         Ok(copy)
     }
+}
+
+/// A1 copies the selected accepted cut without reconciling A or acknowledging its tentative command.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn rescue_copy(
+    source: &ProjectStore,
+    named: Option<&ProjectBundle>,
+    inputs: &ObjectRef,
+    roots: &[ObjectRef],
+    inspection: &crate::namespace::DestinationInspection,
+    on_mutation: &mut dyn FnMut() -> Result<(), BundleError>,
+    limits: StorageLimits,
+    history: &kinewright_core::HistorySnapshot,
+    record: &crate::rescue_record::RescueCopyV1,
+) -> Result<BundleCopy, BundleError> {
+    let copied_bytes = source
+        .closure_with_inventory(roots, false)?
+        .iter()
+        .try_fold(
+            history
+                .encoded_bytes()
+                .map_err(crate::bundle::history_error)?,
+            |n, r| {
+                n.checked_add(r.byte_length)
+                    .ok_or(BundleError::Capacity("rescue copy overlap"))
+            },
+        )?;
+    let hold = source.begin_copy_source(roots, copied_bytes, true)?;
+    let (mut target, before, prepared) =
+        destination_admitted(inspection.path(), limits, Some(inspection), on_mutation)?;
+    if before.root.is_some() || before.had_assets {
+        return Err(BundleError::Identity(
+            "rescue destination must be fresh and unoccupied".into(),
+        ));
+    }
+    let mut map = BTreeMap::new();
+    let publication = (|| {
+        let mut record = record.clone();
+        record.project_id = target.project_id.clone();
+        if let Some(original) = named {
+            origins(
+                &mut target,
+                &before,
+                std::iter::once(original.project_id.clone())
+                    .chain(original.origin_project_ids.clone()),
+                original.origin_session_ids.clone(),
+            )?;
+        } else {
+            origins(
+                &mut target,
+                &before,
+                std::iter::empty(),
+                source.input_owner().1,
+            )?;
+        }
+        target.store.copy_rescue_graph(source, roots)?;
+        let mut selected_inputs =
+            (*source.read_copy_record::<OwnedInputManifest>(inputs, true)?).clone();
+        crate::bundle_commit::retain_history_inputs(history, &mut selected_inputs);
+        let rebound = rebind_inputs(&mut target, &selected_inputs)?;
+        map.insert(inputs.clone(), rebound.clone());
+        let mut rescue_contexts = Vec::new();
+        if let Some(original) = named {
+            target.manual_branch_id = original.manual_branch_id.clone();
+            target.generation = original.generation;
+            target.root.clone_from(&original.root);
+            target.recovery = original.recovery.clone();
+            target.recovery.predecessors = original
+                .recovery
+                .predecessors
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| {
+                    !record
+                        .omissions
+                        .iter()
+                        .any(|o| o.role == format!("predecessor:{i}"))
+                })
+                .map(|(_, r)| r.clone())
+                .collect();
+            if record.omissions.iter().any(|o| o.role == "pre_migration") {
+                target.recovery.pre_migration = None;
+            }
+            target.recovery.staging = None;
+            target.recovery.activation_project_id = Some(target.project_id.clone());
+            target.recovery.manual_branch_id = Some(target.manual_branch_id.clone());
+            target.recovery.namespace_root_file_name = prepared
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_owned);
+            target.receipts = original.receipts.clone();
+            target.issuers = original.issuers.clone();
+            for issuer in target.issuers.values_mut() {
+                issuer.retired = true;
+            }
+            for reference in &original.evidence {
+                let inherited =
+                    if reference.record_kind == crate::bundle_records::RecordKind::OwnedEvidence {
+                        crate::rescue_record::parse(&source.read_copy_evidence(reference, true)?)?
+                    } else {
+                        None
+                    };
+                if let Some(inherited) = inherited {
+                    let attempts = inherited
+                        .attempts
+                        .into_iter()
+                        .filter(|a| !record.attempts.contains(a))
+                        .collect::<Vec<_>>();
+                    record.compact(attempts)?;
+                    if inherited.summary.unresolved {
+                        let (count, overflow) = record
+                            .summary
+                            .count
+                            .overflowing_add(inherited.summary.count);
+                        record.summary.count = if overflow { u64::MAX } else { count };
+                        record.summary.count_overflow |=
+                            overflow || inherited.summary.count_overflow;
+                        record.summary.unresolved = true;
+                        record.summary.digest = kinewright_media::sha256_bytes(
+                            &[
+                                record.summary.digest.as_bytes(),
+                                inherited.summary.digest.as_bytes(),
+                            ]
+                            .concat(),
+                        );
+                    }
+                } else {
+                    target.evidence.push(reference.clone());
+                }
+            }
+            let mut branches = BTreeMap::new();
+            let mut index = BTreeMap::new();
+            let mut seals = Vec::new();
+            for (id, prior) in &original.branches {
+                if id == &original.manual_branch_id {
+                    branches.insert(id.clone(), prior.clone());
+                    let old = source.read_copy_record::<kinewright_core::HistorySnapshot>(
+                        &prior.history_ref,
+                        true,
+                    )?;
+                    let cut =
+                        usize::try_from(history.floor_offset.saturating_sub(old.floor_offset))
+                            .map_err(|_| BundleError::Capacity("rescue input cut"))?;
+                    rescue_contexts.resize(cut, rebound.clone());
+                    for (i, reference) in prior
+                        .history_input_manifest_refs
+                        .iter()
+                        .enumerate()
+                        .skip(cut)
+                    {
+                        rescue_contexts.push(if cut > 0 && i == cut {
+                            rebound.clone()
+                        } else {
+                            rewrite_inputs(&mut target, reference, &mut map)?
+                        });
+                    }
+                    continue;
+                }
+                let mut checkpoint = prior.clone();
+                checkpoint.input_manifest_ref =
+                    rewrite_inputs(&mut target, &checkpoint.input_manifest_ref, &mut map)?;
+                checkpoint.history_input_manifest_refs = checkpoint
+                    .history_input_manifest_refs
+                    .iter()
+                    .map(|r| rewrite_inputs(&mut target, r, &mut map))
+                    .collect::<Result<_, _>>()?;
+                let sealed = target.store.admit_record(&checkpoint)?;
+                index.insert(id.clone(), sealed.reference.clone());
+                seals.push(sealed);
+                branches.insert(id.clone(), checkpoint);
+            }
+            let index = target.store.admit_record(&index)?;
+            if let Some(root) = &mut target.root {
+                root.branch_index_ref = index.reference.clone();
+            }
+            target.branches = branches;
+            if record
+                .omissions
+                .iter()
+                .any(|o| o.role == "acknowledged_root")
+            {
+                record.acknowledged_absence =
+                    Some("unavailable acknowledged root omitted by explicit consent".into());
+            } else {
+                let ack = target.admit_root_checkpoint(
+                    original.admission.raw_bytes(),
+                    &original.root_references()?,
+                )?;
+                let (projected, origin) = target.project_recovery_root(&ack.reference)?;
+                record.acknowledged_root = Some(projected);
+                record.acknowledged_absence = None;
+                record.recovery_origin = Some(origin);
+            }
+        }
+        target.retain_rescue_record(&record)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("rescue_record_before_publish", &prepared.path)?;
+        target.history_cache.clear();
+        if let Some(original) = named {
+            crate::bundle_commit::BundleCommit::publish_rescue(
+                &mut target,
+                history,
+                &rebound,
+                original,
+                &rescue_contexts,
+            )
+        } else {
+            crate::bundle_commit::BundleCommit::publish(&mut target, history, &rebound)
+        }
+    })();
+    result(target, before, prepared, hold, map, publication)
 }
