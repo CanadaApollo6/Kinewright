@@ -194,10 +194,11 @@ impl Ja1EditingSession {
         {
             return Err(BundleError::Unsettled);
         }
-        if self
-            .durable_sessions
-            .iter()
-            .any(|r| r.guard.branch == branch)
+        if self.active_bundle()?.manual_branch_id() == &branch
+            || self
+                .durable_sessions
+                .iter()
+                .any(|r| r.guard.branch == branch)
         {
             return Err(BundleError::Contention(
                 "durable branch already has a live session".into(),

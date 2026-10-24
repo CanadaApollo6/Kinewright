@@ -1056,6 +1056,7 @@ impl BundleCommit {
         bundle.unsettled = false;
         drop(seals);
         Ok(BundleSaveReport {
+            history_sha256: bundle.checkpoint(branch_id)?.history_ref.sha256.clone(),
             collection,
             path: saved_path,
             project_id: bundle.project_id.clone(),

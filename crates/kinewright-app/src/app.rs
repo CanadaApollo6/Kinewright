@@ -979,7 +979,7 @@ impl KinewrightApp {
                         session.install_ja1_view();
                     }
                     Err(_) => {
-                        self.status = "Studio operation stopped unexpectedly. This context is fenced; keep it open to inspect the saved project and retained data.".into();
+                        self.status = "Studio operation stopped unexpectedly. Its attachment and in-session retained data were dropped. This context is fenced; reopen the saved project to inspect what reached storage. Unsaved work may be lost.".into();
                     }
                 }
             } else if session.ja1_job.is_some() {
@@ -16238,4 +16238,208 @@ pub(crate) fn ja1_focus_witness() {
             std::panic::resume_unwind(error);
         }
     });
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn ja1_review_save_suffix_witness() {
+    use crate::ja1_attachment::{Action, Ja1Attachment, tests::named};
+    use kinewright_project::{
+        bundle::LoadedBundle, editing_session::Ja1EditingSession, io_observer,
+        storage_budget::StorageLimits,
+    };
+    for mode in ["ordinary", "first", "as"] {
+        let (temp, mut attachment) = named();
+        if mode == "first" {
+            let core = kinewright_core::Core::spawn(
+                (*attachment.owner.core().export_history().unwrap().document).clone(),
+            )
+            .unwrap();
+            attachment = Ja1Attachment::new(
+                Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap(),
+            )
+            .unwrap();
+        }
+        let actor = attachment.owner.core().clone();
+        let expected = actor.export_history().unwrap();
+        let path = temp.path(if mode == "first" {
+            "first.kinewright"
+        } else if mode == "as" {
+            "b.kinewright"
+        } else {
+            "drive/a.kinewright"
+        });
+        let action = if mode == "first" {
+            Action::FirstSave(path.clone())
+        } else if mode == "as" {
+            Action::SaveAs(path.clone())
+        } else {
+            Action::Save
+        };
+        let (mut app, engine) = in2b_tests::in2b_harness(Document::default(), None);
+        app.focused_mut().ja1_job = Some(std::thread::spawn(move || {
+            io_observer::at_barrier(
+                if mode == "ordinary" {
+                    "history_selected"
+                } else {
+                    "copy_before_publish"
+                },
+                move || {
+                    assert!(matches!(
+                        actor
+                            .request(Command::Do(Operation::SetTrackSyncLock {
+                                track: TrackId(1),
+                                locked: false
+                            }))
+                            .unwrap(),
+                        Event::DocumentChanged { .. }
+                    ));
+                },
+                || attachment.apply(action),
+            )
+            .unwrap();
+            attachment
+        }));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let ctx = egui::Context::default();
+            theme::install(&ctx);
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while app.focused().ja1_job.is_some() {
+                assert!(Instant::now() < deadline);
+                app.poll_ja1(&ctx);
+                std::thread::yield_now();
+            }
+            let loaded = LoadedBundle::read(&path).unwrap();
+            let reader = kinewright_core::Core::spawn(Document::default()).unwrap();
+            loaded.restore_manual(&reader).unwrap();
+            assert_eq!(reader.export_history().unwrap(), expected);
+            assert!(
+                app.focused().is_dirty(),
+                "App must not close an accepted unpublished suffix for {mode}"
+            );
+            assert!(!app.focused().ja1_close_warning().is_empty());
+            app.request_exit(&ctx);
+            assert!(app.pending_project_action.is_some());
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600.0, 3000.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input.clone(), |ui| app.show_unsaved_confirmation(ui.ctx()));
+            let output = ctx.run_ui(input, |ui| app.show_unsaved_confirmation(ui.ctx()));
+            let text = crate::ja1_attachment::tests::painted_text(&output);
+            assert!(text.contains("Closing can discard"), "{text}");
+        }));
+        in2b_tests::in2b_quiesce_engine(&engine);
+        in1_tests::in1_shutdown(&mut app);
+        app.focused_mut().stop_threads("fix2 save race");
+        if let Err(error) = result {
+            std::panic::resume_unwind(error);
+        }
+    }
+}
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn ja1_review_dirty_poll_witness() {
+    use crate::ja1_attachment::tests::named;
+    use kinewright_project::io_observer;
+    let (_temp, attachment) = named();
+    let (mut app, engine) = in2b_tests::in2b_harness(Document::default(), None);
+    app.focused_mut().ja1 = Some(attachment);
+    app.focused_mut().install_ja1_view();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for command in [
+            None,
+            Some(Command::Undo),
+            Some(Command::Redo),
+            Some(Command::DoBatchCoalesced {
+                operations: vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: false,
+                }],
+                coalesce_key: "drag".into(),
+            }),
+            Some(Command::DoBatchCoalesced {
+                operations: vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: true,
+                }],
+                coalesce_key: "drag".into(),
+            }),
+            Some(Command::Undo),
+            Some(Command::Redo),
+        ] {
+            if let Some(command) = command {
+                assert!(matches!(
+                    app.focused().core.request(command).unwrap(),
+                    Event::DocumentChanged { .. }
+                ));
+            }
+            let ((), trace) = io_observer::observe(|| {
+                let history = app.focused().core.export_history().unwrap();
+                let saved = app
+                    .focused()
+                    .ja1
+                    .as_ref()
+                    .unwrap()
+                    .owner
+                    .association()
+                    .unwrap()
+                    .saved_digest()
+                    .unwrap()
+                    .to_owned();
+                let expected =
+                    kinewright_media::sha256_bytes(&serde_json::to_vec(&history).unwrap()) != saved;
+                for _ in 0..100 {
+                    assert_eq!(app.focused().is_dirty(), expected);
+                }
+            });
+            assert!(
+                trace
+                    .events
+                    .iter()
+                    .filter(|e| e.operation == "studio_dirty_history_hash")
+                    .count()
+                    <= 1,
+                "unchanged Studio polls must hash history at most once per authoritative change"
+            );
+        }
+    }));
+    in2b_tests::in2b_quiesce_engine(&engine);
+    in1_tests::in1_shutdown(&mut app);
+    app.focused_mut().stop_threads("fix2 dirty poll");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn ja1_review_worker_panic_witness() {
+    let (_temp, attachment) = crate::ja1_attachment::tests::named();
+    let (mut app, engine) = in2b_tests::in2b_harness(Document::default(), None);
+    app.focused_mut().ja1_job = Some(std::thread::spawn(move || {
+        let _attachment = attachment;
+        panic!("controlled save worker panic");
+    }));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ctx = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.focused().ja1_job.is_some() {
+            assert!(Instant::now() < deadline);
+            app.poll_ja1(&ctx);
+            std::thread::yield_now();
+        }
+        assert!(app.focused().ja1.is_none());
+        assert!(
+            app.status.contains("in-session retained data were dropped"),
+            "{}",
+            app.status
+        );
+        assert!(!app.status.contains("keep it open"));
+    }));
+    in2b_tests::in2b_quiesce_engine(&engine);
+    in1_tests::in1_shutdown(&mut app);
+    app.focused_mut().stop_threads("fix2 worker panic");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
 }

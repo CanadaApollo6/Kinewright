@@ -1,5 +1,45 @@
 # JA-1 S2 implementation reports
 
+## Review fix round
+
+The original C6 claim that Windows carried only raw/native-refusal applicability was false
+for `d01d2ff`; it is withdrawn as evidence for that head. Parent `c39e613` fixed the unsafe
+fixture calls. This round audits every caller and retains native Windows runtime as NOT RUN.
+
+Fix 2 on c39e613 addresses every accepted S2-R review finding in one unpushed commit.
+The [C6 report](c6.md#review-fix-round) contains the exact source sites, witnesses,
+raw results, binary/source identities and limitations. Final Linux: 617 expected/selected,
+607 passes and 10 ignored selection outcomes; complete workspace
+`--no-fail-fast`: 3935 passes, 0 failures, 107 expected ignores.
+Both affected slow selectors execute. All 95 original JA files remain unchanged; no new S0 flip.
+
+| Finding | Fix and owning site | Witness | Red/green evidence |
+| --- | --- | --- | --- |
+| A1 / O2; ruling 1 | Publisher returns exact committed history SHA, including ordinary floors; first Save, Save and Save As use it. `crates/kinewright-project/src/bundle_commit.rs:1059`; `crates/kinewright-project/src/editing_session.rs:511`; `crates/kinewright-project/src/editing_session/recovery.rs:330` | Four owner suffix/floor witnesses `crates/kinewright-project/tests/support/ja_s2_review_fix2.rs:115` and actual worker/Close `crates/kinewright-app/src/ja1_attachment_tests.rs:839` | 5 d01d2ff runtime reds → 5 final-source greens |
+| A5; ruling 2 | One digest per actor/history identity; identity includes accepted no-op Undo/Redo batches as well as revision/floors. `crates/kinewright-core/src/actor.rs:48`; `crates/kinewright-project/src/editing_session.rs:436` | Actual Studio is_dirty polls across unchanged, empty Undo/Redo, gesture, Undo and Redo `crates/kinewright-app/src/ja1_attachment_tests.rs:844` | d01d2ff red → green; batch-count-omission mutation red → restored green |
+| A2; ruling 3 | Failed Retry still probes/stores eligible offer, preserves error and pending-command processing. `crates/kinewright-app/src/ja1_attachment.rs:319` | Rendered button clicks: ordinary/first/prepared Retry → offer → PreviewRescue, no preinstalled choice or owner prepare `crates/kinewright-app/src/ja1_attachment_tests.rs:777` | d01d2ff red → final green |
+| A3; ruling 4 | Select evidence from acknowledged manifest in both source closure and B publication. `crates/kinewright-project/src/editing_session/rescue_selection.rs:33`; `crates/kinewright-project/src/bundle_copy.rs:987` | W10 comments, landed and absent A: B manifest/content exclusion, independent evidence and UnresolvedOrigin `crates/kinewright-project/tests/support/ja_s2_review_fix2.rs:269` | 2 d01d2ff reds → 2 final greens |
+| A4 / O3; ruling 5 | Stage every replacement before evidence mutation; restore original vector and new pending pins on definite publish failure. `crates/kinewright-project/src/editing_session/recovery.rs:597` | Staging failure and publish refusal → later Save → independent reopen; strict full-record comparison and successful edge-retirement control `crates/kinewright-project/tests/support/ja_s2_review_fix2.rs:322` | d01d2ff red → final green |
+| O4; ruling 5 | Retain existing branch rollback; add missing discriminating witness. `crates/kinewright-project/src/editing_session/recovery.rs:566` | Definite prepublication refusal → later Save/reopen preserves original branch/head `crates/kinewright-project/tests/support/ja_s2_review_fix2.rs:366` | Correct d01d2ff control green; drop(removed) red at d01d2ff and final source; restored greens |
+| O1; ruling 6 | Parent c39e613 already gates every unsafe fixture/control; add Windows-safe import and full workspace --no-fail-fast. `crates/kinewright-project/tests/support/ja_s2_c6_admission.rs:2`; `docs/reports/ja1-s2/c6-gate.sh:97` | All S2 read/inspect/builders and four matrix callers audited; portable native-refusal assertions, W14 and both stress paths. See windows-audit.md. | Linux matrix/stress and complete no-fail-fast pass; native Windows runtime pair NOT RUN |
+| O5; ruling 7 | Backend refuses manual durable reopen and registered session/base targets at prepare and publication. `crates/kinewright-project/src/editing_session/durable.rs:197`; `crates/kinewright-project/src/editing_session/recovery.rs:43` | Manual duplicate, registered prepare and registration after prepare `crates/kinewright-project/tests/support/ja_s2_review_fix2.rs:388` | d01d2ff red → green; all 3 guard removals red → restored green |
+| O6; ruling 8 | Honest panic text: attachment/retained data were dropped; reopen storage, unsaved work may be lost. `crates/kinewright-app/src/app.rs:982` | Actual panicking worker join/status `crates/kinewright-app/src/ja1_attachment_tests.rs:849` | d01d2ff red → final green |
+| O7; ruling 9 | Seal A before resuming B; failed A seal retains B Frozen. `crates/kinewright-project/src/editing_session/rescue.rs:293` | Authorized cut interference makes A seal fail; B cannot remain Live `crates/kinewright-project/tests/support/ja_s2_review_fix2.rs:419` | d01d2ff red → final green |
+
+Fresh paired means: d01d2ff **248.081 ms/save**, fix2
+**248.011 ms/save**, observed ratio **0.9997x**;
+zero history decodes on both sides. This is an observation, not a causal speedup claim.
+
+Windows fixture applicability is source-audited, including all four shared-matrix callers;
+actual native refusal is positively asserted by their non-Linux branches. Native Windows
+runtime red/green remains NOT RUN locally. Installed cross-checks retain their actual
+PASS/BLOCKED results in C6's report; missing native headers do not earn a pass.
+The corrected complete gate supersedes an intentionally interrupted attempt using a history
+identity that missed empty Undo/Redo. O4's correct baseline passes and only its exact rollback
+mutation should fail. No historical acceptance is relabeled, no C7 work and no push.
+
+## Earlier implementation evidence
+
 C6 adds the independently usable local S2-R App recovery/rescue controls over the same
 C4/C5 lifecycle owner, plus local admission witnesses. The [C6 report](c6.md) records 65
 passing Linux command rows, 603 expected/selected outcomes, 593 executed passes and ten

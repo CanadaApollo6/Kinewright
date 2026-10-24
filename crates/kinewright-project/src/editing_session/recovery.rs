@@ -40,6 +40,7 @@ impl Ja1EditingSession {
         {
             return Ok(());
         }
+        self.admit_selection_target(&target)?;
         self.prepared = Some(
             self.active_bundle()?
                 .prepare_project_selection(&self.core, target)?,
@@ -67,6 +68,10 @@ impl Ja1EditingSession {
                 "prepare a recovery selection first".into(),
             ));
         };
+        if let Err(error) = self.admit_selection_target(prepared.target()) {
+            self.prepared = Some(prepared);
+            return ProjectSelectionResult::Refused(error);
+        }
         if let Err(error) = prepare(&prepared.restore.core) {
             self.prepared = Some(prepared);
             return ProjectSelectionResult::Refused(error);
@@ -114,7 +119,12 @@ impl Ja1EditingSession {
                         .map_err(crate::bundle::history_error)?;
                     return Err(BundleError::HistoryChanged);
                 }
-                let saved = self.history_digest()?;
+                let saved = self
+                    .active_bundle()?
+                    .checkpoint(self.active_bundle()?.manual_branch_id())?
+                    .history_ref
+                    .sha256
+                    .clone();
                 self.association
                     .as_mut()
                     .ok_or(BundleError::Unsettled)?
@@ -149,10 +159,16 @@ impl Ja1EditingSession {
                 }
                 return Err(error);
             }
+            let saved = self
+                .active_bundle()?
+                .checkpoint(self.active_bundle()?.manual_branch_id())?
+                .history_ref
+                .sha256
+                .clone();
             self.association
                 .as_mut()
                 .ok_or(BundleError::Unsettled)?
-                .saved = Some(self.history_digest()?);
+                .saved = Some(saved);
             // This validates the exact ordinary floor result against durable L; a bypassed suffix refuses.
             if let Err(error) = self
                 .active_bundle()?
@@ -298,7 +314,7 @@ impl Ja1EditingSession {
             }
             crate::bundle_copy::SaveAsOutcome::Copied(copy) => {
                 let status = copy.status().clone();
-                if matches!(status, CopyStatus::Committed(_)) {
+                if let CopyStatus::Committed(report) = &status {
                     let inputs = copy.rebound_manifest(&self.inputs)?;
                     let path = copy.destination_owner()?.store().resolved_root()?;
                     let previous = self
@@ -311,7 +327,7 @@ impl Ja1EditingSession {
                     self.inputs = inputs;
                     self.association = Some(ActiveAssociation {
                         path,
-                        saved: Some(self.history_digest()?),
+                        saved: Some(report.history_sha256.clone()),
                     });
                 } else {
                     self.retained_destinations
@@ -470,6 +486,21 @@ impl Ja1EditingSession {
             .map(|(id, _, _)| id)
             .collect())
     }
+    fn admit_selection_target(&self, target: &RecoverySelection) -> Result<(), BundleError> {
+        if let RecoverySelection::WorkingBranch(branch) = target {
+            let blockers = self.session_branch_blockers(branch);
+            if !blockers.is_empty() {
+                return Err(BundleError::Contention(blockers.join(" ")));
+            }
+        }
+        Ok(())
+    }
+    fn session_branch_blockers(&self, id: &BranchId) -> Vec<String> {
+        self.durable_sessions.iter().filter(|session| {
+            self.active_bundle().is_ok_and(|bundle| bundle.store.owner_epoch() == session.guard.epoch)
+                && (&session.guard.branch == id || &session.guard.base.target_branch == id)
+        }).map(|session| format!("This branch is in use by {} / specialist base. Save or close that session first.", session.name)).collect()
+    }
     fn branch_blockers(&self, id: &BranchId) -> Vec<String> {
         let mut blockers = vec![];
         if self
@@ -485,15 +516,7 @@ impl Ja1EditingSession {
         {
             blockers.push("prepared recovery selection target".into());
         }
-        for session in &self.durable_sessions {
-            if self
-                .active_bundle()
-                .is_ok_and(|bundle| bundle.store.owner_epoch() == session.guard.epoch)
-                && (&session.guard.branch == id || &session.guard.base.target_branch == id)
-            {
-                blockers.push(format!("This branch is in use by {} / specialist base. Save or close that session first.", session.name));
-            }
-        }
+        blockers.extend(self.session_branch_blockers(id));
         blockers
     }
     pub fn root_sha256(&self) -> Result<String, BundleError> {
@@ -571,13 +594,25 @@ impl Ja1EditingSession {
             return Err(BundleError::HistoryChanged);
         }
         let original = bundle.evidence.clone();
-        for (old, record) in replacements {
+        let pending_before = bundle.pending_evidence.len();
+        let staged = replacements
+            .into_iter()
+            .map(|(old, record)| {
+                bundle
+                    .store_mut()?
+                    .admit_record(&record)
+                    .map(|sealed| (old, sealed))
+            })
+            .collect::<Result<Vec<_>, BundleError>>()?;
+        for (old, sealed) in staged {
             bundle.evidence.retain(|r| r != &old);
-            bundle.retain_rescue_record(&record)?;
+            bundle.evidence.push(sealed.reference.clone());
+            bundle.pending_evidence.push(sealed.into_pin());
         }
         let result = BundleCommit::publish_maintenance(bundle);
         if result.is_err() && !bundle.unsettled {
             bundle.evidence = original;
+            bundle.pending_evidence.truncate(pending_before);
         }
         result
     }

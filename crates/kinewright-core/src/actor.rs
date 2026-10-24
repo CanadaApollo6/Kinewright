@@ -41,6 +41,15 @@ use crate::{
 #[serde(transparent)]
 pub struct TimelineRevision(pub u64);
 
+/// Constant-size identity of one actor's complete accepted history state.
+/// Empty Undo/Redo still append accepted batches without changing the timeline revision.
+/// Restores and committed floors advance the revision, so truncation cannot reuse this identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryChangeId {
+    revision: TimelineRevision,
+    batch_count: usize,
+}
+
 impl std::fmt::Display for TimelineRevision {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
@@ -174,7 +183,8 @@ enum CoreMessage {
     Command(Command),
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
-    ExportHistory(Sender<Result<HistorySnapshot, HistoryError>>),
+    HistoryChangeId(Sender<HistoryChangeId>),
+    ExportHistory(Sender<Result<(HistoryChangeId, HistorySnapshot), HistoryError>>),
     BeginFloor(
         TypeId,
         crate::HistoryTransition,
@@ -409,6 +419,26 @@ impl Core {
     /// # Errors
     /// Returns an actor-disconnection error. The persistence owner bounds the retained cut.
     pub fn export_history(&self) -> Result<HistorySnapshot, HistoryError> {
+        self.export_history_identified().map(|(_, history)| history)
+    }
+
+    /// Cheap authoritative history-change identity, including gestures, Undo/Redo and floors.
+    /// # Errors
+    /// Returns an actor-disconnection error.
+    pub fn history_change_id(&self) -> Result<HistoryChangeId, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::HistoryChangeId(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)
+    }
+
+    /// Capture history and its change identity in one actor turn.
+    /// # Errors
+    /// Returns an actor-disconnection error.
+    pub fn export_history_identified(
+        &self,
+    ) -> Result<(HistoryChangeId, HistorySnapshot), HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
             .send(CoreMessage::ExportHistory(reply))
@@ -596,6 +626,12 @@ struct CoreState {
 }
 
 impl CoreState {
+    fn history_change_id(&self) -> HistoryChangeId {
+        HistoryChangeId {
+            revision: self.revision,
+            batch_count: self.batches.len(),
+        }
+    }
     fn new(document: Document, revision: TimelineRevision) -> Self {
         let document = Arc::new(document);
         Self {
@@ -1116,9 +1152,12 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                 }
                 let _ = reply.send(result);
             }
+            CoreMessage::HistoryChangeId(reply) => {
+                let _ = reply.send(state.history_change_id());
+            }
             CoreMessage::ExportHistory(reply) => {
                 // Publication chooses and records any floor before the owner installs it.
-                let _ = reply.send(Ok(state.history()));
+                let _ = reply.send(Ok((state.history_change_id(), state.history())));
             }
             CoreMessage::RestoreHistory(requested, history, expected, reply) => {
                 let admitted = if attachment == AttachmentState::Sealed {

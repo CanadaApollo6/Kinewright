@@ -316,12 +316,16 @@ impl Ja1Attachment {
                 let pending = destination
                     .as_ref()
                     .is_some_and(|path| self.owner.pending_agent_command_at(path));
-                if self.owner.has_prepared_selection() {
+                let reconciliation = if self.owner.has_prepared_selection() {
                     self.apply_inner(Action::OpenRecovery)?;
+                    Ok(())
                 } else {
-                    self.owner.reconcile_active()?;
+                    let result = self.owner.reconcile_active().map(|_| ());
                     self.message = "A's destination was checked; current edits and their Saved baseline are unchanged.".into();
-                }
+                    result
+                };
+                // A failed ordinary/first-save Retry must still reach the phase-aware probe.
+                self.offer = self.owner.probe_active()?;
                 if pending && !self.owner.has_unresolved_publication() {
                     if self.owner.active_publication_state()? == PublicationState::Committed {
                         self.message.push_str(" A contains the agent command's effect as of its proven save; your current edits are unchanged. A later Save is a separate successor and will disclose that omission.");
@@ -332,7 +336,6 @@ impl Ja1Attachment {
                         self.message.push_str(" A shows the older or absent root; the pending command was not proved committed. Your current edits are unchanged.");
                     }
                 }
-                self.offer = self.owner.probe_active()?;
                 if self
                     .offer
                     .as_ref()
@@ -340,6 +343,7 @@ impl Ja1Attachment {
                 {
                     self.message.push_str(" A's save outcome is unknown. Your edits are still in this session. Save rescue copy is available.");
                 }
+                reconciliation?;
             }
             Action::Abandon => {
                 self.message = self.owner.abandon_recovery()?;

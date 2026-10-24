@@ -707,3 +707,145 @@ fn rescue_complete_app_lifecycle_stress() {
     #[cfg(not(target_os = "linux"))]
     w14_unsupported_rescue_refuses_before_session_mutation();
 }
+
+#[cfg(target_os = "linux")]
+fn click_control(app: &Ja1Attachment, label: &str) -> Action {
+    fn locate(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::epaint::Shape::Text(t) if t.galley.job.text == label => {
+                Some(t.pos + t.galley.size() * 0.5)
+            }
+            egui::epaint::Shape::Vec(shapes) => shapes.iter().find_map(|s| locate(s, label)),
+            _ => None,
+        }
+    }
+    let ctx = egui::Context::default();
+    let input = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1600.0, 3000.0),
+        )),
+        ..Default::default()
+    };
+    let _ = ctx.run_ui(input.clone(), |ui| {
+        app.show(ui);
+    });
+    let output = ctx.run_ui(input.clone(), |ui| {
+        app.show(ui);
+    });
+    let at = output
+        .shapes
+        .iter()
+        .find_map(|s| locate(&s.shape, label))
+        .unwrap_or_else(|| {
+            panic!(
+                "missing rendered control {label}: {}",
+                painted_text(&output)
+            )
+        });
+    let mut pressed = input.clone();
+    pressed.events = vec![
+        egui::Event::PointerMoved(at),
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ];
+    let _ = ctx.run_ui(pressed, |ui| {
+        app.show(ui);
+    });
+    let mut released = input;
+    released.events = vec![
+        egui::Event::PointerMoved(at),
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ];
+    let mut action = None;
+    let _ = ctx.run_ui(released, |ui| {
+        action = app.show(ui);
+    });
+    action.unwrap_or_else(|| panic!("rendered control {label} did not dispatch"))
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn r3_rendered_ordinary_first_and_prepared_retry_offer_preview() {
+    use kinewright_project::io_observer;
+    for mode in ["ordinary", "first", "prepared"] {
+        let (temp, mut app) = if mode == "first" {
+            let temp = temp();
+            let core = Core::spawn(doc()).unwrap();
+            let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+                temp.root(),
+                &core,
+                StorageLimits::default(),
+            )
+            .unwrap();
+            (temp, Ja1Attachment::new(owner).unwrap())
+        } else {
+            named()
+        };
+        let path = temp.path("drive/a.kinewright");
+        if mode == "prepared" {
+            unknown_selection(&mut app, &temp, true);
+            app.offer = None;
+        } else {
+            edit(app.owner.core(), false);
+            let action = if mode == "first" {
+                Action::FirstSave(path)
+            } else {
+                Action::Save
+            };
+            let result = io_observer::fail_once("root_parent_sync", || app.apply(action));
+            if mode == "ordinary" {
+                assert!(result.is_err());
+            } else {
+                result.unwrap();
+            }
+            std::fs::rename(temp.path("drive"), temp.path("hidden-drive")).unwrap();
+            assert!(app.offer.is_none());
+        }
+        assert!(app.choice.is_none());
+        let retry = click_control(&app, "Retry A / selection");
+        let result = app.apply(retry);
+        if mode != "prepared" {
+            assert!(result.is_err(), "preserve the ordinary Retry error");
+        }
+        assert!(
+            app.offer
+                .as_ref()
+                .is_some_and(|p| p.eligibility == RescueEligibility::Eligible),
+            "failed Retry must retain an eligible offer for {mode}"
+        );
+        let preview = click_control(&app, "Save rescue copy");
+        app.apply(preview).unwrap();
+        assert!(matches!(app.choice, Some(Choice::Rescue { .. })));
+        assert!(rendered(&app).contains("rescue"));
+        if mode == "prepared" {
+            assert_eq!(
+                app.owner.core().attachment_state().unwrap(),
+                AttachmentState::Frozen
+            );
+        }
+    }
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn r1_app_worker_save_suffix_warns_at_close() {
+    crate::app::ja1_review_save_suffix_witness();
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn r2_studio_dirty_polls_cache_authoritative_history_changes() {
+    crate::app::ja1_review_dirty_poll_witness();
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn r8_worker_panic_status_matches_dropped_attachment() {
+    crate::app::ja1_review_worker_panic_witness();
+}

@@ -286,6 +286,11 @@ impl ProjectBundle {
             &self.store.resolved_root()?,
         )?;
         let report = BundleSaveReport {
+            history_sha256: self
+                .checkpoint(&self.manual_branch_id)?
+                .history_ref
+                .sha256
+                .clone(),
             collection: self.store.collection_status()?,
             path: self.store.resolved_root()?,
             project_id: self.project_id.clone(),

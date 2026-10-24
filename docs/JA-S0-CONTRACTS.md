@@ -545,6 +545,14 @@ paused-state rulings. Ordinary Save on L precedes one frozen selection of R at g
 normal select_history and its disclosed floor apply. There is no retained-manual role,
 read-only working branch, exact-retention bypass or editable durable-no-activation state.
 
+Every Saved baseline comes from the exact committed history returned by the publisher,
+including the ordinary floor result, for first Save, Save and Save As. A post-cut accepted
+suffix remains dirty and Close discloses its loss risk. Unchanged Studio dirty polls use
+the authoritative history-change identity; only a changed history needs a fresh digest.
+Refused retirement restores the original complete records and pending-pin ownership before
+any later Save. Reopening the manual branch as a durable writer, or selecting a registered
+session/base branch for manual writing, refuses in the backend as well as the App.
+
 Final L1 supersedes this document's earlier exact-root retention wording only for inherited
 rescue linkage. Convert only that linkage to provenance and rebuild its required containers,
 manifests and root. Keep the source root SHA as provenance and label "rebound recovery

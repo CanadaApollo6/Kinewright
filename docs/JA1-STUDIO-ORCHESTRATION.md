@@ -293,6 +293,23 @@ implements record, restore and already-saved selection operations. C5 composes t
 ordinary Save, rescue lifecycle and retirement. C6 connects the App. Host receipts and
 leases follow in C11. None of these contracts depends on C7+ to make local recovery work.
 
+The Saved baseline is the exact history identity returned by the successful publisher,
+including its ordinary floor result. First Save, ordinary Save, Save As and selection
+must never recapture a live actor after IO to establish that baseline. An accepted
+post-cut suffix remains dirty and Close warns until its own publication succeeds.
+Unchanged Studio dirty polls compare an authoritative actor/history-change identity;
+they must not export, serialize or hash retained history on every UI poll. Undo, Redo,
+gestures, restores and floor commits invalidate the history cache.
+Accepted empty Undo/Redo commands count as history changes even when the document revision
+is unchanged.
+
+Backend admission refuses reopening the manual branch as a durable session. Existing
+working-branch selection refuses registered session/base dependencies both at prepare
+and immediately before publication. A refused retirement preserves the complete original
+branch/evidence vectors and releases any new pending pins before a later Save. Stage all
+replacement rescue records before changing the evidence vector; a successful explicit
+R_ack retirement changes only that edge and its required retirement reason.
+
 Let O be the current actor, L its ordinary working branch and g the committed switch
 generation. Prepare a checkpoint target as exactly one fresh working branch R. An
 existing-branch target retains its BranchId and expected head. Freeze all producers

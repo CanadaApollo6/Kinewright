@@ -290,7 +290,7 @@ impl Ja1EditingSession {
             );
             let path = copy.destination_owner()?.store().resolved_root()?;
             // Every fallible preparation precedes the seal. A changed cut leaves a capture copy.
-            if b_attachment.resume(&b_cut).is_ok() && self.attachment.seal(&old_cut).is_ok() {
+            if self.attachment.seal(&old_cut).is_ok() && b_attachment.resume(&b_cut).is_ok() {
                 let original = self
                     .destination
                     .take()

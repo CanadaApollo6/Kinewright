@@ -564,6 +564,8 @@ fn refuse_activation_journal(path: &Path) -> Result<(), ProjectSaveError> {
 }
 #[derive(Debug, Clone)]
 pub struct BundleSaveReport {
+    /// SHA of the exact committed branch history, after the ordinary floor selection.
+    pub history_sha256: String,
     pub collection: crate::store::CollectionStatus,
     pub path: PathBuf,
     pub project_id: crate::bundle_records::ProjectId,
@@ -1077,6 +1079,14 @@ impl ProjectBundle {
             .get(&self.manual_branch_id)
             .map(|b| &b.head_id)
     }
+    pub(crate) fn acknowledged_evidence(&self) -> Result<Vec<ObjectRef>, BundleError> {
+        let root = self.root.as_ref().ok_or(BundleError::Unsettled)?;
+        Ok(self
+            .store
+            .read_copy_record::<StoreManifest>(&root.store_manifest_ref, true)?
+            .durable_pins
+            .clone())
+    }
     #[must_use]
     pub fn evidence_refs(&self) -> &[ObjectRef] {
         &self.evidence
@@ -1241,6 +1251,11 @@ impl ProjectBundle {
         self.publication_tag = None;
         self.unsettled = false;
         Ok(Some(BundleSaveReport {
+            history_sha256: self
+                .checkpoint(&self.manual_branch_id)?
+                .history_ref
+                .sha256
+                .clone(),
             collection,
             path,
             project_id: self.project_id.clone(),

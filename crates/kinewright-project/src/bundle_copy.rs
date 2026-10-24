@@ -651,6 +651,11 @@ impl ProjectBundle {
                 .as_ref()
                 .ok_or_else(|| BundleError::Corrupt("no acknowledged copy source".into()))?;
             return Ok(SaveAsOutcome::SameProject(BundleSaveReport {
+                history_sha256: self
+                    .checkpoint(&self.manual_branch_id)?
+                    .history_ref
+                    .sha256
+                    .clone(),
                 collection: self.store.collection_status()?,
                 path: resolved,
                 project_id: self.project_id.clone(),
@@ -979,7 +984,7 @@ pub(crate) fn rescue_copy(
             for issuer in target.issuers.values_mut() {
                 issuer.retired = true;
             }
-            for reference in &original.evidence {
+            for reference in &original.acknowledged_evidence()? {
                 let inherited =
                     if reference.record_kind == crate::bundle_records::RecordKind::OwnedEvidence {
                         crate::rescue_record::parse(&source.read_copy_evidence(reference, true)?)?

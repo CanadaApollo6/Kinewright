@@ -30,7 +30,7 @@ impl Ja1EditingSession {
                 .filter(|(id, _)| **id != bundle.manual_branch_id)
                 .map(|(_, r)| r.clone()),
         );
-        for reference in &bundle.evidence {
+        for reference in &bundle.acknowledged_evidence()? {
             if reference.record_kind == RecordKind::OwnedEvidence
                 && crate::rescue_record::parse(&bundle.store.read_copy_evidence(reference, true)?)?
                     .is_some()

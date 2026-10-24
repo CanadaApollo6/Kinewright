@@ -50,7 +50,8 @@ pub use history_transition::{
 };
 
 pub use actor::{
-    Command, CommandToken, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,
+    Command, CommandToken, Core, CoreDisconnected, Event, HistoryChangeId, Query, QueryResult,
+    TimelineRevision,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use actor::{HistoryEntryObservation, HistoryObservation};

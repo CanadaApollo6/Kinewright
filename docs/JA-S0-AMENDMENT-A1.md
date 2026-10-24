@@ -648,6 +648,13 @@ accepted live Core cut and previously verified committed receipts. Exclude the t
 command checkpoint/result from B's selected roots even if staging changed owner caches;
 retain all those tentative bytes at A. Preserve accepted live edits without guessing
 whether A committed the pending command.
+Select independent evidence from the acknowledged manifest, never the mutable staged
+evidence vector. This excludes a pending-only comment result and its text/strokes even
+when A's tentative root actually landed. Independently committed references still select
+their full closure; pending envelope/result holds stay at A. After a failed ordinary or
+first-save Retry, the App still runs the phase-aware probe and retains any eligible offer,
+while preserving the reconciliation error and pending-command semantics. Rescue handoff
+must not leave a Live B actor retained if A's exact seal fails.
 A post-B5 internal/tail failure must still be classified by its publication phase; a mixed
 or unverified live/receipt state refuses capture rather than fabricating an acknowledged
 history. JA-1 `:334-338,348-364` requires reconciliation, never speculative reapplication.

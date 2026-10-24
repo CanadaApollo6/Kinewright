@@ -26,6 +26,11 @@ mod rescue;
 mod rescue_selection;
 pub use durable::{DurableBranchSessionGuard, specialist_floor_delta_from_baseline};
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);
+type HistoryDigestCache = Option<(
+    kinewright_core::ActorIdentity,
+    kinewright_core::HistoryChangeId,
+    String,
+)>;
 
 pub struct ActiveAssociation {
     path: PathBuf,
@@ -193,6 +198,7 @@ pub struct Ja1EditingSession {
     durable_sessions: Vec<durable::RegisteredSession>,
     retained_destinations: Vec<(RetainedDestination, Core)>,
     originating_session: crate::bundle_records::SessionId,
+    dirty_cache: std::cell::RefCell<HistoryDigestCache>,
 }
 impl Ja1EditingSession {
     pub fn new(parent: &Path, core: &Core, limits: StorageLimits) -> Result<Self, BundleError> {
@@ -221,6 +227,7 @@ impl Ja1EditingSession {
             selection_result: None,
             durable_sessions: vec![],
             retained_destinations: vec![],
+            dirty_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
         })
     }
@@ -248,6 +255,7 @@ impl Ja1EditingSession {
             .ok_or(BundleError::Unsettled)?
             .1)
             .clone();
+        let saved = loaded.manual_checkpoint()?.history_ref.sha256.clone();
         let bundle = loaded.into_writer()?;
         crate::namespace::note("ja1_session_create", path);
         let core = Core::spawn(kinewright_core::Document::default())
@@ -261,7 +269,7 @@ impl Ja1EditingSession {
             .association
             .as_mut()
             .ok_or(BundleError::HistoryBarrierInvariant)?
-            .saved = Some(session.history_digest()?);
+            .saved = Some(saved);
         Ok(session)
     }
     pub fn from_bundle(
@@ -286,6 +294,7 @@ impl Ja1EditingSession {
             selection_result: None,
             durable_sessions: vec![],
             retained_destinations: vec![],
+            dirty_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
         })
     }
@@ -425,13 +434,28 @@ impl Ja1EditingSession {
             != Some(self.history_digest()?.as_str()))
     }
     fn history_digest(&self) -> Result<String, BundleError> {
-        let history = self
+        let actor = self.core.actor_identity();
+        let revision = self
             .core
-            .export_history()
+            .history_change_id()
             .map_err(crate::bundle::history_error)?;
+        if let Some((cached_actor, cached_revision, digest)) = &*self.dirty_cache.borrow()
+            && *cached_actor == actor
+            && *cached_revision == revision
+        {
+            return Ok(digest.clone());
+        }
+        let (revision, history) = self
+            .core
+            .export_history_identified()
+            .map_err(crate::bundle::history_error)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::namespace::note("studio_dirty_history_hash", Path::new("dirty-poll"));
         let bytes =
             serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        Ok(kinewright_media::sha256_bytes(&bytes))
+        let digest = kinewright_media::sha256_bytes(&bytes);
+        *self.dirty_cache.borrow_mut() = Some((actor, revision, digest.clone()));
+        Ok(digest)
     }
     pub fn store(&self) -> Result<&ProjectStore, BundleError> {
         if let Some(destination) = &self.destination {
@@ -483,8 +507,8 @@ impl Ja1EditingSession {
         let copy = source.first_save_with_limits(path, &self.core, &self.inputs, limits)?;
         self.inputs = copy.rebound_manifest(&self.inputs)?;
         let status = copy.status().clone();
-        let saved = if matches!(status, CopyStatus::Committed(_)) {
-            Some(self.history_digest()?)
+        let saved = if let CopyStatus::Committed(report) = &status {
+            Some(report.history_sha256.clone())
         } else {
             None
         };
@@ -503,7 +527,7 @@ impl Ja1EditingSession {
             .as_mut()
             .ok_or_else(|| BundleError::Identity("choose a first-save destination".into()))?
             .save(&self.core, &self.inputs)?;
-        let saved = self.history_digest()?;
+        let saved = report.history_sha256.clone();
         self.association
             .as_mut()
             .ok_or(BundleError::HistoryBarrierInvariant)?

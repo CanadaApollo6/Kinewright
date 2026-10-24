@@ -94,7 +94,7 @@ select_tests media-pins kinewright-media --lib '' test-util 'engine::tests::i8_m
 select_tests media-generated kinewright-media --test generated_media test-util '*'
 run slow-lint nice -n 19 python3 -I scripts/slow_tests.py lint
 run slow-features nice -n 19 python3 -I scripts/slow_tests.py features
-run workspace-fast env -u JA_HARNESS_APP_TEST_BINARY -u JA_S1_PREDECESSOR_BINARY -u JA_SAVE_BENCH_OUTPUT nice -n 19 python3 -I scripts/slow_tests.py fast -- -- --test-threads=1
+run workspace-fast env -u JA_HARNESS_APP_TEST_BINARY -u JA_S1_PREDECESSOR_BINARY -u JA_SAVE_BENCH_OUTPUT nice -n 19 python3 -I scripts/slow_tests.py fast -- --no-fail-fast -- --test-threads=1
 nice -n 19 python3 -I scripts/ja1-s2-c1-evidence.py identity "$evidence/source-after.json"
 cmp "$evidence/source-before.json" "$evidence/source-after.json"
 echo 'C6 Linux gate complete. Native Windows and hosted CI remain NOT RUN.'
