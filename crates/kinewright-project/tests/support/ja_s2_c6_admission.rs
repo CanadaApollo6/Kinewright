@@ -1,6 +1,8 @@
-#[cfg(target_os = "linux")]
-use kinewright_project::bundle::LoadedBundle;
-use kinewright_project::{bundle::BundleError, bundle_recovery::without_api_probe, io_observer};
+use kinewright_project::{
+    bundle::{BundleError, LoadedBundle},
+    bundle_recovery::without_api_probe,
+    io_observer,
+};
 use std::{collections::BTreeMap, path::Path};
 
 pub fn tree(path: &Path) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
