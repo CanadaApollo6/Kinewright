@@ -1,14 +1,14 @@
+use super::Ja1EditingSession;
 use kinewright_core::{
     AttachmentState, Command, Core, Document, Event, Operation, Track, TrackId, TrackKind,
 };
 use kinewright_media::test_support::TempDirectory;
 use kinewright_project::{
-    bundle::LoadedBundle, bundle_copy::CopyStatus, editing_session::Ja1EditingSession, io_observer,
-    storage_budget::StorageLimits,
+    bundle::LoadedBundle, bundle_copy::CopyStatus, io_observer, storage_budget::StorageLimits,
 };
 use std::path::Path;
 fn temp() -> TempDirectory {
-    TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-c5-rescue")
+    TempDirectory::new_in(super::durable_test_root(), "s2-c5-rescue")
 }
 fn document() -> Document {
     Document {
@@ -75,7 +75,7 @@ fn rescue_profile(
     }
 }
 #[test]
-fn w01_first_save_rescue_is_independent() {
+pub(super) fn w01_first_save_rescue_is_independent() {
     use kinewright_core::{LutAsset, LutAssetId, LutAssetKind, LutAssetSource};
     use kinewright_project::{
         bundle_records::{ObjectRef, RecordKind},
@@ -192,7 +192,7 @@ fn w01_first_save_rescue_is_independent() {
     assert_eq!(fresh.export_history().unwrap(), later);
 }
 #[test]
-fn w16_first_save_a_writer_and_later_floor_continue() {
+pub(super) fn w16_first_save_a_writer_and_later_floor_continue() {
     for landed in [false, true] {
         let temp = temp();
         let a = temp.path("drive/a.kinewright");
@@ -256,7 +256,7 @@ fn w16_first_save_a_writer_and_later_floor_continue() {
     }
 }
 #[test]
-fn w16_repeated_active_b_attempts_settle_only_their_tickets() {
+pub(super) fn w16_repeated_active_b_attempts_settle_only_their_tickets() {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("bdrive/b.kinewright");
@@ -332,7 +332,7 @@ fn w16_repeated_active_b_attempts_settle_only_their_tickets() {
 }
 
 #[test]
-fn w10_pending_command_exclusion_and_original_id_lookup() {
+pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
     use kinewright_project::{
         bundle::{BundleWriteAdmission, ProjectBundle},
         receipts::{CommandEnvelope, CommandId, ReceiptLookup},
@@ -465,7 +465,7 @@ fn w10_pending_command_exclusion_and_original_id_lookup() {
 }
 
 #[test]
-fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
+pub(super) fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
     use kinewright_project::bundle::{BundleWriteAdmission, ProjectBundle};
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
@@ -589,7 +589,7 @@ fn w13_one_level_rescue_recopy_and_explicit_ack_retirement() {
 }
 
 #[test]
-fn w13_omission_only_precedes_trim() {
+pub(super) fn w13_omission_only_precedes_trim() {
     use kinewright_project::{
         bundle::{BundleWriteAdmission, ProjectBundle},
         bundle_recovery::RecoverySelection,
@@ -672,7 +672,7 @@ fn w13_omission_only_precedes_trim() {
 }
 
 #[test]
-fn w13_trim_then_separate_omission_recomputes_closure() {
+pub(super) fn w13_trim_then_separate_omission_recomputes_closure() {
     use kinewright_core::{LutAsset, LutAssetId, LutAssetKind, LutAssetSource};
     use kinewright_project::{
         bundle::{BundleWriteAdmission, ProjectBundle},
@@ -840,7 +840,7 @@ fn w13_trim_then_separate_omission_recomputes_closure() {
 }
 
 #[test]
-fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
+pub(super) fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
     for gesture in [false, true] {
         let temp = temp();
         let a = temp.path("drive/a.kinewright");
@@ -930,7 +930,7 @@ fn w04_oldest_first_trim_preserves_redo_gesture_and_inputs() {
 }
 
 #[test]
-fn w13_recovery_on_active_rescue_copy_settles_the_new_attempt() {
+pub(super) fn w13_recovery_on_active_rescue_copy_settles_the_new_attempt() {
     use kinewright_project::bundle_switch::ProjectSelectionResult;
     for occurrence in [1, 2] {
         let temp = temp();
@@ -972,7 +972,7 @@ fn w13_recovery_on_active_rescue_copy_settles_the_new_attempt() {
 }
 
 #[test]
-fn w08_context_close_fences_handles_and_retires_temporary_sources_once() {
+pub(super) fn w08_context_close_fences_handles_and_retires_temporary_sources_once() {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("b.kinewright");
@@ -1008,7 +1008,7 @@ fn w08_context_close_fences_handles_and_retires_temporary_sources_once() {
 }
 
 #[test]
-fn w06_rescue_bounds_refuse_before_destination_mutation() {
+pub(super) fn w06_rescue_bounds_refuse_before_destination_mutation() {
     let temp = temp();
     let a = temp.path("drive/a.kinewright");
     let b = temp.path("b.kinewright");
@@ -1056,7 +1056,7 @@ fn w06_rescue_bounds_refuse_before_destination_mutation() {
 }
 
 #[test]
-fn w13_available_recovery_roots_cannot_be_omitted_for_quota() {
+pub(super) fn w13_available_recovery_roots_cannot_be_omitted_for_quota() {
     use kinewright_project::bundle::BundleWriteAdmission;
     let temp = temp();
     let a = temp.path("drive/a.kinewright");

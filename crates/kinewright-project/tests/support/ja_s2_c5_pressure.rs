@@ -1,3 +1,4 @@
+use super::Ja1EditingSession;
 use kinewright_core::{
     Command, Core, Document, Event, HistoryTransition, Operation, Track, TrackId, TrackKind,
 };
@@ -7,11 +8,9 @@ use kinewright_project::{
     bundle_commit::history_cost_probe,
     bundle_records::BranchId,
     bundle_switch::ProjectSelectionResult,
-    editing_session::Ja1EditingSession,
     io_observer,
     storage_budget::StorageLimits,
 };
-use std::path::Path;
 fn edit(core: &Core, locked: bool) {
     assert!(matches!(
         core.request(Command::Do(Operation::SetTrackSyncLock {
@@ -28,7 +27,7 @@ fn grow(core: &Core, n: usize) {
     }
 }
 fn source(profile: StorageLimits) -> (TempDirectory, Ja1EditingSession, Vec<BranchId>, BranchId) {
-    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "c5-pressure");
+    let temp = TempDirectory::new_in(super::durable_test_root(), "c5-pressure");
     let a = temp.path("drive/a.kinewright");
     std::fs::create_dir_all(a.parent().unwrap()).unwrap();
     let doc = Document {
@@ -102,7 +101,7 @@ fn large_edit(core: &Core) {
     ));
 }
 #[test]
-fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry() {
+pub(super) fn w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry() {
     let (model_temp, mut model, model_ids, _) = source(StorageLimits::default());
     let before = LoadedBundle::read(&model_temp.path("b.kinewright"))
         .unwrap()

@@ -5,6 +5,8 @@ use kinewright_core::{
     Command, Core, CoreMutationRefusal, Document, Event, Operation, Track, TrackId, TrackKind,
 };
 #[cfg(target_os = "linux")]
+use kinewright_project::editing_session::Ja1EditingSession;
+#[cfg(target_os = "linux")]
 #[path = "support/ja_s2_c3.rs"]
 mod c3;
 
@@ -548,3 +550,8 @@ mod linux {
 #[cfg(target_os = "linux")]
 #[path = "support/ja_s2_c5_rescue.rs"]
 mod c5;
+
+#[cfg(target_os = "linux")]
+fn durable_test_root() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+}

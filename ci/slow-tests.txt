@@ -1,4 +1,6 @@
 # Slow-tier manifest: tests skipped in the fast tier on the listed OS.
+ja_s2_rescue_e2e rescue_reopen_recopy_retention_stress crates/kinewright-agent/tests/ja_s2_rescue_e2e.rs any # C6 bounded local rescue/recopy stress
+kinewright_app ja1_attachment::tests::rescue_complete_app_lifecycle_stress crates/kinewright-app/src/ja1_attachment_tests.rs any # C6 bounded App lifecycle stress
 #
 # One test per line:  <test binary> <libtest test path> <source file> <os> # linux/windows seconds
 #

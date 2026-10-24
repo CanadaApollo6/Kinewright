@@ -1316,3 +1316,14 @@ actual adapter/connector certification and implementation evidence remain pendin
 | 1 — Major: durable take-validation evidence and implicit inventories | §§3.2, 3.5, 5.2–5.4, 8.3 item 1, 13.1 Q3 | Added one typed take-evidence record with exact page/map/JA-1 retention edges, S2/S3 producers and successor invalidation; both editorial inventories persist within the existing consumer family. JA-4 G7/G10 now require cache-delete/reopen preservation of the critical-word observation or explicit unresolved/refused output. |
 | 2 — Major: unsaved store, first save and LUT scope | §§4.1–4.3, 8.1 G3, 8.3 item 2, 12 item 2, 13.1 Q1–Q2 | JA-1 S1 owns the bounded session-to-named handoff consumed by AW2 P1a; authority/copy/verification precede root, failures preserve usable unsaved state/prior destination, and reader pins outlive handoff. Named AW2 G11/JA-1 G3 witness; whole new-bundle graph includes LUTs while unrelated legacy behavior stays unchanged. |
 | 3 — Minor: AW2 runtime-red terminology | §7.4, §12 item 5, §11 S0-1, §13.1 Q4 | Preserve capability-gap evidence separately with no JA-1 behavioral-red/invariant credit. Adopt all five conflict resolutions and the critic's Q1–Q4 answers; correct S0-1 to reference the complete ledger. All three findings accepted; nothing rejected. |
+
+### S2-R C6 caller boundary
+
+The local App, headless and agent entry points validate actual rescue-role and nonzero
+switch requirements before editable-session admission and any sidecar/journal/store
+mutation. A supported Linux control must really save and independently reopen; missing,
+mismatched and masked requirements observe zero mutation. Windows retains its native
+durability refusal. A completed, never-active rescue capture may release its destination
+writer only after explicit choice and verified commit. This does not release any rescue
+source, change active editing, or refund a consumed slot. Original S0 fixtures and
+historical acceptance are unchanged; new App evidence is additive.

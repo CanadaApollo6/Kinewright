@@ -284,6 +284,7 @@ impl FrozenRescueCapture {
     }
 }
 /// An explicit local choice, bound to one exact capture. Background probes cannot create it.
+#[derive(Clone)]
 pub struct RescueConsent {
     pub(crate) tag: HistorySaveTag,
     pub(crate) digest: String,
@@ -319,9 +320,21 @@ pub struct RescueSelection {
     pub(crate) removed_undo: u64,
     pub(crate) omissions: Vec<crate::rescue_record::RecoveryOmission>,
     pub(crate) roots: Vec<ObjectRef>,
-    pub(crate) _reads: crate::store::RetainedReadAdmission,
+    pub(crate) reads: crate::store::RetainedReadAdmission,
 }
 impl RescueSelection {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn consent_choices_probe(
+        &self,
+        consent: &RescueConsent,
+    ) -> Result<(bool, bool), BundleError> {
+        self.check_identity(consent)?;
+        Ok((consent.trim, consent.omission))
+    }
+    #[must_use]
+    pub fn undo_floor(&self) -> u64 {
+        self.history.floor_offset
+    }
     #[must_use]
     pub fn removed_undo(&self) -> u64 {
         self.removed_undo
@@ -368,7 +381,7 @@ impl RescueSelection {
         Ok(())
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RescueOutcome {
     pub status: crate::bundle_copy::CopyStatus,
     pub activated: bool,

@@ -288,7 +288,7 @@ impl Ja1EditingSession {
             removed_undo,
             omissions,
             roots,
-            _reads: reads,
+            reads,
         })
     }
 }

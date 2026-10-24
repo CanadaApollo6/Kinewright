@@ -1,5 +1,23 @@
 # JA-1 S2 implementation reports
 
+C6 adds the independently usable local S2-R App recovery/rescue controls over the same
+C4/C5 lifecycle owner, plus local admission witnesses. The [C6 report](c6.md) records 65
+passing Linux command rows, 603 expected/selected outcomes, 593 executed passes and ten
+ignored selection outcomes (the new slow App test executes separately). Full workspace
+fast passes: 3,922 passes, zero failures and 106 expected ignores. Both named slow additions
+execute, and all 126 runtime mutation red/restored-green pairs bind to the gate's exact source.
+Only the additive App fixture receives pending-baseline to revised-pass credit; all 92 prior
+fixture/oracle files and 31 old index entries remain unchanged.
+
+Five alternating lanes per revision measure C5 at 235.429 ms/save and C6 at 230.418 ms/save
+(0.9787x), beside archived C5's 230.9 ms. Both sides retain zero history decodes and the same
+135,717,260-byte decoded-budget peak; sampled other-process CPU never exceeds 20 percent.
+The ratio is an observed paired result, not a causal comparison to the archived run.
+Three installed-target MSVC checks are blocked by missing Windows C headers (`stdio.h` /
+`errno.h`); native Windows, exact-SHA hosted full slow CI and the lead's two independent
+S2-R data-loss reviews remain NOT RUN locally. C6 stops before C7. A selected point retained
+only by this session's pin can still be lost in the disclosed crash window after rotation.
+
 C5 composes local recovery, rescue publication/handoff and durable-session registration
 under `Ja1EditingSession`. The [C5 report](c5.md) records 58 passing Linux command rows,
 563 expected/selected outcomes, 554 executed passes, nine existing ignores marked NOT RUN,
@@ -291,3 +309,22 @@ and the recopy witness independently asserts the published R_ack edge
 (`crates/kinewright-project/tests/support/ja_s2_c5_rescue.rs:542`). Earlier weak/compile-only
 mutation attempts and development gates
 are excluded; `mutations-sealed/` contains the complete final 68-pair unchanged-source run.
+
+## C6 integration details and deviations
+
+- `crates/kinewright-project/src/editing_session/recovery.rs:55`: The existing C5 selection engine accepts a pre-seal App preparation callback. Subscription/snapshot failures occur before publication/sealing; final attachment only moves the prepared view.
+- `crates/kinewright-project/src/editing_session/rescue.rs:40`: Rescue uses the same callback seam before any destination mutation. There is no second recovery engine or host/stream implementation.
+- `crates/kinewright-project/src/editing_session.rs:354`: Never-active captured destinations are distinguished from retained source A. Only a proven capture owner can be explicitly released; source holds, active editing and slot accounting remain.
+- `crates/kinewright-project/src/bundle_copy.rs:788`: A successful temporary-store creation now has an actual event through the existing shipping-safe note wrapper. The positive control observes the physical directory and its cleanup; create-then-drop no longer escapes the W14 zero-mutation oracle.
+- `crates/kinewright-project/tests/support/ja_s2_c6_admission.rs:108`: One shared local admission matrix covers three supported controls and nine raw/capability refusals per caller. Linux creates/saves/reopens through each real route; Windows carries raw/native-refusal applicability only.
+- `crates/kinewright-app/src/ja1_attachment_tests.rs:16`: Unchanged independent C5 scenario assertions run through an App action adapter, including actual retry/reconcile/trim/omission/retirement choices. Test-only consent-bit observation translates existing scenario consent into actual UI controls.
+- `crates/kinewright-app/src/app.rs:16182`: W8 uses real App New Project/focus-return and status closure, with actor/charge/slot/source-lock assertions and a drop-owner-on-focus mutation.
+- `crates/kinewright-app/src/app.rs:1604`: The legacy read-only inspection flag no longer disables Save after explicit Studio activation; Studio retains its own save/read-only guards.
+- `scripts/ja1-s2-c6-mutations.py:27`: The backend duplicate-retirement mutation stays at the project witness because App preview already rejects the missing retired branch. App duplicate/refusal behavior is independently retained, without claiming that unreachable backend mutation as App evidence.
+- `scripts/ja1-s2-c6-mutations.py:119`: Each restored original test binary is built once, source/profile/SHA-bound and sealed outside target, then actually executes every exact green. Every red is independently compiled and run; the additive App fixture also rebuilds and hashes its mutant child executable.
+
+S2-R has no real App durable-branch session creation route. C6 claims applicable offers,
+refusals and rendered blocker/save/close text only; C5 project/agent registration and later
+C11/C12 host repeats retain their own attribution. The original C5 dirty-Save-before-Save-As
+contract remains, with explicit successor/agent-effect omission confirmation. The in-session
+selected-target crash window is accepted and disclosed. Historical acceptance is unchanged.

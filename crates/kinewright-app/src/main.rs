@@ -13,6 +13,7 @@ mod icons;
 mod incident_ui;
 mod inspector_ui;
 mod investigator;
+mod ja1_attachment;
 #[cfg(test)]
 mod ja_harness;
 mod keys;

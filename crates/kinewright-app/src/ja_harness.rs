@@ -15,6 +15,8 @@ use serde_json::Value;
 struct AppControl {
     batches: Vec<Vec<Operation>>,
     at: i64,
+    #[serde(default)]
+    rescue: bool,
 }
 
 fn observe(
@@ -29,6 +31,14 @@ fn observe(
         ja_harness::baseline::input(loaded, &args.input)?,
     )?)
     .map_err(|e| e.to_string())?;
+    if control.rescue {
+        #[cfg(target_os = "linux")]
+        return Ok(Some(crate::ja1_attachment::tests::observe_s2(
+            report.mode == Mode::Revised,
+        )));
+        #[cfg(not(target_os = "linux"))]
+        return Err("C6 App durable rescue observer requires Linux; NOT RUN".into());
+    }
     let document = if let Some(role) = &loaded.fixture.initial.document {
         serde_json::from_value::<kinewright_project::ProjectFile>(
             ja_harness::protocol::unique_json(ja_harness::baseline::input(loaded, role)?)?,

@@ -27,7 +27,9 @@ mod harness;
 /// Job A predecessor-compatible, observational evaluation harness.
 #[cfg(feature = "eval-harness")]
 pub mod ja_harness;
+mod local_editing;
 mod models;
+pub use local_editing::LocalEditingSession;
 mod motion;
 mod muse;
 mod pacing;

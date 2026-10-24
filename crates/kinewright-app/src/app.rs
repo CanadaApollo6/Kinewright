@@ -872,6 +872,170 @@ impl KinewrightApp {
     pub(crate) fn focused_mut(&mut self) -> &mut ProjectSession {
         &mut self.projects[self.focused_project]
     }
+    fn ja1_destination_change(&mut self) -> bool {
+        let error = if self.focused().ja1_job.is_some() {
+            Some("A save or selection is in progress. Wait for its outcome before changing destination.".to_owned())
+        } else {
+            self.focused()
+                .ja1
+                .as_ref()
+                .and_then(|j| j.destination_change().err())
+                .map(|e| e.to_string())
+        };
+        if let Some(error) = error {
+            self.status = error;
+            false
+        } else {
+            true
+        }
+    }
+    fn enable_ja1(&mut self) {
+        if self.focused().ja1_job.is_some() {
+            return;
+        }
+        let result = (|| {
+            let session = self.focused();
+            session
+                .source_admission
+                .require_supported()
+                .map_err(|e| e.to_string())?;
+            let owner = if session.source_admission.is_studio() {
+                let history = session.core.export_history().map_err(|e| e.to_string())?;
+                if session.source_admission.inspection_document() != Some(&*history.document) {
+                    return Err("The read-only inspection has local edits. Keep this session open; Studio activation cannot discard them.".into());
+                }
+                crate::ja1_attachment::Ja1Attachment::open(
+                    session
+                        .project_path
+                        .as_deref()
+                        .ok_or("Studio project has no path")?,
+                )
+                .map_err(|e| e.to_string())?
+            } else {
+                let owner = if let Some(path) = &session.project_path {
+                    kinewright_project::editing_session::Ja1EditingSession::activate(
+                        path,
+                        session.source_admission.clone(),
+                        &session.core,
+                        None,
+                    )
+                } else {
+                    kinewright_project::editing_session::Ja1EditingSession::new(
+                        &kinewright_project::default_recovery_directory(),
+                        &session.core,
+                        kinewright_project::storage_budget::StorageLimits::default(),
+                    )
+                }
+                .map_err(|e| e.to_string())?;
+                crate::ja1_attachment::Ja1Attachment::new(owner).map_err(|e| e.to_string())?
+            };
+            Ok::<_, String>(owner)
+        })();
+        match result {
+            Ok(attachment) => {
+                let session = self.focused_mut();
+                session.recovery.stop_for_studio();
+                session.sidecar.sidecar_suspended = true;
+                session.ja1 = Some(attachment);
+                session.install_ja1_view();
+                self.playback
+                    .set_document(Arc::clone(&self.focused().document));
+                self.status = "Studio recovery and rescue enabled for this editing context.".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+    fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
+        let session = self.focused_mut();
+        if session.ja1_job.is_some() {
+            return;
+        }
+        let Some(mut attachment) = session.ja1.take() else {
+            return;
+        };
+        attachment.panel_open = true;
+        session.ja1_job = Some(std::thread::spawn(move || {
+            let _ = attachment.apply(action);
+            attachment
+        }));
+    }
+    fn poll_ja1(&mut self, ctx: &egui::Context) {
+        let focused = self.focused_project;
+        let mut changed = false;
+        for (index, session) in self.projects.iter_mut().enumerate() {
+            if session
+                .ja1_job
+                .as_ref()
+                .is_some_and(std::thread::JoinHandle::is_finished)
+            {
+                let job = session.ja1_job.take().expect("finished job");
+                match job.join() {
+                    Ok(attachment) => {
+                        if index == focused {
+                            self.status.clone_from(&attachment.message);
+                            changed = true;
+                        }
+                        session.ja1 = Some(attachment);
+                        session.install_ja1_view();
+                    }
+                    Err(_) => {
+                        self.status = "Studio operation stopped unexpectedly. This context is fenced; keep it open to inspect the saved project and retained data.".into();
+                    }
+                }
+            } else if session.ja1_job.is_some() {
+                ctx.request_repaint_after(Duration::from_millis(20));
+            }
+        }
+        if changed {
+            let path = self.focused().project_path.clone();
+            let (store, error) = match derive_lut_store(path.as_deref()) {
+                Ok(store) => (store, None),
+                Err(error) => (None, Some(error)),
+            };
+            self.focused_mut().lut_store = store;
+            self.focused_mut().lut_store_error = error;
+            let (library, statuses) = kinewright_media::LutLibrary::build(
+                &self.focused().document.lut_assets,
+                self.focused().lut_store.as_ref(),
+            );
+            self.focused_mut().lut_library = Arc::new(library);
+            self.focused_mut().lut_availability = statuses.into_iter().collect();
+            self.playback
+                .set_document(Arc::clone(&self.focused().document));
+            self.publish_focused_lut_library();
+            self.playback.request_frame(self.focused().position);
+        }
+    }
+    fn show_ja1(&mut self, ctx: &egui::Context) {
+        if self.focused().ja1_job.is_some() {
+            egui::Modal::new(egui::Id::new("ja1-busy")).show(ctx, |ui| { ui.label("Editing is read-only while your current work is saved and the selection or rescue is checked."); ui.spinner(); });
+            return;
+        }
+        let Some(attachment) = &self.focused().ja1 else {
+            return;
+        };
+        let mut open = attachment.panel_open;
+        let mut action = None;
+        if attachment.read_only() {
+            egui::Modal::new(egui::Id::new("ja1-choice")).show(ctx, |ui| {
+                action = attachment.show(ui);
+            });
+        } else if open {
+            egui::Window::new("Studio recovery and rescue")
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        action = attachment.show(ui);
+                    });
+                });
+        }
+        if let Some(attachment) = &mut self.focused_mut().ja1 {
+            attachment.panel_open = open;
+        }
+        if let Some(action) = action {
+            self.start_ja1(action);
+        }
+    }
 
     /// Retire the held import id for one session after a rejection.
     fn release_lut_import_reservation(&mut self, project_index: usize) {
@@ -1007,6 +1171,10 @@ impl KinewrightApp {
         &mut self,
         path: &Path,
     ) -> Result<ProjectSaveReport, ProjectSaveError> {
+        if self.focused().ja1.is_some() || self.focused().ja1_job.is_some() {
+            let notice = self.focused().ja1.as_ref().and_then(|j| j.destination_change().err()).map_or_else(|| "Use the Studio lifecycle save action; a document-only write cannot replace this project.".into(), |e| e.to_string());
+            return Err(ProjectSaveError::UnsupportedBundle { notice });
+        }
         if !can_overwrite_save(self.focused().format_version)
             && self.focused().project_path.as_deref() == Some(path)
         {
@@ -1204,6 +1372,33 @@ impl KinewrightApp {
     }
 
     pub(crate) fn save_project(&mut self, save_as: bool) -> bool {
+        if self.focused().ja1_job.is_some() {
+            self.status = "Saving or selection is still in progress; editing is read-only.".into();
+            return false;
+        }
+        if self.focused().ja1.is_some() {
+            if save_as && !self.ja1_destination_change() {
+                return false;
+            }
+            let path = if save_as || self.focused().project_path.is_none() {
+                rfd::FileDialog::new()
+                    .add_filter("Kinewright project", &["kinewright"])
+                    .save_file()
+            } else {
+                self.focused().project_path.clone()
+            };
+            if let Some(path) = path {
+                let action = if self.focused().project_path.is_none() {
+                    crate::ja1_attachment::Action::FirstSave(path)
+                } else if save_as {
+                    crate::ja1_attachment::Action::SaveAs(path)
+                } else {
+                    crate::ja1_attachment::Action::Save
+                };
+                self.start_ja1(action);
+            }
+            return false;
+        }
         let path = if save_as {
             None
         } else {
@@ -1324,6 +1519,9 @@ impl KinewrightApp {
     }
 
     fn choose_project(&mut self) {
+        if !self.ja1_destination_change() {
+            return;
+        }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Kinewright project", &["kinewright", "json"])
             .pick_file()
@@ -1334,6 +1532,9 @@ impl KinewrightApp {
     }
 
     pub(crate) fn new_project(&mut self) {
+        if !self.ja1_destination_change() {
+            return;
+        }
         let name = format!("Project {}", self.next_project_id);
         let session = match self.create_project_session(
             name,
@@ -1400,7 +1601,7 @@ impl KinewrightApp {
     /// [`Self::overwrite_save_refusal`] for one session.
     fn overwrite_save_refusal_for(&self, project_index: usize) -> Option<String> {
         let session = &self.projects[project_index];
-        if session.recovery_suspended {
+        if session.recovery_suspended && session.ja1.is_none() && session.ja1_job.is_none() {
             return Some(
                 "Saving is disabled for this recovered copy until it has its own \
                  file — use Save As."
@@ -1433,7 +1634,11 @@ impl KinewrightApp {
         false
     }
 
+    #[allow(clippy::too_many_lines)]
     fn open_project(&mut self, path: &Path) {
+        if !self.ja1_destination_change() {
+            return;
+        }
         if self.refocus_if_open(path) {
             return;
         }
@@ -1563,6 +1768,9 @@ impl KinewrightApp {
     /// one-session-per-path because the recovered document needs a home, so
     /// the suspension keeps it from clobbering the open session's history).
     fn apply_restore_request(&mut self, request: RestoreRequest) {
+        if !self.ja1_destination_change() {
+            return;
+        }
         if request.writer_format_version > PROJECT_FORMAT_VERSION {
             if let Some(first) = self.projects.first_mut() {
                 first.recovery.shelve_pending(&request.journal_path);
@@ -1641,7 +1849,12 @@ impl KinewrightApp {
             return;
         }
         let id = self.projects[index].id;
-        if self.projects[index].is_dirty() {
+        if self.projects[index].ja1_job.is_some() {
+            self.status =
+                "Wait for this save or selection before closing the editing context.".into();
+            return;
+        }
+        if self.projects[index].is_dirty() || !self.projects[index].ja1_close_warning().is_empty() {
             self.focus_project(index);
             self.pending_project_action = Some(ProjectAction::CloseProject(id));
         } else {
@@ -1687,8 +1900,13 @@ impl KinewrightApp {
     }
 
     fn request_exit(&mut self, ctx: &egui::Context) {
+        if self.projects.iter().any(|p| p.ja1_job.is_some()) {
+            self.status = "Wait for the current Studio operation before closing.".into();
+            return;
+        }
         if let Some(index) = self.projects.iter().position(|project| {
-            project.is_dirty() && !self.exit_discarded_projects.contains(&project.id)
+            (project.is_dirty() || !project.ja1_close_warning().is_empty())
+                && !self.exit_discarded_projects.contains(&project.id)
         }) {
             self.focus_project(index);
             self.pending_project_action = Some(ProjectAction::Exit(self.projects[index].id));
@@ -1741,6 +1959,7 @@ impl KinewrightApp {
                     color::STATUS_WARNING,
                 ));
                 ui.label(format!("Save changes to {project_name} before continuing?"));
+                ui.label(self.projects[project_index].ja1_close_warning());
                 ui.add_space(space::TWO);
                 ui.horizontal(|ui| {
                     if ui
@@ -2475,6 +2694,11 @@ impl KinewrightApp {
     }
 
     pub(crate) fn send_operations(&mut self, operations: Vec<Operation>) {
+        if self.focused().ja1_read_only() {
+            self.status =
+                "Editing is read-only while the save or recovery choice is resolved.".into();
+            return;
+        }
         let count = operations.len();
         if count == 0 {
             return;
@@ -2516,6 +2740,11 @@ impl KinewrightApp {
         operations: Vec<Operation>,
         coalesce_key: String,
     ) {
+        if self.focused().ja1_read_only() {
+            self.status =
+                "Editing is read-only while the save or recovery choice is resolved.".into();
+            return;
+        }
         let count = operations.len();
         if count == 0 {
             return;
@@ -2547,6 +2776,9 @@ impl KinewrightApp {
     }
 
     pub(crate) fn undo(&mut self) {
+        if self.focused().ja1_read_only() {
+            return;
+        }
         if self.focused().core.send(Command::Undo).is_err() {
             // Appendix B row 18.
             self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while undoing");
@@ -2556,6 +2788,9 @@ impl KinewrightApp {
     }
 
     pub(crate) fn redo(&mut self) {
+        if self.focused().ja1_read_only() {
+            return;
+        }
         if self.focused().core.send(Command::Redo).is_err() {
             // Appendix B row 19.
             self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while redoing");
@@ -2567,6 +2802,7 @@ impl KinewrightApp {
     // Polling coordinates six independent channels and preserves their visible event ordering.
     #[allow(clippy::too_many_lines)]
     fn poll_background(&mut self, ctx: &egui::Context) {
+        self.poll_ja1(ctx);
         while let Ok(reply) = self.ui_replies.1.try_recv() {
             reply(self, ctx);
         }
@@ -3088,6 +3324,11 @@ impl KinewrightApp {
                 ui.close();
                 self.choose_project();
             }
+            if ui.button("Studio recovery and rescue…").clicked() {
+                ui.close();
+                if let Some(ja1) = &mut self.focused_mut().ja1 { ja1.panel_open = true; }
+                else { self.enable_ja1(); }
+            }
             // `IN2B` §4 rule 3: Save greys out for a newer-format session,
             // with a tooltip naming the version; Save As stays enabled.
             // N6/H2 greys it out for routed sessions too, with the refusal
@@ -3291,6 +3532,7 @@ impl eframe::App for KinewrightApp {
         // window it is no longer a count of.
         crate::incident_ui::show_incidents_panel(self, ui.ctx());
         self.show_unsaved_confirmation(ui.ctx());
+        self.show_ja1(ui.ctx());
         self.show_motion_plan_dialog(ui.ctx());
         self.show_solo_dialog(ui.ctx());
         self.screenshot.update(ui.ctx());
@@ -10941,7 +11183,7 @@ mod in2b_tests {
 
     /// The smallest real app that can save, on an optional project path.
     #[allow(clippy::too_many_lines)]
-    fn in2b_harness(
+    pub(crate) fn in2b_harness(
         document: Document,
         project_path: Option<PathBuf>,
     ) -> (KinewrightApp, Arc<FfmpegMediaEngine>) {
@@ -11154,7 +11396,7 @@ mod in2b_tests {
     /// quiescence: the sentinel's frame arrives only after every earlier
     /// render finished, and nothing after this function renders again.
     /// Tests that never focus (C1's) need no quiesce.
-    fn in2b_quiesce_engine(engine: &FfmpegMediaEngine) {
+    pub(crate) fn in2b_quiesce_engine(engine: &FfmpegMediaEngine) {
         let frames = engine.frames();
         while frames.try_recv().is_ok() {}
         // Every focus in these tests requests `ZERO` (no test scrubs), so a
@@ -15791,3 +16033,209 @@ pub(crate) fn fixture_source_admission(
 
 #[cfg(test)]
 use kinewright_project::load_document;
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered destination/refusal and modal teardown witness"
+)]
+pub(crate) fn ja1_destination_witness() {
+    use crate::ja1_attachment::{
+        Action,
+        tests::{named, unknown_selection},
+    };
+    let (temp, mut attachment) = named();
+    unknown_selection(&mut attachment, &temp, false);
+    let (mut app, engine) = in2b_tests::in2b_harness(Document::default(), None);
+    app.focused_mut().ja1 = Some(attachment);
+    app.focused_mut().install_ja1_view();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // A read-only Studio inspection keeps its legacy flag after explicit activation.
+        app.focused_mut().recovery_suspended = true;
+        assert!(app.overwrite_save_refusal().is_none());
+        let close_ctx = egui::Context::default();
+        theme::install(&close_ctx);
+        app.request_exit(&close_ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 1800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = close_ctx.run_ui(input.clone(), |ui| app.show_unsaved_confirmation(ui.ctx()));
+        let output = close_ctx.run_ui(input, |ui| app.show_unsaved_confirmation(ui.ctx()));
+        let close = crate::ja1_attachment::tests::painted_text(&output);
+        assert!(
+            close.contains("no longer in the project's automatic list"),
+            "Close disclosure missing: {close}"
+        );
+        assert!(
+            close.contains("A keeps it only if the selection completed"),
+            "{close}"
+        );
+        assert!(close.contains("only accessible copy"), "{close}");
+        app.pending_project_action = None;
+        let history = app.focused().core.export_history().unwrap();
+        let count = app.projects.len();
+        for step in 0..5 {
+            if let Ok(selected) = std::env::var("JA_C6_DESTINATION_CASE")
+                && selected != step.to_string()
+            {
+                continue;
+            }
+            match step {
+                0 => {
+                    assert!(!app.save_project(true));
+                }
+                1 => app.open_project(&temp.path("elsewhere.kinewright")),
+                2 => app.choose_project(),
+                3 => app.new_project(),
+                _ => {
+                    app.status = app
+                        .write_project(&temp.path("copy.kinewright"))
+                        .unwrap_err()
+                        .to_string();
+                }
+            }
+            assert!(
+                app.status
+                    .contains("no longer in the project's automatic list"),
+                "{step}: {}",
+                app.status
+            );
+            assert!(
+                app.status.contains("Abandon this selection explicitly"),
+                "{step}: {}",
+                app.status
+            );
+            assert_eq!(app.projects.len(), count);
+            assert_eq!(app.focused().core.export_history().unwrap(), history);
+        }
+        assert!(
+            app.focused()
+                .ja1_close_warning()
+                .contains("only accessible copy")
+        );
+        std::fs::rename(temp.path("hidden-drive"), temp.path("drive")).unwrap();
+        app.start_ja1(Action::Retry);
+        app.send_operations(vec![Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        }]);
+        assert!(app.status.contains("read-only"));
+        assert!(app.focused().ja1_job.is_some());
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input.clone(), |ui| app.show_ja1(ui.ctx()));
+        let output = ctx.run_ui(input, |ui| app.show_ja1(ui.ctx()));
+        let text = crate::ja1_attachment::tests::painted_text(&output);
+        assert!(
+            text.contains("Editing is read-only"),
+            "modal missing: {text}"
+        );
+        assert!(
+            ctx.memory(egui::Memory::top_modal_layer).is_some(),
+            "the recovery status must be modal"
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.focused().ja1_job.is_some() {
+            assert!(Instant::now() < deadline);
+            app.poll_ja1(&ctx);
+            std::thread::yield_now();
+        }
+        assert_eq!(app.focused().core.export_history().unwrap(), history);
+        app.start_ja1(Action::Abandon);
+        while app.focused().ja1_job.is_some() {
+            app.poll_ja1(&ctx);
+            std::thread::yield_now();
+        }
+        assert!(
+            app.focused()
+                .ja1
+                .as_ref()
+                .unwrap()
+                .destination_change()
+                .is_ok()
+        );
+    }));
+    let ctx = egui::Context::default();
+    while app.focused().ja1_job.is_some() {
+        app.poll_ja1(&ctx);
+        std::thread::yield_now();
+    }
+    in2b_tests::in2b_quiesce_engine(&engine);
+    in1_tests::in1_shutdown(&mut app);
+    app.focused_mut().stop_threads("C6 witness complete");
+    if let Err(error) = outcome {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn ja1_focus_witness() {
+    use crate::ja1_attachment::{
+        Action,
+        tests::{named, unknown_selection},
+    };
+    let (temp, mut attachment) = named();
+    unknown_selection(&mut attachment, &temp, true);
+    attachment.apply(Action::PreviewRescue).unwrap();
+    attachment
+        .apply(Action::RescueTo(temp.path("b.kinewright")))
+        .unwrap();
+    let actor = attachment.owner.core().actor_identity();
+    let slots = attachment.owner.rescue_slots();
+    let usage = attachment.owner.store().unwrap().usage().unwrap();
+    crate::recovery::with_ja_directory(temp.path("app-recovery"), || {
+        let (mut app, engine) = in2b_tests::in2b_harness(Document::default(), None);
+        app.focused_mut().ja1 = Some(attachment);
+        app.focused_mut().install_ja1_view();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            app.focused_mut().ja1.as_mut().unwrap().panel_open = false;
+            let ctx = egui::Context::default();
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| app.show_ja1(ui.ctx()));
+            app.new_project();
+            assert_eq!(app.projects.len(), 2);
+            assert_eq!(app.focused_project, 1);
+            let retained = app.projects[0]
+                .ja1
+                .as_ref()
+                .expect("focus must retain its actual owner");
+            assert_eq!(retained.owner.core().actor_identity(), actor);
+            assert_eq!(retained.owner.rescue_slots(), slots);
+            assert_eq!(
+                retained.owner.store().unwrap().usage().unwrap().owned_bytes,
+                usage.owned_bytes
+            );
+            app.focus_project(0);
+            std::fs::rename(temp.path("hidden-drive"), temp.path("drive")).unwrap();
+            let retained = app.focused_mut().ja1.as_mut().unwrap();
+            retained
+                .apply(Action::Reconcile(temp.path("drive/a.kinewright")))
+                .unwrap();
+            assert_eq!(retained.owner.core().actor_identity(), actor);
+            assert_eq!(retained.owner.rescue_slots(), slots);
+            assert!(matches!(
+                kinewright_project::editing_session::Ja1EditingSession::open(
+                    &temp.path("drive/a.kinewright")
+                ),
+                Err(kinewright_project::bundle::BundleError::Contention(_))
+            ));
+        }));
+        in2b_tests::in2b_quiesce_engine(&engine);
+        in1_tests::in1_shutdown(&mut app);
+        for session in &mut app.projects {
+            session.stop_threads("C6 focus witness complete");
+        }
+        if let Err(error) = outcome {
+            std::panic::resume_unwind(error);
+        }
+    });
+}

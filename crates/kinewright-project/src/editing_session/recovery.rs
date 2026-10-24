@@ -49,7 +49,17 @@ impl Ja1EditingSession {
     }
     /// Duplicate/lost replies keep the same preparation, R identity and target pin.
     pub fn select_local(&mut self) -> ProjectSelectionResult {
+        self.select_local_with_activation(|_| Ok(()))
+    }
+    /// Prepare a caller's fallible subscriptions/resources before publication or sealing.
+    pub fn select_local_with_activation(
+        &mut self,
+        mut prepare: impl FnMut(&kinewright_core::Core) -> Result<(), BundleError>,
+    ) -> ProjectSelectionResult {
         if let Some((_, report)) = &self.selection_result {
+            if let Err(error) = prepare(&self.core) {
+                return ProjectSelectionResult::Refused(error);
+            }
             return ProjectSelectionResult::Activated(report.clone());
         }
         let Some(mut prepared) = self.prepared.take() else {
@@ -57,6 +67,10 @@ impl Ja1EditingSession {
                 "prepare a recovery selection first".into(),
             ));
         };
+        if let Err(error) = prepare(&prepared.restore.core) {
+            self.prepared = Some(prepared);
+            return ProjectSelectionResult::Refused(error);
+        }
         let result = self.select_local_prepared(&mut prepared);
         match &result {
             ProjectSelectionResult::Activated(report) => {
@@ -246,6 +260,21 @@ impl Ja1EditingSession {
             }
         }
         Ok(disclosure)
+    }
+    pub fn rescue_handoff_disclosure(
+        &self,
+        selection: &crate::bundle_rescue::RescueSelection,
+    ) -> Result<String, BundleError> {
+        let mut text = self.selection_availability()?;
+        if let Some(prepared) = &self.prepared {
+            text.push_str(" Rescue handoff abandons the recovery selection at A irrevocably.");
+            if let RecoverySelection::Checkpoint { root, .. } = prepared.target()
+                && !selection.reads.objects().contains(root)
+            {
+                text.push_str(" The selected recovery point is not in B.");
+            }
+        }
+        Ok(text)
     }
     pub fn open_project(&self, path: &Path) -> Result<Self, BundleError> {
         self.check_destination_change()?;

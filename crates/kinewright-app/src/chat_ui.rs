@@ -927,6 +927,10 @@ impl KinewrightApp {
             self.note_label(LabelIncident::AgentBranch, IncidentSubject::Agent, error);
             false
         } else {
+            let id = self.projects[project_index].threads[thread_index].id;
+            self.projects[project_index]
+                .retired_agent_threads
+                .remove(&id);
             true
         }
     }
@@ -967,6 +971,14 @@ impl KinewrightApp {
     }
 
     fn merge_agent_branch(&mut self, project_index: usize, thread_index: usize) {
+        if self.projects[project_index].ja1_read_only()
+            || self.projects[project_index]
+                .retired_agent_threads
+                .contains(&self.projects[project_index].threads[thread_index].id)
+        {
+            self.status = "This agent branch belongs to the previous working edit or editing is read-only. Keep its work and return to that working branch before applying it.".into();
+            return;
+        }
         self.stop_agent(thread_index);
         let branch = self.projects[project_index].threads[thread_index]
             .branch

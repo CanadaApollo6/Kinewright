@@ -115,6 +115,9 @@ pub(crate) struct ProjectSession {
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) source_admission: kinewright_project::bundle::BundleWriteAdmission,
+    pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
+    pub(crate) ja1_job: Option<std::thread::JoinHandle<crate::ja1_attachment::Ja1Attachment>>,
+    pub(crate) retired_agent_threads: BTreeSet<u64>,
     /// The project-relative LUT store, derived from `project_path` at runtime
     /// and never serialized (CC4 §2.2). `None` for a project that has never
     /// been saved.
@@ -407,6 +410,9 @@ impl ProjectSession {
             revision: TimelineRevision::default(),
             project_path,
             source_admission,
+            ja1: None,
+            ja1_job: None,
+            retired_agent_threads: BTreeSet::new(),
             lut_store,
             lut_store_error,
             agent_project_path: std::sync::Arc::clone(&agent_project_path),
@@ -477,6 +483,12 @@ impl ProjectSession {
     /// Whether the project differs from the last save: the live document
     /// differs structurally, or the investigator mutes changed since the save.
     pub(crate) fn is_dirty(&self) -> bool {
+        if self.ja1_job.is_some() {
+            return true;
+        }
+        if let Some(ja1) = &self.ja1 {
+            return ja1.owner.dirty().unwrap_or(true);
+        }
         self.document_dirty()
             || self
                 .investigator
@@ -661,6 +673,40 @@ impl ProjectSession {
 
     pub(crate) fn display_name(&self) -> String {
         project_display_name(self.project_path.as_deref(), &self.name, self.is_dirty())
+    }
+    pub(crate) fn ja1_read_only(&self) -> bool {
+        self.ja1_job.is_some()
+            || self
+                .ja1
+                .as_ref()
+                .is_some_and(crate::ja1_attachment::Ja1Attachment::read_only)
+    }
+    pub(crate) fn ja1_close_warning(&self) -> String {
+        self.ja1
+            .as_ref()
+            .map(crate::ja1_attachment::Ja1Attachment::close_text)
+            .unwrap_or_default()
+    }
+    pub(crate) fn install_ja1_view(&mut self) {
+        let Some(ja1) = &mut self.ja1 else {
+            return;
+        };
+        if let Some(view) = ja1.view.take() {
+            if self.core.actor_identity() != view.core.actor_identity() {
+                self.retired_agent_threads
+                    .extend(self.threads.iter().map(|t| t.id));
+            }
+            self.core = view.core;
+            self.core_events = view.events;
+            self.document = view.document;
+            self.revision = view.revision;
+        }
+        self.project_path = ja1.owner.association().map(|a| a.path().to_path_buf());
+        if !ja1.owner.dirty().unwrap_or(true) {
+            self.saved_document = Some(Arc::clone(&self.document));
+        }
+        self.reconcile_source_state();
+        self.publish_project_path_to_agents();
     }
 
     pub(crate) fn stop_threads(&mut self, reason: &str) {

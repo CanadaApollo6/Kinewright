@@ -1,3 +1,4 @@
+use super::Ja1EditingSession;
 use kinewright_core::{
     AttachmentState, Command, Core, Document, Event, Operation, Track, TrackId, TrackKind,
 };
@@ -7,11 +8,9 @@ use kinewright_project::{
     bundle_records::{BranchId, ObjectRef},
     bundle_recovery::RecoverySelection,
     bundle_switch::ProjectSelectionResult,
-    editing_session::Ja1EditingSession,
     io_observer,
     storage_budget::StorageLimits,
 };
-use std::path::Path;
 fn edit(core: &Core, locked: bool) {
     assert!(matches!(
         core.request(Command::Do(Operation::SetTrackSyncLock {
@@ -41,7 +40,7 @@ fn fixture() -> (
     RecoverySelection,
     BranchId,
 ) {
-    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-c5-local");
+    let temp = TempDirectory::new_in(super::durable_test_root(), "s2-c5-local");
     let core = Core::spawn(Document {
         tracks: vec![Track {
             id: TrackId(1),
@@ -106,7 +105,7 @@ fn fixture() -> (
     (temp, session, target, branch)
 }
 #[test]
-fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
+pub(super) fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
     let (temp, mut session, _, original_branch) = fixture();
     let target = session
         .list_recovery_points()
@@ -318,7 +317,7 @@ fn w13_checkpoint_recovery_preserves_dirty_b_before_activation() {
     assert_ne!(expected_r, later_r);
 }
 #[test]
-fn w13_preliminary_save_faults_keep_exact_cut_and_do_not_select() {
+pub(super) fn w13_preliminary_save_faults_keep_exact_cut_and_do_not_select() {
     for fault in ["root_before_publish", "root_rename_io", "root_parent_sync"] {
         let (_temp, mut session, _, _) = fixture();
         let target = session.list_recovery_points().unwrap()[0].clone();
@@ -364,7 +363,7 @@ fn w13_preliminary_save_faults_keep_exact_cut_and_do_not_select() {
     }
 }
 #[test]
-fn w13_one_level_retention_and_explicit_retirement() {
+pub(super) fn w13_one_level_retention_and_explicit_retirement() {
     let (_temp, mut session, _, branch) = fixture();
     let mut guard = session.fork_durable_branch("worker X").unwrap();
     let specialist_core = guard.core().clone();
@@ -410,7 +409,7 @@ fn w13_one_level_retention_and_explicit_retirement() {
     );
 }
 #[test]
-fn w13_prepared_existing_target_is_never_a_retirement_offer() {
+pub(super) fn w13_prepared_existing_target_is_never_a_retirement_offer() {
     let (_temp, mut session, _, branch) = fixture();
     let target = session.list_recovery_points().unwrap()[0].clone();
     session.prepare_recovery(target).unwrap();
@@ -441,7 +440,7 @@ fn w13_prepared_existing_target_is_never_a_retirement_offer() {
 }
 
 #[test]
-fn w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation() {
+pub(super) fn w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation() {
     for (publication, landed) in [(1, false), (1, true), (2, false), (2, true)] {
         let (temp, mut session, _, _) = fixture();
         let a = temp.path("a.kinewright");
@@ -602,7 +601,7 @@ fn w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation() {
 }
 
 #[test]
-fn w13_existing_target_retry_requires_current_membership_and_head() {
+pub(super) fn w13_existing_target_retry_requires_current_membership_and_head() {
     for head in [false, true] {
         let (_temp, mut session, _, left) = fixture();
         let target = session.list_recovery_points().unwrap()[0].clone();
@@ -639,7 +638,7 @@ fn w13_existing_target_retry_requires_current_membership_and_head() {
 }
 
 #[test]
-fn w13_selection_refusal_and_absence_keep_p2_for_same_target_retry() {
+pub(super) fn w13_selection_refusal_and_absence_keep_p2_for_same_target_retry() {
     for fault in ["root_before_publish", "root_rename_io", "root_parent_sync"] {
         let (temp, mut session, _, _) = fixture();
         edit(session.core(), false);
@@ -712,7 +711,7 @@ fn w13_selection_refusal_and_absence_keep_p2_for_same_target_retry() {
 }
 
 #[test]
-fn w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture() {
+pub(super) fn w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture() {
     for gesture in [false, true] {
         let (_temp, mut session, _, _) = fixture();
         for i in 0..24 {

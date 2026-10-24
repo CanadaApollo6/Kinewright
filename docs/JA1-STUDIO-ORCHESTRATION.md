@@ -1237,3 +1237,22 @@ deferrals.
 | 3 — Shipped Songbird v1 dataset/scope/completeness | Replace every superseded four-field assumption with format/version 1, provenance and typed dataset selectors. Preserve per-answer/section completeness and query scope; chartData rows/reflines plus chartSpec exclusively drive the plot. Bind labels and geometry, actual output comparison and the full validation key; update JA-3 handoff. | §9, §14.2 and corrected §15 handoff summary; G17: differing SQL/plot rows, reference line, duplicate section titles, mixed completeness, null chartData, truncated subtotal, scoped positive controls and correctly-hashed/wrong-output mutations. |
 | 4 — Scope reductions | Incremental admission verifies new/unverified bytes while open/recovery validates the full graph; retain two automatic predecessors plus bounded staging/legacy backup; one execution owner refuses another run without a daemon; one manual attachment validation shadow. | §§1, 5.1, 6.1, 8.2, 12; G15/G20: verified bytes/latency, repeated floor/root retirement and crash, independent pins, second-run refusal through cleanup and no parked-branch shadows. |
 | Lead decision 3 — Platform durability | Fix the release/refusal policy in one statement in §6.1; remove repeated policy uncertainty elsewhere, preserve all barriers and keep native evidence unclaimed. | §6.1; G1/G1-W unsupported-profile zero-mutation witness; §14.2 asks only for implementation/evidence. |
+
+### S2-R local App integration (C6)
+
+The App's `ProjectSession` carries one local `Ja1Attachment` and moves that same
+`Ja1EditingSession` into each finite background operation and back. Closing a status
+window or focusing another project does not end its originating editing context.
+Modal save/selection/rescue choices disable App producers; the existing actor enforces
+the frozen/sealed cut for retained and alternate handles. Subscribe and prepare the
+new view before selection publication or rescue's first mutation/seal. Activating a
+new actor fences application of old in-memory agent branches; their work remains
+available for inspection or an explicit new base.
+
+Studio activation is explicit. Unsupported inspection stays read-only and cannot be
+converted into a writable local session by generic Save As. Local headless and agent
+open/save/resume use the same admission and lifecycle; no process host or manual stream
+is implied. Explicit loss, omission, retirement, abandonment and completed-capture
+release choices retain the rules above. Source-bound C6 evidence and its exact gate
+are recorded in `docs/reports/ja1-s2/c6.md` and `c6-gate.sh`; native Windows/hosted slow
+and physical storage lanes require their separately recorded results.

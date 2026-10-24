@@ -1081,6 +1081,29 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-app-rescue",
+      "relative_file": "s2-app-rescue.json",
+      "sha256": "07748dd151d316a1a09f7a691422f70d6449d3d409165786d428643f08297d04",
+      "byte_length": 1689,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-app-rescue-control.json",
+          "sha256": "56c030181aae972cd01373582d26ad42bbae400b4c87da3d9d63603b7befe17f",
+          "byte_length": 36,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

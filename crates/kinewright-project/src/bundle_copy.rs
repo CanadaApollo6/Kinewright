@@ -785,6 +785,7 @@ impl SessionStore {
         limits.validate()?;
         let session_id = SessionId::fresh()?;
         let namespace = ProjectNamespace::create_session(parent, &session_id)?;
+        crate::namespace::note("session_store_create", &namespace.identity().resolved_root);
         let store = ProjectStore::new(namespace, None, Some(session_id.clone()), limits)?;
         Ok(Self {
             store,

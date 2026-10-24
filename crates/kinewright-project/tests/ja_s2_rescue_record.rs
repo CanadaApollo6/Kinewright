@@ -1,12 +1,48 @@
 //! C4 record/reader/selection witnesses. Full rescue publication belongs to C5.
 #![cfg(feature = "test-util")]
 #![allow(clippy::too_many_lines)]
+#[cfg(target_os = "linux")]
+use kinewright_project::editing_session::Ja1EditingSession;
 use kinewright_project::{
     bundle_records::{ProjectId, SessionId},
     rescue_record::{ProvenanceSummary, RescueCopyV1},
     storage_budget::StorageLimits,
     store::BundleRecord,
 };
+#[path = "support/ja_s2_c6_admission.rs"]
+mod c6_admission;
+#[test]
+fn w14_local_headless_admission_precedes_mutation() {
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright");
+    let loaded = kinewright_project::bundle::LoadedBundle::read(&source).unwrap();
+    let mut cores = (0..12)
+        .map(|_| {
+            let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+            loaded.restore_manual(&core).unwrap();
+            core
+        })
+        .collect::<Vec<_>>();
+    c6_admission::matrix(|path| {
+        let core = cores.pop().unwrap();
+        let before = core.export_history().unwrap();
+        let result = kinewright_project::headless::save_headless_bundle(
+            path,
+            kinewright_project::bundle::BundleWriteAdmission::read(path)?,
+            &core,
+            None,
+        )
+        .map(|_| ());
+        if result.is_err() {
+            assert_eq!(core.export_history().unwrap(), before);
+            assert_eq!(
+                core.attachment_state().unwrap(),
+                kinewright_core::AttachmentState::Live
+            );
+        }
+        result
+    });
+}
 fn record(project: ProjectId) -> RescueCopyV1 {
     RescueCopyV1 {
         role: "rescue_copy_v1".into(),
@@ -1101,3 +1137,7 @@ mod c5;
 #[cfg(target_os = "linux")]
 #[path = "support/ja_s2_c5_pressure.rs"]
 mod c5_pressure;
+
+fn durable_test_root() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+}

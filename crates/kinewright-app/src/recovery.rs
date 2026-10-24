@@ -914,6 +914,10 @@ impl Recovery {
             recorder.shutdown();
         }
     }
+    /// Studio uses the bundle's owner. Preserve any legacy journal for explicit recovery.
+    pub(crate) fn stop_for_studio(&mut self) {
+        self.stop_active();
+    }
 
     fn remove_journal(&self) {
         if self.path.as_os_str().is_empty() {

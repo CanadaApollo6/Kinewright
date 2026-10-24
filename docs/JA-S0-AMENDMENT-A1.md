@@ -966,3 +966,14 @@ here with required S2 implementation and mutation witnesses.
 No open lead question remains. Cargo, runtime red/restored-green witnesses, physical-device
 removal, storage-crash persistence, native Windows execution and CI are **NOT RUN**. This is
 a design revision only; S2 must implement and gate it before any rescue availability claim.
+
+### S2-R C6 App realization
+
+The local App displays the §7 outcome/loss distinctions and the binding revision-7
+availability disclosure at preview, rescue handoff, Close and destination changes.
+Its same originating lifecycle owner survives finite background operations, wrapper
+replacement and focus changes. A late capture's explicit destination release applies
+only to a proven, never-active capture; active and source owners cannot use it. View
+subscriptions/resources are prepared before actor sealing. C6's source-bound report
+records the in-session selection pin's accepted crash window and all unrun native,
+hosted and physical-storage lanes without revising older acceptance.

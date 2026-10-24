@@ -240,11 +240,23 @@ impl Ja1EditingSession {
     }
     pub fn open(path: &Path) -> Result<Self, BundleError> {
         let loaded = LoadedBundle::read(path)?;
+        let inputs = loaded.root()?.input_manifest_ref.clone();
+        let branch = loaded.root()?.manual_branch_id.clone();
+        let history = (**loaded
+            .branches
+            .get(&branch)
+            .ok_or(BundleError::Unsettled)?
+            .1)
+            .clone();
+        let bundle = loaded.into_writer()?;
+        crate::namespace::note("ja1_session_create", path);
         let core = Core::spawn(kinewright_core::Document::default())
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        loaded.restore_manual(&core)?;
-        let inputs = loaded.root()?.input_manifest_ref.clone();
-        let mut session = Self::from_bundle(loaded.into_writer()?, &core, inputs)?;
+        bundle
+            .attach_core(&core)?
+            .restore_history(history)
+            .map_err(crate::bundle::history_error)?;
+        let mut session = Self::from_bundle(bundle, &core, inputs)?;
         session
             .association
             .as_mut()
@@ -257,6 +269,7 @@ impl Ja1EditingSession {
         core: &Core,
         inputs: ObjectRef,
     ) -> Result<Self, BundleError> {
+        crate::namespace::note("ja1_session_attach", &bundle.store().resolved_root()?);
         let attachment = bundle.attach_core(core)?;
         let path = bundle.store().resolved_root()?;
         Ok(Self {
@@ -291,6 +304,101 @@ impl Ja1EditingSession {
     #[must_use]
     pub fn retained_attempts(&self) -> &[RetainedAttempt] {
         &self.rescue.attempts
+    }
+    #[must_use]
+    pub fn has_prepared_selection(&self) -> bool {
+        self.prepared.is_some()
+    }
+    #[must_use]
+    pub fn preliminary_save_pending(&self) -> bool {
+        self.recovery_save_pending
+    }
+    #[must_use]
+    pub fn has_unresolved_publication(&self) -> bool {
+        self.destination
+            .as_ref()
+            .is_some_and(|d| d.bundle().is_ok_and(|b| b.unsettled))
+    }
+    pub fn active_publication_state(&self) -> Result<PublicationState, BundleError> {
+        Ok(self.active_bundle()?.publication_state())
+    }
+    pub fn acknowledged_recovery_point(&self) -> Result<Option<ObjectRef>, BundleError> {
+        Ok(self
+            .active_bundle()?
+            .rescue_records()?
+            .into_iter()
+            .find_map(|r| r.acknowledged_root))
+    }
+    pub fn retained_destinations(&self) -> Result<Vec<(PathBuf, PublicationState)>, BundleError> {
+        self.retained_destinations
+            .iter()
+            .map(|(owner, _)| {
+                let bundle = owner.bundle()?;
+                Ok((bundle.store.resolved_root()?, bundle.publication_state()))
+            })
+            .collect()
+    }
+    #[must_use]
+    pub fn pending_agent_command_at(&self, path: &Path) -> bool {
+        self.destination
+            .iter()
+            .chain(self.retained_destinations.iter().map(|(d, _)| d))
+            .any(|d| {
+                d.bundle().is_ok_and(|b| {
+                    b.store.resolved_root().is_ok_and(|p| p == path) && b.pending_command.is_some()
+                })
+            })
+    }
+    /// Whether a retained owner is a never-active capture copy, rather than its source.
+    #[must_use]
+    pub fn is_capture_destination(&self, path: &Path) -> bool {
+        self.retained_destinations.iter().any(|(owner, actor)| {
+            owner.bundle().is_ok_and(|b| {
+                b.store.resolved_root().is_ok_and(|p| p == path)
+                    && actor.actor_identity() != self.core.actor_identity()
+                    && actor
+                        .attachment_state()
+                        .is_ok_and(|s| s == kinewright_core::AttachmentState::Frozen)
+                    && !self.rescue.attempts.iter().any(|a| {
+                        a.core.actor_identity() == actor.actor_identity()
+                            && a.capture.cut().actor() == actor.actor_identity()
+                    })
+            })
+        })
+    }
+    /// Release only a proven, never-active capture destination. Source owners and slots stay.
+    pub fn release_completed_capture(&mut self, path: &Path) -> Result<(), BundleError> {
+        let index = self
+            .retained_destinations
+            .iter()
+            .position(|(owner, _)| {
+                owner
+                    .bundle()
+                    .is_ok_and(|b| b.store.resolved_root().is_ok_and(|p| p == path))
+            })
+            .ok_or_else(|| BundleError::Identity("unknown retained destination".into()))?;
+        let (owner, actor) = &self.retained_destinations[index];
+        let bundle = owner.bundle()?;
+        if bundle.publication_state() != PublicationState::Committed
+            || bundle.unsettled
+            || actor.actor_identity() == self.core.actor_identity()
+            || actor
+                .attachment_state()
+                .map_err(crate::bundle::history_error)?
+                != kinewright_core::AttachmentState::Frozen
+            || actor
+                .pending_history_save()
+                .map_err(crate::bundle::history_error)?
+                .is_some()
+            || self.rescue.attempts.iter().any(|a| {
+                a.core.actor_identity() == actor.actor_identity()
+                    && a.capture.cut().actor() == actor.actor_identity()
+            })
+        {
+            return Err(BundleError::Identity("only a proven completed capture copy may be released; rescue sources remain retained".into()));
+        }
+        self.retained_destinations.remove(index);
+        Ok(())
     }
     #[must_use]
     pub const fn source(&self) -> Option<&SessionStore> {

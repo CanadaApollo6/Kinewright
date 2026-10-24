@@ -736,3 +736,37 @@ fn s2_additive_publication_fixture_observes_real_rescue() {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2_additive_app_fixture_observes_real_controls() {
+    use kinewright_agent::ja_harness::protocol::Mode;
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-c6-fixture");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s2-app-rescue.json");
+    for mode in [Mode::Baseline, Mode::Revised] {
+        let output = temp.path(if mode == Mode::Baseline {
+            "baseline"
+        } else {
+            "revised"
+        });
+        assert_eq!(
+            kinewright_agent::ja_harness::run(&fixture, &output, mode).unwrap(),
+            0
+        );
+        let summary: Value =
+            serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap()).unwrap();
+        assert_eq!(
+            summary["pending"].as_array().unwrap().len(),
+            usize::from(mode == Mode::Baseline)
+        );
+        let observed: Value = serde_json::from_slice(
+            &std::fs::read(output.join("app-1/artifacts/observation-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            observed["app_rescue"].as_bool().unwrap_or(false),
+            mode == Mode::Revised
+        );
+    }
+}

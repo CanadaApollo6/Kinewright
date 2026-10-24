@@ -34,8 +34,18 @@ impl Ja1EditingSession {
         consent: &RescueConsent,
         inspection: &DestinationInspection,
     ) -> Result<RescueOutcome, BundleError> {
+        self.rescue_with_activation(selection, consent, inspection, |_| Ok(()))
+    }
+    /// The caller prepares its attachment before any destination mutation or actor seal.
+    pub fn rescue_with_activation(
+        &mut self,
+        selection: RescueSelection,
+        consent: &RescueConsent,
+        inspection: &DestinationInspection,
+        prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
+    ) -> Result<RescueOutcome, BundleError> {
         let resume = !selection.capture.was_frozen;
-        let result = self.rescue_inner(selection, consent, inspection);
+        let result = self.rescue_inner(selection, consent, inspection, prepare);
         if result.is_err()
             && resume
             && self
@@ -60,6 +70,7 @@ impl Ja1EditingSession {
         selection: RescueSelection,
         consent: &RescueConsent,
         inspection: &DestinationInspection,
+        prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
     ) -> Result<RescueOutcome, BundleError> {
         selection.check_consent(consent)?;
         let Some(current_probe) = self.probe_active()? else {
@@ -103,13 +114,11 @@ impl Ja1EditingSession {
         let b_cut = b_attachment
             .freeze()
             .map_err(crate::bundle::history_error)?;
+        prepare(&b_core)?;
         let old_core = self.core.clone();
         let old_cut = selection.capture.cut.clone();
         let was_frozen = selection.capture.was_frozen;
-        let mut disclosure = self.selection_availability()?;
-        if !disclosure.is_empty() {
-            disclosure.push_str(" Rescue handoff abandons this selection irrevocably; its selected point is not promised in B.");
-        }
+        let disclosure = self.rescue_handoff_disclosure(&selection)?;
         let tag = selection.capture.tag.clone();
         let existing = self.rescue.attempts.iter().position(|a| a.tag == tag);
         self.rescue
