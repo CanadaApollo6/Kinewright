@@ -227,6 +227,8 @@ def main():
                     environment['JA_HARNESS_APP_TEST_BINARY'] = app_binary
                     (directory/(phase+'.app-binary.json')).write_text(json.dumps({'path':app_binary,'sha256':digest(app_binary)})+'\n')
                 test_args = [witness,'--exact','--nocapture','--test-threads=4']
+                if witness == 's2_additive_app_fixture_observes_real_controls':
+                    test_args.append('--include-ignored')
                 if phase == 'red':
                     command = ['nice','-n','10','cargo',*args,witness,'--',*test_args[1:]]
                 else:

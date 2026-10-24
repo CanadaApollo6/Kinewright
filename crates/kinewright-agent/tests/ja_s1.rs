@@ -739,8 +739,10 @@ fn s2_additive_publication_fixture_observes_real_rescue() {
 
 #[cfg(target_os = "linux")]
 #[test]
+#[ignore = "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"]
 fn s2_additive_app_fixture_observes_real_controls() {
     use kinewright_agent::ja_harness::protocol::Mode;
+    assert!(std::env::var_os("JA_HARNESS_APP_TEST_BINARY").is_some());
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s2-c6-fixture");
     let fixture =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja/s2-app-rescue.json");

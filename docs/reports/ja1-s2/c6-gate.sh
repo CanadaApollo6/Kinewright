@@ -7,6 +7,7 @@ evidence="$(realpath -m -- "${1:?usage: ja1-s2-c6-gate.sh /absolute/evidence-dir
 case "$evidence" in "$root/target"*) echo 'evidence must be outside build output' >&2; exit 2;; esac
 mkdir -p "$evidence" "$root/target/c6-tmp"
 export CARGO_TARGET_DIR="$root/target/c6-build" TMPDIR="$root/target/c6-tmp" CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
+for harness_env_name in ${!JA_@} ${!KINEWRIGHT_@}; do unset "$harness_env_name"; done
 source scripts/setup-ffmpeg.sh
 printf 'cwd=%s\nCARGO_TARGET_DIR=%s\nTMPDIR=%s\nevidence=%s\n' "$PWD" "$CARGO_TARGET_DIR" "$TMPDIR" "$evidence" > "$evidence/environment.txt"
 rustc -Vv > "$evidence/rustc.txt"
@@ -54,7 +55,7 @@ select_tests() {
     local threads=4
     if [[ "$package" == kinewright-media ]]; then threads=1; fi
     local execution=(--exact "${names[@]}" --test-threads="$threads")
-    if [[ "$label" == ja_baseline ]]; then execution+=(--include-ignored); fi
+    if [[ "$label" == ja_baseline || "$label" == ja_s1 ]]; then execution+=(--include-ignored); fi
     cargo_run "$label" "${args[@]}" -- "${execution[@]}"
     nice -n 19 python3 -I scripts/ja1-s2-c1-evidence.py verify "$evidence/$label-selected.txt" "$evidence/$label.log" "$evidence/$label-counts.json"
 }
@@ -93,7 +94,7 @@ select_tests media-pins kinewright-media --lib '' test-util 'engine::tests::i8_m
 select_tests media-generated kinewright-media --test generated_media test-util '*'
 run slow-lint nice -n 19 python3 -I scripts/slow_tests.py lint
 run slow-features nice -n 19 python3 -I scripts/slow_tests.py features
-run workspace-fast nice -n 19 python3 -I scripts/slow_tests.py fast -- -- --test-threads=1
+run workspace-fast env -u JA_HARNESS_APP_TEST_BINARY -u JA_S1_PREDECESSOR_BINARY -u JA_SAVE_BENCH_OUTPUT nice -n 19 python3 -I scripts/slow_tests.py fast -- -- --test-threads=1
 nice -n 19 python3 -I scripts/ja1-s2-c1-evidence.py identity "$evidence/source-after.json"
 cmp "$evidence/source-before.json" "$evidence/source-after.json"
 echo 'C6 Linux gate complete. Native Windows and hosted CI remain NOT RUN.'

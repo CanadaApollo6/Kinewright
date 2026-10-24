@@ -163,7 +163,20 @@ pub fn matrix(mut caller: impl FnMut(&Path) -> Result<(), BundleError>) {
             let before = tree(temp.root());
             let refused = kind != "ordinary" && mode != "supported";
             if !refused {
+                #[cfg(target_os = "linux")]
                 LoadedBundle::read(&path).unwrap();
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let (result, trace) =
+                        io_observer::observe(|| LoadedBundle::read(&path).map(|_| ()));
+                    assert!(
+                        matches!(result, Err(BundleError::DurabilityUnsupported)),
+                        "{kind}/{mode}: {result:?}"
+                    );
+                    assert!(!trace.overflowed);
+                    assert!(trace.events.is_empty());
+                    assert_eq!(tree(temp.root()), before, "{kind}/{mode}");
+                }
             }
             let mut run = || io_observer::observe(|| caller(&path));
             let (result, trace) = if mode == "masked" {
@@ -172,7 +185,8 @@ pub fn matrix(mut caller: impl FnMut(&Path) -> Result<(), BundleError>) {
                 run()
             };
             assert!(!trace.overflowed);
-            if refused {
+            // Uncertified namespaces refuse before graph/API inspection.
+            if refused && cfg!(target_os = "linux") {
                 assert!(
                     matches!(
                         result,
@@ -211,10 +225,10 @@ pub fn matrix(mut caller: impl FnMut(&Path) -> Result<(), BundleError>) {
                 {
                     assert!(
                         matches!(result, Err(BundleError::DurabilityUnsupported)),
-                        "{result:?}"
+                        "{kind}/{mode}: {result:?}"
                     );
                     assert!(trace.events.is_empty());
-                    assert_eq!(tree(temp.root()), before);
+                    assert_eq!(tree(temp.root()), before, "{kind}/{mode}");
                 }
             }
         }

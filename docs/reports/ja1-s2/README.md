@@ -316,7 +316,7 @@ are excluded; `mutations-sealed/` contains the complete final 68-pair unchanged-
 - `crates/kinewright-project/src/editing_session/rescue.rs:40`: Rescue uses the same callback seam before any destination mutation. There is no second recovery engine or host/stream implementation.
 - `crates/kinewright-project/src/editing_session.rs:354`: Never-active captured destinations are distinguished from retained source A. Only a proven capture owner can be explicitly released; source holds, active editing and slot accounting remain.
 - `crates/kinewright-project/src/bundle_copy.rs:788`: A successful temporary-store creation now has an actual event through the existing shipping-safe note wrapper. The positive control observes the physical directory and its cleanup; create-then-drop no longer escapes the W14 zero-mutation oracle.
-- `crates/kinewright-project/tests/support/ja_s2_c6_admission.rs:108`: One shared local admission matrix covers three supported controls and nine raw/capability refusals per caller. Linux creates/saves/reopens through each real route; Windows carries raw/native-refusal applicability only.
+- `crates/kinewright-project/tests/support/ja_s2_c6_admission.rs:164`: The shared matrix retains three Linux save/reopen controls and nine typed graph/API refusals per caller. Windows namespace inspection precedes graph validation, so all twelve cases positively assert native `DurabilityUnsupported` with zero mutation.
 - `crates/kinewright-app/src/ja1_attachment_tests.rs:16`: Unchanged independent C5 scenario assertions run through an App action adapter, including actual retry/reconcile/trim/omission/retirement choices. Test-only consent-bit observation translates existing scenario consent into actual UI controls.
 - `crates/kinewright-app/src/app.rs:16182`: W8 uses real App New Project/focus-return and status closure, with actor/charge/slot/source-lock assertions and a drop-owner-on-focus mutation.
 - `crates/kinewright-app/src/app.rs:1604`: The legacy read-only inspection flag no longer disables Save after explicit Studio activation; Studio retains its own save/read-only guards.
@@ -328,3 +328,20 @@ refusals and rendered blocker/save/close text only; C5 project/agent registratio
 C11/C12 host repeats retain their own attribution. The original C5 dirty-Save-before-Save-As
 contract remains, with explicit successor/agent-effect omission confirmation. The in-session
 selected-target crash window is accepted and disclosed. Historical acceptance is unchanged.
+
+## CI fix round 1
+
+[The C6 report](c6.md#ci-fix-round-1) records the follow-up on `d01d2ff`: Windows fixture
+loads and graph-error expectations now respect native refusal, including the separate
+headless setup and both stress routes. The App fixture is explicitly on-demand, allowlisted
+on Linux, and actually executed with the built App binary by the C6 gate and mutation runner.
+The gate removes ambient harness overrides and runs workspace fast without its fixture variables.
+
+Fresh Linux evidence under `.review/ja/s2-evidence/c6/fix1/`: 66 passing command rows;
+603 selected outcomes, 593 executed passes and 10 explicit ignores; full workspace fast
+3,921 passes and 107 ignores; clean C6 environment 94 passes plus one on-demand NOT RUN;
+six targeted runtime red/restored-green pairs. Native MSVC checks remain blocked at missing
+Windows `errno.h`; native Windows and hosted slow acceptance remain NOT RUN. Paired means
+are C5 230.294 and fix1 230.469 ms/save (1.0008x), beside archived C5 230.9 ms/save.
+Production code, normative contracts and all 95 JA fixture files are unchanged. The original
+C6 record remains archived evidence; superseded/interrupted fix runs earn no acceptance.

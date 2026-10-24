@@ -13,12 +13,15 @@ use kinewright_project::{
 mod c6_admission;
 #[test]
 fn w14_local_headless_admission_precedes_mutation() {
+    #[cfg(target_os = "linux")]
     let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../kinewright-agent/tests/fixtures/ja/s1-v3-bundle/studio.kinewright");
+    #[cfg(target_os = "linux")]
     let loaded = kinewright_project::bundle::LoadedBundle::read(&source).unwrap();
     let mut cores = (0..12)
         .map(|_| {
             let core = kinewright_core::Core::spawn(kinewright_core::Document::default()).unwrap();
+            #[cfg(target_os = "linux")]
             loaded.restore_manual(&core).unwrap();
             core
         })
