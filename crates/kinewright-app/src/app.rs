@@ -10987,10 +10987,19 @@ mod in2b_tests {
                     visit(root, &path, out);
                 } else {
                     assert!(metadata.is_file());
-                    out.insert(
-                        path.strip_prefix(root).unwrap().to_path_buf(),
-                        fs::read(path).unwrap(),
-                    );
+                    // A held lock object denies second-handle reads on
+                    // Windows (`LockFileEx`, lockfile B4); its length stands
+                    // in for its bytes.
+                    let locked = cfg!(windows)
+                        && path
+                            .to_string_lossy()
+                            .ends_with(kinewright_project::LOCKFILE_SUFFIX);
+                    let bytes = if locked {
+                        format!("lock object, {} bytes", metadata.len()).into_bytes()
+                    } else {
+                        fs::read(&path).unwrap()
+                    };
+                    out.insert(path.strip_prefix(root).unwrap().to_path_buf(), bytes);
                 }
             }
         }
@@ -14411,21 +14420,22 @@ mod in2b_tests {
         }
         #[cfg(windows)]
         {
+            use std::os::windows::process::CommandExt as _;
             // canonicalize supplies the verbatim long-name spelling even when
             // the temp root uses RUNNER~1. Both must find this same session.
             let verbatim = project.canonicalize().unwrap();
             assert_eq!(app.session_index_for_path(&verbatim), Some(0));
+            // `cmd` does not read `\"` escapes, so the line is passed raw.
             let short = std::process::Command::new("cmd")
-                .args([
-                    "/d",
-                    "/c",
-                    &format!("for %I in (\"{}\") do @echo %~sI", project.display()),
-                ])
+                .raw_arg(format!(
+                    "/d /c for %I in (\"{}\") do @echo %~sI",
+                    project.display()
+                ))
                 .output()
                 .unwrap();
             assert!(short.status.success());
             let short = PathBuf::from(String::from_utf8(short.stdout).unwrap().trim());
-            assert!(!short.as_os_str().is_empty());
+            assert!(short.is_file(), "{}", short.display());
             assert_eq!(app.session_index_for_path(&short), Some(0));
             assert_eq!(
                 app.focused()
