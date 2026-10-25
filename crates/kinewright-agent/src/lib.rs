@@ -45,6 +45,8 @@ mod server;
 mod session;
 mod silence;
 mod solo;
+/// Authenticated project writer and UI-free session owner.
+pub mod writer_host;
 
 pub use acp_drivers::{
     DEVIN_SANDBOX_NOTICE, DevinDriver, KIMI_SANDBOX_NOTICE, KIRO_SANDBOX_NOTICE, KimiDriver,

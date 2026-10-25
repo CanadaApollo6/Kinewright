@@ -1143,6 +1143,22 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-host-auth",
+      "relative_file": "s2-host-auth.json",
+      "sha256": "8a0798248eb08927a237176ef4a48a2533bdf04a4f4a40019d8dd238f502357f",
+      "byte_length": 1417,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
     }
   ]
 }

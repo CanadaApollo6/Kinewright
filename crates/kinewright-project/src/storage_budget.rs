@@ -133,6 +133,75 @@ pub struct StorageReservation<T = ()> {
     active: bool,
 }
 impl StorageReservation {
+    /// Reserve only additional snapshot overlap on this reservation's existing ledger.
+    /// The extension remains independently active until admission commits it below.
+    pub(crate) fn reserve_copy_growth(
+        &self,
+        target_bytes: u64,
+        limits: &StorageLimits,
+        free: u64,
+    ) -> Result<Self, BundleError> {
+        if !self.active || !self.copy || self.decoded != 0 || self.history != 0 {
+            return Err(BundleError::Capacity(
+                "snapshot overlap reservation is not active",
+            ));
+        }
+        Self::reserve_for_retained_read(
+            &self.usage,
+            limits,
+            target_bytes.saturating_sub(self.bytes),
+            0,
+            0,
+            true,
+            free,
+            true,
+        )
+    }
+
+    /// Combine two active charges without uncharging either one or changing the ledger.
+    pub(crate) fn absorb_copy_growth(&mut self, mut extension: Self) -> Result<(), BundleError> {
+        if !self.active
+            || !extension.active
+            || !self.copy
+            || !extension.copy
+            || self.decoded != 0
+            || extension.decoded != 0
+            || self.history != 0
+            || extension.history != 0
+            || !Arc::ptr_eq(&self.usage, &extension.usage)
+        {
+            return Err(BundleError::Capacity(
+                "snapshot overlap extension owner differs",
+            ));
+        }
+        let bytes = self
+            .bytes
+            .checked_add(extension.bytes)
+            .ok_or(BundleError::Capacity("snapshot overlap growth overflow"))?;
+        self.bytes = bytes;
+        extension.active = false;
+        Ok(())
+    }
+
+    pub(crate) fn verify_copy_charge(&self, bytes: u64) -> Result<(), BundleError> {
+        let usage = self
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("accounting poisoned"))?;
+        if !self.active
+            || !self.copy
+            || self.bytes < bytes
+            || usage.damaged_accounting
+            || usage.reserved_copy_bytes < self.bytes
+            || usage.reserved_bytes < self.bytes
+        {
+            return Err(BundleError::Capacity(
+                "snapshot overlap charge is not retained",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn reserve(
         usage: &Arc<Mutex<StorageUsage>>,
         limits: &StorageLimits,

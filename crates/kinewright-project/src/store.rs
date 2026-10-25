@@ -94,6 +94,8 @@ struct StoreInner {
     project_id: Option<ProjectId>,
     session_id: Option<SessionId>,
     owner_epoch: u64,
+    session_closed: std::sync::atomic::AtomicBool,
+    session_closing: std::sync::atomic::AtomicBool,
 }
 
 pub struct ProjectStore {
@@ -114,7 +116,7 @@ pub struct RetainedReadAdmission {
     hold: Arc<SourceCopyHold>,
     objects: StorageReservation<Vec<ObjectRef>>,
 }
-struct RetainedReadLease {
+pub(crate) struct RetainedReadLease {
     file: File,
     _hold: Arc<SourceCopyHold>,
     _charge: StorageReservation,
@@ -130,11 +132,55 @@ impl Seek for RetainedReadLease {
     }
 }
 impl RetainedReadAdmission {
+    pub(crate) fn reserve_snapshot_growth(
+        &self,
+        overlap: &StorageReservation,
+        encoded_bytes: u64,
+    ) -> Result<StorageReservation, BundleError> {
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        if store
+            .inner
+            .session_closing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(BundleError::Identity(
+                "originating source is closing".into(),
+            ));
+        }
+        let free = store.with_namespace(|n| n.available_bytes())?;
+        overlap.reserve_copy_growth(encoded_bytes, store.limits(), free)
+    }
+    pub(crate) fn reserve_snapshot_scratch(
+        &self,
+        encoded_bytes: u64,
+    ) -> Result<StorageReservation, BundleError> {
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        store.reserve_copy_read(0, encoded_bytes, 0, false, true)
+    }
+    pub(crate) fn inspect_destination(
+        &self,
+        path: &Path,
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        ProjectStore::inspect_borrowed_destination(path, &[&store])
+    }
     #[must_use]
     pub fn objects(&self) -> &[ObjectRef] {
         &self.objects
     }
     pub fn open(&self, reference: &ObjectRef) -> Result<impl Read + Seek + use<>, BundleError> {
+        self.open_lease(reference)
+    }
+    pub(crate) fn open_lease(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<RetainedReadLease, BundleError> {
         if !self.objects.contains(reference) {
             return Err(BundleError::Identity(
                 "object outside retained admission".into(),
@@ -155,6 +201,96 @@ impl RetainedReadAdmission {
     }
 }
 impl ProjectStore {
+    /// Explicit originating Close. Keep this owner for retry on failure or while
+    /// readers still hold the real pin; no host descriptor can call this method.
+    pub(crate) fn close_temporary_source(&mut self) -> Result<bool, BundleError> {
+        use std::sync::atomic::Ordering;
+        if self.inner.session_closed.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+        if self.inner.session_id.is_none() {
+            return Err(BundleError::Identity(
+                "only the originating temporary owner can close its source".into(),
+            ));
+        }
+        self.inner.session_closing.store(true, Ordering::SeqCst);
+        if Arc::strong_count(&self.inner) != 1 {
+            return Ok(false);
+        }
+        let needs_collection = {
+            let mut ledger = self
+                .inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+            if ledger.copy_holds != 0 || ledger.pins.values().any(|n| *n != 0) {
+                return Ok(false);
+            }
+            if !ledger.pending.is_empty() || !ledger.pending_controls.is_empty() {
+                return Err(BundleError::Unsettled);
+            }
+            ledger.can_collect = true;
+            ledger.committed.clear();
+            !ledger.objects.is_empty()
+                || !ledger.unclassified.is_empty()
+                || !ledger.temporaries.is_empty()
+        };
+        let result = (|| {
+            if needs_collection {
+                collect(&self.inner)?;
+            }
+            self.with_namespace(ProjectNamespace::cleanup_session)?;
+            self.inner.session_closed.store(true, Ordering::SeqCst);
+            Ok(true)
+        })();
+        self.inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?
+            .unsettled = result.is_err();
+        result
+    }
+
+    /// Only the bundle's own durable pin may remain at a named writer handover.
+    /// Check and release under the actual pinned namespace, before a new host acquires it.
+    pub(crate) fn release_named_writer_for_host(
+        &mut self,
+        expected_root: &[u8],
+        own_pins: usize,
+    ) -> Result<(), BundleError> {
+        if self.inner.session_id.is_some() || Arc::strong_count(&self.inner) != 1 + own_pins {
+            return Err(BundleError::Identity(
+                "named writer still has source holds or readers".into(),
+            ));
+        }
+        let mut ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        if ledger.copy_holds != 0
+            || !ledger.pending.is_empty()
+            || !ledger.pending_controls.is_empty()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let mut namespace = self
+            .inner
+            .namespace
+            .lock()
+            .map_err(|_| BundleError::Capacity("namespace poisoned"))?;
+        namespace.verify()?;
+        if namespace.read_root()?.as_deref() != Some(expected_root) {
+            return Err(BundleError::Identity(
+                "named handover checkpoint changed".into(),
+            ));
+        }
+        // The released owner must do no collection after giving up the lock.
+        ledger.can_collect = false;
+        namespace.release()?;
+        Ok(())
+    }
+
     #[cfg(any(test, feature = "test-util"))]
     pub fn retention_probe(&self) -> Result<(u64, BTreeMap<String, u64>), BundleError> {
         let ledger = self
@@ -178,6 +314,19 @@ impl ProjectStore {
         path: &Path,
         stores: &[&Self],
     ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        Self::inspect_copy_destination(path, stores, false)
+    }
+    pub fn inspect_borrowed_destination(
+        path: &Path,
+        stores: &[&Self],
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        Self::inspect_copy_destination(path, stores, true)
+    }
+    fn inspect_copy_destination(
+        path: &Path,
+        stores: &[&Self],
+        borrowed: bool,
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
         let mut stores = stores.to_vec();
         stores.sort_by_key(|store| Arc::as_ptr(&store.inner));
         stores.dedup_by(|a, b| Arc::ptr_eq(&a.inner, &b.inner));
@@ -190,10 +339,12 @@ impl ProjectStore {
                     .map_err(|_| BundleError::Capacity("namespace poisoned"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        crate::namespace::DestinationInspection::inspect(
-            path,
-            &guards.iter().map(|g| &**g).collect::<Vec<_>>(),
-        )
+        let namespaces = guards.iter().map(|g| &**g).collect::<Vec<_>>();
+        if borrowed {
+            crate::namespace::DestinationInspection::inspect_borrowed(path, &namespaces)
+        } else {
+            crate::namespace::DestinationInspection::inspect(path, &namespaces)
+        }
     }
     pub fn revalidate_rescue_destination(
         inspection: &crate::namespace::DestinationInspection,
@@ -432,6 +583,8 @@ impl ProjectStore {
                 project_id,
                 session_id,
                 owner_epoch,
+                session_closed: std::sync::atomic::AtomicBool::new(false),
+                session_closing: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
@@ -542,6 +695,13 @@ impl ProjectStore {
         history: u64,
         copy: bool,
     ) -> Result<StorageReservation, BundleError> {
+        if self
+            .inner
+            .session_closing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(BundleError::Identity("originating source is closed".into()));
+        }
         let free = self.with_namespace(|n| n.available_bytes())?;
         StorageReservation::reserve(
             &self.inner.usage,
@@ -1456,6 +1616,12 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
 }
 impl Drop for StoreInner {
     fn drop(&mut self) {
+        if self
+            .session_closed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         let temporary = self.session_id.is_some();
         let mut collectable = false;
         if let Ok(ledger) = self.ledger.get_mut() {
@@ -2736,6 +2902,132 @@ pub(crate) struct SourceCopyHold {
     previous_collection: bool,
 }
 impl ProjectStore {
+    /// Retain the real source objects under this ledger; only the descriptor may cross processes.
+    pub(crate) fn retain_borrowed_source(
+        &self,
+        roots: &[ObjectRef],
+        extra_overlap_bytes: u64,
+    ) -> Result<crate::source_boundary::RetainedBorrowedSource, BundleError> {
+        use crate::source_boundary::{
+            BorrowedSnapshotOverlap, BorrowedSourceDescriptor, BorrowedSourceObject,
+            RetainedBorrowedSource,
+        };
+        if roots.len() as u64 > self.limits().objects {
+            return Err(BundleError::Capacity("borrowed source roots"));
+        }
+        let _working = self.reserve_copy_read(0, self.usage()?.metadata_bytes, 0, false, true)?;
+        let roots_with_roles = roots
+            .iter()
+            .cloned()
+            .map(|r| (r, crate::bundle_rescue::MissingOwnedUse::Manifest))
+            .collect::<Vec<_>>();
+        let admission = self.admit_retained_reads(&roots_with_roles)?;
+        let manifest = self.manifest()?;
+        let mut remaining = admission
+            .objects()
+            .iter()
+            .cloned()
+            .map(|r| (r.sha256.clone(), r))
+            .collect::<BTreeMap<_, _>>();
+        let mut ordered = Vec::new();
+        let mut copied = BTreeSet::new();
+        while !remaining.is_empty() {
+            let ready = remaining
+                .iter()
+                .filter(|(hash, _)| {
+                    manifest.dependencies[*hash]
+                        .iter()
+                        .all(|r| copied.contains(&r.sha256))
+                })
+                .map(|(hash, _)| hash.clone())
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                return Err(BundleError::Corrupt(
+                    "borrowed source graph is not closed".into(),
+                ));
+            }
+            for hash in ready {
+                let reference = remaining
+                    .remove(&hash)
+                    .ok_or_else(|| BundleError::Corrupt("borrowed object disappeared".into()))?;
+                ordered.push(BorrowedSourceObject {
+                    reference,
+                    dependencies: manifest.dependencies[&hash].clone(),
+                    inventory_dependencies: manifest
+                        .inventory_dependencies
+                        .get(&hash)
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+                copied.insert(hash);
+            }
+        }
+        let (project_id, session_id) = self.input_owner();
+        let descriptor = BorrowedSourceDescriptor {
+            admission: SessionId::fresh()?,
+            project_id,
+            session_id,
+            owner_epoch: self.owner_epoch(),
+            extra_overlap_bytes,
+            roots: roots.to_vec(),
+            objects: ordered,
+        };
+        descriptor.validate(self.limits())?;
+        let metadata = self.reserve_copy_read(0, descriptor.metadata_bytes()?, 0, false, true)?;
+        let overlap = self.reserve_copy_read(extra_overlap_bytes, 0, 0, true, true)?;
+        Ok(RetainedBorrowedSource {
+            descriptor,
+            reads: admission,
+            _metadata: metadata,
+            overlap: Mutex::new(BorrowedSnapshotOverlap {
+                reservation: overlap,
+                snapshot: None,
+            }),
+            accepting_reads: std::sync::atomic::AtomicBool::new(true),
+            reader: Mutex::new(None),
+        })
+    }
+
+    /// A host destination uses its own normal ledger and verifies every streamed object.
+    /// This method never opens a source namespace or holds a source reservation.
+    pub fn copy_graph_from_borrowed(
+        &mut self,
+        source: &crate::source_boundary::BorrowedSourceDescriptor,
+        reader: &mut dyn crate::source_boundary::BorrowedSourceReader,
+    ) -> Result<(), BundleError> {
+        source.validate(self.limits())?;
+        let path = self.resolved_root()?;
+        let inspection = Self::inspect_borrowed_destination(&path, &[])?;
+        if reader.inspect_destination(source, inspection.path())? != inspection.identity()? {
+            return Err(BundleError::Identity(
+                "borrowed destination identity differs".into(),
+            ));
+        }
+        let _working = self.reserve(0, source.metadata_bytes()?, 0, false)?;
+        for object in &source.objects {
+            let mut stream = crate::source_boundary::BorrowedObjectReader::new(
+                source,
+                &object.reference,
+                reader,
+            );
+            let sealed =
+                self.admit_recovered(&mut stream, &object.reference, &object.dependencies)?;
+            if !object.inventory_dependencies.is_empty() {
+                self.inner
+                    .ledger
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                    .inventory_dependencies
+                    .insert(
+                        object.reference.sha256.clone(),
+                        object.inventory_dependencies.clone(),
+                    );
+            }
+            drop(sealed);
+        }
+        Ok(())
+    }
+
     fn reserve_copy_read(
         &self,
         bytes: u64,
@@ -2744,6 +3036,15 @@ impl ProjectStore {
         copy: bool,
         cleanup_only: bool,
     ) -> Result<StorageReservation, BundleError> {
+        if self
+            .inner
+            .session_closing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(BundleError::Identity(
+                "originating source is closing".into(),
+            ));
+        }
         let free = self.with_namespace(|n| n.available_bytes())?;
         StorageReservation::reserve_for_retained_read(
             &self.inner.usage,

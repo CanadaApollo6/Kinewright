@@ -36,6 +36,9 @@ impl Adapter {
     ) -> Result<Value, String> {
         let call = &action.call;
         match call {
+            Call::S2HostAuthProbe(_) => {
+                super::s2_host_observer::observe(&self.baseline.root, self.mode == Mode::Revised)
+            }
             Call::S2RescuePublicationProbe(_) => {
                 #[cfg(target_os = "linux")]
                 {

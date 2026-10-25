@@ -13,6 +13,7 @@ mod receipt_observer;
 pub mod recording;
 pub mod report;
 pub mod revised;
+mod s2_host_observer;
 mod s2_observer;
 mod supervision;
 

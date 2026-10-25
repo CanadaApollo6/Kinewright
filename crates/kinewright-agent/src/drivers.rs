@@ -146,6 +146,103 @@ impl AgentDriver for ClaudeCodeDriver {
     }
 }
 
+const CLAUDE_HOST_AUTHORIZATION_ENV: &str = "KINEWRIGHT_HOST_AUTHORIZATION";
+const CLAUDE_HOST_AUTHORIZATION_TEMPLATE: &str = "${KINEWRIGHT_HOST_AUTHORIZATION}";
+
+/// Keep diagnostics safe: `std::process::Command` Debug renders explicit environment values.
+struct ClaudeCommand {
+    inner: ProcessCommand,
+}
+impl std::fmt::Debug for ClaudeCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let environment = self
+            .inner
+            .get_envs()
+            .map(|(name, _)| (name, "[REDACTED]"))
+            .collect::<Vec<_>>();
+        formatter
+            .debug_struct("ClaudeCommand")
+            .field("program", &self.inner.get_program())
+            .field("args", &self.inner.get_args().collect::<Vec<_>>())
+            .field("environment", &environment)
+            .finish_non_exhaustive()
+    }
+}
+impl ClaudeCommand {
+    fn spawn(&mut self) -> std::io::Result<Child> {
+        self.inner.spawn()
+    }
+}
+
+fn build_claude_command(
+    executable: PathBuf,
+    endpoint: &str,
+    cfg: &SessionConfig,
+) -> Result<ClaudeCommand, AgentError> {
+    let tool_allowlist = configured_tool_names(cfg)
+        .into_iter()
+        .map(|name| format!("mcp__kinewright__{name}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut command = ProcessCommand::new(executable);
+    let mut mcp_config = json!({
+        "mcpServers": { "kinewright": { "type": "http", "url": endpoint } }
+    });
+    if let Some(bootstrap) = crate::writer_host::mcp_credentials(endpoint) {
+        // Claude's supported MCP HTTP-header expansion resolves this custom name from the
+        // child environment. The config and argv carry only the literal reference.
+        // https://code.claude.com/docs/en/mcp#environment-variable-expansion-in-mcp-json
+        command.env(CLAUDE_HOST_AUTHORIZATION_ENV, bootstrap.auth.bearer());
+        mcp_config["mcpServers"]["kinewright"]["headers"] = json!({
+            "authorization": CLAUDE_HOST_AUTHORIZATION_TEMPLATE,
+            "x-kinewright-project": bootstrap.endpoint.project,
+            "x-kinewright-protocol": crate::writer_host::HOST_PROTOCOL.to_string(),
+            "x-kinewright-roots": bootstrap.roots.wire_header()
+                .map_err(|_| AgentError::Protocol("invalid private MCP attachment".into()))?,
+        });
+    }
+    let mcp_config = mcp_config.to_string();
+    command.args([
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "--mcp-config",
+        &mcp_config,
+        "--tools",
+        "",
+        "--allowedTools",
+        &tool_allowlist,
+        "--permission-mode",
+        "dontAsk",
+        "--no-session-persistence",
+        "--system-prompt",
+        KINEWRIGHT_SYSTEM_PROMPT,
+    ]);
+    if let Some(model) = &cfg.model {
+        command.args(["--model", model]);
+    }
+    if let Some(effort) = &cfg.effort {
+        if effort == crate::models::CLAUDE_ULTRACODE {
+            command.args(["--settings", r#"{"ultracode": true}"#]);
+        } else {
+            command.args(["--effort", effort]);
+        }
+    }
+    if let Some(directory) = &cfg.working_directory {
+        command.current_dir(directory);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_console_window(&mut command);
+    Ok(ClaudeCommand { inner: command })
+}
+
 struct ClaudeSession {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -157,60 +254,7 @@ struct ClaudeSession {
 
 impl ClaudeSession {
     fn spawn(executable: PathBuf, endpoint: &str, cfg: &SessionConfig) -> Result<Self, AgentError> {
-        let tool_allowlist = configured_tool_names(cfg)
-            .into_iter()
-            .map(|name| format!("mcp__kinewright__{name}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let mcp_config = json!({
-            "mcpServers": {
-                "kinewright": {
-                    "type": "http",
-                    "url": endpoint,
-                }
-            }
-        })
-        .to_string();
-
-        let mut command = ProcessCommand::new(executable);
-        command.args([
-            "-p",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--strict-mcp-config",
-            "--mcp-config",
-            &mcp_config,
-            "--tools",
-            "",
-            "--allowedTools",
-            &tool_allowlist,
-            "--permission-mode",
-            "dontAsk",
-            "--no-session-persistence",
-            "--system-prompt",
-            KINEWRIGHT_SYSTEM_PROMPT,
-        ]);
-        if let Some(model) = &cfg.model {
-            command.args(["--model", model]);
-        }
-        if let Some(effort) = &cfg.effort {
-            if effort == crate::models::CLAUDE_ULTRACODE {
-                command.args(["--settings", r#"{"ultracode": true}"#]);
-            } else {
-                command.args(["--effort", effort]);
-            }
-        }
-        if let Some(directory) = &cfg.working_directory {
-            command.current_dir(directory);
-        }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        hide_console_window(&mut command);
+        let mut command = build_claude_command(executable, endpoint, cfg)?;
 
         let mut child = command.spawn().map_err(|error| {
             AgentError::Harness(format!("could not start Claude Code: {error}"))
@@ -446,6 +490,10 @@ impl Drop for CodexSession {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Keep the complete Codex argv and child-environment policy auditable in one constructor"
+)]
 fn build_codex_command(
     target: &CodexSpawnTarget,
     endpoint: &str,
@@ -486,6 +534,7 @@ fn build_codex_command(
         let tier = serde_json::to_string(tier).expect("serializing a string cannot fail");
         command.arg("-c").arg(format!("service_tier={tier}"));
     }
+    let host_attachment = crate::writer_host::mcp_credentials(endpoint);
     let endpoint = serde_json::to_string(endpoint).expect("serializing a string cannot fail");
     let model_catalog_path = serde_json::to_string(model_catalog_path)
         .expect("serializing a model catalog path cannot fail");
@@ -526,6 +575,40 @@ fn build_codex_command(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(bootstrap) = host_attachment {
+        let bearer = bootstrap.auth.bearer();
+        command.env(
+            "KINEWRIGHT_HOST_MCP_TOKEN",
+            bearer.strip_prefix("Bearer ").unwrap_or_default(),
+        );
+        command
+            .arg("-c")
+            .arg("mcp_servers.kinewright.bearer_token_env_var='KINEWRIGHT_HOST_MCP_TOKEN'");
+        let fields = [
+            ("x-kinewright-project", bootstrap.endpoint.project),
+            (
+                "x-kinewright-protocol",
+                crate::writer_host::HOST_PROTOCOL.to_string(),
+            ),
+            (
+                "x-kinewright-roots",
+                bootstrap.roots.wire_header().unwrap_or_default(),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, value)| {
+            format!(
+                "{}={}",
+                serde_json::to_string(name).unwrap_or_default(),
+                serde_json::to_string(&value).unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+        command
+            .arg("-c")
+            .arg(format!("mcp_servers.kinewright.http_headers={{{fields}}}"));
+    }
     hide_console_window(&mut command);
     command
 }
@@ -965,6 +1048,109 @@ mod tests {
     fn driver_ids_match_the_public_harness_names() {
         assert_eq!(CodexDriver.id(), HarnessId::new("codex"));
         assert_eq!(ClaudeCodeDriver.id(), HarnessId::new("claude-code"));
+    }
+
+    #[test]
+    fn claude_host_auth_uses_only_child_environment_and_redacts_debug() {
+        use crate::writer_host::{
+            HOST_PROTOCOL, HostAuth, HostBootstrap, HostEndpoint, SessionRoots,
+        };
+        use std::{ffi::OsStr, net::TcpListener};
+        struct Registration(String);
+        impl Drop for Registration {
+            fn drop(&mut self) {
+                crate::writer_host::unregister_mcp(&self.0);
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = format!("http://{address}/mcp");
+        let config = SessionConfig {
+            model: Some("claude-config-witness".into()),
+            effort: Some("high".into()),
+            tool_names: Some(vec!["get_timeline_state".into()]),
+            ..SessionConfig::default()
+        };
+        let baseline = build_claude_command(PathBuf::from("claude"), &endpoint, &config).unwrap();
+        assert!(baseline.inner.get_envs().next().is_none());
+        let baseline_args = baseline
+            .inner
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let config_index = baseline_args
+            .iter()
+            .position(|arg| arg == "--mcp-config")
+            .unwrap()
+            + 1;
+        let baseline_json: Value = serde_json::from_str(&baseline_args[config_index]).unwrap();
+        assert_eq!(
+            baseline_json,
+            json!({"mcpServers":{"kinewright":{"type":"http","url":endpoint}}})
+        );
+        let bootstrap = HostBootstrap {
+            endpoint: HostEndpoint {
+                address,
+                project: "claude-private-config".into(),
+                protocol: HOST_PROTOCOL,
+            },
+            auth: HostAuth::generate().unwrap(),
+            roots: SessionRoots {
+                read: vec![PathBuf::from("read-电影-${KINEWRIGHT_HOST_AUTHORIZATION}")],
+                write: vec![PathBuf::from("write-🎬")],
+            },
+        };
+        let authorization = bootstrap.auth.bearer();
+        let token = authorization.strip_prefix("Bearer ").unwrap();
+        crate::writer_host::register_mcp(&endpoint, bootstrap.clone());
+        let _registration = Registration(endpoint.clone());
+        let command = build_claude_command(PathBuf::from("claude"), &endpoint, &config).unwrap();
+        let args = command
+            .inner
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            args.iter()
+                .all(|arg| !arg.contains(&authorization) && !arg.contains(token)),
+            "credential appeared in argv"
+        );
+        assert_eq!(args.len(), baseline_args.len());
+        assert!(
+            args.iter()
+                .zip(&baseline_args)
+                .enumerate()
+                .all(|(index, (actual, baseline))| index == config_index || actual == baseline),
+            "unprotected command arguments changed outside MCP config"
+        );
+        let encoded: Value = serde_json::from_str(&args[config_index]).unwrap();
+        let headers = &encoded["mcpServers"]["kinewright"]["headers"];
+        assert_eq!(headers["authorization"], CLAUDE_HOST_AUTHORIZATION_TEMPLATE);
+        assert_eq!(headers["x-kinewright-project"], bootstrap.endpoint.project);
+        assert_eq!(headers["x-kinewright-protocol"], HOST_PROTOCOL.to_string());
+        let roots = headers["x-kinewright-roots"].as_str().unwrap();
+        assert!(roots.is_ascii(), "HTTP root headers must be visible ASCII");
+        assert!(
+            !roots.contains("${"),
+            "path text cannot expand child credentials"
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(roots).unwrap(),
+            serde_json::to_value(&bootstrap.roots).unwrap()
+        );
+        assert_eq!(command.inner.get_envs().count(), 1);
+        assert!(
+            command.inner.get_envs().any(|(name, value)| name
+                == OsStr::new(CLAUDE_HOST_AUTHORIZATION_ENV)
+                && value == Some(OsStr::new(&authorization))),
+            "full Bearer missing from child-only environment"
+        );
+        let debug = format!("{command:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(
+            !debug.contains(&authorization) && !debug.contains(token),
+            "credential appeared in Debug"
+        );
     }
 
     #[test]

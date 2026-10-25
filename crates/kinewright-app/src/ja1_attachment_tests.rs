@@ -881,3 +881,651 @@ fn g04_gui_journal_directory_remains_pinned_across_checkpoint() {
 fn g04_startup_journal_retirement_uses_scanned_parent_and_bytes() {
     crate::recovery::g04_startup_retirement_keeps_scanned_identity();
 }
+
+/// App-level L2 fence: a real GUI source admission, exact history and all action routes.
+/// Process kill/exit/unwind transport witnesses are owned by the parent's host gate.
+#[cfg(target_os = "linux")]
+#[test]
+fn c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close() {
+    use std::io::Read as _;
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    edit(&core, false);
+    core.request(Command::Undo).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let history = core.export_history().unwrap();
+    let transfer = app.owner.prepare_host_attachment().unwrap();
+    let descriptor = transfer.source.unwrap();
+    let service = transfer.source_service.unwrap();
+    let input = transfer.inputs;
+    let source = app.owner.source().unwrap();
+    let source_root = source
+        .store()
+        .resolved_root()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(
+        source_root.is_dir(),
+        "setup: the actual private session directory exists"
+    );
+    let source_bytes = admission::tree(&source_root);
+    assert!(
+        !source_bytes.is_empty(),
+        "setup: retained source data exists before failure"
+    );
+    assert!(
+        source_bytes
+            .values()
+            .any(|bytes| kinewright_media::sha256_bytes(bytes) == input.sha256),
+        "setup: the admitted input bytes really exist"
+    );
+    let usage = source.store().usage_handle();
+    let pins = source.store().retention_probe().unwrap();
+    let charged = usage().unwrap();
+    assert!(charged.physical_bytes > 0);
+    assert!(charged.reserved_bytes > 0);
+    assert!(!pins.1.is_empty());
+    let mut reader = service.open_borrowed_source(&descriptor, &input).unwrap();
+    let mut exact = Vec::new();
+    reader.read_to_end(&mut exact).unwrap();
+    assert_eq!(kinewright_media::sha256_bytes(&exact), input.sha256);
+
+    app.operation_panicked();
+    assert!(app.read_only());
+    assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+    let branch = BranchId::fresh().unwrap();
+    let destination = temp.path("fresh/never-created.kinewright");
+    let actions = vec![
+        Action::Save,
+        Action::ConfirmSuccessorSave,
+        Action::SaveAs(destination.clone()),
+        Action::FirstSave(destination.clone()),
+        Action::Retry,
+        Action::PreviewRecovery(RecoverySelection::WorkingBranch(branch.clone())),
+        Action::OpenRecovery,
+        Action::Abandon,
+        Action::PreviewRescue,
+        Action::ConsentTrim,
+        Action::ConsentOmission,
+        Action::RescueTo(destination.clone()),
+        Action::Cancel,
+        Action::PreviewRetirement(branch.clone()),
+        Action::RemoveBranch,
+        Action::PreviewForget,
+        Action::Forget,
+        Action::Reconcile(destination.clone()),
+        Action::PreviewRelease(destination.clone()),
+        Action::Release,
+        Action::SaveSession(branch.clone()),
+        Action::CloseSession(branch),
+    ];
+    for action in actions {
+        assert!(app.apply(action).is_err());
+        assert!(
+            !destination.parent().unwrap().exists(),
+            "refused before parent creation"
+        );
+        assert_eq!(core.export_history().unwrap(), history);
+        assert_eq!(admission::tree(&source_root), source_bytes);
+        assert_eq!(
+            app.owner
+                .source()
+                .unwrap()
+                .store()
+                .retention_probe()
+                .unwrap(),
+            pins
+        );
+        let now = usage().unwrap();
+        assert_eq!(now.physical_bytes, charged.physical_bytes);
+        assert_eq!(now.reserved_bytes, charged.reserved_bytes);
+        assert_eq!(now.reserved_copy_bytes, charged.reserved_copy_bytes);
+    }
+    assert!(matches!(
+        core.request(Command::Query(Query::Snapshot)).unwrap(),
+        Event::QueryResult(_)
+    ));
+    assert!(matches!(
+        core.request(Command::Redo).unwrap(),
+        Event::MutationRefused { .. }
+    ));
+    assert!(rendered(&app).contains("retained data"));
+    assert!(
+        app.close_text()
+            .contains("Close this editing context explicitly")
+    );
+    assert!(app.destination_change().is_err());
+    let mut after = vec![0; exact.len()];
+    assert_eq!(
+        service
+            .read_borrowed_source(&descriptor, &input, 0, &mut after)
+            .unwrap(),
+        exact.len()
+    );
+    assert_eq!(after, exact);
+
+    assert!(!app.close());
+    assert!(!app.close());
+    assert!(
+        service
+            .read_borrowed_source(&descriptor, &input, 0, &mut [])
+            .is_err()
+    );
+    assert!(
+        source_root.exists(),
+        "an actual reader still holds the source namespace"
+    );
+    assert_eq!(usage().unwrap().reserved_bytes, charged.reserved_bytes);
+    assert_eq!(admission::tree(&source_root), source_bytes);
+    drop(reader);
+    assert!(
+        app.close(),
+        "same actual owner retries explicit Close after reader retirement"
+    );
+    assert!(app.close(), "completed Close is idempotent");
+    assert!(!source_root.exists());
+    assert_eq!(usage().unwrap().reserved_bytes, 0);
+    drop(app);
+}
+
+/// A successful real loopback first Save precedes the App's host-loss refusal control.
+#[cfg(target_os = "linux")]
+#[test]
+fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
+    use kinewright_agent::writer_host::{HostCommand, SessionRoots};
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let test_binary = std::env::current_exe().unwrap();
+    let executable = test_binary
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("kinewright");
+    assert!(
+        executable.is_file(),
+        "setup: build the shipping kinewright host first"
+    );
+    app.launch_host_at(
+        &executable,
+        "app-c8-owner".into(),
+        SessionRoots {
+            read: vec![temp.root().to_path_buf()],
+            write: vec![temp.root().to_path_buf()],
+        },
+    )
+    .expect("the exact GUI snapshot must reach the shipping host bootstrap");
+    let attached = app
+        .host_client()
+        .unwrap()
+        .request(HostCommand::ReadHistory)
+        .unwrap();
+    assert!(attached.error.is_none());
+    assert_eq!(attached.history.unwrap(), core.export_history().unwrap());
+    let source_root = app
+        .owner
+        .source()
+        .unwrap()
+        .store()
+        .resolved_root()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(
+        source_root.is_dir(),
+        "setup: actual GUI source directory exists before first Save"
+    );
+    let source_bytes = admission::tree(&source_root);
+    assert!(
+        !source_bytes.is_empty(),
+        "setup: actual retained source bytes exist"
+    );
+    assert!(source_bytes.values().any(|bytes| !bytes.is_empty()));
+    let path = temp.path("a.kinewright");
+    // Regression: attachment precedes edits; FirstSave must grow the real owner's
+    // source overlap for this exact foreground cut, not rely on the initial empty history.
+    edit(&core, false);
+    app.apply(Action::FirstSave(path.clone())).unwrap();
+    assert!(
+        !app.is_dirty(),
+        "only the publisher digest marks this exact history Saved"
+    );
+    assert_eq!(app.project_path().as_deref(), Some(path.as_path()));
+    let reopened = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&reopened)
+        .unwrap();
+    assert_eq!(
+        reopened.export_history().unwrap(),
+        core.export_history().unwrap()
+    );
+    assert!(
+        source_root.exists(),
+        "first Save keeps the original GUI source owner"
+    );
+    assert_eq!(admission::tree(&source_root), source_bytes);
+    let pins = app
+        .owner
+        .source()
+        .unwrap()
+        .store()
+        .retention_probe()
+        .unwrap();
+    let usage = app.owner.source().unwrap().store().usage_handle();
+    edit(&core, true);
+    let unsaved = core.export_history().unwrap();
+    assert!(app.is_dirty());
+    // The next save must admit this larger exact cut even if transport then fails.
+    // Measure retained ownership after that admission, before the host Drop path.
+    let cut = app.owner.freeze_host_cut().unwrap();
+    app.host.as_mut().unwrap().cut = Some(cut);
+    let retained = usage().unwrap();
+
+    let host_pid = app.host.as_ref().unwrap().child_id().unwrap();
+    app.host.as_mut().unwrap().close(); // the real shipping child exits and is reaped
+    assert!(
+        !Path::new(&format!("/proc/{host_pid}")).exists(),
+        "orderly host exit must reap its actual child, including a zombie"
+    );
+    let elsewhere = temp.path("fresh/b.kinewright");
+    assert!(app.apply(Action::SaveAs(elsewhere.clone())).is_err());
+    assert!(app.apply(Action::FirstSave(elsewhere.clone())).is_err());
+    assert!(app.apply(Action::PreviewRescue).is_err());
+    assert!(!elsewhere.parent().unwrap().exists());
+    assert_eq!(core.export_history().unwrap(), unsaved);
+    assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+    assert_eq!(
+        app.owner
+            .source()
+            .unwrap()
+            .store()
+            .retention_probe()
+            .unwrap(),
+        pins
+    );
+    let now = usage().unwrap();
+    assert_eq!(now.physical_bytes, retained.physical_bytes);
+    assert_eq!(now.reserved_copy_bytes, retained.reserved_copy_bytes);
+    assert_eq!(now.reserved_bytes, retained.reserved_bytes);
+    assert!(source_root.exists());
+    assert_eq!(admission::tree(&source_root), source_bytes);
+    assert!(app.close_text().contains("Saving and rescue are paused"));
+    app.close();
+    drop(app);
+    assert!(!source_root.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn c8_failed_host_launch_keeps_source_and_requires_explicit_close() {
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    edit(&core, false);
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let virtual_root = app.owner.source().unwrap().store().resolved_root().unwrap();
+    let root = virtual_root.parent().unwrap().to_path_buf();
+    assert!(
+        root.is_dir(),
+        "setup: actual source directory exists before launch"
+    );
+    let source_bytes = admission::tree(&root);
+    assert!(
+        !source_bytes.is_empty(),
+        "setup: actual source data exists before launch"
+    );
+    assert!(source_bytes.values().any(|bytes| !bytes.is_empty()));
+    let initial_physical = app
+        .owner
+        .source()
+        .unwrap()
+        .store()
+        .usage()
+        .unwrap()
+        .physical_bytes;
+    assert!(initial_physical > 0);
+    let history = core.export_history().unwrap();
+    let roots = kinewright_agent::writer_host::SessionRoots {
+        read: vec![temp.root().to_path_buf()],
+        write: vec![temp.root().to_path_buf()],
+    };
+    assert!(
+        app.launch_host_at(
+            &temp.path("absent-host-binary"),
+            "launch-failure".into(),
+            roots
+        )
+        .is_err()
+    );
+    let source = app.owner.source().unwrap();
+    assert_eq!(source.store().resolved_root().unwrap(), virtual_root);
+    assert_eq!(admission::tree(&root), source_bytes);
+    assert_eq!(
+        source.store().usage().unwrap().physical_bytes,
+        initial_physical
+    );
+    assert!(root.exists());
+    assert!(source.has_borrowed_sources());
+    assert!(source.store().usage().unwrap().reserved_copy_bytes > 0);
+    assert!(app.read_only());
+    assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+    assert_eq!(core.export_history().unwrap(), history);
+    let fresh = temp.path("elsewhere/new.kinewright");
+    assert!(app.apply(Action::FirstSave(fresh.clone())).is_err());
+    assert!(app.apply(Action::SaveAs(fresh.clone())).is_err());
+    assert!(app.apply(Action::PreviewRescue).is_err());
+    assert!(!fresh.parent().unwrap().exists());
+    assert_eq!(admission::tree(&root), source_bytes);
+    assert!(
+        app.close_text()
+            .contains("Close this editing context explicitly")
+    );
+    app.close();
+    drop(app);
+    assert!(!root.exists());
+}
+
+/// Completion adapter: exact publisher-written floors stay on the existing GUI actor;
+/// an explicit committed recovery activation creates a fresh actor even for equal content.
+#[cfg(target_os = "linux")]
+#[test]
+fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_actor() {
+    use kinewright_agent::writer_host::{
+        HostConfig, HostOrigin, HostReply, HostSaveReport, HostSourceBinding, HostStatus,
+        SessionRoots, SourceServer, WriterHost,
+    };
+    use kinewright_core::HistoryTransition;
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    for n in 0..10 {
+        edit(&core, n % 2 == 0);
+    }
+    let before = core.export_history().unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let transfer = app.owner.prepare_host_attachment().unwrap();
+    let server = SourceServer::start(transfer.source_service.unwrap()).unwrap();
+    let writer = WriterHost::start(HostConfig {
+        project: "app-c8-floor-activation".into(),
+        path: None,
+        roots: SessionRoots {
+            read: vec![temp.root().to_path_buf()],
+            write: vec![temp.root().to_path_buf()],
+        },
+        origin: HostOrigin::Gui {
+            initial_snapshot: kinewright_agent::writer_host::HostSnapshot::from_history(
+                transfer.history.clone(),
+            )
+            .unwrap(),
+            retention: HostSourceBinding {
+                source: transfer.source.clone(),
+                inputs: Some(transfer.inputs.clone()),
+                callback: server.bootstrap(),
+            },
+            expected_root_sha256: None,
+            expected_project_id: None,
+        },
+    })
+    .unwrap();
+    let initial = app.owner.freeze_host_cut().unwrap();
+    app.owner.complete_host_cut(&initial, None, None).unwrap();
+    app.host = Some(
+        host::HostAttachment::connected(writer.client(), transfer.source, transfer.inputs, server)
+            .unwrap(),
+    );
+    app.frozen = false;
+
+    // This report is from a real constrained publisher, rather than a live GUI history hash.
+    let publisher_core = Core::spawn(Document::default()).unwrap();
+    publisher_core.restore_history(before.clone()).unwrap();
+    let mut publisher = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &publisher_core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let selected = HistoryTransition::floor(before.clone(), 5).unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: kinewright_project::bundle_commit::history_cost_probe(
+            selected.after(),
+            &StorageLimits::default(),
+        )
+        .unwrap(),
+        ..StorageLimits::default()
+    };
+    let path = temp.path("committed_history-floor.kinewright");
+    let CopyStatus::Committed(report) = publisher.first_save(&path, limits).unwrap() else {
+        panic!("real constrained publisher must commit");
+    };
+    let committed_history = publisher_core.export_history().unwrap();
+    assert!(committed_history.floor_offset > before.floor_offset);
+    assert_eq!(
+        kinewright_media::sha256_bytes(&serde_json::to_vec(&committed_history).unwrap()),
+        report.history_sha256
+    );
+    let actor = core.actor_identity();
+    let cut = app.owner.freeze_host_cut().unwrap();
+    app.host.as_mut().unwrap().cut = Some(cut);
+    app.accept_host_reply(HostReply {
+        status: HostStatus {
+            retention_proven: true,
+            association: Some(path),
+            saved_digest: Some(report.history_sha256.clone()),
+            ..HostStatus::default()
+        },
+        saved: Some(HostSaveReport::from(&report)),
+        history: Some(committed_history.clone()),
+        ..HostReply::default()
+    })
+    .unwrap();
+    assert_eq!(app.owner.core().actor_identity(), actor);
+    assert_eq!(core.export_history().unwrap(), committed_history);
+    assert_eq!(app.owner.retained_host_actor_count(), 0);
+
+    // Continue through actual App -> loopback host commands for recovery, using the original
+    // host's own newly named branch. Its cut is this exact, already-floor-installed GUI history.
+    app.apply(Action::FirstSave(temp.path("host-a.kinewright")))
+        .unwrap();
+    for value in [true, false, true] {
+        edit(app.owner.core(), value);
+        app.apply(Action::Save).unwrap();
+    }
+    let target = app
+        .host
+        .as_ref()
+        .unwrap()
+        .status
+        .recovery_points
+        .last()
+        .unwrap()
+        .clone();
+    app.apply(Action::PreviewRecovery(target.into())).unwrap();
+    let prior = app.owner.core().clone();
+    app.apply(Action::OpenRecovery).unwrap();
+    assert_ne!(app.owner.core().actor_identity(), prior.actor_identity());
+    assert_eq!(prior.attachment_state(), Ok(AttachmentState::Sealed));
+    assert_eq!(
+        app.owner.core().attachment_state(),
+        Ok(AttachmentState::Live)
+    );
+    assert_eq!(
+        app.owner.retained_host_actor_count(),
+        0,
+        "recovery retains no hidden old GUI actor"
+    );
+    assert!(
+        app.owner.source().is_some(),
+        "the exact originating source stays with the same owner"
+    );
+    assert!(!app.is_dirty());
+    app.close();
+    writer.shutdown().unwrap();
+}
+
+/// The existing file-picker action authorizes a destination outside initial roots;
+/// forwarded roots without that exact GUI admission still refuse before mutation.
+#[cfg(target_os = "linux")]
+#[test]
+fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_authority() {
+    use kinewright_agent::writer_host::{
+        HostCommand, HostConfig, HostOrigin, HostSnapshot, HostSourceBinding, SessionRoots,
+        SourceServer, WriterHost,
+    };
+    let temp = temp();
+    let allowed = temp.path("initial-root");
+    let external = temp.path("external-root");
+    let other = temp.path("other-root");
+    for directory in [&allowed, &external, &other] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let core = Core::spawn(doc()).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        &allowed,
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let source_directory = app
+        .owner
+        .source()
+        .unwrap()
+        .store()
+        .resolved_root()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    assert!(source_directory.is_dir());
+    let original_bytes = admission::tree(&source_directory);
+    assert!(!original_bytes.is_empty());
+    let transfer = app.owner.prepare_host_attachment().unwrap();
+    let server = SourceServer::start(transfer.source_service.unwrap()).unwrap();
+    let initial_roots = SessionRoots {
+        read: vec![allowed.clone()],
+        write: vec![allowed.clone()],
+    };
+    let writer = WriterHost::start(HostConfig {
+        project: "app-person-destination".into(),
+        path: None,
+        roots: initial_roots,
+        origin: HostOrigin::Gui {
+            initial_snapshot: kinewright_agent::writer_host::HostSnapshot::from_history(
+                transfer.history.clone(),
+            )
+            .unwrap(),
+            retention: HostSourceBinding {
+                source: transfer.source.clone(),
+                inputs: Some(transfer.inputs.clone()),
+                callback: server.bootstrap(),
+            },
+            expected_root_sha256: None,
+            expected_project_id: None,
+        },
+    })
+    .unwrap();
+    let cut = app.owner.freeze_host_cut().unwrap();
+    app.owner.complete_host_cut(&cut, None, None).unwrap();
+    app.host = Some(
+        host::HostAttachment::connected(writer.client(), transfer.source, transfer.inputs, server)
+            .unwrap(),
+    );
+    app.frozen = false;
+    edit(&core, false); // larger history than the attachment's initial snapshot
+    let first = external.join("a.kinewright");
+    app.apply(Action::FirstSave(first.clone())).unwrap();
+    assert!(!app.is_dirty());
+    assert_eq!(app.project_path().as_deref(), Some(first.as_path()));
+    assert_eq!(admission::tree(&source_directory), original_bytes);
+
+    let refused = other.join("unapproved.kinewright");
+    let widened_forwarding = writer.client().with_roots(SessionRoots {
+        read: vec![allowed.clone(), external.clone(), other.clone()],
+        write: vec![allowed, external.clone(), other.clone()],
+    });
+    let reply = widened_forwarding
+        .request(HostCommand::SaveAs {
+            destination: refused.clone(),
+            snapshot: HostSnapshot::capture(&core).unwrap(),
+        })
+        .unwrap();
+    assert!(
+        reply.error.is_some(),
+        "forwarded roots alone never authorize an external destination"
+    );
+    assert!(!refused.exists());
+    assert!(admission::tree(&other).is_empty());
+
+    edit(&core, true);
+    let second = other.join("person-picked.kinewright");
+    app.apply(Action::SaveAs(second.clone())).unwrap();
+    assert_eq!(app.project_path().as_deref(), Some(second.as_path()));
+    assert!(!app.is_dirty());
+    let reopened = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&second)
+        .unwrap()
+        .restore_manual(&reopened)
+        .unwrap();
+    assert_eq!(
+        reopened.export_history().unwrap(),
+        core.export_history().unwrap()
+    );
+    assert_eq!(admission::tree(&source_directory), original_bytes);
+    app.apply(Action::Save).unwrap(); // later IO uses only the host-admitted current scope
+    let pins = app
+        .owner
+        .source()
+        .unwrap()
+        .store()
+        .retention_probe()
+        .unwrap();
+    let usage = app.owner.source().unwrap().store().usage().unwrap();
+    app.operation_panicked();
+    let never = temp.path("never-admitted/new.kinewright");
+    assert!(app.apply(Action::FirstSave(never.clone())).is_err());
+    assert!(app.apply(Action::SaveAs(never.clone())).is_err());
+    assert!(app.apply(Action::RescueTo(never.clone())).is_err());
+    assert!(!never.parent().unwrap().exists());
+    assert_eq!(admission::tree(&source_directory), original_bytes);
+    assert_eq!(
+        app.owner
+            .source()
+            .unwrap()
+            .store()
+            .retention_probe()
+            .unwrap(),
+        pins
+    );
+    let retained = app.owner.source().unwrap().store().usage().unwrap();
+    assert_eq!(retained.physical_bytes, usage.physical_bytes);
+    assert_eq!(retained.reserved_bytes, usage.reserved_bytes);
+    assert!(app.close());
+    writer.shutdown().unwrap();
+}

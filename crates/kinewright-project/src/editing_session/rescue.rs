@@ -44,6 +44,7 @@ impl Ja1EditingSession {
         inspection: &DestinationInspection,
         prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
     ) -> Result<RescueOutcome, BundleError> {
+        self.require_local_writer()?;
         let resume = !selection.capture.was_frozen;
         let result = self.rescue_inner(selection, consent, inspection, prepare);
         if result.is_err()

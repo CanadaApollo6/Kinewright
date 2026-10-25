@@ -438,6 +438,12 @@ unsaved work before ending its retention.
 
 ## 5. Session retention and editing after success
 
+C8's process split is binding in JA-1's "C8 process ownership and retention" and
+S0 §4.3. GUI-origin temporary bytes, holds, pins, and their one source ledger stay
+in the GUI. Host source access is borrowed and has no cleanup or release authority.
+Unproved replacement retention refuses every save and rescue, including fresh paths,
+while preserving the GUI's actual source objects and histories until explicit Close.
+
 **Originating session and owner.** The originating session is one app editing context from
 New or Open (including a project opened from A) until its explicit Close or app exit. A
 rescue switch A→B and ordinary focus/project switches do not start or end this context or

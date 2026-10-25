@@ -14,7 +14,8 @@ mod linux;
 #[cfg(windows)]
 mod windows;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NamespaceIdentity {
     pub resolved_root: PathBuf,
     pub parent_device: u64,
@@ -38,6 +39,37 @@ pub struct DestinationInspection {
     )
 )]
 impl DestinationInspection {
+    pub(crate) fn inspect_borrowed(
+        path: &Path,
+        sources: &[&ProjectNamespace],
+    ) -> Result<Self, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::inspect_copy_destination(path, sources, false)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, sources);
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+    /// Wire-safe identity of this pinned target admission; contains no source locator.
+    pub fn identity(&self) -> Result<NamespaceIdentity, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            let stat = rustix::fs::fstat(&self.parent)?;
+            Ok(NamespaceIdentity {
+                resolved_root: self.path.clone(),
+                parent_device: stat.st_dev,
+                parent_inode: stat.st_ino,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -183,6 +215,10 @@ impl From<BundleError> for RootReplaceFailure {
     }
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "writer/read policy, object batching and once-only session retirement are independent namespace facts"
+)]
 pub struct ProjectNamespace {
     identity: NamespaceIdentity,
     #[cfg(target_os = "linux")]
@@ -191,6 +227,8 @@ pub struct ProjectNamespace {
     probe_failure: RefCell<Option<ProbeFailure>>,
     #[cfg(target_os = "linux")]
     session: Option<(File, OsString)>,
+    #[cfg(target_os = "linux")]
+    session_unlinked: bool,
     #[cfg(target_os = "linux")]
     root_name: OsString,
     #[cfg(target_os = "linux")]

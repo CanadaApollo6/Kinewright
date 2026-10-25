@@ -889,6 +889,10 @@ impl KinewrightApp {
             true
         }
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one activation boundary stages the local owner and authenticated host together"
+    )]
     fn enable_ja1(&mut self) {
         if self.focused().ja1_job.is_some() {
             return;
@@ -949,7 +953,51 @@ impl KinewrightApp {
                 session.install_ja1_view();
                 self.playback
                     .set_document(Arc::clone(&self.focused().document));
-                self.status = "Studio recovery and rescue enabled for this editing context.".into();
+                let mut root_paths = Vec::new();
+                if let Some(home) =
+                    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+                {
+                    root_paths.push(PathBuf::from(home));
+                }
+                if let Ok(cwd) = std::env::current_dir() {
+                    root_paths.push(cwd);
+                }
+                if let Some(parent) = self
+                    .focused()
+                    .project_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                {
+                    root_paths.push(parent.to_path_buf());
+                }
+                root_paths.sort();
+                root_paths.dedup();
+                let roots = kinewright_agent::writer_host::SessionRoots {
+                    read: root_paths.clone(),
+                    write: root_paths,
+                };
+                let session = self.focused_mut();
+                // Retire local execution before granting the host named write authority.
+                for thread in &mut session.threads {
+                    if let Some(local) = &mut thread.session {
+                        local.interrupt();
+                    }
+                    thread.session = None;
+                    thread.events = None;
+                    thread.running = false;
+                    if let Some(confirmations) = &thread.confirmations {
+                        confirmations.reject_all("Studio host attachment");
+                    }
+                    thread.pending_confirmations.clear();
+                    thread.confirmations = None;
+                    if let Some(server) = thread.mcp_server.take() {
+                        server.shutdown();
+                    }
+                }
+                let project = format!("gui-{}-{:?}", session.id, session.core.actor_identity());
+                let attachment = session.ja1.as_mut().expect("installed Studio source owner");
+                let _ = attachment.launch_host(project, roots);
+                self.status = attachment.message.clone();
             }
             Err(error) => {
                 if was_legacy {
@@ -975,7 +1023,13 @@ impl KinewrightApp {
         };
         attachment.panel_open = true;
         session.ja1_job = Some(std::thread::spawn(move || {
-            let _ = attachment.apply(action);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = attachment.apply(action);
+            }))
+            .is_err()
+            {
+                attachment.operation_panicked();
+            }
             attachment
         }));
     }
@@ -983,6 +1037,29 @@ impl KinewrightApp {
         let focused = self.focused_project;
         let mut changed = false;
         for (index, session) in self.projects.iter_mut().enumerate() {
+            if session
+                .ja1
+                .as_mut()
+                .is_some_and(crate::ja1_attachment::Ja1Attachment::poll_host)
+            {
+                if index == focused {
+                    self.status = session
+                        .ja1
+                        .as_ref()
+                        .expect("polled attachment")
+                        .message
+                        .clone();
+                    changed = true;
+                }
+                session.install_ja1_view();
+            }
+            if session
+                .ja1
+                .as_ref()
+                .is_some_and(crate::ja1_attachment::Ja1Attachment::host_attached)
+            {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             if session
                 .ja1_job
                 .as_ref()
@@ -1948,7 +2025,13 @@ impl KinewrightApp {
         }
         let closing_focused = index == self.focused_project;
         let next_focus = index_after_close(self.focused_project, index, self.projects.len());
-        self.projects[index].stop_threads("the project was closed");
+        if !self.projects[index].stop_threads("the project was closed") {
+            self.status = self.projects[index].ja1.as_ref().map_or_else(
+                || "Source cleanup is pending. Retry Close.".into(),
+                |attachment| attachment.message.clone(),
+            );
+            return;
+        }
         let name = self.projects[index].name.clone();
         if index == 0 {
             let (first, remaining) = self.projects.split_at_mut(1);
@@ -1989,8 +2072,19 @@ impl KinewrightApp {
             self.pending_project_action = Some(ProjectAction::Exit(self.projects[index].id));
             return;
         }
-        for project in &mut self.projects {
-            project.stop_threads("Kinewright is closing");
+        let mut pending_close = None;
+        for (index, project) in self.projects.iter_mut().enumerate() {
+            if !project.stop_threads("Kinewright is closing") && pending_close.is_none() {
+                pending_close = Some(index);
+            }
+        }
+        if let Some(index) = pending_close {
+            self.focus_project(index);
+            self.status = self.projects[index].ja1.as_ref().map_or_else(
+                || "Source cleanup is pending. Retry Close.".into(),
+                |attachment| attachment.message.clone(),
+            );
+            return;
         }
         self.allow_close = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);

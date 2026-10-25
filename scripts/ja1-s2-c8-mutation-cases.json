@@ -1,0 +1,664 @@
+[
+  {
+    "name": "project_snapshot_growth_omits_actual_delta_charge",
+    "changes": [
+      [
+        "crates/kinewright-project/src/storage_budget.rs",
+        "target_bytes.saturating_sub(self.bytes),",
+        "target_bytes.saturating_sub(target_bytes),"
+      ]
+    ],
+    "witness": "linux::foreground_snapshot_growth_is_exact_at_copy_cap_and_refusal_preserves_charge",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_snapshot_proof_ignores_exact_current_digest",
+    "changes": [
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "if overlap.snapshot.as_ref() != Some(snapshot) {",
+        "if overlap.snapshot.is_none() {"
+      ]
+    ],
+    "witness": "linux::foreground_snapshot_growth_is_exact_at_copy_cap_and_refusal_preserves_charge",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_snapshot_growth_omits_metadata_scratch_admission",
+    "changes": [
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "retained.reads.reserve_snapshot_scratch(encoded_bytes)?",
+        "retained.reads.reserve_snapshot_scratch(0)?"
+      ]
+    ],
+    "witness": "linux::foreground_snapshot_growth_is_exact_at_copy_cap_and_refusal_preserves_charge",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_foreground_cut_skips_owner_snapshot_growth",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "        self.host_cut = Some(cut.clone());\n        self.ensure_host_snapshot(&cut)?;\n        Ok(cut)",
+        "        self.host_cut = Some(cut.clone());\n        Ok(cut)"
+      ]
+    ],
+    "witness": "linux::gui_foreground_cut_grows_its_existing_source_admission_before_first_save",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_originating_close_keeps_old_service_clones_open",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "        for retained in &self.borrowed_sources {\n            retained\n                .accepting_reads\n                .store(false, std::sync::atomic::Ordering::SeqCst);\n        }\n        self.borrowed_sources.clear();",
+        "        for retained in &self.borrowed_sources {\n            retained\n                .accepting_reads\n                .store(true, std::sync::atomic::Ordering::SeqCst);\n        }\n        self.borrowed_sources.clear();"
+      ]
+    ],
+    "witness": "linux::originating_close_fences_service_clones_and_retires_once_after_last_reader",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_reader_drops_actual_snapshot_reservation_before_retirement",
+    "changes": [
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "        Ok(BorrowedSourceLease {\n            reader,\n            _retained: retained,\n        })",
+        "        let lease = BorrowedSourceLease {\n            reader,\n            _retained: retained,\n        };\n        Ok(lease.reader)"
+      ]
+    ],
+    "witness": "linux::originating_close_fences_service_clones_and_retires_once_after_last_reader",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_explicit_close_attempts_cleanup_while_real_reader_is_live",
+    "changes": [
+      [
+        "crates/kinewright-project/src/store.rs",
+        "        if Arc::strong_count(&self.inner) != 1 {\n            return Ok(false);\n        }\n",
+        ""
+      ],
+      [
+        "crates/kinewright-project/src/store.rs",
+        "            if ledger.copy_holds != 0 || ledger.pins.values().any(|n| *n != 0) {\n                return Ok(false);\n            }\n",
+        ""
+      ]
+    ],
+    "witness": "linux::originating_close_fences_service_clones_and_retires_once_after_last_reader",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_failed_cleanup_is_falsely_marked_closed",
+    "changes": [
+      [
+        "crates/kinewright-project/src/store.rs",
+        "            self.with_namespace(ProjectNamespace::cleanup_session)?;",
+        "            let _ = self.with_namespace(ProjectNamespace::cleanup_session);"
+      ],
+      [
+        "crates/kinewright-project/src/store.rs",
+        "            if needs_collection {\n                collect(&self.inner)?;\n            }",
+        "            if needs_collection {\n                let _ = collect(&self.inner);\n            }"
+      ]
+    ],
+    "witness": "linux::explicit_source_close_keeps_failed_cleanup_charged_and_retryable",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_cleanup_reply_retry_unlinks_reused_session_name",
+    "changes": [
+      [
+        "crates/kinewright-project/src/namespace/linux.rs",
+        "    if namespace.session_unlinked {\n        // The original directory was already removed by this owner. Retry only\n        // its durability barrier; never unlink a successor that reused the name.\n        fs::fsync(base)?;\n        namespace.session = None;\n        return Ok(());\n    }",
+        "    if namespace.session_unlinked {\n        // The original directory was already removed by this owner. Retry only\n        // its durability barrier; never unlink a successor that reused the name.\n        fs::unlinkat(base, name, AtFlags::REMOVEDIR)?;\n        fs::fsync(base)?;\n        namespace.session = None;\n        return Ok(());\n    }"
+      ]
+    ],
+    "witness": "linux::close_reply_retry_never_unlinks_successor_temporary_name",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_prepared_actor_resumes_before_old_seal_and_leaks_on_failure",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "        if let Err(error) = self.attachment.seal(cut) {\n            Self::seal_prepared_host_actor(&core, &attachment)?;\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if let Err(error) = attachment.resume(&fresh_cut) {\n            // A is already sealed. Keep its history/source and retire all escaped\n            // prepared B clones rather than leaving a second usable actor.\n            Self::seal_prepared_host_actor(&core, &attachment)?;\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if kind == HostActivationKind::Rescue {",
+        "        if let Err(error) = attachment.resume(&fresh_cut) {\n            Self::seal_prepared_host_actor(&core, &attachment)?;\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if let Err(error) = self.attachment.seal(cut) {\n            self.host_lost()?;\n            return Err(crate::bundle::history_error(error));\n        }\n        if kind == HostActivationKind::Rescue {"
+      ]
+    ],
+    "witness": "linux::failed_old_cut_seal_retires_escaped_prepared_actor_and_keeps_gui_source",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_failed_prepared_view_cleanup_resumes_candidate",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "    fn seal_prepared_host_actor(\n        core: &Core,\n        attachment: &ProjectAttachment,\n    ) -> Result<(), BundleError> {\n        if core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            == kinewright_core::AttachmentState::Sealed\n        {\n            return Ok(());\n        }\n        let current = attachment.freeze().map_err(crate::bundle::history_error)?;\n        attachment\n            .seal(&current)\n            .map_err(crate::bundle::history_error)\n    }",
+        "    fn seal_prepared_host_actor(\n        core: &Core,\n        attachment: &ProjectAttachment,\n    ) -> Result<(), BundleError> {\n        if core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            == kinewright_core::AttachmentState::Sealed\n        {\n            return Ok(());\n        }\n        let current = attachment.freeze().map_err(crate::bundle::history_error)?;\n        attachment\n            .resume(&current)\n            .map_err(crate::bundle::history_error)\n    }"
+      ]
+    ],
+    "witness": "linux::remote_activation_prepares_fresh_actor_before_exact_old_seal",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_publication_reply_reads_live_actor_after_io",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "        let history = bundle\n            .store\n            .read_copy_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref, true)?;\n        Ok((*history).clone())",
+        "        let history = bundle\n            .store\n            .read_copy_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref, true)?;\n        drop(history);\n        self.core.export_history().map_err(crate::bundle::history_error)"
+      ]
+    ],
+    "witness": "linux::publisher_history_matches_exact_report_and_ignores_later_actor_edits",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_publisher_report_ignores_exact_head_identity",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "            || report.head_id != checkpoint.head_id",
+        "            || false"
+      ]
+    ],
+    "witness": "linux::publisher_history_matches_exact_report_and_ignores_later_actor_edits",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_save_as_reopens_path_instead_of_consuming_inspection",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "        let (mut target, before, prepared) = if let Some(inspection) = inspection {\n            ProjectStore::revalidate_rescue_destination(inspection, &[&self.store])?;\n            destination_admitted(path, limits, Some(inspection), &mut || {\n                ProjectStore::inspect_borrowed_destination(inspection.path(), &[&self.store])?;\n                Ok(())\n            })?\n        } else {\n            destination(path, limits)?\n        };",
+        "        let (mut target, before, prepared) = destination(path, limits)?;"
+      ]
+    ],
+    "witness": "linux::pinned_save_as_rejects_replaced_inspected_parent_before_target_mutation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_selection_discards_actual_preliminary_save_report",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "                saved.map(|report| {\n                    self.preliminary_save = Some(super::PreliminarySave {\n                        report,\n                        branch,\n                        pending: true,\n                    });\n                })",
+        "                saved.map(|report| drop((report, branch)))"
+      ]
+    ],
+    "witness": "linux::preliminary_save_report_survives_selection_refusal_unknown_and_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_preliminary_report_uses_active_r_instead_of_surviving_l",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "            let checkpoint = bundle.checkpoint(&saved.branch)?;",
+        "            let _saved_branch = &saved.branch;\n            let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;"
+      ]
+    ],
+    "witness": "linux::preliminary_save_report_survives_selection_refusal_unknown_and_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_selection_discards_committed_preliminary_reconciliation_report",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "                self.preliminary_save = Some(super::PreliminarySave {\n                    report,\n                    branch,\n                    pending: true,\n                });",
+        "                drop((report, branch));"
+      ]
+    ],
+    "witness": "linux::preliminary_reconciliation_report_is_publisher_derived_and_delivered_once",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_l2_action_gate_omitted_for_lost_retention",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "    fn require_retention(&self) -> Result<(), BundleError> {\n        if self.retention_lost {\n            return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));\n        }\n        Ok(())\n    }",
+        "    fn require_retention(&self) -> Result<(), BundleError> {\n        Ok(())\n    }"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_retention_loss_fences_every_action_and_keeps_actual_source_until_close",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_failed_host_launch_implicitly_closes_originating_source",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "            Err(error) => {\n                self.operation_panicked();\n                self.message.push_str(\" Host attachment failed: \");\n                self.message.push_str(&error.to_string());\n                Err(error)\n            }",
+        "            Err(error) => {\n                self.operation_panicked();\n                let _ = self.owner.close_originating_source();\n                self.message.push_str(\" Host attachment failed: \");\n                self.message.push_str(&error.to_string());\n                Err(error)\n            }"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_failed_host_launch_keeps_source_and_requires_explicit_close",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_host_disconnect_implicitly_closes_gui_source",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "        match result {\n            Ok(reply) => self.accept_host_reply(reply),\n            Err(error) => {\n                self.operation_panicked();\n                Err(error)\n            }\n        }\n    }\n\n    fn accept_host_reply(",
+        "        match result {\n            Ok(reply) => self.accept_host_reply(reply),\n            Err(error) => {\n                self.operation_panicked();\n                let _ = self.owner.close_originating_source();\n                Err(error)\n            }\n        }\n    }\n\n    fn accept_host_reply("
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_ordinary_publisher_floor_uses_fresh_actor_activation",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "            } else {\n                if let Err(error) = self.owner.complete_host_cut(cut, reply.history, digest) {\n                    self.operation_panicked();\n                    return Err(error);\n                }\n                self.view = Some(PreparedView::prepare(self.owner.core())?);\n            }",
+        "            } else {\n                let history = reply.history.ok_or(BundleError::HistoryBarrierInvariant)?;\n                let publisher_digest = digest.ok_or(BundleError::HistoryBarrierInvariant)?;\n                let mut prepared = None;\n                if let Err(error) = self.owner.activate_host_cut(\n                    cut,\n                    history,\n                    publisher_digest,\n                    kinewright_project::editing_session::HostActivationKind::Recovery,\n                    |core| {\n                        prepared = Some(PreparedView::prepare(core)?);\n                        Ok(())\n                    },\n                ) {\n                    self.operation_panicked();\n                    return Err(error);\n                }\n                self.view = prepared;\n            }"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_actor",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_recovery_activation_retains_hidden_rescue_actor",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "                    kinewright_agent::writer_host::HostActivationKind::Recovery => {\n                        kinewright_project::editing_session::HostActivationKind::Recovery\n                    }",
+        "                    kinewright_agent::writer_host::HostActivationKind::Recovery => {\n                        kinewright_project::editing_session::HostActivationKind::Rescue\n                    }"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_actor",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_publisher_digest_replaced_by_post_io_live_core_digest",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "            let digest = reply\n                .saved\n                .as_ref()\n                .map(|report| report.history_sha256.as_str());",
+        "            let live_history = self.owner.core().export_history()\n                .map_err(|error| BundleError::Corrupt(error.to_string()))?;\n            let live_digest = kinewright_media::sha256_bytes(\n                &serde_json::to_vec(&live_history)\n                    .map_err(|error| BundleError::Corrupt(error.to_string()))?,\n            );\n            let digest = reply.saved.as_ref().map(|_| live_digest.as_str());"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_actor",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_committed_activation_rejects_matching_publisher_digest",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "                let Some(digest) = digest.filter(|digest| *digest == activation.history_sha256)\n",
+        "                let Some(digest) = digest.filter(|digest| *digest != activation.history_sha256)\n"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_actor",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_person_picked_destination_skips_explicit_host_grant",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "                self.client\n                    .admit_destination(destination)\n                    .map_err(host_error)?",
+        "                let _ = destination;\n                self.client.clone()"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_authority",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app_person_picked_destination_discards_granted_forwarded_scope",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "                self.client\n                    .admit_destination(destination)\n                    .map_err(host_error)?",
+        "                let _ = self.client\n                    .admit_destination(destination)\n                    .map_err(host_error)?;\n                self.client.clone()"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_authority",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_source_read_chunk_bound_omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "if buffer.len() > SOURCE_READ_CHUNK_BYTES || offset > object.byte_length {",
+        "if offset > object.byte_length {"
+      ]
+    ],
+    "witness": "linux::borrowed_source_identity_range_and_stream_digest_are_verified",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "project_source_open_ignores_exact_admitted_descriptor",
+    "changes": [
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "    pub fn open_borrowed_source(\n        &self,\n        source: &BorrowedSourceDescriptor,\n        object: &ObjectRef,\n    ) -> Result<impl Read + Seek + use<>, BundleError> {\n        let retained = self\n            .retained\n            .upgrade()\n            .filter(|r| r.accepting_reads.load(Ordering::SeqCst) && r.descriptor == *source)\n",
+        "    pub fn open_borrowed_source(\n        &self,\n        source: &BorrowedSourceDescriptor,\n        object: &ObjectRef,\n    ) -> Result<impl Read + Seek + use<>, BundleError> {\n        let retained = self\n            .retained\n            .upgrade()\n            .filter(|r| r.accepting_reads.load(Ordering::SeqCst))\n"
+      ]
+    ],
+    "witness": "linux::borrowed_source_identity_range_and_stream_digest_are_verified",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_source_boundary",
+    "features": "test-util",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "host_snapshot_digest_guard_omitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "        snapshot.verify()?;",
+        "        let _ = &snapshot;"
+      ]
+    ],
+    "witness": "writer_host::tests::snapshot_digest_refusal_precedes_any_owner_install",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "claude_child_authorization_value_omitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/drivers.rs",
+        "        command.env(CLAUDE_HOST_AUTHORIZATION_ENV, bootstrap.auth.bearer());",
+        "        command.env(CLAUDE_HOST_AUTHORIZATION_ENV, \"\");"
+      ]
+    ],
+    "witness": "drivers::tests::claude_host_auth_uses_only_child_environment_and_redacts_debug",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "gui-bootstrap-initial-shadow-snapshot-omitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "            host.install(initial_snapshot)?;",
+        "            let _ = initial_snapshot;"
+      ]
+    ],
+    "witness": "host_failure_preserves_originating_context_or_refuses_recovery",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "environment": {
+      "JA_C8_HOST_FAILURE_CASE": "orderly"
+    },
+    "red_text": "host bootstrap must preserve the exact GUI history before first Save"
+  },
+  {
+    "name": "named-gui-shadow-snapshot-install-omitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "            owner.install_host_snapshot(snapshot.history)?;",
+        "            let _ = snapshot.history;"
+      ]
+    ],
+    "witness": "host_failure_preserves_originating_context_or_refuses_recovery",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "environment": {
+      "JA_C8_HOST_FAILURE_CASE": "orderly"
+    },
+    "red_text": "named handover must seed the unsaved GUI snapshot instead of the older checkpoint"
+  },
+  {
+    "name": "app-bootstrap-replaces-frozen-gui-history-with-empty-core",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "                    initial_snapshot: HostSnapshot::from_history(transfer.history)\n                        .map_err(host_error)?,",
+        "                    initial_snapshot: HostSnapshot::capture(\n                        &kinewright_core::Core::spawn(kinewright_core::Document::default())\n                            .map_err(|error| BundleError::Corrupt(error.to_string()))?,\n                    ).map_err(host_error)?,"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": "the exact GUI snapshot must reach the shipping host bootstrap"
+  },
+  {
+    "name": "app-orderly-host-close-does-not-reap-child",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "            let deadline = Instant::now() + Duration::from_secs(5);\n            loop {\n                match child.try_wait() {\n                    Ok(Some(_)) => break,\n                    Ok(None) if Instant::now() < deadline => {\n                        std::thread::park_timeout(Duration::from_millis(5));\n                    }\n                    Ok(None) | Err(_) => {\n                        let _ = child.kill();\n                        let _ = child.wait();\n                        break;\n                    }\n                }\n            }",
+        "            let _ = child;"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": "orderly host exit must reap its actual child, including a zombie"
+  },
+  {
+    "name": "root-header-unicode-escaping-omitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "        Ok(encoded)\n    }",
+        "        Ok(json)\n    }"
+      ]
+    ],
+    "witness": "stdio_proxy_preserves_auth_roots_and_protocol_stdout",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "environment": {},
+    "red_text": "stdio process failed"
+  },
+  {
+    "name": "root-header-path-expands-child-environment",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "byte.is_ascii() && byte != b'$'",
+        "byte.is_ascii()"
+      ]
+    ],
+    "witness": "drivers::tests::claude_host_auth_uses_only_child_environment_and_redacts_debug",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "environment": {},
+    "red_text": "path text cannot expand child credentials"
+  }
+]

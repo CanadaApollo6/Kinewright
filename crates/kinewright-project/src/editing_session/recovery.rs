@@ -1,8 +1,8 @@
 //! Local Save-then-select and explicit, owner-serialized retirement.
 use super::{
     ActiveAssociation, BundleError, BundleSaveReport, BundleWriteAdmission, CopyStatus,
-    Ja1EditingSession, ObjectRef, Path, ProjectBundle, PublicationState, RetainedDestination,
-    StorageLimits,
+    DestinationInspection, Ja1EditingSession, ObjectRef, Path, ProjectBundle, PublicationState,
+    RetainedDestination, StorageLimits,
 };
 use crate::{
     bundle_commit::BundleCommit,
@@ -13,6 +13,17 @@ use crate::{
 use kinewright_core::AttachmentState;
 
 impl Ja1EditingSession {
+    /// Deliver the actual preceding ordinary Save once, including when the
+    /// subsequent selection refused, remained unknown or activated another branch.
+    /// Keep its bounded identity for `published_history` to read durable L afterward.
+    pub fn take_preliminary_save_report(&mut self) -> Option<BundleSaveReport> {
+        let saved = self.preliminary_save.as_mut()?;
+        if !saved.pending {
+            return None;
+        }
+        saved.pending = false;
+        Some(saved.report.clone())
+    }
     pub(super) fn active_bundle(&self) -> Result<&ProjectBundle, BundleError> {
         self.destination
             .as_ref()
@@ -20,6 +31,7 @@ impl Ja1EditingSession {
             .bundle()
     }
     pub(super) fn active_bundle_mut(&mut self) -> Result<&mut ProjectBundle, BundleError> {
+        self.require_local_writer()?;
         self.destination
             .as_mut()
             .ok_or(BundleError::Unsettled)?
@@ -46,6 +58,7 @@ impl Ja1EditingSession {
                 .prepare_project_selection(&self.core, target)?,
         );
         self.selection_result = None;
+        self.preliminary_save = None;
         Ok(())
     }
     /// Duplicate/lost replies keep the same preparation, R identity and target pin.
@@ -94,6 +107,10 @@ impl Ja1EditingSession {
         }
         result
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one ordered preliminary publication, reconciliation and selection retains exact cuts and report disposition"
+    )]
     fn select_local_prepared(
         &mut self,
         prepared: &mut PreparedProjectSelection,
@@ -107,7 +124,8 @@ impl Ja1EditingSession {
         }
         let result = (|| {
             if self.recovery_save_pending {
-                self.reconcile_active()?;
+                let branch = self.active_bundle()?.manual_branch_id().clone();
+                let reconciled = self.reconcile_active()?;
                 self.recovery_save_pending = false;
                 if self.active_bundle()?.publication_state() != PublicationState::Committed {
                     let cut = self
@@ -119,12 +137,13 @@ impl Ja1EditingSession {
                         .map_err(crate::bundle::history_error)?;
                     return Err(BundleError::HistoryChanged);
                 }
-                let saved = self
-                    .active_bundle()?
-                    .checkpoint(self.active_bundle()?.manual_branch_id())?
-                    .history_ref
-                    .sha256
-                    .clone();
+                let report = reconciled.ok_or(BundleError::HistoryBarrierInvariant)?;
+                let saved = report.history_sha256.clone();
+                self.preliminary_save = Some(super::PreliminarySave {
+                    report,
+                    branch,
+                    pending: true,
+                });
                 self.association
                     .as_mut()
                     .ok_or(BundleError::Unsettled)?
@@ -137,9 +156,15 @@ impl Ja1EditingSession {
             let save = if self.dirty()? {
                 let core = self.core.clone();
                 let inputs = self.inputs.clone();
-                self.active_bundle_mut()?
-                    .save_frozen(&core, &inputs, &cut)
-                    .map(|_| ())
+                let branch = self.active_bundle()?.manual_branch_id().clone();
+                let saved = self.active_bundle_mut()?.save_frozen(&core, &inputs, &cut);
+                saved.map(|report| {
+                    self.preliminary_save = Some(super::PreliminarySave {
+                        report,
+                        branch,
+                        pending: true,
+                    });
+                })
             } else {
                 Ok(())
             };
@@ -301,13 +326,33 @@ impl Ja1EditingSession {
         path: &Path,
         limits: StorageLimits,
     ) -> Result<CopyStatus, BundleError> {
+        self.save_as_with_admission(path, limits, None)
+    }
+    pub fn save_as_admitted(
+        &mut self,
+        inspection: &DestinationInspection,
+        limits: StorageLimits,
+    ) -> Result<CopyStatus, BundleError> {
+        self.save_as_with_admission(inspection.path(), limits, Some(inspection))
+    }
+    fn save_as_with_admission(
+        &mut self,
+        path: &Path,
+        limits: StorageLimits,
+        inspection: Option<&DestinationInspection>,
+    ) -> Result<CopyStatus, BundleError> {
+        self.require_local_writer()?;
         self.check_destination_change()?;
         if self.dirty()? {
             self.save_active()?;
         }
-        let outcome = self
-            .active_bundle_mut()?
-            .save_as_with_limits(path, limits)?;
+        let outcome = if let Some(inspection) = inspection {
+            self.active_bundle_mut()?
+                .save_as_admitted(inspection, limits)?
+        } else {
+            self.active_bundle_mut()?
+                .save_as_with_limits(path, limits)?
+        };
         match outcome {
             crate::bundle_copy::SaveAsOutcome::SameProject(mut report) => {
                 self.set_path_spelling(path);

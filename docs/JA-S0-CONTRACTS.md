@@ -412,6 +412,23 @@ context, shared by agent/headless entry points. The originating session runs fro
 through explicit Close or exit; rescue handoffs and ordinary focus/project switches do not
 end it or reset its slots. Closing a destination status view is not session teardown.
 
+C8 splits that lifecycle by physical ownership as specified in JA-1's "C8 process
+ownership and retention" contract. The GUI keeps its actual temporary root and
+`SessionStore`, source holds, complete-closure pins, reader leases, reservations, and
+the source store's single `StorageUsage` owner. The host owns named destination stores
+and receives bounded authenticated source-read descriptors. A borrowed host descriptor
+cannot own a source namespace, delete bytes, unpin objects, release charges, or send an
+implicit Close on Drop, disconnect, orderly exit, or unwind. Named-source holds stay
+with their host-owned named store. Distinct destination copies retain distinct charges.
+
+Unproved retention after replacement refuses all saves and rescue, including fresh-path
+first Save and Save As. IDs and a reacquired lock do not establish retention. The GUI
+keeps its edits, query and history export, actual source bytes, and charges, and says
+that retained data was not re-established. Only explicit context Close ends retention.
+Close first fences requests and drains readers. The actual owner then retires each
+hold and charge once through the existing cleanup path. Outstanding readers delay
+retirement. Failed cleanup remains charged and retryable under that same owner.
+
 An unnamed edit has one session owner with an exclusive temporary root, pinned handles and
 session/epoch-scoped authority. It uses the same reserve/write/seal/pin/retire primitives,
 validation and object/byte limits as the named store. Bound temporary objects, staging and

@@ -195,6 +195,45 @@ file identity before removing discovery. Missing discovery never permits takeove
 of a held lock. C7 supplies local participants only; host activation and transport
 remain C8. Native Windows Studio durability remains unsupported.
 
+### C8 process ownership and retention
+
+The originating GUI owns its temporary root, `SessionStore`, source `ProjectStore`,
+`SourceCopyHold`s, complete-closure `StorePin`s, reader leases, and source reservations.
+That physical source store has one `StorageUsage` owner in the GUI. These actual
+objects remain there through focus changes, attachment changes, and host replacement.
+Host source descriptors authorize bounded verified reads through the authenticated
+attachment. They carry no cleanup, unpin, reservation-release, or Close authority.
+Dropping a host source handle, disconnecting, orderly host exit, and panic unwinding
+cannot delete or uncharge the GUI source. An accounting snapshot cannot retire it.
+
+The host owns each named destination's `ProjectBundle`, namespace, lock, ancestor
+claim, store, pins, and accounting. Each named physical store has one owner and ledger.
+A named-source hold stays with that host store. Changing writer authority fences and
+drains the previous writer, preserves the actual source holds, and validates the exact
+checkpoint after the destination lock handover. No source ledger moves across IPC.
+The GUI retains its manual and sealed actors. The host owns its agent sessions and
+the one validation shadow. GUI detach closes only the attachment.
+The private GUI bootstrap carries its exact frozen history snapshot. Before serving
+sessions, the host validates that snapshot and its admitted source overlap, then seeds
+the shadow from it, including unsaved history and Redo. This initialization publishes
+nothing and cannot mark edits Saved; only the publisher's actual result does that.
+
+When a replacement cannot re-establish exact retained ownership, every save and rescue
+request refuses, including first Save and Save As to fresh destinations. A session ID,
+remote handle, PID, or reacquired writer lock is insufficient evidence. The surviving
+GUI freezes producers and preserves all histories, temporary bytes, pins, and charges.
+Queries and history export remain available. The person sees: "The host could not
+re-establish this session's retained data. Your edits remain here. Saving and rescue
+are paused, including saving elsewhere. Close this editing context explicitly to end it."
+
+Explicit context Close fences requests and drains readers. Only the owning process
+retires its actual holds through the existing collector and namespace cleanup. Repeated
+Close, a lost reply, or reader retirement releases each pin and reservation at most once.
+Failed cleanup stays charged and retryable with that owner. Host Drop never means GUI
+Close. A headless-only context has its originating source owner in the host and has no
+surviving GUI after host death. C8 and C12 reports separate kill, orderly-exit, and caught
+panic-unwind evidence from native Windows and physical-storage acceptance.
+
 ### 5.1 A fenced local manual Core
 
 The host holds the project OS lock and pinned store/root handles. Acquire it on Studio activation before authorizing any writer. A legacy GUI checkpoints

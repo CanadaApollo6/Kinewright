@@ -111,6 +111,7 @@ pub enum Call {
     AdapterStatus(Empty),
     S2SavePhaseProbe(Empty),
     S2WriterIdentityProbe(Empty),
+    S2HostAuthProbe(Empty),
     S2CoreSealProbe(Empty),
     S2RescueSourceProbe(Empty),
     S2RescueSlotsProbe(Empty),

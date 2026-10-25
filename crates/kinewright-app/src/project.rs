@@ -499,7 +499,7 @@ impl ProjectSession {
             return true;
         }
         if let Some(ja1) = &self.ja1 {
-            return ja1.owner.dirty().unwrap_or(true);
+            return ja1.is_dirty();
         }
         self.document_dirty()
             || self
@@ -598,7 +598,7 @@ impl ProjectSession {
             *slot = self.project_path.as_ref().map(|display| {
                 self.ja1
                     .as_ref()
-                    .and_then(|ja1| ja1.owner.store().ok()?.resolved_root().ok())
+                    .and_then(crate::ja1_attachment::Ja1Attachment::named_io_root)
                     .or_else(|| {
                         self.sidecar
                             .authority
@@ -706,6 +706,16 @@ impl ProjectSession {
                 .as_ref()
                 .is_some_and(crate::ja1_attachment::Ja1Attachment::read_only)
     }
+    pub(crate) fn studio_host_managed(&self) -> bool {
+        self.ja1
+            .as_ref()
+            .is_some_and(crate::ja1_attachment::Ja1Attachment::host_managed)
+    }
+
+    pub(crate) fn studio_host_client(&self) -> Option<kinewright_agent::writer_host::HostClient> {
+        self.ja1.as_ref()?.host_client()
+    }
+
     pub(crate) fn ja1_close_warning(&self) -> String {
         self.ja1
             .as_ref()
@@ -726,15 +736,19 @@ impl ProjectSession {
             self.document = view.document;
             self.revision = view.revision;
         }
-        self.project_path = ja1.owner.association().map(|a| a.path().to_path_buf());
-        if !ja1.owner.dirty().unwrap_or(true) {
+        self.project_path = ja1.project_path();
+        if !ja1.is_dirty() {
             self.saved_document = Some(Arc::clone(&self.document));
         }
         self.reconcile_source_state();
         self.publish_project_path_to_agents();
     }
 
-    pub(crate) fn stop_threads(&mut self, reason: &str) {
+    pub(crate) fn stop_threads(&mut self, reason: &str) -> bool {
+        let source_closed = self
+            .ja1
+            .as_mut()
+            .is_none_or(crate::ja1_attachment::Ja1Attachment::close);
         // Cloned before the investigator borrow: `incidents` now resolves
         // through the sidecar deref, which borrows the whole session.
         let incidents = std::sync::Arc::clone(&self.incidents);
@@ -758,6 +772,7 @@ impl ProjectSession {
             ));
         }
         for thread in &mut self.threads {
+            thread.host_chat = None;
             if let Some(session) = &mut thread.session {
                 session.interrupt();
             }
@@ -774,6 +789,7 @@ impl ProjectSession {
         }
         self.recovery.close();
         self.sidecar.authority = None;
+        source_closed
     }
 }
 

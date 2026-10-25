@@ -18,6 +18,14 @@ pub(super) fn inspect_rescue_destination(
     path: &Path,
     sources: &[&ProjectNamespace],
 ) -> Result<super::DestinationInspection, BundleError> {
+    inspect_copy_destination(path, sources, true)
+}
+
+pub(super) fn inspect_copy_destination(
+    path: &Path,
+    sources: &[&ProjectNamespace],
+    fresh: bool,
+) -> Result<super::DestinationInspection, BundleError> {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -42,7 +50,10 @@ pub(super) fn inspect_rescue_destination(
         .ok_or_else(|| BundleError::Identity("rescue filename".into()))?
         .to_os_string();
     assets.push(".kinewright-assets");
-    for candidate in [path.clone(), path.with_file_name(assets)] {
+    for candidate in [path.clone(), path.with_file_name(assets)]
+        .into_iter()
+        .filter(|_| fresh)
+    {
         match std::fs::symlink_metadata(candidate) {
             Ok(_) => return Err(BundleError::Identity("occupied rescue destination".into())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -458,6 +469,7 @@ pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
         },
         parent,
         session: None,
+        session_unlinked: false,
         probe_failure: std::cell::RefCell::default(),
         root_name,
         lock: None,
@@ -1140,12 +1152,20 @@ pub(super) fn create_session(
         uncertain: false,
         read_only: false,
         session: Some((base, name)),
+        session_unlinked: false,
     })
 }
 pub(super) fn cleanup_session(namespace: &mut ProjectNamespace) -> Result<(), BundleError> {
     let Some((base, name)) = namespace.session.as_ref() else {
         return Ok(());
     };
+    if namespace.session_unlinked {
+        // The original directory was already removed by this owner. Retry only
+        // its durability barrier; never unlink a successor that reused the name.
+        fs::fsync(base)?;
+        namespace.session = None;
+        return Ok(());
+    }
     if namespace.uncertain {
         return Err(BundleError::Unsettled);
     }
@@ -1174,6 +1194,12 @@ pub(super) fn cleanup_session(namespace: &mut ProjectNamespace) -> Result<(), Bu
     }
     fs::fsync(&namespace.parent)?;
     fs::unlinkat(base, name, AtFlags::REMOVEDIR)?;
+    namespace.session_unlinked = true;
+    #[cfg(any(test, feature = "test-util"))]
+    crate::io_observer::check_failure(
+        "session_cleanup_base_sync",
+        &namespace.identity.resolved_root,
+    )?;
     fs::fsync(base)?;
     namespace.session = None;
     Ok(())

@@ -16,6 +16,7 @@ pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};
 pub mod owned_inputs;
 pub mod receipts;
+pub mod source_boundary;
 pub mod storage_budget;
 pub mod store;
 

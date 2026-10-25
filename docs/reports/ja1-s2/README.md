@@ -453,3 +453,57 @@ are **NOT RUN**. No normative contract/fixture change or new S0 flip; 98 JA file
 `0ce9124`. N2 remains deferred to C12; no C8 work. The report records the existing-lockfile
 Windows dependency, corrected test cfg, copy-marker retry and preserved acquisition
 snapshot. The final gate uses final source; only delivery notes follow verification.
+
+## C8 retained-source writer host
+
+[C8 report](c8.md) and [rerunnable gate](c8-gate.sh): one local C8 commit on exact
+parent `3bd1266`, branch `ja1/s2`, no push or independent review round. The shipping
+no-default host owns named destinations and sessions; the originating GUI keeps its
+actual temporary bytes, holds, readers, pins and single source ledger. Unproved
+replacement retention fences all saves and rescue, including fresh destinations,
+until explicit Close. No C9 stream, C10 barrier, C11 switch protocol or C12 composed
+witness is implemented.
+
+Final Linux: **83 passing command rows; 36 nonempty selections; 780 expected = selected,
+760 executed passes, 20 existing ignored outcomes**. Complete workspace fast ran once
+with `--no-fail-fast`: **3,988 passed, 0 failed, 107 ignored**, 56 raw summaries, empty
+failure list, strict verifier passed. Both affected slow stress selectors and the whole
+unfiltered `mcp_server` binary pass. **50 runtime mutation red/restored-green pairs**
+cover 19 Project, 20 Agent/host and 11 App cases; separate orderly/unwind Drop cases
+prove forbidden source deletion and real reservation uncharge. All source restores
+match delivered bytes. The additive S0 fixture is pending → revised-pass; 97 old
+files are byte-identical and every old index entry remains.
+
+Paired save-cost means, five alternating runs/60 saves per source: pristine
+`3bd1266` **231.383 ms/save**, C8 **228.513 ms/save** (0.9876×), zero history decodes,
+successful commit/reopen. Lane ranges overlap; this is a descriptive test/debug
+publisher measurement, without a causal speedup claim. No unrelated process exceeded
+20% CPU in the recorder's five-second samples. Raw evidence and final source/commit
+bindings are under `.review/ja/s2-evidence/c8/`.
+
+Tracked lifecycle contracts: `docs/JA1-STUDIO-ORCHESTRATION.md:198`,
+`docs/JA-S0-CONTRACTS.md:415`, `docs/JA-S0-AMENDMENT-A1.md:441`. Integration details
+and deviations are documented with witnesses in the report:
+
+- `writer_host/mod.rs:1078`: the exact private GUI bootstrap snapshot seeds the host
+  shadow, including unsaved edits/Redo, without changing the actual Saved identity.
+- `writer_host/auth.rs:66`: ASCII JSON encodes Unicode roots and escapes `$` in literal
+  paths. Real stdio/ScriptedDriver tests use Japanese/emoji directories; protected
+  Claude configuration keeps bearer values only in the child environment.
+- `server.rs:1316`, `acp_session.rs:318`: unpinned host file/media operations and
+  connectors without authenticated inline MCP headers refuse explicitly. Actual
+  provider acceptance is NOT RUN; current media functionality is limited accordingly.
+- `editing_session.rs:615`: fresh B resume can fail after A is sealed, leaving the
+  context fail-closed. No infallible switch tail is claimed; original S2-R N2 remains
+  deferred to C12. `namespace/linux.rs:1162` makes source cleanup retry safe after unlink.
+- `.github/workflows/ci.yml:112`: the explicit no-default host link joins C1's Windows
+  timing JSON; LASTEXITCODE checks and 60-minute timeout remain. Estimated added work
+  is **2–5 minutes**, projecting **49.6–52.6 minutes** from the green 47.6-minute parent.
+  The lead evaluates actual C8 CI timing.
+
+Installed MSVC checks were attempted for Project, Agent and App, all **BLOCKED** in
+existing native prerequisites before C8 Rust compilation. Native Windows, exact-C8
+hosted CI, full slow tier, actual providers/G6, interactive GUI and physical faults
+remain **NOT RUN**. Earlier weak mutation survivors, runtime development reds and the
+partial gate are retained and excluded from final acceptance. Only report/index
+delivery notes follow the source-frozen final gate.

@@ -1,4 +1,4 @@
-//! Local S2-R controls. The originating owner moves into each finite background operation.
+//! Studio controls. The GUI keeps its originating source and manual actors until explicit Close.
 use eframe::egui;
 use kinewright_core::{
     AttachmentState, Command, Core, Document, Event, Query, QueryResult, TimelineRevision,
@@ -14,6 +14,8 @@ use kinewright_project::{
     storage_budget::StorageLimits,
 };
 use std::fmt::Write as _;
+#[path = "ja1_host.rs"]
+mod host;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -101,6 +103,16 @@ pub(crate) struct Ja1Attachment {
     destinations: Vec<(PathBuf, PublicationState)>,
     frozen: bool,
     pub panel_open: bool,
+    retention_lost: bool,
+    originating_context: Arc<std::sync::atomic::AtomicBool>,
+    host: Option<host::HostAttachment>,
+    host_history_digest: std::cell::RefCell<
+        Option<(
+            kinewright_core::ActorIdentity,
+            kinewright_core::HistoryChangeId,
+            String,
+        )>,
+    >,
     known_agent_effects: std::collections::BTreeSet<PathBuf>,
     save_disclosure: String,
     #[cfg(test)]
@@ -130,6 +142,10 @@ impl Ja1Attachment {
             destinations: vec![],
             frozen: false,
             panel_open: true,
+            retention_lost: false,
+            originating_context: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            host: None,
+            host_history_digest: std::cell::RefCell::new(None),
             known_agent_effects: std::collections::BTreeSet::new(),
             save_disclosure: String::new(),
             #[cfg(test)]
@@ -145,6 +161,9 @@ impl Ja1Attachment {
         Ok(this)
     }
     fn refresh(&mut self) {
+        if self.host.is_some() || self.retention_lost {
+            return;
+        }
         self.frozen = self.owner.core().attachment_state() != Ok(AttachmentState::Live);
         self.points = self.owner.list_recovery_points().unwrap_or_default();
         self.branches = self
@@ -157,10 +176,74 @@ impl Ja1Attachment {
         self.candidates = self.owner.retirement_candidates().unwrap_or_default();
         self.destinations = self.owner.retained_destinations().unwrap_or_default();
     }
+    pub fn is_dirty(&self) -> bool {
+        if self.retention_lost {
+            return true;
+        }
+        if let Some(host) = &self.host {
+            let Some(saved) = &host.status.saved_digest else {
+                return true;
+            };
+            let core = self.owner.core();
+            let Ok(change) = core.history_change_id() else {
+                return true;
+            };
+            if let Some((actor, cached, digest)) = &*self.host_history_digest.borrow()
+                && *actor == core.actor_identity()
+                && *cached == change
+            {
+                return digest != saved;
+            }
+            let Ok((identified, history)) = core.export_history_identified() else {
+                return true;
+            };
+            let Ok(bytes) = serde_json::to_vec(&history) else {
+                return true;
+            };
+            let digest = kinewright_media::sha256_bytes(&bytes);
+            let dirty = &digest != saved;
+            *self.host_history_digest.borrow_mut() =
+                Some((core.actor_identity(), identified, digest));
+            return dirty;
+        }
+        self.owner.dirty().unwrap_or(true)
+    }
+
+    pub fn project_path(&self) -> Option<PathBuf> {
+        if let Some(host) = &self.host {
+            return host.status.association.clone();
+        }
+        self.owner
+            .association()
+            .map(|association| association.path().to_path_buf())
+    }
+
+    pub fn named_io_root(&self) -> Option<PathBuf> {
+        if self.host.is_some() {
+            return None;
+        }
+        self.owner.store().ok()?.resolved_root().ok()
+    }
+
     pub fn destination_change(&self) -> Result<(), BundleError> {
+        self.require_retention()?;
+        if let Some(host) = &self.host {
+            if let Some(disclosure) = &host.status.destination_change {
+                return Err(BundleError::Identity(disclosure.clone()));
+            }
+            return Ok(());
+        }
         self.owner.check_destination_change()
     }
     pub fn close_text(&self) -> String {
+        if self.retention_lost {
+            return format!(
+                "{RETENTION_LOST_TEXT} Closing can discard the only accessible copy of your unsaved work."
+            );
+        }
+        if let Some(host) = &self.host {
+            return host.status.close_disclosure.clone();
+        }
         let mut text = self.owner.close_disclosure().unwrap_or_else(|e| format!("Could not verify this project's state: {e}. Closing can discard work still held only in this session."));
         if !self.destinations.is_empty() {
             text.push_str(" Closing ends retention of the original session, including unknown destinations; it does not prove that they never saved.");
@@ -168,9 +251,19 @@ impl Ja1Attachment {
         text
     }
     pub fn read_only(&self) -> bool {
-        self.frozen || self.choice.is_some()
+        self.retention_lost
+            || self
+                .host
+                .as_ref()
+                .is_some_and(host::HostAttachment::read_only)
+            || self.frozen
+            || self.choice.is_some()
     }
     pub fn apply(&mut self, action: Action) -> Result<(), BundleError> {
+        self.require_retention()?;
+        if self.host.is_some() {
+            return self.apply_host(action);
+        }
         let result = self.apply_inner(action);
         if let Err(error) = &result {
             self.message = match error {
@@ -206,6 +299,239 @@ impl Ja1Attachment {
         self.refresh();
         result
     }
+    fn require_retention(&self) -> Result<(), BundleError> {
+        if self.retention_lost {
+            return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
+        }
+        Ok(())
+    }
+
+    pub fn operation_panicked(&mut self) {
+        // The catch surrounds the borrowed operation: unwind cannot drop this owner.
+        let _ = self.owner.host_lost();
+        self.retention_lost = true;
+        self.frozen = true;
+        self.choice = None;
+        self.message = RETENTION_LOST_TEXT.into();
+        self.panel_open = true;
+    }
+
+    pub fn launch_host(
+        &mut self,
+        project: String,
+        roots: kinewright_agent::writer_host::SessionRoots,
+    ) -> Result<(), BundleError> {
+        self.launch_host_at(&host::executable(), project, roots)
+    }
+
+    fn launch_host_at(
+        &mut self,
+        executable: &Path,
+        project: String,
+        roots: kinewright_agent::writer_host::SessionRoots,
+    ) -> Result<(), BundleError> {
+        self.require_retention()?;
+        if self.host.is_some() {
+            return Ok(());
+        }
+        let result = host::HostAttachment::launch(
+            &mut self.owner,
+            executable,
+            project,
+            roots,
+            Arc::downgrade(&self.originating_context),
+        );
+        match result {
+            Ok(mut host) => {
+                let cut = self.owner.freeze_host_cut()?;
+                self.owner.complete_host_cut(&cut, None, None)?;
+                host.cut = None;
+                self.message = "Studio writer host attached. Your manual edit stays in this window; saves and agent sessions run in the host.".into();
+                self.host = Some(host);
+                self.frozen = false;
+                Ok(())
+            }
+            Err(error) => {
+                self.operation_panicked();
+                self.message.push_str(" Host attachment failed: ");
+                self.message.push_str(&error.to_string());
+                Err(error)
+            }
+        }
+    }
+
+    pub fn host_client(&self) -> Option<kinewright_agent::writer_host::HostClient> {
+        if self.retention_lost {
+            return None;
+        }
+        self.host.as_ref().map(|host| host.client.clone())
+    }
+
+    pub fn host_attached(&self) -> bool {
+        self.host.is_some()
+    }
+
+    pub fn host_managed(&self) -> bool {
+        self.host.is_some() || self.retention_lost
+    }
+
+    fn apply_host(&mut self, action: Action) -> Result<(), BundleError> {
+        let result = self
+            .host
+            .as_mut()
+            .expect("attached host")
+            .request(action, &mut self.owner);
+        match result {
+            Ok(reply) => self.accept_host_reply(reply),
+            Err(error) => {
+                self.operation_panicked();
+                Err(error)
+            }
+        }
+    }
+
+    fn accept_host_reply(
+        &mut self,
+        reply: kinewright_agent::writer_host::HostReply,
+    ) -> Result<(), BundleError> {
+        if !reply.status.retention_proven
+            || reply
+                .error
+                .as_ref()
+                .is_some_and(|error| error.code == "retention_lost")
+        {
+            self.operation_panicked();
+            return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
+        }
+        let host = self.host.as_mut().expect("attached host");
+        self.message = reply.error.as_ref().map_or_else(
+            || reply.status.message.clone(),
+            |error| error.message.clone(),
+        );
+        if let Some(saved) = &reply.saved
+            && !saved.floor_disclosure.is_empty()
+        {
+            self.message.push(' ');
+            self.message.push_str(&saved.floor_disclosure);
+        }
+        let can_resume = !reply.status.frozen && reply.status.choice.is_none();
+        if reply.activation.is_some() && (!can_resume || host.cut.is_none()) {
+            self.operation_panicked();
+            return Err(BundleError::Identity(
+                "Host activation arrived outside its frozen foreground cut.".into(),
+            ));
+        }
+        if can_resume && let Some(cut) = &host.cut {
+            let digest = reply
+                .saved
+                .as_ref()
+                .map(|report| report.history_sha256.as_str());
+            if reply
+                .history
+                .as_ref()
+                .is_some_and(|history| history != cut.history())
+                && digest.is_none()
+            {
+                self.operation_panicked();
+                return Err(BundleError::Identity("The host did not return the publisher's exact history identity. Saving and rescue remain paused.".into()));
+            }
+            if let Some(activation) = &reply.activation {
+                let Some(digest) = digest.filter(|digest| *digest == activation.history_sha256)
+                else {
+                    self.operation_panicked();
+                    return Err(BundleError::Identity(
+                        "Host activation differs from its publisher's report.".into(),
+                    ));
+                };
+                let Some(history) = reply.history else {
+                    self.operation_panicked();
+                    return Err(BundleError::HistoryBarrierInvariant);
+                };
+                let kind = match &activation.kind {
+                    kinewright_agent::writer_host::HostActivationKind::Rescue => {
+                        kinewright_project::editing_session::HostActivationKind::Rescue
+                    }
+                    kinewright_agent::writer_host::HostActivationKind::Recovery => {
+                        kinewright_project::editing_session::HostActivationKind::Recovery
+                    }
+                };
+                let mut prepared = None;
+                let result = self
+                    .owner
+                    .activate_host_cut(cut, history, digest, kind, |core| {
+                        prepared = Some(PreparedView::prepare(core)?);
+                        Ok(())
+                    });
+                if let Err(error) = result {
+                    self.operation_panicked();
+                    return Err(error);
+                }
+                self.view = prepared;
+            } else {
+                if let Err(error) = self.owner.complete_host_cut(cut, reply.history, digest) {
+                    self.operation_panicked();
+                    return Err(error);
+                }
+                self.view = Some(PreparedView::prepare(self.owner.core())?);
+            }
+            host.cut = None;
+            if let Some(saved) = &reply.saved {
+                self.owner.set_host_association(
+                    reply.status.association.as_deref().unwrap_or(&saved.path),
+                    &saved.history_sha256,
+                )?;
+            }
+        }
+        self.frozen = reply.status.frozen;
+        host.accept_status(reply.status);
+        if let Some(error) = reply.error {
+            return Err(BundleError::Identity(error.to_string()));
+        }
+        Ok(())
+    }
+
+    pub fn poll_host(&mut self) -> bool {
+        if self.retention_lost || self.host.is_none() {
+            return false;
+        }
+        let result = self.host.as_mut().expect("attached host").poll();
+        match result {
+            Ok(Some(reply)) => {
+                let _ = self.accept_host_reply(reply);
+                true
+            }
+            Ok(None) => false,
+            Err(_) => {
+                self.operation_panicked();
+                true
+            }
+        }
+    }
+
+    pub fn close(&mut self) -> bool {
+        self.originating_context
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.retention_lost = true;
+        self.frozen = true;
+        let _ = self.owner.host_lost();
+        if let Some(host) = &mut self.host {
+            host.close();
+        }
+        match self.owner.close_originating_source() {
+            Ok(true) => true,
+            Ok(false) => {
+                self.message = "This editing context is closed to new work. Its source readers are still retiring; the same retained data and charges stay here. Close again after they finish.".into();
+                false
+            }
+            Err(error) => {
+                self.message = format!(
+                    "Source cleanup is still pending: {error}. This editing context keeps its retained owner and charges. Retry Close to finish cleanup."
+                );
+                false
+            }
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn apply_inner(&mut self, action: Action) -> Result<(), BundleError> {
         match action {
@@ -562,6 +888,13 @@ impl Ja1Attachment {
     pub fn show(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
         ui.label(&self.message);
+        if self.retention_lost {
+            ui.label("Queries and history export remain available. Close this editing context explicitly to end retention.");
+            return None;
+        }
+        if let Some(host) = &self.host {
+            return host.show(ui);
+        }
         if self.owner.has_prepared_selection() {
             ui.label(self.owner.selection_availability().unwrap_or_default());
         }
@@ -730,6 +1063,8 @@ impl Ja1Attachment {
         action
     }
 }
+const RETENTION_LOST_TEXT: &str = kinewright_agent::writer_host::RETENTION_LOST;
+
 fn copy_text(status: &CopyStatus) -> String {
     match status {
         CopyStatus::Committed(report) => format!("Saved {}.", report.path.display()),

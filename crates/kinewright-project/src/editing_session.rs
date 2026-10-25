@@ -199,8 +199,552 @@ pub struct Ja1EditingSession {
     retained_destinations: Vec<(RetainedDestination, Core)>,
     originating_session: crate::bundle_records::SessionId,
     dirty_cache: std::cell::RefCell<HistoryDigestCache>,
+    host_attached: bool,
+    host_retention_lost: bool,
+    host_cut: Option<kinewright_core::AcceptedCut>,
+    host_published_digest: Option<String>,
+    host_rescue_actors: Vec<Core>,
+    host_source_admission: Option<crate::bundle_records::SessionId>,
+    preliminary_save: Option<PreliminarySave>,
+}
+
+/// One transient publisher receipt, backed by the surviving ordinary L branch.
+/// It owns no actor, history snapshot, pin, namespace or additional ledger.
+struct PreliminarySave {
+    report: BundleSaveReport,
+    branch: crate::bundle_records::BranchId,
+    pending: bool,
+}
+
+/// GUI-owned source/actor half survives this handover. Only wire values and a
+/// weak, read-only GUI callback service are returned; no source ledger moves.
+pub struct PreparedHostAttachment {
+    pub named_path: Option<PathBuf>,
+    pub expected_root_sha256: Option<String>,
+    pub project_id: Option<crate::bundle_records::ProjectId>,
+    pub history: kinewright_core::HistorySnapshot,
+    pub inputs: ObjectRef,
+    pub source: Option<crate::source_boundary::BorrowedSourceDescriptor>,
+    pub source_service: Option<crate::source_boundary::BorrowedSourceService>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostActivationKind {
+    Rescue,
+    Recovery,
 }
 impl Ja1EditingSession {
+    /// Read the checkpoint identified by the publisher's exact report. Current
+    /// actor history is deliberately irrelevant, including edits accepted after IO.
+    pub fn published_history(
+        &self,
+        report: &BundleSaveReport,
+    ) -> Result<kinewright_core::HistorySnapshot, BundleError> {
+        let bundle = self.active_bundle()?;
+        if let Some(saved) = &self.preliminary_save
+            && report.project_id == saved.report.project_id
+            && report.generation == saved.report.generation
+            && report.head_id == saved.report.head_id
+            && report.history_sha256 == saved.report.history_sha256
+            && report.root_sha256 == saved.report.root_sha256
+            && report.byte_length == saved.report.byte_length
+        {
+            let checkpoint = bundle.checkpoint(&saved.branch)?;
+            if report.project_id != *bundle.project_id()
+                || checkpoint.head_id != report.head_id
+                || checkpoint.history_ref.sha256 != report.history_sha256
+                || checkpoint.checkpoint_generation != report.generation
+                || !crate::same_project_file(&report.path, &bundle.store.resolved_root()?)
+            {
+                return Err(BundleError::Identity(
+                    "preliminary publisher report differs from surviving L checkpoint".into(),
+                ));
+            }
+            bundle
+                .store
+                .with_namespace(|namespace| namespace.verify_read_authority())?;
+            let history = bundle
+                .store
+                .read_copy_record::<kinewright_core::HistorySnapshot>(
+                    &checkpoint.history_ref,
+                    true,
+                )?;
+            return Ok((*history).clone());
+        }
+        let root = bundle.root().ok_or(BundleError::HistoryBarrierInvariant)?;
+        let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+        let raw = bundle.admission.raw_bytes();
+        if report.project_id != *bundle.project_id()
+            || report.generation != root.generation
+            || report.head_id != checkpoint.head_id
+            || report.history_sha256 != checkpoint.history_ref.sha256
+            || report.root_sha256 != kinewright_media::sha256_bytes(raw)
+            || report.byte_length != raw.len() as u64
+            || !crate::same_project_file(&report.path, &bundle.store.resolved_root()?)
+        {
+            return Err(BundleError::Identity(
+                "publisher report differs from the retained checkpoint".into(),
+            ));
+        }
+        bundle.store.with_namespace(|namespace| {
+            namespace.verify_read_authority()?;
+            if namespace.read_root()?.as_deref() != Some(raw) {
+                return Err(BundleError::Identity(
+                    "published checkpoint root was replaced".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        let history = bundle
+            .store
+            .read_copy_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref, true)?;
+        Ok((*history).clone())
+    }
+
+    /// Explicit GUI context Close. The caller drains its source callback service
+    /// and readers, then retries until true before dropping the source owner.
+    pub fn close_originating_source(&mut self) -> Result<bool, BundleError> {
+        self.host_lost()?;
+        self.input_leases.clear();
+        self.source
+            .as_mut()
+            .map_or(Ok(true), SessionStore::close_originating_source)
+    }
+
+    fn require_local_writer(&self) -> Result<(), BundleError> {
+        if self.host_attached || self.host_retention_lost {
+            return Err(BundleError::Identity(
+                "source retention was not re-established for local writes".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Update GUI association only from the authenticated publisher's reply.
+    /// `complete_host_cut` must already have validated its returned history digest.
+    pub fn set_host_association(
+        &mut self,
+        path: &Path,
+        publisher_digest: &str,
+    ) -> Result<(), BundleError> {
+        if !self.host_attached
+            || self.host_retention_lost
+            || self.host_cut.is_some()
+            || self.host_published_digest.as_deref() != Some(publisher_digest)
+        {
+            return Err(BundleError::Identity(
+                "host publication has not completed its exact cut".into(),
+            ));
+        }
+        self.association = Some(ActiveAssociation {
+            path: path.to_path_buf(),
+            saved: Some(publisher_digest.to_owned()),
+        });
+        Ok(())
+    }
+
+    /// Freeze producers before calling. A named writer is released only after its
+    /// exact checkpoint and absence of unresolved owners/readers have been verified.
+    pub fn prepare_host_attachment(&mut self) -> Result<PreparedHostAttachment, BundleError> {
+        if self.host_attached
+            || self.host_retention_lost
+            || self.prepared.is_some()
+            || self.recovery_save_pending
+            || !self.rescue.attempts.is_empty()
+            || !self.retained_destinations.is_empty()
+            || !self.durable_sessions.is_empty()
+        {
+            return Err(BundleError::Identity(
+                "host handover requires settled originating ownership".into(),
+            ));
+        }
+        if self
+            .core
+            .pending_history_save()
+            .map_err(crate::bundle::history_error)?
+            .is_some()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let cut = self
+            .attachment
+            .freeze()
+            .map_err(crate::bundle::history_error)?;
+        let result = (|| {
+            let mut source = None;
+            let mut source_service = None;
+            let mut named_path = None;
+            let mut expected_root_sha256 = None;
+            let mut project_id = None;
+            if let Some(destination) = &mut self.destination {
+                let RetainedDestination::Named(bundle) = destination else {
+                    return Err(BundleError::Unsettled);
+                };
+                if bundle.unsettled
+                    || bundle.pending_command.is_some()
+                    || bundle.pending_save.is_some()
+                    || bundle.pending_copy_source.is_some()
+                    || !bundle.pending_evidence.is_empty()
+                    || !self.input_leases.is_empty()
+                {
+                    return Err(BundleError::Unsettled);
+                }
+                named_path = Some(bundle.store.resolved_root()?);
+                expected_root_sha256 =
+                    Some(kinewright_media::sha256_bytes(bundle.admission.raw_bytes()));
+                project_id = Some(bundle.project_id.clone());
+                if let Err(error) = bundle.store.release_named_writer_for_host(
+                    bundle.admission.raw_bytes(),
+                    usize::from(bundle.durable.is_some()),
+                ) {
+                    // Release failures may have relinquished the OS lock. Never
+                    // resume edits under a possibly lost named writer authority.
+                    self.host_retention_lost = true;
+                    return Err(error);
+                }
+                self.destination = None;
+            } else {
+                let owner = self
+                    .source
+                    .as_mut()
+                    .ok_or(BundleError::HistoryBarrierInvariant)?;
+                let descriptor = owner.retain_borrowed_source(
+                    std::slice::from_ref(&self.inputs),
+                    cut.history()
+                        .encoded_bytes()
+                        .map_err(crate::bundle::history_error)?,
+                )?;
+                let service = owner.borrowed_source_service(&descriptor)?;
+                service.ensure_snapshot(&descriptor, cut.history())?;
+                source_service = Some(service);
+                source = Some(descriptor);
+            }
+            Ok(PreparedHostAttachment {
+                named_path,
+                expected_root_sha256,
+                project_id,
+                history: cut.history().clone(),
+                inputs: self.inputs.clone(),
+                source,
+                source_service,
+            })
+        })();
+        if result.is_ok() {
+            self.host_attached = true;
+            self.host_cut = Some(cut);
+            self.host_source_admission = result
+                .as_ref()
+                .ok()
+                .and_then(|prepared| prepared.source.as_ref())
+                .map(|source| source.admission_id().clone());
+        } else if !self.host_retention_lost {
+            self.attachment
+                .resume(&cut)
+                .map_err(crate::bundle::history_error)?;
+        }
+        result
+    }
+
+    /// Capture a foreground operation. No continuous/manual stream is introduced here.
+    pub fn freeze_host_cut(&mut self) -> Result<kinewright_core::AcceptedCut, BundleError> {
+        if !self.host_attached || self.host_retention_lost {
+            return Err(BundleError::Identity(
+                "source retention was not re-established".into(),
+            ));
+        }
+        if let Some(cut) = &self.host_cut {
+            self.ensure_host_snapshot(cut)?;
+            return Ok(cut.clone());
+        }
+        let cut = self
+            .attachment
+            .freeze()
+            .map_err(crate::bundle::history_error)?;
+        self.host_cut = Some(cut.clone());
+        self.ensure_host_snapshot(&cut)?;
+        Ok(cut)
+    }
+
+    /// Admit the exact foreground snapshot on the one existing GUI source ledger.
+    /// A named-only origin has no GUI temporary-source overlap to grow.
+    pub fn ensure_host_snapshot(
+        &self,
+        cut: &kinewright_core::AcceptedCut,
+    ) -> Result<Option<crate::source_boundary::BorrowedSnapshotBinding>, BundleError> {
+        if !self.host_attached || self.host_retention_lost || self.host_cut.as_ref() != Some(cut) {
+            return Err(BundleError::Identity(
+                "snapshot admission is outside its exact foreground cut".into(),
+            ));
+        }
+        self.host_source_admission
+            .as_ref()
+            .map(|admission| {
+                self.source
+                    .as_ref()
+                    .ok_or(BundleError::HistoryBarrierInvariant)?
+                    .ensure_borrowed_snapshot(admission, cut.history())
+            })
+            .transpose()
+    }
+
+    /// Install a publisher-returned history under the existing attachment proof.
+    /// Callers keep every GUI producer fenced throughout this foreground operation.
+    pub fn complete_host_cut(
+        &mut self,
+        cut: &kinewright_core::AcceptedCut,
+        returned_history: Option<kinewright_core::HistorySnapshot>,
+        publisher_digest: Option<&str>,
+    ) -> Result<(), BundleError> {
+        if !self.host_attached || self.host_retention_lost || self.host_cut.as_ref() != Some(cut) {
+            return Err(BundleError::Identity(
+                "host completion is outside its exact foreground cut".into(),
+            ));
+        }
+        if let Some(digest) = publisher_digest {
+            let history = returned_history.as_ref().unwrap_or_else(|| cut.history());
+            let bytes =
+                serde_json::to_vec(history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if kinewright_media::sha256_bytes(&bytes) != digest {
+                self.host_lost()?;
+                return Err(BundleError::Identity(
+                    "host publisher history digest differs".into(),
+                ));
+            }
+        }
+        if let Some(history) = &returned_history
+            && history != cut.history()
+        {
+            let discard = history
+                .floor_offset
+                .checked_sub(cut.history().floor_offset)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(BundleError::HistoryChanged)?;
+            let floor = kinewright_core::HistoryTransition::floor(cut.history().clone(), discard)
+                .map_err(crate::bundle::history_error)?;
+            if floor.after() != history {
+                self.host_lost()?;
+                return Err(BundleError::Identity("ordinary host completion must be the exact captured history or its legal floor".into()));
+            }
+        }
+        self.attachment
+            .resume(cut)
+            .map_err(crate::bundle::history_error)?;
+        if let Some(history) = returned_history
+            && history != *cut.history()
+            && let Err(error) = self
+                .attachment
+                .install_checkpoint(cut.history().clone(), history)
+        {
+            self.host_lost()?;
+            return Err(crate::bundle::history_error(error));
+        }
+        self.host_cut = None;
+        self.host_published_digest = publisher_digest.map(str::to_owned);
+        if let Some(digest) = publisher_digest
+            && let Some(association) = &mut self.association
+        {
+            association.saved = Some(digest.to_owned());
+        }
+        Ok(())
+    }
+
+    /// Prepare App resources against a frozen fresh actor, then seal the old cut.
+    /// A post-seal resume failure fails closed; it cannot restore the sealed source.
+    pub fn activate_host_cut(
+        &mut self,
+        cut: &kinewright_core::AcceptedCut,
+        history: kinewright_core::HistorySnapshot,
+        publisher_digest: &str,
+        kind: HostActivationKind,
+        prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
+    ) -> Result<Core, BundleError> {
+        if !self.host_attached || self.host_retention_lost || self.host_cut.as_ref() != Some(cut) {
+            return Err(BundleError::Identity(
+                "host activation is outside its exact foreground cut".into(),
+            ));
+        }
+        if kind == HostActivationKind::Rescue && self.host_rescue_actors.len() >= 4 {
+            return Err(BundleError::Capacity("retained GUI rescue actors"));
+        }
+        let bytes =
+            serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        if kinewright_media::sha256_bytes(&bytes) != publisher_digest {
+            self.host_lost()?;
+            return Err(BundleError::Identity(
+                "host activation publisher history digest differs".into(),
+            ));
+        }
+        let core = Core::spawn(kinewright_core::Document::default())
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let attachment = ProjectAttachment::new(&core).map_err(crate::bundle::history_error)?;
+        attachment
+            .restore_history(history)
+            .map_err(crate::bundle::history_error)?;
+        let fresh_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
+        if let Err(error) = prepare(&core) {
+            Self::seal_prepared_host_actor(&core, &attachment)?;
+            if self
+                .core
+                .attachment_state()
+                .map_err(crate::bundle::history_error)?
+                != kinewright_core::AttachmentState::Frozen
+                || self
+                    .attachment
+                    .capture()
+                    .map_err(crate::bundle::history_error)?
+                    != *cut
+            {
+                self.host_lost()?;
+            }
+            return Err(error);
+        }
+        if core
+            .attachment_state()
+            .map_err(crate::bundle::history_error)?
+            != kinewright_core::AttachmentState::Frozen
+            || attachment.capture().map_err(crate::bundle::history_error)? != fresh_cut
+        {
+            Self::seal_prepared_host_actor(&core, &attachment)?;
+            return Err(BundleError::HistoryChanged);
+        }
+        if let Err(error) = self.attachment.seal(cut) {
+            Self::seal_prepared_host_actor(&core, &attachment)?;
+            self.host_lost()?;
+            return Err(crate::bundle::history_error(error));
+        }
+        if let Err(error) = attachment.resume(&fresh_cut) {
+            // A is already sealed. Keep its history/source and retire all escaped
+            // prepared B clones rather than leaving a second usable actor.
+            Self::seal_prepared_host_actor(&core, &attachment)?;
+            self.host_lost()?;
+            return Err(crate::bundle::history_error(error));
+        }
+        if kind == HostActivationKind::Rescue {
+            self.host_rescue_actors.push(self.core.clone());
+        }
+        self.core = core.clone();
+        self.attachment = attachment;
+        self.host_cut = None;
+        self.host_published_digest = Some(publisher_digest.to_owned());
+        *self.dirty_cache.borrow_mut() = None;
+        if let Some(association) = &mut self.association {
+            association.saved = Some(publisher_digest.to_owned());
+        }
+        Ok(core)
+    }
+
+    fn seal_prepared_host_actor(
+        core: &Core,
+        attachment: &ProjectAttachment,
+    ) -> Result<(), BundleError> {
+        if core
+            .attachment_state()
+            .map_err(crate::bundle::history_error)?
+            == kinewright_core::AttachmentState::Sealed
+        {
+            return Ok(());
+        }
+        let current = attachment.freeze().map_err(crate::bundle::history_error)?;
+        attachment
+            .seal(&current)
+            .map_err(crate::bundle::history_error)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn retained_host_actor_count(&self) -> usize {
+        self.host_rescue_actors.len()
+    }
+
+    /// Transport failure is permanent for this originating context (final L2).
+    /// Keep all actual temporary sources, holds and actor histories until explicit Close.
+    pub fn host_lost(&mut self) -> Result<(), BundleError> {
+        self.host_retention_lost = true;
+        if self
+            .core
+            .attachment_state()
+            .map_err(crate::bundle::history_error)?
+            == kinewright_core::AttachmentState::Sealed
+        {
+            return Ok(());
+        }
+        let cut = self
+            .attachment
+            .freeze()
+            .map_err(crate::bundle::history_error)?;
+        self.host_cut = Some(cut);
+        Ok(())
+    }
+
+    /// Host-only validation shadow installation for an explicit foreground snapshot.
+    pub fn install_host_snapshot(
+        &mut self,
+        history: kinewright_core::HistorySnapshot,
+    ) -> Result<(), BundleError> {
+        if self.host_attached || self.prepared.is_some() || self.has_unresolved_publication() {
+            return Err(BundleError::Unsettled);
+        }
+        self.attachment
+            .restore_history(history)
+            .map_err(crate::bundle::history_error)
+    }
+
+    /// Adopt the host destination while its GUI source remains a non-owning descriptor.
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "adoption consumes the original source input identity along with the copy and rebinds it to the destination"
+    )]
+    pub fn from_borrowed_copy(
+        copy: BundleCopy,
+        core: &Core,
+        inputs: ObjectRef,
+    ) -> Result<Self, BundleError> {
+        if copy.borrowed_source().is_none() {
+            return Err(BundleError::Identity(
+                "expected borrowed GUI source copy".into(),
+            ));
+        }
+        let rebound = copy.rebound_manifest(&inputs)?;
+        let attachment = copy.attach_core(core)?;
+        let saved = if let CopyStatus::Committed(report) = copy.status() {
+            let destination = copy.destination_owner()?;
+            let checkpoint = destination.checkpoint(destination.manual_branch_id())?;
+            let history = destination
+                .store
+                .read_record::<kinewright_core::HistorySnapshot>(&checkpoint.history_ref)?;
+            attachment
+                .restore_history((*history).clone())
+                .map_err(crate::bundle::history_error)?;
+            Some(report.history_sha256.clone())
+        } else {
+            None
+        };
+        let path = copy.destination_owner()?.store.resolved_root()?;
+        Ok(Self {
+            core: core.clone(),
+            attachment,
+            source: None,
+            destination: Some(RetainedDestination::FirstSave(Box::new(copy))),
+            inputs: rebound,
+            input_leases: vec![],
+            association: Some(ActiveAssociation { path, saved }),
+            rescue: RescueSessionState::default(),
+            prepared: None,
+            recovery_save_pending: false,
+            selection_result: None,
+            durable_sessions: vec![],
+            retained_destinations: vec![],
+            originating_session: crate::bundle_records::SessionId::fresh()?,
+            dirty_cache: std::cell::RefCell::new(None),
+            host_attached: false,
+            host_retention_lost: false,
+            host_cut: None,
+            host_published_digest: None,
+            host_rescue_actors: vec![],
+            host_source_admission: None,
+            preliminary_save: None,
+        })
+    }
+
     pub fn new(parent: &Path, core: &Core, limits: StorageLimits) -> Result<Self, BundleError> {
         let mut source = SessionStore::create(parent, limits)?;
         let attachment = source.attach_core(core)?;
@@ -229,6 +773,13 @@ impl Ja1EditingSession {
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
+            host_attached: false,
+            host_retention_lost: false,
+            host_cut: None,
+            host_published_digest: None,
+            host_rescue_actors: vec![],
+            host_source_admission: None,
+            preliminary_save: None,
         })
     }
     pub fn activate(
@@ -303,6 +854,13 @@ impl Ja1EditingSession {
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
+            host_attached: false,
+            host_retention_lost: false,
+            host_cut: None,
+            host_published_digest: None,
+            host_rescue_actors: vec![],
+            host_source_admission: None,
+            preliminary_save: None,
         })
     }
     #[must_use]
@@ -426,6 +984,7 @@ impl Ja1EditingSession {
         self.source.as_ref()
     }
     pub fn source_mut(&mut self) -> Result<&mut SessionStore, BundleError> {
+        self.require_local_writer()?;
         if self.destination.is_some() {
             return Err(BundleError::Identity(
                 "associated source is retained read-only".into(),
@@ -509,6 +1068,7 @@ impl Ja1EditingSession {
         path: &Path,
         limits: StorageLimits,
     ) -> Result<CopyStatus, BundleError> {
+        self.require_local_writer()?;
         if self.destination.is_some() {
             return Err(BundleError::Identity("session already associated".into()));
         }
@@ -537,6 +1097,7 @@ impl Ja1EditingSession {
     }
     /// Ordinary saves never inspect the rescue slot ledger.
     pub fn save_active(&mut self) -> Result<BundleSaveReport, BundleError> {
+        self.require_local_writer()?;
         let mut report = self
             .destination
             .as_mut()
@@ -563,6 +1124,7 @@ impl Ja1EditingSession {
     }
     fn retire_ordinary_copy(&mut self) -> Result<(), BundleError> {
         if !self.rescue.attempts.is_empty()
+            || matches!(&self.destination, Some(RetainedDestination::FirstSave(copy)) if copy.borrowed_source().is_some())
             || !matches!(&self.destination, Some(RetainedDestination::FirstSave(copy)) if matches!(copy.status(), CopyStatus::Committed(_)))
         {
             return Ok(());
@@ -571,7 +1133,13 @@ impl Ja1EditingSession {
             match copy.into_destination() {
                 Ok(bundle) => {
                     self.destination = Some(RetainedDestination::Named(Box::new(bundle)));
-                    self.source = None;
+                    if !self
+                        .source
+                        .as_ref()
+                        .is_some_and(SessionStore::has_borrowed_sources)
+                    {
+                        self.source = None;
+                    }
                 }
                 Err(copy) => {
                     self.destination = Some(RetainedDestination::FirstSave(copy));
