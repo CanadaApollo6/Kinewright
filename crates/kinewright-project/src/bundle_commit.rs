@@ -505,7 +505,9 @@ impl BundleCommit {
         bundle: &mut ProjectBundle,
         selection: &crate::bundle_switch::PreparedProjectSelection,
     ) -> Result<BundleSaveReport, BundleError> {
-        Self::publish_branch_impl(
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("switch_before_publish");
+        let result = Self::publish_branch_impl(
             bundle,
             &selection.restore.history,
             &selection.restore.checkpoint.input_manifest_ref,
@@ -516,7 +518,12 @@ impl BundleCommit {
             false,
             None,
             &[],
-        )
+        );
+        #[cfg(any(test, feature = "test-util"))]
+        if result.is_ok() {
+            crate::test_hook("switch_after_publish");
+        }
+        result
     }
     pub(crate) fn publish_maintenance(
         bundle: &mut ProjectBundle,
@@ -1076,23 +1083,58 @@ impl BundleCommit {
         recovery.generation = generation;
         recovery.staging = None;
         let mut receipts = bundle.receipts.clone();
-        for envelope in manual_batch.iter().chain(
-            bundle
-                .pending_command
-                .as_deref()
-                .filter(|_| manual_batch.is_empty()),
-        ) {
-            let result = bundle
-                .pending_result
-                .clone()
-                .unwrap_or_else(|| ReceiptResult::Edit {
-                    checkpoint_ref: checkpoint_ref.clone(),
-                    batch_id: envelope
-                        .manual
-                        .as_ref()
-                        .map(|m| m.batch_id.clone())
-                        .or_else(|| branches[&manual_branch_id].batch_ids.last().cloned()),
-                });
+        let mut issuers = bundle.issuers.clone();
+        for envelope in manual_batch
+            .iter()
+            .chain(
+                bundle
+                    .pending_command
+                    .as_deref()
+                    .filter(|_| manual_batch.is_empty()),
+            )
+            .chain(selection.and_then(|s| s.envelope.as_ref()))
+        {
+            let result = if let Some(request) = &envelope.switch {
+                let selected = selection.ok_or(BundleError::HistoryChanged)?;
+                let state = issuers
+                    .get_mut(&envelope.id.issuer)
+                    .filter(|s| !s.retired)
+                    .ok_or(BundleError::HistoryChanged)?;
+                if state.next_sequence != envelope.id.sequence {
+                    return Err(BundleError::HistoryChanged);
+                }
+                state.next_sequence = state
+                    .next_sequence
+                    .checked_add(1)
+                    .ok_or(BundleError::Capacity("issuer sequence"))?;
+                ReceiptResult::Switch {
+                    result: Box::new(crate::bundle_switch::SwitchResult {
+                        old: crate::bundle_switch::SwitchBranch::from_checkpoint(
+                            bundle.checkpoint_reference(&selected.source_branch)?,
+                            bundle.checkpoint(&selected.source_branch)?,
+                        ),
+                        new: crate::bundle_switch::SwitchBranch::from_checkpoint(
+                            checkpoint_ref.clone(),
+                            &branches[branch_id],
+                        ),
+                        target_version: request.target.version(),
+                        switch_generation,
+                        root_generation: generation,
+                    }),
+                }
+            } else {
+                bundle
+                    .pending_result
+                    .clone()
+                    .unwrap_or_else(|| ReceiptResult::Edit {
+                        checkpoint_ref: checkpoint_ref.clone(),
+                        batch_id: envelope
+                            .manual
+                            .as_ref()
+                            .map(|m| m.batch_id.clone())
+                            .or_else(|| branches[&manual_branch_id].batch_ids.last().cloned()),
+                    })
+            };
             if matches!(result, ReceiptResult::Comment { .. }) {
                 receipts.comments = receipts
                     .comments
@@ -1124,10 +1166,10 @@ impl BundleCommit {
         } else {
             Some(seal!(&receipts))
         };
-        let issuer_state_ref = if bundle.issuers.is_empty() && receipt_index_ref.is_none() {
+        let issuer_state_ref = if issuers.is_empty() && receipt_index_ref.is_none() {
             None
         } else {
-            Some(seal!(&bundle.issuers))
+            Some(seal!(&issuers))
         };
         let mut roots = vec![
             branch_index_ref.clone(),
@@ -1150,6 +1192,9 @@ impl BundleCommit {
             switch_generation != 0 || bundle.store.has_archived_manual_switch(&closure)?;
         inventory.required_apis =
             crate::rescue_record::required_apis(u64::from(requires_switch), !roles.is_empty());
+        if bundle.store.has_host_switch_receipts(&closure)? {
+            inventory.required_apis.insert("host-switch".into(), 1);
+        }
         let store_manifest = bundle.store.selected_manifest(
             &roots,
             &evidence,
@@ -1268,6 +1313,7 @@ impl BundleCommit {
         let tail = (|| -> Result<(), BundleError> {
             bundle.evidence = evidence;
             bundle.receipts = receipts;
+            bundle.issuers = issuers;
             bundle.manual_branch_id = manual_branch_id.clone();
             bundle.root = Some(root);
             bundle.branches = branches;

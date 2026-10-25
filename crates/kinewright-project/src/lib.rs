@@ -67,7 +67,8 @@ pub(crate) fn test_hook(point: &str) {
         return;
     }
     let dir = std::path::PathBuf::from(std::env::var_os("REV2_SIGNALS").unwrap());
-    std::fs::write(dir.join("paused"), point).unwrap();
+    std::fs::write(dir.join("paused.partial"), point).unwrap();
+    std::fs::rename(dir.join("paused.partial"), dir.join("paused")).unwrap();
     if std::env::var("REV2_EXIT").is_ok() {
         std::process::exit(77);
     }

@@ -352,6 +352,7 @@ pub(super) fn w10_pending_command_exclusion_and_original_id_lookup() {
             panic!("snapshot");
         };
         let envelope = CommandEnvelope {
+            switch: None,
             manual: None,
             version: 1,
             action: "edit".into(),

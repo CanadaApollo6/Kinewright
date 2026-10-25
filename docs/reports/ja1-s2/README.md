@@ -620,3 +620,43 @@ All 26 runtime mutation reds and restored greens are verified. Core MSVC
 all-target check passed; project/agent/App are blocked at native aws-lc C build.
 Native Windows/hosted C10 CI remain NOT RUN. Estimated Windows workspace/slow jobs
 are **35m49s–37m49s / 27m39s–29m39s**, based on the linked parent/C9 jobs in the report.
+
+## C11 host adoption and return
+
+C11 wraps the existing pinned Save/select owner with original switch envelopes,
+atomic Switch receipts and separate current-attachment confirmation. The complete
+source-bound report is [c11.md](c11.md). No C12 implementation or push is included.
+
+Linux gates pass: 39 affected selections, **820 selected / 796 executed passes /
+24 ignored** (overlaps included). Full fast uses `--no-fail-fast`: **4,021 passed /
+0 failed / 111 ignored**, 57 raw summaries, failure list `[]`; the strict verifier
+passes. All **47 runtime red/restored-green mutation pairs** are verified, and
+every restored binary matches its final gate binary. Both additive switch fixtures
+pass six properties plus a control; baseline switch absence stays six pending
+properties plus a control. All 105 other parent fixture files remain byte-identical,
+and the original 38 index entries remain an exact prefix. Native Windows and
+hosted C11 CI remain NOT RUN. Core's MSVC all-target cross-check passes; touched
+crates are blocked by native FFmpeg/Whisper/aws-lc prerequisites.
+
+Parent/C11 ordinary Save means are **255.077 / 244.849 ms** (five pairs, 60 saves
+per side). Request-to-usable-lease switch recovery medians are **548.267 ms**
+before restore and **559.757 ms** after restore (five each); return median is
+**337.190 ms** (ten). The report retains min/median/p95/max and all observations.
+External CPU load flags are retained in 46 observations; no speedup claim is made.
+Windows workspace/slow estimates are **42m58s–44m58s / 30m13s–32m13s**, using the
+exact parent CI jobs plus an explicit, unmeasured 1–3 minute allowance.
+
+Deviations and placement evidence:
+
+- The parent already preserves switch generation (`crates/kinewright-project/src/bundle_commit.rs:592`, root assignment at line 1213). C11 retains it and adds host/receipt/return/copy/reopen coverage.
+- Confirmation uses scalar committed references/digests (`crates/kinewright-project/src/bundle_switch.rs:111`), because the tagged command deserializer rejects nested numeric lineage keys. Full payloads remain verified before confirmation.
+- The existing registered host session runner also handles reopen (`crates/kinewright-agent/src/writer_host/mod.rs:2110`); no second runner is added.
+- The no-default test build needed the existing project test utilities as a dev-dependency (`crates/kinewright-agent/Cargo.toml:72`). W14 now explicitly confirms a reopened switched attachment before Save (`crates/kinewright-agent/tests/ja_s2_host.rs:1081`). The C8 test-only connector now takes the actual App lifetime reference (`crates/kinewright-app/src/ja1_host.rs:213`). All three failed gate attempts and targeted restored greens remain excluded development evidence; the complete final gate passes after these migrations.
+- Exact timing uses an isolated driver with only endpoint capture moved before post-lease assertions/output IO. Its patch/source hashes and `endpoint-instrumented` label are retained. All assertions still pass; the actual no-default shipping host and all product files are unchanged. Save measurements use unmodified parent/current targets.
+- The fixture-audit import generated Python bytecode after its inventory; a shell error-handling mistake let the first staging commit include it. The artifact was removed, the audit no longer writes bytecode, and the binder now rejects any changed file outside the audited set. The same unpublished C11 commit was amended; final history remains one commit with no runtime changes.
+- Guard-only survivors and an unexecuted rescue-error-branch control are excluded. Corrected controls cause actual premature authority, stale target selection or wrong rescue resume; no survivor, compile error or pending baseline is counted as a runtime red. Fourteen integration/App pairs are repeated after the test migrations.
+
+Only this README and the C11 report are completed after the final gate. The final
+source/blob audit and one-commit binding are retained outside the commit, together
+with compressed raw logs and sealed timed binaries. The accepted session-pin crash
+limit and C12 N2/composed restart work remain deferred.

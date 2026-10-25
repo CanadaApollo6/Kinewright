@@ -112,6 +112,7 @@ fn request(
         panic!("snapshot")
     };
     CommandEnvelope {
+        switch: None,
         manual: None,
         version: 1,
         action: "edit".into(),

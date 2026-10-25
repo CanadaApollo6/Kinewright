@@ -24,6 +24,8 @@ mod durable;
 mod manual;
 pub use manual::ManualRecoveryEndpoint;
 mod recovery;
+mod switch;
+pub use switch::PreparedGuiSwitch;
 mod rescue;
 mod rescue_selection;
 pub use durable::{DurableBranchSessionGuard, specialist_floor_delta_from_baseline};
@@ -234,6 +236,7 @@ pub struct PreparedHostAttachment {
 pub enum HostActivationKind {
     Rescue,
     Recovery,
+    Switch,
 }
 impl Ja1EditingSession {
     /// Read the checkpoint identified by the publisher's exact report. Current
@@ -560,6 +563,21 @@ impl Ja1EditingSession {
         kind: HostActivationKind,
         prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
     ) -> Result<Core, BundleError> {
+        self.activate_host_cut_prepared(cut, history, publisher_digest, kind, prepare, None)
+    }
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the original exact-cut handoff also consumes optional prepublication GUI resources"
+    )]
+    fn activate_host_cut_prepared(
+        &mut self,
+        cut: &kinewright_core::AcceptedCut,
+        history: kinewright_core::HistorySnapshot,
+        publisher_digest: &str,
+        kind: HostActivationKind,
+        prepare: impl FnOnce(&Core) -> Result<(), BundleError>,
+        prepared: Option<PreparedGuiSwitch>,
+    ) -> Result<Core, BundleError> {
         if !self.host_attached || self.host_retention_lost || self.host_cut.as_ref() != Some(cut) {
             return Err(BundleError::Identity(
                 "host activation is outside its exact foreground cut".into(),
@@ -576,13 +594,18 @@ impl Ja1EditingSession {
                 "host activation publisher history digest differs".into(),
             ));
         }
-        let core = Core::spawn(kinewright_core::Document::default())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let attachment = ProjectAttachment::new(&core).map_err(crate::bundle::history_error)?;
-        attachment
-            .restore_history(history)
-            .map_err(crate::bundle::history_error)?;
-        let fresh_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
+        let (core, attachment, fresh_cut) = if let Some(prepared) = prepared {
+            (prepared.core, prepared.attachment, prepared.cut)
+        } else {
+            let core = Core::spawn(kinewright_core::Document::default())
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            let attachment = ProjectAttachment::new(&core).map_err(crate::bundle::history_error)?;
+            attachment
+                .restore_history(history)
+                .map_err(crate::bundle::history_error)?;
+            let fresh_cut = attachment.freeze().map_err(crate::bundle::history_error)?;
+            (core, attachment, fresh_cut)
+        };
         if let Err(error) = prepare(&core) {
             Self::seal_prepared_host_actor(&core, &attachment)?;
             if self
@@ -614,7 +637,9 @@ impl Ja1EditingSession {
             self.host_lost()?;
             return Err(crate::bundle::history_error(error));
         }
-        if let Err(error) = attachment.resume(&fresh_cut) {
+        if kind != HostActivationKind::Switch
+            && let Err(error) = attachment.resume(&fresh_cut)
+        {
             // A is already sealed. Keep its history/source and retire all escaped
             // prepared B clones rather than leaving a second usable actor.
             Self::seal_prepared_host_actor(&core, &attachment)?;
@@ -626,7 +651,11 @@ impl Ja1EditingSession {
         }
         self.core = core.clone();
         self.attachment = attachment;
-        self.host_cut = None;
+        self.host_cut = if kind == HostActivationKind::Switch {
+            Some(fresh_cut)
+        } else {
+            None
+        };
         self.host_published_digest = Some(publisher_digest.to_owned());
         *self.dirty_cache.borrow_mut() = None;
         if let Some(association) = &mut self.association {

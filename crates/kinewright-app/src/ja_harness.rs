@@ -23,6 +23,8 @@ struct AppControl {
     manual_stream: bool,
     #[serde(default)]
     manual_recovery: Option<ManualRecoveryControl>,
+    #[serde(default)]
+    switch: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -44,6 +46,26 @@ fn observe(
         ja_harness::baseline::input(loaded, &args.input)?,
     )?)
     .map_err(|e| e.to_string())?;
+    if let Some(reply_drop) = control.switch {
+        if report.mode == Mode::Baseline {
+            let core = kinewright_core::Core::spawn(kinewright_core::Document::default())
+                .map_err(|e| e.to_string())?;
+            let query = matches!(
+                core.request(kinewright_core::Command::Query(
+                    kinewright_core::Query::Snapshot
+                ))
+                .map_err(|e| e.to_string())?,
+                kinewright_core::Event::QueryResult(_)
+            );
+            return Ok(Some(serde_json::json!({"query":query,"switch":null})));
+        }
+        #[cfg(target_os = "linux")]
+        return Ok(Some(crate::ja1_attachment::tests::observe_c11(reply_drop)));
+        #[cfg(not(target_os = "linux"))]
+        return Err(format!(
+            "C11 App switch observer (reply_drop={reply_drop}) requires Linux; NOT RUN"
+        ));
+    }
     if control.writer_journal {
         return crate::recovery::g04_gui_journal_observation().map(Some);
     }
@@ -198,6 +220,51 @@ mod c10_tests {
                 assert_eq!(
                     run(&fixture, &temp.path(&format!("{label}-{name}")), mode).unwrap(),
                     0
+                );
+            }
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod c11_tests {
+    use super::*;
+    #[test]
+    fn additive_switch_reply_drop_and_return_fixtures() {
+        let root = kinewright_media::test_support::workspace_target_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "c11-fixtures");
+        for label in ["s2-switch-reply-drop", "s2-switch-return"] {
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../kinewright-agent/tests/fixtures/ja/{label}.json"
+            ));
+            for (mode, name) in [(Mode::Baseline, "baseline"), (Mode::Revised, "revised")] {
+                let output = std::env::var_os("JA_SWITCH_FIXTURE_OUTPUT").map_or_else(
+                    || temp.path(&format!("{label}-{name}")),
+                    |root| std::path::PathBuf::from(root).join(format!("{label}-{name}")),
+                );
+                std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+                assert_eq!(run(&fixture, &output, mode).unwrap(), 0);
+                let summary: Value =
+                    serde_json::from_slice(&std::fs::read(output.join("summary.json")).unwrap())
+                        .unwrap();
+                assert!(
+                    summary["assertions"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|a| a["passed"] == true)
+                );
+                let properties = summary["assertions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|a| a["evidence_class"] == "revised_property")
+                    .count();
+                assert_eq!(properties, if mode == Mode::Revised { 6 } else { 0 });
+                assert_eq!(
+                    summary["pending"].as_array().unwrap().len(),
+                    if mode == Mode::Baseline { 6 } else { 0 }
                 );
             }
         }

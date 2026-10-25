@@ -394,7 +394,15 @@ pub(super) fn validate(
                 payload!(crate::bundle_records::RecoveryCloseCheckpoint);
             }
             RecordKind::ReceiptIndex => {
-                payload!(crate::receipts::ReceiptLedger);
+                let value = control!(crate::receipts::ReceiptLedger);
+                super::validate_switch_receipts(
+                    namespace,
+                    &value,
+                    &manifest,
+                    usage,
+                    &mut fields,
+                    limits,
+                )?;
             }
             RecordKind::IssuerState => {
                 payload!(BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>);

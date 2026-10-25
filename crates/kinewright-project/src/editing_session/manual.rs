@@ -506,6 +506,7 @@ impl Ja1EditingSession {
             crate::receipts::HistoryRequest::RecoveryClose { .. } => "recovery_close",
         };
         Ok(crate::receipts::CommandEnvelope {
+            switch: None,
             manual: None,
             version: 1,
             action: action.into(),

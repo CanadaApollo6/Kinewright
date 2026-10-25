@@ -2308,6 +2308,23 @@ impl ProjectStore {
         store.account_residuals(true)?;
         Ok(store)
     }
+    pub(crate) fn has_host_switch_receipts(
+        &self,
+        objects: &[ObjectRef],
+    ) -> Result<bool, BundleError> {
+        for reference in objects
+            .iter()
+            .filter(|r| r.record_kind == RecordKind::ReceiptIndex)
+        {
+            if self
+                .read_record::<crate::receipts::ReceiptLedger>(reference)?
+                .has_switch()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(crate) fn has_archived_manual_switch(
         &self,
         objects: &[ObjectRef],

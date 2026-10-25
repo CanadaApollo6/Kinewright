@@ -344,6 +344,7 @@ fn save_as_copies_every_retained_asset_including_luts_before_root() {
     let text_ref = reference(text, RecordKind::OwnedEvidence);
     let strokes_ref = reference(strokes, RecordKind::OwnedEvidence);
     let request = CommandEnvelope {
+        switch: None,
         manual: None,
         version: 1,
         action: "comment".into(),

@@ -153,6 +153,7 @@ fn comment_rescue(landed: bool) {
     let text = object(b"PENDING COMMENT MUST STAY AT A");
     let strokes = object(b"[]");
     let envelope = CommandEnvelope {
+        switch: None,
         manual: None,
         version: 1,
         action: "comment".into(),

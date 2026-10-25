@@ -1388,3 +1388,17 @@ proof remains a prerequisite rather than G5-L acceptance. The fast restart tests
 execute without slow features; the two complete recovery matrices use the existing
 agent slow tier. Native Windows runs protocol, process and actor-state controls;
 Studio durable success remains unsupported until its separate certification.
+
+### C11 switch observation boundary
+
+Additive `s2-switch-reply-drop` and `s2-switch-return` fixtures observe the real
+App/host Save/select path, original-envelope retry, exactly one adopted branch,
+restored current pointer/resources, first edit/Undo and exact retained return
+history. Source mode records a real query control and pending switch absence;
+it is not a fabricated behavioral red. `branches-current` remains the original
+divergence control. Switch receipt lookup never grants authority. The current
+checkpoint/payload must be confirmed after frozen GUI restore before a fresh
+lease, including after a host restart or a superseding selection. Independent
+Open and the prepublication fresh-open guard admit the exact receipt-bearing
+root and its `host-switch@1` requirement. Process-cut, dropped-reply, native
+Windows and physical-storage evidence remain separate lanes.

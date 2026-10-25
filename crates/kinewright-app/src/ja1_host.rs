@@ -21,6 +21,11 @@ use std::{
 mod recovery;
 
 pub(super) struct HostAttachment {
+    pub(super) switch_envelope: Option<kinewright_project::receipts::CommandEnvelope>,
+    prepared_switch: Option<(
+        kinewright_project::editing_session::PreparedGuiSwitch,
+        super::PreparedView,
+    )>,
     executable: PathBuf,
     context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     recovery: Option<JoinHandle<Result<recovery::RecoveredManual, BundleError>>>,
@@ -44,6 +49,67 @@ pub(super) struct HostAttachment {
 }
 
 impl HostAttachment {
+    #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn prepared_switch_probe(&self) -> Option<kinewright_core::Core> {
+        self.prepared_switch
+            .as_ref()
+            .map(|(actor, _)| actor.core().clone())
+    }
+    pub fn restore_switch(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+        committed: &kinewright_project::bundle_switch::SwitchAttachment,
+    ) -> Result<(HostReply, super::PreparedView), BundleError> {
+        committed.verify()?;
+        let cut = self.cut.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let mut prepared = None;
+        if self
+            .prepared_switch
+            .as_ref()
+            .is_some_and(|(actor, _)| !actor.matches(committed))
+        {
+            self.prepared_switch = None;
+        }
+        if let Some((actor, view)) = self.prepared_switch.take() {
+            owner.activate_prepared_gui_switch(cut, committed, actor)?;
+            prepared = Some(view);
+        } else {
+            owner.activate_host_switch(cut, committed, |core| {
+                prepared = Some(super::PreparedView::prepare(core)?);
+                Ok(())
+            })?;
+        }
+        // The fresh GUI actor remains Frozen while the host checks the current pointer.
+        let reply = self
+            .client
+            .request(HostCommand::ConfirmSwitch {
+                client: self.manual_client.clone(),
+                installed: Box::new(committed.identity()?),
+            })
+            .map_err(host_error)?;
+        if let Some(error) = &reply.error {
+            return Err(BundleError::Identity(error.to_string()));
+        }
+        let permit = owner.finish_host_switch(
+            reply
+                .manual_lease
+                .clone()
+                .ok_or(BundleError::HistoryChanged)?,
+            reply
+                .manual_inputs
+                .clone()
+                .ok_or(BundleError::HistoryChanged)?,
+            self.context.upgrade().ok_or(BundleError::HistoryChanged)?,
+        )?;
+        self.inputs = committed.current.inputs.clone();
+        self.manual = Some(super::ManualProducerGate {
+            actor: owner.core().actor_identity(),
+            permit,
+        });
+        self.client = self.client.with_manual_editor(self.manual_client.clone());
+        self.cut = None;
+        Ok((reply, prepared.ok_or(BundleError::HistoryChanged)?))
+    }
     pub fn launch(
         owner: &mut Ja1EditingSession,
         executable: &Path,
@@ -115,6 +181,8 @@ impl HostAttachment {
             }
         };
         Ok(Self {
+            prepared_switch: None,
+            switch_envelope: None,
             executable: executable.to_path_buf(),
             context: retained_context,
             recovery: None,
@@ -147,6 +215,7 @@ impl HostAttachment {
         source: Option<BorrowedSourceDescriptor>,
         inputs: ObjectRef,
         source_server: SourceServer,
+        context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, BundleError> {
         let reply = client.request(HostCommand::Attach).map_err(host_error)?;
         if let Some(error) = reply.error {
@@ -156,8 +225,10 @@ impl HostAttachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         Ok(Self {
+            prepared_switch: None,
+            switch_envelope: None,
             executable: PathBuf::new(),
-            context: std::sync::Weak::new(),
+            context,
             recovery: None,
             recovery_plan: std::sync::Arc::default(),
             recovery_originals: vec![],
@@ -182,13 +253,16 @@ impl HostAttachment {
         })
     }
 
-    pub fn start_manual(&mut self, owner: &mut Ja1EditingSession) -> Result<(), BundleError> {
+    pub fn start_manual(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+    ) -> Result<Option<super::PreparedView>, BundleError> {
         if self
             .manual
             .as_ref()
             .is_some_and(|gate| gate.actor == owner.core().actor_identity())
         {
-            return Ok(());
+            return Ok(None);
         }
         // C9 has no absent-suffix/floor/recovery authorization. A first-save or
         // dirty bootstrap must explicitly Save before granting a durable identity.
@@ -200,7 +274,27 @@ impl HostAttachment {
             if self.cut.is_none() {
                 self.cut = Some(owner.freeze_host_cut()?);
             }
-            return Ok(());
+            return Ok(None);
+        }
+        if self.status.frozen
+            && self.status.association.is_some()
+            && !self.status.prepared_selection
+            && !self.status.unresolved
+        {
+            let current = self
+                .client
+                .request(HostCommand::CurrentAttachment)
+                .map_err(host_error)?;
+            if let Some(committed) = current.switch_attachment
+                && committed.switch_generation != 0
+            {
+                if self.cut.is_none() {
+                    self.cut = Some(owner.recapture_host_recovery_cut()?);
+                }
+                let (reply, view) = self.restore_switch(owner, &committed)?;
+                self.accept_status(reply.status);
+                return Ok(Some(view));
+            }
         }
         let reply = self
             .client
@@ -220,7 +314,7 @@ impl HostAttachment {
             permit,
         });
         self.accept_status(reply.status);
-        Ok(())
+        Ok(None)
     }
     fn drain_manual(&mut self, owner: &Ja1EditingSession) -> Result<(), BundleError> {
         if let Some(worker) = self.manual_inflight.take() {
@@ -299,15 +393,18 @@ impl HostAttachment {
                 kinewright_core::CoreMutationRefusal::Frozen,
             ));
         }
-        let needs_cut = matches!(
-            &action,
-            Action::Save
-                | Action::ConfirmSuccessorSave
-                | Action::SaveAs(_)
-                | Action::FirstSave(_)
-                | Action::PreviewRescue
-                | Action::PreviewRecovery(_)
-        );
+        let needs_cut = (matches!(&action, Action::Retry)
+            && self.switch_envelope.is_some()
+            && self.status.prepared_selection)
+            || matches!(
+                &action,
+                Action::Save
+                    | Action::ConfirmSuccessorSave
+                    | Action::SaveAs(_)
+                    | Action::FirstSave(_)
+                    | Action::PreviewRescue
+                    | Action::PreviewRecovery(_)
+            );
         if needs_cut && self.cut.is_none() {
             self.cut = Some(owner.freeze_host_cut()?);
         }
@@ -364,10 +461,26 @@ impl HostAttachment {
                     .ok_or(BundleError::HistoryChanged)?
                     .bootstrap(),
             },
+            Action::Retry if self.switch_envelope.is_some() && self.status.frozen => {
+                HostCommand::Switch {
+                    envelope: Box::new(
+                        self.switch_envelope
+                            .clone()
+                            .ok_or(BundleError::HistoryChanged)?,
+                    ),
+                }
+            }
             Action::Retry => HostCommand::Retry,
             Action::PreviewRecovery(target) => HostCommand::PreviewRecovery {
                 target: target.into(),
                 snapshot: snapshot()?,
+            },
+            Action::OpenRecovery if self.switch_envelope.is_some() => HostCommand::Switch {
+                envelope: Box::new(
+                    self.switch_envelope
+                        .clone()
+                        .ok_or(BundleError::HistoryChanged)?,
+                ),
             },
             Action::OpenRecovery => HostCommand::OpenRecovery,
             Action::Abandon => HostCommand::Abandon,
@@ -400,7 +513,32 @@ impl HostAttachment {
             }
             _ => self.client.clone(),
         };
-        client.request(command).map_err(host_error)
+        let mut reply = client.request(command).map_err(host_error)?;
+        if reply.activation.is_some() {
+            self.switch_envelope = None;
+            self.prepared_switch = None;
+        }
+        if let Some(envelope) = &reply.switch_envelope {
+            self.switch_envelope = Some(envelope.clone());
+        }
+        if let Some(payload) = reply.switch_preview.take() {
+            let staged = owner.prepare_gui_switch(payload).and_then(|actor| {
+                let view = super::PreparedView::prepare(actor.core())?;
+                Ok((actor, view))
+            });
+            match staged {
+                Ok(staged) => self.prepared_switch = Some(staged),
+                Err(error) => {
+                    self.prepared_switch = None;
+                    reply = client.request(HostCommand::Abandon).map_err(host_error)?;
+                    reply.error = Some(kinewright_agent::writer_host::HostRefusal::new(
+                        "switch_prepare",
+                        &error.to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(reply)
     }
 
     pub fn pending_count(&self) -> usize {

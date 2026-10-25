@@ -391,7 +391,9 @@ impl Ja1Attachment {
 
     fn start_host_manual(&mut self) -> Result<(), BundleError> {
         let host = self.host.as_mut().expect("attached host");
-        host.start_manual(&mut self.owner)?;
+        if let Some(view) = host.start_manual(&mut self.owner)? {
+            self.view = Some(view);
+        }
         self.frozen = self.owner.core().attachment_state() != Ok(AttachmentState::Live);
         self.message = manual_status_message(&self.message, host.manual.is_some());
         Ok(())
@@ -507,6 +509,46 @@ impl Ja1Attachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         let host = self.host.as_mut().expect("attached host");
+        if let Some(committed) = &reply.switch_attachment {
+            if reply.error.is_some()
+                && host.cut.as_ref().is_some_and(|cut| {
+                    if committed.history == *cut.history() {
+                        return false;
+                    }
+                    let discarded = committed
+                        .history
+                        .floor_offset
+                        .saturating_sub(cut.history().floor_offset);
+                    usize::try_from(discarded)
+                        .ok()
+                        .filter(|n| *n > 0)
+                        .and_then(|n| {
+                            kinewright_core::HistoryTransition::floor(cut.history().clone(), n).ok()
+                        })
+                        .is_none_or(|floor| floor.after() != &committed.history)
+                })
+            {
+                self.frozen = true;
+                return Err(BundleError::HistoryChanged);
+            }
+            let (confirmed, view) = host.restore_switch(&mut self.owner, committed)?;
+            self.owner.set_host_association(
+                confirmed
+                    .status
+                    .association
+                    .as_deref()
+                    .ok_or(BundleError::HistoryChanged)?,
+                &committed.current.history.sha256,
+            )?;
+            self.view = Some(view);
+            self.message.clone_from(&confirmed.status.message);
+            self.frozen = confirmed.status.frozen;
+            host.accept_status(confirmed.status);
+            if let Some(error) = reply.error {
+                return Err(BundleError::Identity(error.to_string()));
+            }
+            return Ok(());
+        }
         host.accept_manual_ack(&reply, &self.owner)?;
         self.message = reply.error.as_ref().map_or_else(
             || reply.status.message.clone(),

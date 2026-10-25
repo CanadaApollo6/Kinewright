@@ -125,6 +125,7 @@ fn repeated_small_saves_with_six_populated_branches() {
     let mut sync_calls = Vec::new();
     for sequence in 1..=12 {
         let envelope = CommandEnvelope {
+            switch: None,
             manual: None,
             version: 1,
             action: "comment".into(),

@@ -9,12 +9,153 @@ use crate::{
     store::StorePin,
 };
 use kinewright_core::{AcceptedCut, AttachmentState, Core};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SwitchTarget {
+    WorkingBranch {
+        branch: BranchId,
+    },
+    Checkpoint {
+        root: crate::bundle_records::ObjectRef,
+        branch: BranchId,
+    },
+    Snapshot {
+        root: crate::bundle_records::ObjectRef,
+        branch: BranchId,
+        version: String,
+    },
+}
+impl SwitchTarget {
+    #[must_use]
+    pub fn selection(&self) -> RecoverySelection {
+        match self {
+            Self::WorkingBranch { branch } => RecoverySelection::WorkingBranch(branch.clone()),
+            Self::Checkpoint { root, branch } | Self::Snapshot { root, branch, .. } => {
+                RecoverySelection::Checkpoint {
+                    root: root.clone(),
+                    branch: branch.clone(),
+                }
+            }
+        }
+    }
+    #[must_use]
+    pub fn version(&self) -> Option<String> {
+        if let Self::Snapshot { version, .. } = self {
+            Some(version.clone())
+        } else {
+            None
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchRequest {
+    pub target: SwitchTarget,
+    pub source_checkpoint: crate::bundle_records::ObjectRef,
+    pub checkpoint_generation: u64,
+    pub floor_generation: u64,
+    pub switch_generation: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchBranch {
+    pub branch: BranchId,
+    pub head: HeadId,
+    pub checkpoint: crate::bundle_records::ObjectRef,
+    pub history: crate::bundle_records::ObjectRef,
+    pub inputs: crate::bundle_records::ObjectRef,
+    pub lineage: crate::bundle_records::ObjectRef,
+}
+impl SwitchBranch {
+    pub(crate) fn from_checkpoint(
+        checkpoint: crate::bundle_records::ObjectRef,
+        value: &crate::bundle_records::BranchCheckpoint,
+    ) -> Self {
+        Self {
+            branch: value.branch_id.clone(),
+            head: value.head_id.clone(),
+            checkpoint,
+            history: value.history_ref.clone(),
+            inputs: value.input_manifest_ref.clone(),
+            lineage: value.lineage_ref.clone(),
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchResult {
+    pub old: SwitchBranch,
+    pub new: SwitchBranch,
+    pub target_version: Option<String>,
+    pub switch_generation: u64,
+    pub root_generation: u64,
+}
+
+/// Exact current committed attachment. Historical receipt results never select it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchAttachment {
+    pub project: ProjectId,
+    pub root_sha256: String,
+    pub root_generation: u64,
+    pub switch_generation: u64,
+    pub current: SwitchBranch,
+    pub history: kinewright_core::HistorySnapshot,
+    pub inputs: crate::owned_inputs::OwnedInputManifest,
+    pub lineage: crate::bundle_records::LineageRecord,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchAttachmentIdentity {
+    pub project: ProjectId,
+    pub root_sha256: String,
+    pub root_generation: u64,
+    pub switch_generation: u64,
+    pub current: SwitchBranch,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchPayload {
+    pub history: kinewright_core::HistorySnapshot,
+    pub inputs: crate::owned_inputs::OwnedInputManifest,
+    pub lineage: crate::bundle_records::LineageRecord,
+}
+impl SwitchAttachment {
+    pub fn identity(&self) -> Result<SwitchAttachmentIdentity, BundleError> {
+        self.verify()?;
+        Ok(SwitchAttachmentIdentity {
+            project: self.project.clone(),
+            root_sha256: self.root_sha256.clone(),
+            root_generation: self.root_generation,
+            switch_generation: self.switch_generation,
+            current: self.current.clone(),
+        })
+    }
+    pub fn verify(&self) -> Result<(), BundleError> {
+        for (reference, bytes) in [
+            (&self.current.history, serde_json::to_vec(&self.history)),
+            (&self.current.inputs, serde_json::to_vec(&self.inputs)),
+            (&self.current.lineage, serde_json::to_vec(&self.lineage)),
+        ] {
+            let bytes = bytes.map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if reference.byte_length != bytes.len() as u64
+                || reference.sha256 != kinewright_media::sha256_bytes(&bytes)
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+        }
+        Ok(())
+    }
+}
 
 pub struct PreparedProjectSelection {
+    pub(crate) envelope: Option<crate::receipts::CommandEnvelope>,
     pub(crate) restore: PreparedCheckpointRestore,
     pub(crate) target_branch: BranchId,
     source_project: ProjectId,
-    source_branch: BranchId,
+    pub(crate) source_branch: BranchId,
     source_generation: u64,
     source_cut: AcceptedCut,
     source_head: HeadId,
@@ -105,6 +246,7 @@ impl ProjectBundle {
             .capture()
             .map_err(crate::bundle::history_error)?;
         Ok(PreparedProjectSelection {
+            envelope: None,
             restore,
             target_branch,
             source_project: self.project_id.clone(),

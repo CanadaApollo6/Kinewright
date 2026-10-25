@@ -1329,8 +1329,14 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
     let initial = app.owner.freeze_host_cut().unwrap();
     app.owner.complete_host_cut(&initial, None, None).unwrap();
     app.host = Some(
-        host::HostAttachment::connected(writer.client(), transfer.source, transfer.inputs, server)
-            .unwrap(),
+        host::HostAttachment::connected(
+            writer.client(),
+            transfer.source,
+            transfer.inputs,
+            server,
+            Arc::downgrade(&app.originating_context),
+        )
+        .unwrap(),
     );
     app.frozen = false;
 
@@ -1486,8 +1492,14 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
     let cut = app.owner.freeze_host_cut().unwrap();
     app.owner.complete_host_cut(&cut, None, None).unwrap();
     app.host = Some(
-        host::HostAttachment::connected(writer.client(), transfer.source, transfer.inputs, server)
-            .unwrap(),
+        host::HostAttachment::connected(
+            writer.client(),
+            transfer.source,
+            transfer.inputs,
+            server,
+            Arc::downgrade(&app.originating_context),
+        )
+        .unwrap(),
     );
     app.frozen = false;
     edit(&core, false); // larger history than the attachment's initial snapshot
@@ -1791,4 +1803,189 @@ pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
     }});
     assert!(app.close());
     observed
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn g05a_first_edit_undo_and_exact_switch_back() {
+    observe_c11(false);
+    observe_c11(true);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_c11(reply_drop: bool) -> serde_json::Value {
+    use kinewright_agent::writer_host::{HostCommand, SessionRoots};
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let path = temp.path("c11.kinewright");
+    owner.first_save(&path, StorageLimits::default()).unwrap();
+    edit(&core, false);
+    owner.save_active().unwrap();
+    edit(&core, true);
+    core.request(Command::Undo).unwrap();
+    owner.save_active().unwrap();
+    let target = owner.list_recovery_points().unwrap().remove(0);
+    let old_history = core.export_history().unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    app.launch_host_at(
+        &host::executable(),
+        "c11-app".into(),
+        SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+    )
+    .unwrap();
+    let old_branch = app
+        .host
+        .as_ref()
+        .unwrap()
+        .client
+        .request(HostCommand::CurrentAttachment)
+        .unwrap()
+        .switch_attachment
+        .unwrap()
+        .current
+        .branch;
+    let old_permit = app
+        .host
+        .as_ref()
+        .unwrap()
+        .manual
+        .as_ref()
+        .unwrap()
+        .permit
+        .clone();
+    app.apply(Action::PreviewRecovery(target)).unwrap();
+    let staged_actor = app
+        .host
+        .as_ref()
+        .unwrap()
+        .prepared_switch_probe()
+        .expect("GUI resources must be staged before the selection publication");
+    assert_eq!(
+        staged_actor.attachment_state().unwrap(),
+        AttachmentState::Frozen
+    );
+    let frozen = app.read_only()
+        && matches!(
+            old_permit.request(Command::Undo).unwrap(),
+            Event::MutationRefused { .. }
+        );
+    assert!(frozen);
+    if reply_drop {
+        let dropped = app
+            .host
+            .as_mut()
+            .unwrap()
+            .request(Action::OpenRecovery, &mut app.owner)
+            .unwrap();
+        assert!(dropped.switch_result.is_some());
+        assert!(dropped.manual_lease.is_none());
+        assert_eq!(dropped.status.branches.len(), 2);
+        drop(dropped);
+        app.apply(Action::Retry).unwrap();
+    } else {
+        app.apply(Action::OpenRecovery).unwrap();
+    }
+    assert!(!app.read_only());
+    let selected = app.owner.core().export_history().unwrap();
+    let selected_actor = app.owner.core().actor_identity();
+    assert_eq!(selected_actor, staged_actor.actor_identity());
+    let fresh = app
+        .host
+        .as_ref()
+        .unwrap()
+        .manual
+        .as_ref()
+        .unwrap()
+        .permit
+        .clone();
+    fresh
+        .request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: !selected.document.tracks[0].sync_lock,
+        }))
+        .unwrap();
+    fresh.request(Command::Undo).unwrap();
+    let first_undo = app.owner.core().export_history().unwrap().document == selected.document;
+    assert!(first_undo);
+    app.apply(Action::PreviewRecovery(RecoverySelection::WorkingBranch(
+        old_branch.clone(),
+    )))
+    .unwrap();
+    app.apply(Action::OpenRecovery).unwrap();
+    let exact = app.owner.core().export_history().unwrap() == old_history;
+    assert!(exact);
+    assert_ne!(app.owner.core().actor_identity(), selected_actor);
+    let stale = matches!(
+        old_permit.request(Command::Redo).unwrap(),
+        Event::MutationRefused { .. }
+    );
+    assert!(stale);
+    let attachment = app
+        .host
+        .as_ref()
+        .unwrap()
+        .client
+        .request(HostCommand::CurrentAttachment)
+        .unwrap()
+        .switch_attachment
+        .unwrap();
+    assert_eq!(attachment.current.branch, old_branch);
+    let saved = !app.is_dirty();
+    assert!(saved);
+    let query = matches!(
+        app.owner
+            .core()
+            .request(Command::Query(Query::Snapshot))
+            .unwrap(),
+        Event::QueryResult(_)
+    );
+    assert!(app.close());
+    drop(app);
+    let mut reopened = Ja1Attachment::open(&path).unwrap();
+    reopened
+        .launch_host_at(
+            &host::executable(),
+            "c11-app-reopened".into(),
+            SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+        )
+        .unwrap();
+    assert!(!reopened.read_only());
+    assert_eq!(
+        reopened.view.as_ref().unwrap().core.actor_identity(),
+        reopened.owner.core().actor_identity()
+    );
+    reopened
+        .host
+        .as_ref()
+        .unwrap()
+        .manual
+        .as_ref()
+        .unwrap()
+        .permit
+        .request(Command::Undo)
+        .unwrap();
+    assert!(
+        reopened
+            .view
+            .as_ref()
+            .unwrap()
+            .events
+            .try_iter()
+            .any(|event| matches!(event, Event::DocumentChanged { .. })),
+        "the actual restored view must receive the first edit's Core event"
+    );
+    assert!(reopened.close());
+    serde_json::json!({"query": query, "switch": { "exact": exact, "frozen": frozen, "first_undo": first_undo, "stale": stale, "saved": saved, "generation": attachment.switch_generation == 2 }})
 }

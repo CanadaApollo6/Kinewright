@@ -103,3 +103,5 @@ ja_baseline native_app_bridge_retains_exercised_control_and_property_failures cr
 ja_baseline native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two crates/kinewright-agent/tests/ja_baseline.rs any on-demand  # Requires the separately built App libtest executable; S0 gate explicitly includes it
 ja_baseline native_app_bridge_rejects_abnormal_exit_after_completed_report crates/kinewright-agent/tests/ja_baseline.rs any on-demand  # Requires the separately built App libtest executable; S0 gate explicitly includes it
 ja_s1 s2_additive_app_fixture_observes_real_controls crates/kinewright-agent/tests/ja_s1.rs linux on-demand  # Requires JA_HARNESS_APP_TEST_BINARY; C6 gate explicitly includes it
+
+ja_s2_host c11_switch_gui_participant crates/kinewright-agent/tests/ja_s2_host.rs linux on-demand  # C11 private process helper; its matrix explicitly launches it

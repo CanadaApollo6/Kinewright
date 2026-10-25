@@ -371,6 +371,7 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
             panic!("snapshot");
         };
         let envelope = kinewright_project::receipts::CommandEnvelope {
+            switch: None,
             manual: None,
             version: 1,
             action: "edit".into(),

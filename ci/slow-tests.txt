@@ -151,3 +151,5 @@ kinewright_media pf1_s2c_witness::tests::continuation_holds_the_scripted_cases c
 
 ja_s2_host g05l_host_death_recovers_absent_and_committed_drag_suffix crates/kinewright-agent/tests/ja_s2_host.rs any # C10 real process recovery matrix
 ja_s2_host g05l_shared_floor_and_recovery_close_reply_drop crates/kinewright-agent/tests/ja_s2_host.rs any # C10 shared floor and close reply loss
+
+ja_s2_host g05a_switch_reply_drop_and_participant_death crates/kinewright-agent/tests/ja_s2_host.rs any # C11 two-participant switch process cuts

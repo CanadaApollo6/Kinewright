@@ -1078,6 +1078,28 @@ fn w14_headless_and_agent_admission_precedes_mutation() {
                 .map_err(bundle_error)?;
         let reply = host.execute(HostCommand::ReadHistory, roots(path.parent().unwrap()));
         let history = reply.history.ok_or(BundleError::HistoryBarrierInvariant)?;
+        if reply.status.frozen {
+            let current = host.execute(
+                HostCommand::CurrentAttachment,
+                roots(path.parent().unwrap()),
+            );
+            let current = current
+                .switch_attachment
+                .ok_or(BundleError::HistoryBarrierInvariant)?;
+            current.verify()?;
+            assert_eq!(current.history, history);
+            let confirmed = host.execute(
+                HostCommand::ConfirmSwitch {
+                    client: "a".repeat(64),
+                    installed: Box::new(current.identity()?),
+                },
+                roots(path.parent().unwrap()),
+            );
+            if let Some(error) = confirmed.error {
+                return Err(bundle_error(error.into()));
+            }
+            assert!(confirmed.manual_lease.is_some());
+        }
         let snapshot = HostSnapshot {
             history_sha256: kinewright_media::sha256_bytes(&serde_json::to_vec(&history).unwrap()),
             history,
@@ -1892,6 +1914,32 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
 
 #[path = "support/ja_s2_c10.rs"]
 mod c10;
+#[path = "support/ja_s2_c11.rs"]
+mod c11;
+
+#[test]
+fn g05a_fast_b5_switch_reply_loss_before_and_after_restore() {
+    c11::fast();
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn g05a_switch_reply_drop_and_participant_death() {
+    #[cfg(target_os = "linux")]
+    c11::linux::matrix();
+    #[cfg(not(target_os = "linux"))]
+    c11::fast();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "on-demand C11 GUI process participant: private bootstrap required"]
+fn c11_switch_gui_participant() {
+    c11::linux::gui_participant();
+}
 
 #[test]
 fn g05l_fast_restart_absent_vs_committed_lost_reply_suffix() {

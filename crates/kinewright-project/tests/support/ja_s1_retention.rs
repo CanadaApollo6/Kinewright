@@ -96,6 +96,7 @@ fn request(
 ) -> CommandEnvelope {
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
+        switch: None,
         manual: None,
         version: 1,
         action: "edit".into(),

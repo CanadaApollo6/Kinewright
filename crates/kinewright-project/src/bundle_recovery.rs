@@ -172,6 +172,7 @@ pub(crate) fn base_apis() -> BTreeMap<String, u32> {
 pub(crate) fn supported_apis() -> BTreeMap<String, u32> {
     let mut apis = base_apis();
     apis.insert("manual-switch".into(), 1);
+    apis.insert("host-switch".into(), 1);
     apis.insert("rescue-copy".into(), 1);
     #[cfg(any(test, feature = "test-util"))]
     MASKED_API.with(|mask| {
@@ -304,6 +305,41 @@ pub(crate) fn decode<T: DeserializeOwned>(
     let typed = serde_json::from_value(raw).map_err(|e| BundleError::Corrupt(e.to_string()))?;
     drop(shadow);
     Ok(value.hold(typed))
+}
+fn validate_switch_receipts(
+    namespace: &ProjectNamespace,
+    ledger: &crate::receipts::ReceiptLedger,
+    manifest: &StoreManifest,
+    usage: &Arc<Mutex<StorageUsage>>,
+    fields: &mut BTreeSet<String>,
+    limits: &StorageLimits,
+) -> Result<(), BundleError> {
+    if ledger.has_switch() && manifest.required_apis.get("host-switch") != Some(&1) {
+        return Err(BundleError::Unsupported("host-switch declaration".into()));
+    }
+    for receipt in ledger.detailed.iter().chain(&ledger.retired) {
+        if let crate::receipts::ReceiptResult::Switch { result } = &receipt.result {
+            for branch in [&result.old, &result.new] {
+                let checkpoint = read_record::<BranchCheckpoint>(
+                    namespace,
+                    &branch.checkpoint,
+                    usage,
+                    fields,
+                    limits,
+                )?;
+                if crate::bundle_switch::SwitchBranch::from_checkpoint(
+                    branch.checkpoint.clone(),
+                    &checkpoint,
+                ) != *branch
+                {
+                    return Err(BundleError::Corrupt(
+                        "switch receipt checkpoint agreement".into(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 fn check_encoded_record(reference: &ObjectRef, limits: &StorageLimits) -> Result<(), BundleError> {
     let cap = match reference.record_kind {
@@ -839,7 +875,8 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
                 input_manifests.insert(reference.sha256.clone(), admit!(OwnedInputManifest));
             }
             RecordKind::ReceiptIndex => {
-                let _value = admit!(crate::receipts::ReceiptLedger);
+                let value = admit!(crate::receipts::ReceiptLedger);
+                validate_switch_receipts(namespace, &value, &manifest, usage, &mut fields, limits)?;
             }
             RecordKind::IssuerState => {
                 let _value =

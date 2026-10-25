@@ -164,6 +164,20 @@ pub struct RecoveryBarrier {
     reason = "The bounded foreground wire command owns its snapshot and source binding without another boxed API layer"
 )]
 pub enum HostCommand {
+    PrepareSwitch {
+        target: kinewright_project::bundle_switch::SwitchTarget,
+    },
+    Switch {
+        envelope: Box<kinewright_project::receipts::CommandEnvelope>,
+    },
+    SwitchReceipt {
+        envelope: Box<kinewright_project::receipts::CommandEnvelope>,
+    },
+    CurrentAttachment,
+    ConfirmSwitch {
+        client: String,
+        installed: Box<kinewright_project::bundle_switch::SwitchAttachmentIdentity>,
+    },
     BeginRecovery {
         client: String,
         frozen: Option<HostSnapshot>,
@@ -240,6 +254,12 @@ pub enum HostCommand {
         branch: BranchId,
     },
     StartScripted {
+        turns: Vec<crate::ScriptedTurn>,
+        prompts: Vec<String>,
+    },
+    ReopenScripted {
+        branch: BranchId,
+        base: ObjectRef,
         turns: Vec<crate::ScriptedTurn>,
         prompts: Vec<String>,
     },
@@ -411,6 +431,8 @@ pub struct HostStatus {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostSessionStatus {
+    pub branch: Option<BranchId>,
+    pub base: Option<ObjectRef>,
     pub id: u64,
     pub running: bool,
     pub turns: u32,
@@ -437,6 +459,10 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub switch_preview: Option<kinewright_project::bundle_switch::SwitchPayload>,
+    pub switch_envelope: Option<kinewright_project::receipts::CommandEnvelope>,
+    pub switch_result: Option<kinewright_project::bundle_switch::SwitchResult>,
+    pub switch_attachment: Option<kinewright_project::bundle_switch::SwitchAttachment>,
     pub recovery: Option<RecoveryBarrier>,
     pub barrier_checkpoint: Option<kinewright_project::bundle_records::BranchCheckpoint>,
     pub manual_lease: Option<kinewright_project::manual_history::ManualLease>,

@@ -1264,6 +1264,52 @@
           "kind": "input"
         }
       }
+    },
+    {
+      "fixture_id": "s2-switch-reply-drop",
+      "relative_file": "s2-switch-reply-drop.json",
+      "sha256": "0dd9f3ef8168102b3a9093b79c7c8a10eb70c6a4f51ef839290d77cac96637da",
+      "byte_length": 3388,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-switch-reply-drop-control.json",
+          "sha256": "29c7867e3f50ed71b0e936a7e654055a8b1ce63762002265383d227afcbb3281",
+          "byte_length": 49,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-switch-return",
+      "relative_file": "s2-switch-return.json",
+      "sha256": "c03e837dad414812ffb4fe472d2bfa11f4e8a90b6c608c1562ace942d2ad5044",
+      "byte_length": 3380,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-switch-return-control.json",
+          "sha256": "01317a5c259326fe9d22d24b625d5e355db792b1e0e59c6c0e1ddacf4111c3e5",
+          "byte_length": 50,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
     }
   ]
 }

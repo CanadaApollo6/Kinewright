@@ -70,6 +70,8 @@ pub struct OriginalCommand {
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch: Option<Box<crate::bundle_switch::SwitchRequest>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual: Option<crate::manual_history::ManualHistoryIdentity>,
     pub version: u32,
     pub action: String,
@@ -103,7 +105,34 @@ impl CommandEnvelope {
                 "manual identity on ordinary command".into(),
             ));
         }
+        if self.action != "switch" && self.switch.is_some() {
+            return Err(BundleError::Unsupported(
+                "switch payload on ordinary command".into(),
+            ));
+        }
         match self.action.as_str() {
+            "switch"
+                if self.switch.is_some()
+                    && self.lease.is_some()
+                    && self.transition.is_none()
+                    && self.command.is_none()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.is_empty() =>
+            {
+                if let crate::bundle_switch::SwitchTarget::Snapshot { version, .. } = &self
+                    .switch
+                    .as_ref()
+                    .ok_or(BundleError::HistoryChanged)?
+                    .target
+                    && (version.len() != 32
+                        || !version
+                            .bytes()
+                            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+                {
+                    return Err(BundleError::Unsupported("snapshot version identity".into()));
+                }
+            }
             "edit"
                 if self.transition.is_none()
                     && self.command.is_some()
@@ -158,6 +187,9 @@ impl CommandEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReceiptResult {
+    Switch {
+        result: Box<crate::bundle_switch::SwitchResult>,
+    },
     Edit {
         checkpoint_ref: ObjectRef,
         batch_id: Option<BatchId>,
@@ -173,6 +205,9 @@ pub enum ReceiptResult {
 impl ReceiptResult {
     fn dependencies(&self) -> Vec<ObjectRef> {
         match self {
+            Self::Switch { result } => {
+                vec![result.old.checkpoint.clone(), result.new.checkpoint.clone()]
+            }
             Self::Edit { checkpoint_ref, .. } => vec![checkpoint_ref.clone()],
             Self::Comment {
                 record_ref,
@@ -229,6 +264,13 @@ pub struct ReceiptLedger {
 }
 impl ReceiptLedger {
     #[must_use]
+    pub fn has_switch(&self) -> bool {
+        self.detailed
+            .iter()
+            .chain(&self.retired)
+            .any(|r| matches!(r.result, ReceiptResult::Switch { .. }))
+    }
+    #[must_use]
     pub fn lookup(&self, id: &CommandId, digest: &CommandDigest) -> ReceiptLookup {
         for (records, retired) in [(&self.detailed, false), (&self.retired, true)] {
             if let Some(receipt) = records
@@ -284,6 +326,33 @@ impl ReceiptLedger {
                 reference.validate()?;
             }
             match &receipt.result {
+                ReceiptResult::Switch { result } => {
+                    if result
+                        .target_version
+                        .as_ref()
+                        .is_some_and(|version| !hex(version, 32))
+                        || result.old.branch == result.new.branch
+                        || result.root_generation != receipt.generation
+                        || result.switch_generation == 0
+                        || result.switch_generation >= result.root_generation
+                        || result.old.branch != receipt.target_branch
+                        || result.new.head != receipt.head_id
+                        || [&result.old.checkpoint, &result.new.checkpoint]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::BranchCheckpoint)
+                        || [&result.old.history, &result.new.history]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::History)
+                        || [&result.old.inputs, &result.new.inputs]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::InputManifest)
+                        || [&result.old.lineage, &result.new.lineage]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::Lineage)
+                    {
+                        return Err(BundleError::Corrupt("switch result identity/kind".into()));
+                    }
+                }
                 ReceiptResult::Edit { checkpoint_ref, .. }
                     if checkpoint_ref.record_kind != RecordKind::BranchCheckpoint =>
                 {

@@ -4,6 +4,7 @@ mod auth;
 mod manual;
 mod protocol;
 mod recovery;
+mod switch;
 pub use auth::HostAuth;
 use auth::PinnedPath;
 use axum::{
@@ -19,7 +20,6 @@ use kinewright_project::{
     bundle_copy::{BundleCopy, CopyStatus},
     bundle_records::{BranchId, ObjectRef},
     bundle_rescue::{RescueConsent, RescueSelection},
-    bundle_switch::ProjectSelectionResult,
     editing_session::Ja1EditingSession,
     source_boundary::{
         BorrowedSnapshotBinding, BorrowedSourceDescriptor, BorrowedSourceReader,
@@ -960,7 +960,13 @@ impl BorrowedSourceReader for RemoteSource {
 
 /// The same serialized command owner used by HTTP. Public for scoped observations of real IO;
 /// it creates no transport or background worker until a session is explicitly requested.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
+)]
 pub struct HostCommandOwner {
+    pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
+    switch_frozen: bool,
     config: HostConfig,
     owner: Option<Ja1EditingSession>,
     initial_core: Core,
@@ -1080,7 +1086,16 @@ impl HostCommandOwner {
         } else {
             Core::spawn(Document::default()).map_err(|e| HostError::Protocol(e.to_string()))?
         };
+        let switch_frozen = owner
+            .as_ref()
+            .and_then(|o| o.current_switch_attachment().ok())
+            .is_some_and(|a| a.switch_generation != 0);
+        if switch_frozen && let Some(owner) = &owner {
+            owner.freeze_manual_barrier()?;
+        }
         let mut host = Self {
+            pending_switch: None,
+            switch_frozen,
             config,
             owner,
             initial_core,
@@ -1184,6 +1199,8 @@ impl HostCommandOwner {
             let write = !matches!(
                 command,
                 HostCommand::Attach
+                    | HostCommand::CurrentAttachment
+                    | HostCommand::SwitchReceipt { .. }
                     | HostCommand::Status
                     | HostCommand::ReadHistory
                     | HostCommand::SessionStatus { .. }
@@ -1224,6 +1241,14 @@ impl HostCommandOwner {
             || matches!(reply.saved.as_ref(), Some(saved) if self.manual.as_ref().is_some_and(|lease| self.owner().ok().and_then(|o| o.active_manual_project().ok()).as_ref() != Some(&lease.project)) && !saved.root_sha256.is_empty())
         {
             self.manual = None;
+        }
+        if reply
+            .activation
+            .as_ref()
+            .is_some_and(|a| matches!(a.kind, HostActivationKind::Rescue))
+        {
+            self.pending_switch = None;
+            self.switch_frozen = false;
         }
         reply.status = self.status();
         reply
@@ -1312,6 +1337,15 @@ impl HostCommandOwner {
             .into());
         }
         match command {
+            HostCommand::PrepareSwitch { target } => self.prepare_switch(target, reply)?,
+            HostCommand::Switch { envelope } => self.publish_switch(&envelope, reply)?,
+            HostCommand::SwitchReceipt { envelope } => self.lookup_switch(&envelope, reply)?,
+            HostCommand::CurrentAttachment => {
+                reply.switch_attachment = Some(self.owner()?.current_switch_attachment()?);
+            }
+            HostCommand::ConfirmSwitch { client, installed } => {
+                self.confirm_switch(client, &installed, reply)?;
+            }
             HostCommand::BeginRecovery {
                 client,
                 frozen,
@@ -1569,8 +1603,20 @@ impl HostCommandOwner {
             }
             HostCommand::PreviewRecovery { target, snapshot } => {
                 self.install(snapshot)?;
-                let owner = self.owner_mut()?;
-                owner.prepare_recovery(target.into())?;
+                let target = match kinewright_project::bundle_recovery::RecoverySelection::from(
+                    target.clone(),
+                ) {
+                    kinewright_project::bundle_recovery::RecoverySelection::WorkingBranch(
+                        branch,
+                    ) => kinewright_project::bundle_switch::SwitchTarget::WorkingBranch { branch },
+                    kinewright_project::bundle_recovery::RecoverySelection::Checkpoint {
+                        root,
+                        branch,
+                    } => {
+                        kinewright_project::bundle_switch::SwitchTarget::Checkpoint { root, branch }
+                    }
+                };
+                self.prepare_switch(target, reply)?;
                 self.recovery_choice = true;
                 let owner = self.owner()?;
                 self.message = format!(
@@ -1580,33 +1626,30 @@ impl HostCommandOwner {
                 );
             }
             HostCommand::OpenRecovery => {
-                self.recovery_choice = false;
-                let result = self.owner_mut()?.select_local();
-                if matches!(&result, ProjectSelectionResult::Activated(_)) {
-                    let _ = self.owner_mut()?.take_preliminary_save_report();
-                } else if let Some(report) = self.owner_mut()?.take_preliminary_save_report() {
-                    self.saved(&report, reply, true)?;
+                if let Some(envelope) = self.pending_switch.clone() {
+                    self.recovery_choice = false;
+                    self.publish_switch(&envelope, reply)?;
+                    return Ok(());
                 }
-                match result {
-                    ProjectSelectionResult::Activated(report) => {
-                        self.initial_core = self.owner()?.core().clone();
-                        self.saved(&report, reply, true)?;
-                        reply.activation = Some(HostActivation {
-                            kind: HostActivationKind::Recovery,
-                            history_sha256: report.history_sha256.clone(),
-                        });
-                        self.message = "Opened recovery point. Prior work remains saved in its ordinary working branch.".into();
-                    }
-                    ProjectSelectionResult::Unknown => {
-                        return Err(BundleError::DurabilityUnknown.into());
-                    }
-                    ProjectSelectionResult::CommittedWithError(error)
-                    | ProjectSelectionResult::Refused(error) => return Err(error.into()),
-                }
+                return Err(HostRefusal::new(
+                    "switch_envelope",
+                    "retry the original prepared switch envelope",
+                )
+                .into());
             }
             HostCommand::Abandon => {
                 self.recovery_choice = false;
+                let switching = self.pending_switch.is_some();
+                if switching && !self.owner()?.has_unresolved_publication() {
+                    let cut = self.owner()?.freeze_manual_barrier()?;
+                    self.owner_mut()?.resume_manual_barrier(&cut)?;
+                }
                 self.message = self.owner_mut()?.abandon_recovery()?;
+                self.pending_switch = None;
+                self.switch_frozen = switching;
+                if switching {
+                    reply.switch_attachment = Some(self.owner()?.current_switch_attachment()?);
+                }
             }
             HostCommand::PreviewRetirement { branch } => {
                 self.message = self.owner()?.retirement_disclosure(&branch)?;
@@ -1710,6 +1753,31 @@ impl HostCommandOwner {
                 let driver = Box::new(crate::ScriptedDriver::new(turns));
                 let session =
                     self.start_session(driver, HostSessionConfig::default(), Some(prompts))?;
+                reply.session = Some(self.session_status(session)?);
+            }
+            HostCommand::ReopenScripted {
+                branch,
+                base,
+                turns,
+                prompts,
+            } => {
+                if turns.len() > 64
+                    || prompts.len() > 64
+                    || turns.iter().any(|t| t.pause > Duration::from_secs(30))
+                {
+                    return Err(HostRefusal::new(
+                        "capacity",
+                        "script exceeds bounded host session capacity",
+                    )
+                    .into());
+                }
+                let driver = Box::new(crate::ScriptedDriver::new(turns));
+                let session = self.start_registered_session(
+                    driver,
+                    HostSessionConfig::default(),
+                    Some(prompts),
+                    Some((branch, base)),
+                )?;
                 reply.session = Some(self.session_status(session)?);
             }
             HostCommand::StartSession { harness, config } => {
@@ -1872,7 +1940,8 @@ impl HostCommandOwner {
                 .association()
                 .and_then(|a| a.saved_digest())
                 .map(str::to_owned);
-            status.frozen = self.recovering
+            status.frozen = self.switch_frozen
+                || self.recovering
                 || !self.retention_proven
                 || owner.core().attachment_state() != Ok(AttachmentState::Live);
             status.prepared_selection = owner.has_prepared_selection();
@@ -2036,6 +2105,18 @@ impl HostCommandOwner {
         cfg: HostSessionConfig,
         scripted_prompts: Option<Vec<String>>,
     ) -> Result<u64, HostError> {
+        self.start_registered_session(driver, cfg, scripted_prompts, None)
+    }
+    fn start_registered_session(
+        &mut self,
+        driver: Box<dyn AgentDriver>,
+        cfg: HostSessionConfig,
+        scripted_prompts: Option<Vec<String>>,
+        reopen: Option<(BranchId, ObjectRef)>,
+    ) -> Result<u64, HostError> {
+        if reopen.is_some() && self.owner.is_none() {
+            return Err(BundleError::HistoryChanged.into());
+        }
         if self.sessions.len() >= 16 {
             return Err(HostRefusal::new("capacity", "host session limit reached").into());
         }
@@ -2054,7 +2135,12 @@ impl HostCommandOwner {
             .checked_add(1)
             .ok_or_else(|| HostRefusal::new("capacity", "host session identity exhausted"))?;
         let (core, branch) = if let Some(owner) = &mut self.owner {
-            let guard = owner.fork_durable_branch(&format!("host-session-{id}"))?;
+            let name = format!("host-session-{id}");
+            let guard = if let Some((branch, base)) = reopen {
+                owner.reopen_durable_branch(branch, &base, &name)?
+            } else {
+                owner.fork_durable_branch(&name)?
+            };
             (guard.core().clone(), Some(guard.branch_id().clone()))
         } else {
             let history = self
@@ -2167,6 +2253,24 @@ impl HostCommandOwner {
         Ok(id)
     }
     fn session_status(&mut self, id: u64) -> Result<HostSessionStatus, HostError> {
+        let branch = self.sessions.get(&id).and_then(|s| s.branch.clone());
+        let base = self
+            .owner
+            .as_ref()
+            .and_then(|o| {
+                o.durable_sessions()
+                    .into_iter()
+                    .find(|(_, g)| Some(g.branch_id()) == branch.as_ref())
+            })
+            .map(|(_, guard)| {
+                let bytes = serde_json::to_vec(guard.base())?;
+                Ok::<_, HostError>(ObjectRef {
+                    record_kind: kinewright_project::bundle_records::RecordKind::SpecialistBase,
+                    sha256: kinewright_media::sha256_bytes(&bytes),
+                    byte_length: bytes.len() as u64,
+                })
+            })
+            .transpose()?;
         let session = self
             .sessions
             .get_mut(&id)
@@ -2181,6 +2285,8 @@ impl HostCommandOwner {
             .export_history()
             .map_err(|e| HostError::Protocol(e.to_string()))?;
         Ok(HostSessionStatus {
+            branch,
+            base,
             id,
             running: state.running,
             turns: session.counters.snapshot().turns,

@@ -1020,6 +1020,7 @@ fn w10_lifecycle_no_ticket_destination_settlement_keeps_live_history() {
             let issuer = bundle.issue_issuer(&core, &inputs, 1).unwrap();
             let attachment = bundle.attach_core(&core).unwrap();
             let command = CommandEnvelope {
+                switch: None,
                 manual: None,
                 version: 1,
                 action: "edit".into(),

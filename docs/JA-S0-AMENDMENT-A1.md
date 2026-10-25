@@ -1012,3 +1012,18 @@ A replacement callback borrows the same actual GUI source admission and cannot
 retire its bytes, pins or charges. Failure to re-establish retained ownership keeps
 all save/rescue routes refused; only explicit originating Close retires the source.
 C10 does not change the deferred sealed-A/fresh-B rescue resume case.
+
+### C11 host-wrapped selection and rescue
+
+A host switch retains the local prepared selection, its verified target and its
+actual complete-closure session pin. Its original envelope and atomic Switch
+receipt add reconciliation identity, not another selection engine. A failed,
+refused, cancelled or unknown rescue during an unknown preliminary Save or
+selection leaves the original actor frozen. Successful rescue handoff abandons
+that selection irrevocably in both the local owner and host routing state; late
+A reconciliation remains destination-only and cannot attach its historical
+selection or change B. Preview, handoff, Close and destination changes retain
+the existing session-only target disclosures and crash limit. Receipt reads
+never replace the required current-pointer/payload confirmation or grant a lease.
+N2's fresh-actor resume failure after sealing A and the final composed restart
+witness remain C12 work.

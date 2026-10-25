@@ -1418,3 +1418,41 @@ rather than name or path equality, proves continuity. An identical copied
 root at a replacement parent is insufficient proof of an original command's
 absence. Recovery refuses before reauthorization when that identity differs or
 was never recorded; this comparison uses native IDs rather than path spelling.
+
+### C11 original-envelope adoption and return
+
+The host prepares a verified target through the existing local Save/select owner,
+retaining its complete-closure session pin across preliminary Save, refusal and
+retirement/retry. The GUI freezes and drains its original manual chain before
+requesting selection. Preparation stages the target GUI actor, subscriptions and
+resource context before publication. The ordinary Save executor preserves L; one
+selection root creates R or selects an existing BranchId, advances the switch
+generation once, and includes the original-envelope Switch receipt. Its result
+names both saved checkpoints, heads, histories, inputs and lineage, optional
+snapshot VersionId, and resulting root/switch generations. Adoption adds no
+whole-document Undo entry. Return saves R if dirty and selects the existing L.
+
+An optional switch envelope field is omitted when absent. Edit/comment encodings
+and original fixture bytes remain unchanged. Roots reaching Switch receipts
+declare `host-switch@1` in addition to `manual-switch@1`; independent Open and
+the exact-candidate publication guard verify each receipt against its checkpoint
+objects. Later saves, maintenance, copies and reopen preserve switch generation.
+
+A receipt lookup returns its original result without granting a lease, selecting
+again or allocating another branch. The accompanying attachment always names the
+current committed pointer, including after a later switch supersedes that receipt.
+The GUI restores committed history, lineage and inputs on a frozen actor. Only
+confirmation against the exact current pointer and payload permits fresh manual
+authority. A restarted host requires that confirmation before acquisition for a
+switched root. A definite refusal restores/revalidates the saved old branch under
+fresh authority; an unknown publication keeps both actors frozen. Old permits
+and delayed old-lease envelopes remain fenced after returning to the same branch.
+
+Registered agent/specialist creation and reopen execute only through the host's
+Ja1EditingSession and retain its registration guard. Retirement consults live
+registrations and specialist-base dependencies; save/close precedes eligibility
+refresh. A successful A1 rescue irrevocably abandons the host-wrapped selection;
+late reconciliation of A never activates it. Failed or unknown rescue preserves
+its existing freeze and target-availability, Close and destination disclosures.
+The selected-point session pin still has the accepted crash window: it does not
+make a rotated-out point durable. Native Windows Studio success remains S6-owned.

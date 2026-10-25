@@ -11,11 +11,14 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
     matches!(
         command,
         HostCommand::Attach
+            | HostCommand::CurrentAttachment
+            | HostCommand::SwitchReceipt { .. }
             | HostCommand::Status
             | HostCommand::ReadHistory
             | HostCommand::Detach
             | HostCommand::StartSession { .. }
             | HostCommand::StartScripted { .. }
+            | HostCommand::ReopenScripted { .. }
             | HostCommand::SendMessage { .. }
             | HostCommand::InterruptSession { .. }
             | HostCommand::SessionStatus { .. }
@@ -61,6 +64,13 @@ impl HostCommandOwner {
             return Err(HostRefusal::new(
                 "manual_client",
                 "a private attachment identity is required",
+            )
+            .into());
+        }
+        if self.switch_frozen {
+            return Err(HostRefusal::new(
+                "switch_frozen",
+                "restore and confirm the current working edit before acquiring authority",
             )
             .into());
         }
