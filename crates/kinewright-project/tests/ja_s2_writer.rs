@@ -199,13 +199,20 @@ fn g04_child_participant() {
             Err(kinewright_project::ProjectSaveError::LockLost { .. }) => "lock_lost",
             Err(_) => "other_refusal",
         };
+        // Publish by rename: the parent waits for the name, so it must never see a
+        // created-but-unwritten file.
         fs::write(
-            signals.join("result.json"),
+            signals.join("result.json.partial"),
             serde_json::to_vec(&serde_json::json!({
                 "disposition": disposition,
                 "result": result.map(|_| "saved").map_err(|e| e.to_string())
             }))
             .unwrap(),
+        )
+        .unwrap();
+        fs::rename(
+            signals.join("result.json.partial"),
+            signals.join("result.json"),
         )
         .unwrap();
         // A refused alias change is legal; a successful write must still target the admitted namespace.
