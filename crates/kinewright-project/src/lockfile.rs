@@ -261,6 +261,13 @@ pub struct LockfileHandle {
     pub discovery: PathBuf,
     /// This handle's claim.
     pub claim: LockfileClaim,
+    #[cfg_attr(
+        all(not(unix), not(test)),
+        expect(
+            dead_code,
+            reason = "held for its unlocking drop; only Unix re-reads the object in verify"
+        )
+    )]
     file: Arc<LockedFile>,
     parent: crate::legacy_io::PinnedDirectory,
     /// The spelling claimed through and the identity it resolved to (J3).
