@@ -642,7 +642,7 @@ impl ProjectBundle {
                 "cleanup-only copy requires a fresh destination".into(),
             ));
         }
-        if resolved == self.store.resolved_root()? {
+        if crate::same_project_file(&resolved, &self.store.resolved_root()?) {
             if cleanup_only {
                 return Err(BundleError::Unsettled);
             }

@@ -313,9 +313,7 @@ impl Ja1Attachment {
             }
             Action::Retry => {
                 let destination = self.owner.association().map(|a| a.path().to_path_buf());
-                let pending = destination
-                    .as_ref()
-                    .is_some_and(|path| self.owner.pending_agent_command_at(path));
+                let pending = self.owner.pending_agent_command();
                 let reconciliation = if self.owner.has_prepared_selection() {
                     self.apply_inner(Action::OpenRecovery)?;
                     Ok(())
@@ -401,6 +399,7 @@ impl Ja1Attachment {
             Action::RescueTo(path) => {
                 let inspection = self.owner.inspect_rescue_destination(&path)?;
                 self.rescue_with_inspection(&inspection)?;
+                self.owner.set_path_spelling(&path);
             }
             Action::Cancel => {
                 if let Some(Choice::Rescue { selection, .. }) = self.choice.take() {

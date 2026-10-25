@@ -430,3 +430,26 @@ Eight direct RestoreRequest tests now capture the real startup scan; existing as
 remain. Opus r2 N2 at `crates/kinewright-project/src/editing_session/rescue.rs:293`, `:318-323` is deferred to C12:
 C7 leaves that file unchanged. No C8 host/auth/roots/manual-stream implementation or
 independent review round was started. Only report/README delivery notes follow testing.
+
+### CI fix round 1
+
+[C7 CI fix report](c7.md#ci-fix-round-1): one fix commit on `0ce9124`, branch `ja1/s2`,
+no push. Live file/session checks use shared native identity; App state retains the
+supplied path and private IO retains the actual stem. The acquisition no-follow snapshot
+and release fd guard remain; display and true-alias-refusal assertions remain.
+
+Final gate: **67 passing rows; 29 selections; 636 expected = selected, 626 passes,
+10 existing ignored outcomes**. Full fast `--no-fail-fast`: **3,954 passed, 0 failed,
+107 ignored**, 53 summaries, empty failure list. Seven mutation pairs passed.
+Fresh paired means: pristine `4952851` **232.370 ms/save**, fix **231.019
+ms/save**, five alternating runs/60 saves each, zero history decodes and successful
+reopen. The timing comparison is **inconclusive**. Raw outcomes and source bindings
+are in `.review/ja/s2-evidence/c7/fix1/`.
+
+The identity module's MSVC check and Linux identity/FIFO probe passed; the full MSVC
+check is **blocked** in native dependencies. Native Windows, hosted CI for this fix,
+full local slow tier, dedicated PF1 wrapper, interactive GUI and physical durability
+are **NOT RUN**. No normative contract/fixture change or new S0 flip; 98 JA files match
+`0ce9124`. N2 remains deferred to C12; no C8 work. The report records the existing-lockfile
+Windows dependency, corrected test cfg, copy-marker retry and preserved acquisition
+snapshot. The final gate uses final source; only delivery notes follow verification.

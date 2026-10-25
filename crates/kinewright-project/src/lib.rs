@@ -39,8 +39,8 @@ pub use lockfile::{
 };
 pub use project::{
     ProjectFile, ProjectIdentityError, ProjectSaveError, ProjectSaveReport, can_overwrite_save,
-    canonical_project_identity, canonical_session_key, derive_lut_store, load_document,
-    min_required_format_version, project_newer_format_observation, serialize_project_document,
+    canonical_project_identity, derive_lut_store, load_document, min_required_format_version,
+    project_newer_format_observation, same_project_file, serialize_project_document,
     write_file_atomic, write_project_bytes, write_project_document,
 };
 pub use recovery::{

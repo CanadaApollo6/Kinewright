@@ -26,6 +26,55 @@ fn marked_document(mark: u64) -> Document {
         ..Document::default()
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn g04_studio_associations_preserve_the_persons_path() {
+    use kinewright_project::{editing_session::Ja1EditingSession, storage_budget::StorageLimits};
+    let cwd = std::env::current_dir().unwrap();
+    let base = cwd.join("target/c7-person-path-tests");
+    fs::create_dir_all(&base).unwrap();
+    let temp = TempDirectory::new_in(&base, "c7-studio-person-path");
+    let relative = temp.root().strip_prefix(&cwd).unwrap();
+    let first = relative.join("first.kinewright");
+    let second = relative.join("second.kinewright");
+    let core = kinewright_core::Core::spawn(Document::default()).unwrap();
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    owner.first_save(&first, StorageLimits::default()).unwrap();
+    assert_eq!(
+        owner.association().unwrap().path(),
+        first,
+        "first Save keeps the supplied spelling"
+    );
+    owner.save_as(&second, StorageLimits::default()).unwrap();
+    assert_eq!(
+        owner.association().unwrap().path(),
+        second,
+        "Save As keeps the supplied spelling"
+    );
+    drop(owner);
+    let reopened = Ja1EditingSession::open(&second).unwrap();
+    assert_eq!(
+        reopened.association().unwrap().path(),
+        second,
+        "Studio open keeps the supplied spelling"
+    );
+    drop(reopened);
+    let legacy = relative.join("legacy.kinewright");
+    fs::write(
+        &legacy,
+        serialize_project_document(&Document::default()).unwrap(),
+    )
+    .unwrap();
+    let core = kinewright_core::Core::spawn(Document::default()).unwrap();
+    let admission = BundleWriteAdmission::read(&legacy).unwrap();
+    let activated = Ja1EditingSession::activate(&legacy, admission, &core, None).unwrap();
+    assert_eq!(
+        activated.association().unwrap().path(),
+        legacy,
+        "activation keeps the supplied spelling"
+    );
+}
 fn claim(path: &Path, recovery: &Path) -> Result<kinewright_project::AcquiredLock, LockfileError> {
     acquire_project_lock_with_policy(
         path,

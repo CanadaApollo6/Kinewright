@@ -275,9 +275,10 @@ impl SidecarSession {
             .then(|| project_path.and_then(|path| sidecar_path_for_project(Some(path))))
             .flatten();
         let established = BTreeSet::from_iter(stem);
+        let io_project = authority.as_ref().map(crate::LockfileHandle::io_path);
         let loaded = load_session_sidecar(
             mode,
-            project_path,
+            io_project.as_deref().or(project_path),
             &incidents,
             opening,
             rename,
@@ -373,15 +374,23 @@ impl SidecarSession {
         let (bytes, report) = self
             .sidecar_bytes_for_save(project_digest, previous_digest, prepare)
             .map_err(std::io::Error::other)?;
+        let io_project = self.authority.as_ref().map(crate::LockfileHandle::io_path);
+        let io_sidecar = io_project
+            .as_deref()
+            .and_then(|path| sidecar_path_for_project(Some(path)));
+        let occupied_path = io_sidecar.as_deref().unwrap_or(&sidecar_path);
         // GUARD-B (R6/F1/G3): an unestablished stem keeps its history
         // against an empty flush — reported distinctly, so the save path
         // preserves-and-replaces instead of skipping into an unpaired save.
         // Fresh, established, and non-empty flushes are untouched.
-        if !self.established.contains(&sidecar_path)
+        if !self
+            .established
+            .iter()
+            .any(|established| crate::same_project_file(established, &sidecar_path))
             && report.written_open == 0
             && report.written_resolved == 0
             && self.carried_sidecar_records.is_empty()
-            && sidecar_path.exists()
+            && occupied_path.exists()
         {
             return Ok(FlushOutcome::Occupied);
         }

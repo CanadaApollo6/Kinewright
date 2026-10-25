@@ -24,10 +24,10 @@ use kinewright_core::{
 use kinewright_media::{FfmpegMediaEngine, GpuContext, compositor_required_limits};
 use kinewright_project::{
     FlushOutcome, ProjectSaveError, ProjectSaveReport, RefuseRename, SidecarMode, SidecarWriter,
-    can_overwrite_save, canonical_session_key, derive_lut_store, digest_bytes,
-    min_required_format_version, project_newer_format_observation, refuse_sidecar,
-    rollback_sidecar_write, serialize_project_document, sidecar_path_for_project,
-    sidecar_write_failed_observation, snapshot_sidecar_rollback,
+    can_overwrite_save, derive_lut_store, digest_bytes, min_required_format_version,
+    project_newer_format_observation, refuse_sidecar, rollback_sidecar_write, same_project_file,
+    serialize_project_document, sidecar_path_for_project, sidecar_write_failed_observation,
+    snapshot_sidecar_rollback,
 };
 
 use crate::{
@@ -1196,7 +1196,11 @@ impl KinewrightApp {
             return Err(ProjectSaveError::UnsupportedBundle { notice });
         }
         if !can_overwrite_save(self.focused().format_version)
-            && self.focused().project_path.as_deref() == Some(path)
+            && self
+                .focused()
+                .project_path
+                .as_deref()
+                .is_some_and(|open| same_project_file(open, path))
         {
             return Err(ProjectSaveError::NewerFormat {
                 read_version: self.focused().format_version,
@@ -1205,7 +1209,11 @@ impl KinewrightApp {
         self.focused()
             .source_admission
             .authorize_legacy_write(path)?;
-        let save_as = self.focused().project_path.as_deref() != Some(path);
+        let save_as = !self
+            .focused()
+            .project_path
+            .as_deref()
+            .is_some_and(|open| same_project_file(open, path));
         // N6/H5: Save As onto a path another session holds open is refused
         // before any IO — the target's history is not ours to replace. The
         // focused session cannot match: Save As always names a new path.
@@ -1230,6 +1238,18 @@ impl KinewrightApp {
         if !save_as && let Some(notice) = self.overwrite_save_refusal() {
             return Err(ProjectSaveError::SaveAsRequired { notice });
         }
+        // The displayed spelling is not authority to transfer an ordinary Save.
+        if !save_as
+            && self
+                .focused()
+                .recovery
+                .writer()
+                .is_some_and(|writer| !writer.names_project(path))
+        {
+            return Err(ProjectSaveError::LockLost {
+                path: path.to_path_buf(),
+            });
+        }
         let writer = self
             .focused()
             .recovery
@@ -1239,7 +1259,6 @@ impl KinewrightApp {
         writer.verify().map_err(|_| ProjectSaveError::LockLost {
             path: path.to_path_buf(),
         })?;
-        let path = writer.resolved_identity();
         let document = Arc::clone(&self.focused().document);
         let previous_store = self.focused().lut_store.clone();
         // The live investigator mutes travel in the saved bytes (IN2 §2.4).
@@ -1279,12 +1298,10 @@ impl KinewrightApp {
             self.drop_newer_format_note_for_save_as();
         }
         // Same sidecar stem, same previous save; a new stem has no previous.
-        let previous_digest = if sidecar_path_for_project(self.focused().project_path.as_deref())
-            == sidecar_path_for_project(Some(path))
-        {
-            self.focused().saved_digest.clone()
-        } else {
+        let previous_digest = if save_as {
             String::new()
+        } else {
+            self.focused().saved_digest.clone()
         };
         // The session takes the new path BEFORE the sidecar flush, so the
         // flush derives the new stem: a Save As must carry the live log to
@@ -1373,7 +1390,7 @@ impl KinewrightApp {
             }
             Ok(_) => {}
         }
-        let report = match kinewright_project::project::write_project_bytes_owned(
+        let mut report = match kinewright_project::project::write_project_bytes_owned(
             &json,
             to_write,
             &writer,
@@ -1395,9 +1412,10 @@ impl KinewrightApp {
         );
         self.focused_mut().source_admission =
             kinewright_project::bundle::BundleWriteAdmission::from_written_legacy(
-                path,
+                writer.resolved_identity(),
                 json.as_bytes(),
             )?;
+        report.path = path.to_path_buf();
         self.adopt_saved_path(path, &new_digest, written_version);
         if let Some(reason) = &report.lut_store_error {
             // Appendix B row 3: the project **was** saved.
@@ -1507,7 +1525,9 @@ impl KinewrightApp {
     /// checkpoints the recovery journal onto the new baseline.
     fn adopt_saved_path(&mut self, path: &Path, new_digest: &str, written_version: u32) {
         let name = project_name(Some(path), &self.focused().name);
-        let (store, store_error) = match derive_lut_store(Some(path)) {
+        let writer = self.focused().sidecar.authority.clone();
+        let io_project = writer.as_ref().map_or(path, |w| w.resolved_identity());
+        let (store, store_error) = match derive_lut_store(Some(io_project)) {
             Ok(store) => (store, None),
             Err(reason) => (None, Some(reason)),
         };
@@ -1516,7 +1536,7 @@ impl KinewrightApp {
         session.project_path = Some(path.to_path_buf());
         new_digest.clone_into(&mut session.saved_digest);
         // F1: landed bytes establish the stem (later flushes pair).
-        if let Some(stem) = sidecar_path_for_project(Some(path)) {
+        if let Some(stem) = sidecar_path_for_project(Some(io_project)) {
             session.established.insert(stem);
         }
         session.format_version = written_version;
@@ -1606,15 +1626,13 @@ impl KinewrightApp {
 
     /// The live session already holding `path`, if any (N2/S-13): the
     /// one-session-per-path guard reads the live sessions only, so closing
-    /// frees it. Both spellings canonicalise, so `.`/`..` segments and
-    /// symlinks still match.
+    /// frees it. Native file identity matches aliases and Windows path forms.
     fn session_index_for_path(&self, path: &Path) -> Option<usize> {
-        let key = canonical_session_key(path);
         self.projects.iter().position(|session| {
             session
                 .project_path
                 .as_deref()
-                .is_some_and(|open| canonical_session_key(open) == key)
+                .is_some_and(|open| same_project_file(open, path))
         })
     }
 
@@ -1623,13 +1641,12 @@ impl KinewrightApp {
     /// so a duplicate can exist, and neither side may then overwrite. Takes
     /// the index because the close prompt renders before it focuses.
     fn another_session_has_path_for(&self, project_index: usize, path: &Path) -> bool {
-        let key = canonical_session_key(path);
         self.projects.iter().enumerate().any(|(index, session)| {
             index != project_index
                 && session
                     .project_path
                     .as_deref()
-                    .is_some_and(|open| canonical_session_key(open) == key)
+                    .is_some_and(|open| same_project_file(open, path))
         })
     }
 
@@ -1832,11 +1849,11 @@ impl KinewrightApp {
         }
         let journal_path = request.journal_path;
         let retirement_owner = request.project_path.as_deref().and_then(|path| {
-            let identity = kinewright_project::canonical_project_identity(path).ok()?;
             self.projects.iter().position(|session| {
-                session.recovery.writer().is_some_and(|writer| {
-                    writer.resolved_identity() == identity && writer.verify().is_ok()
-                })
+                session
+                    .recovery
+                    .writer()
+                    .is_some_and(|writer| writer.names_project(path) && writer.verify().is_ok())
             })
         });
         let name = project_name(request.project_path.as_deref(), "Recovered project");
@@ -14331,6 +14348,293 @@ mod in2b_tests {
         in2b_shutdown(&mut app);
     }
 
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one native alias, writer reuse and refusal scenario"
+    )]
+    fn g04_session_spellings_match_file_identity_and_reuse_writer() {
+        let temp = TempDirectory::new("c7-session-file-identity");
+        let project = temp.path("person project.kinewright");
+        fs::write(
+            &project,
+            serialize_project_document(&Document::default()).unwrap(),
+        )
+        .unwrap();
+        let alias = temp.path("hard-link.kinewright");
+        fs::hard_link(&project, &alias).unwrap();
+        let different = temp.path("different.kinewright");
+        fs::write(&different, fs::read(&project).unwrap()).unwrap();
+        let (mut app, engine) = in2b_harness(Document::default(), Some(project.clone()));
+        assert_eq!(
+            app.session_index_for_path(&alias),
+            Some(0),
+            "a true alias is the same session"
+        );
+        assert_eq!(
+            app.session_index_for_path(&different),
+            None,
+            "identical bytes are a different file"
+        );
+        let writer = app.focused().recovery.writer().unwrap();
+        let reused = app
+            .focused()
+            .recovery
+            .writer_for(Some(&alias))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            writer.claim.claim_id, reused.claim.claim_id,
+            "alias reuses the held writer"
+        );
+        assert!(!app.another_session_has_path_for(0, &alias));
+        fs::create_dir(temp.path("sub")).unwrap();
+        assert_eq!(
+            app.session_index_for_path(&temp.path("sub/../person project.kinewright")),
+            Some(0)
+        );
+        #[cfg(unix)]
+        {
+            let symlink = temp.path("symlink.kinewright");
+            std::os::unix::fs::symlink(&project, &symlink).unwrap();
+            assert_eq!(app.session_index_for_path(&symlink), Some(0));
+            assert_eq!(
+                app.focused()
+                    .recovery
+                    .writer_for(Some(&symlink))
+                    .unwrap()
+                    .unwrap()
+                    .claim
+                    .claim_id,
+                writer.claim.claim_id
+            );
+        }
+        #[cfg(windows)]
+        {
+            // canonicalize supplies the verbatim long-name spelling even when
+            // the temp root uses RUNNER~1. Both must find this same session.
+            let verbatim = project.canonicalize().unwrap();
+            assert_eq!(app.session_index_for_path(&verbatim), Some(0));
+            let short = std::process::Command::new("cmd")
+                .args([
+                    "/d",
+                    "/c",
+                    &format!("for %I in (\"{}\") do @echo %~sI", project.display()),
+                ])
+                .output()
+                .unwrap();
+            assert!(short.status.success());
+            let short = PathBuf::from(String::from_utf8(short.stdout).unwrap().trim());
+            assert!(!short.as_os_str().is_empty());
+            assert_eq!(app.session_index_for_path(&short), Some(0));
+            assert_eq!(
+                app.focused()
+                    .recovery
+                    .writer_for(Some(&verbatim))
+                    .unwrap()
+                    .unwrap()
+                    .claim
+                    .claim_id,
+                writer.claim.claim_id
+            );
+        }
+        app.new_project();
+        assert!(app.another_session_has_path_for(1, &alias));
+        assert!(
+            matches!(
+                app.write_project(&alias),
+                Err(ProjectSaveError::PathOpenElsewhere { .. })
+            ),
+            "Save As refuses a true file alias"
+        );
+        assert_eq!(fs::read(&project).unwrap(), fs::read(&alias).unwrap());
+        drop(reused);
+        drop(writer);
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    #[test]
+    fn g04_open_and_save_preserve_the_persons_path() {
+        let temp = TempDirectory::new("c7-person-path");
+        fs::create_dir(temp.path("sub")).unwrap();
+        let path = temp.path("sub/../person project.kinewright");
+        fs::write(
+            &path,
+            serialize_project_document(&Document::default()).unwrap(),
+        )
+        .unwrap();
+        let (mut app, engine) = in2b_harness(Document::default(), Some(path.clone()));
+        assert_eq!(
+            app.focused().project_path.as_ref(),
+            Some(&path),
+            "open keeps the supplied spelling"
+        );
+        assert!(same_project_file(
+            app.focused()
+                .agent_project_path
+                .read()
+                .unwrap()
+                .as_deref()
+                .unwrap(),
+            &path
+        ));
+        for _ in 0..2 {
+            let report = app
+                .write_project(&path)
+                .expect("same-session save succeeds");
+            assert_eq!(
+                app.focused().project_path.as_ref(),
+                Some(&path),
+                "save keeps the supplied spelling"
+            );
+            assert_eq!(report.path, path, "save report keeps the person's path");
+            assert!(
+                app.focused()
+                    .established
+                    .iter()
+                    .any(|stem| same_project_file(
+                        stem,
+                        &sidecar_path_for_project(Some(&path)).unwrap()
+                    )),
+                "sidecar bookkeeping names the actual sidecar"
+            );
+            assert!(same_project_file(
+                app.focused()
+                    .agent_project_path
+                    .read()
+                    .unwrap()
+                    .as_deref()
+                    .unwrap(),
+                &path
+            ));
+        }
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn g04_retargeted_display_alias_cannot_transfer_an_ordinary_save() {
+        let temp = TempDirectory::new("c7-retargeted-display-alias");
+        let original = temp.path("original.kinewright");
+        let foreign = temp.path("foreign.kinewright");
+        let alias = temp.path("person.kinewright");
+        let original_bytes = serialize_project_document(&Document::default()).unwrap();
+        let foreign_bytes = serialize_project_document(&Document {
+            markers: vec![Marker {
+                id: MarkerId(71),
+                position: TimeCode::ZERO,
+                label: "foreign".into(),
+                color_token: 0,
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        fs::write(&original, &original_bytes).unwrap();
+        fs::write(&foreign, &foreign_bytes).unwrap();
+        inspect_project_document(&foreign).expect("foreign control is a valid supported project");
+        assert_ne!(original_bytes, foreign_bytes);
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        let (mut app, engine) = in2b_harness(Document::default(), Some(alias.clone()));
+        app.focused()
+            .recovery
+            .writer()
+            .expect("the original writer was acquired")
+            .verify()
+            .unwrap();
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&foreign, &alias).unwrap();
+        let save_path = app.focused().project_path.clone().unwrap();
+        let result = app.write_project(&save_path);
+        assert!(
+            matches!(result, Err(ProjectSaveError::LockLost { .. })),
+            "ordinary Save cannot acquire the retargeted display alias: {result:?}"
+        );
+        assert!(
+            same_project_file(
+                app.focused()
+                    .agent_project_path
+                    .read()
+                    .unwrap()
+                    .as_deref()
+                    .unwrap(),
+                &original
+            ),
+            "agent IO remains bound to the admitted original"
+        );
+        assert_eq!(fs::read(&original).unwrap(), original_bytes.as_bytes());
+        assert_eq!(fs::read(&foreign).unwrap(), foreign_bytes.as_bytes());
+        assert!(!sidecar_path_for_project(Some(&foreign)).unwrap().exists());
+        assert_eq!(app.focused().project_path.as_ref(), Some(&alias));
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn g04_save_as_alias_preserves_the_actual_foreign_sidecar() {
+        let temp = TempDirectory::new("c7-save-as-sidecar-alias");
+        let destination = temp.path("physical-copy.kinewright");
+        let alias = temp.path("person-copy.kinewright");
+        fs::write(
+            &destination,
+            serialize_project_document(&Document::default()).unwrap(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&destination, &alias).unwrap();
+        let sidecar = sidecar_path_for_project(Some(&destination)).unwrap();
+        let foreign = b"foreign sidecar history must survive byte for byte";
+        fs::write(&sidecar, foreign).unwrap();
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        let report = app
+            .write_project(&alias)
+            .expect("Save As through an alias succeeds");
+        let mut backup = sidecar.as_os_str().to_os_string();
+        backup.push(".bak");
+        let backup = PathBuf::from(backup);
+        assert!(
+            backup.exists(),
+            "Save As alias preserves the actual foreign sidecar"
+        );
+        assert_eq!(fs::read(&backup).unwrap(), foreign);
+        assert_ne!(fs::read(&sidecar).unwrap(), foreign);
+        assert!(!sidecar_path_for_project(Some(&alias)).unwrap().exists());
+        assert_eq!(report.path, alias);
+        assert_eq!(app.focused().project_path.as_ref(), Some(&alias));
+        inspect_project_document(&destination).expect("the actual destination reopens");
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    #[test]
+    fn g04_unsaved_studio_keeps_the_agent_project_path_absent() {
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "c7-unsaved-agent-path",
+        );
+        let (mut app, engine) = in2b_harness(Document::default(), None);
+        app.focused_mut().recovery.stop_for_studio();
+        let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+            temp.root(),
+            &app.focused().core,
+            kinewright_project::storage_budget::StorageLimits::default(),
+        )
+        .unwrap();
+        app.focused_mut().ja1 = Some(crate::ja1_attachment::Ja1Attachment::new(owner).unwrap());
+        app.focused_mut().install_ja1_view();
+        let no_person_path = app.focused().project_path.is_none();
+        let no_agent_path = app.focused().agent_project_path.read().unwrap().is_none();
+        in2b_quiesce_engine(&engine);
+        in2b_shutdown(&mut app);
+        assert!(no_person_path);
+        assert!(
+            no_agent_path,
+            "an unsaved Studio session must not advertise its temporary root as a saved project"
+        );
+    }
+
     /// N6/H2: the original session cannot overwrite while a recovery
     /// duplicate holds its path — both sides route to Save As.
     #[test]
@@ -14995,7 +15299,11 @@ mod in2b_tests {
         let failed = matches!(app.write_project(&target), Err(ProjectSaveError::Write(_)));
         // Collected before shutdown; asserted after (see the G4 test).
         let stem_after = fs::read(&stem).expect("the stem re-reads");
-        let member_after = app.focused().established.contains(&stem);
+        let member_after = app
+            .focused()
+            .established
+            .iter()
+            .any(|established| same_project_file(established, &stem));
         let mut baks_after = 0;
         for entry in fs::read_dir(temp.root()).expect("the dir reads") {
             let entry = entry.expect("a readable entry");
@@ -15019,6 +15327,10 @@ mod in2b_tests {
     /// never earned — and the empty-retry after the fix preserves-and-pairs
     /// instead of wiping.
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one complete rollback and retry witness"
+    )]
     fn g4_failed_save_as_restores_established_and_retry_preserves() {
         let temp = TempDirectory::new("aw1-g4-save-as-rollback");
         let target = temp.path("target.kinewright");
@@ -15052,7 +15364,10 @@ mod in2b_tests {
         let (mut app, engine) = in2b_harness(source, None);
         in2b_observe_opens(&app.projects[0], 1, 41);
         assert!(
-            !app.focused().established.contains(&target_sidecar),
+            !app.focused()
+                .established
+                .iter()
+                .any(|established| same_project_file(established, &target_sidecar)),
             "the target starts unestablished"
         );
         let last = app.focused().last_written_gen;
@@ -15068,7 +15383,11 @@ mod in2b_tests {
         // Collected before shutdown; asserted after — a red assert must
         // never unwind past the engine quiesce (worker teardown race).
         let stem_after = fs::read(&target_sidecar).expect("the stem re-reads");
-        let member_after = app.focused().established.contains(&target_sidecar);
+        let member_after = app
+            .focused()
+            .established
+            .iter()
+            .any(|established| same_project_file(established, &target_sidecar));
         let last_after = app.focused().last_written_gen;
         let confirmed_after = app.focused().confirmed_written_gen;
         let mut baks_after = 0;
@@ -15096,7 +15415,11 @@ mod in2b_tests {
         let mut bak = target_sidecar.as_os_str().to_owned();
         bak.push(".bak");
         let bak_bytes = fs::read(std::path::PathBuf::from(bak)).expect("the .bak reads");
-        let member_retry = app.focused().established.contains(&target_sidecar);
+        let member_retry = app
+            .focused()
+            .established
+            .iter()
+            .any(|established| same_project_file(established, &target_sidecar));
         in2b_quiesce_engine(&engine);
         in2b_shutdown(&mut app);
         assert_eq!(

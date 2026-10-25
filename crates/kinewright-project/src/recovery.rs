@@ -274,7 +274,7 @@ fn header_names_from(
     if !project.is_absolute() {
         return Ok(false);
     }
-    Ok(canonical_project_identity(&project).is_ok_and(|named| named == identity))
+    Ok(crate::same_project_file(&project, identity))
 }
 
 /// Pending journal (AW1 §5/S7, F5/G5/G6): canonical and legacy bases,

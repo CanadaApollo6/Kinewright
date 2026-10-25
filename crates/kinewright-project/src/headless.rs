@@ -56,12 +56,10 @@ pub fn save_headless(
     if sidecar.established.is_empty() {
         return Err(ProjectSaveError::SessionNotLoaded);
     }
-    let identity = crate::canonical_project_identity(path)
-        .map_err(|e| ProjectSaveError::Write(e.to_string()))?;
     let existing = sidecar
         .authority
         .as_ref()
-        .filter(|writer| writer.resolved_identity() == identity);
+        .filter(|writer| writer.names_project(path));
     let writer = match lock.or(existing) {
         Some(writer) => writer.clone(),
         None => {
@@ -70,7 +68,7 @@ pub fn save_headless(
                 .handle
         }
     };
-    if writer.verify().is_err() || identity != writer.resolved_identity() {
+    if writer.verify().is_err() || !writer.names_project(path) {
         return Err(ProjectSaveError::LockLost {
             path: path.to_path_buf(),
         });
@@ -89,7 +87,10 @@ pub fn save_headless(
     if result.is_err() {
         sidecar.authority = old_authority;
     }
-    result
+    result.map(|mut report| {
+        report.project.path = path.to_path_buf();
+        report
+    })
 }
 
 fn save_legacy_owned(
@@ -100,7 +101,7 @@ fn save_legacy_owned(
     revision: TimelineRevision,
     writer: &LockfileHandle,
 ) -> Result<HeadlessSaveReport, ProjectSaveError> {
-    let path = writer.resolved_identity();
+    let path = writer.project_path();
     let json = serialize_project_document(document)?;
     let new_digest = digest_bytes(json.as_bytes());
     // N6/H12+J2 (as in `write_project`): snapshot for rollback.

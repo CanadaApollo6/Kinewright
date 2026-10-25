@@ -5,8 +5,8 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.."
 root="$PWD"
 evidence="$(realpath -m -- "${1:?usage: ja1-s2-c7-gate.sh /absolute/evidence-directory}")"
 case "$evidence" in "$root/target"*) echo 'evidence must be outside build output' >&2; exit 2;; esac
-mkdir -p "$evidence" "$root/target/c7-tmp"
-export CARGO_TARGET_DIR="$root/target/c7-build" TMPDIR="$root/target/c7-tmp" CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
+mkdir -p "$evidence" "$root/target/c7-fix1-tmp"
+export CARGO_TARGET_DIR="$root/target/c7-fix1-build" TMPDIR="$root/target/c7-fix1-tmp" CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4
 for harness_env_name in ${!JA_@} ${!KINEWRIGHT_@} ${!REV2_@}; do unset "$harness_env_name"; done
 source scripts/setup-ffmpeg.sh
 printf 'cwd=%s\nCARGO_TARGET_DIR=%s\nTMPDIR=%s\nevidence=%s\n' "$PWD" "$CARGO_TARGET_DIR" "$TMPDIR" "$evidence" > "$evidence/environment.txt"

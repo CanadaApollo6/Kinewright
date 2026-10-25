@@ -309,14 +309,19 @@ impl Ja1EditingSession {
             .active_bundle_mut()?
             .save_as_with_limits(path, limits)?;
         match outcome {
-            crate::bundle_copy::SaveAsOutcome::SameProject(report) => {
+            crate::bundle_copy::SaveAsOutcome::SameProject(mut report) => {
+                self.set_path_spelling(path);
+                report.path = path.to_path_buf();
                 Ok(CopyStatus::Committed(report))
             }
             crate::bundle_copy::SaveAsOutcome::Copied(copy) => {
-                let status = copy.status().clone();
+                let mut status = copy.status().clone();
+                if let CopyStatus::Committed(report) = &mut status {
+                    report.path = path.to_path_buf();
+                }
                 if let CopyStatus::Committed(report) = &status {
                     let inputs = copy.rebound_manifest(&self.inputs)?;
-                    let path = copy.destination_owner()?.store().resolved_root()?;
+                    let path = path.to_path_buf();
                     let previous = self
                         .destination
                         .replace(RetainedDestination::FirstSave(copy));

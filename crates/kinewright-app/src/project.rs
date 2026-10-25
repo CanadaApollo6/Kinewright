@@ -362,16 +362,13 @@ impl ProjectSession {
             source_admission.require_supported().is_ok() && !source_admission.is_studio();
         // Open already resolved the source once. Claim and journal that identity,
         // even if the original caller alias was repointed before session creation.
-        let project_path = source_admission
-            .source()
-            .map(Path::to_path_buf)
-            .or(project_path);
+        let io_project_path = source_admission.source().or(project_path.as_deref());
         let recovery = if !writable {
             Recovery::read_only()
         } else if id == 1 {
-            Recovery::start(&core, project_path.as_deref())
+            Recovery::start(&core, io_project_path)
         } else {
-            Recovery::start_attached(&core, project_path.as_deref())
+            Recovery::start_attached(&core, io_project_path)
         };
         let document = Arc::new(document);
         let writer_identity = recovery
@@ -383,8 +380,12 @@ impl ProjectSession {
                 Err(reason) => (None, Some(reason)),
             };
         let (library, statuses) = LutLibrary::build(&document.lut_assets, lut_store.as_ref());
-        let agent_project_path: ProjectPathHandle =
-            std::sync::Arc::new(std::sync::RwLock::new(project_path.clone()));
+        let agent_project_path: ProjectPathHandle = std::sync::Arc::new(std::sync::RwLock::new(
+            writer_identity
+                .as_deref()
+                .or(io_project_path)
+                .map(Path::to_path_buf),
+        ));
         // The wall origin is injected at session creation (`IN2B` §3 rule 14,
         // N1/B4, N-8): wall stamps derive at sidecar write as origin +
         // `opened_at`, and no other construction site passes one.
@@ -593,7 +594,20 @@ impl ProjectSession {
     /// for the branch servers a later thread creates from the same handle.
     pub(crate) fn publish_project_path_to_agents(&self) {
         if let Ok(mut slot) = self.agent_project_path.write() {
-            slot.clone_from(&self.project_path);
+            // Agent asset IO uses the admitted namespace, independently of the UI spelling.
+            *slot = self.project_path.as_ref().map(|display| {
+                self.ja1
+                    .as_ref()
+                    .and_then(|ja1| ja1.owner.store().ok()?.resolved_root().ok())
+                    .or_else(|| {
+                        self.sidecar
+                            .authority
+                            .as_ref()
+                            .map(|writer| writer.resolved_identity().to_path_buf())
+                    })
+                    .or_else(|| self.source_admission.source().map(Path::to_path_buf))
+                    .unwrap_or_else(|| display.clone())
+            });
         }
     }
 
@@ -949,9 +963,9 @@ mod tests {
     #[cfg(unix)]
     use kinewright_project::write_file_atomic;
     use kinewright_project::{
-        ProjectFile, build_sidecar_bytes, can_overwrite_save, canonical_session_key,
-        derive_lut_store, digest_bytes, load_sidecar, serialize_project_document,
-        sidecar_matches_project, sidecar_path_for_project, write_project_document,
+        ProjectFile, build_sidecar_bytes, can_overwrite_save, derive_lut_store, digest_bytes,
+        load_sidecar, same_project_file, serialize_project_document, sidecar_matches_project,
+        sidecar_path_for_project, write_project_document,
     };
 
     /// A media backend that does nothing, so the real `AgentThread` seam can
@@ -2622,33 +2636,28 @@ mod tests {
         shutdown_test_session(&mut session);
     }
 
-    /// `canonical_session_key` collapses non-canonical spellings of one file
-    /// (N2/S-13): `.`/`..` segments resolve, so the one-session guard sees
-    /// through them. A missing file keys by its raw path — still matching
-    /// itself.
+    /// Native object identity, including first-save slots with no root file yet.
     #[test]
-    fn canonical_session_key_collapses_spellings_of_one_file() {
-        let temporary = TempDirectory::new("in2b-canonical-key");
+    fn session_identity_collapses_spellings_of_one_file() {
+        let temporary = TempDirectory::new("in2b-file-identity");
         let file = temporary.path("edit.kinewright");
-        fs::write(&file, b"{}").expect("the file writes");
-        fs::create_dir(temporary.path("sub")).expect("the segment exists");
-        let alias = temporary
-            .root()
-            .join("sub")
-            .join("..")
-            .join("edit.kinewright");
-        assert_ne!(alias, file, "the spellings really differ");
-        assert_eq!(
-            canonical_session_key(&alias),
-            canonical_session_key(&file),
-            "one file, one key"
-        );
+        fs::write(&file, b"{}").unwrap();
+        fs::create_dir(temporary.path("sub")).unwrap();
+        let alias = temporary.path("sub/../edit.kinewright");
+        assert_ne!(alias, file);
+        assert!(same_project_file(&alias, &file));
+        let hard_link = temporary.path("hard-link.kinewright");
+        fs::hard_link(&file, &hard_link).unwrap();
+        assert!(same_project_file(&hard_link, &file));
         let missing = temporary.path("gone.kinewright");
-        assert_eq!(
-            canonical_session_key(&missing),
-            missing,
-            "a missing file keys by its raw path"
-        );
+        assert!(same_project_file(
+            &missing,
+            &temporary.path("sub/../gone.kinewright")
+        ));
+        assert!(!same_project_file(
+            &missing,
+            &temporary.path("other.kinewright")
+        ));
     }
 
     /// `can_overwrite_save` gates on the read version (`IN2B` §4 rule 3):

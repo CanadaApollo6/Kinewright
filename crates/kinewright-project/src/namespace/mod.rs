@@ -2,6 +2,10 @@
 #![allow(clippy::missing_errors_doc)]
 use crate::{LockfileHandle, bundle::BundleError};
 use std::path::{Component, Path, PathBuf};
+mod file_identity;
+#[cfg(unix)]
+pub(crate) use file_identity::FileIdentity;
+pub(crate) use file_identity::{file_matches_path, paths_match};
 #[cfg(target_os = "linux")]
 use std::{cell::RefCell, collections::BTreeMap, ffi::OsString, fs::File};
 

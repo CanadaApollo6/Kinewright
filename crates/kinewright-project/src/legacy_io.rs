@@ -91,14 +91,8 @@ impl PinnedDirectory {
         if !self.directory.metadata()?.is_dir() {
             return Err(io::Error::other("writer parent is not a directory"));
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            let held = self.directory.metadata()?;
-            let current = std::fs::metadata(&self.path)?;
-            if held.dev() != current.dev() || held.ino() != current.ino() {
-                return Err(io::Error::other("writer directory changed"));
-            }
+        if !crate::namespace::file_matches_path(&self.directory, &self.path)? {
+            return Err(io::Error::other("writer directory changed"));
         }
         Ok(())
     }

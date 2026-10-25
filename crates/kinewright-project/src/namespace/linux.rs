@@ -449,12 +449,12 @@ pub(super) fn inspect(path: &Path) -> Result<ProjectNamespace, BundleError> {
         Err(e) => return Err(e.into()),
     }
     check_profile(&parent)?;
-    let stat = fs::fstat(&parent)?;
+    let identity = super::FileIdentity::of_file(&parent)?;
     let namespace = ProjectNamespace {
         identity: NamespaceIdentity {
             resolved_root: resolved,
-            parent_device: stat.st_dev,
-            parent_inode: stat.st_ino,
+            parent_device: identity.device,
+            parent_inode: identity.inode,
         },
         parent,
         session: None,
@@ -497,7 +497,10 @@ pub(super) fn claim(namespace: &mut ProjectNamespace) -> Result<(), BundleError>
         Duration::ZERO,
     )
     .map_err(|e| BundleError::Contention(e.to_string()))?;
-    if acquired.handle.resolved_identity() != namespace.identity.resolved_root {
+    if !acquired
+        .handle
+        .names_project(&namespace.identity.resolved_root)
+    {
         let _ = acquired.handle.release();
         return Err(BundleError::Identity(
             "claim identity changed during admission".into(),

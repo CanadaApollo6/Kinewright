@@ -243,7 +243,13 @@ impl Ja1EditingSession {
         } else {
             bundle.empty_inputs()?.reference.clone()
         };
-        Self::from_bundle(bundle, core, inputs)
+        let mut session = Self::from_bundle(bundle, core, inputs)?;
+        session
+            .association
+            .as_mut()
+            .ok_or(BundleError::HistoryBarrierInvariant)?
+            .path = path.to_path_buf();
+        Ok(session)
     }
     pub fn open(path: &Path) -> Result<Self, BundleError> {
         let loaded = LoadedBundle::read(path)?;
@@ -265,11 +271,12 @@ impl Ja1EditingSession {
             .restore_history(history)
             .map_err(crate::bundle::history_error)?;
         let mut session = Self::from_bundle(bundle, &core, inputs)?;
-        session
+        let association = session
             .association
             .as_mut()
-            .ok_or(BundleError::HistoryBarrierInvariant)?
-            .saved = Some(saved);
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        association.path = path.to_path_buf();
+        association.saved = Some(saved);
         Ok(session)
     }
     pub fn from_bundle(
@@ -346,6 +353,11 @@ impl Ja1EditingSession {
                 Ok((bundle.store.resolved_root()?, bundle.publication_state()))
             })
             .collect()
+    }
+    #[must_use]
+    pub fn pending_agent_command(&self) -> bool {
+        self.active_bundle()
+            .is_ok_and(|bundle| bundle.pending_command.is_some())
     }
     #[must_use]
     pub fn pending_agent_command_at(&self, path: &Path) -> bool {
@@ -506,14 +518,17 @@ impl Ja1EditingSession {
             .ok_or(BundleError::HistoryBarrierInvariant)?;
         let copy = source.first_save_with_limits(path, &self.core, &self.inputs, limits)?;
         self.inputs = copy.rebound_manifest(&self.inputs)?;
-        let status = copy.status().clone();
+        let mut status = copy.status().clone();
+        if let CopyStatus::Committed(report) = &mut status {
+            report.path = path.to_path_buf();
+        }
         let saved = if let CopyStatus::Committed(report) = &status {
             Some(report.history_sha256.clone())
         } else {
             None
         };
         self.association = Some(ActiveAssociation {
-            path: copy.destination_owner()?.store().resolved_root()?,
+            path: path.to_path_buf(),
             saved,
         });
         self.destination = Some(RetainedDestination::FirstSave(Box::new(copy)));
@@ -522,7 +537,7 @@ impl Ja1EditingSession {
     }
     /// Ordinary saves never inspect the rescue slot ledger.
     pub fn save_active(&mut self) -> Result<BundleSaveReport, BundleError> {
-        let report = self
+        let mut report = self
             .destination
             .as_mut()
             .ok_or_else(|| BundleError::Identity("choose a first-save destination".into()))?
@@ -533,7 +548,18 @@ impl Ja1EditingSession {
             .ok_or(BundleError::HistoryBarrierInvariant)?
             .saved = Some(saved);
         self.retire_ordinary_copy()?;
+        if let Some(association) = &self.association {
+            report.path.clone_from(&association.path);
+        }
         Ok(report)
+    }
+    /// Keep a caller's display spelling after a verified handoff. IO stays with its owner.
+    pub fn set_path_spelling(&mut self, path: &Path) {
+        if let Some(association) = &mut self.association
+            && crate::same_project_file(&association.path, path)
+        {
+            association.path = path.to_path_buf();
+        }
     }
     fn retire_ordinary_copy(&mut self) -> Result<(), BundleError> {
         if !self.rescue.attempts.is_empty()

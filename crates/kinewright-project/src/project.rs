@@ -286,13 +286,39 @@ pub fn project_newer_format_observation(
     observation
 }
 
-/// The canonical key two project paths share iff they name one file (N2/S-13).
-///
-/// `canonicalize` resolves symlinks, `.`/`..` and (on Windows) case; when the
-/// file is gone the raw path is the key, which still matches itself.
+/// Whether two spellings name the same native file (N2/S-13).
+/// Missing files compare their existing parent identity and final filename:
+/// first-save slots have no file identity yet. Other IO failures never match.
 #[must_use]
-pub fn canonical_session_key(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+pub fn same_project_file(first: &Path, second: &Path) -> bool {
+    let (Ok(first), Ok(second)) = (
+        canonical_project_identity(first),
+        canonical_project_identity(second),
+    ) else {
+        return false;
+    };
+    match (fs::metadata(&first), fs::metadata(&second)) {
+        (Ok(_), Ok(_)) => crate::namespace::paths_match(&first, &second).unwrap_or(false),
+        (Err(first_error), Err(second_error))
+            if first_error.kind() == std::io::ErrorKind::NotFound
+                && second_error.kind() == std::io::ErrorKind::NotFound =>
+        {
+            match (
+                first.parent(),
+                second.parent(),
+                first.file_name(),
+                second.file_name(),
+            ) {
+                (Some(first_parent), Some(second_parent), Some(first_name), Some(second_name)) => {
+                    first_name == second_name
+                        && crate::namespace::paths_match(first_parent, second_parent)
+                            .unwrap_or(false)
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    }
 }
 
 /// The Linux `MAXSYMLINKS` (H5), applied to the LEAF link chain only
@@ -587,7 +613,7 @@ pub fn write_project_bytes_owned(
     previous_store: Option<&LutStore>,
 ) -> Result<ProjectSaveReport, ProjectSaveError> {
     writer.verify().map_err(|_| ProjectSaveError::LockLost {
-        path: writer.resolved_identity().to_path_buf(),
+        path: writer.project_path().to_path_buf(),
     })?;
     #[cfg(any(test, feature = "test-util"))]
     crate::test_hook("legacy_writer_verified");
@@ -598,10 +624,12 @@ pub fn write_project_bytes_owned(
         previous_store,
         Some(writer.resolved_identity()),
     )?;
-    report.path = writer.resolved_identity().to_path_buf();
-    report.lut_store_root = report
-        .lut_store_root
-        .map(|_| report.path.with_extension("kinewright-assets"));
+    report.path = writer.project_path().to_path_buf();
+    report.lut_store_root = report.lut_store_root.map(|_| {
+        writer
+            .resolved_identity()
+            .with_extension("kinewright-assets")
+    });
     Ok(report)
 }
 
@@ -631,13 +659,14 @@ fn write_project_bytes_at(
         Err(reason) => (None, Some(reason)),
     };
     let store_root_changed = match (previous_store, next_store.as_ref()) {
-        (Some(previous), Some(next)) => {
-            previous.root()
-                != pinned_identity.map_or_else(
-                    || next.root().to_path_buf(),
-                    |path| path.with_extension("kinewright-assets"),
-                )
-        }
+        (Some(previous), Some(next)) => !crate::namespace::paths_match(
+            previous.root(),
+            &pinned_identity.map_or_else(
+                || next.root().to_path_buf(),
+                |path| path.with_extension("kinewright-assets"),
+            ),
+        )
+        .unwrap_or(false),
         (None, Some(_)) => true,
         _ => false,
     };

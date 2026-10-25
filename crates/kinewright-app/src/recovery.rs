@@ -38,9 +38,10 @@ use kinewright_core::{
     Core, Document, Event, IncidentCode, IncidentObservation, IncidentSubject, JournalCommand,
     LabelIncident, PROJECT_FORMAT_VERSION, TimelineRevision,
 };
+#[cfg(test)]
+use kinewright_project::canonical_project_identity;
 use kinewright_project::{
-    JOURNAL_MAGIC as MAGIC, allocate_journal_path, canonical_project_identity,
-    default_recovery_directory,
+    JOURNAL_MAGIC as MAGIC, allocate_journal_path, default_recovery_directory,
 };
 use serde::{Deserialize, Serialize};
 
@@ -841,9 +842,8 @@ impl Recovery {
         let Some(path) = path else {
             return Ok(None);
         };
-        let identity = canonical_project_identity(path).map_err(|e| e.to_string())?;
         if let Some(writer) = &self.authority
-            && writer.resolved_identity() == identity
+            && writer.names_project(path)
         {
             writer.verify().map_err(|e| e.to_string())?;
             return Ok(Some(writer.clone()));

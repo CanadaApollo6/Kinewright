@@ -269,6 +269,18 @@ pub struct LockfileHandle {
 }
 
 impl LockfileHandle {
+    /// The caller's spelling, for state, reports and notices only.
+    #[must_use]
+    pub fn project_path(&self) -> &Path {
+        &self.spelling
+    }
+
+    /// Compare against the current pinned destination, including after atomic Save.
+    #[must_use]
+    pub fn names_project(&self, path: &Path) -> bool {
+        crate::same_project_file(path, &self.identity)
+    }
+
     #[must_use]
     pub fn resolved_identity(&self) -> &Path {
         &self.identity
@@ -297,17 +309,10 @@ impl LockfileHandle {
     /// # Errors
     /// Returns `LockLost` when the spelling or the object moved.
     pub fn verify(&self) -> Result<(), LockfileError> {
-        let same = crate::project::canonical_project_identity(&self.spelling)
-            .is_ok_and(|now| now == self.identity);
+        let same = self.names_project(&self.spelling);
         #[cfg(unix)]
         let same = same && {
-            use std::os::unix::fs::MetadataExt as _;
-            match (self.file.metadata(), fs::metadata(&self.path)) {
-                (Ok(opened), Ok(current)) => {
-                    opened.dev() == current.dev() && opened.ino() == current.ino()
-                }
-                _ => false,
-            }
+            crate::namespace::file_matches_path(&self.file, &self.path).unwrap_or(false)
         };
         if same && self.parent.verify().is_ok() {
             Ok(())
@@ -726,13 +731,14 @@ fn is_discovery_temp(entry: &std::ffi::OsStr, name: &std::ffi::OsStr) -> bool {
 /// symlink — closing the swap window between open and flock.
 #[cfg(unix)]
 fn fd_matches_path(file: &File, lock_path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    let (Ok(opened), Ok(current)) = (file.metadata(), fs::symlink_metadata(lock_path)) else {
+    let (Ok(opened), Ok(current)) = (
+        crate::namespace::FileIdentity::of_file(file),
+        fs::symlink_metadata(lock_path),
+    ) else {
         return false;
     };
     !current.file_type().is_symlink()
-        && opened.dev() == current.dev()
-        && opened.ino() == current.ino()
+        && opened == crate::namespace::FileIdentity::of_metadata(&current)
 }
 
 /// The claim, lock and discovery paths of one resolved identity (J2): no
