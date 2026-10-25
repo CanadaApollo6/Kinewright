@@ -113,7 +113,7 @@ impl HostAttachment {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn connected(
         client: HostClient,
         source: Option<BorrowedSourceDescriptor>,

@@ -1171,9 +1171,8 @@ fn g04_two_process_lock_save_alias_and_discovery() {
         let root = temp("c8-windows-refusal");
         let path = admission::fixture(root.root(), "ordinary", "supported");
         let before = admission::tree(root.root());
-        let error = match HostCommandOwner::open(config(root.root(), Some(path))) {
-            Ok(_) => panic!("uncertified Studio writer admitted"),
-            Err(error) => error,
+        let Err(error) = HostCommandOwner::open(config(root.root(), Some(path))) else {
+            panic!("uncertified Studio writer admitted")
         };
         assert!(matches!(
             bundle_error(error),
