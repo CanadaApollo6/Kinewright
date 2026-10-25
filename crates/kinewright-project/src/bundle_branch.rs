@@ -68,7 +68,7 @@ pub(crate) fn transition(
             suffix_digest,
         } => {
             if checkpoint.checkpoint_generation != *preceding_checkpoint_generation
-                || checkpoint.command_cut.as_ref() != Some(reconciled_cut)
+                || checkpoint.command_cut.as_ref() != reconciled_cut.as_ref()
                 || checkpoint.history_ref.sha256 != *suffix_digest
             {
                 return Err(BundleError::Unsupported(

@@ -64,6 +64,13 @@ impl HostCommandOwner {
             )
             .into());
         }
+        if self.recovering {
+            return Err(HostRefusal::new(
+                "recovery_frozen",
+                "shared recovery has not been confirmed",
+            )
+            .into());
+        }
         if self.manual.is_some() {
             return Err(HostRefusal::new(
                 "manual_busy",

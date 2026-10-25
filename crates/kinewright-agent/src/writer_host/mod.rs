@@ -3,6 +3,7 @@
 mod auth;
 mod manual;
 mod protocol;
+mod recovery;
 pub use auth::HostAuth;
 use auth::PinnedPath;
 use axum::{
@@ -977,6 +978,8 @@ pub struct HostCommandOwner {
     next_session: u64,
     manual: Option<kinewright_project::manual_history::ManualLease>,
     next_manual_generation: u64,
+    recovering: bool,
+    recovery: Option<RecoveryBarrier>,
 }
 enum Choice {
     Rescue {
@@ -1095,6 +1098,8 @@ impl HostCommandOwner {
             next_session: 1,
             manual: None,
             next_manual_generation: 1,
+            recovering: false,
+            recovery: None,
         };
         // Initial attachment seeds the one validation shadow before it can serve sessions.
         // This is a bootstrap snapshot, not the C9 continuous manual stream.
@@ -1102,6 +1107,11 @@ impl HostCommandOwner {
             host.install(initial_snapshot)?;
         }
         Ok(host)
+    }
+    #[cfg(feature = "eval-harness")]
+    pub fn restrict_manual_limits_probe(&mut self, limits: StorageLimits) -> Result<(), HostError> {
+        self.owner_mut()?.restrict_manual_limits_probe(limits)?;
+        Ok(())
     }
     fn owner(&self) -> Result<&Ja1EditingSession, HostError> {
         self.owner.as_ref().ok_or_else(|| {
@@ -1196,6 +1206,11 @@ impl HostCommandOwner {
             self.execute_inner(command, &roots, &mut reply)
         });
         if let Err(error) = result {
+            if self.recovering
+                && let Some(owner) = &self.owner
+            {
+                let _ = owner.freeze_manual_barrier();
+            }
             self.message = error.to_string();
             reply.error = Some(error.refusal());
         }
@@ -1280,7 +1295,35 @@ impl HostCommandOwner {
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
+        if self.recovering
+            && !manual::connector_command(&command)
+            && !matches!(
+                command,
+                HostCommand::BeginRecovery { .. }
+                    | HostCommand::PublishBarrier { .. }
+                    | HostCommand::ConfirmBarrier { .. }
+                    | HostCommand::Shutdown
+            )
+        {
+            return Err(HostRefusal::new(
+                "recovery_frozen",
+                "Editing remains read-only until both Cores confirm the durable recovery result.",
+            )
+            .into());
+        }
         match command {
+            HostCommand::BeginRecovery {
+                client,
+                frozen,
+                pending,
+                discard_batches,
+            } => {
+                self.begin_recovery(client, frozen.as_ref(), &pending, discard_batches, reply)?;
+            }
+            HostCommand::PublishBarrier { barrier } => self.publish_barrier(*barrier, reply)?,
+            HostCommand::ConfirmBarrier { barrier, installed } => {
+                self.confirm_barrier(*barrier, installed, reply)?;
+            }
             HostCommand::AcquireManual { client } => {
                 reply.manual_lease = Some(self.acquire_manual(client)?);
                 reply.manual_inputs = Some(self.owner()?.manual_input_context()?);
@@ -1829,7 +1872,8 @@ impl HostCommandOwner {
                 .association()
                 .and_then(|a| a.saved_digest())
                 .map(str::to_owned);
-            status.frozen = !self.retention_proven
+            status.frozen = self.recovering
+                || !self.retention_proven
                 || owner.core().attachment_state() != Ok(AttachmentState::Live);
             status.prepared_selection = owner.has_prepared_selection();
             status.unresolved = owner.has_unresolved_publication();

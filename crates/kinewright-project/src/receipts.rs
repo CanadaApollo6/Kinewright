@@ -52,9 +52,17 @@ pub enum HistoryRequest {
     },
     RecoveryClose {
         preceding_checkpoint_generation: u64,
-        reconciled_cut: CommandId,
+        reconciled_cut: Option<CommandId>,
         suffix_digest: String,
     },
+}
+
+/// An absent manual command reauthorized only inside the shared recovery barrier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalCommand {
+    pub id: CommandId,
+    pub digest: CommandDigest,
 }
 
 /// Transport tokens are deliberately absent. A retry preserves every original field.
@@ -183,6 +191,8 @@ impl ReceiptResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_origin: Option<OriginalCommand>,
     pub id: CommandId,
     pub digest: CommandDigest,
     pub project_id: ProjectId,
@@ -221,8 +231,16 @@ impl ReceiptLedger {
     #[must_use]
     pub fn lookup(&self, id: &CommandId, digest: &CommandDigest) -> ReceiptLookup {
         for (records, retired) in [(&self.detailed, false), (&self.retired, true)] {
-            if let Some(receipt) = records.iter().find(|r| r.id == *id) {
-                return if receipt.digest != *digest {
+            if let Some(receipt) = records
+                .iter()
+                .find(|r| r.id == *id || r.recovery_origin.as_ref().is_some_and(|o| o.id == *id))
+            {
+                let expected = receipt
+                    .recovery_origin
+                    .as_ref()
+                    .filter(|o| o.id == *id)
+                    .map_or(&receipt.digest, |o| &o.digest);
+                return if expected != digest {
                     ReceiptLookup::IdPayloadConflict
                 } else if retired {
                     ReceiptLookup::Retired(receipt.clone())
@@ -250,6 +268,17 @@ impl ReceiptLedger {
                 || !ids.insert(&receipt.id)
             {
                 return Err(BundleError::Corrupt("receipt identity/digest".into()));
+            }
+            if let Some(original) = &receipt.recovery_origin {
+                original.id.issuer.validate()?;
+                if original.id.sequence == 0
+                    || !hex(&original.digest.0, 64)
+                    || !ids.insert(&original.id)
+                {
+                    return Err(BundleError::Corrupt(
+                        "recovery origin identity/digest".into(),
+                    ));
+                }
             }
             for reference in receipt.result.dependencies() {
                 reference.validate()?;
@@ -332,6 +361,15 @@ impl ProjectBundle {
         inputs: &ObjectRef,
         first_sequence: u64,
     ) -> Result<IssuerId, BundleError> {
+        self.issue_issuer_at_cut(core, inputs, first_sequence, None)
+    }
+    pub(crate) fn issue_issuer_at_cut(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+        first_sequence: u64,
+        cut: Option<&kinewright_core::AcceptedCut>,
+    ) -> Result<IssuerId, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
@@ -357,7 +395,11 @@ impl ProjectBundle {
                 retired: false,
             },
         );
-        let result = self.save(core, inputs);
+        let result = if let Some(cut) = cut {
+            self.save_frozen(core, inputs, cut)
+        } else {
+            self.save(core, inputs)
+        };
         if let Err(error) = result {
             if !self.unsettled {
                 self.issuers.remove(&id);

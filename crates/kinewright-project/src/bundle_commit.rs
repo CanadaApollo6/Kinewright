@@ -42,8 +42,35 @@ impl BundleCommit {
         inputs: &ObjectRef,
         blobs: &[(&ObjectRef, &[u8])],
     ) -> Result<ReceiptLookup, BundleError> {
+        Self::command_inner(bundle, envelope, core, inputs, blobs, true)
+    }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one existing transactional command publisher with optional frozen install"
+    )]
+    pub(crate) fn command_inner(
+        bundle: &mut ProjectBundle,
+        envelope: &CommandEnvelope,
+        core: &Core,
+        inputs: &ObjectRef,
+        blobs: &[(&ObjectRef, &[u8])],
+        install: bool,
+    ) -> Result<ReceiptLookup, BundleError> {
         use kinewright_core::{Command, Event, Query, QueryResult};
-        crate::bundle::reconcile_core_save(core)?;
+        if install {
+            crate::bundle::reconcile_core_save(core)?;
+        } else if core
+            .attachment_state()
+            .map_err(crate::bundle::history_error)?
+            != kinewright_core::AttachmentState::Frozen
+            || core
+                .pending_history_save()
+                .map_err(crate::bundle::history_error)?
+                .is_some()
+            || envelope.transition.is_none()
+        {
+            return Err(BundleError::HistoryBarrierInvariant);
+        }
         let lookup = bundle.receipt_lookup(envelope)?;
         if lookup != ReceiptLookup::Absent {
             return Ok(lookup);
@@ -219,7 +246,13 @@ impl BundleCommit {
             .get_mut(&envelope.id.issuer)
             .ok_or_else(|| BundleError::Corrupt("admitted issuer disappeared".into()))?
             .next_sequence = next_sequence;
-        if let Err(error) = Self::publish(bundle, &after, inputs) {
+        let publication = if install {
+            Self::publish(bundle, &after, inputs)
+        } else {
+            let branch = bundle.manual_branch_id.clone();
+            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))
+        };
+        if let Err(error) = publication {
             if !matches!(
                 error,
                 BundleError::DurabilityUnknown | BundleError::Unsettled
@@ -235,7 +268,8 @@ impl BundleCommit {
             std::sync::Arc::clone(bundle.cached_history(&bundle.manual_branch_id).ok_or_else(
                 || BundleError::Corrupt("published history missing from owner".into()),
             )?);
-        if **published != original
+        if install
+            && **published != original
             && bundle
                 .attach_core(core)?
                 .install_checkpoint(original, (**published).clone())
@@ -264,6 +298,9 @@ impl BundleCommit {
             .manual
             .as_ref()
             .ok_or(BundleError::HistoryBarrierInvariant)?;
+        if manual.recovery_origin.is_some() {
+            return Err(BundleError::HistoryChanged);
+        }
         let binding = &manual.binding;
         if bundle.unsettled || bundle.pending_command.is_some() {
             return Err(BundleError::Unsettled);
@@ -431,7 +468,37 @@ impl BundleCommit {
         selected: Option<&HistorySnapshot>,
     ) -> Result<BundleSaveReport, BundleError> {
         Self::publish_branch_impl(
-            bundle, history, inputs, branch_id, seed, selected, None, false, None,
+            bundle,
+            history,
+            inputs,
+            branch_id,
+            seed,
+            selected,
+            None,
+            false,
+            None,
+            &[],
+        )
+    }
+    pub(crate) fn publish_recovery_batch(
+        bundle: &mut ProjectBundle,
+        history: &HistorySnapshot,
+        selected: &HistorySnapshot,
+        inputs: &ObjectRef,
+        envelopes: &[CommandEnvelope],
+    ) -> Result<BundleSaveReport, BundleError> {
+        let branch = bundle.manual_branch_id.clone();
+        Self::publish_branch_impl(
+            bundle,
+            history,
+            inputs,
+            &branch,
+            None,
+            Some(selected),
+            None,
+            false,
+            None,
+            envelopes,
         )
     }
     pub(crate) fn publish_selection(
@@ -448,6 +515,7 @@ impl BundleCommit {
             Some(selection),
             false,
             None,
+            &[],
         )
     }
     pub(crate) fn publish_maintenance(
@@ -466,6 +534,7 @@ impl BundleCommit {
             None,
             true,
             None,
+            &[],
         )
     }
     pub(crate) fn publish_rescue(
@@ -486,6 +555,7 @@ impl BundleCommit {
             None,
             false,
             Some((source, contexts)),
+            &[],
         )
     }
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -499,6 +569,7 @@ impl BundleCommit {
         selection: Option<&crate::bundle_switch::PreparedProjectSelection>,
         metadata_only: bool,
         rescue_source: Option<(&ProjectBundle, &[ObjectRef])>,
+        manual_batch: &[CommandEnvelope],
     ) -> Result<BundleSaveReport, BundleError> {
         let existing_selection = metadata_only
             || selection.is_some_and(|selected| {
@@ -741,15 +812,24 @@ impl BundleCommit {
             .map_or_else(Vec::new, |p| p.batch_ids.clone());
         let total_batches = checked.batches.len() + floor_discard.unwrap_or(0);
         while batch_ids.len() < total_batches {
-            let accepted = bundle
-                .pending_command
-                .as_ref()
-                .and_then(|e| e.manual.as_ref());
+            let accepted = if manual_batch.is_empty() {
+                bundle
+                    .pending_command
+                    .as_ref()
+                    .and_then(|e| e.manual.as_ref())
+            } else {
+                manual_batch
+                    .iter()
+                    .filter_map(|e| e.manual.as_ref())
+                    .find(|m| usize::try_from(m.batch.order).ok() == Some(batch_ids.len()))
+            };
             batch_ids.push(if let Some(manual) = accepted {
-                if batch_ids.len() + 1 != total_batches {
+                if manual_batch.is_empty() && batch_ids.len() + 1 != total_batches {
                     return Err(BundleError::HistoryChanged);
                 }
                 manual.batch_id.clone()
+            } else if !manual_batch.is_empty() {
+                return Err(BundleError::HistoryChanged);
             } else {
                 BatchId::fresh()?
             });
@@ -996,13 +1076,22 @@ impl BundleCommit {
         recovery.generation = generation;
         recovery.staging = None;
         let mut receipts = bundle.receipts.clone();
-        if let Some(envelope) = &bundle.pending_command {
+        for envelope in manual_batch.iter().chain(
+            bundle
+                .pending_command
+                .as_deref()
+                .filter(|_| manual_batch.is_empty()),
+        ) {
             let result = bundle
                 .pending_result
                 .clone()
                 .unwrap_or_else(|| ReceiptResult::Edit {
                     checkpoint_ref: checkpoint_ref.clone(),
-                    batch_id: branches[&manual_branch_id].batch_ids.last().cloned(),
+                    batch_id: envelope
+                        .manual
+                        .as_ref()
+                        .map(|m| m.batch_id.clone())
+                        .or_else(|| branches[&manual_branch_id].batch_ids.last().cloned()),
                 });
             if matches!(result, ReceiptResult::Comment { .. }) {
                 receipts.comments = receipts
@@ -1011,6 +1100,10 @@ impl BundleCommit {
                     .ok_or(BundleError::Capacity("comment count"))?;
             }
             receipts.detailed.push(CommandReceipt {
+                recovery_origin: envelope
+                    .manual
+                    .as_ref()
+                    .and_then(|m| m.recovery_origin.clone()),
                 id: envelope.id.clone(),
                 digest: envelope.digest()?,
                 project_id: bundle.project_id.clone(),

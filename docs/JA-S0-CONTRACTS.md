@@ -1375,3 +1375,16 @@ witness covers local acceptance before B5, and two authenticated clients exercis
 one-editor authority. The original `app-coalesced-paint` fixture and all old oracle
 bytes remain unchanged. This is C9 ingress evidence, not G5-L recovery, G20 or native
 Windows durable-success acceptance.
+
+### C10 manual recovery observation boundary
+
+The additive `s2-manual-recovery.json` and `s2-manual-floor.json` fixtures retain a
+real Core query control in baseline mode. The original S0 host-recovery seam stays
+pending. Revised mode drives the actual App attachment, all manual command forms,
+a killed/restarted shipping host, the original accepted envelopes, shared durable
+floor/close records, and fresh permit acquisition. Exact history, frozen producers,
+Saved identity and actual source ownership are observed. The unchanged S1 restore
+proof remains a prerequisite rather than G5-L acceptance. The fast restart tests
+execute without slow features; the two complete recovery matrices use the existing
+agent slow tier. Native Windows runs protocol, process and actor-state controls;
+Studio durable success remains unsupported until its separate certification.

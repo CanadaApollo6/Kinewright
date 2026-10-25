@@ -211,7 +211,7 @@ pub struct HistoryFloorCheckpoint {
 #[serde(deny_unknown_fields)]
 pub struct RecoveryCloseCheckpoint {
     pub preceding_checkpoint_ref: ObjectRef,
-    pub reconciled_cut: CommandId,
+    pub reconciled_cut: Option<CommandId>,
     pub suffix_digest: String,
     pub closed_checkpoint_ref: ObjectRef,
 }

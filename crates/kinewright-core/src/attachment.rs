@@ -114,6 +114,15 @@ impl<P: 'static> CoreAttachment<P> {
     ) -> Result<ManualPermit, HistoryError> {
         self.core.bind_manual::<P>(encoder)
     }
+    pub fn resume_manual(
+        &self,
+        _proof: &P,
+        cut: &AcceptedCut,
+        encoder: Box<dyn ManualHistoryEncoder>,
+        live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<ManualPermit, HistoryError> {
+        self.core.resume_manual::<P>(cut.clone(), encoder, live)
+    }
     pub fn acknowledge_manual(
         &self,
         _proof: &P,
@@ -151,6 +160,17 @@ impl<P: 'static> CoreAttachment<P> {
         after: HistorySnapshot,
     ) -> Result<(), HistoryError> {
         self.core.restore_authorized::<P>(after, Some(before))
+    }
+    /// Install only an exact frozen cut's legal floor or recovery-close result.
+    /// Keeps input fenced and invalidates every old manual permit.
+    pub fn install_frozen_transition(
+        &self,
+        _proof: &P,
+        cut: &AcceptedCut,
+        after: HistorySnapshot,
+        pending: Vec<AcceptedHistory>,
+    ) -> Result<AcceptedCut, HistoryError> {
+        self.core.install_frozen::<P>(cut.clone(), after, pending)
     }
     pub fn install_history_transition(
         &self,
@@ -614,6 +634,99 @@ mod tests {
         ));
         assert!(matches!(
             successor.request(edit(4)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+    }
+    #[test]
+    fn g05l_frozen_install_keeps_exact_cut_pending_and_fresh_permit() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        let (core, owner, old) = manual(0);
+        old.request(edit(1)).unwrap();
+        old.request(Command::DoBatchCoalesced {
+            operations: vec![Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }],
+            coalesce_key: "original-drag".into(),
+        })
+        .unwrap();
+        let pending = old.pending().unwrap();
+        let cut = owner.freeze(&Proof).unwrap();
+        let floor = HistoryTransition::floor(cut.history().clone(), 1).unwrap();
+        let after = HistoryTransition::recovery_close(floor.after().clone(), floor.after())
+            .unwrap()
+            .after()
+            .clone();
+        let stranger = CoreAttachment::<Stranger>::new(core.clone());
+        assert!(
+            stranger
+                .install_frozen_transition(&Stranger, &cut, after.clone(), pending.clone())
+                .is_err()
+        );
+        let mut stale = cut.clone();
+        stale.revision = TimelineRevision(1000);
+        assert!(
+            owner
+                .install_frozen_transition(&Proof, &stale, after.clone(), pending.clone())
+                .is_err()
+        );
+        assert!(
+            owner
+                .install_frozen_transition(&Proof, &cut, after.clone(), pending[..1].to_vec())
+                .is_err()
+        );
+        assert_eq!(core.export_history().unwrap(), *cut.history());
+        let mut wrong = after.clone();
+        Arc::make_mut(&mut wrong.document).duration = crate::TimeCode(12345);
+        assert!(
+            owner
+                .install_frozen_transition(&Proof, &cut, wrong, pending.clone())
+                .is_err()
+        );
+        let installed = owner
+            .install_frozen_transition(&Proof, &cut, after.clone(), pending)
+            .unwrap();
+        assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+        assert_eq!(core.export_history().unwrap(), after);
+        assert!(
+            owner
+                .resume_manual(
+                    &Proof,
+                    &cut,
+                    Box::new(Encoder(0)),
+                    Arc::new(AtomicBool::new(true))
+                )
+                .is_err()
+        );
+        assert!(
+            owner
+                .resume_manual(
+                    &Proof,
+                    &installed,
+                    Box::new(Encoder(0)),
+                    Arc::new(AtomicBool::new(false))
+                )
+                .is_err()
+        );
+        assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+        let fresh = owner
+            .resume_manual(
+                &Proof,
+                &installed,
+                Box::new(Encoder(0)),
+                Arc::new(AtomicBool::new(true)),
+            )
+            .unwrap();
+        assert!(matches!(
+            old.request(edit(2)).unwrap(),
+            Event::MutationRefused { .. }
+        ));
+        assert!(matches!(
+            core.request(edit(2)).unwrap(),
+            Event::MutationRefused { .. }
+        ));
+        assert!(matches!(
+            fresh.request(edit(2)).unwrap(),
             Event::DocumentChanged { .. }
         ));
     }

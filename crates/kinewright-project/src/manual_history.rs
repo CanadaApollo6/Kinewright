@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualLease {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_identity: Option<(u64, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_name: Option<String>,
     pub client: String,
     pub token: String,
     pub project: ProjectId,
@@ -31,6 +35,8 @@ pub struct ManualLease {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ManualHistoryIdentity {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_origin: Option<crate::receipts::OriginalCommand>,
     pub binding: ManualLease,
     pub batch_id: BatchId,
     pub predecessor: Option<BatchId>,
@@ -104,6 +110,7 @@ impl ManualHistoryEncoder for AdmittedManualEncoder {
                 .or_else(|| self.predecessor.clone());
             let envelope = CommandEnvelope {
                 manual: Some(ManualHistoryIdentity {
+                    recovery_origin: None,
                     binding: self.lease.clone(),
                     batch_id: batch_id.clone(),
                     predecessor: previous,

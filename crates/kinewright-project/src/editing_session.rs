@@ -22,6 +22,7 @@ use kinewright_core::{Core, HistorySaveTag};
 use std::path::{Path, PathBuf};
 mod durable;
 mod manual;
+pub use manual::ManualRecoveryEndpoint;
 mod recovery;
 mod rescue;
 mod rescue_selection;

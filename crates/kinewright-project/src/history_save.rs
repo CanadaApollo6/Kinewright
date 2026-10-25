@@ -80,6 +80,15 @@ impl ProjectAttachment {
     ) -> Result<kinewright_core::ManualPermit, HistoryError> {
         self.authority.manual_permit(&ProjectHistoryProof, encoder)
     }
+    pub(crate) fn resume_manual(
+        &self,
+        cut: &kinewright_core::AcceptedCut,
+        encoder: Box<dyn kinewright_core::ManualHistoryEncoder>,
+        live: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<kinewright_core::ManualPermit, HistoryError> {
+        self.authority
+            .resume_manual(&ProjectHistoryProof, cut, encoder, live)
+    }
     pub fn acknowledge_manual(
         &self,
         permit: &kinewright_core::ManualPermit,
@@ -114,6 +123,15 @@ impl ProjectAttachment {
     ) -> Result<(), HistoryError> {
         self.authority
             .install_checkpoint(&ProjectHistoryProof, before, after)
+    }
+    pub(crate) fn install_frozen_transition(
+        &self,
+        cut: &kinewright_core::AcceptedCut,
+        after: kinewright_core::HistorySnapshot,
+        pending: Vec<kinewright_core::AcceptedHistory>,
+    ) -> Result<kinewright_core::AcceptedCut, HistoryError> {
+        self.authority
+            .install_frozen_transition(&ProjectHistoryProof, cut, after, pending)
     }
     pub fn install_history_transition(
         &self,

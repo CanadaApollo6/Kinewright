@@ -1368,3 +1368,53 @@ remaining local suffix. Unknown publication or lost retention fences the actor.
 C9 does not authorize recovery replay, a shared floor, recovery-close or switching;
 those remain later stages. A required floor or unsupported input context refuses
 and retains the accepted pending history for explicit resolution.
+
+### C10 shared manual recovery and ordered floors
+
+C10 implements §5.1's shared barrier around C9's accepted envelopes. On transport
+failure or transfer, the GUI freezes the actor before joining submitted stream IO.
+The original pending envelopes remain in the GUI until the shared result is
+confirmed. The successor acquires the ordinary named writer, authenticates a fresh
+callback to the same actual GUI source admission, and reads the acknowledged root.
+It creates no source owner, source ledger or cleanup right. Retained destinations
+or a prepared selection whose ownership cannot be re-established still refuse.
+
+Each original ID/digest is resolved before fresh admission. Only proven absence
+permits recovery-only reauthorization. Its new receipt contains the original
+ID/digest in that same publication. The bounded absent suffix reserves its control
+and history overlap before replay, then publishes every original-to-new receipt
+and preserved batch ID in one ordinary root transaction. The S1 selector may
+choose a legal floor for this full accepted cut; neither actor resumes until both
+install that exact selected result and then the recovery-close result. This uses
+the existing limits, without special recovery headroom. Committed commands are never reapplied;
+unknown, payload conflict and retired-unresolved outcomes remain frozen. Recovery
+compares the complete accepted history, including the original open gesture,
+with the shadow. With no surviving GUI, the barrier uses the acknowledged prefix.
+
+A runtime RecoveryBarrier binds the switch generation, original transition envelope,
+checkpoint reference, and exact before/after histories. The reference identifies
+the predecessor for a new transition, or the committed batch result for an
+automatically selected floor. Ordered floors
+use S1's validated HistoryTransition and existing transactional publisher. After
+both actors install and confirm the same floor, the host prepares recovery-close.
+Close likewise requires its durable receipt before confirmation can grant a fresh
+lease. A lost publication reply retries the same envelope and recorded result.
+Later metadata-only publications may change runtime head wrappers; every payload
+reference, command cut, lineage and floor identity must still match that result.
+
+The GUI endpoint installs only an owner-authorized exact frozen cut's legal floor
+or recovery-close result. Installation keeps input frozen and invalidates old
+permits. Resume and binding the fresh permit are one actor turn, conditional on
+the originating context still being open. Rescue's exact own-ticket settlement
+remains separate and gives no recovery-install permission. C9's explicit Save
+requirement for an unsaved or dirty bootstrap remains unchanged. Adoption, return,
+C11 switch receipts and the sealed-A rescue-tail repair remain later work.
+An acknowledged prefix with no accepted command has no cut CommandId. Its
+recovery-close record uses an absent cut, checked against the predecessor's absent
+cut, rather than inventing a command. Existing nonempty cut encodings stay exact.
+Manual leases also bind the admitted native parent identity and logical namespace
+name. The name identifies the slot within that native parent; native identity,
+rather than name or path equality, proves continuity. An identical copied
+root at a replacement parent is insufficient proof of an original command's
+absence. Recovery refuses before reauthorization when that identity differs or
+was never recorded; this comparison uses native IDs rather than path spelling.

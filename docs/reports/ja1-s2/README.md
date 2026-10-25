@@ -558,3 +558,65 @@ Windows cross-check is blocked in aws-lc-sys; native Windows/hosted CI remain NO
 The dirty named fixture uses C9's named-owner harness; legacy JSON handoff remains
 outside this validation. Exact source binding, raw outcomes and development
 failure disposition are in the fix1 report/evidence.
+
+## C10 shared recovery barrier
+
+[C10 report](c10.md), [gate](c10-gate.sh), and
+[mutation driver](../../../scripts/ja1-s2-c10-mutations.sh) describe the single
+commit on `4c82bdb`, without pushing. It adds receipt-linked absent-suffix
+reauthorization, exact frozen actor installs, shared S1 floor/close publication and
+confirmation, and background App host restart using the actual GUI source owner.
+The explicit first-Save bootstrap restriction remains. C11 adoption/return and S2-R
+N2 remain deferred. New additive fixtures have pending baseline host recovery and
+revised runtime assertions; no original S0/S1 assertion is rewritten.
+
+Implementation placement differs from the sketch only by keeping the narrow GUI
+actor endpoint beside its project proof owner and the App recovery worker in
+`ja1_host_recovery.rs`. Named-source/retained-destination ownership that cannot be
+re-established still fails closed. Gates, raw summaries, mutation pairs, timings,
+Windows estimates and remaining platform lanes are recorded in the C10 report.
+The recovery-close cut is optional for a genuinely empty acknowledged prefix.
+Nonempty cuts keep their original serialized bytes; no synthetic command identity
+stands in for a command that was never accepted.
+
+C10's bounded absent suffix publishes all linked receipts and original batch IDs
+in one ordinary S1 root transaction; automatic floor selection then joins the
+same two-actor handshake. No storage cap or special headroom is added. Native
+parent identity and logical namespace provenance fail closed on missing or changed
+continuity. Placement/schema details: `crates/kinewright-project/src/editing_session/manual.rs:215`, `crates/kinewright-project/src/editing_session/manual.rs:627`, `crates/kinewright-app/src/ja1_host_recovery.rs:53`, `crates/kinewright-project/src/receipts.rs:55`, and `crates/kinewright-project/src/manual_history.rs:18`.
+The full-fast Cargo command and stock verifier run separately to preserve the
+required process priorities. Two early main-checkout `bundle_records.rs` reads
+were outside the permitted read boundary; no main tracked writes occurred.
+All C10 changes and verification use the designated worktree; parent timing uses
+an exact archive under the authorized evidence directory. The report records the
+discarded development mutation survivor, final runtime pairs, platform gaps,
+precommit source/binary sealing and post-gate report-only edits explicitly.
+
+The complete workspace fast Cargo run exited 0 (4,007 passed, 109 ignored;
+failure list `[]`). Its first stock-verifier call rejected the split-stream
+capture because Cargo headers were appended after stdout. The capture helper
+`scripts/ja1-s2-c10-fast-log.py:1` restores the exact ordered headers, preserves
+every stdout byte and retains all other stderr. The unchanged stock verifier
+then passed all 56 sections and the exact manifest/allowlist skip set. Only this
+helper and `docs/reports/ja1-s2/c10-gate.sh` changed after runtime execution;
+no production fix was needed and the full Cargo run was not repeated. The first
+parser failure and the exact source/hash disposition remain in the evidence.
+
+The first timing launcher exited 127 before test execution because GNU time was
+absent. It has no timing credit. The accepted window uses a separately sealed
+native Linux wait4/rusage wrapper, with monotonic elapsed time, unchanged child
+exit status and atomic resource-result publication; source is retained at
+`.review/ja/s2-evidence/c10/measure-process.c:1`. No package/toolchain was installed.
+All A/B and recovery binaries were built before that accepted window; no own
+builds or other tests ran alongside it. Parent and C10 source/binary hashes,
+annotations, counters and the postcommit binding are retained with the report.
+
+Final measurements: parent/C10 save means **232.325 / 232.467 ms** (60 saves per
+side, five pairs); recovery has 15 samples, min/median/p95/max
+**551.560 / 789.153 / 1415.773 / 1415.773 ms**. These are descriptive debug-profile
+workstation measurements. Full fast: 4,007 passed, 109 ignored, failure list `[]`;
+affected: 803 selected, 781 executed passes, 22 ignored (overlaps included).
+All 26 runtime mutation reds and restored greens are verified. Core MSVC
+all-target check passed; project/agent/App are blocked at native aws-lc C build.
+Native Windows/hosted C10 CI remain NOT RUN. Estimated Windows workspace/slow jobs
+are **35m49s–37m49s / 27m39s–29m39s**, based on the linked parent/C9 jobs in the report.

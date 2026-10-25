@@ -1000,3 +1000,15 @@ pending; only an exact durable acknowledgement releases their ingress capacity.
 Source ownership, rescue slots, exact own-ticket settlement and capture-only late
 outcomes remain with their existing owners. C9 adds no recovery authorization,
 shared floor handshake, switch receipt or fresh-actor rescue-tail repair.
+
+### C10 recovery authority remains separate from rescue settlement
+
+A frozen manual recovery endpoint accepts only the captured actor/cut and complete
+pending chain. It may install that cut's validated floor or recovery-close result
+while preserving the freeze. Neither an A1 own-ticket proof nor a matching document
+confers this permission. Original-to-new command links and close/floor outcomes are
+ordinary receipt/history records in the same root, with existing admission limits.
+A replacement callback borrows the same actual GUI source admission and cannot
+retire its bytes, pins or charges. Failure to re-establish retained ownership keeps
+all save/rescue routes refused; only explicit originating Close retires the source.
+C10 does not change the deferred sealed-A/fresh-B rescue resume case.

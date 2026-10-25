@@ -1629,3 +1629,166 @@ fn edit_attachment(app: &Ja1Attachment, locked: bool) {
 fn g05l_w05_all_manual_producers_respect_the_actor_cut() {
     crate::app::ja_c9_manual_producer_gate_witness();
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn g05l_every_producer_stays_frozen_until_equivalence() {
+    for floor in [false, true] {
+        observe_c10(floor);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn observe_c10(floor: bool) -> serde_json::Value {
+    use kinewright_agent::writer_host::{HostCommand, SessionRoots};
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    let path = temp.path("c10.kinewright");
+    if !floor {
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+    }
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    app.launch_host_at(
+        &host::executable(),
+        "c10-gui".into(),
+        SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+    )
+    .unwrap();
+    if floor {
+        app.apply(Action::FirstSave(path.clone())).unwrap();
+    }
+    let source_usage = app.owner.source().map(|s| s.store().usage().unwrap());
+    let gate = app
+        .host
+        .as_ref()
+        .unwrap()
+        .manual
+        .as_ref()
+        .unwrap()
+        .permit
+        .clone();
+    let operation = Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    };
+    gate.send(Command::Do(operation.clone())).unwrap();
+    // The actor barrier drains the submitted send; it cannot become a post-cut edit.
+    let cut = app.owner.freeze_host_cut().unwrap();
+    assert_eq!(cut.history().batches.len(), 1);
+    app.host.as_mut().unwrap().cut = Some(cut.clone());
+    let commands = [
+        Command::Do(operation.clone()),
+        Command::DoBatch(vec![operation.clone()]),
+        Command::DoBatchCoalesced {
+            operations: vec![operation.clone()],
+            coalesce_key: "live-control".into(),
+        },
+        Command::Undo,
+        Command::Redo,
+        Command::DoIfRevision {
+            expected: cut.revision(),
+            operation: operation.clone(),
+            token: None,
+        },
+        Command::DoBatchIfRevision {
+            expected: cut.revision(),
+            operations: vec![operation],
+        },
+    ];
+    let producer_count = commands.len();
+    let mut refused = 0;
+    for command in commands {
+        assert!(app.read_only());
+        app.send_manual(command.clone()).unwrap();
+        assert!(
+            matches!(
+                gate.request(command.clone()).unwrap(),
+                Event::MutationRefused {
+                    reason: kinewright_core::CoreMutationRefusal::Frozen,
+                    ..
+                }
+            ),
+            "{command:?}"
+        );
+        refused += 1;
+        core.send(command).unwrap();
+        assert_eq!(core.export_history().unwrap(), *cut.history());
+    }
+    assert!(
+        app.owner
+            .install_host_snapshot(cut.history().clone())
+            .is_err()
+    );
+    let client = app.host_client().unwrap();
+    assert!(
+        client
+            .request(HostCommand::ReadHistory)
+            .unwrap()
+            .error
+            .is_none()
+    );
+    app.host.as_mut().unwrap().kill_owned_child();
+    app.host
+        .as_mut()
+        .unwrap()
+        .begin_manual_recovery_with_floor(&mut app.owner, floor.then_some(1))
+        .unwrap();
+    assert!(app.apply(Action::Save).is_err());
+    assert!(
+        !app.retention_lost,
+        "a refused action during recovery cannot discard proven source ownership"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        app.poll_host();
+        if !app.read_only() {
+            break;
+        }
+        assert!(
+            app.host.as_ref().unwrap().recovery_running(),
+            "recovery finished without equivalence: {}",
+            app.message
+        );
+        assert!(std::time::Instant::now() < deadline, "{}", app.message);
+        std::thread::park_timeout(std::time::Duration::from_millis(5));
+    }
+    assert!(matches!(
+        gate.request(Command::Undo).unwrap(),
+        Event::MutationRefused { .. }
+    ));
+    assert_eq!(
+        core.export_history().unwrap().document,
+        cut.history().document
+    );
+    assert!(!app.is_dirty());
+    if let Some(before) = source_usage {
+        let after = app.owner.source().unwrap().store().usage().unwrap();
+        assert_eq!(after.physical_bytes, before.physical_bytes);
+        assert!(after.reserved_copy_bytes >= before.reserved_copy_bytes);
+    }
+    let actual = core.export_history().unwrap();
+    let base = if floor {
+        kinewright_core::HistoryTransition::floor(cut.history().clone(), 1)
+            .unwrap()
+            .after()
+            .clone()
+    } else {
+        cut.history().clone()
+    };
+    let expected = kinewright_core::HistoryTransition::recovery_close(base.clone(), &base).unwrap();
+    let observed = serde_json::json!({"query": matches!(core.request(Command::Query(Query::Snapshot)).unwrap(), Event::QueryResult(_)), "recovery": {
+        "exact": actual == *expected.after(), "frozen_producers": refused == producer_count,
+        "fresh_lease": !app.read_only(), "saved": !app.is_dirty(), "floor": actual.floor_offset == u64::from(floor),
+    }});
+    assert!(app.close());
+    observed
+}

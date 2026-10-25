@@ -179,6 +179,7 @@ enum CoreMessage {
     BindManual(
         TypeId,
         Box<dyn crate::ManualHistoryEncoder>,
+        Option<(AcceptedCut, Arc<std::sync::atomic::AtomicBool>)>,
         Sender<Result<u64, HistoryError>>,
     ),
     ManualCommand(u64, Command, Option<Sender<Event>>),
@@ -220,6 +221,13 @@ enum CoreMessage {
         Option<crate::PendingHistorySave>,
         bool,
         Sender<Result<(), HistoryError>>,
+    ),
+    InstallFrozen(
+        TypeId,
+        AcceptedCut,
+        HistorySnapshot,
+        Vec<crate::AcceptedHistory>,
+        Sender<Result<AcceptedCut, HistoryError>>,
     ),
     RestoreHistory(
         Option<TypeId>,
@@ -316,6 +324,24 @@ impl Core {
             ))
             .map_err(|_| HistoryError::Disconnected)?;
         receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+    pub(crate) fn install_frozen<P: 'static>(
+        &self,
+        cut: AcceptedCut,
+        after: HistorySnapshot,
+        pending: Vec<crate::AcceptedHistory>,
+    ) -> Result<AcceptedCut, HistoryError> {
+        let (reply, result) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(CoreMessage::InstallFrozen(
+                TypeId::of::<P>(),
+                cut,
+                after,
+                pending,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        result.recv().map_err(|_| HistoryError::Disconnected)?
     }
     pub(crate) fn restore_authorized<P: 'static>(
         &self,
@@ -564,7 +590,33 @@ impl Core {
     ) -> Result<crate::ManualPermit, HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
-            .send(CoreMessage::BindManual(TypeId::of::<P>(), encoder, reply))
+            .send(CoreMessage::BindManual(
+                TypeId::of::<P>(),
+                encoder,
+                None,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        let generation = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(crate::ManualPermit {
+            core: self.clone(),
+            generation,
+        })
+    }
+    pub(crate) fn resume_manual<P: 'static>(
+        &self,
+        cut: AcceptedCut,
+        encoder: Box<dyn crate::ManualHistoryEncoder>,
+        live: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<crate::ManualPermit, HistoryError> {
+        let (reply, receiver) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(CoreMessage::BindManual(
+                TypeId::of::<P>(),
+                encoder,
+                Some((cut, live)),
+                reply,
+            ))
             .map_err(|_| HistoryError::Disconnected)?;
         let generation = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
         Ok(crate::ManualPermit {
@@ -1118,22 +1170,32 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
     let mut attachment = AttachmentState::Live;
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
     let mut manual: Option<ManualIngress> = None;
+    let mut manual_generation = 0_u64;
     while let Ok(message) = receiver.recv() {
         match message {
-            CoreMessage::BindManual(requested, encoder, reply) => {
+            CoreMessage::BindManual(requested, encoder, recovery, reply) => {
                 let result =
                     authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
-                        if attachment != AttachmentState::Live
+                        let valid_state = if let Some((cut, live)) = &recovery {
+                            attachment == AttachmentState::Frozen
+                                && live.load(Ordering::Acquire)
+                                && cut.actor == identity
+                                && cut.revision == state.revision
+                                && cut.history == state.history()
+                        } else {
+                            attachment == AttachmentState::Live
+                        };
+                        if !valid_state
                             || manual.as_ref().is_some_and(|m| !m.pending.is_empty())
                             || state.pending_floor.is_some()
                         {
                             return Err(HistoryError::BarrierInvariant);
                         }
                         state.history().encoded_bytes()?;
-                        let generation = manual
-                            .as_ref()
-                            .map_or(Some(1), |m| m.generation.checked_add(1))
+                        let generation = manual_generation
+                            .checked_add(1)
                             .ok_or(HistoryError::Capacity)?;
+                        manual_generation = generation;
                         manual = Some(ManualIngress {
                             generation,
                             encoder,
@@ -1142,6 +1204,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                             pending: std::collections::VecDeque::new(),
                             bytes: 0,
                         });
+                        attachment = AttachmentState::Live;
                         Ok(generation)
                     });
                 let _ = reply.send(result);
@@ -1309,6 +1372,68 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
             CoreMessage::ExportHistory(reply) => {
                 // Publication chooses and records any floor before the owner installs it.
                 let _ = reply.send(Ok((state.history_change_id(), state.history())));
+            }
+            CoreMessage::InstallFrozen(requested, cut, after, pending, reply) => {
+                let result = (|| {
+                    authorize_attachment(attachment, owner, Some(requested))?;
+                    if attachment != AttachmentState::Frozen
+                        || cut.actor != identity
+                        || cut.revision != state.revision
+                        || cut.history != state.history()
+                        || state.pending_floor.is_some()
+                        || manual
+                            .as_ref()
+                            .map_or(!pending.is_empty(), |m| m.pending.iter().ne(pending.iter()))
+                    {
+                        return Err(HistoryError::CaptureChanged);
+                    }
+                    let discard = after
+                        .floor_offset
+                        .checked_sub(cut.history.floor_offset)
+                        .and_then(|n| usize::try_from(n).ok())
+                        .ok_or(HistoryError::Corrupt)?;
+                    let floored = if discard == 0 {
+                        cut.history.clone()
+                    } else {
+                        crate::HistoryTransition::floor(cut.history.clone(), discard)?
+                            .after()
+                            .clone()
+                    };
+                    if floored != after {
+                        let close =
+                            crate::HistoryTransition::recovery_close(floored.clone(), &floored)?;
+                        if close.after() != &after {
+                            return Err(HistoryError::Corrupt);
+                        }
+                    }
+                    let mut candidate = CoreState::restore(&after)?;
+                    candidate.next_floor_id = state.next_floor_id;
+                    candidate.revision = TimelineRevision(
+                        state
+                            .revision
+                            .0
+                            .checked_add(1)
+                            .ok_or(HistoryError::Capacity)?,
+                    );
+                    state = candidate;
+                    manual = None;
+                    broadcast(
+                        &mut subscribers,
+                        &Event::DocumentChanged {
+                            doc: Arc::clone(&state.document),
+                            revision: state.revision,
+                            last_op: None,
+                            journal_command: None,
+                            token: None,
+                        },
+                    );
+                    Ok(AcceptedCut {
+                        actor: identity,
+                        revision: state.revision,
+                        history: state.history(),
+                    })
+                })();
+                let _ = reply.send(result);
             }
             CoreMessage::RestoreHistory(requested, history, expected, reply) => {
                 let admitted = if attachment == AttachmentState::Sealed {

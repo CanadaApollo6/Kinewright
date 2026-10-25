@@ -75,7 +75,7 @@ pub struct HostBootstrap {
     pub auth: HostAuth,
     pub roots: SessionRoots,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostSnapshot {
     pub history: HistorySnapshot,
@@ -146,6 +146,17 @@ pub struct HostSessionConfig {
     pub service_tier: Option<String>,
     pub max_turns: Option<u32>,
 }
+/// Runtime plan only. Its durable identity/result are the ordinary envelope and receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryBarrier {
+    pub switch_generation: u64,
+    pub client: String,
+    pub envelope: kinewright_project::receipts::CommandEnvelope,
+    pub checkpoint_ref: ObjectRef,
+    pub before: HostSnapshot,
+    pub after: HostSnapshot,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 #[allow(
@@ -153,6 +164,19 @@ pub struct HostSessionConfig {
     reason = "The bounded foreground wire command owns its snapshot and source binding without another boxed API layer"
 )]
 pub enum HostCommand {
+    BeginRecovery {
+        client: String,
+        frozen: Option<HostSnapshot>,
+        pending: Vec<kinewright_core::AcceptedHistory>,
+        discard_batches: Option<usize>,
+    },
+    PublishBarrier {
+        barrier: Box<RecoveryBarrier>,
+    },
+    ConfirmBarrier {
+        barrier: Box<RecoveryBarrier>,
+        installed: HostSnapshot,
+    },
     AcquireManual {
         client: String,
     },
@@ -413,6 +437,8 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub recovery: Option<RecoveryBarrier>,
+    pub barrier_checkpoint: Option<kinewright_project::bundle_records::BranchCheckpoint>,
     pub manual_lease: Option<kinewright_project::manual_history::ManualLease>,
     pub manual_inputs: Option<kinewright_project::owned_inputs::OwnedInputManifest>,
     pub manual_ack: Vec<kinewright_core::AcceptedHistory>,

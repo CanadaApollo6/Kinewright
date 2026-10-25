@@ -423,7 +423,7 @@ fn exercise_floor_and_close(path: &Path) {
     close.command = None;
     close.transition = Some(HistoryRequest::RecoveryClose {
         preceding_checkpoint_generation: previous.checkpoint_generation,
-        reconciled_cut: previous.command_cut.clone().unwrap(),
+        reconciled_cut: previous.command_cut.clone(),
         suffix_digest: previous.history_ref.sha256.clone(),
     });
     let closed = committed(bundle.command(&close, &core, &inputs, &[]).unwrap());

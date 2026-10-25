@@ -21,6 +21,15 @@ struct AppControl {
     writer_journal: bool,
     #[serde(default)]
     manual_stream: bool,
+    #[serde(default)]
+    manual_recovery: Option<ManualRecoveryControl>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ManualRecoveryControl {
+    Recovery,
+    Floor,
 }
 
 fn observe(
@@ -45,6 +54,28 @@ fn observe(
         )));
         #[cfg(not(target_os = "linux"))]
         return Err("C6 App durable rescue observer requires Linux; NOT RUN".into());
+    }
+    if let Some(recovery) = control.manual_recovery {
+        let floor = matches!(recovery, ManualRecoveryControl::Floor);
+        if report.mode == Mode::Baseline {
+            let core = kinewright_core::Core::spawn(kinewright_core::Document::default())
+                .map_err(|e| e.to_string())?;
+            let query = matches!(
+                core.request(kinewright_core::Command::Query(
+                    kinewright_core::Query::Snapshot
+                ))
+                .map_err(|e| e.to_string())?,
+                kinewright_core::Event::QueryResult(_)
+            );
+            return Ok(Some(serde_json::json!({"query": query, "recovery": null})));
+        }
+        #[cfg(target_os = "linux")]
+        return Ok(Some(crate::ja1_attachment::tests::observe_c10(floor)));
+        #[cfg(not(target_os = "linux"))]
+        return Err(format!(
+            "C10 App {} observer requires Linux; NOT RUN",
+            if floor { "floor" } else { "recovery" }
+        ));
     }
     let document = if let Some(role) = &loaded.fixture.initial.document {
         serde_json::from_value::<kinewright_project::ProjectFile>(
@@ -147,6 +178,28 @@ mod tests {
                 "revised"
             });
             assert_eq!(run(&fixture, &output, mode).unwrap(), 0);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod c10_tests {
+    use super::*;
+    #[test]
+    fn additive_manual_recovery_and_floor_fixtures() {
+        let root = kinewright_media::test_support::workspace_target_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "c10-fixtures");
+        for label in ["s2-manual-recovery", "s2-manual-floor"] {
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+                "../kinewright-agent/tests/fixtures/ja/{label}.json"
+            ));
+            for (mode, name) in [(Mode::Baseline, "baseline"), (Mode::Revised, "revised")] {
+                assert_eq!(
+                    run(&fixture, &temp.path(&format!("{label}-{name}")), mode).unwrap(),
+                    0
+                );
+            }
         }
     }
 }

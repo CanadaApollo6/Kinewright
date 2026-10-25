@@ -1218,6 +1218,52 @@
           "kind": "independent-landmark"
         }
       }
+    },
+    {
+      "fixture_id": "s2-manual-recovery",
+      "relative_file": "s2-manual-recovery.json",
+      "sha256": "5f4c5f22fd4e92a8fa45e4dba4c20ed2e5d61c853edc7046fb64e97741806f0f",
+      "byte_length": 3062,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-manual-recovery-control.json",
+          "sha256": "18e9de3bb2c910c7b3fc3ce955a9acf44749867e36f27dd974a08982c1e89078",
+          "byte_length": 64,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-manual-floor",
+      "relative_file": "s2-manual-floor.json",
+      "sha256": "0fdbf6cbe0dcc2421617af3fb3c7f17cd5a21b3f6ac80c07162404bfd01acea7",
+      "byte_length": 3056,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-manual-floor-control.json",
+          "sha256": "06e9b46f3054c0f22b712821d8a650934cd61127af732b562a0358ec69deb393",
+          "byte_length": 61,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
     }
   ]
 }

@@ -148,3 +148,6 @@ kinewright_media pf1_s2c_witness::tests::a_continuation_that_ignores_the_domain_
 kinewright_media pf1_s2c_witness::tests::the_continuation_adapter_holds_no_control_capability crates/kinewright-media/src/pf1_s2c_witness.rs windows
 kinewright_media pf1_s2c_witness::tests::continuation_reproduces_seek_on_every_fixture crates/kinewright-media/src/pf1_s2c_witness.rs windows
 kinewright_media pf1_s2c_witness::tests::continuation_holds_the_scripted_cases crates/kinewright-media/src/pf1_s2c_witness.rs windows
+
+ja_s2_host g05l_host_death_recovers_absent_and_committed_drag_suffix crates/kinewright-agent/tests/ja_s2_host.rs any # C10 real process recovery matrix
+ja_s2_host g05l_shared_floor_and_recovery_close_reply_drop crates/kinewright-agent/tests/ja_s2_host.rs any # C10 shared floor and close reply loss

@@ -1889,3 +1889,63 @@ fn g05l_input_context_is_admitted_before_local_acceptance() {
     assert_eq!(manual_history_from(&path), gui.export_history().unwrap());
     host.shutdown().unwrap();
 }
+
+#[path = "support/ja_s2_c10.rs"]
+mod c10;
+
+#[test]
+fn g05l_fast_restart_absent_vs_committed_lost_reply_suffix() {
+    c10::fast_suffix();
+}
+#[test]
+fn g05l_fast_restart_shared_floor_and_close_reply_loss() {
+    c10::fast_floor();
+}
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn g05l_host_death_recovers_absent_and_committed_drag_suffix() {
+    #[cfg(target_os = "linux")]
+    {
+        for suffix in 0..3 {
+            for committed in [false, true] {
+                c10::restart_case(committed, false, true, suffix);
+            }
+        }
+        c10::prefix_and_pause_cases(None);
+        c10::empty_acknowledged_prefix();
+    }
+    #[cfg(not(target_os = "linux"))]
+    c10::fast_suffix();
+}
+#[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow tier: cargo test --features slow-tests"
+)]
+fn g05l_shared_floor_and_recovery_close_reply_drop() {
+    #[cfg(target_os = "linux")]
+    for suffix in 0..3 {
+        for committed in [false, true] {
+            c10::restart_case(committed, true, true, suffix);
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    c10::fast_floor();
+}
+
+#[test]
+fn g05l_parent_replacement_does_not_prove_absence() {
+    #[cfg(target_os = "linux")]
+    c10::prefix_and_pause_cases(Some(3));
+    #[cfg(not(target_os = "linux"))]
+    c10::fast_suffix();
+}
+
+#[cfg(all(target_os = "linux", feature = "eval-harness"))]
+#[test]
+fn g05l_absent_suffix_pressure_publishes_one_shared_floor() {
+    c10::pressure_floor();
+}

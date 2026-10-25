@@ -17,7 +17,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "ja1_host_recovery.rs"]
+mod recovery;
+
 pub(super) struct HostAttachment {
+    executable: PathBuf,
+    context: std::sync::Weak<std::sync::atomic::AtomicBool>,
+    recovery: Option<JoinHandle<Result<recovery::RecoveredManual, BundleError>>>,
+    recovery_plan:
+        std::sync::Arc<std::sync::Mutex<Option<kinewright_agent::writer_host::RecoveryBarrier>>>,
+    recovery_originals: Vec<kinewright_core::AcceptedHistory>,
     pub client: HostClient,
     pub status: HostStatus,
     source: Option<BorrowedSourceDescriptor>,
@@ -43,6 +52,7 @@ impl HostAttachment {
         context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, BundleError> {
         let transfer = owner.prepare_host_attachment()?;
+        let retained_context = context.clone();
         let source_server = Some(if let Some(reader) = transfer.source_service {
             SourceServer::start(reader).map_err(host_error)?
         } else {
@@ -105,6 +115,11 @@ impl HostAttachment {
             }
         };
         Ok(Self {
+            executable: executable.to_path_buf(),
+            context: retained_context,
+            recovery: None,
+            recovery_plan: std::sync::Arc::default(),
+            recovery_originals: vec![],
             client,
             status,
             source: transfer.source,
@@ -141,6 +156,11 @@ impl HostAttachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         Ok(Self {
+            executable: PathBuf::new(),
+            context: std::sync::Weak::new(),
+            recovery: None,
+            recovery_plan: std::sync::Arc::default(),
+            recovery_originals: vec![],
             client,
             status: reply.status,
             source,
@@ -255,6 +275,12 @@ impl HostAttachment {
     }
 
     #[cfg(all(test, target_os = "linux"))]
+    pub(super) fn kill_owned_child(&mut self) {
+        let child = self.child.as_mut().expect("owned child");
+        child.kill().unwrap();
+        child.wait().unwrap();
+    }
+    #[cfg(all(test, target_os = "linux"))]
     pub(super) fn child_id(&self) -> Option<u32> {
         self.child.as_ref().map(Child::id)
     }
@@ -268,6 +294,23 @@ impl HostAttachment {
         action: Action,
         owner: &mut Ja1EditingSession,
     ) -> Result<HostReply, BundleError> {
+        if self.recovery.is_some() {
+            return Err(BundleError::CoreMutationRefused(
+                kinewright_core::CoreMutationRefusal::Frozen,
+            ));
+        }
+        let needs_cut = matches!(
+            &action,
+            Action::Save
+                | Action::ConfirmSuccessorSave
+                | Action::SaveAs(_)
+                | Action::FirstSave(_)
+                | Action::PreviewRescue
+                | Action::PreviewRecovery(_)
+        );
+        if needs_cut && self.cut.is_none() {
+            self.cut = Some(owner.freeze_host_cut()?);
+        }
         self.drain_manual(owner)?;
         if matches!(
             &action,
@@ -278,15 +321,6 @@ impl HostAttachment {
         // A status response issued before this command cannot replace its newer metadata.
         self.heartbeat = None;
         self.last_heartbeat = Instant::now();
-        let needs_cut = matches!(
-            &action,
-            Action::Save
-                | Action::ConfirmSuccessorSave
-                | Action::SaveAs(_)
-                | Action::FirstSave(_)
-                | Action::PreviewRescue
-                | Action::PreviewRecovery(_)
-        );
         if !self.status.retention_proven {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
@@ -393,7 +427,13 @@ impl HostAttachment {
     }
 
     /// The frame thread polls only completed work or the child process handle.
-    pub fn poll(&mut self) -> Result<Option<HostReply>, BundleError> {
+    pub fn poll(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+    ) -> Result<Option<HostReply>, BundleError> {
+        if self.recovery.is_some() {
+            return self.poll_manual_recovery(owner);
+        }
         if let Some(child) = &mut self.child
             && child.try_wait().map_err(BundleError::Io)?.is_some()
         {
@@ -455,6 +495,10 @@ impl HostAttachment {
             }));
         }
         Ok(None)
+    }
+
+    pub fn recovery_running(&self) -> bool {
+        self.recovery.is_some()
     }
 
     pub fn close(&mut self) {

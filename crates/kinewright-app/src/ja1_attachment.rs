@@ -450,6 +450,20 @@ impl Ja1Attachment {
     }
 
     fn apply_host(&mut self, action: Action) -> Result<(), BundleError> {
+        if matches!(action, Action::Retry)
+            && self
+                .host
+                .as_ref()
+                .is_some_and(|host| host.cut.is_some() && host.manual.is_some())
+        {
+            self.host
+                .as_mut()
+                .expect("attached host")
+                .begin_manual_recovery(&mut self.owner)?;
+            self.frozen = true;
+            self.message = "Editing is read-only while accepted history is recovered.".into();
+            return Ok(());
+        }
         let result = self
             .host
             .as_mut()
@@ -461,7 +475,15 @@ impl Ja1Attachment {
                 self.start_host_manual()
             }
             Err(error) => {
-                self.operation_panicked();
+                if matches!(
+                    &error,
+                    BundleError::CoreMutationRefused(kinewright_core::CoreMutationRefusal::Frozen)
+                ) {
+                    self.frozen = true;
+                    self.message = error.to_string();
+                } else {
+                    self.operation_panicked();
+                }
                 Err(error)
             }
         }
@@ -587,7 +609,11 @@ impl Ja1Attachment {
         if self.retention_lost || self.host.is_none() {
             return false;
         }
-        let result = self.host.as_mut().expect("attached host").poll();
+        let result = self
+            .host
+            .as_mut()
+            .expect("attached host")
+            .poll(&mut self.owner);
         match result {
             Ok(Some(reply)) => {
                 let _ = self
@@ -596,8 +622,17 @@ impl Ja1Attachment {
                 true
             }
             Ok(None) => false,
-            Err(_) => {
-                self.operation_panicked();
+            Err(error) => {
+                let recovery = self
+                    .host
+                    .as_mut()
+                    .expect("attached host")
+                    .begin_manual_recovery(&mut self.owner);
+                self.frozen = true;
+                self.message = "Editing is read-only while the writer host and accepted history are recovered.".into();
+                if let Err(cause) = recovery {
+                    self.message = format!("Recovery remains paused: {error}; {cause}");
+                }
                 true
             }
         }
@@ -610,6 +645,13 @@ impl Ja1Attachment {
         self.frozen = true;
         let _ = self.owner.host_lost();
         if let Some(host) = &mut self.host {
+            if host.recovery_running() {
+                let _ = host.poll(&mut self.owner);
+                if host.recovery_running() {
+                    self.message = "Recovery is stopping. The originating source remains retained until its worker retires.".into();
+                    return false;
+                }
+            }
             host.close();
         }
         match self.owner.close_originating_source() {
