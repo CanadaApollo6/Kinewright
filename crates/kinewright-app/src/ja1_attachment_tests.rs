@@ -1100,7 +1100,7 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
     let path = temp.path("a.kinewright");
     // Regression: attachment precedes edits; FirstSave must grow the real owner's
     // source overlap for this exact foreground cut, not rely on the initial empty history.
-    edit(&core, false);
+    assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
     app.apply(Action::FirstSave(path.clone())).unwrap();
     assert!(
         !app.is_dirty(),
@@ -1129,7 +1129,7 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
         .retention_probe()
         .unwrap();
     let usage = app.owner.source().unwrap().store().usage_handle();
-    edit(&core, true);
+    edit_attachment(&app, false);
     let unsaved = core.export_history().unwrap();
     assert!(app.is_dirty());
     // The next save must admit this larger exact cut even if transport then fails.
@@ -1354,7 +1354,7 @@ fn c8_app_publisher_floor_keeps_actor_and_committed_recovery_activates_fresh_act
     app.apply(Action::FirstSave(temp.path("host-a.kinewright")))
         .unwrap();
     for value in [true, false, true] {
-        edit(app.owner.core(), value);
+        edit_attachment(&app, value);
         app.apply(Action::Save).unwrap();
     }
     let target = app
@@ -1483,7 +1483,7 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
     assert!(!refused.exists());
     assert!(admission::tree(&other).is_empty());
 
-    edit(&core, true);
+    edit_attachment(&app, true);
     let second = other.join("person-picked.kinewright");
     app.apply(Action::SaveAs(second.clone())).unwrap();
     assert_eq!(app.project_path().as_deref(), Some(second.as_path()));
@@ -1528,4 +1528,72 @@ fn c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_aut
     assert_eq!(retained.reserved_bytes, usage.reserved_bytes);
     assert!(app.close());
     writer.shutdown().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn g05l_live_coalesced_preview_precedes_disk_ack() {
+    use kinewright_agent::ja_harness::protocol::Mode;
+    let temp = temp();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kinewright-agent/tests/fixtures/ja/s2-manual-stream.json");
+    // This App-private bridge runs the same additive fixture through the real
+    // producer, Core, media engine, presenter callback, shipping child and publisher.
+    for (mode, name) in [(Mode::Baseline, "baseline"), (Mode::Revised, "revised")] {
+        let output = std::env::var_os("JA_MANUAL_APP_OUTPUT")
+            .map_or_else(|| temp.path(name), |root| PathBuf::from(root).join(name));
+        std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+        assert_eq!(
+            crate::ja_harness::run(&fixture, &output, mode).unwrap(),
+            0,
+            "{}",
+            output.display()
+        );
+        let observation: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output.join("artifacts/observation-1.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            observation["center_rgba"],
+            serde_json::json!([255, 0, 0, 255])
+        );
+        if mode == Mode::Revised {
+            assert_eq!(observation["manual_stream"]["complete"], true);
+            assert_eq!(
+                observation["manual_stream"]["painted_frames"][0]["center_rgba"],
+                serde_json::json!([0, 255, 0, 255])
+            );
+            assert_eq!(
+                observation["manual_stream"]["painted_frames"][1]["center_rgba"],
+                serde_json::json!([255, 0, 0, 255])
+            );
+
+            assert_eq!(
+                observation["manual_stream"]["accepted"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn edit_attachment(app: &Ja1Attachment, locked: bool) {
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked,
+    }))
+    .unwrap();
+    assert_eq!(
+        app.owner.core().export_history().unwrap().document.tracks[0].sync_lock,
+        locked
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn g05l_w05_all_manual_producers_respect_the_actor_cut() {
+    crate::app::ja_c9_manual_producer_gate_witness();
 }

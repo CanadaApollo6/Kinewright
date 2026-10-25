@@ -507,3 +507,40 @@ hosted CI, full slow tier, actual providers/G6, interactive GUI and physical fau
 remain **NOT RUN**. Earlier weak mutation survivors, runtime development reds and the
 partial gate are retained and excluded from final acceptance. Only report/index
 delivery notes follow the source-frozen final gate.
+
+## C9 fenced manual ingress and durable history
+
+[C9 report](c9.md) and [rerunnable gate](c9-gate.sh): one local commit on exact
+parent `51529ca`, branch `ja1/s2`, no push. Actor-owned ManualPermit gates every
+manual producer, reserves 64 commands/256 KiB before acceptance, and retains exact
+original envelopes until contiguous durable ack. One host shadow publishes all
+intermediate history; local paint stays ahead of disk and pending work stays dirty.
+
+Final Linux: **84 passing command rows, 37 nonempty selections, 790 expected =
+selected, 770 executed passes, 20 existing ignored outcomes**. Complete fast
+ran once with `--no-fail-fast`: **3996 passed, 1 failed, 107 ignored**. The AU6 failure came from direct OS cfg in
+the C9 test observer. It reproduced on C9 and passed on pristine parent; the
+observer now delegates to storage capability checks, and the exact AU6 test passes.
+The full fast tier was not repeated. Both affected slow stress selectors and unfiltered mcp_server pass.
+**34 runtime mutation red/restored-green pairs**; additive S0 pending→revised-pass
+with actual intermediate/final painted frames, all six original controls green,
+98 old fixture files and 35 old index entries unchanged.
+
+Five alternating cost pairs/60 saves per source: parent **228.003 ms/save**,
+C9 **232.769 ms/save** (1.0209×), zero history decodes. Report-only
+32-message sequential accept→durable ack: mean **197.482 ms**, p50 **194.415**,
+p95 **227.218**, max **228.642**. Native Windows/hosted C9 timing is NOT RUN;
+estimated Windows addition 1–3 minutes over the verified green 35.067-minute parent,
+within the unchanged 60-minute timeout. Cross-check outcomes and every raw summary
+are in the report; a blocked target is not a pass.
+
+Tracked contracts: `docs/JA1-STUDIO-ORCHESTRATION.md:1333`,
+`docs/JA-S0-CONTRACTS.md:1366`, `docs/JA-S0-AMENDMENT-A1.md:994`. Deviations:
+`ja1_host.rs:173` freezes unsaved/dirty bootstrap until explicit first Save/Save
+establishes exact durable identity; `editing_session/manual.rs:89` reuses the
+existing selected-branch publisher rather than adding a duplicate bundle_branch
+bridge; `manual_history.rs:90` refuses new unadmitted inputs before acceptance.
+C10+ recovery/absent-suffix/floor/switch work and original S2-R N2 remain deferred.
+Early plain-Python text-edit helpers and superseded gate attempts are explicitly
+disclosed in the report. Final tested source is frozen; only report/README delivery
+notes follow it. Evidence and commit binding: `.review/ja/s2-evidence/c9/`.

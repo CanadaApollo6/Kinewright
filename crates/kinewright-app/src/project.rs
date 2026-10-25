@@ -699,6 +699,16 @@ impl ProjectSession {
     pub(crate) fn display_name(&self) -> String {
         project_display_name(self.project_path.as_deref(), &self.name, self.is_dirty())
     }
+    pub(crate) fn send_manual_command(
+        &self,
+        command: kinewright_core::Command,
+    ) -> Result<(), kinewright_core::CoreDisconnected> {
+        if let Some(attachment) = &self.ja1 {
+            attachment.send_manual(command)
+        } else {
+            self.core.send(command)
+        }
+    }
     pub(crate) fn ja1_read_only(&self) -> bool {
         self.ja1_job.is_some()
             || self

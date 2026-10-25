@@ -20,6 +20,12 @@ pub enum CoreMutationRefusal {
     Sealed,
     #[error("history installation requires the bound attachment owner")]
     OwnerRequired,
+    #[error("a current manual producer permit is required")]
+    ManualPermitRequired,
+    #[error("Saving is catching up. Editing is paused; retry when the pending history is saved.")]
+    ManualBackpressure,
+    #[error("This input must be admitted by the project writer before the edit can be accepted.")]
+    ManualInputRequired,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +49,52 @@ impl AcceptedCut {
     }
 }
 
+pub const MANUAL_COMMANDS: usize = 64;
+pub const MANUAL_BYTES: usize = 256 * 1024;
+
+/// Immutable publication identity made by the persistence codec inside actor acceptance.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptedHistory {
+    pub sequence: u64,
+    pub batch_id: String,
+    pub digest: String,
+    pub envelope: Vec<u8>,
+}
+
+/// No operation execution belongs in this codec. The actor supplies both exact histories.
+pub trait ManualHistoryEncoder: Send + 'static {
+    fn encode(
+        &self,
+        sequence: u64,
+        revision: crate::TimelineRevision,
+        predecessor: Option<&str>,
+        before: &HistorySnapshot,
+        after: &HistorySnapshot,
+    ) -> Result<AcceptedHistory, HistoryError>;
+}
+
+#[derive(Clone)]
+pub struct ManualPermit {
+    pub(crate) core: Core,
+    pub(crate) generation: u64,
+}
+impl ManualPermit {
+    pub fn send(&self, command: crate::Command) -> Result<(), crate::CoreDisconnected> {
+        self.core.send_manual(self.generation, command)
+    }
+    pub fn request(
+        &self,
+        command: crate::Command,
+    ) -> Result<crate::Event, crate::CoreDisconnected> {
+        self.core.request_manual(self.generation, command)
+    }
+    /// Read without removing: lost transport replies retry the original envelopes.
+    pub fn pending(&self) -> Result<Vec<AcceptedHistory>, HistoryError> {
+        self.core.manual_pending(self.generation)
+    }
+}
+
 /// The proof type's constructor stays private to the persistence owner.
 pub struct CoreAttachment<P> {
     pub(crate) core: Core,
@@ -54,6 +106,24 @@ impl<P: 'static> CoreAttachment<P> {
             core,
             proof: std::marker::PhantomData,
         }
+    }
+    pub fn manual_permit(
+        &self,
+        _proof: &P,
+        encoder: Box<dyn ManualHistoryEncoder>,
+    ) -> Result<ManualPermit, HistoryError> {
+        self.core.bind_manual::<P>(encoder)
+    }
+    pub fn acknowledge_manual(
+        &self,
+        _proof: &P,
+        permit: &ManualPermit,
+        prefix: Vec<AcceptedHistory>,
+    ) -> Result<(), HistoryError> {
+        if self.core.actor_identity() != permit.core.actor_identity() {
+            return Err(HistoryError::BarrierInvariant);
+        }
+        self.core.manual_ack::<P>(permit.generation, prefix)
     }
     pub fn capture(&self, _proof: &P) -> Result<AcceptedCut, HistoryError> {
         self.core.attachment_cut::<P>(false)
@@ -341,5 +411,210 @@ mod tests {
         assert_eq!(core.pending_history_save().unwrap(), pending);
         drop(barrier);
         assert_eq!(core.pending_history_save().unwrap(), pending);
+    }
+    struct Encoder(usize);
+    impl ManualHistoryEncoder for Encoder {
+        fn encode(
+            &self,
+            sequence: u64,
+            _revision: crate::TimelineRevision,
+            _predecessor: Option<&str>,
+            _before: &HistorySnapshot,
+            _after: &HistorySnapshot,
+        ) -> Result<AcceptedHistory, HistoryError> {
+            let mut item = AcceptedHistory {
+                sequence,
+                batch_id: sequence.to_string(),
+                digest: String::new(),
+                envelope: vec![],
+            };
+            if self.0 > 0 {
+                let size = serde_json::to_vec(&item).unwrap().len();
+                item.digest = "x".repeat(self.0.checked_sub(size).unwrap());
+            }
+            Ok(item)
+        }
+    }
+    fn manual(size: usize) -> (Core, CoreAttachment<Proof>, ManualPermit) {
+        let core = Core::spawn(crate::Document::default()).unwrap();
+        let owner = core.history_save_owner(&Proof).unwrap();
+        let permit = owner
+            .manual_permit(&Proof, Box::new(Encoder(size)))
+            .unwrap();
+        (core, owner, permit)
+    }
+    #[test]
+    fn g05l_permit_and_bounded_acceptance() {
+        let (core, owner, permit) = manual(0);
+        let raw = core.clone();
+        let before = core.export_history().unwrap();
+        assert!(matches!(
+            raw.request(edit(800)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualPermitRequired,
+                ..
+            }
+        ));
+        raw.send(Command::Undo).unwrap();
+        assert_eq!(core.export_history().unwrap(), before);
+        for id in 1..=64 {
+            assert!(matches!(
+                permit.request(edit(id)).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+        }
+        let exact = core.export_history().unwrap();
+        let pending = permit.pending().unwrap();
+        assert_eq!(pending.len(), MANUAL_COMMANDS);
+        let stranger = CoreAttachment::<Stranger>::new(core.clone());
+        assert!(
+            stranger
+                .acknowledge_manual(&Stranger, &permit, pending[..1].to_vec())
+                .is_err()
+        );
+
+        assert!(matches!(
+            permit.request(edit(65)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualBackpressure,
+                ..
+            }
+        ));
+        assert_eq!(core.export_history().unwrap(), exact);
+        assert_eq!(permit.pending().unwrap(), pending);
+        let mut forged = pending[..1].to_vec();
+        forged[0].digest.push('x');
+        assert!(owner.acknowledge_manual(&Proof, &permit, forged).is_err());
+        assert!(
+            owner
+                .acknowledge_manual(&Proof, &permit, pending[1..2].to_vec())
+                .is_err()
+        );
+        owner
+            .acknowledge_manual(&Proof, &permit, pending[..1].to_vec())
+            .unwrap();
+        assert!(matches!(
+            permit.request(edit(65)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        owner
+            .acknowledge_manual(&Proof, &permit, permit.pending().unwrap()[..1].to_vec())
+            .unwrap();
+        let cut = owner.freeze(&Proof).unwrap();
+        assert!(matches!(
+            permit.clone().request(edit(66)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::Frozen,
+                ..
+            }
+        ));
+        owner.seal(&Proof, &cut).unwrap();
+        assert!(matches!(
+            permit.request(Command::Redo).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::Sealed,
+                ..
+            }
+        ));
+        assert_eq!(permit.pending().unwrap().len(), 63);
+    }
+    #[test]
+    fn g05l_exact_byte_boundary_and_one_beyond() {
+        let (core, owner, permit) = manual(MANUAL_BYTES);
+        assert!(matches!(
+            permit.request(edit(1)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let pending = permit.pending().unwrap();
+        assert_eq!(serde_json::to_vec(&pending[0]).unwrap().len(), MANUAL_BYTES);
+        let before = core.export_history().unwrap();
+        assert!(matches!(
+            permit.request(edit(2)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualBackpressure,
+                ..
+            }
+        ));
+        assert_eq!(core.export_history().unwrap(), before);
+        owner.acknowledge_manual(&Proof, &permit, pending).unwrap();
+        assert!(matches!(
+            permit.request(edit(2)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let (core, _, oversized) = manual(MANUAL_BYTES + 1);
+        let before = core.export_history().unwrap();
+        assert!(matches!(
+            oversized.request(edit(1)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualBackpressure,
+                ..
+            }
+        ));
+        assert_eq!(core.export_history().unwrap(), before);
+        assert!(oversized.pending().unwrap().is_empty());
+    }
+    #[test]
+    fn g05l_w05_manual_install_and_alternate_paths_are_fenced() {
+        let (core, owner, permit) = manual(0);
+        assert!(matches!(
+            permit.request(edit(1)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let history = core.export_history().unwrap();
+        assert_eq!(
+            owner.restore_history(&Proof, history.clone()),
+            Err(history_error(CoreMutationRefusal::ManualPermitRequired))
+        );
+        assert_eq!(
+            owner.install_checkpoint(&Proof, history.clone(), history.clone()),
+            Err(history_error(CoreMutationRefusal::ManualPermitRequired))
+        );
+        assert!(matches!(
+            owner.begin_history_floor(
+                &Proof,
+                HistoryTransition::floor(history.clone(), 1).unwrap()
+            ),
+            Err(HistoryError::MutationRefused(
+                CoreMutationRefusal::ManualPermitRequired
+            ))
+        ));
+        for command in [edit(2), Command::Undo, Command::Redo] {
+            core.send(command.clone()).unwrap();
+            assert!(matches!(
+                core.request(command).unwrap(),
+                Event::MutationRefused {
+                    reason: CoreMutationRefusal::ManualPermitRequired,
+                    ..
+                }
+            ));
+        }
+        let fake = ManualPermit {
+            core: core.clone(),
+            generation: 2,
+        };
+        assert!(matches!(
+            fake.request(edit(3)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualPermitRequired,
+                ..
+            }
+        ));
+        assert_eq!(core.export_history().unwrap(), history);
+        assert!(owner.manual_permit(&Proof, Box::new(Encoder(0))).is_err());
+        owner
+            .acknowledge_manual(&Proof, &permit, permit.pending().unwrap())
+            .unwrap();
+        let successor = owner.manual_permit(&Proof, Box::new(Encoder(0))).unwrap();
+        assert!(matches!(
+            permit.request(edit(4)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualPermitRequired,
+                ..
+            }
+        ));
+        assert!(matches!(
+            successor.request(edit(4)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
     }
 }

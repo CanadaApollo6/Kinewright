@@ -990,3 +990,13 @@ only to a proven, never-active capture; active and source owners cannot use it. 
 subscriptions/resources are prepared before actor sealing. C6's source-bound report
 records the in-session selection pin's accepted crash window and all unrun native,
 hosted and physical-storage lanes without revising older acceptance.
+
+### C9 manual producer qualification
+
+A manual permit does not weaken A1's Frozen/Sealed or exact-cut rules. Raw Core
+clones, retained permits and owner install/floor paths cannot bypass a frozen or
+sealed actor. Accepted manual messages remain retained while publication is
+pending; only an exact durable acknowledgement releases their ingress capacity.
+Source ownership, rescue slots, exact own-ticket settlement and capture-only late
+outcomes remain with their existing owners. C9 adds no recovery authorization,
+shared floor handshake, switch receipt or fresh-actor rescue-tail repair.

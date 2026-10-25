@@ -511,6 +511,7 @@ mod linux {
                 panic!("snapshot")
             };
             let envelope = CommandEnvelope {
+                manual: None,
                 version: 1,
                 action: "edit".into(),
                 id: CommandId {

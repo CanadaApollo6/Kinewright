@@ -19,6 +19,8 @@ struct AppControl {
     rescue: bool,
     #[serde(default)]
     writer_journal: bool,
+    #[serde(default)]
+    manual_stream: bool,
 }
 
 fn observe(
@@ -64,11 +66,12 @@ fn observe(
         control.batches,
         TimeCode(control.at),
         report,
+        control.manual_stream,
     )
     .map(Some)
 }
 
-fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
+pub(crate) fn run(fixture: &Path, output: &Path, mode: Mode) -> Result<i32, String> {
     ja_harness::run_with_observer(fixture, output, mode, &mut observe)
 }
 

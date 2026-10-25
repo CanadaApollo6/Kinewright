@@ -80,3 +80,5 @@ pub(crate) fn test_hook(point: &str) {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
+
+pub mod manual_history;

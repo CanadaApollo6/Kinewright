@@ -1,6 +1,7 @@
 //! Product-owned, serialized named-project IO and authenticated UI-free sessions.
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 mod auth;
+mod manual;
 mod protocol;
 pub use auth::HostAuth;
 use auth::PinnedPath;
@@ -76,6 +77,7 @@ impl HostError {
 #[derive(Clone)]
 pub struct HostClient {
     bootstrap: HostBootstrap,
+    editor: Option<String>,
 }
 impl std::fmt::Debug for HostClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -106,6 +108,7 @@ impl HostClient {
             .into());
         }
         Ok(Self {
+            editor: None,
             bootstrap: HostBootstrap {
                 endpoint,
                 auth,
@@ -116,6 +119,7 @@ impl HostClient {
     #[must_use]
     pub fn with_roots(&self, roots: SessionRoots) -> Self {
         Self {
+            editor: self.editor.clone(),
             bootstrap: HostBootstrap {
                 roots,
                 ..self.bootstrap.clone()
@@ -130,8 +134,16 @@ impl HostClient {
     pub fn bootstrap(&self) -> HostBootstrap {
         self.bootstrap.clone()
     }
+    #[must_use]
+    pub fn with_manual_editor(&self, private_client: String) -> Self {
+        Self {
+            bootstrap: self.bootstrap.clone(),
+            editor: Some(private_client),
+        }
+    }
     pub fn request(&self, command: HostCommand) -> Result<HostReply, HostError> {
         let request = HostRequest {
+            editor: self.editor.clone(),
             protocol: self.endpoint().protocol,
             project: self.endpoint().project.clone(),
             roots: self.bootstrap.roots.clone(),
@@ -366,6 +378,7 @@ impl WriterHost {
     #[must_use]
     pub fn client(&self) -> HostClient {
         HostClient {
+            editor: None,
             bootstrap: HostBootstrap {
                 endpoint: self.endpoint.clone(),
                 auth: self.auth.clone(),
@@ -469,10 +482,14 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
     if request.protocol != HOST_PROTOCOL || request.project != state.bootstrap.endpoint.project {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if bytes.len() > 512 * 1024 && matches!(&request.command, HostCommand::CommitHistory { .. }) {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
     if bytes.len() > 256 * 1024
         && !matches!(
             &request.command,
-            HostCommand::Save { .. }
+            HostCommand::CommitHistory { .. }
+                | HostCommand::Save { .. }
                 | HostCommand::SaveAs { .. }
                 | HostCommand::FirstSave { .. }
                 | HostCommand::PreviewRescue { .. }
@@ -489,9 +506,11 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
                 error: Some(HostRefusal::new("retention_lost", RETENTION_LOST)),
                 ..HostReply::default()
             },
-            |mut owner| owner.execute(request.command, request.roots),
+            |mut owner| {
+                owner.execute_client(request.command, request.roots, request.editor.as_deref())
+            },
         );
-        if shutting_down {
+        if shutting_down && reply.error.is_none() {
             state.stop.notify_one();
         }
         reply
@@ -549,7 +568,7 @@ async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> R
         Some("notifications/initialized" | "notifications/cancelled") => serde_json::Value::Null,
         Some("ping") => serde_json::json!({}),
         Some("tools/list") => {
-            serde_json::json!({"tools":[{"name":"host_command","description":"Authenticated foreground project lifecycle command","inputSchema":{"type":"object","properties":{"command":{"type":"object"}},"required":["command"]}}]})
+            serde_json::json!({"tools":[{"name":"host_command","description":"Read Studio state and control isolated agent sessions; manual mutation belongs to the editor attachment","inputSchema":{"type":"object","properties":{"command":{"type":"object"}},"required":["command"]}}]})
         }
         Some("tools/call") => {
             if value
@@ -568,7 +587,7 @@ async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> R
             let Some(command) = command else {
                 return StatusCode::BAD_REQUEST.into_response();
             };
-            if matches!(&command, HostCommand::AdmitDestination { .. }) {
+            if !manual::connector_command(&command) {
                 return StatusCode::FORBIDDEN.into_response();
             }
 
@@ -956,6 +975,8 @@ pub struct HostCommandOwner {
     message: String,
     sessions: BTreeMap<u64, HostOwnedSession>,
     next_session: u64,
+    manual: Option<kinewright_project::manual_history::ManualLease>,
+    next_manual_generation: u64,
 }
 enum Choice {
     Rescue {
@@ -1072,6 +1093,8 @@ impl HostCommandOwner {
             message: "Authenticated writer attachment. Saved means a verified durable save.".into(),
             sessions: BTreeMap::new(),
             next_session: 1,
+            manual: None,
+            next_manual_generation: 1,
         };
         // Initial attachment seeds the one validation shadow before it can serve sessions.
         // This is a bootstrap snapshot, not the C9 continuous manual stream.
@@ -1110,9 +1133,29 @@ impl HostCommandOwner {
     }
     fn install(&mut self, snapshot: HostSnapshot) -> Result<(), HostError> {
         snapshot.verify()?;
+        if self.manual.is_some()
+            && self
+                .core()
+                .export_history()
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+                != snapshot.history
+        {
+            return Err(HostRefusal::new(
+                "manual_stream_required",
+                "accepted edits must arrive through the manual history stream",
+            )
+            .into());
+        }
         self.foreground_history = Some(snapshot.history.clone());
         if let Some(owner) = &mut self.owner {
-            owner.install_host_snapshot(snapshot.history)?;
+            if owner
+                .core()
+                .export_history()
+                .map_err(|e| HostError::Protocol(e.to_string()))?
+                != snapshot.history
+            {
+                owner.install_host_snapshot(snapshot.history)?;
+            }
         } else {
             self.initial_core
                 .restore_history(snapshot.history)
@@ -1161,6 +1204,11 @@ impl HostCommandOwner {
         {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
+        }
+        if reply.activation.is_some()
+            || matches!(reply.saved.as_ref(), Some(saved) if self.manual.as_ref().is_some_and(|lease| self.owner().ok().and_then(|o| o.active_manual_project().ok()).as_ref() != Some(&lease.project)) && !saved.root_sha256.is_empty())
+        {
+            self.manual = None;
         }
         reply.status = self.status();
         reply
@@ -1233,6 +1281,13 @@ impl HostCommandOwner {
     ) -> Result<(), HostError> {
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
         match command {
+            HostCommand::AcquireManual { client } => {
+                reply.manual_lease = Some(self.acquire_manual(client)?);
+                reply.manual_inputs = Some(self.owner()?.manual_input_context()?);
+            }
+            HostCommand::CommitHistory { client, messages } => {
+                self.commit_history(&client, &messages, reply)?;
+            }
             HostCommand::Attach | HostCommand::Status | HostCommand::Detach => {}
             HostCommand::AdmitDestination { destination } => {
                 self.admit_person_destination(destination)?;

@@ -41,6 +41,7 @@ fn revision(core: &Core) -> TimelineRevision {
 fn envelope(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> CommandEnvelope {
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
+        manual: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {

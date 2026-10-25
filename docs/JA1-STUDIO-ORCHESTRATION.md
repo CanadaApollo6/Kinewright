@@ -1329,3 +1329,38 @@ is implied. Explicit loss, omission, retirement, abandonment and completed-captu
 release choices retain the rules above. Source-bound C6 evidence and its exact gate
 are recorded in `docs/reports/ja1-s2/c6.md` and `c6-gate.sh`; native Windows/hosted slow
 and physical storage lanes require their separately recorded results.
+
+### C9 accepted manual history
+
+A named Studio attachment starts its manual stream from an exact acknowledged
+checkpoint. An unsaved or dirty bootstrap remains read-only until an explicit
+foreground Save establishes that identity. The App's `ManualProducerGate` is the
+only manual mutation capability; discrete actions, frame-coalesced controls,
+keyboard Undo/Redo, revision-gated recovery tools, deferred actions and
+import/relink installation all use it. Specialist/session MCP endpoints have no
+manual permit, and the host MCP surface cannot acquire one or install foreground
+snapshots. Other attachments can read and operate their isolated sessions.
+
+The owning actor checks its attachment and permit generation and reserves the
+64-command/256-KiB pending ingress plus bounded history/control overlap before
+acceptance. A refusal leaves history unchanged and is visible. Each accepted
+message retains its original CommandId/digest, BatchId/predecessor, JournalCommand,
+coalescing key, resulting history/cursor identities, identity effects and bound
+lineage/input context. Closing or sealing ingress preserves its drainable queue.
+Only the bound owner can release an exact acknowledged contiguous prefix.
+The input manifest is transferred once at lease acquisition, checked against its
+ObjectRef bytes/hash and retained as bounded actor control metadata. New media,
+LUT or font references absent from this admitted context refuse before acceptance.
+The person sees an input-admission refusal; it cannot become an unsaveable pending
+command. This reuses the existing owned-input rules and grants no decoder certificate.
+
+One host shadow validates the original contiguous messages through Core and the
+distinct admitted-history BundleCommit route. The S1 command route still requires
+`lease=None`. Publication preserves each intermediate batch, actor-assigned BatchId,
+receipt and input context. A foreground snapshot cannot replace this stream. Local
+preview and paint do not wait for publication. Pending manual work is not Saved;
+a durable acknowledgement uses the publisher's result, and Close warns about any
+remaining local suffix. Unknown publication or lost retention fences the actor.
+C9 does not authorize recovery replay, a shared floor, recovery-close or switching;
+those remain later stages. A required floor or unsupported input context refuses
+and retains the accepted pending history for explicit resolution.

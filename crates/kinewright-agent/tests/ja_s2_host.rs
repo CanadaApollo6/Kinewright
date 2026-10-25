@@ -154,6 +154,7 @@ fn auth_and_project_protocol_guard_every_read_and_command() {
         },
     ] {
         let request = serde_json::to_vec(&HostRequest {
+            editor: None,
             protocol: HOST_PROTOCOL,
             project: bootstrap.endpoint.project.clone(),
             roots: roots(root.root()),
@@ -1180,4 +1181,711 @@ fn g04_two_process_lock_save_alias_and_discovery() {
         ));
         assert_eq!(admission::tree(root.root()), before);
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(clippy::too_many_lines)]
+fn g05l_two_clients_one_editor_ordered_history() {
+    use kinewright_core::{Command as Edit, Event, Operation, Track, TrackId, TrackKind};
+    use kinewright_project::{
+        bundle::LoadedBundle, editing_session::Ja1EditingSession, storage_budget::StorageLimits,
+    };
+    let root = temp("c9-manual");
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    };
+    let gui = Core::spawn(document).unwrap();
+    let path = root.path("manual.kinewright");
+    let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
+    source.first_save(&path, StorageLimits::default()).unwrap();
+    let _transfer = source.prepare_host_attachment().unwrap();
+    let cut = source.freeze_host_cut().unwrap();
+    source.complete_host_cut(&cut, None, None).unwrap();
+    let host = WriterHost::start(config(root.root(), Some(path.clone()))).unwrap();
+    let first = host.client();
+    let second = HostClient::connect(
+        first.endpoint().clone(),
+        first.bootstrap().auth,
+        roots(root.root()),
+    )
+    .unwrap();
+    let identity = "a".repeat(64);
+    let grant = successful(
+        &first,
+        HostCommand::AcquireManual {
+            client: identity.clone(),
+        },
+    );
+    let lease = grant.manual_lease.unwrap();
+    let input_context = grant.manual_inputs.unwrap();
+    assert_eq!(
+        second
+            .request(HostCommand::AcquireManual {
+                client: "b".repeat(64)
+            })
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "manual_busy"
+    );
+    let first = first.with_manual_editor(identity.clone());
+    assert_eq!(
+        second
+            .request(HostCommand::Save {
+                snapshot: HostSnapshot::capture(&gui).unwrap()
+            })
+            .unwrap()
+            .error
+            .unwrap()
+            .code,
+        "manual_editor"
+    );
+    let narrow = root.path("viewer-narrow");
+    std::fs::create_dir(&narrow).unwrap();
+    let refused = second
+        .with_roots(roots(&narrow))
+        .request(HostCommand::Save {
+            snapshot: HostSnapshot::capture(&gui).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(refused.error.unwrap().code, "manual_editor");
+    assert!(
+        refused.status.association.is_none(),
+        "a role refusal before root admission cannot disclose protected project metadata"
+    );
+    let permit = source
+        .bind_manual_producer(lease.clone(), input_context)
+        .unwrap();
+    let saved_before = successful(&first, HostCommand::Status)
+        .status
+        .saved_digest
+        .unwrap();
+    let mut times = Vec::new();
+    for locked in [false, true, false] {
+        let started = Instant::now();
+        assert!(matches!(
+            permit
+                .request(Edit::DoBatchCoalesced {
+                    operations: vec![Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked
+                    }],
+                    coalesce_key: "drag#original".into()
+                })
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        times.push(started);
+    }
+    let accepted = permit.pending().unwrap();
+    let expected = gui.export_history().unwrap();
+    assert_eq!(expected.cursor.undo.len(), 1);
+    assert_eq!(expected.batches.len(), 3);
+    assert_ne!(
+        saved_before,
+        kinewright_project::manual_history::history_sha256(&expected).unwrap()
+    );
+    assert_eq!(
+        successful(&first, HostCommand::Status)
+            .status
+            .saved_digest
+            .as_deref(),
+        Some(saved_before.as_str()),
+        "acceptance must stay pending until publication"
+    );
+    assert!(
+        second
+            .request(HostCommand::CommitHistory {
+                client: "b".repeat(64),
+                messages: accepted.clone()
+            })
+            .unwrap()
+            .error
+            .is_some()
+    );
+    assert!(matches!(
+        gui.request(Edit::Undo).unwrap(),
+        Event::MutationRefused { .. }
+    ));
+    for field in ["digest", "sequence", "batch_id"] {
+        let mut mismatch = accepted[0].clone();
+        match field {
+            "digest" => mismatch.digest.push('f'),
+            "sequence" => mismatch.sequence += 1,
+            _ => mismatch.batch_id.push('f'),
+        }
+        assert!(
+            first
+                .request(HostCommand::CommitHistory {
+                    client: identity.clone(),
+                    messages: vec![mismatch]
+                })
+                .unwrap()
+                .error
+                .is_some(),
+            "the actor-stamped {field} must match its original envelope"
+        );
+    }
+    let mut tampered = accepted[0].clone();
+    let mut envelope = kinewright_project::manual_history::AcceptedManualCommand::decode(&tampered)
+        .unwrap()
+        .envelope;
+    envelope.manual.as_mut().unwrap().predecessor =
+        Some(kinewright_project::bundle_records::BatchId::fresh().unwrap());
+    tampered.envelope = serde_json::to_vec(&envelope).unwrap();
+    tampered.digest = serde_json::to_value(envelope.digest().unwrap())
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .into();
+    assert!(
+        first
+            .request(HostCommand::CommitHistory {
+                client: identity.clone(),
+                messages: vec![tampered]
+            })
+            .unwrap()
+            .error
+            .is_some(),
+        "the exact predecessor is mandatory even with matching history bytes"
+    );
+    for pointer in [
+        "/manual/after_sha256",
+        "/manual/cursor_sha256",
+        "/manual/batch/undo_entries",
+    ] {
+        let mut tampered = accepted[0].clone();
+        let mut value: Value = serde_json::from_slice(&tampered.envelope).unwrap();
+        *value.pointer_mut(pointer).unwrap() = if pointer.ends_with("undo_entries") {
+            json!(900)
+        } else {
+            json!("0".repeat(64))
+        };
+        let envelope: kinewright_project::receipts::CommandEnvelope =
+            serde_json::from_value(value).unwrap();
+        tampered.envelope = serde_json::to_vec(&envelope).unwrap();
+        tampered.digest = serde_json::to_value(envelope.digest().unwrap())
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .into();
+        let before = std::fs::read(&path).unwrap();
+        assert!(
+            first
+                .request(HostCommand::CommitHistory {
+                    client: identity.clone(),
+                    messages: vec![tampered]
+                })
+                .unwrap()
+                .error
+                .is_some(),
+            "tampered accepted result was published: {pointer}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+    let bypass = first
+        .request(HostCommand::Save {
+            snapshot: HostSnapshot::capture(&gui).unwrap(),
+        })
+        .unwrap();
+    assert_eq!(
+        bypass.error.unwrap().code,
+        "manual_stream_required",
+        "a foreground snapshot cannot replace accepted manual messages"
+    );
+    let mut latencies = Vec::new();
+    for (message, started) in accepted.iter().zip(times) {
+        let reply = successful(
+            &first,
+            HostCommand::CommitHistory {
+                client: identity.clone(),
+                messages: vec![message.clone()],
+            },
+        );
+        latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(reply.manual_ack, vec![message.clone()]);
+        let published = LoadedBundle::read(&path).unwrap();
+        let restored = Core::spawn(Document::default()).unwrap();
+        published.restore_manual(&restored).unwrap();
+        let durable = restored.export_history().unwrap();
+        let envelope = kinewright_project::manual_history::AcceptedManualCommand::decode(message)
+            .unwrap()
+            .envelope;
+        let metadata = envelope.manual.as_ref().unwrap();
+        assert_eq!(
+            kinewright_project::manual_history::history_sha256(&durable).unwrap(),
+            metadata.after_sha256
+        );
+        assert_eq!(durable.batches.last(), Some(&metadata.batch));
+        assert_eq!(
+            published
+                .manual_checkpoint()
+                .unwrap()
+                .batch_ids
+                .last()
+                .unwrap()
+                .as_str(),
+            message.batch_id
+        );
+        assert_eq!(reply.saved.unwrap().history_sha256, metadata.after_sha256);
+    }
+    source
+        .acknowledge_manual(&permit, accepted.clone())
+        .unwrap();
+    let durable = manual_history_from(&path);
+    assert_eq!(
+        durable, expected,
+        "no intermediate drag message may disappear"
+    );
+    let before_retry = std::fs::read(&path).unwrap();
+    let retry = successful(
+        &first,
+        HostCommand::CommitHistory {
+            client: identity.clone(),
+            messages: accepted.clone(),
+        },
+    );
+    assert_eq!(retry.manual_ack, accepted);
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before_retry,
+        "original-envelope retry must not republish or execute again"
+    );
+    for command in [Edit::Undo, Edit::Redo] {
+        assert!(matches!(
+            permit.request(command).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let messages = permit.pending().unwrap();
+        let reply = successful(
+            &first,
+            HostCommand::CommitHistory {
+                client: identity.clone(),
+                messages: messages.clone(),
+            },
+        );
+        assert_eq!(reply.manual_ack, messages);
+        source.acknowledge_manual(&permit, messages).unwrap();
+        assert_eq!(manual_history_from(&path), gui.export_history().unwrap());
+    }
+    // A contiguous transport prefix can include many original drag messages.
+    // Every one must remain in history and retain its actor-assigned BatchId.
+    for locked in [true, false, true, false, true, false] {
+        permit
+            .request(Edit::DoBatchCoalesced {
+                operations: vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked,
+                }],
+                coalesce_key: "drag#second".into(),
+            })
+            .unwrap();
+    }
+    let messages = permit.pending().unwrap();
+    let reply = successful(
+        &first,
+        HostCommand::CommitHistory {
+            client: identity.clone(),
+            messages: messages.clone(),
+        },
+    );
+    assert_eq!(reply.manual_ack, messages);
+    source
+        .acknowledge_manual(&permit, messages.clone())
+        .unwrap();
+    let loaded = LoadedBundle::read(&path).unwrap();
+    assert_eq!(manual_history_from(&path), gui.export_history().unwrap());
+    assert!(
+        loaded
+            .manual_checkpoint()
+            .unwrap()
+            .batch_ids
+            .iter()
+            .rev()
+            .zip(messages.iter().rev())
+            .all(|(id, message)| id.as_str() == message.batch_id)
+    );
+    // Report-only uninterrupted drag timing: accept, then exact durable receipt.
+    latencies.clear();
+    for frame in 0..32 {
+        let started = Instant::now();
+        assert!(matches!(
+            permit
+                .request(Edit::DoBatchCoalesced {
+                    operations: vec![Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: frame % 2 == 0
+                    }],
+                    coalesce_key: "drag#timed".into()
+                })
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let messages = permit.pending().unwrap();
+        let reply = successful(
+            &first,
+            HostCommand::CommitHistory {
+                client: identity.clone(),
+                messages: messages.clone(),
+            },
+        );
+        latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert_eq!(reply.manual_ack, messages);
+        source.acknowledge_manual(&permit, messages).unwrap();
+    }
+    if let Some(output) = std::env::var_os("JA_MANUAL_LATENCY_OUTPUT") {
+        std::fs::write(output, serde_json::to_vec_pretty(&json!({"accept_to_ack_ms": latencies, "samples":32, "model":"uninterrupted 32-message coalesced drag, sequential accept then durable loopback acknowledgement, test/debug profile"})).unwrap()).unwrap();
+    }
+    host.shutdown().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn manual_history_from(path: &Path) -> kinewright_core::HistorySnapshot {
+    let core = Core::spawn(Document::default()).unwrap();
+    kinewright_project::bundle::LoadedBundle::read(path)
+        .unwrap()
+        .restore_manual(&core)
+        .unwrap();
+    core.export_history().unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "One barrier witness retains the before, pending and exact publisher result together"
+)]
+fn g05l_disk_barrier_keeps_acceptance_local_and_saved_exact() {
+    use kinewright_core::{Command as Edit, Event, Operation, Track, TrackId, TrackKind};
+    use kinewright_project::{
+        editing_session::Ja1EditingSession, io_observer, storage_budget::StorageLimits,
+    };
+    let root = temp("c9-disk-barrier");
+    let gui = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let path = root.path("barrier.kinewright");
+    let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
+    source.first_save(&path, StorageLimits::default()).unwrap();
+    source.prepare_host_attachment().unwrap();
+    let cut = source.freeze_host_cut().unwrap();
+    source.complete_host_cut(&cut, None, None).unwrap();
+    let mut host = HostCommandOwner::open(config(root.root(), Some(path.clone()))).unwrap();
+    let identity = "c".repeat(64);
+    let reply = host.execute(
+        HostCommand::AcquireManual {
+            client: identity.clone(),
+        },
+        roots(root.root()),
+    );
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    let saved = reply.status.saved_digest.unwrap();
+    let permit = source
+        .bind_manual_producer(reply.manual_lease.unwrap(), reply.manual_inputs.unwrap())
+        .unwrap();
+    let command = |locked| Edit::DoBatchCoalesced {
+        operations: vec![Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked,
+        }],
+        coalesce_key: "disk-stalled-drag".into(),
+    };
+    assert!(matches!(
+        permit.request(command(false)).unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let messages = permit.pending().unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let signals = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = signals.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let requested_roots = roots(root.root());
+    let worker = std::thread::spawn(move || {
+        let reply = io_observer::at_barrier(
+            "root_file_sync",
+            move || {
+                ready_tx.send(()).unwrap();
+                release.wait();
+            },
+            || {
+                host.execute(
+                    HostCommand::CommitHistory {
+                        client: identity,
+                        messages,
+                    },
+                    requested_roots,
+                )
+            },
+        );
+        (host, reply)
+    });
+    ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "B5 has not happened"
+    );
+    let events = gui.subscribe().unwrap();
+    let _ = events.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(matches!(
+        permit.request(command(true)).unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    assert!(matches!(
+        events.recv_timeout(Duration::from_secs(1)).unwrap(),
+        Event::DocumentChanged {
+            journal_command: Some(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        permit.pending().unwrap().len(),
+        2,
+        "preview/local acceptance never waits for disk"
+    );
+    signals.wait();
+    let (mut host, reply) = worker.join().unwrap();
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    assert_eq!(reply.manual_ack.len(), 1);
+    assert_ne!(reply.status.saved_digest.as_deref(), Some(saved.as_str()));
+    assert_ne!(
+        reply.status.saved_digest.as_deref(),
+        Some(
+            kinewright_project::manual_history::history_sha256(&gui.export_history().unwrap())
+                .unwrap()
+                .as_str()
+        ),
+        "the later accepted suffix cannot be labelled Saved"
+    );
+    assert_eq!(manual_history_from(&path).batches.len(), 1);
+    source
+        .acknowledge_manual(&permit, reply.manual_ack)
+        .unwrap();
+    let messages = permit.pending().unwrap();
+    let reply = host.execute(
+        HostCommand::CommitHistory {
+            client: "c".repeat(64),
+            messages,
+        },
+        roots(root.root()),
+    );
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    source
+        .acknowledge_manual(&permit, reply.manual_ack)
+        .unwrap();
+    assert_eq!(manual_history_from(&path), gui.export_history().unwrap());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn g05l_ack_prefix_is_the_independently_reopened_history() {
+    use kinewright_core::{Command as Edit, Operation, Track, TrackId, TrackKind};
+    use kinewright_project::{editing_session::Ja1EditingSession, storage_budget::StorageLimits};
+    let root = temp("c9-ack");
+    let gui = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let path = root.path("ack.kinewright");
+    let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
+    source.first_save(&path, StorageLimits::default()).unwrap();
+    source.prepare_host_attachment().unwrap();
+    let cut = source.freeze_host_cut().unwrap();
+    source.complete_host_cut(&cut, None, None).unwrap();
+    let host = WriterHost::start(config(root.root(), Some(path.clone()))).unwrap();
+    let client = host.client();
+    let id = "d".repeat(64);
+    let grant = successful(&client, HostCommand::AcquireManual { client: id.clone() });
+    let permit = source
+        .bind_manual_producer(grant.manual_lease.unwrap(), grant.manual_inputs.unwrap())
+        .unwrap();
+    let baseline = manual_history_from(&path);
+    for locked in [false, true, false] {
+        permit
+            .request(Edit::DoBatchCoalesced {
+                operations: vec![Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked,
+                }],
+                coalesce_key: "ack-exact".into(),
+            })
+            .unwrap();
+    }
+    let messages = permit.pending().unwrap();
+    assert_eq!(manual_history_from(&path), baseline);
+    let reply = successful(
+        &client,
+        HostCommand::CommitHistory {
+            client: id,
+            messages: messages.clone(),
+        },
+    );
+    assert_eq!(reply.manual_ack, messages);
+    assert_eq!(
+        manual_history_from(&path),
+        gui.export_history().unwrap(),
+        "acknowledged prefix must already be independently durable, including intermediate messages"
+    );
+    let loaded = kinewright_project::bundle::LoadedBundle::read(&path).unwrap();
+    assert_eq!(loaded.manual_checkpoint().unwrap().batch_ids.len(), 3);
+    assert!(
+        loaded
+            .manual_checkpoint()
+            .unwrap()
+            .batch_ids
+            .iter()
+            .zip(&messages)
+            .all(|(batch, message)| batch.as_str() == message.batch_id)
+    );
+    source
+        .acknowledge_manual(&permit, reply.manual_ack)
+        .unwrap();
+    assert!(permit.pending().unwrap().is_empty());
+    host.shutdown().unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "Input admission and refusal share the same actor, manifest and publisher"
+)]
+fn g05l_input_context_is_admitted_before_local_acceptance() {
+    use kinewright_core::{
+        AssetId, Command as Edit, CoreMutationRefusal, Event, MediaAsset, MediaKind, Operation,
+        Rational, TimeCode,
+    };
+    use kinewright_project::{
+        bundle_records::{ObjectRef, RecordKind},
+        editing_session::Ja1EditingSession,
+        owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+        storage_budget::StorageLimits,
+    };
+    let root = temp("c9-input-context");
+    let gui = Core::spawn(Document::default()).unwrap();
+    let mut source = Ja1EditingSession::new(root.root(), &gui, StorageLimits::default()).unwrap();
+    let bytes = b"C9 independently retained owned-media bytes; no decoder certification";
+    let object = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: RecordKind::OwnedMedia,
+    };
+    let media = source
+        .source_mut()
+        .unwrap()
+        .store_mut()
+        .admit_blob(&mut &bytes[..], &object, &[])
+        .unwrap();
+    let store = source.source_mut().unwrap();
+    let manifest = OwnedInputManifest {
+        project_id: None,
+        session_id: Some(store.session_id().clone()),
+        owner_epoch: store.store().owner_epoch(),
+        entries: vec![OwnedInputEntry {
+            entry_id: "media:700".into(),
+            object,
+            dependencies: vec![],
+            selected_stream: None,
+            time_base: None,
+            origin: None,
+            profile: None,
+        }],
+    };
+    let inputs = store.admit_inputs(&manifest).unwrap();
+    source.set_unsaved_inputs(inputs.reference.clone()).unwrap();
+    let path = root.path("input-context.kinewright");
+    source.first_save(&path, StorageLimits::default()).unwrap();
+    drop(inputs);
+    drop(media);
+    source.prepare_host_attachment().unwrap();
+    let cut = source.freeze_host_cut().unwrap();
+    source.complete_host_cut(&cut, None, None).unwrap();
+    let host = WriterHost::start(config(root.root(), Some(path.clone()))).unwrap();
+    let client = host.client();
+    let id = "e".repeat(64);
+    let grant = successful(&client, HostCommand::AcquireManual { client: id.clone() });
+    let lease = grant.manual_lease.unwrap();
+    let input_context = grant.manual_inputs.unwrap();
+    let mut changed_context = input_context.clone();
+    changed_context.owner_epoch += 1;
+    assert!(
+        source
+            .bind_manual_producer(lease.clone(), changed_context)
+            .is_err(),
+        "input context must match the exact admitted record bytes"
+    );
+    let permit = source.bind_manual_producer(lease, input_context).unwrap();
+    let asset = |id| MediaAsset {
+        id: AssetId(id),
+        path: root.path("source.wav"),
+        name: "source".into(),
+        duration: TimeCode(30),
+        fps: Rational::new(30, 1).unwrap(),
+        kind: MediaKind::Audio,
+        resolution: None,
+        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+        color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
+    };
+    let before = gui.export_history().unwrap();
+    let root_before = std::fs::read(&path).unwrap();
+    assert!(
+        matches!(
+            permit
+                .request(Edit::Do(Operation::AddAsset { asset: asset(701) }))
+                .unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::ManualInputRequired,
+                ..
+            }
+        ),
+        "unadmitted import must refuse before local acceptance"
+    );
+    assert_eq!(gui.export_history().unwrap(), before);
+    assert!(permit.pending().unwrap().is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), root_before);
+    assert!(
+        matches!(
+            permit
+                .request(Edit::Do(Operation::AddAsset { asset: asset(700) }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ),
+        "the real owner-admitted input must remain editable"
+    );
+    let messages = permit.pending().unwrap();
+    let reply = successful(
+        &client,
+        HostCommand::CommitHistory {
+            client: id,
+            messages: messages.clone(),
+        },
+    );
+    assert_eq!(reply.manual_ack, messages);
+    source
+        .acknowledge_manual(&permit, reply.manual_ack)
+        .unwrap();
+    assert_eq!(manual_history_from(&path), gui.export_history().unwrap());
+    host.shutdown().unwrap();
 }

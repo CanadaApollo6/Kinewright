@@ -413,6 +413,7 @@ mod linux {
                     .unwrap()
                     .revision();
                 let command = CommandEnvelope {
+                    manual: None,
                     version: 1,
                     action: "edit".into(),
                     id: CommandId {

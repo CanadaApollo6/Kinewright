@@ -21,6 +21,7 @@ use crate::{
 use kinewright_core::{Core, HistorySaveTag};
 use std::path::{Path, PathBuf};
 mod durable;
+mod manual;
 mod recovery;
 mod rescue;
 mod rescue_selection;

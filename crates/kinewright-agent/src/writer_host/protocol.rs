@@ -1,4 +1,4 @@
-//! Bounded C8 foreground commands. No manual stream, recovery barrier or switch envelopes.
+//! Bounded foreground commands and the C9 accepted manual-history stream.
 #![allow(clippy::missing_errors_doc)]
 use super::HostAuth;
 use kinewright_core::HistorySnapshot;
@@ -153,6 +153,13 @@ pub struct HostSessionConfig {
     reason = "The bounded foreground wire command owns its snapshot and source binding without another boxed API layer"
 )]
 pub enum HostCommand {
+    AcquireManual {
+        client: String,
+    },
+    CommitHistory {
+        client: String,
+        messages: Vec<kinewright_core::AcceptedHistory>,
+    },
     Attach,
     AdmitDestination {
         destination: PathBuf,
@@ -232,6 +239,8 @@ pub enum HostCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor: Option<String>,
     pub protocol: u32,
     pub project: String,
     pub roots: SessionRoots,
@@ -404,6 +413,9 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub manual_lease: Option<kinewright_project::manual_history::ManualLease>,
+    pub manual_inputs: Option<kinewright_project::owned_inputs::OwnedInputManifest>,
+    pub manual_ack: Vec<kinewright_core::AcceptedHistory>,
     pub activation: Option<HostActivation>,
     pub status: HostStatus,
     pub saved: Option<HostSaveReport>,

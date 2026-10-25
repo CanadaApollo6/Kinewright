@@ -61,6 +61,8 @@ pub enum HistoryRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<crate::manual_history::ManualHistoryIdentity>,
     pub version: u32,
     pub action: String,
     pub id: CommandId,
@@ -88,9 +90,22 @@ impl CommandEnvelope {
                 "command envelope version/identity".into(),
             ));
         }
+        if self.action != "manual" && self.manual.is_some() {
+            return Err(BundleError::Unsupported(
+                "manual identity on ordinary command".into(),
+            ));
+        }
         match self.action.as_str() {
             "edit"
                 if self.transition.is_none()
+                    && self.command.is_some()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.is_empty() => {}
+            "manual"
+                if self.manual.is_some()
+                    && self.lease.is_some()
+                    && self.transition.is_none()
                     && self.command.is_some()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()

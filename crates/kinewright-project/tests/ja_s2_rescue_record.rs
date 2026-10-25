@@ -600,6 +600,7 @@ mod durable {
         let (_temp, core, mut bundle, input) = fixture();
         let issuer = bundle.issue_issuer(&core, &input, 1).unwrap();
         let envelope = CommandEnvelope {
+            manual: None,
             version: 1,
             action: "edit".into(),
             id: CommandId {

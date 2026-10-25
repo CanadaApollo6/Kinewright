@@ -74,6 +74,7 @@ fn command(
 ) -> CommandEnvelope {
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
+        manual: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {

@@ -560,6 +560,7 @@ fn no_edit_comment_repairs_the_original_core_cut_after_floor_reconciliation() {
     let text_ref = reference(text);
     let strokes_ref = reference(strokes);
     let request = CommandEnvelope {
+        manual: None,
         version: 1,
         action: "comment".into(),
         id: CommandId {

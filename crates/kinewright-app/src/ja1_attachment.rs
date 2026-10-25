@@ -91,6 +91,18 @@ enum Choice {
     Release(PathBuf),
 }
 
+/// Every Studio producer uses this capability; raw/stale Core clones are refused
+/// inside the actor. No UI producer waits for durable IO.
+pub(crate) struct ManualProducerGate {
+    actor: kinewright_core::ActorIdentity,
+    permit: kinewright_core::ManualPermit,
+}
+impl ManualProducerGate {
+    pub fn send(&self, command: Command) -> Result<(), kinewright_core::CoreDisconnected> {
+        self.permit.send(command)
+    }
+}
+
 pub(crate) struct Ja1Attachment {
     pub owner: Ja1EditingSession,
     pub message: String,
@@ -242,7 +254,11 @@ impl Ja1Attachment {
             );
         }
         if let Some(host) = &self.host {
-            return host.status.close_disclosure.clone();
+            let mut text = host.status.close_disclosure.clone();
+            if host.pending_count() > 0 {
+                text.push_str(" Manual edits are still waiting for a durable acknowledgement. Closing can discard this pending work; it is not Saved.");
+            }
+            return text;
         }
         let mut text = self.owner.close_disclosure().unwrap_or_else(|e| format!("Could not verify this project's state: {e}. Closing can discard work still held only in this session."));
         if !self.destinations.is_empty() {
@@ -346,6 +362,7 @@ impl Ja1Attachment {
                 let cut = self.owner.freeze_host_cut()?;
                 self.owner.complete_host_cut(&cut, None, None)?;
                 host.cut = None;
+                host.start_manual(&mut self.owner)?;
                 self.message = "Studio writer host attached. Your manual edit stays in this window; saves and agent sessions run in the host.".into();
                 self.host = Some(host);
                 self.frozen = false;
@@ -360,6 +377,25 @@ impl Ja1Attachment {
         }
     }
 
+    pub fn send_manual(&self, command: Command) -> Result<(), kinewright_core::CoreDisconnected> {
+        if let Some(gate) = self.host.as_ref().and_then(|host| host.manual.as_ref()) {
+            gate.send(command)
+        } else {
+            self.owner.core().send(command)
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn manual_pending_for_test(
+        &self,
+    ) -> Result<Vec<kinewright_core::AcceptedHistory>, String> {
+        self.host
+            .as_ref()
+            .and_then(|h| h.manual.as_ref())
+            .ok_or("manual permit missing")?
+            .permit
+            .pending()
+            .map_err(|e| e.to_string())
+    }
     pub fn host_client(&self) -> Option<kinewright_agent::writer_host::HostClient> {
         if self.retention_lost {
             return None;
@@ -382,7 +418,13 @@ impl Ja1Attachment {
             .expect("attached host")
             .request(action, &mut self.owner);
         match result {
-            Ok(reply) => self.accept_host_reply(reply),
+            Ok(reply) => {
+                self.accept_host_reply(reply)?;
+                self.host
+                    .as_mut()
+                    .expect("attached host")
+                    .start_manual(&mut self.owner)
+            }
             Err(error) => {
                 self.operation_panicked();
                 Err(error)
@@ -390,6 +432,10 @@ impl Ja1Attachment {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The one reply transition keeps actor, publisher and source-retention decisions together"
+    )]
     fn accept_host_reply(
         &mut self,
         reply: kinewright_agent::writer_host::HostReply,
@@ -404,6 +450,7 @@ impl Ja1Attachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         let host = self.host.as_mut().expect("attached host");
+        host.accept_manual_ack(&reply, &self.owner)?;
         self.message = reply.error.as_ref().map_or_else(
             || reply.status.message.clone(),
             |error| error.message.clone(),
@@ -414,7 +461,11 @@ impl Ja1Attachment {
             self.message.push(' ');
             self.message.push_str(&saved.floor_disclosure);
         }
-        let can_resume = !reply.status.frozen && reply.status.choice.is_none();
+        let manual_failed = reply.error.is_some() && host.pending_count() > 0;
+        if manual_failed && host.cut.is_none() {
+            host.cut = Some(self.owner.freeze_host_cut()?);
+        }
+        let can_resume = !manual_failed && !reply.status.frozen && reply.status.choice.is_none();
         if reply.activation.is_some() && (!can_resume || host.cut.is_none()) {
             self.operation_panicked();
             return Err(BundleError::Identity(
@@ -484,6 +535,9 @@ impl Ja1Attachment {
         }
         self.frozen = reply.status.frozen;
         host.accept_status(reply.status);
+        if host.manual.is_none() {
+            self.message.push_str(" Choose Save before editing so this attachment can establish its durable manual history.");
+        }
         if let Some(error) = reply.error {
             return Err(BundleError::Identity(error.to_string()));
         }

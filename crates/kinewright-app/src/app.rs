@@ -2250,7 +2250,7 @@ impl KinewrightApp {
             }) = dialog.cached
             {
                 let command = motion_plan_apply_command(planned_revision, operations);
-                if self.projects[project].core.send(command).is_err() {
+                if self.projects[project].send_manual_command(command).is_err() {
                     self.note_actor_stopped(
                         IncidentSubject::Clip(dialog.clip),
                         "Core actor stopped while applying the planned move",
@@ -2269,7 +2269,11 @@ impl KinewrightApp {
         // a stopped actor is not that operation's problem — it is the whole
         // document's, and a second stopped send must not open a second
         // incident (Appendix B row 12).
-        if self.focused().core.send(Command::Do(operation)).is_err() {
+        if self
+            .focused()
+            .send_manual_command(Command::Do(operation))
+            .is_err()
+        {
             self.note_actor_stopped(
                 IncidentSubject::Project,
                 "Core actor stopped while applying the edit",
@@ -2513,8 +2517,7 @@ impl KinewrightApp {
         // The token is what the conflict is matched by (`IN1b` §4 rule 6).
         let token = self.next_command_token();
         if self.projects[project_index]
-            .core
-            .send(Command::DoIfRevision {
+            .send_manual_command(Command::DoIfRevision {
                 expected: revision,
                 operation,
                 token: Some(token),
@@ -2840,8 +2843,7 @@ impl KinewrightApp {
         let expected = self.projects[project_index].revision;
         let token = self.next_command_token();
         if self.projects[project_index]
-            .core
-            .send(Command::DoIfRevision {
+            .send_manual_command(Command::DoIfRevision {
                 expected,
                 operation,
                 token: Some(token),
@@ -2876,8 +2878,7 @@ impl KinewrightApp {
         }
         if self
             .focused()
-            .core
-            .send(Command::DoBatch(operations))
+            .send_manual_command(Command::DoBatch(operations))
             .is_err()
         {
             // Appendix B row 16.
@@ -2922,8 +2923,7 @@ impl KinewrightApp {
         }
         if self
             .focused()
-            .core
-            .send(Command::DoBatchCoalesced {
+            .send_manual_command(Command::DoBatchCoalesced {
                 operations,
                 coalesce_key,
             })
@@ -2950,7 +2950,7 @@ impl KinewrightApp {
         if self.focused().ja1_read_only() {
             return;
         }
-        if self.focused().core.send(Command::Undo).is_err() {
+        if self.focused().send_manual_command(Command::Undo).is_err() {
             // Appendix B row 18.
             self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while undoing");
         } else {
@@ -2962,7 +2962,7 @@ impl KinewrightApp {
         if self.focused().ja1_read_only() {
             return;
         }
-        if self.focused().core.send(Command::Redo).is_err() {
+        if self.focused().send_manual_command(Command::Redo).is_err() {
             // Appendix B row 19.
             self.note_actor_stopped(IncidentSubject::Project, "Core actor stopped while redoing");
         } else {
@@ -3041,8 +3041,7 @@ impl KinewrightApp {
                         .pending_timeline_adds
                         .push(asset.id);
                     if self.projects[project_index]
-                        .core
-                        .send(Command::Do(Operation::AddAsset { asset }))
+                        .send_manual_command(Command::Do(Operation::AddAsset { asset }))
                         .is_err()
                     {
                         // Appendix B row 21.
@@ -16419,6 +16418,7 @@ pub(crate) mod ja_observe {
         batches: Vec<Vec<Operation>>,
         at: TimeCode,
         report: &mut kinewright_agent::ja_harness::report::Report,
+        manual_stream: bool,
     ) -> Result<serde_json::Value, String> {
         use crate::presenter::paint_support::{Painted, Pass};
         use kinewright_agent::ja_harness::media_observer::stamp_value as stamp;
@@ -16440,18 +16440,72 @@ pub(crate) mod ja_observe {
             crate::recovery::with_ja_directory(report.root.join("gui-recovery"), || {
                 in1_tests::in1_harness_with_engine(document, Arc::clone(&engine))
             });
+        let mut manual_path: Option<PathBuf> = None;
+        if manual_stream && report.mode == kinewright_agent::ja_harness::protocol::Mode::Revised {
+            let core = app.focused().core.clone();
+            let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+                &report.root,
+                &core,
+                kinewright_project::storage_budget::StorageLimits::default(),
+            )
+            .map_err(|e| format!("manual App storage prerequisite NOT RUN: {e}"))?;
+            let path = report.root.join("manual-stream.kinewright");
+            owner
+                .first_save(
+                    &path,
+                    kinewright_project::storage_budget::StorageLimits::default(),
+                )
+                .map_err(|e| format!("manual App storage prerequisite NOT RUN: {e}"))?;
+            let mut attachment =
+                crate::ja1_attachment::Ja1Attachment::new(owner).map_err(|e| e.to_string())?;
+            attachment
+                .launch_host(
+                    "c9-app-manual-paint".into(),
+                    kinewright_agent::writer_host::SessionRoots {
+                        read: vec![report.root.clone()],
+                        write: vec![report.root.clone()],
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            app.focused_mut().recovery.stop_for_studio();
+            app.focused_mut().ja1 = Some(attachment);
+            manual_path = Some(path);
+        }
         let result: Result<serde_json::Value, String> = (|| {
             let started = Instant::now();
             let gesture = app.begin_edit_gesture();
             let key = format!("ja-{gesture}");
             let mut inputs = Vec::new();
+            let mut manual_painted = Vec::new();
+            let mut drag_painter = manual_path.as_ref().map(|_| Painted::new());
             for operations in batches {
                 inputs.push(json!({"elapsed_ns":started.elapsed().as_nanos().to_string(),"operations":operations,"coalesce_key":key}));
                 app.send_operations_coalesced(operations, key.clone());
+                if let Some(painter) = &mut drag_painter {
+                    // This is one real UI frame's coalesced command. Its actor
+                    // event must reach the actual presenter before the next input.
+                    let observation =
+                        manual_frame(&mut app, &engine, painter, at, report, inputs.len())?;
+                    manual_painted.push(observation);
+                }
             }
             let core = app.focused().core.clone();
             let history = core.observe_history().map_err(|e| e.to_string())?;
             let accepted_observed_ns = started.elapsed().as_nanos().to_string();
+            // Delay only the transport poll. The actual App producer, actor,
+            // media consumer and paint callback run while every disk ack is absent.
+            let mut manual_attachment = if manual_path.is_some() {
+                app.focused_mut().ja1.take()
+            } else {
+                None
+            };
+            let manual_accepted = manual_attachment
+                .as_ref()
+                .map(crate::ja1_attachment::Ja1Attachment::manual_pending_for_test)
+                .transpose()?;
+            let pending_dirty = manual_attachment
+                .as_ref()
+                .is_some_and(crate::ja1_attachment::Ja1Attachment::is_dirty);
             let context = egui::Context::default();
             app.poll_background(&context);
             let pending_revision = app.focused().revision;
@@ -16488,6 +16542,7 @@ pub(crate) mod ja_observe {
             let mut painted = Painted::new();
             let whole = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64.0, 64.0));
             let image = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(48.0, 48.0));
+            let before_discard = app.presenter.paint_mark_for_test();
             painted.pass(
                 &app.presenter,
                 &|| app.paint_clock(),
@@ -16495,7 +16550,7 @@ pub(crate) mod ja_observe {
                 image,
                 Pass::Discarded,
             );
-            let discarded_has_no_mark = app.presenter.paint_mark_for_test().is_none();
+            let discarded_has_no_mark = app.presenter.paint_mark_for_test() == before_discard;
             painted.pass(
                 &app.presenter,
                 &|| app.paint_clock(),
@@ -16506,10 +16561,66 @@ pub(crate) mod ja_observe {
             let mark = app.presenter.paint_mark_for_test();
             app.acknowledge_paint(painted.epoch());
             let ack_consumed_once = app.presenter.take_ack(painted.epoch() + 1).is_none();
-            let (journal_bytes, journal) = app.focused().recovery.ja_observe()?;
+            let manual_observation = if let Some(path) = &manual_path {
+                let mut attachment = manual_attachment
+                    .take()
+                    .ok_or("manual attachment disappeared")?;
+                let accepted = manual_accepted
+                    .as_ref()
+                    .ok_or("accepted stream disappeared")?;
+                let paint_before_ack = mark.is_some() && !accepted.is_empty() && pending_dirty;
+                let deadline = Instant::now() + Duration::from_secs(20);
+                while attachment.is_dirty() && Instant::now() < deadline {
+                    attachment.poll_host();
+                    std::thread::yield_now();
+                }
+                if attachment.is_dirty() {
+                    return Err(format!(
+                        "manual disk ack did not settle: {}",
+                        attachment.message
+                    ));
+                }
+                let loaded = kinewright_project::bundle::LoadedBundle::read(path)
+                    .map_err(|e| e.to_string())?;
+                let restored = kinewright_core::Core::spawn(kinewright_core::Document::default())
+                    .map_err(|e| e.to_string())?;
+                loaded
+                    .restore_manual(&restored)
+                    .map_err(|e| e.to_string())?;
+                let durable = restored.export_history().map_err(|e| e.to_string())?;
+                let local = core.export_history().map_err(|e| e.to_string())?;
+                let checkpoint = loaded.manual_checkpoint().map_err(|e| e.to_string())?;
+                let exact_ids = checkpoint
+                    .batch_ids
+                    .iter()
+                    .rev()
+                    .zip(accepted.iter().rev())
+                    .all(|(id, a)| id.as_str() == a.batch_id);
+                let complete = paint_before_ack
+                    && manual_painted.len() == accepted.len()
+                    && manual_painted
+                        .iter()
+                        .all(|f| f["presented_before_ack"] == true)
+                    && local == durable
+                    && durable.batches.len() == accepted.len()
+                    && exact_ids
+                    && attachment.manual_pending_for_test()?.is_empty();
+                let observation = json!({"complete":complete,"painted_frames":manual_painted,"paint_before_ack":paint_before_ack,"pending_was_dirty":pending_dirty,"accepted":accepted,"durable_history":durable,"durable_batch_ids":checkpoint.batch_ids,"saved_after_exact_ack":!attachment.is_dirty(),"evidence_class":"actual_headless_paint_before_transport_publication"});
+                attachment.close();
+                observation
+            } else if manual_stream {
+                json!({"surface":"pending_baseline_witness"})
+            } else {
+                serde_json::Value::Null
+            };
+            let (journal_bytes, journal) = if manual_path.is_some() {
+                (vec![], json!({"commands":[]}))
+            } else {
+                app.focused().recovery.ja_observe()?
+            };
             let journal_artifact = report.artifact("gui-journal.bin", &journal_bytes)?;
             Ok(
-                json!({"input_events":inputs,"core_accepted_observed_ns":accepted_observed_ns,
+                json!({"manual_stream":manual_observation,"input_events":inputs,"core_accepted_observed_ns":accepted_observed_ns,
                 "core_history":{"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history},
                 "app_pending_revision":pending_revision,"issued_stamp":stamp(issued),"returned_stamp":stamp(returned),
                 "bound_display_cell":bound.map(|c| json!({"stamp":stamp(c.stamp),"at":c.at,"frame_id":c.frame_id,"stale":c.stale})),
@@ -16533,6 +16644,74 @@ pub(crate) mod ja_observe {
         let mut result = result?;
         result["engine_worker_finished"] = json!(true);
         Ok(result)
+    }
+    fn manual_frame(
+        app: &mut KinewrightApp,
+        engine: &FfmpegMediaEngine,
+        painter: &mut crate::presenter::paint_support::Painted,
+        at: TimeCode,
+        report: &mut kinewright_agent::ja_harness::report::Report,
+        frame_index: usize,
+    ) -> Result<serde_json::Value, String> {
+        use crate::presenter::paint_support::Pass;
+        let core = app.focused().core.clone();
+        let local = core.export_history().map_err(|e| e.to_string())?;
+        let attachment = app
+            .focused_mut()
+            .ja1
+            .take()
+            .ok_or("manual frame attachment missing")?;
+        let accepted = attachment.manual_pending_for_test()?;
+        let pending = attachment.is_dirty() && accepted.len() == frame_index;
+        let context = egui::Context::default();
+        app.poll_background(&context);
+        let frames = engine.frames();
+        while frames.try_recv().is_ok() {}
+        engine.request_frame(at);
+        let issued = engine.stamp();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let frame = loop {
+            let frame = frames
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|e| e.to_string())?;
+            if frame.at == at && frame.stamp == issued {
+                break frame;
+            }
+        };
+        let center = (u64::from(frame.texture.height / 2) * u64::from(frame.texture.width)
+            + u64::from(frame.texture.width / 2))
+            * 4;
+        let center = usize::try_from(center).map_err(|e| e.to_string())?;
+        let rgba = frame
+            .texture
+            .rgba
+            .get(center..center + 4)
+            .ok_or("manual frame landmark missing")?
+            .to_vec();
+        let raw = report.artifact(
+            &format!("manual-frame-{frame_index}.rgba"),
+            &frame.texture.rgba,
+        )?;
+        app.presenter.collect(frame);
+        app.finalize_preview(&context);
+        let whole = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(64.0, 64.0));
+        let image = egui::Rect::from_min_size(egui::pos2(8.0, 8.0), egui::vec2(48.0, 48.0));
+        painter.pass(
+            &app.presenter,
+            &|| app.paint_clock(),
+            whole,
+            image,
+            Pass::Rendered,
+        );
+        let mark = app.presenter.paint_mark_for_test();
+        app.acknowledge_paint(painter.epoch());
+        let presented = pending && mark.is_some_and(|m| m.cell.stamp == issued && m.cell.at == at);
+        let last = accepted
+            .last()
+            .ok_or("manual frame accepted identity missing")?;
+        let value = serde_json::json!({"center_rgba":rgba,"presented_before_ack":presented,"command_sequence":last.sequence,"command_digest":last.digest,"batch_id":last.batch_id,"history_sha256":kinewright_media::sha256_bytes(&serde_json::to_vec(&local).map_err(|e| e.to_string())?),"raw_frame":raw});
+        app.focused_mut().ja1 = Some(attachment);
+        Ok(value)
     }
 }
 
@@ -16960,4 +17139,122 @@ pub(crate) fn ja1_review_worker_panic_witness() {
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The producer inventory shares one real host and one exact frozen cut"
+)]
+pub(crate) fn ja_c9_manual_producer_gate_witness() {
+    use kinewright_project::{editing_session::Ja1EditingSession, storage_budget::StorageLimits};
+    let root = kinewright_media::test_support::workspace_target_dir();
+    let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "c9-producers");
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    };
+    let (mut app, engine) = in1_tests::in1_harness(document);
+    let core = app.projects[0].core.clone();
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    owner
+        .first_save(&temp.path("producers.kinewright"), StorageLimits::default())
+        .unwrap();
+    let mut attachment = crate::ja1_attachment::Ja1Attachment::new(owner).unwrap();
+    attachment
+        .launch_host(
+            "c9-all-producers".into(),
+            kinewright_agent::writer_host::SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+        )
+        .unwrap();
+    app.projects[0].recovery.stop_for_studio();
+    app.projects[0].ja1 = Some(attachment);
+    let operation = || Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    };
+    app.send_operation(operation());
+    app.send_operations(vec![operation()]);
+    app.send_operations_coalesced(vec![operation()], "c9-live".into());
+    app.undo();
+    app.redo();
+    let before = core.export_history().unwrap();
+    assert_eq!(
+        before.batches.len(),
+        5,
+        "discrete, batch, live and keyboard producers must use the permit"
+    );
+    let attachment = app.projects[0].ja1.as_mut().unwrap();
+    let cut = attachment.owner.freeze_host_cut().unwrap();
+    let history = cut.history().clone();
+    // The actual actor fence, rather than a UI read-only flag, blocks commands
+    // which were planned earlier or come from asynchronous/background callbacks.
+    app.send_operation(operation());
+    app.send_operations(vec![operation()]);
+    app.send_operations_coalesced(vec![operation()], "c9-live".into());
+    app.undo();
+    app.redo();
+    app.projects[0]
+        .send_manual_command(Command::DoIfRevision {
+            expected: app.projects[0].revision,
+            operation: operation(),
+            token: Some(CommandToken(900)),
+        })
+        .unwrap();
+    app.projects[0]
+        .send_manual_command(motion_plan_apply_command(
+            app.projects[0].revision,
+            vec![operation()],
+        ))
+        .unwrap();
+    let asset = MediaAsset {
+        id: AssetId(700),
+        path: temp.path("deferred.wav"),
+        name: "deferred".into(),
+        duration: TimeCode(30),
+        fps: Rational::new(30, 1).unwrap(),
+        kind: kinewright_core::MediaKind::Audio,
+        resolution: None,
+        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+        color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
+    };
+    app.projects[0]
+        .send_manual_command(Command::Do(Operation::AddAsset { asset }))
+        .unwrap();
+    assert_eq!(
+        core.export_history().unwrap(),
+        history,
+        "no producer may accept after the frozen cut"
+    );
+    assert_eq!(
+        app.projects[0]
+            .ja1
+            .as_ref()
+            .unwrap()
+            .manual_pending_for_test()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert!(
+        app.projects[0]
+            .ja1
+            .as_ref()
+            .unwrap()
+            .close_text()
+            .contains("not Saved")
+    );
+    app.projects[0].ja1.as_mut().unwrap().close();
+    in1_tests::in2_cleanup(&mut app);
+    drop(app);
+    drop(engine);
 }

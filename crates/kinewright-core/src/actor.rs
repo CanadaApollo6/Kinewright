@@ -176,6 +176,22 @@ pub enum Event {
 pub struct CoreDisconnected;
 
 enum CoreMessage {
+    BindManual(
+        TypeId,
+        Box<dyn crate::ManualHistoryEncoder>,
+        Sender<Result<u64, HistoryError>>,
+    ),
+    ManualCommand(u64, Command, Option<Sender<Event>>),
+    ManualPending(
+        u64,
+        Sender<Result<Vec<crate::AcceptedHistory>, HistoryError>>,
+    ),
+    ManualAck(
+        TypeId,
+        u64,
+        Vec<crate::AcceptedHistory>,
+        Sender<Result<(), HistoryError>>,
+    ),
     BindOwner(TypeId, Sender<Result<(), HistoryError>>),
     AttachmentState(Sender<AttachmentState>),
     CaptureCut(TypeId, bool, Sender<Result<AcceptedCut, HistoryError>>),
@@ -540,6 +556,67 @@ impl Core {
             })
             .expect("failed to spawn Core actor");
         Ok(Self { sender, identity })
+    }
+
+    pub(crate) fn bind_manual<P: 'static>(
+        &self,
+        encoder: Box<dyn crate::ManualHistoryEncoder>,
+    ) -> Result<crate::ManualPermit, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::BindManual(TypeId::of::<P>(), encoder, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        let generation = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(crate::ManualPermit {
+            core: self.clone(),
+            generation,
+        })
+    }
+    pub(crate) fn send_manual(
+        &self,
+        generation: u64,
+        command: Command,
+    ) -> Result<(), CoreDisconnected> {
+        self.sender
+            .send(CoreMessage::ManualCommand(generation, command, None))
+            .map_err(|_| CoreDisconnected)
+    }
+    pub(crate) fn request_manual(
+        &self,
+        generation: u64,
+        command: Command,
+    ) -> Result<Event, CoreDisconnected> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ManualCommand(generation, command, Some(reply)))
+            .map_err(|_| CoreDisconnected)?;
+        receiver.recv().map_err(|_| CoreDisconnected)
+    }
+    pub(crate) fn manual_pending(
+        &self,
+        generation: u64,
+    ) -> Result<Vec<crate::AcceptedHistory>, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ManualPending(generation, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+    pub(crate) fn manual_ack<P: 'static>(
+        &self,
+        generation: u64,
+        prefix: Vec<crate::AcceptedHistory>,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ManualAck(
+                TypeId::of::<P>(),
+                generation,
+                prefix,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
 
     /// Queue a command for the core actor.
@@ -1040,8 +1117,75 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
     let mut owner: Option<TypeId> = None;
     let mut attachment = AttachmentState::Live;
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
+    let mut manual: Option<ManualIngress> = None;
     while let Ok(message) = receiver.recv() {
         match message {
+            CoreMessage::BindManual(requested, encoder, reply) => {
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        if attachment != AttachmentState::Live
+                            || manual.as_ref().is_some_and(|m| !m.pending.is_empty())
+                            || state.pending_floor.is_some()
+                        {
+                            return Err(HistoryError::BarrierInvariant);
+                        }
+                        state.history().encoded_bytes()?;
+                        let generation = manual
+                            .as_ref()
+                            .map_or(Some(1), |m| m.generation.checked_add(1))
+                            .ok_or(HistoryError::Capacity)?;
+                        manual = Some(ManualIngress {
+                            generation,
+                            encoder,
+                            next_sequence: 1,
+                            predecessor: None,
+                            pending: std::collections::VecDeque::new(),
+                            bytes: 0,
+                        });
+                        Ok(generation)
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::ManualPending(generation, reply) => {
+                let result = manual
+                    .as_ref()
+                    .filter(|m| generation == m.generation)
+                    .map(|m| m.pending.iter().cloned().collect())
+                    .ok_or(HistoryError::BarrierInvariant);
+                let _ = reply.send(result);
+            }
+            CoreMessage::ManualAck(requested, generation, prefix, reply) => {
+                let result = manual
+                    .as_mut()
+                    .filter(|m| generation == m.generation && owner == Some(requested))
+                    .ok_or(HistoryError::BarrierInvariant)
+                    .and_then(|m| {
+                        if prefix.len() > m.pending.len()
+                            || !prefix.iter().zip(&m.pending).all(|(a, b)| a == b)
+                        {
+                            return Err(HistoryError::BarrierInvariant);
+                        }
+                        for _ in &prefix {
+                            let item = m
+                                .pending
+                                .pop_front()
+                                .ok_or(HistoryError::BarrierInvariant)?;
+                            m.bytes -= manual_message_bytes(&item)?;
+                        }
+                        Ok(())
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::ManualCommand(generation, command, reply) => {
+                let event = match manual.as_mut().filter(|m| generation == m.generation) {
+                    Some(m) => m.execute(&mut state, attachment, command),
+                    None => manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired),
+                };
+                broadcast(&mut subscribers, &event);
+                if let Some(reply) = reply {
+                    let _ = reply.send(event);
+                }
+            }
             CoreMessage::BindOwner(requested, reply) => {
                 let result = if owner.is_none_or(|existing| existing == requested) {
                     owner = Some(requested);
@@ -1119,8 +1263,15 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                 let _ = reply.send(result);
             }
             CoreMessage::BeginFloor(requested, transition, reply) => {
-                let result = authorize_attachment(attachment, owner, Some(requested))
-                    .and_then(|()| state.begin_floor(identity, &transition));
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        if manual.is_some() {
+                            return Err(HistoryError::MutationRefused(
+                                CoreMutationRefusal::ManualPermitRequired,
+                            ));
+                        }
+                        state.begin_floor(identity, &transition)
+                    });
                 let _ = reply.send(result);
             }
             CoreMessage::SettleFloor(requested, offset, expected, commit, reply) => {
@@ -1164,6 +1315,10 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     Err(HistoryError::MutationRefused(CoreMutationRefusal::Sealed))
                 } else if attachment == AttachmentState::Frozen {
                     Err(HistoryError::MutationRefused(CoreMutationRefusal::Frozen))
+                } else if manual.is_some() {
+                    Err(HistoryError::MutationRefused(
+                        CoreMutationRefusal::ManualPermitRequired,
+                    ))
                 } else if state.pending_floor.is_some() {
                     Err(HistoryError::SaveInProgress)
                 } else if owner.is_some() && owner != requested {
@@ -1232,15 +1387,111 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                 }
             }
             CoreMessage::Command(command) => {
-                let event = execute_actor_command(&mut state, attachment, command);
+                let event = if manual.is_some() && !matches!(command, Command::Query(_)) {
+                    manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired)
+                } else {
+                    execute_actor_command(&mut state, attachment, command)
+                };
                 broadcast(&mut subscribers, &event);
             }
             CoreMessage::Request(command, reply) => {
-                let event = execute_actor_command(&mut state, attachment, command);
+                let event = if manual.is_some() && !matches!(command, Command::Query(_)) {
+                    manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired)
+                } else {
+                    execute_actor_command(&mut state, attachment, command)
+                };
                 broadcast(&mut subscribers, &event);
                 let _ = reply.send(event);
             }
         }
+    }
+}
+
+struct ManualIngress {
+    generation: u64,
+    encoder: Box<dyn crate::ManualHistoryEncoder>,
+    next_sequence: u64,
+    predecessor: Option<String>,
+    pending: std::collections::VecDeque<crate::AcceptedHistory>,
+    bytes: usize,
+}
+fn manual_message_bytes(item: &crate::AcceptedHistory) -> Result<usize, HistoryError> {
+    serde_json::to_vec(item)
+        .map(|bytes| bytes.len())
+        .map_err(|_| HistoryError::Capacity)
+}
+fn manual_refusal(command: &Command, reason: CoreMutationRefusal) -> Event {
+    Event::MutationRefused {
+        reason,
+        token: if let Command::DoIfRevision { token, .. } = command {
+            *token
+        } else {
+            None
+        },
+    }
+}
+impl ManualIngress {
+    fn execute(
+        &mut self,
+        state: &mut CoreState,
+        attachment: AttachmentState,
+        command: Command,
+    ) -> Event {
+        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {
+            return execute_actor_command(state, attachment, command);
+        }
+        if self.pending.len() >= crate::MANUAL_COMMANDS {
+            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
+        }
+        // The existing history bound covers the live state and both candidate/control
+        // overlaps before acceptance. Candidate rejection never touches the live state.
+        let before = state.history();
+        if before.encoded_bytes().is_err() {
+            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
+        }
+        let mut candidate = state.clone();
+        let event = execute_actor_command(&mut candidate, attachment, command.clone());
+        if !matches!(
+            &event,
+            Event::DocumentChanged {
+                journal_command: Some(_),
+                ..
+            }
+        ) {
+            return event;
+        }
+        let after = candidate.history();
+        let encoded = after.encoded_bytes().and_then(|_| {
+            self.encoder.encode(
+                self.next_sequence,
+                state.revision,
+                self.predecessor.as_deref(),
+                &before,
+                &after,
+            )
+        });
+        let item = match encoded {
+            Ok(item) => item,
+            Err(HistoryError::MutationRefused(reason)) => return manual_refusal(&command, reason),
+            Err(_) => return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure),
+        };
+        let Ok(bytes) = manual_message_bytes(&item) else {
+            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
+        };
+        let Some(next_sequence) = self.next_sequence.checked_add(1) else {
+            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
+        };
+        if item.sequence != self.next_sequence
+            || bytes > crate::MANUAL_BYTES.saturating_sub(self.bytes)
+        {
+            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
+        }
+        self.next_sequence = next_sequence;
+        self.predecessor = Some(item.batch_id.clone());
+        self.bytes += bytes;
+        self.pending.push_back(item);
+        *state = candidate;
+        event
     }
 }
 

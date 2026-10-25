@@ -1362,3 +1362,16 @@ durability refusal. A completed, never-active rescue capture may release its des
 writer only after explicit choice and verified commit. This does not release any rescue
 source, change active editing, or refund a consumed slot. Original S0 fixtures and
 historical acceptance are unchanged; new App evidence is additive.
+
+### C9 manual-stream observation boundary
+
+`s2-manual-stream.json` is additive. Its unchanged App/Core/paint controls run in
+both modes. Baseline host absence is pending, never a behavioral red. Revised
+observations retain the original accepted envelopes and compare the independently
+reopened history and BatchIds after actual host publication. The observation delays
+transport polling while the local App/media/presenter paint callback runs; it does
+not claim physical display or disk-stall latency. A separate publisher-barrier
+witness covers local acceptance before B5, and two authenticated clients exercise
+one-editor authority. The original `app-coalesced-paint` fixture and all old oracle
+bytes remain unchanged. This is C9 ingress evidence, not G5-L recovery, G20 or native
+Windows durable-success acceptance.

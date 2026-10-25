@@ -246,6 +246,139 @@ impl BundleCommit {
         }
         bundle.receipt_lookup(envelope)
     }
+    /// Publish an already accepted manual message. The supplied Core is the host's
+    /// sole validation shadow; the GUI is never executed or installed here.
+    #[allow(clippy::too_many_lines)]
+    pub fn admitted_history(
+        bundle: &mut ProjectBundle,
+        envelope: &CommandEnvelope,
+        shadow: &Core,
+        inputs: &ObjectRef,
+    ) -> Result<(ReceiptLookup, Option<BundleSaveReport>), BundleError> {
+        use kinewright_core::{Command, Event};
+        let lookup = bundle.receipt_lookup(envelope)?;
+        if lookup != ReceiptLookup::Absent {
+            return Ok((lookup, None));
+        }
+        let manual = envelope
+            .manual
+            .as_ref()
+            .ok_or(BundleError::HistoryBarrierInvariant)?;
+        let binding = &manual.binding;
+        if bundle.unsettled || bundle.pending_command.is_some() {
+            return Err(BundleError::Unsettled);
+        }
+        let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+        if envelope.action != "manual"
+            || envelope.project_id != bundle.project_id
+            || envelope.target_branch != bundle.manual_branch_id
+            || envelope.owner_epoch != bundle.store.owner_epoch()
+            || envelope.lease.as_deref() != Some(binding.token.as_str())
+            || envelope.expected_head.as_ref() != Some(&binding.anchor_head)
+            || envelope.id.issuer != binding.issuer
+            || bundle
+                .root()
+                .is_none_or(|r| r.manual_switch_generation != binding.switch_generation)
+            || inputs != &binding.inputs
+            || checkpoint.input_manifest_ref != *inputs
+            || checkpoint.batch_ids.last() != manual.predecessor.as_ref()
+            || checkpoint.history_ref.sha256 != manual.before_sha256
+        {
+            return Err(BundleError::Unsupported(
+                "manual chain authority/predecessor".into(),
+            ));
+        }
+        let issuer = bundle
+            .issuers
+            .get(&envelope.id.issuer)
+            .cloned()
+            .ok_or(BundleError::HistoryChanged)?;
+        if issuer.retired || issuer.next_sequence != envelope.id.sequence {
+            return Err(BundleError::HistoryChanged);
+        }
+        if bundle.store.limits().pending_commands == 0
+            || (bundle.receipts.detailed.len() + bundle.receipts.retired.len()) as u64
+                >= bundle.store.limits().receipts
+        {
+            return Err(BundleError::Capacity("manual receipt entries"));
+        }
+        let bytes = envelope.encoded_bytes()?;
+        if bytes > bundle.store.limits().command_bytes {
+            return Err(BundleError::Capacity("manual command bytes"));
+        }
+        let reservation = bundle.store.reserve(0, bytes, 0, false)?;
+        let before = shadow
+            .export_history()
+            .map_err(crate::bundle::history_error)?;
+        if crate::manual_history::history_sha256(&before)? != manual.before_sha256 {
+            return Err(BundleError::HistoryChanged);
+        }
+        let _overlap = bundle.store.reserve_history_shadow(
+            before
+                .encoded_bytes()
+                .map_err(crate::bundle::history_error)?,
+        )?;
+        let event = shadow
+            .request(Command::from(
+                envelope
+                    .command
+                    .clone()
+                    .ok_or(BundleError::HistoryChanged)?,
+            ))
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let after = shadow
+            .export_history()
+            .map_err(crate::bundle::history_error)?;
+        if !matches!(event, Event::DocumentChanged { .. })
+            || crate::manual_history::history_sha256(&after)? != manual.after_sha256
+            || after.batches.last() != Some(&manual.batch)
+            || kinewright_media::sha256_bytes(
+                &serde_json::to_vec(&after.cursor)
+                    .map_err(|e| BundleError::Corrupt(e.to_string()))?,
+            ) != manual.cursor_sha256
+        {
+            bundle
+                .attach_core(shadow)?
+                .restore_history(before)
+                .map_err(crate::bundle::history_error)?;
+            return Err(BundleError::HistoryChanged);
+        }
+        bundle.pending_command = Some(reservation.hold(envelope.clone()));
+        bundle
+            .issuers
+            .get_mut(&envelope.id.issuer)
+            .ok_or(BundleError::HistoryChanged)?
+            .next_sequence = issuer
+            .next_sequence
+            .checked_add(1)
+            .ok_or(BundleError::Capacity("manual sequence"))?;
+        // Selecting the exact accepted history forbids a unilateral manual floor in C9.
+        let branch = bundle.manual_branch_id.clone();
+        let publication =
+            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after));
+        match publication {
+            Ok(report) => {
+                bundle.pending_command = None;
+                let lookup = bundle.receipt_lookup(envelope)?;
+                Ok((lookup, Some(report)))
+            }
+            Err(error) => {
+                if bundle.publication_state != crate::bundle::PublicationState::Unknown
+                    && bundle.publication_state != crate::bundle::PublicationState::Committed
+                {
+                    bundle.pending_command = None;
+                    bundle.issuers.insert(envelope.id.issuer.clone(), issuer);
+                    bundle
+                        .attach_core(shadow)?
+                        .restore_history(before)
+                        .map_err(crate::bundle::history_error)?;
+                } else {
+                    bundle.unsettled = true;
+                }
+                Err(error)
+            }
+        }
+    }
     pub fn run(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> CommitOutcome {
         if bundle.pending_command.is_some() {
             return match bundle.publication_state {
@@ -608,7 +741,18 @@ impl BundleCommit {
             .map_or_else(Vec::new, |p| p.batch_ids.clone());
         let total_batches = checked.batches.len() + floor_discard.unwrap_or(0);
         while batch_ids.len() < total_batches {
-            batch_ids.push(BatchId::fresh()?);
+            let accepted = bundle
+                .pending_command
+                .as_ref()
+                .and_then(|e| e.manual.as_ref());
+            batch_ids.push(if let Some(manual) = accepted {
+                if batch_ids.len() + 1 != total_batches {
+                    return Err(BundleError::HistoryChanged);
+                }
+                manual.batch_id.clone()
+            } else {
+                BatchId::fresh()?
+            });
         }
         let all_batch_ids = batch_ids.clone();
         if let Some(discard) = floor_discard {

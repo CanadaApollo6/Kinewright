@@ -74,6 +74,20 @@ impl ProjectAttachment {
                 authority,
             })
     }
+    pub fn manual_permit(
+        &self,
+        encoder: Box<dyn kinewright_core::ManualHistoryEncoder>,
+    ) -> Result<kinewright_core::ManualPermit, HistoryError> {
+        self.authority.manual_permit(&ProjectHistoryProof, encoder)
+    }
+    pub fn acknowledge_manual(
+        &self,
+        permit: &kinewright_core::ManualPermit,
+        prefix: Vec<kinewright_core::AcceptedHistory>,
+    ) -> Result<(), HistoryError> {
+        self.authority
+            .acknowledge_manual(&ProjectHistoryProof, permit, prefix)
+    }
     pub fn capture(&self) -> Result<kinewright_core::AcceptedCut, HistoryError> {
         self.authority.capture(&ProjectHistoryProof)
     }

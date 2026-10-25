@@ -285,6 +285,7 @@ impl DurableTimelineBranch {
             ));
         }
         Ok(CommandEnvelope {
+            manual: None,
             version: 1,
             action: "edit".into(),
             id,

@@ -3,7 +3,8 @@
 mod actor;
 mod attachment;
 pub use attachment::{
-    AcceptedCut, ActorIdentity, AttachmentState, CoreAttachment, CoreMutationRefusal,
+    AcceptedCut, AcceptedHistory, ActorIdentity, AttachmentState, CoreAttachment,
+    CoreMutationRefusal, MANUAL_BYTES, MANUAL_COMMANDS, ManualHistoryEncoder, ManualPermit,
 };
 mod agent;
 /// AU6 §2's scenario authority: the five audio workflows' documents,

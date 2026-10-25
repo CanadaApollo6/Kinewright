@@ -28,6 +28,10 @@ pub(super) struct HostAttachment {
     pub cut: Option<AcceptedCut>,
     heartbeat: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
     last_heartbeat: Instant,
+    pub manual: Option<super::ManualProducerGate>,
+    manual_client: String,
+    manual_inflight:
+        Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
 }
 
 impl HostAttachment {
@@ -110,6 +114,15 @@ impl HostAttachment {
             cut: None,
             heartbeat: None,
             last_heartbeat: Instant::now(),
+            manual: None,
+            manual_client: serde_json::to_value(
+                kinewright_agent::writer_host::HostAuth::generate().map_err(host_error)?,
+            )
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+            .as_str()
+            .ok_or(BundleError::HistoryChanged)?
+            .to_owned(),
+            manual_inflight: None,
         })
     }
 
@@ -137,7 +150,108 @@ impl HostAttachment {
             cut: None,
             heartbeat: None,
             last_heartbeat: Instant::now(),
+            manual: None,
+            manual_client: serde_json::to_value(
+                kinewright_agent::writer_host::HostAuth::generate().map_err(host_error)?,
+            )
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+            .as_str()
+            .ok_or(BundleError::HistoryChanged)?
+            .to_owned(),
+            manual_inflight: None,
         })
+    }
+
+    pub fn start_manual(&mut self, owner: &mut Ja1EditingSession) -> Result<(), BundleError> {
+        if self
+            .manual
+            .as_ref()
+            .is_some_and(|gate| gate.actor == owner.core().actor_identity())
+        {
+            return Ok(());
+        }
+        // C9 has no absent-suffix/floor/recovery authorization. A first-save or
+        // dirty bootstrap must explicitly Save before granting a durable identity.
+        let digest = HostSnapshot::capture(owner.core())
+            .map_err(host_error)?
+            .history_sha256;
+        if self.status.association.is_none() || self.status.saved_digest.as_deref() != Some(&digest)
+        {
+            if self.cut.is_none() {
+                self.cut = Some(owner.freeze_host_cut()?);
+            }
+            return Ok(());
+        }
+        let reply = self
+            .client
+            .request(HostCommand::AcquireManual {
+                client: self.manual_client.clone(),
+            })
+            .map_err(host_error)?;
+        if let Some(error) = reply.error {
+            return Err(BundleError::Identity(error.to_string()));
+        }
+        let lease = reply.manual_lease.ok_or(BundleError::HistoryChanged)?;
+        let inputs = reply.manual_inputs.ok_or(BundleError::HistoryChanged)?;
+        let permit = owner.bind_manual_producer(lease, inputs)?;
+        self.client = self.client.with_manual_editor(self.manual_client.clone());
+        self.manual = Some(super::ManualProducerGate {
+            actor: owner.core().actor_identity(),
+            permit,
+        });
+        self.accept_status(reply.status);
+        Ok(())
+    }
+    fn drain_manual(&mut self, owner: &Ja1EditingSession) -> Result<(), BundleError> {
+        if let Some(worker) = self.manual_inflight.take() {
+            let reply = worker
+                .join()
+                .map_err(|_| BundleError::HistoryChanged)?
+                .map_err(host_error)?;
+            self.accept_manual_ack(&reply, owner)?;
+            self.accept_status(reply.status);
+            if let Some(error) = reply.error {
+                return Err(BundleError::Identity(error.to_string()));
+            }
+        }
+        if let Some(gate) = &self.manual {
+            let messages = gate
+                .permit
+                .pending()
+                .map_err(|e| BundleError::Identity(e.to_string()))?;
+            if !messages.is_empty() {
+                let reply = self
+                    .client
+                    .request(HostCommand::CommitHistory {
+                        client: self.manual_client.clone(),
+                        messages,
+                    })
+                    .map_err(host_error)?;
+                self.accept_manual_ack(&reply, owner)?;
+                self.accept_status(reply.status);
+                if let Some(error) = reply.error {
+                    return Err(BundleError::Identity(error.to_string()));
+                }
+            }
+        }
+        Ok(())
+    }
+    pub fn accept_manual_ack(
+        &self,
+        reply: &HostReply,
+        owner: &Ja1EditingSession,
+    ) -> Result<(), BundleError> {
+        if !reply.manual_ack.is_empty() {
+            owner.acknowledge_manual(
+                &self
+                    .manual
+                    .as_ref()
+                    .ok_or(BundleError::HistoryChanged)?
+                    .permit,
+                reply.manual_ack.clone(),
+            )?;
+        }
+        Ok(())
     }
 
     #[cfg(all(test, target_os = "linux"))]
@@ -154,6 +268,13 @@ impl HostAttachment {
         action: Action,
         owner: &mut Ja1EditingSession,
     ) -> Result<HostReply, BundleError> {
+        self.drain_manual(owner)?;
+        if matches!(
+            &action,
+            Action::SaveAs(_) | Action::FirstSave(_) | Action::OpenRecovery | Action::RescueTo(_)
+        ) {
+            self.manual = None;
+        }
         // A status response issued before this command cannot replace its newer metadata.
         self.heartbeat = None;
         self.last_heartbeat = Instant::now();
@@ -248,8 +369,17 @@ impl HostAttachment {
         client.request(command).map_err(host_error)
     }
 
+    pub fn pending_count(&self) -> usize {
+        self.manual
+            .as_ref()
+            .and_then(|gate| gate.permit.pending().ok())
+            .map_or(0, |messages| messages.len())
+    }
     pub fn read_only(&self) -> bool {
-        self.cut.is_some() || self.status.frozen || self.status.choice.is_some()
+        self.cut.is_some()
+            || self.status.frozen
+            || self.status.choice.is_some()
+            || self.pending_count() >= kinewright_core::MANUAL_COMMANDS
     }
 
     pub fn accept_status(&mut self, status: HostStatus) {
@@ -263,6 +393,44 @@ impl HostAttachment {
             && child.try_wait().map_err(BundleError::Io)?.is_some()
         {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
+        }
+        if self
+            .manual_inflight
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            return self
+                .manual_inflight
+                .take()
+                .expect("finished manual stream")
+                .join()
+                .map_err(|_| BundleError::HistoryChanged)?
+                .map(Some)
+                .map_err(host_error);
+        }
+        if self.manual_inflight.is_none()
+            && self.cut.is_none()
+            && let Some(gate) = &self.manual
+        {
+            let messages = gate
+                .permit
+                .pending()
+                .map_err(|e| BundleError::Identity(e.to_string()))?;
+            if !messages.is_empty() {
+                // Discard the stale status lane; only stream publication replies can mark Saved.
+                self.heartbeat = None;
+                let client = self.client.clone();
+                let identity = self.manual_client.clone();
+                self.manual_inflight = Some(std::thread::spawn(move || {
+                    client.request(HostCommand::CommitHistory {
+                        client: identity,
+                        messages,
+                    })
+                }));
+            }
+        }
+        if self.manual_inflight.is_some() {
+            return Ok(None);
         }
         if self.heartbeat.as_ref().is_some_and(JoinHandle::is_finished) {
             let reply = self
@@ -315,6 +483,15 @@ impl HostAttachment {
     #[allow(clippy::too_many_lines)]
     pub fn show(&self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
+        let pending = self.pending_count();
+        if pending > 0 {
+            ui.label(format!("{pending} manual edits pending durable save. Preview is local; these edits are not Saved yet."));
+        }
+        if self.manual.is_none() && self.cut.is_some() {
+            ui.label(
+                "Choose Save to establish this attachment's durable manual history before editing.",
+            );
+        }
         ui.label(&self.status.selection_availability);
         ui.label(&self.status.save_disclosure);
         match self.status.choice {
@@ -474,6 +651,14 @@ pub(super) fn executable() -> PathBuf {
     } else {
         "kinewright"
     };
+    #[cfg(test)]
+    if let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent()?.parent().map(|parent| parent.join(name)))
+        && path.is_file()
+    {
+        return path;
+    }
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join(name)))

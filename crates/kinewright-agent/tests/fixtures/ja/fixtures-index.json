@@ -1159,6 +1159,65 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-manual-stream",
+      "relative_file": "s2-manual-stream.json",
+      "sha256": "7c2353785bd171bfd7eb554f221a4a2cee54adaf6d10dd7a46e5aadb9fc5004e",
+      "byte_length": 5472,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "initial": {
+          "relative_file": "synthetic-blue-project.kinewright",
+          "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
+          "byte_length": 1491,
+          "kind": "synthetic-control"
+        },
+        "gesture": {
+          "relative_file": "s2-manual-stream-control.json",
+          "sha256": "8195b02ec08a0b99beec578e57b1b92ccb785465ed3b5723ba9f663544a81955",
+          "byte_length": 420,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        },
+        "one": {
+          "relative_file": "oracle-one.json",
+          "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+          "byte_length": 2,
+          "kind": "input"
+        },
+        "red": {
+          "relative_file": "oracle-red-rgba.json",
+          "sha256": "d2fc591344738b05e6eabe35b9069bd599788dd0d250c47faf76ab8282f8eb34",
+          "byte_length": 27,
+          "kind": "independent-landmark"
+        },
+        "key": {
+          "relative_file": "oracle-gesture-key.json",
+          "sha256": "17049e474ae190b9bb9708ab6c43eba3e1f1e421d1aefb49236cc733010ce9b4",
+          "byte_length": 7,
+          "kind": "independent-identity"
+        },
+        "letterbox": {
+          "relative_file": "oracle-letterbox.json",
+          "sha256": "e636e77340bc6192b8ebb43af038cf2288677282b7aeb3d22201ab860487f0ac",
+          "byte_length": 40,
+          "kind": "independent-landmark"
+        },
+        "green": {
+          "relative_file": "s2-manual-green-rgba.json",
+          "sha256": "6d3224294e717c73fe5820f6802b0bc0d86306bef6194463fa1968ecd4fdc14c",
+          "byte_length": 27,
+          "kind": "independent-landmark"
+        }
+      }
     }
   ]
 }
