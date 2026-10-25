@@ -544,3 +544,17 @@ C10+ recovery/absent-suffix/floor/switch work and original S2-R N2 remain deferr
 Early plain-Python text-edit helpers and superseded gate attempts are explicitly
 disclosed in the report. Final tested source is frozen; only report/README delivery
 notes follow it. Evidence and commit binding: `.review/ja/s2-evidence/c9/`.
+
+
+### C9 fix1: visible read-only bootstrap
+
+[C9 fix1](c9.md#fix1-honest-read-only-bootstrap-after-studio-activation) makes the
+accepted bootstrap restriction visible: Save once before editing, with Save/Save As
+in the existing modal and a specific refusal reason. The first successful Save
+grants the manual gate and clears the notice. Status/error replies retain the cut.
+Linux: 9 nonempty selections, 208 expected/selected, 204 passes, 4 existing ignored;
+5 runtime mutation red/restored-green pairs. Full fast was intentionally not run.
+Windows cross-check is blocked in aws-lc-sys; native Windows/hosted CI remain NOT RUN.
+The dirty named fixture uses C9's named-owner harness; legacy JSON handoff remains
+outside this validation. Exact source binding, raw outcomes and development
+failure disposition are in the fix1 report/evidence.

@@ -376,10 +376,15 @@ impl HostAttachment {
             .map_or(0, |messages| messages.len())
     }
     pub fn read_only(&self) -> bool {
-        self.cut.is_some()
+        self.manual.is_none()
+            || self.cut.is_some()
             || self.status.frozen
             || self.status.choice.is_some()
             || self.pending_count() >= kinewright_core::MANUAL_COMMANDS
+    }
+
+    pub fn manual_save_required(&self) -> bool {
+        self.manual.is_none() && !self.status.frozen && self.status.choice.is_none()
     }
 
     pub fn accept_status(&mut self, status: HostStatus) {
@@ -487,10 +492,19 @@ impl HostAttachment {
         if pending > 0 {
             ui.label(format!("{pending} manual edits pending durable save. Preview is local; these edits are not Saved yet."));
         }
-        if self.manual.is_none() && self.cut.is_some() {
-            ui.label(
-                "Choose Save to establish this attachment's durable manual history before editing.",
-            );
+        if self.manual_save_required() {
+            ui.label(super::MANUAL_SAVE_REQUIRED_TEXT);
+            if self.status.association.is_some() {
+                if ui.button("Save").clicked() {
+                    action = Some(Action::Save);
+                }
+            } else if ui.button("Save As…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Kinewright project", &["kinewright"])
+                    .save_file()
+            {
+                action = Some(Action::FirstSave(path));
+            }
         }
         ui.label(&self.status.selection_availability);
         ui.label(&self.status.save_disclosure);

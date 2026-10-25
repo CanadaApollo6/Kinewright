@@ -21,6 +21,20 @@ use std::{
     sync::Arc,
 };
 
+const MANUAL_SAVE_REQUIRED_TEXT: &str =
+    "Save once to keep editing here; until then this timeline is read-only.";
+
+fn manual_status_message(message: &str, has_manual_gate: bool) -> String {
+    let message = message
+        .strip_suffix(MANUAL_SAVE_REQUIRED_TEXT)
+        .map_or(message, str::trim_end);
+    if has_manual_gate {
+        message.into()
+    } else {
+        format!("{message} {MANUAL_SAVE_REQUIRED_TEXT}")
+    }
+}
+
 pub(crate) struct PreparedView {
     pub core: Core,
     pub events: crossbeam_channel::Receiver<Event>,
@@ -362,11 +376,9 @@ impl Ja1Attachment {
                 let cut = self.owner.freeze_host_cut()?;
                 self.owner.complete_host_cut(&cut, None, None)?;
                 host.cut = None;
-                host.start_manual(&mut self.owner)?;
-                self.message = "Studio writer host attached. Your manual edit stays in this window; saves and agent sessions run in the host.".into();
                 self.host = Some(host);
-                self.frozen = false;
-                Ok(())
+                self.message = "Studio writer host attached.".into();
+                self.start_host_manual()
             }
             Err(error) => {
                 self.operation_panicked();
@@ -374,6 +386,32 @@ impl Ja1Attachment {
                 self.message.push_str(&error.to_string());
                 Err(error)
             }
+        }
+    }
+
+    fn start_host_manual(&mut self) -> Result<(), BundleError> {
+        let host = self.host.as_mut().expect("attached host");
+        host.start_manual(&mut self.owner)?;
+        self.frozen = self.owner.core().attachment_state() != Ok(AttachmentState::Live);
+        self.message = manual_status_message(&self.message, host.manual.is_some());
+        Ok(())
+    }
+
+    pub fn manual_save_required(&self) -> bool {
+        !self.retention_lost
+            && self
+                .host
+                .as_ref()
+                .is_some_and(host::HostAttachment::manual_save_required)
+    }
+
+    pub fn manual_refusal_reason(&self) -> &str {
+        if self.retention_lost {
+            RETENTION_LOST_TEXT
+        } else if self.manual_save_required() {
+            MANUAL_SAVE_REQUIRED_TEXT
+        } else {
+            "Editing is read-only while the save or recovery choice is resolved."
         }
     }
 
@@ -420,10 +458,7 @@ impl Ja1Attachment {
         match result {
             Ok(reply) => {
                 self.accept_host_reply(reply)?;
-                self.host
-                    .as_mut()
-                    .expect("attached host")
-                    .start_manual(&mut self.owner)
+                self.start_host_manual()
             }
             Err(error) => {
                 self.operation_panicked();
@@ -465,7 +500,12 @@ impl Ja1Attachment {
         if manual_failed && host.cut.is_none() {
             host.cut = Some(self.owner.freeze_host_cut()?);
         }
-        let can_resume = !manual_failed && !reply.status.frozen && reply.status.choice.is_none();
+        // A bootstrap cut stays frozen through Status/Retry, including errors.
+        // Only a successful foreground publication can establish its manual base.
+        let can_resume = !manual_failed
+            && !reply.status.frozen
+            && reply.status.choice.is_none()
+            && (host.manual.is_some() || (reply.error.is_none() && reply.saved.is_some()));
         if reply.activation.is_some() && (!can_resume || host.cut.is_none()) {
             self.operation_panicked();
             return Err(BundleError::Identity(
@@ -533,11 +573,10 @@ impl Ja1Attachment {
                 )?;
             }
         }
-        self.frozen = reply.status.frozen;
+        self.frozen = reply.status.frozen
+            || self.owner.core().attachment_state() != Ok(AttachmentState::Live);
         host.accept_status(reply.status);
-        if host.manual.is_none() {
-            self.message.push_str(" Choose Save before editing so this attachment can establish its durable manual history.");
-        }
+        self.message = manual_status_message(&self.message, !self.manual_save_required());
         if let Some(error) = reply.error {
             return Err(BundleError::Identity(error.to_string()));
         }
@@ -551,7 +590,9 @@ impl Ja1Attachment {
         let result = self.host.as_mut().expect("attached host").poll();
         match result {
             Ok(Some(reply)) => {
-                let _ = self.accept_host_reply(reply);
+                let _ = self
+                    .accept_host_reply(reply)
+                    .and_then(|()| self.start_host_manual());
                 true
             }
             Ok(None) => false,

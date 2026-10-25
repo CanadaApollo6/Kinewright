@@ -2264,7 +2264,26 @@ impl KinewrightApp {
         }
     }
 
+    fn refuse_ja1_manual_edit(&mut self) -> bool {
+        if !self.focused().ja1_read_only() {
+            return false;
+        }
+        self.status = self
+            .focused()
+            .ja1
+            .as_ref()
+            .map_or(
+                "Editing is read-only while the save or recovery choice is resolved.",
+                crate::ja1_attachment::Ja1Attachment::manual_refusal_reason,
+            )
+            .into();
+        true
+    }
+
     pub(crate) fn send_operation(&mut self, operation: Operation) {
+        if self.refuse_ja1_manual_edit() {
+            return;
+        }
         // The operation names the narrowest subject the refusal is about, but
         // a stopped actor is not that operation's problem — it is the whole
         // document's, and a second stopped send must not open a second
@@ -2867,9 +2886,7 @@ impl KinewrightApp {
     }
 
     pub(crate) fn send_operations(&mut self, operations: Vec<Operation>) {
-        if self.focused().ja1_read_only() {
-            self.status =
-                "Editing is read-only while the save or recovery choice is resolved.".into();
+        if self.refuse_ja1_manual_edit() {
             return;
         }
         let count = operations.len();
@@ -2912,9 +2929,7 @@ impl KinewrightApp {
         operations: Vec<Operation>,
         coalesce_key: String,
     ) {
-        if self.focused().ja1_read_only() {
-            self.status =
-                "Editing is read-only while the save or recovery choice is resolved.".into();
+        if self.refuse_ja1_manual_edit() {
             return;
         }
         let count = operations.len();
@@ -2947,7 +2962,7 @@ impl KinewrightApp {
     }
 
     pub(crate) fn undo(&mut self) {
-        if self.focused().ja1_read_only() {
+        if self.refuse_ja1_manual_edit() {
             return;
         }
         if self.focused().send_manual_command(Command::Undo).is_err() {
@@ -2959,7 +2974,7 @@ impl KinewrightApp {
     }
 
     pub(crate) fn redo(&mut self) {
-        if self.focused().ja1_read_only() {
+        if self.refuse_ja1_manual_edit() {
             return;
         }
         if self.focused().send_manual_command(Command::Redo).is_err() {
@@ -3261,7 +3276,14 @@ impl KinewrightApp {
                 // `reconcile_router_sends` reads (review-final B1).
                 Event::MutationRefused { reason, .. } => {
                     self.release_lut_import_reservation(project_index);
-                    self.status = reason.to_string();
+                    self.status = self.projects[project_index]
+                        .ja1
+                        .as_ref()
+                        .filter(|attachment| attachment.manual_save_required())
+                        .map_or_else(
+                            || reason.to_string(),
+                            |attachment| attachment.manual_refusal_reason().into(),
+                        );
                 }
                 Event::UndoBlockedBySave { .. } => {
                     self.status = "Undo is waiting for the save to finish. Retry after the destination is reconciled.".into();
@@ -17136,6 +17158,277 @@ pub(crate) fn ja1_review_worker_panic_witness() {
     in2b_tests::in2b_quiesce_engine(&engine);
     in1_tests::in1_shutdown(&mut app);
     app.focused_mut().stop_threads("fix2 worker panic");
+    if let Err(error) = result {
+        std::panic::resume_unwind(error);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(
+    clippy::too_many_lines,
+    reason = "The activation, refusal and first durable edit share the real App and shipping host"
+)]
+pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
+    use crate::ja1_attachment::Action;
+    use kinewright_core::{AttachmentState, Core};
+    use kinewright_project::bundle::LoadedBundle;
+
+    let root = kinewright_media::test_support::workspace_target_dir();
+    let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "c9-fix1");
+    let document = Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    };
+    let path = temp.path("bootstrap.kinewright");
+    let (mut app, engine) = in2b_tests::in2b_harness(document, None);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let core = app.focused().core.clone();
+        let operation = |locked| Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked,
+        };
+        let named_owner = if dirty_named {
+            app.focused_mut().recovery.stop_for_studio();
+            let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+                temp.root(),
+                &core,
+                kinewright_project::storage_budget::StorageLimits::default(),
+            )
+            .unwrap();
+            owner
+                .first_save(
+                    &path,
+                    kinewright_project::storage_budget::StorageLimits::default(),
+                )
+                .unwrap();
+            assert!(matches!(
+                core.request(Command::Do(operation(false))).unwrap(),
+                Event::DocumentChanged { .. }
+            ));
+            Some(owner)
+        } else {
+            None
+        };
+        let before = core.export_history().unwrap();
+        if let Some(owner) = named_owner {
+            // C9's named-owner harness: the named checkpoint predates a local
+            // dirty edit when the real Studio host is activated.
+            let mut attachment = crate::ja1_attachment::Ja1Attachment::new(owner).unwrap();
+            attachment
+                .launch_host(
+                    "c9-fix1-dirty-named".into(),
+                    kinewright_agent::writer_host::SessionRoots {
+                        read: vec![temp.root().into()],
+                        write: vec![temp.root().into()],
+                    },
+                )
+                .unwrap();
+            app.status.clone_from(&attachment.message);
+            app.focused_mut().ja1 = Some(attachment);
+            app.focused_mut().install_ja1_view();
+        } else {
+            app.enable_ja1();
+        }
+        assert!(
+            app.focused().ja1.as_ref().unwrap().host_attached(),
+            "{}",
+            app.status
+        );
+        assert!(app.focused().ja1_read_only());
+        assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+        assert!(
+            app.status.contains("Save once to keep editing here"),
+            "{}",
+            app.status
+        );
+        assert!(app.status.contains("timeline is read-only"));
+        assert!(
+            app.focused()
+                .ja1
+                .as_ref()
+                .unwrap()
+                .manual_pending_for_test()
+                .is_err()
+        );
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 1800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input.clone(), |ui| app.show_ja1(ui.ctx()));
+        let output = ctx.run_ui(input, |ui| app.show_ja1(ui.ctx()));
+        let text = crate::ja1_attachment::tests::painted_text(&output);
+        assert!(text.contains("Save once to keep editing here"), "{text}");
+        assert!(text.contains(if dirty_named { "Save" } else { "Save As…" }));
+        assert!(ctx.memory(egui::Memory::top_modal_layer).is_some());
+
+        for producer in 0..6 {
+            app.status.clear();
+            match producer {
+                0 => app.send_operation(operation(dirty_named)),
+                1 => app.send_operations(vec![operation(dirty_named)]),
+                2 => {
+                    app.send_operations_coalesced(vec![operation(dirty_named)], "bootstrap".into());
+                }
+                3 => app.undo(),
+                4 => app.redo(),
+                _ => {
+                    app.focused_mut().threads[0].input = "Keep editing this project".into();
+                    app.start_agent_turn();
+                    assert!(!app.focused().threads[0].running);
+                }
+            }
+            assert!(
+                app.status.contains("Save once"),
+                "producer {producer}: {}",
+                app.status
+            );
+            assert_eq!(
+                core.export_history().unwrap(),
+                before,
+                "producer {producer}"
+            );
+        }
+        // A stale/raw sender reaches the actor's Frozen refusal. The real GUI
+        // event drain must replace its generic check message with the Save reason.
+        core.send(Command::Do(operation(dirty_named))).unwrap();
+        assert_eq!(core.export_history().unwrap(), before);
+        app.status.clear();
+        app.poll_background(&ctx);
+        assert!(app.status.contains("Save once"), "{}", app.status);
+        assert_eq!(core.export_history().unwrap(), before);
+
+        // The periodic successful Status path must also retain the same fence.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !app.focused_mut().ja1.as_mut().unwrap().poll_host() {
+            assert!(Instant::now() < deadline, "bootstrap Status did not finish");
+            std::thread::yield_now();
+        }
+        app.focused_mut().install_ja1_view();
+        assert!(app.focused().ja1_read_only());
+        assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+        assert!(
+            app.focused()
+                .ja1
+                .as_ref()
+                .unwrap()
+                .message
+                .contains("Save once")
+        );
+        assert_eq!(core.export_history().unwrap(), before);
+
+        // A later successful host reply must not clear the bootstrap presentation
+        // or leave the actor writable before a durable checkpoint exists.
+        app.start_ja1(Action::Retry);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.focused().ja1_job.is_some() {
+            assert!(Instant::now() < deadline, "bootstrap Retry did not finish");
+            app.poll_ja1(&ctx);
+            std::thread::yield_now();
+        }
+        assert!(app.focused().ja1_read_only());
+        assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+        assert!(app.status.contains("Save once"), "{}", app.status);
+        assert_eq!(core.export_history().unwrap(), before);
+
+        if dirty_named {
+            assert!(
+                !app.save_project(false),
+                "ordinary Save runs in the existing worker"
+            );
+        } else {
+            assert!(!path.exists());
+            app.start_ja1(Action::FirstSave(path.clone()));
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while app.focused().ja1_job.is_some() {
+            assert!(Instant::now() < deadline, "bootstrap Save did not finish");
+            app.poll_ja1(&ctx);
+            std::thread::yield_now();
+        }
+        assert_eq!(app.focused().project_path.as_ref(), Some(&path));
+        assert!(
+            !app.focused().ja1_read_only(),
+            "first successful Save must grant the manual gate: {}",
+            app.status
+        );
+        assert_eq!(core.attachment_state(), Ok(AttachmentState::Live));
+        let attachment = app.focused().ja1.as_ref().unwrap();
+        assert!(attachment.manual_pending_for_test().unwrap().is_empty());
+        assert!(
+            !attachment.message.contains("Save once"),
+            "{}",
+            attachment.message
+        );
+        assert!(
+            !attachment.message.contains("read-only"),
+            "{}",
+            attachment.message
+        );
+        assert!(!app.status.contains("Save once"));
+        assert!(!attachment.is_dirty());
+
+        app.send_operation(operation(dirty_named));
+        let accepted_history = core.export_history().unwrap();
+        assert_eq!(accepted_history.batches.len(), before.batches.len() + 1);
+        assert_eq!(accepted_history.document.tracks[0].sync_lock, dirty_named);
+        let pending = app
+            .focused()
+            .ja1
+            .as_ref()
+            .unwrap()
+            .manual_pending_for_test()
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(app.focused().ja1.as_ref().unwrap().is_dirty());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            app.poll_ja1(&ctx);
+            let attachment = app.focused().ja1.as_ref().unwrap();
+            if attachment.manual_pending_for_test().unwrap().is_empty() && !attachment.is_dirty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "manual edit did not reach durable ack: {}",
+                attachment.message
+            );
+            std::thread::yield_now();
+        }
+        let loaded = LoadedBundle::read(&path).unwrap();
+        let restored = Core::spawn(Document::default()).unwrap();
+        loaded.restore_manual(&restored).unwrap();
+        assert_eq!(restored.export_history().unwrap(), accepted_history);
+        assert_eq!(
+            loaded
+                .manual_checkpoint()
+                .unwrap()
+                .batch_ids
+                .last()
+                .unwrap()
+                .as_str(),
+            pending[0].batch_id
+        );
+        assert!(!app.focused().ja1_read_only());
+        assert!(!app.status.contains("Save once"));
+    }));
+    if let Some(job) = app.focused_mut().ja1_job.take() {
+        app.focused_mut().ja1 = Some(job.join().unwrap());
+    }
+    if let Some(attachment) = &mut app.focused_mut().ja1 {
+        attachment.close();
+    }
+    in2b_tests::in2b_quiesce_engine(&engine);
+    in1_tests::in2_cleanup(&mut app);
+    app.focused_mut().stop_threads("C9 fix1 bootstrap witness");
     if let Err(error) = result {
         std::panic::resume_unwind(error);
     }

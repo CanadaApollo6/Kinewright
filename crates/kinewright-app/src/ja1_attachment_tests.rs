@@ -11,6 +11,38 @@ use kinewright_project::{
     namespace::DestinationInspection,
 };
 
+#[test]
+fn c9_fix1_manual_gate_controls_the_save_requirement_message() {
+    let attached = manual_status_message("Studio writer host attached.", false);
+    assert!(attached.contains("Save once to keep editing here"));
+    assert!(attached.contains("timeline is read-only"));
+    assert!(!attached.contains("Your manual edit stays"));
+    assert_eq!(
+        manual_status_message(&attached, true),
+        "Studio writer host attached."
+    );
+    assert_eq!(manual_status_message(&attached, false), attached);
+    assert_eq!(
+        manual_status_message("Saved the current edit.", true),
+        "Saved the current edit."
+    );
+    let refused = manual_status_message("The destination could not be saved.", false);
+    assert!(refused.starts_with("The destination could not be saved."));
+    assert!(refused.contains("Save once"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn c9_fix1_unsaved_studio_activation_requires_first_save_before_manual_edit() {
+    crate::app::ja_c9_bootstrap_save_witness(false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn c9_fix1_dirty_named_studio_activation_requires_save_before_manual_edit() {
+    crate::app::ja_c9_bootstrap_save_witness(true);
+}
+
 /// Shared C5 independent history/byte oracles, driven through the actual App actions.
 #[cfg(target_os = "linux")]
 struct AppSession(Ja1Attachment);

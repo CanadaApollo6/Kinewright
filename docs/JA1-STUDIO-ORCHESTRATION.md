@@ -1334,7 +1334,11 @@ and physical storage lanes require their separately recorded results.
 
 A named Studio attachment starts its manual stream from an exact acknowledged
 checkpoint. An unsaved or dirty bootstrap remains read-only until an explicit
-foreground Save establishes that identity. The App's `ManualProducerGate` is the
+foreground Save establishes that identity. The attachment, read-only modal and
+manual-refusal notices say "Save once to keep editing here; until then this
+timeline is read-only." The modal offers Save (named project) or Save As (new
+project). Status/retry replies retain this requirement; the first successful Save
+grants the manual gate and clears the read-only presentation. The App's `ManualProducerGate` is the
 only manual mutation capability; discrete actions, frame-coalesced controls,
 keyboard Undo/Redo, revision-gated recovery tools, deferred actions and
 import/relink installation all use it. Specialist/session MCP endpoints have no

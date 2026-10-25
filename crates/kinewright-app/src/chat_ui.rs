@@ -782,7 +782,15 @@ impl KinewrightApp {
             return;
         }
         if self.projects[project_index].ja1_read_only() {
-            self.status = "Editing and agent producers are paused for this Studio context.".into();
+            self.status = self.projects[project_index]
+                .ja1
+                .as_ref()
+                .filter(|attachment| attachment.manual_save_required())
+                .map_or(
+                    "Editing and agent producers are paused for this Studio context.",
+                    crate::ja1_attachment::Ja1Attachment::manual_refusal_reason,
+                )
+                .into();
             return;
         }
         if self.projects[project_index].studio_host_client().is_some() {
@@ -1095,7 +1103,15 @@ impl KinewrightApp {
                 .retired_agent_threads
                 .contains(&self.projects[project_index].threads[thread_index].id)
         {
-            self.status = "This agent branch belongs to the previous working edit or editing is read-only. Keep its work and return to that working branch before applying it.".into();
+            self.status = self.projects[project_index]
+                .ja1
+                .as_ref()
+                .filter(|attachment| attachment.manual_save_required())
+                .map_or(
+                    "This agent branch belongs to the previous working edit or editing is read-only. Keep its work and return to that working branch before applying it.",
+                    crate::ja1_attachment::Ja1Attachment::manual_refusal_reason,
+                )
+                .into();
             return;
         }
         self.stop_agent(thread_index);
