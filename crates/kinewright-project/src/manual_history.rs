@@ -6,8 +6,8 @@ use crate::{
     receipts::{CommandEnvelope, CommandId, IssuerId},
 };
 use kinewright_core::{
-    AcceptedHistory, HistoryBatch, HistoryError, HistorySnapshot, ManualHistoryEncoder,
-    TimelineRevision,
+    AcceptedHistory, HistoryBatch, HistoryError, HistorySnapshot, ManualHistoryCandidate,
+    ManualHistoryEncoder, TimelineRevision,
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,21 +87,16 @@ impl ManualHistoryEncoder for AdmittedManualEncoder {
         sequence: u64,
         revision: TimelineRevision,
         predecessor: Option<&str>,
-        before: &HistorySnapshot,
-        after: &HistorySnapshot,
+        candidate: ManualHistoryCandidate<'_>,
     ) -> Result<AcceptedHistory, HistoryError> {
-        crate::bundle_commit::validate_document_inputs(&after.document, &self.input_manifest)
+        crate::bundle_commit::validate_document_inputs(candidate.document, &self.input_manifest)
             .map_err(|_| {
                 HistoryError::MutationRefused(
                     kinewright_core::CoreMutationRefusal::ManualInputRequired,
                 )
             })?;
         let encode = || -> Result<AcceptedHistory, BundleError> {
-            let batch = after
-                .batches
-                .last()
-                .ok_or(BundleError::HistoryBarrierInvariant)?
-                .clone();
+            let batch = candidate.batch.clone();
             let batch_id = BatchId::fresh()?;
             let previous = predecessor
                 .map(|id| serde_json::from_value(serde_json::Value::String(id.into())))
@@ -115,12 +110,9 @@ impl ManualHistoryEncoder for AdmittedManualEncoder {
                     binding: self.lease.clone(),
                     batch_id: batch_id.clone(),
                     predecessor: previous,
-                    before_sha256: history_sha256(before)?,
-                    after_sha256: history_sha256(after)?,
-                    cursor_sha256: kinewright_media::sha256_bytes(
-                        &serde_json::to_vec(&after.cursor)
-                            .map_err(|e| BundleError::Corrupt(e.to_string()))?,
-                    ),
+                    before_sha256: candidate.before_sha256.to_owned(),
+                    after_sha256: candidate.after_sha256.to_owned(),
+                    cursor_sha256: candidate.cursor_sha256.to_owned(),
                     batch: batch.clone(),
                 }),
                 version: 1,

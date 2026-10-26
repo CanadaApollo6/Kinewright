@@ -62,15 +62,23 @@ pub struct AcceptedHistory {
     pub envelope: Vec<u8>,
 }
 
-/// No operation execution belongs in this codec. The actor supplies both exact histories.
+/// Borrowed candidate values, admitted and hashed by the actor before publication.
+pub struct ManualHistoryCandidate<'a> {
+    pub document: &'a crate::Document,
+    pub batch: &'a crate::HistoryBatch,
+    pub before_sha256: &'a str,
+    pub after_sha256: &'a str,
+    pub cursor_sha256: &'a str,
+}
+
+/// No operation execution belongs in this codec. The actor supplies exact v1 identities.
 pub trait ManualHistoryEncoder: Send + 'static {
     fn encode(
         &self,
         sequence: u64,
         revision: crate::TimelineRevision,
         predecessor: Option<&str>,
-        before: &HistorySnapshot,
-        after: &HistorySnapshot,
+        candidate: ManualHistoryCandidate<'_>,
     ) -> Result<AcceptedHistory, HistoryError>;
 }
 
@@ -439,8 +447,7 @@ mod tests {
             sequence: u64,
             _revision: crate::TimelineRevision,
             _predecessor: Option<&str>,
-            _before: &HistorySnapshot,
-            _after: &HistorySnapshot,
+            _candidate: ManualHistoryCandidate<'_>,
         ) -> Result<AcceptedHistory, HistoryError> {
             let mut item = AcceptedHistory {
                 sequence,

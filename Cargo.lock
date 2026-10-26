@@ -2357,6 +2357,7 @@ dependencies = [
  "crossbeam-channel",
  "half",
  "kinewright-core",
+ "kinewright-hash",
  "proptest",
  "schemars",
  "serde",

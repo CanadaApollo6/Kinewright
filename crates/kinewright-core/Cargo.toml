@@ -17,6 +17,7 @@ test-util = []
 [dependencies]
 ab_glyph.workspace = true
 crossbeam-channel.workspace = true
+kinewright-hash = { path = "../kinewright-hash" }
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,0 +1,104 @@
+[
+  {
+    "name": "stale-cached-history-segment",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor/manual_history.rs",
+        "        // S2H_STALE_SEGMENT_ANCHOR: discard replaced cursor bytes before appending.\n        self.bytes.truncate(start);",
+        "        // MUTATION: retain stale cached cursor segment."
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "production": false,
+    "witness": "actor::manual_history::tests::s2h_cached_history_matches_full_after_every_command",
+    "red_text": "assertion `left == right` failed"
+  },
+  {
+    "name": "sha-ni-round-word-order",
+    "changes": [
+      [
+        "crates/kinewright-hash/src/x86.rs",
+        "            cdgh = _mm_sha256rnds2_epu32(cdgh, abef, rounds);",
+        "            cdgh = _mm_sha256rnds2_epu32(cdgh, abef, _mm_shuffle_epi32::<0x0e>(rounds));"
+      ]
+    ],
+    "package": "kinewright-hash",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "production": false,
+    "witness": "tests::s2h_sha_ni_rounds_match_software",
+    "red_text": "1 blocks"
+  },
+  {
+    "name": "refused-candidate-keeps-open-operations",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor/manual_history.rs",
+        "                    entry.operations.truncate(head.operations);",
+        "                    let _ = head.operations;"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "production": false,
+    "witness": "actor::manual_history::tests::s2h_cached_history_rolls_back_encoder_and_admission_refusals",
+    "red_text": "assertion `left == right` failed"
+  },
+  {
+    "name": "floor-keeps-stale-history-cache",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor/manual_history.rs",
+        "        if self.cache.epoch != state.history_epoch {",
+        "        if false && self.cache.epoch != state.history_epoch {"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "production": false,
+    "witness": "actor::manual_history::tests::s2h_cached_history_rebinds_after_floor_restore_and_cursor_changes",
+    "red_text": "assertion `left == right` failed"
+  },
+  {
+    "name": "history-byte-accounting-skips-total-cap",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor/manual_history.rs",
+        "                .filter(|bytes| *bytes <= HISTORY_BYTES)",
+        "                .filter(|_| true)"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "production": false,
+    "witness": "actor::manual_history::tests::s2h_cached_history_rejects_exact_byte_limit_then_accepts",
+    "red_text": "assertion `left == right` failed"
+  },
+  {
+    "name": "serialized-chunk-allocates-before-cap-refusal",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor/manual_history.rs",
+        "            .filter(|length| *length <= self.limit)",
+        "            .filter(|_| true)"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "production": false,
+    "witness": "actor::manual_history::tests::s2h_cached_history_rejects_exact_byte_limit_then_accepts",
+    "red_text": "is_err()"
+  }
+]

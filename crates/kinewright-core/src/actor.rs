@@ -1,4 +1,6 @@
 use crate::{AcceptedCut, ActorIdentity, AttachmentState, CoreMutationRefusal};
+mod manual_history;
+use manual_history::{ManualIngress, manual_message_bytes};
 use std::{
     any::TypeId,
     sync::{
@@ -715,7 +717,7 @@ impl Core {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 struct HistoryEntry {
     document: Arc<Document>,
     operations: Vec<Operation>,
@@ -741,6 +743,8 @@ struct PendingFloor {
 
 #[derive(Clone)]
 struct CoreState {
+    // Changes to the baseline or installed history invalidate manual JSON caches.
+    history_epoch: u64,
     next_floor_id: u64,
     pending_floor: Option<PendingFloor>,
     floor_offset: u64,
@@ -764,6 +768,7 @@ impl CoreState {
     fn new(document: Document, revision: TimelineRevision) -> Self {
         let document = Arc::new(document);
         Self {
+            history_epoch: 0,
             next_floor_id: 0,
             pending_floor: None,
             floor_offset: 0,
@@ -1020,6 +1025,10 @@ impl CoreState {
                         .ok_or(HistoryError::Capacity)?,
                 );
                 candidate.next_floor_id = self.next_floor_id;
+                candidate.history_epoch = self
+                    .history_epoch
+                    .checked_add(1)
+                    .ok_or(HistoryError::Capacity)?;
                 #[cfg(any(test, feature = "test-util"))]
                 if std::env::var_os("JA_S1_COMMIT_TIMING").is_some() {
                     eprintln!(
@@ -1191,19 +1200,12 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                         {
                             return Err(HistoryError::BarrierInvariant);
                         }
-                        state.history().encoded_bytes()?;
                         let generation = manual_generation
                             .checked_add(1)
                             .ok_or(HistoryError::Capacity)?;
+                        let ingress = ManualIngress::new(&state, generation, encoder)?;
                         manual_generation = generation;
-                        manual = Some(ManualIngress {
-                            generation,
-                            encoder,
-                            next_sequence: 1,
-                            predecessor: None,
-                            pending: std::collections::VecDeque::new(),
-                            bytes: 0,
-                        });
+                        manual = Some(ingress);
                         attachment = AttachmentState::Live;
                         Ok(generation)
                     });
@@ -1407,6 +1409,10 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                         }
                     }
                     let mut candidate = CoreState::restore(&after)?;
+                    candidate.history_epoch = state
+                        .history_epoch
+                        .checked_add(1)
+                        .ok_or(HistoryError::Capacity)?;
                     candidate.next_floor_id = state.next_floor_id;
                     candidate.revision = TimelineRevision(
                         state
@@ -1459,6 +1465,10 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     CoreState::restore(&history)
                 };
                 let result = admitted.and_then(|mut candidate| {
+                    candidate.history_epoch = state
+                        .history_epoch
+                        .checked_add(1)
+                        .ok_or(HistoryError::Capacity)?;
                     candidate.next_floor_id = state.next_floor_id;
                     candidate.revision = TimelineRevision(
                         state
@@ -1532,19 +1542,6 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
     }
 }
 
-struct ManualIngress {
-    generation: u64,
-    encoder: Box<dyn crate::ManualHistoryEncoder>,
-    next_sequence: u64,
-    predecessor: Option<String>,
-    pending: std::collections::VecDeque<crate::AcceptedHistory>,
-    bytes: usize,
-}
-fn manual_message_bytes(item: &crate::AcceptedHistory) -> Result<usize, HistoryError> {
-    serde_json::to_vec(item)
-        .map(|bytes| bytes.len())
-        .map_err(|_| HistoryError::Capacity)
-}
 fn manual_refusal(command: &Command, reason: CoreMutationRefusal) -> Event {
     Event::MutationRefused {
         reason,
@@ -1553,70 +1550,6 @@ fn manual_refusal(command: &Command, reason: CoreMutationRefusal) -> Event {
         } else {
             None
         },
-    }
-}
-impl ManualIngress {
-    fn execute(
-        &mut self,
-        state: &mut CoreState,
-        attachment: AttachmentState,
-        command: Command,
-    ) -> Event {
-        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {
-            return execute_actor_command(state, attachment, command);
-        }
-        if self.pending.len() >= crate::MANUAL_COMMANDS {
-            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
-        }
-        // The existing history bound covers the live state and both candidate/control
-        // overlaps before acceptance. Candidate rejection never touches the live state.
-        let before = state.history();
-        if before.encoded_bytes().is_err() {
-            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
-        }
-        let mut candidate = state.clone();
-        let event = execute_actor_command(&mut candidate, attachment, command.clone());
-        if !matches!(
-            &event,
-            Event::DocumentChanged {
-                journal_command: Some(_),
-                ..
-            }
-        ) {
-            return event;
-        }
-        let after = candidate.history();
-        let encoded = after.encoded_bytes().and_then(|_| {
-            self.encoder.encode(
-                self.next_sequence,
-                state.revision,
-                self.predecessor.as_deref(),
-                &before,
-                &after,
-            )
-        });
-        let item = match encoded {
-            Ok(item) => item,
-            Err(HistoryError::MutationRefused(reason)) => return manual_refusal(&command, reason),
-            Err(_) => return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure),
-        };
-        let Ok(bytes) = manual_message_bytes(&item) else {
-            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
-        };
-        let Some(next_sequence) = self.next_sequence.checked_add(1) else {
-            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
-        };
-        if item.sequence != self.next_sequence
-            || bytes > crate::MANUAL_BYTES.saturating_sub(self.bytes)
-        {
-            return manual_refusal(&command, CoreMutationRefusal::ManualBackpressure);
-        }
-        self.next_sequence = next_sequence;
-        self.predecessor = Some(item.batch_id.clone());
-        self.bytes += bytes;
-        self.pending.push_back(item);
-        *state = candidate;
-        event
     }
 }
 
