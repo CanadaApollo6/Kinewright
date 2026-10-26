@@ -117,23 +117,43 @@ fixes, so Riel never has to file a report.
 
 ## Jobs, in build order
 
-**A. Talking head.** References: Todd Kerpelman's "Get to know Cloud Firestore",
-Theo Browne, Mo Bitar. Standard elements:
+**A. Talking head.** Most of Riel's videos are some form of talking head
+(2026-10-26), at the desk or on location.
 
-- a clean, lit look, with background blur or a designed replacement backdrop;
+The epitome references are:
+
+- Todd Kerpelman's "Get to know Cloud Firestore";
+- Zohran Mamdani's campaign videos (walk-and-talk across many locations, quick cuts,
+  bold on-screen text);
+- Good Work's videos.
+
+Other references: Theo Browne, Mo Bitar.
+
+Standard elements:
+
+- a clean, lit look, with background blur or a designed replacement backdrop at the desk;
 - tight jump cuts and punch-in zooms;
 - explainer-graphic cutaways;
 - on-screen cards for tweets, articles and code;
-- captions.
+- captions, and bold animated text punches.
+
+On location, the job also needs:
+
+- picking the best take of each line across many shots;
+- matching colour and loudness from one location to the next;
+- cleaning up outdoor audio (wind, traffic, room changes);
+- cutting mid-sentence between locations.
 
 Optional per video: music, chapter cards. Rare: jokes and sound effects.
 
-Recording: a C920 at 1080p30 with a QuadCast S, in any recording app for now. If
-software can't make the footage look professional, Riel buys a key light, and may
-later improve the room.
+Recording at the desk uses a C920 at 1080p30 with a QuadCast S, in any recording app
+for now. If software can't make the footage look professional, Riel buys a key light,
+and may later improve the room. On location, Riel uses a phone or camera with a clip-on
+microphone.
 
-**B. Video essay.** References: AI in Context, Hoog, Fern, LEMMiNO, Run The
-Numbers, Jacob Geller, Aidin Robbins. Elements:
+**B. Video essay,** the non-talking-head style. Riel's epitome references are Aidin
+Robbins, Jacob Geller and exurb1a. Others: AI in Context, Hoog, Fern, LEMMiNO, Run The
+Numbers. Elements:
 
 - agent-made animated slides, with PDF or PPTX import when Riel's exact slides are
   needed (Riel makes slides with Claude, ChatGPT and Google Slides);
@@ -178,7 +198,7 @@ blocks with C and E, and lands with them.
 
 | Job | Work |
 |---|---|
-| A | Studio layout, pointing and versions; Opus/ACP orchestration v1; person separation (background blur/replace); face-aware look correction; jump-cut and punch-in planning; AW2 Part 1 (SVG code clips) and MO6 titles and templates; styled on-screen cards; PF1-H item H-T (talk-playback holds) |
+| A | Studio layout, pointing and versions; Opus/ACP orchestration v1; person separation (background blur/replace); face-aware look correction; jump-cut and punch-in planning; AW2 Part 1 (SVG code clips) and MO6 titles and templates; styled on-screen cards; PF1-H item H-T (talk-playback holds); on location: take choice across shots (JA-4), cross-location colour and loudness matching, outdoor audio repair |
 | B | Slides (agent-made, plus PDF/PPTX import); MO3 compound clips; music and sound design; own-voice clone late |
 | C | Data-bound templates; AW2 Part 2 (Remotion) if data visualisation needs it; MO4 speed ramps |
 | D | Recorder rebuild, auto-zoom, smooth cursor, frame styling |
@@ -213,6 +233,14 @@ Later candidates:
 - "NFL analytics aren't as advanced as you think"
 - Same-day news roundups, such as a cybersecurity CVE roundup for X. These need
   turnaround within hours (Riel, 2026-10-21).
+- For Smart Data, Riel's employer (2026-10-26):
+  - "One-size-fits-all SaaS is dead": a marketing video in the Mamdani style, with Riel
+    on camera across many locations. It is a job A on-location candidate, and needs
+    Smart Data's brand rules and sign-off.
+  - Joining OpenAI's Daybreak Blue as an individual with a hardware security key: an
+    explainer with Riel on camera, screen recordings and key close-ups. Its facts
+    change quickly, so recheck them against OpenAI's help pages the week it is
+    recorded. Blur account details and any QR or recovery codes.
 
 ## Measures
 
