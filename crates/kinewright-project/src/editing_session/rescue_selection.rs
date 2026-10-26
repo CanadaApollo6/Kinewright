@@ -32,11 +32,14 @@ impl Ja1EditingSession {
         );
         for reference in &bundle.acknowledged_evidence()? {
             if reference.record_kind == RecordKind::OwnedEvidence
-                && crate::rescue_record::parse(&bundle.store.read_copy_evidence(reference, true)?)?
-                    .is_some()
+                && let Ok(bytes) = bundle.store.read_copy_evidence(reference, true)
+                && crate::rescue_record::parse(&bytes)?.is_some()
             {
                 continue;
             }
+            // Unreadable evidence remains a required root. Retained admission
+            // reports its exact missing bytes/uses instead of losing that diagnostic
+            // while trying to classify an unavailable rescue record.
             roots.push(reference.clone());
         }
         Ok(roots)

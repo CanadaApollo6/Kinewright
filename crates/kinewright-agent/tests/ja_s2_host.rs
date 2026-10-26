@@ -1922,6 +1922,14 @@ fn g05a_fast_b5_switch_reply_loss_before_and_after_restore() {
     c11::fast();
 }
 
+#[path = "support/ja_s2_c12.rs"]
+mod c12;
+
+#[test]
+fn rescue_and_switch_share_one_owner_after_restart() {
+    c12::run();
+}
+
 #[test]
 #[cfg_attr(
     not(feature = "slow-tests"),

@@ -1027,3 +1027,13 @@ the existing session-only target disclosures and crash limit. Receipt reads
 never replace the required current-pointer/payload confirmation or grant a lease.
 N2's fresh-actor resume failure after sealing A and the final composed restart
 witness remain C12 work.
+
+### C12 post-seal resume failure
+
+If B cannot resume after A seals, retain B Frozen and return its committed
+capture outcome with `activated=false`. Do not resume sealed A. Disclose that
+A is sealed and name the committed B path; offer Open B read-only. The existing
+explicit completed-capture owner release remains necessary for a separate
+editable open. A capture result never updates the active source's Saved identity
+or grants a lease. This closes the deferred N2 failure tail without adding an
+editable pause or changing late-copy, source-retention or rescue-slot rules.

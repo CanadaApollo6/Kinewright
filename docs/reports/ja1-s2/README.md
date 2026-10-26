@@ -660,3 +660,23 @@ Only this README and the C11 report are completed after the final gate. The fina
 source/blob audit and one-commit binding are retained outside the commit, together
 with compressed raw logs and sealed timed binaries. The accepted session-pin crash
 limit and C12 N2/composed restart work remain deferred.
+
+## C12 final S2-H closure
+
+[C12 report](c12.md), [repeat ledger](c12-repeat-ledger.md) and [gate](c12-gate.sh) close C7–C12 in one unpushed local commit on `2aa6633`. The real child-owner composed restart/switch/rescue witness, N2 disclosure/Open B and integration fixes are implemented. Missing-byte detail, exact current-history reuse in refusal replies and capture Saved identity each have owning-module witnesses and runtime mutation pairs.
+
+Linux: **856 expected/selected / 832 passed / 24 ignored**, zero failures; affected slow selectors execute explicitly. Full workspace fast after full touched-crate targets: **4057 passed / 0 failed / 111 ignored**, failure list `[]`. **171 runtime red/restored-green pairs** are source-bound. All parent fixture/index bytes remain unchanged. S1 Minors, A1 rule/sites, S2-H landings, historical genuine S0 flips and unchanged/additive controls have separate final-source attribution; none becomes a new C12 baseline flip.
+
+Fresh parent/C12 Save means: **235.648 / 236.427 ms** (five pairs, 60 saves per side), descriptive debug publisher observations with counters/load annotations, not a speedup claim.
+
+The lead records parent C11 CI `40246873840` green on all five jobs, Windows workspace 36 min/60 min. C12 native Windows and hosted CI remain NOT RUN; local cross-check is blocked on native dependencies. Estimated added portable Windows runtime is 1–3 s plus 30–90 s compilation, under ~3 min, not measured. Timeout unchanged. Native providers/G6, G20, G7-D/G1-W, physical power loss/device, interactive display, Kani and ignored lanes remain NOT RUN.
+
+The selected-target session pin keeps its accepted rotation-to-activation crash window. The ledger distinguishes shipping HTTP/process routes, private actual-owner process fault scheduling and lower-layer controls. Obsolete generic-restore selection attribution and observer-only false-property mutants receive no product credit. Exact-limit refusal and retry metadata profiles are separate without production headroom/bypass. Report/README alone are completed after the frozen gate; final audit binds every other source, fixture and mutation to the one commit. Old reports retain their historical status.
+
+Concrete C12 dispositions and deviations:
+
+- `crates/kinewright-agent/tests/support/ja_s2_c12.rs:11` runs the actual owner in child processes over a private fault-scheduling pipe; shipping HTTP/restart tests execute separately.
+- `crates/kinewright-agent/src/writer_host/switch.rs:261` separates exact-limit refusal replies from retry profiles that fit ordinary issuer metadata; production limits remain unchanged.
+- `crates/kinewright-project/src/editing_session.rs:1149` already guards path spelling by native identity. The attempted relabel mutant survived; the redundant change/test and claimed bug credit were removed, and required App pairs reran.
+- `docs/reports/ja1-s2/c12-gate.sh:114` isolates full-App fixture output after the retained `File exists` failure. The pre-commit-only wrapper guard was also removed so the script can rerun at C12; final ancestry is checked by `scripts/ja1-s2-c12-audit.py:130`.
+- `scripts/ja1-s2-c12-measure.sh:13` isolates parent/current build environments in subshells using the same native kit. Earlier partial gate frames stay excluded; the complete frozen gate and timing run are the acceptance evidence.

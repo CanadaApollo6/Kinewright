@@ -699,6 +699,63 @@ fn w15_completed_capture_release_keeps_sources_and_active_c_exact() {
 }
 
 #[cfg(target_os = "linux")]
+#[test]
+fn n2_sealed_a_discloses_committed_b_and_offers_open() {
+    let (temp, mut app) = named();
+    let original = app.owner.core().clone();
+    edit(&original, false);
+    assert!(
+        kinewright_project::io_observer::fail_once("root_parent_sync", || app.apply(Action::Save))
+            .is_err()
+    );
+    std::fs::rename(temp.path("drive"), temp.path("hidden-drive")).unwrap();
+    app.apply(Action::PreviewRescue).unwrap();
+    let Some(Choice::Rescue {
+        selection, consent, ..
+    }) = app.choice.take()
+    else {
+        panic!("rescue choice")
+    };
+    let loss = rescue_preview(&selection);
+    let path = temp.path("b.kinewright");
+    let inspection = app.owner.inspect_rescue_destination(&path).unwrap();
+    let binder = ProjectBundle::activate(
+        &temp.path("cut-authority.kinewright"),
+        BundleWriteAdmission::new_document(),
+    )
+    .unwrap();
+    let outcome = app
+        .owner
+        .rescue_with_activation(*selection, &consent, &inspection, |core| {
+            let authority = binder.attach_core(core)?;
+            let cut = authority.capture().unwrap();
+            authority.resume(&cut).unwrap();
+            edit(core, true);
+            authority.freeze().unwrap();
+            Ok(())
+        })
+        .unwrap();
+    app.finish_rescue(&outcome, None, &path, &loss);
+    app.refresh();
+    let text = rendered(&app);
+    assert!(text.contains("A is sealed"), "{text}");
+    assert!(text.contains("committed rescue copy"), "{text}");
+    assert!(text.contains(&path.display().to_string()), "{text}");
+    assert!(
+        !text.contains("Editing continues in the original session"),
+        "{text}"
+    );
+    assert!(!text.contains("B's save outcome is unknown"), "{text}");
+    let action = click_control(&app, &format!("Open B read-only: {}", path.display()));
+    assert!(matches!(action, Action::OpenCapture(ref p) if p == &path));
+    assert_eq!(
+        original.attachment_state().unwrap(),
+        AttachmentState::Sealed
+    );
+    assert!(app.owner.is_capture_destination(&path));
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn observe_s2(revised: bool) -> serde_json::Value {
     let (temp, mut app) = named();
     let control = LoadedBundle::read(&temp.path("drive/a.kinewright"))

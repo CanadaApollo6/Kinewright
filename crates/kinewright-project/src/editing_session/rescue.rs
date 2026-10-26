@@ -291,7 +291,19 @@ impl Ja1EditingSession {
             );
             let path = copy.destination_owner()?.store().resolved_root()?;
             // Every fallible preparation precedes the seal. A changed cut leaves a capture copy.
-            if self.attachment.seal(&old_cut).is_ok() && b_attachment.resume(&b_cut).is_ok() {
+            if self.attachment.seal(&old_cut).is_ok() {
+                if let Err(error) = b_attachment.resume(&b_cut) {
+                    self.retained_destinations
+                        .push((RetainedDestination::FirstSave(Box::new(copy)), b_core));
+                    return Ok(RescueOutcome {
+                        status,
+                        activated: false,
+                        disclosure: format!(
+                            "A is sealed and editing could not move to B: {error}. The committed rescue copy is at {}. Open B separately read-only, or explicitly release its completed copy owner before opening it for editing. {disclosure}",
+                            inspection.path().display()
+                        ),
+                    });
+                }
                 let original = self
                     .destination
                     .take()

@@ -151,180 +151,181 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn w13_host_same_target_pin_survives_quota_retirement_rotation_and_retry() {
-        use super::super::*;
-        use kinewright_core::{Command, Operation, Track, TrackId, TrackKind};
-        use kinewright_project::{
-            bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
-            bundle_recovery::RecoverySelection,
-            bundle_switch::SwitchTarget,
-            storage_budget::StorageLimits,
-        };
-        let parent = kinewright_media::test_support::workspace_target_dir();
-        std::fs::create_dir_all(&parent).unwrap();
-        let root = kinewright_media::test_support::TempDirectory::new_in(&parent, "c11-host-pin");
-        let path = root.path("a.kinewright");
-        let doc = Document {
-            tracks: (1..=8)
-                .map(|id| Track {
-                    id: TrackId(id),
-                    kind: TrackKind::Video,
-                    sync_lock: true,
-                    clips: vec![],
-                })
-                .collect(),
-            ..Document::default()
-        };
-        let core = Core::spawn(doc).unwrap();
-        let grow = |core: &Core, count| {
-            for i in 0..count {
-                core.request(Command::Do(Operation::SetTrackSyncLock {
-                    track: TrackId(1),
-                    locked: i % 2 == 0,
-                }))
-                .unwrap();
+        for (target_index, reply_only) in [(0, true), (0, false), (1, false)] {
+            use super::super::*;
+            use kinewright_core::{Command, Operation, Track, TrackId, TrackKind};
+            use kinewright_project::{
+                bundle::{BundleWriteAdmission, LoadedBundle, ProjectBundle},
+                bundle_recovery::RecoverySelection,
+                bundle_switch::SwitchTarget,
+                storage_budget::StorageLimits,
+            };
+            let parent = kinewright_media::test_support::workspace_target_dir();
+            std::fs::create_dir_all(&parent).unwrap();
+            let root =
+                kinewright_media::test_support::TempDirectory::new_in(&parent, "c11-host-pin");
+            let path = root.path("a.kinewright");
+            let doc = Document {
+                tracks: (1..=8)
+                    .map(|id| Track {
+                        id: TrackId(id),
+                        kind: TrackKind::Video,
+                        sync_lock: true,
+                        clips: vec![],
+                    })
+                    .collect(),
+                ..Document::default()
+            };
+            let core = Core::spawn(doc).unwrap();
+            let grow = |core: &Core, count| {
+                for i in 0..count {
+                    core.request(Command::Do(Operation::SetTrackSyncLock {
+                        track: TrackId(1),
+                        locked: i % 2 == 0,
+                    }))
+                    .unwrap();
+                }
+            };
+            grow(&core, 12);
+            let mut bundle =
+                ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
+            let inputs = bundle.empty_inputs().unwrap().reference.clone();
+            bundle.save(&core, &inputs).unwrap();
+            let left = bundle.manual_branch_id().clone();
+            let mut spare = vec![];
+            for count in 16..22 {
+                let branch = bundle.fork_branch(&left).unwrap();
+                let other =
+                    Core::spawn((*core.export_history().unwrap().document).clone()).unwrap();
+                grow(&other, count);
+                bundle.save_branch(&branch, &other).unwrap();
+                spare.push(branch);
             }
-        };
-        grow(&core, 12);
-        let mut bundle =
-            ProjectBundle::activate(&path, BundleWriteAdmission::new_document()).unwrap();
-        let inputs = bundle.empty_inputs().unwrap().reference.clone();
-        bundle.save(&core, &inputs).unwrap();
-        let left = bundle.manual_branch_id().clone();
-        let mut spare = vec![];
-        for count in 16..22 {
-            let branch = bundle.fork_branch(&left).unwrap();
-            let other = Core::spawn((*core.export_history().unwrap().document).clone()).unwrap();
-            grow(&other, count);
-            bundle.save_branch(&branch, &other).unwrap();
-            spare.push(branch);
-        }
-        grow(&core, 8);
-        bundle.save(&core, &inputs).unwrap();
-        grow(&core, 8);
-        bundle.save(&core, &inputs).unwrap();
-        drop(bundle);
-        let roots = SessionRoots {
-            read: vec![root.root().into()],
-            write: vec![root.root().into()],
-        };
-        let mut host = HostCommandOwner::open(HostConfig {
-            project: "c11-pin-host".into(),
-            path: Some(path.clone()),
-            roots: roots.clone(),
-            origin: HostOrigin::Headless,
-        })
-        .unwrap();
-        let run = |host: &mut HostCommandOwner, command| host.execute(command, roots.clone());
-        let identity = "a".repeat(64);
-        assert!(
-            run(
+            grow(&core, 8);
+            bundle.save(&core, &inputs).unwrap();
+            grow(&core, 8);
+            bundle.save(&core, &inputs).unwrap();
+            drop(bundle);
+            let roots = SessionRoots {
+                read: vec![root.root().into()],
+                write: vec![root.root().into()],
+            };
+            let mut host = HostCommandOwner::open(HostConfig {
+                project: "c11-pin-host".into(),
+                path: Some(path.clone()),
+                roots: roots.clone(),
+                origin: HostOrigin::Headless,
+            })
+            .unwrap();
+            let run = |host: &mut HostCommandOwner, command| host.execute(command, roots.clone());
+            let identity = "a".repeat(64);
+            assert!(
+                run(
+                    &mut host,
+                    HostCommand::AcquireManual {
+                        client: identity.clone()
+                    }
+                )
+                .error
+                .is_none()
+            );
+            // Issuer creation rotates inventory. Establish distinct P1/P2 histories
+            // after lease acquisition so P1 is not merely the same-history issuer root.
+            for _ in 0..2 {
+                grow(host.core(), 8);
+                let snapshot = HostSnapshot::capture(host.core()).unwrap();
+                let saved = run(&mut host, HostCommand::Save { snapshot });
+                assert!(saved.error.is_none(), "{:?}", saved.error);
+            }
+            let loaded = LoadedBundle::read(&path).unwrap();
+            let peak = loaded.usage_probe().unwrap().peak_live_history_bytes;
+            drop(loaded);
+            let target = host
+                .owner()
+                .unwrap()
+                .list_recovery_points()
+                .unwrap()
+                .remove(target_index);
+            let RecoverySelection::Checkpoint {
+                root: selected,
+                branch,
+            } = target.clone()
+            else {
+                panic!("P2")
+            };
+            let profile = StorageLimits {
+                // The exact lane checks a refusal reply at the current root's
+                // measured peak. Retry lanes also admit ordinary issuer and
+                // retirement metadata publications under this fixed test profile.
+                live_history_bytes: peak
+                    + if reply_only {
+                        0
+                    } else {
+                        kinewright_project::bundle_commit::history_cost_probe(
+                            &host.core().export_history().unwrap(),
+                            &StorageLimits::default(),
+                        )
+                        .unwrap()
+                            / 2
+                    },
+                ..StorageLimits::default()
+            };
+            host.owner_mut()
+                .unwrap()
+                .restrict_limits_probe(profile.clone())
+                .unwrap();
+            let prepared = run(
                 &mut host,
-                HostCommand::AcquireManual {
-                    client: identity.clone()
-                }
-            )
-            .error
-            .is_none()
-        );
-        let loaded = LoadedBundle::read(&path).unwrap();
-        let peak = loaded.usage_probe().unwrap().peak_live_history_bytes;
-        drop(loaded);
-        let target = host
-            .owner()
-            .unwrap()
-            .list_recovery_points()
-            .unwrap()
-            .pop()
-            .unwrap();
-        let RecoverySelection::Checkpoint {
-            root: selected,
-            branch,
-        } = target.clone()
-        else {
-            panic!("P2")
-        };
-        let profile = StorageLimits {
-            live_history_bytes: peak,
-            ..StorageLimits::default()
-        };
-        host.owner_mut()
-            .unwrap()
-            .restrict_limits_probe(profile.clone())
-            .unwrap();
-        let prepared = run(
-            &mut host,
-            HostCommand::PrepareSwitch {
-                target: SwitchTarget::Checkpoint {
-                    root: selected.clone(),
-                    branch,
+                HostCommand::PrepareSwitch {
+                    target: SwitchTarget::Checkpoint {
+                        root: selected.clone(),
+                        branch,
+                    },
                 },
-            },
-        );
-        assert!(prepared.error.is_none(), "{:?}", prepared.error);
-        let target_payload = prepared.switch_preview.unwrap();
-        let request = prepared.switch_envelope.unwrap();
-        let pin_count = host
-            .owner()
-            .unwrap()
-            .store()
-            .unwrap()
-            .retention_probe()
-            .unwrap()
-            .1[&selected.sha256];
-        assert!(pin_count > 0);
-        let refused = run(
-            &mut host,
-            HostCommand::Switch {
-                envelope: Box::new(request.clone()),
-            },
-        );
-        assert_eq!(
-            refused.error.as_ref().map(|e| e.code.as_str()),
-            Some("storage_backpressure"),
-            "{:?}",
-            refused.error
-        );
-        assert!(
-            run(
-                &mut host,
-                HostCommand::ConfirmSwitch {
-                    client: identity.clone(),
-                    installed: Box::new(refused.switch_attachment.unwrap().identity().unwrap())
-                }
-            )
-            .error
-            .is_none()
-        );
-        assert!(
-            host.owner()
+            );
+            assert!(prepared.error.is_none(), "{:?}", prepared.error);
+            let target_payload = prepared.switch_preview.unwrap();
+            let request = prepared.switch_envelope.unwrap();
+            let pin_count = host
+                .owner()
                 .unwrap()
                 .store()
                 .unwrap()
                 .retention_probe()
                 .unwrap()
-                .1
-                .get(&selected.sha256)
-                .copied()
-                .unwrap_or_default()
-                > 0
-        );
-        let mut activated = None;
-        for branch in spare {
-            let preview = run(
+                .1[&selected.sha256];
+            assert!(pin_count > 0);
+            let refused = run(
                 &mut host,
-                HostCommand::PreviewRetirement {
-                    branch: branch.clone(),
+                HostCommand::Switch {
+                    envelope: Box::new(request.clone()),
                 },
             );
-            assert!(preview.error.is_none());
-            assert!(run(&mut host, HostCommand::RemoveBranch).error.is_none());
+            assert_eq!(
+                refused.error.as_ref().map(|e| e.code.as_str()),
+                Some("storage_backpressure"),
+                "{:?}",
+                refused.error
+            );
             assert!(
-                host.owner()
-                    .unwrap()
-                    .store()
-                    .unwrap()
-                    .verify(&selected)
-                    .is_ok()
+                refused.switch_attachment.is_some(),
+                "quota refusal must carry the verified saved source attachment"
+            );
+            if reply_only {
+                assert!(LoadedBundle::read_with_limits_probe(&path, profile).is_ok());
+                continue;
+            }
+            let confirmation = run(
+                &mut host,
+                HostCommand::ConfirmSwitch {
+                    client: identity.clone(),
+                    installed: Box::new(refused.switch_attachment.unwrap().identity().unwrap()),
+                },
+            );
+            assert!(
+                confirmation.error.is_none(),
+                "P1/P2 confirmation: {:?}",
+                confirmation.error
             );
             assert!(
                 host.owner()
@@ -339,48 +340,83 @@ mod tests {
                     .unwrap_or_default()
                     > 0
             );
-            let result = run(
-                &mut host,
-                HostCommand::Switch {
-                    envelope: Box::new(request.clone()),
-                },
-            );
-            if result.error.is_none() {
-                activated = result.switch_attachment;
-                break;
-            }
-            assert_eq!(
-                result.error.as_ref().map(|e| e.code.as_str()),
-                Some("storage_backpressure")
-            );
-            assert!(
-                run(
+            let mut activated = None;
+            for branch in spare {
+                let preview = run(
                     &mut host,
-                    HostCommand::ConfirmSwitch {
-                        client: identity.clone(),
-                        installed: Box::new(result.switch_attachment.unwrap().identity().unwrap())
-                    }
-                )
-                .error
-                .is_none()
+                    HostCommand::PreviewRetirement {
+                        branch: branch.clone(),
+                    },
+                );
+                assert!(preview.error.is_none());
+                assert!(run(&mut host, HostCommand::RemoveBranch).error.is_none());
+                assert!(
+                    host.owner()
+                        .unwrap()
+                        .store()
+                        .unwrap()
+                        .verify(&selected)
+                        .is_ok()
+                );
+                assert!(
+                    host.owner()
+                        .unwrap()
+                        .store()
+                        .unwrap()
+                        .retention_probe()
+                        .unwrap()
+                        .1
+                        .get(&selected.sha256)
+                        .copied()
+                        .unwrap_or_default()
+                        > 0
+                );
+                let result = run(
+                    &mut host,
+                    HostCommand::Switch {
+                        envelope: Box::new(request.clone()),
+                    },
+                );
+                if result.error.is_none() {
+                    activated = result.switch_attachment;
+                    break;
+                }
+                assert_eq!(
+                    result.error.as_ref().map(|e| e.code.as_str()),
+                    Some("storage_backpressure")
+                );
+                assert!(
+                    run(
+                        &mut host,
+                        HostCommand::ConfirmSwitch {
+                            client: identity.clone(),
+                            installed: Box::new(
+                                result.switch_attachment.unwrap().identity().unwrap()
+                            )
+                        }
+                    )
+                    .error
+                    .is_none()
+                );
+            }
+            let activated = activated.expect(
+                "unrelated working-branch retirement must make the same pinned target usable",
             );
+            assert_eq!(activated.history, target_payload.history);
+            assert!(
+                !host
+                    .owner()
+                    .unwrap()
+                    .list_recovery_points()
+                    .unwrap()
+                    .contains(&target)
+            );
+            drop(host);
+            let loaded = LoadedBundle::read_with_limits_probe(&path, profile).unwrap();
+            let fresh = Core::spawn(Document::default()).unwrap();
+            loaded.restore_manual(&fresh).unwrap();
+            assert_eq!(fresh.export_history().unwrap(), activated.history);
         }
-        let activated = activated
-            .expect("unrelated working-branch retirement must make the same pinned target usable");
-        assert_eq!(activated.history, target_payload.history);
-        assert!(
-            !host
-                .owner()
-                .unwrap()
-                .list_recovery_points()
-                .unwrap()
-                .contains(&target)
-        );
-        drop(host);
-        let loaded = LoadedBundle::read_with_limits_probe(&path, profile).unwrap();
-        let fresh = Core::spawn(Document::default()).unwrap();
-        loaded.restore_manual(&fresh).unwrap();
-        assert_eq!(fresh.export_history().unwrap(), activated.history);
     }
     #[cfg(target_os = "linux")]
     #[test]
@@ -555,7 +591,7 @@ mod tests {
         };
         let parent = kinewright_media::test_support::workspace_target_dir();
         std::fs::create_dir_all(&parent).unwrap();
-        for landed in [false, true] {
+        for (landed, publication) in [(false, 1), (false, 2), (true, 1), (true, 2)] {
             let root = kinewright_media::test_support::TempDirectory::new_in(
                 &parent,
                 "c11-host-frozen-rescue",
@@ -651,7 +687,7 @@ mod tests {
                 } else {
                     "root_rename_io"
                 },
-                2,
+                publication,
                 || {
                     run(
                         &mut host,

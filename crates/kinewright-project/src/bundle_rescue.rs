@@ -256,7 +256,18 @@ impl std::fmt::Display for RescueMissingOwnedBytes {
             self.entries.len(),
             self.omitted,
             self.dependencies_complete
-        )
+        )?;
+        for (object, uses, cause) in &self.entries {
+            write!(
+                f,
+                "; {:?} {} ({} bytes), uses {uses:?}: {cause}",
+                object.record_kind, object.sha256, object.byte_length
+            )?;
+        }
+        if let Some(next) = self.next {
+            write!(f, "; next diagnostic page starts at {next}")?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for RescueMissingOwnedBytes {}

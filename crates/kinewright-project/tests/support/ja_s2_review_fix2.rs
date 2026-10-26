@@ -455,6 +455,71 @@ fn r9_a_seal_failure_never_retains_live_b() {
 }
 
 #[test]
+fn n2_sealed_a_failed_b_resume_returns_committed_capture() {
+    for frozen in [false, true] {
+        let temp = temp();
+        let mut owner = named(&temp);
+        let original = owner.core().clone();
+        edit(&original, false);
+        assert!(io_observer::fail_once("root_parent_sync", || owner.save_active()).is_err());
+        std::fs::rename(temp.path("drive"), temp.path("hidden-drive")).unwrap();
+        if frozen {
+            owner.freeze_probe().unwrap();
+        }
+        let offer = owner.probe_active().unwrap().unwrap();
+        let capture = owner.prepare_rescue(&offer).unwrap().unwrap();
+        let expected = original.export_history().unwrap();
+        let selection = owner
+            .preview_rescue(capture, StorageLimits::default())
+            .unwrap();
+        let consent = selection.consent();
+        let b = temp.path("b.kinewright");
+        let destination = owner.inspect_rescue_destination(&b).unwrap();
+        let binder = ProjectBundle::activate(
+            &temp.path("cut-authority.kinewright"),
+            BundleWriteAdmission::new_document(),
+        )
+        .unwrap();
+        let mut candidate = None;
+        let outcome = owner
+            .rescue_with_activation(selection, &consent, &destination, |core| {
+                let attachment = binder.attach_core(core)?;
+                let cut = attachment.capture().unwrap();
+                attachment.resume(&cut).unwrap();
+                edit(core, true);
+                attachment.freeze().unwrap();
+                candidate = Some(core.clone());
+                Ok(())
+            })
+            .expect(
+                "a committed capture must be returned after A seals, rather than resuming sealed A",
+            );
+        assert!(!outcome.activated);
+        assert!(matches!(outcome.status, CopyStatus::Committed(_)));
+        assert!(outcome.disclosure.contains("A is sealed"));
+        assert!(outcome.disclosure.contains(&b.display().to_string()));
+        assert!(outcome.disclosure.contains("Open B"));
+        assert_eq!(
+            original.attachment_state().unwrap(),
+            AttachmentState::Sealed
+        );
+        assert_eq!(
+            candidate.unwrap().attachment_state().unwrap(),
+            AttachmentState::Frozen
+        );
+        assert_eq!(original.export_history().unwrap(), expected);
+        assert!(owner.is_capture_destination(&b));
+        assert!(
+            Ja1EditingSession::open(&b).is_err(),
+            "B remains owned until explicit release or Close"
+        );
+        assert_eq!(reopen(&b), expected);
+        drop(owner);
+        assert_eq!(reopen(&b), expected);
+    }
+}
+
+#[test]
 fn r1_ordinary_floor_committed_identity_excludes_suffix() {
     let temp = temp();
     let mut doc = document();

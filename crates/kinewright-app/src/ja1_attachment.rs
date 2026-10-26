@@ -84,6 +84,7 @@ pub(crate) enum Action {
     Release,
     SaveSession(BranchId),
     CloseSession(BranchId),
+    OpenCapture(PathBuf),
 }
 enum Choice {
     SuccessorSave(Option<PathBuf>),
@@ -1016,6 +1017,11 @@ impl Ja1Attachment {
                 }
                 self.message = "Session saved. Retirement eligibility has been rechecked; a live session or required base remains protected.".into();
             }
+            Action::OpenCapture(_) => {
+                return Err(BundleError::Identity(
+                    "Open B is handled by the project window".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -1038,6 +1044,16 @@ impl Ja1Attachment {
                     view = Some(PreparedView::prepare(core)?);
                     Ok(())
                 })?;
+        self.finish_rescue(&outcome, view, path, &loss);
+        Ok(())
+    }
+    fn finish_rescue(
+        &mut self,
+        outcome: &kinewright_project::bundle_rescue::RescueOutcome,
+        view: Option<PreparedView>,
+        path: &Path,
+        loss: &str,
+    ) {
         self.message = if outcome.activated {
             self.view = view;
             format!(
@@ -1045,6 +1061,8 @@ impl Ja1Attachment {
                 path.display(),
                 outcome.disclosure
             )
+        } else if matches!(outcome.status, CopyStatus::Committed(_)) {
+            outcome.disclosure.clone()
         } else if self.owner.has_prepared_selection() {
             "B's save outcome is unknown. Editing remains read-only while A's save or selection is unresolved.".into()
         } else {
@@ -1052,9 +1070,8 @@ impl Ja1Attachment {
         };
         #[cfg(test)]
         {
-            self.last_rescue = Some(outcome);
+            self.last_rescue = Some(outcome.clone());
         }
-        Ok(())
     }
     fn unknown_text(&self) -> String {
         if self.owner.preliminary_save_pending() {
@@ -1213,6 +1230,14 @@ impl Ja1Attachment {
                     }
                 }
                 for (path, state) in &self.destinations {
+                    if *state == PublicationState::Committed
+                        && self.owner.is_capture_destination(path)
+                        && ui
+                            .button(format!("Open B read-only: {}", path.display()))
+                            .clicked()
+                    {
+                        action = Some(Action::OpenCapture(path.clone()));
+                    }
                     if ui
                         .button(format!("Check {} ({state:?})", path.display()))
                         .clicked()

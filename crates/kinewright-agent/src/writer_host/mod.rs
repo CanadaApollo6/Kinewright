@@ -19,7 +19,7 @@ use kinewright_project::{
     bundle::{BundleError, BundleSaveReport},
     bundle_copy::{BundleCopy, CopyStatus},
     bundle_records::{BranchId, ObjectRef},
-    bundle_rescue::{RescueConsent, RescueSelection},
+    bundle_rescue::{RescueConsent, RescueOutcome, RescueSelection},
     editing_session::Ja1EditingSession,
     source_boundary::{
         BorrowedSnapshotBinding, BorrowedSourceDescriptor, BorrowedSourceReader,
@@ -1313,6 +1313,29 @@ impl HostCommandOwner {
             }
         }
     }
+    fn accept_rescue_outcome(
+        &mut self,
+        outcome: RescueOutcome,
+        destination: &Path,
+        reply: &mut HostReply,
+    ) -> Result<(), HostError> {
+        if outcome.activated {
+            self.initial_core = self.owner()?.core().clone();
+            self.owner_mut()?.set_path_spelling(destination);
+            if let CopyStatus::Committed(report) = &outcome.status {
+                self.saved(report, reply, true)?;
+                reply.activation = Some(HostActivation {
+                    kind: HostActivationKind::Rescue,
+                    history_sha256: report.history_sha256.clone(),
+                });
+            }
+        }
+        self.message = outcome.disclosure;
+        if !outcome.activated && !matches!(outcome.status, CopyStatus::Committed(_)) {
+            self.copy_status(&outcome.status, reply)?;
+        }
+        Ok(())
+    }
     fn execute_inner(
         &mut self,
         command: HostCommand,
@@ -1572,22 +1595,10 @@ impl HostCommandOwner {
                 let outcome = self
                     .owner_mut()?
                     .rescue(*selection, &consent, &inspection)?;
+                #[cfg(all(test, target_os = "linux"))]
+                c12_tests::observe_rescue(&outcome);
                 self.keep_pin(pin);
-                if outcome.activated {
-                    self.initial_core = self.owner()?.core().clone();
-                    self.owner_mut()?.set_path_spelling(&destination);
-                    if let CopyStatus::Committed(report) = &outcome.status {
-                        self.saved(report, reply, true)?;
-                        reply.activation = Some(HostActivation {
-                            kind: HostActivationKind::Rescue,
-                            history_sha256: report.history_sha256.clone(),
-                        });
-                    }
-                }
-                self.message = outcome.disclosure;
-                if !outcome.activated {
-                    self.copy_status(&outcome.status, reply)?;
-                }
+                self.accept_rescue_outcome(outcome, &destination, reply)?;
             }
             HostCommand::Cancel => {
                 self.recovery_choice = false;
@@ -2608,3 +2619,6 @@ mod tests {
         assert!(owner.core().export_history().unwrap().batches.is_empty());
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod c12_tests;

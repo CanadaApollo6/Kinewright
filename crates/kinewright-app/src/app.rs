@@ -1014,6 +1014,10 @@ impl KinewrightApp {
         }
     }
     fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
+        if let crate::ja1_attachment::Action::OpenCapture(path) = &action {
+            self.open_project(path);
+            return;
+        }
         let session = self.focused_mut();
         if session.ja1_job.is_some() {
             return;

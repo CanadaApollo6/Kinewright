@@ -1456,3 +1456,33 @@ late reconciliation of A never activates it. Failed or unknown rescue preserves
 its existing freeze and target-availability, Close and destination disclosures.
 The selected-point session pin still has the accepted crash window: it does not
 make a rotated-out point durable. Native Windows Studio success remains S6-owned.
+
+### C12 rescue activation failure and final-owner evidence
+
+If A seals but the prepared B actor cannot resume, return the committed capture
+with `activated=false`. A remains sealed; B remains Frozen under its retained
+destination owner. Never attempt to resume sealed A. The person sees that A is
+sealed, the committed B path, and Open B read-only. Editing B separately still
+requires the existing explicit release of its completed destination owner.
+Neither a committed capture nor its receipt marks the active source Saved or
+grants manual authority. The host and local App preserve this disclosure.
+
+Unreadable acknowledged evidence stays required while rescue classifies its
+closure. Failure to read it must reach the bounded missing-owned-bytes diagnostic,
+including exact object identity, retaining uses, cause and completeness. A host
+error must not reduce that page to an item count. Refusal replies may reuse the
+current history's verified cache entry only when its full ObjectRef matches the
+current checkpoint, with ordinary byte/namespace verification and a normal read
+fallback. The selection pin and existing limits remain in force.
+
+C12's report and repeat ledger bind composed rescue/switch/restart, exact source
+ownership, original receipts and final Linux gates to one committed source head.
+Private process fault scheduling exercises the actual serialized host owner;
+shipping HTTP/authentication and App routes retain their separate witnesses.
+Process death and modeled IO faults do not certify physical power loss. The
+in-session selected-target pin still has its accepted crash window; native
+Windows durability, native providers and G20 retain their separate gates.
+
+A non-activated rescue leaves the active association's display path and Saved identity at A.
+Only an activated outcome transfers the caller's destination spelling to B; a later proof of
+a completed capture does not change the active association.

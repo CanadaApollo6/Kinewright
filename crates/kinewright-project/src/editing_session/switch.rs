@@ -136,6 +136,12 @@ impl Ja1EditingSession {
         }
         let root = bundle.root().ok_or(BundleError::Unsettled)?;
         let checkpoint = bundle.checkpoint(bundle.manual_branch_id())?;
+        let history = if let Some(cached) = bundle.cached_history(bundle.manual_branch_id()) {
+            bundle.store.verify(&checkpoint.history_ref)?;
+            (***cached).clone()
+        } else {
+            (*bundle.branch_history(bundle.manual_branch_id())?).clone()
+        };
         Ok(SwitchAttachment {
             project: root.project_id.clone(),
             root_sha256: self.root_sha256()?,
@@ -145,7 +151,7 @@ impl Ja1EditingSession {
                 bundle.checkpoint_reference(bundle.manual_branch_id())?,
                 checkpoint,
             ),
-            history: (*bundle.branch_history(bundle.manual_branch_id())?).clone(),
+            history,
             inputs: (*bundle
                 .store
                 .read_input_manifest(&checkpoint.input_manifest_ref)?)

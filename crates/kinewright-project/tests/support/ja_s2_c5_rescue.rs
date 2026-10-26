@@ -644,7 +644,12 @@ pub(super) fn w13_omission_only_precedes_trim() {
     assert!(result.is_err());
     assert_eq!(session.rescue_slots(), 0);
     assert!(!b.exists());
-    assert!(!trace.events.iter().any(|e| e.path.starts_with(&b)));
+    assert!(
+        !trace
+            .events
+            .iter()
+            .any(|e| e.operation != "rescue_separation_inspect" && e.path.starts_with(&b))
+    );
     let selection = prepare(&mut session);
     let mut consent = selection.consent();
     selection.consent_omission(&mut consent).unwrap();

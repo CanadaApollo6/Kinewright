@@ -500,6 +500,11 @@ impl HostAttachment {
             Action::Release => HostCommand::Release,
             Action::SaveSession(branch) => HostCommand::SaveSession { branch },
             Action::CloseSession(branch) => HostCommand::CloseSession { branch },
+            Action::OpenCapture(_) => {
+                return Err(BundleError::Identity(
+                    "Open B is handled by the project window".into(),
+                ));
+            }
         };
         let client = match &command {
             HostCommand::FirstSave { destination, .. }
@@ -808,6 +813,12 @@ impl HostAttachment {
                     }
                 }
                 for (path, _) in &self.status.destinations {
+                    if ui
+                        .button(format!("Open B read-only: {}", path.display()))
+                        .clicked()
+                    {
+                        action = Some(Action::OpenCapture(path.clone()));
+                    }
                     if ui.button(format!("Check {}", path.display())).clicked() {
                         action = Some(Action::Reconcile(path.clone()));
                     }

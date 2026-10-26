@@ -1402,3 +1402,16 @@ lease, including after a host restart or a superseding selection. Independent
 Open and the prepublication fresh-open guard admit the exact receipt-bearing
 root and its `host-switch@1` requirement. Process-cut, dropped-reply, native
 Windows and physical-storage evidence remain separate lanes.
+
+### C12 final-owner and capture acknowledgement boundary
+
+A committed rescue copy whose activation fails after A seals is a retained,
+Frozen capture. Its outcome says `activated=false`, names B's committed path,
+and discloses that A is sealed. Open B read-only uses ordinary project inspection;
+editable opening requires explicit completed-capture owner release. Never resume
+sealed A or acknowledge that capture as a save of the active source.
+
+The C12 repeat ledger distinguishes final host commands, real process restarts,
+shared lower-layer byte/graph controls and unavailable native/physical lanes.
+Frozen S0/S1 fixture and index bytes remain unchanged. Existing controls and
+additive pending-to-revised cases do not become new baseline-red flips.

@@ -1,0 +1,3284 @@
+[
+  {
+    "name": "source-project-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "envelope.project_id != root.project_id",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-branch-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "envelope.target_branch != root.manual_branch_id",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-epoch-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "envelope.owner_epoch != bundle.store.owner_epoch()",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-head-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "envelope.expected_head.as_ref() != Some(&checkpoint.head_id)",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-checkpoint-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "request.source_checkpoint\n                != bundle.checkpoint_reference(bundle.manual_branch_id())?",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-checkpoint-generation-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "request.checkpoint_generation != checkpoint.checkpoint_generation",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-floor-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "request.floor_generation != checkpoint.floor_generation",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-switch-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "request.switch_generation != root.manual_switch_generation",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-revision-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "envelope.expected_revision\n                != self\n                    .attachment\n                    .capture()\n                    .map_err(crate::bundle::history_error)?\n                    .revision()",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "source-sequence-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "envelope.id.sequence != state.next_sequence",
+        "false"
+      ]
+    ],
+    "witness": "linux::g05a_each_source_identity_is_required_before_selection",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "legacy-switch-field-not-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/receipts.rs",
+        "#[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub switch:",
+        "#[serde(default)]\n    pub switch:"
+      ]
+    ],
+    "witness": "linux::g05a_receipt_support_is_required_and_legacy_envelopes_remain_identical",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "original-id-digest-conflict-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/receipts.rs",
+        "if expected != digest {",
+        "if false {"
+      ]
+    ],
+    "witness": "linux::g05a_original_envelope_reply_loss_and_superseding_result",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "switch-receipt-not-atomic",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        ".chain(selection.and_then(|s| s.envelope.as_ref()))",
+        ".chain(None::<&CommandEnvelope>)"
+      ]
+    ],
+    "witness": "linux::g05a_atomic_retain_create_select_and_switch_generation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "receipt-publication-agreement-skipped",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/publication.rs",
+        "                super::validate_switch_receipts(\n                    namespace,\n                    &value,\n                    &manifest,\n                    usage,\n                    &mut fields,\n                    limits,\n                )?;",
+        ""
+      ]
+    ],
+    "witness": "linux::g05a_exact_receipt_bearing_publication_requires_checkpoint_agreement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "receipt-reader-agreement-skipped",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery.rs",
+        "                validate_switch_receipts(namespace, &value, &manifest, usage, &mut fields, limits)?;",
+        ""
+      ]
+    ],
+    "witness": "linux::g05a_independent_open_checks_raw_switch_receipt_and_api_declarations",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "raw-host-switch-declaration-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery.rs",
+        "if ledger.has_switch() && manifest.required_apis.get(\"host-switch\") != Some(&1) {",
+        "if false {"
+      ]
+    ],
+    "witness": "linux::g05a_independent_open_checks_raw_switch_receipt_and_api_declarations",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "next-save-resets-switch-generation",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        } else {\n            old_switch\n        };",
+        "        } else {\n            0\n        };"
+      ]
+    ],
+    "witness": "linux::g05a_atomic_retain_create_select_and_switch_generation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "selection-drops-saved-l",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let branch_index_ref = seal!(&branch_index);",
+        "        if let Some(selected) = selection { branches.remove(&selected.source_branch); branch_index.remove(&selected.source_branch); }\n        let branch_index_ref = seal!(&branch_index);"
+      ]
+    ],
+    "witness": "linux::g05a_atomic_retain_create_select_and_switch_generation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "definite-refusal-keeps-old-actor-frozen",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "                    owner.resume(&cut).map_err(crate::bundle::history_error)?;",
+        "                    let _ = &cut;"
+      ]
+    ],
+    "witness": "linux::g05a_prepublication_refusal_preserves_saved_l_and_target_pin",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_switch",
+    "features": "test-util",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "lease-before-restored-equivalence",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "        if self.switch_frozen {",
+        "        if self.switch_frozen {\n            let cut = self.owner()?.freeze_manual_barrier()?;\n            self.owner_mut()?.resume_manual_barrier(&cut)?;\n        }\n        if false {"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "confirmation-trusts-supplied-pointer",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            || self.owner()?.current_switch_attachment()?.identity()? != *installed",
+        "            || false"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "receipt-grants-real-manual-authority",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            return self.lookup_switch(envelope, reply);",
+        "            self.lookup_switch(envelope, reply)?;\n            if self.switch_frozen { let current = self.owner()?.current_switch_attachment()?.identity()?; self.confirm_switch(\"a\".repeat(64), &current, reply)?; }\n            return Ok(());"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "delayed-old-lease-acknowledged-after-return",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "            if envelope.manual.as_ref().map(|m| &m.binding) != Some(&lease) {",
+        "            if false {"
+      ],
+      [
+        "crates/kinewright-project/src/editing_session/manual.rs",
+        "        if envelope.manual.as_ref().map(|m| &m.binding) != Some(lease) {",
+        "        if false {"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "old-gui-actor-never-sealed",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "        if let Err(error) = self.attachment.seal(cut) {",
+        "        if let Err(error) = self.attachment.capture().map(|_| ()) {"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "shadow-resumed-before-gui-confirmation",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "                self.initial_core = self.owner()?.core().clone();\n                self.owner()?.freeze_manual_barrier()?;",
+        "                self.initial_core = self.owner()?.core().clone();"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_prepared_target_exclusion_and_current_head_retry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "restart-forgets-switch-confirmation",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        ".is_some_and(|a| a.switch_generation != 0);",
+        ".is_some_and(|_| false);"
+      ]
+    ],
+    "witness": "g05a_switch_reply_drop_and_participant_death",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util,slow-tests",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "gui-resources-not-staged",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "                Ok(staged) => self.prepared_switch = Some(staged),",
+        "                Ok(staged) => { drop(staged); self.prepared_switch = None; },"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::g05a_first_edit_undo_and_exact_switch_back",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": true
+  },
+  {
+    "name": "cold-open-drops-restored-view",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "        if let Some(view) = host.start_manual(&mut self.owner)? {\n            self.view = Some(view);\n        }",
+        "        let _ = host.start_manual(&mut self.owner)?;"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::g05a_first_edit_undo_and_exact_switch_back",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": true
+  },
+  {
+    "name": "host-releases-target-pin-before-quota-retry",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "    pin: Option<StorePin>,",
+        "    pub(crate) pin: Option<StorePin>,"
+      ],
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "_ => self.prepared = Some(prepared),",
+        "_ => { prepared.pin.take(); self.prepared = Some(prepared); },"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_same_target_pin_survives_quota_retirement_rotation_and_retry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-offers-prepared-target-for-retirement",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        if self\n            .prepared\n            .as_ref()\n            .is_some_and(|p| p.protects_branch(id))\n        {\n            blockers.push(\"prepared recovery selection target\".into());\n        }",
+        ""
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_prepared_target_exclusion_and_current_head_retry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-removes-prepared-target-directly",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        let blockers = self.branch_blockers(branch);",
+        "        let mut blockers = self.branch_blockers(branch); blockers.retain(|b| b != \"prepared recovery selection target\");"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_prepared_target_exclusion_and_current_head_retry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-ignores-existing-target-head",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(&prepared.target_branch)\n                    .is_some_and(|c| c.head_id == *head)\n            });",
+        "            && prepared.existing_head.as_ref().is_none_or(|_| self.branches.contains_key(&prepared.target_branch));"
+      ],
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let checkpoint_ref = if existing_selection {\n            bundle.checkpoint_reference(branch_id)?",
+        "        let checkpoint_ref = if existing_selection {\n            seal!(&checkpoint)"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_prepared_target_exclusion_and_current_head_retry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-resurrects-retired-target",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(&prepared.target_branch)\n                    .is_some_and(|c| c.head_id == *head)\n            });",
+        "            && true;"
+      ],
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "        let target_ref = match &prepared.target {\n            RecoverySelection::WorkingBranch(id) => self.checkpoint_reference(id)?,",
+        "        let target_ref = match &prepared.target {\n            RecoverySelection::WorkingBranch(id) => { if !self.branches.contains_key(id) { self.branches.insert(id.clone(), prepared.restore.checkpoint.clone()); let sealed = self.store.admit_record(&prepared.restore.checkpoint)?; let mut index = (*self.store.read_record::<std::collections::BTreeMap<BranchId, crate::bundle_records::ObjectRef>>(&self.root.as_ref().unwrap().branch_index_ref)?).clone(); index.insert(id.clone(), sealed.reference.clone()); self.root.as_mut().unwrap().branch_index_ref = self.store.admit_record(&index)?.reference.clone(); } self.store.admit_record(&prepared.restore.checkpoint)?.reference.clone() },"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_prepared_target_exclusion_and_current_head_retry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-fork-without-registration",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "    pub fn fork_durable_branch(\n        &mut self,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n        {\n            return Err(BundleError::Unsettled);\n        }\n        let charge = self.registration_capacity(name)?;\n        let live = self\n            .core\n            .export_history()\n            .map_err(crate::bundle::history_error)?;\n        if self.dirty()? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let core = Core::spawn((*live.document).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;\n        let target = bundle.manual_branch_id().clone();\n        if live != *bundle.branch_history(&target)? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let checkpoint = bundle.checkpoint(&target)?.clone();\n        let base = SpecialistBaseRecord {\n            target_branch: target.clone(),\n            base_head: checkpoint.head_id,\n            base_document_hash: checkpoint.document_hash,\n            original_baseline_ref: checkpoint.document_ref,\n            frozen_checkpoint_ref: bundle.checkpoint_reference(&target)?,\n            full_applied_delta: vec![],\n        };\n        let pin = bundle\n            .store\n            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;\n        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        if !candidate_cut.history().batches.is_empty() {\n            attachment\n                .resume(&candidate_cut)\n                .map_err(crate::bundle::history_error)?;\n            return Err(BundleError::HistoryChanged);\n        }\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let branch = match bundle.fork_branch(&target) {\n            Ok(branch) => branch,\n            Err(error) => {\n                attachment\n                    .seal(&candidate_cut)\n                    .map_err(crate::bundle::history_error)?;\n                return Err(error);\n            }\n        };\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base,\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        self.durable_sessions.push(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }",
+        "    pub fn fork_durable_branch(\n        &mut self,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n        {\n            return Err(BundleError::Unsettled);\n        }\n        let charge = self.registration_capacity(name)?;\n        let live = self\n            .core\n            .export_history()\n            .map_err(crate::bundle::history_error)?;\n        if self.dirty()? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let core = Core::spawn((*live.document).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;\n        let target = bundle.manual_branch_id().clone();\n        if live != *bundle.branch_history(&target)? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let checkpoint = bundle.checkpoint(&target)?.clone();\n        let base = SpecialistBaseRecord {\n            target_branch: target.clone(),\n            base_head: checkpoint.head_id,\n            base_document_hash: checkpoint.document_hash,\n            original_baseline_ref: checkpoint.document_ref,\n            frozen_checkpoint_ref: bundle.checkpoint_reference(&target)?,\n            full_applied_delta: vec![],\n        };\n        let pin = bundle\n            .store\n            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;\n        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        if !candidate_cut.history().batches.is_empty() {\n            attachment\n                .resume(&candidate_cut)\n                .map_err(crate::bundle::history_error)?;\n            return Err(BundleError::HistoryChanged);\n        }\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let branch = match bundle.fork_branch(&target) {\n            Ok(branch) => branch,\n            Err(error) => {\n                attachment\n                    .seal(&candidate_cut)\n                    .map_err(crate::bundle::history_error)?;\n                return Err(error);\n            }\n        };\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base,\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        drop(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-reopen-without-registration",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "    pub fn reopen_durable_branch(\n        &mut self,\n        branch: BranchId,\n        base_ref: &ObjectRef,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n            || self.active_bundle()?.unsettled\n        {\n            return Err(BundleError::Unsettled);\n        }\n        if self.active_bundle()?.manual_branch_id() == &branch\n            || self\n                .durable_sessions\n                .iter()\n                .any(|r| r.guard.branch == branch)\n        {\n            return Err(BundleError::Contention(\n                \"durable branch already has a live session\".into(),\n            ));\n        }\n        let charge = self.registration_capacity(name)?;\n        let bundle = self.active_bundle()?;\n        let base = bundle.store.read_record::<SpecialistBaseRecord>(base_ref)?;\n        let checkpoint = bundle\n            .store\n            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;\n        if checkpoint.branch_id != base.target_branch\n            || checkpoint.head_id != base.base_head\n            || checkpoint.document_hash != base.base_document_hash\n            || checkpoint.document_ref != base.original_baseline_ref\n            || !bundle.branches.contains_key(&base.target_branch)\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let history = bundle.branch_history(&branch)?;\n        let core =\n            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        bundle\n            .attach_core(&core)?\n            .restore_history((*history).clone())\n            .map_err(crate::bundle::history_error)?;\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        let pin = bundle\n            .store\n            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base: Arc::new(base),\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        self.durable_sessions.push(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }",
+        "    pub fn reopen_durable_branch(\n        &mut self,\n        branch: BranchId,\n        base_ref: &ObjectRef,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n            || self.active_bundle()?.unsettled\n        {\n            return Err(BundleError::Unsettled);\n        }\n        if self.active_bundle()?.manual_branch_id() == &branch\n            || self\n                .durable_sessions\n                .iter()\n                .any(|r| r.guard.branch == branch)\n        {\n            return Err(BundleError::Contention(\n                \"durable branch already has a live session\".into(),\n            ));\n        }\n        let charge = self.registration_capacity(name)?;\n        let bundle = self.active_bundle()?;\n        let base = bundle.store.read_record::<SpecialistBaseRecord>(base_ref)?;\n        let checkpoint = bundle\n            .store\n            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;\n        if checkpoint.branch_id != base.target_branch\n            || checkpoint.head_id != base.base_head\n            || checkpoint.document_hash != base.base_document_hash\n            || checkpoint.document_ref != base.original_baseline_ref\n            || !bundle.branches.contains_key(&base.target_branch)\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let history = bundle.branch_history(&branch)?;\n        let core =\n            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        bundle\n            .attach_core(&core)?\n            .restore_history((*history).clone())\n            .map_err(crate::bundle::history_error)?;\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        let pin = bundle\n            .store\n            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base: Arc::new(base),\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        drop(RegisteredSession {\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-ignores-live-session",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "(&session.guard.branch == id || &session.guard.base.target_branch == id)",
+        "(&session.guard.base.target_branch == id)"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-ignores-live-specialist-base",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "(&session.guard.branch == id || &session.guard.base.target_branch == id)",
+        "(&session.guard.branch == id)"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-resumes-after-failed-rescue",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "\n        if !was_frozen {",
+        "\n        if !was_frozen || matches!(status, CopyStatus::DefinitelyUnpublished | CopyStatus::CleanupPending { .. }) {"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_frozen_rescue_abandons_original_switch_and_preserves_disclosures",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-resumes-after-unknown-rescue",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "\n        if !was_frozen {",
+        "\n        if !was_frozen || matches!(status, CopyStatus::DurabilityUnknown) {"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_frozen_rescue_abandons_original_switch_and_preserves_disclosures",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-late-a-replaces-b",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "        let state = owner.bundle()?.publication_state();",
+        "        let state = owner.bundle()?.publication_state(); self.core = self.retained_destinations[index].1.clone();"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_frozen_rescue_abandons_original_switch_and_preserves_disclosures",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "later-r-save-drops-l",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        branch_index.retain(|id, _| branches.contains_key(id));",
+        "        if old_switch == 1 && selection.is_none() { branches.retain(|id, _| id == branch_id); } branch_index.retain(|id, _| branches.contains_key(id));"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "later-l-save-drops-r",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        branch_index.retain(|id, _| branches.contains_key(id));",
+        "        if old_switch >= 2 && selection.is_none() { branches.retain(|id, _| id == branch_id); } branch_index.retain(|id, _| branches.contains_key(id));"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "first-r-save-remints-shared-batches",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let all_batch_ids = batch_ids.clone();",
+        "        if old_switch == 1 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "return-save-remints-old-batches",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let all_batch_ids = batch_ids.clone();",
+        "        if old_switch >= 2 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "original-retry-starts-another-selection",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            return self.lookup_switch(envelope, reply);",
+        "            self.lookup_switch(envelope, reply)?;\n            self.manual = None;\n            self.owner()?.freeze_manual_barrier()?;\n            self.switch_frozen = true;\n            let current = self.owner()?.current_switch_attachment()?.identity()?;\n            self.confirm_switch(\"a\".repeat(64), &current, &mut HostReply::default())?;\n            let target = self.owner()?.list_recovery_points()?.remove(0);\n            let target = match target { kinewright_project::bundle_recovery::RecoverySelection::Checkpoint { root, branch } => SwitchTarget::Checkpoint { root, branch }, kinewright_project::bundle_recovery::RecoverySelection::WorkingBranch(branch) => SwitchTarget::WorkingBranch { branch } };\n            self.prepare_switch(target, &mut HostReply::default())?;\n            let fresh = self.pending_switch.clone().ok_or(BundleError::HistoryChanged)?;\n            return self.publish_switch(&fresh, reply);"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "superseded-receipt-selects-historical-branch",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "    pub(super) fn lookup_switch(\n        &self,",
+        "    pub(super) fn lookup_switch(\n        &mut self,"
+      ],
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "                reply.switch_result = Some(*result);",
+        "                if self.owner()?.current_switch_attachment()?.current.branch != result.new.branch {\n                    self.owner_mut()?.prepare_recovery(kinewright_project::bundle_recovery::RecoverySelection::WorkingBranch(result.new.branch.clone()))?;\n                    if !matches!(self.owner_mut()?.select_local(), kinewright_project::bundle_switch::ProjectSelectionResult::Activated(_)) { return Err(BundleError::HistoryChanged.into()); }\n                }\n                reply.switch_result = Some(*result);"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "rescue-handoff-keeps-host-switch-freeze",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "            self.pending_switch = None;\n            self.switch_frozen = false;",
+        "            self.pending_switch = None;"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_frozen_rescue_abandons_original_switch_and_preserves_disclosures",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "n2-resume-sealed-a-again",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "                if let Err(error) = b_attachment.resume(&b_cut) {",
+        "                if let Err(error) = b_attachment.resume(&b_cut) {\n                    self.attachment.resume(&old_cut).map_err(crate::bundle::history_error)?;"
+      ]
+    ],
+    "witness": "review_fix2::n2_sealed_a_failed_b_resume_returns_committed_capture",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "n2-sealed-disclosure-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "A is sealed and editing could not move to B: {error}. The committed rescue copy is at {}. Open B separately read-only, or explicitly release its completed copy owner before opening it for editing. {disclosure}",
+        "Rescue activation failed: {error}. Copy at {}. {disclosure}"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::n2_sealed_a_discloses_committed_b_and_offers_open",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "n2-app-claims-unknown-and-live-a",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "outcome.disclosure.clone()",
+        "\"B's save outcome is unknown. Editing continues in the original session.\".into()"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::n2_sealed_a_discloses_committed_b_and_offers_open",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "n2-open-b-choice-omitted",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "if *state == PublicationState::Committed\n                        && self.owner.is_capture_destination(path)\n                        && ui\n                            .button(format!(\"Open B read-only: {}\", path.display()))",
+        "if false && *state == PublicationState::Committed\n                        && self.owner.is_capture_destination(path)\n                        && ui\n                            .button(format!(\"Open B read-only: {}\", path.display()))"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::n2_sealed_a_discloses_committed_b_and_offers_open",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "n2-host-capture-enters-saved-path",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "if !outcome.activated && !matches!(outcome.status, CopyStatus::Committed(_)) {",
+        "if !outcome.activated {"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::n2_committed_capture_never_acknowledges_sealed_a",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "missing-evidence-fails-before-bounded-diagnostic",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
+        "                && let Ok(bytes) = bundle.store.read_copy_evidence(reference, true)\n                && crate::rescue_record::parse(&bytes)?.is_some()",
+        "                && crate::rescue_record::parse(&bundle.store.read_copy_evidence(reference, true)?)?.is_some()"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::w02_host_missing_required_evidence_refuses_without_destination_mutation",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "pin-refusal-reply-decodes-current-history-again",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/switch.rs",
+        "        let history = if let Some(cached) = bundle.cached_history(bundle.manual_branch_id()) {\n            bundle.store.verify(&checkpoint.history_ref)?;\n            (***cached).clone()\n        } else {\n            (*bundle.branch_history(bundle.manual_branch_id())?).clone()\n        };\n",
+        "        let history = (*bundle.branch_history(bundle.manual_branch_id())?).clone();\n"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_host_same_target_pin_survives_quota_retirement_rotation_and_retry",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "composed-gui-source-not-sealed",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "        if let Err(error) = self.attachment.seal(cut) {",
+        "        if let Err(error) = self.attachment.capture().map(|_| ()) {"
+      ]
+    ],
+    "witness": "rescue_and_switch_share_one_owner_after_restart",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "composed-receipt-grants-lease",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            return self.lookup_switch(envelope, reply);",
+        "            self.lookup_switch(envelope, reply)?;\n            if self.switch_frozen { let current = self.owner()?.current_switch_attachment()?.identity()?; self.confirm_switch(\"a\".repeat(64), &current, reply)?; }\n            return Ok(());"
+      ]
+    ],
+    "witness": "rescue_and_switch_share_one_owner_after_restart",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "host-drop-deletes-gui-root-orderly",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "impl Drop for WriterHost {\n    fn drop(&mut self) {",
+        "impl Drop for WriterHost {\n    fn drop(&mut self) {\n        if let Some(root) = std::env::var_os(\"JA_C8_SOURCE_ROOT\") {\n            std::fs::remove_dir_all(root).expect(\"mutated host source cleanup\");\n        }"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "host_failure_preserves_originating_context_or_refuses_recovery",
+    "environment": {
+      "JA_C8_HOST_FAILURE_CASE": "orderly"
+    },
+    "red_text": "host Drop deleted the GUI temporary root",
+    "build_host": false
+  },
+  {
+    "name": "host-drop-uncharges-gui-source-orderly",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "impl RemoteSource {",
+        "impl Drop for RemoteSource {\n    fn drop(&mut self) {\n        let (Some(source), Some(inputs)) = (&self.binding.source, &self.binding.inputs) else { return; };\n        let request = SourceRequest::Read { source: source.clone(), object: inputs.clone(), offset: u64::MAX, length: 0, instance: self.instance.clone() };\n        let body = serde_json::to_vec(&request).expect(\"mutated source release packet\");\n        let bootstrap = &self.binding.callback;\n        let mut stream = std::net::TcpStream::connect_timeout(&bootstrap.endpoint.address, Duration::from_secs(2)).expect(\"mutated source release connection\");\n        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();\n        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();\n        write!(stream, \"POST /source HTTP/1.1\\r\\nHost: {}\\r\\nAuthorization: {}\\r\\nx-kinewright-project: {}\\r\\nx-kinewright-protocol: 1\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n\", bootstrap.endpoint.address, bootstrap.auth.bearer(), bootstrap.endpoint.project, body.len()).unwrap();\n        stream.write_all(&body).unwrap();\n        let mut reply = Vec::new();\n        stream.take(1 << 20).read_to_end(&mut reply).expect(\"mutated source release reply\");\n    }\n}\nimpl RemoteSource {"
+      ],
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "                    if *length > SOURCE_READ_CHUNK_BYTES {",
+        "                    if *offset == u64::MAX {\n                        reader.as_mut().ok_or(BundleError::Unsettled)?.release_copy_for_mutation()?;\n                        return Ok(reply);\n                    }\n                    if *length > SOURCE_READ_CHUNK_BYTES {"
+      ],
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "pub trait BorrowedSourceReader {",
+        "pub trait BorrowedSourceReader {\n    fn release_copy_for_mutation(&mut self) -> Result<(), BundleError> {\n        Err(BundleError::Identity(\"source release unavailable\".into()))\n    }"
+      ],
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "impl BorrowedSourceReader for BorrowedSourceService {",
+        "impl BorrowedSourceReader for BorrowedSourceService {\n    fn release_copy_for_mutation(&mut self) -> Result<(), BundleError> {\n        let retained = self.retained.upgrade().ok_or(BundleError::Unsettled)?;\n        retained.overlap.lock().map_err(|_| BundleError::Unsettled)?.reservation.release_charge_for_mutation();\n        Ok(())\n    }"
+      ],
+      [
+        "crates/kinewright-project/src/storage_budget.rs",
+        "impl<T> StorageReservation<T> {",
+        "impl<T> StorageReservation<T> {\n    pub(crate) fn release_charge_for_mutation(&mut self) {\n        let charged = StorageReservation {\n            value: self.value.take(), usage: Arc::clone(&self.usage), bytes: self.bytes,\n            decoded: self.decoded, history: self.history, copy: self.copy, active: self.active,\n        };\n        self.active = false;\n        drop(charged);\n    }\n"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "host_failure_preserves_originating_context_or_refuses_recovery",
+    "environment": {
+      "JA_C8_HOST_FAILURE_CASE": "orderly"
+    },
+    "red_text": "host Drop uncharged a GUI source reservation",
+    "build_host": false
+  },
+  {
+    "name": "host-drop-deletes-gui-root-unwind",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "impl Drop for WriterHost {\n    fn drop(&mut self) {",
+        "impl Drop for WriterHost {\n    fn drop(&mut self) {\n        if let Some(root) = std::env::var_os(\"JA_C8_SOURCE_ROOT\") {\n            std::fs::remove_dir_all(root).expect(\"mutated host source cleanup\");\n        }"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "host_failure_preserves_originating_context_or_refuses_recovery",
+    "environment": {
+      "JA_C8_HOST_FAILURE_CASE": "unwind"
+    },
+    "red_text": "host Drop deleted the GUI temporary root",
+    "build_host": false
+  },
+  {
+    "name": "host-drop-uncharges-gui-source-unwind",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "impl RemoteSource {",
+        "impl Drop for RemoteSource {\n    fn drop(&mut self) {\n        let (Some(source), Some(inputs)) = (&self.binding.source, &self.binding.inputs) else { return; };\n        let request = SourceRequest::Read { source: source.clone(), object: inputs.clone(), offset: u64::MAX, length: 0, instance: self.instance.clone() };\n        let body = serde_json::to_vec(&request).expect(\"mutated source release packet\");\n        let bootstrap = &self.binding.callback;\n        let mut stream = std::net::TcpStream::connect_timeout(&bootstrap.endpoint.address, Duration::from_secs(2)).expect(\"mutated source release connection\");\n        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();\n        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();\n        write!(stream, \"POST /source HTTP/1.1\\r\\nHost: {}\\r\\nAuthorization: {}\\r\\nx-kinewright-project: {}\\r\\nx-kinewright-protocol: 1\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n\", bootstrap.endpoint.address, bootstrap.auth.bearer(), bootstrap.endpoint.project, body.len()).unwrap();\n        stream.write_all(&body).unwrap();\n        let mut reply = Vec::new();\n        stream.take(1 << 20).read_to_end(&mut reply).expect(\"mutated source release reply\");\n    }\n}\nimpl RemoteSource {"
+      ],
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "                    if *length > SOURCE_READ_CHUNK_BYTES {",
+        "                    if *offset == u64::MAX {\n                        reader.as_mut().ok_or(BundleError::Unsettled)?.release_copy_for_mutation()?;\n                        return Ok(reply);\n                    }\n                    if *length > SOURCE_READ_CHUNK_BYTES {"
+      ],
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "pub trait BorrowedSourceReader {",
+        "pub trait BorrowedSourceReader {\n    fn release_copy_for_mutation(&mut self) -> Result<(), BundleError> {\n        Err(BundleError::Identity(\"source release unavailable\".into()))\n    }"
+      ],
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "impl BorrowedSourceReader for BorrowedSourceService {",
+        "impl BorrowedSourceReader for BorrowedSourceService {\n    fn release_copy_for_mutation(&mut self) -> Result<(), BundleError> {\n        let retained = self.retained.upgrade().ok_or(BundleError::Unsettled)?;\n        retained.overlap.lock().map_err(|_| BundleError::Unsettled)?.reservation.release_charge_for_mutation();\n        Ok(())\n    }"
+      ],
+      [
+        "crates/kinewright-project/src/storage_budget.rs",
+        "impl<T> StorageReservation<T> {",
+        "impl<T> StorageReservation<T> {\n    pub(crate) fn release_charge_for_mutation(&mut self) {\n        let charged = StorageReservation {\n            value: self.value.take(), usage: Arc::clone(&self.usage), bytes: self.bytes,\n            decoded: self.decoded, history: self.history, copy: self.copy, active: self.active,\n        };\n        self.active = false;\n        drop(charged);\n    }\n"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "host_failure_preserves_originating_context_or_refuses_recovery",
+    "environment": {
+      "JA_C8_HOST_FAILURE_CASE": "unwind"
+    },
+    "red_text": "host Drop uncharged a GUI source reservation",
+    "build_host": false
+  },
+  {
+    "name": "composed-host-drop-uncharges-source",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "impl RemoteSource {",
+        "impl Drop for RemoteSource {\n    fn drop(&mut self) {\n        let (Some(source), Some(inputs)) = (&self.binding.source, &self.binding.inputs) else { return; };\n        let request = SourceRequest::Read { source: source.clone(), object: inputs.clone(), offset: u64::MAX, length: 0, instance: self.instance.clone() };\n        let body = serde_json::to_vec(&request).expect(\"mutated source release packet\");\n        let bootstrap = &self.binding.callback;\n        let mut stream = std::net::TcpStream::connect_timeout(&bootstrap.endpoint.address, Duration::from_secs(2)).expect(\"mutated source release connection\");\n        stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();\n        stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();\n        write!(stream, \"POST /source HTTP/1.1\\r\\nHost: {}\\r\\nAuthorization: {}\\r\\nx-kinewright-project: {}\\r\\nx-kinewright-protocol: 1\\r\\nContent-Length: {}\\r\\nConnection: close\\r\\n\\r\\n\", bootstrap.endpoint.address, bootstrap.auth.bearer(), bootstrap.endpoint.project, body.len()).unwrap();\n        stream.write_all(&body).unwrap();\n        let mut reply = Vec::new();\n        stream.take(1 << 20).read_to_end(&mut reply).expect(\"mutated source release reply\");\n    }\n}\nimpl RemoteSource {"
+      ],
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "                    if *length > SOURCE_READ_CHUNK_BYTES {",
+        "                    if *offset == u64::MAX {\n                        reader.as_mut().ok_or(BundleError::Unsettled)?.release_copy_for_mutation()?;\n                        return Ok(reply);\n                    }\n                    if *length > SOURCE_READ_CHUNK_BYTES {"
+      ],
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "pub trait BorrowedSourceReader {",
+        "pub trait BorrowedSourceReader {\n    fn release_copy_for_mutation(&mut self) -> Result<(), BundleError> {\n        Err(BundleError::Identity(\"source release unavailable\".into()))\n    }"
+      ],
+      [
+        "crates/kinewright-project/src/source_boundary.rs",
+        "impl BorrowedSourceReader for BorrowedSourceService {",
+        "impl BorrowedSourceReader for BorrowedSourceService {\n    fn release_copy_for_mutation(&mut self) -> Result<(), BundleError> {\n        let retained = self.retained.upgrade().ok_or(BundleError::Unsettled)?;\n        retained.overlap.lock().map_err(|_| BundleError::Unsettled)?.reservation.release_charge_for_mutation();\n        Ok(())\n    }"
+      ],
+      [
+        "crates/kinewright-project/src/storage_budget.rs",
+        "impl<T> StorageReservation<T> {",
+        "impl<T> StorageReservation<T> {\n    pub(crate) fn release_charge_for_mutation(&mut self) {\n        let charged = StorageReservation {\n            value: self.value.take(), usage: Arc::clone(&self.usage), bytes: self.bytes,\n            decoded: self.decoded, history: self.history, copy: self.copy, active: self.active,\n        };\n        self.active = false;\n        drop(charged);\n    }\n"
+      ]
+    ],
+    "witness": "rescue_and_switch_share_one_owner_after_restart",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "host-compaction-loses-warning-summary",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "            let (count, overflow) = self.summary.count.overflowing_add(1);\n            self.summary.count = if overflow { u64::MAX } else { count };\n            self.summary.count_overflow |= overflow;\n            self.summary.unresolved = true;\n            self.summary.digest = kinewright_media::sha256_bytes(\n                &[self.summary.digest.as_bytes(), &encoded].concat(),\n            );\n",
+        "            self.summary = ProvenanceSummary::default();\n            let _ = encoded;\n"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::w11_host_recopy_compacts_provenance_and_keeps_independent_bytes",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {}
+  },
+  {
+    "name": "host-missing-byte-details-hidden",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_rescue.rs",
+        "        for (object, uses, cause) in &self.entries {\n            write!(\n                f,\n                \"; {:?} {} ({} bytes), uses {uses:?}: {cause}\",\n                object.record_kind, object.sha256, object.byte_length\n            )?;\n        }\n",
+        ""
+      ]
+    ],
+    "witness": "writer_host::c12_tests::w02_host_missing_required_evidence_refuses_without_destination_mutation",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "repeat-c4-fresh-open-guard-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/store.rs",
+        "crate::bundle_recovery::validate_publication_reopen_fit(\n                n,\n                bytes,\n                self.limits(),\n                &mut *self\n                    .inner\n                    .verified_memo\n                    .lock()\n                    .map_err(|_| BundleError::Capacity(\"memo poisoned\"))?,\n            )",
+        "Ok(())"
+      ]
+    ],
+    "witness": "durable::w13_selection_fresh_open_exact_and_one_byte_over",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-committed-selection-phase-erased",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "ProjectSelectionResult::CommittedWithError(error)",
+        "ProjectSelectionResult::Refused(error)"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-portable-nonzero-switch-refused",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "self.manual_switch_generation >= self.generation",
+        "(self.manual_switch_generation >= self.generation || self.manual_switch_generation != 0)"
+      ]
+    ],
+    "witness": "w14_raw_switch_structure_and_ordinary_v3_backward_control",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-compaction-attachment-drops-independent-root",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.evidence.push(reference.clone());",
+        "self.evidence.clear(); self.evidence.push(reference.clone());"
+      ]
+    ],
+    "witness": "durable::w11_independent_roots_survive_provenance_compaction",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-ack-exact-receipt-lookup-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/receipts.rs",
+        "recovery.extend(records.iter().filter_map(|r| r.acknowledged_root.clone()));",
+        "let _ = &records;"
+      ]
+    ],
+    "witness": "durable::w10_pending_command_exclusion_and_original_id_lookup",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-selected-pin-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "let pin = self.store.pin(std::slice::from_ref(&reference))?;",
+        "let pin = self.store.pin(&[])?;"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-selected-pin-released-before-activation",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "prepared.source_head = self.manual_head().cloned().ok_or(BundleError::Unsettled)?;",
+        "prepared.source_head = self.manual_head().cloned().ok_or(BundleError::Unsettled)?; prepared.pin.take();"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-resolve-by-automatic-list-position",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "let restore = self.prepare_checkpoint_restore(&target)?;",
+        "let wrong = match &target { RecoverySelection::Checkpoint { branch, .. } => RecoverySelection::Checkpoint { root: self.recovery.predecessors[0].clone(), branch: branch.clone() }, other => other.clone() }; let restore = self.prepare_checkpoint_restore(&wrong)?;"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-require-continued-automatic-membership",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "// Verify the original identity even after its automatic slot has rotated away.",
+        "if !self.recovery.references().contains(&target_ref) { owner.resume(&cut).map_err(crate::bundle::history_error)?; return Err(BundleError::Unsettled); }\n        // Verify the original identity even after its automatic slot has rotated away."
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-restored-history-truncated",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        ".restore_history((*history).clone())",
+        ".restore_history(kinewright_core::HistoryTransition::floor((*history).clone(), 1).map_err(crate::bundle::history_error)?.after().clone())"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-shared-prefix-batches-reminted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "let all_batch_ids = batch_ids.clone();",
+        "for id in &mut batch_ids { *id = BatchId::fresh()?; } let all_batch_ids = batch_ids.clone();"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_shared_prefix_occurrence_identity_survives_branch_saves",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-occurrences-restamped",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "let origin = origins.get(id).unwrap_or(branch);",
+        "let _ = &origins; let origin = branch;"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_shared_prefix_occurrence_identity_survives_branch_saves",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-floor-forgets-shared-origins",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "old_lineage.as_deref().or(seed),",
+        "None,"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_shared_prefix_occurrence_identity_survives_branch_saves",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-definite-pointer-not-refreshed",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "bundle.manual_branch_id = manual_branch_id.clone();",
+        "let _ = &manual_branch_id;"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-reconciled-pointer-not-refreshed",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "self.manual_branch_id = root.manual_branch_id.clone();",
+        "let _ = &root.manual_branch_id;"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-later-save-resets-switch-generation",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "manual_switch_generation: switch_generation,",
+        "manual_switch_generation: if selection.is_none() { 0 } else { switch_generation },"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-retry-allocates-new-target",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "if let Some(hash) = &prepared.published_root {",
+        "if let Some(hash) = &prepared.published_root { prepared.target_branch = BranchId::fresh()?;"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-frozen-direct-save-allowed",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "kinewright_core::AttachmentState::Frozen => {\n            return Err(history_error(\n                kinewright_core::HistoryError::MutationRefused(\n                    kinewright_core::CoreMutationRefusal::Frozen,\n                ),\n            ));\n        }",
+        "kinewright_core::AttachmentState::Frozen => {}"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-pin-admission-charge-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "(closure.len() as u64)\n                .checked_mul(128)",
+        "0_u64\n                .checked_mul(128)"
+      ]
+    ],
+    "witness": "durable::w13_selection_pin_capacity_refuses_before_publication",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-raw-switch-requirement-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "apis.insert(\"manual-switch\".into(), 1);",
+        "let _ = &mut apis;"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-supported-switch-unconditionally-refused",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "self.manual_switch_generation >= self.generation",
+        "(self.manual_switch_generation >= self.generation || self.manual_switch_generation != 0)"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-record-ack-edge-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.acknowledged_root.iter().cloned().collect()",
+        "vec![]"
+      ]
+    ],
+    "witness": "durable::w13_ack_and_two_predecessors_reopen_rotate_and_recover",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-record-digest-only-ack",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.acknowledged_root.iter().cloned().collect()",
+        "vec![]"
+      ]
+    ],
+    "witness": "durable::w14_raw_role_schema_api_and_checkpoint_edges_are_required",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-two-predecessor-validator-weakened",
+    "changes": [
+      [
+        "crates/kinewright-project/src/store.rs",
+        "self.predecessors.len() > 2",
+        "self.predecessors.len() > 3"
+      ]
+    ],
+    "witness": "durable::w14_raw_role_schema_api_and_checkpoint_edges_are_required",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-record-role-admission-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "if role.map(String::as_str) != record.map(|r| r.role.as_str()) {",
+        "if false && role.map(String::as_str) != record.map(|r| r.role.as_str()) {"
+      ]
+    ],
+    "witness": "durable::w14_raw_role_schema_api_and_checkpoint_edges_are_required",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-record-edge-admission-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "if expected != actual {",
+        "if false && expected != actual {"
+      ]
+    ],
+    "witness": "durable::w14_raw_role_schema_api_and_checkpoint_edges_are_required",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-record-schema-accepted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.role != RESCUE_ROLE || self.schema != 1",
+        "self.role != RESCUE_ROLE"
+      ]
+    ],
+    "witness": "durable::w14_raw_role_schema_api_and_checkpoint_edges_are_required",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-record-omitted-before-publication",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.evidence.push(reference.clone());",
+        "let _ = &reference;"
+      ]
+    ],
+    "witness": "durable::w14_raw_role_schema_api_and_checkpoint_edges_are_required",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-provenance-count-unbounded",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.attempts.len() <= 16",
+        "self.attempts.len() <= 100"
+      ]
+    ],
+    "witness": "w11_warning_provenance_compaction_and_recopy",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-provenance-overflow-lost",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.summary.count_overflow |= overflow;",
+        "let _ = overflow;"
+      ]
+    ],
+    "witness": "w11_warning_provenance_compaction_and_recopy",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-provenance-treated-as-absent",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "ReceiptLookup::UnresolvedOrigin",
+        "ReceiptLookup::Absent"
+      ]
+    ],
+    "witness": "durable::w10_pending_command_exclusion_and_original_id_lookup",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-origin-digest-conflict-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "if expected == digest {",
+        "if true || expected == digest {"
+      ]
+    ],
+    "witness": "durable::w10_pending_command_exclusion_and_original_id_lookup",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-l1-document-payload-change",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "if before.inspection_document() != after.inspection_document()",
+        "if false && (before.inspection_document() != after.inspection_document()"
+      ],
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "|| left.issuer_state_ref != right.issuer_state_ref\n    {",
+        "|| left.issuer_state_ref != right.issuer_state_ref)\n    {"
+      ]
+    ],
+    "witness": "durable::w13_projection_preserves_every_non_linkage_payload",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {
+      "JA_C4_L1_CASE": "document"
+    },
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-l1-batch-payload-change",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "if before.inspection_document() != after.inspection_document()",
+        "if false && (before.inspection_document() != after.inspection_document()"
+      ],
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "|| left.issuer_state_ref != right.issuer_state_ref\n    {",
+        "|| left.issuer_state_ref != right.issuer_state_ref)\n    {"
+      ]
+    ],
+    "witness": "durable::w13_projection_preserves_every_non_linkage_payload",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {
+      "JA_C4_L1_CASE": "batch"
+    },
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-l1-input-payload-change",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "if before.inspection_document() != after.inspection_document()",
+        "if false && (before.inspection_document() != after.inspection_document()"
+      ],
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "|| left.issuer_state_ref != right.issuer_state_ref\n    {",
+        "|| left.issuer_state_ref != right.issuer_state_ref)\n    {"
+      ]
+    ],
+    "witness": "durable::w13_projection_preserves_every_non_linkage_payload",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {
+      "JA_C4_L1_CASE": "input"
+    },
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-independent-projection-root-dropped",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "let mut pins = manifest.durable_pins.clone();",
+        "let mut pins = manifest.durable_pins.iter().filter(|r| manifest.evidence_roles.contains_key(&r.sha256)).cloned().collect::<Vec<_>>();"
+      ]
+    ],
+    "witness": "durable::w13_projection_preserves_every_non_linkage_payload",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-current-provenance-summarized",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.validate(&StorageLimits::default())?;\n        for attempt in inherited {",
+        "self.attempts.clear(); self.validate(&StorageLimits::default())?;\n        for attempt in inherited {"
+      ]
+    ],
+    "witness": "w11_warning_provenance_compaction_and_recopy",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-current-omission-dropped",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.validate(&StorageLimits::default())?;\n        for attempt in inherited {",
+        "self.omissions.clear(); self.validate(&StorageLimits::default())?;\n        for attempt in inherited {"
+      ]
+    ],
+    "witness": "w11_warning_provenance_compaction_and_recopy",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-oversized-raw-role-hidden",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery.rs",
+        "if serde_json::from_slice::<RoleProbe>(&bytes).is_ok_and(|probe| probe.role) {",
+        "if false && serde_json::from_slice::<RoleProbe>(&bytes).is_ok_and(|probe| probe.role) {"
+      ]
+    ],
+    "witness": "durable::w14_oversized_unclaimed_raw_role_refuses",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-archived-raw-switch-requirement-skipped",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery.rs",
+        "crate::rescue_record::required_apis(root.manual_switch_generation, false)",
+        "crate::rescue_record::required_apis(0, false)"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-missing-raw-requirement-accepted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "|| required.iter().any(|(k, v)| declared.get(k) != Some(v))",
+        "|| false && required.iter().any(|(k, v)| declared.get(k) != Some(v))"
+      ]
+    ],
+    "witness": "durable::w13_local_selection_mapping_limits_and_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-rack-counted-as-third-predecessor",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "recovery.predecessors.truncate(2);",
+        "recovery.predecessors.truncate(2); if recovery.predecessors.len() == 2 && !bundle.rescue_records()?.is_empty() { return Err(BundleError::Capacity(\"third recovery root\")); }"
+      ]
+    ],
+    "witness": "durable::w13_ack_and_two_predecessors_reopen_rotate_and_recover",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-selected-predecessor-dropped",
+    "changes": [
+      [
+        "crates/kinewright-project/src/store.rs",
+        "let mut all = roots.to_vec();",
+        "let mut recovery = recovery; recovery.predecessors.truncate(1); let mut all = roots.to_vec();"
+      ]
+    ],
+    "witness": "durable::w13_ack_and_two_predecessors_reopen_rotate_and_recover",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c4-b-activation-rewrites-origin-inputs",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "let historical_input_owner = switch_generation != 0",
+        "let historical_input_owner = false && switch_generation != 0"
+      ]
+    ],
+    "witness": "durable::w13_checkpoint_restore_uses_b_identity_without_rewriting_inputs",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-target-only-ordinary-publisher",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/publication.rs",
+        "        let _ = id;",
+        "        let active = active && *id == root.manual_branch_id;"
+      ]
+    ],
+    "witness": "linux::w13_every_publication_fits_fresh_open",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_save",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": "live history bytes"
+  },
+  {
+    "name": "repeat-c5-target-only-c5-sparse-cache",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/publication.rs",
+        "        let _ = id;",
+        "        let active = active && *id == root.manual_branch_id;"
+      ]
+    ],
+    "witness": "c5_pressure::w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": "published candidate cannot exceed independent fresh-open capacity"
+  },
+  {
+    "name": "repeat-c5-select-before-definite-ordinary-save",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "let save = if self.dirty()? {",
+        "let save = if false && self.dirty()? {"
+      ]
+    ],
+    "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-refuse-legal-ordinary-floor",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?;",
+        "let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?; if bounded.floor.is_some() { return Err(BundleError::Capacity(\"mutant refuses legal floor\")); }"
+      ]
+    ],
+    "witness": "c5::w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-bypass-ordinary-select-history",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "let bounded = crate::bundle_commit::select_history(&aligned, self.store.limits())?;",
+        "let bounded = crate::bundle_commit::BoundedHistory { history: aligned.clone(), floor: None };"
+      ]
+    ],
+    "witness": "c5::w13_preliminary_save_uses_ordinary_floor_with_redo_or_gesture",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-unfreeze-selection-unknown",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "            Err(_) if self.unsettled || self.publication_state == PublicationState::Unknown => {\n                ProjectSelectionResult::Unknown",
+        "            Err(_) if self.unsettled || self.publication_state == PublicationState::Unknown => {\n                let owner = self.attach_core(core).unwrap(); let cut = owner.capture().unwrap(); owner.resume(&cut).unwrap(); ProjectSelectionResult::Unknown"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-drop-l-on-later-r-save",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        branch_index.retain(|id, _| branches.contains_key(id));",
+        "        if old_switch == 1 && selection.is_none() { branches.retain(|id, _| id == branch_id); } branch_index.retain(|id, _| branches.contains_key(id));"
+      ]
+    ],
+    "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-drop-r-on-later-l-save",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        branch_index.retain(|id, _| branches.contains_key(id));",
+        "        if old_switch >= 2 && selection.is_none() { branches.retain(|id, _| id == branch_id); } branch_index.retain(|id, _| branches.contains_key(id));"
+      ]
+    ],
+    "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-remint-shared-prefix-on-first-r-save",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let all_batch_ids = batch_ids.clone();",
+        "        if old_switch == 1 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
+      ]
+    ],
+    "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-omit-quota-retirement-action",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "            .filter(|(_, _, blockers)| blockers.is_empty())",
+        "            .filter(|(_, _, _)| false)"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-release-target-pin-before-quota-retry",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "    pin: Option<StorePin>,",
+        "    pub(crate) pin: Option<StorePin>,"
+      ],
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "_ => self.prepared = Some(prepared),",
+        "_ => { prepared.pin.take(); self.prepared = Some(prepared); },"
+      ]
+    ],
+    "witness": "c5_pressure::w13_definite_rescue_sparse_cache_growing_saves_and_same_pin_quota_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-offer-prepared-target-for-retirement",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        if self\n            .prepared\n            .as_ref()\n            .is_some_and(|p| p.protects_branch(id))\n        {\n            blockers.push(\"prepared recovery selection target\".into());\n        }",
+        ""
+      ]
+    ],
+    "witness": "c5::w13_prepared_existing_target_is_never_a_retirement_offer",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-remove-prepared-target-directly",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        let blockers = self.branch_blockers(branch);",
+        "        let mut blockers = self.branch_blockers(branch); blockers.retain(|b| b != \"prepared recovery selection target\");"
+      ]
+    ],
+    "witness": "c5::w13_prepared_existing_target_is_never_a_retirement_offer",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-existing-target-head-not-revalidated",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(&prepared.target_branch)\n                    .is_some_and(|c| c.head_id == *head)\n            });",
+        "            && prepared.existing_head.as_ref().is_none_or(|_| self.branches.contains_key(&prepared.target_branch));"
+      ]
+    ],
+    "witness": "c5::w13_existing_target_retry_requires_current_membership_and_head",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-resurrect-missing-existing-target",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "            && prepared.existing_head.as_ref().is_none_or(|head| {\n                self.branches\n                    .get(&prepared.target_branch)\n                    .is_some_and(|c| c.head_id == *head)\n            });",
+        "            && true;"
+      ],
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "        let target_ref = match &prepared.target {\n            RecoverySelection::WorkingBranch(id) => self.checkpoint_reference(id)?,",
+        "        let target_ref = match &prepared.target {\n            RecoverySelection::WorkingBranch(id) => { if !self.branches.contains_key(id) { self.branches.insert(id.clone(), prepared.restore.checkpoint.clone()); let sealed = self.store.admit_record(&prepared.restore.checkpoint)?; let mut index = (*self.store.read_record::<std::collections::BTreeMap<BranchId, crate::bundle_records::ObjectRef>>(&self.root.as_ref().unwrap().branch_index_ref)?).clone(); index.insert(id.clone(), sealed.reference.clone()); self.root.as_mut().unwrap().branch_index_ref = self.store.admit_record(&index)?.reference.clone(); } self.store.admit_record(&prepared.restore.checkpoint)?.reference.clone() },"
+      ]
+    ],
+    "witness": "c5::w13_existing_target_retry_requires_current_membership_and_head",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-retire-active-working-branch",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        let mut blockers = vec![];",
+        "        let mut blockers = vec![]; if self.active_bundle().is_ok_and(|b| b.manual_branch_id() == id) { return blockers; }"
+      ],
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "            .ok_or(BundleError::HistoryChanged)?;\n        let result = BundleCommit::publish_maintenance(bundle);",
+        "            .ok_or(BundleError::HistoryChanged)?;\n        if &bundle.manual_branch_id == branch { bundle.manual_branch_id = bundle.branches.keys().next().unwrap().clone(); } let result = BundleCommit::publish_maintenance(bundle);"
+      ]
+    ],
+    "witness": "c5::w13_one_level_retention_and_explicit_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-retirement-without-explicit-consent",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        if !confirmed {",
+        "        if false && !confirmed {"
+      ]
+    ],
+    "witness": "c5::w13_one_level_retention_and_explicit_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-duplicate-retirement-acknowledged",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        ".ok_or(BundleError::HistoryChanged)?;\n        let result = BundleCommit::publish_maintenance(bundle);",
+        ".unwrap_or_else(|| bundle.branches.values().next().unwrap().clone());\n        let result = BundleCommit::publish_maintenance(bundle);"
+      ]
+    ],
+    "witness": "c5::w13_one_level_retention_and_explicit_retirement",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-resume-after-frozen-cancel",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "        if !capture.was_frozen {",
+        "        if true {"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-resume-after-frozen-preview-refusal",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "if result.is_err() && !was_frozen {",
+        "if result.is_err() {"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-resume-after-frozen-publication-failure",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "                if !was_frozen {",
+        "                if true {"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-resume-after-frozen-unknown-b",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "\n        if !was_frozen {",
+        "\n        if true {"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-late-a-seals-b",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "        let state = owner.bundle()?.publication_state();",
+        "        let state = owner.bundle()?.publication_state(); if let Ok(owner) = ProjectAttachment::new(&self.core) { if let Ok(cut) = owner.freeze() { let _ = owner.seal(&cut); } }"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-shares-original-core",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "let b_core = Core::spawn((*selection.history.baseline).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;",
+        "let b_core = self.core.clone();"
+      ]
+    ],
+    "witness": "c5::w01_first_save_rescue_is_independent",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-record-not-published",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "        target.retain_rescue_record(&record)?;",
+        "        let _ = &record;"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-drops-default-ack",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "                record.acknowledged_root = Some(projected);",
+        "                let _ = projected; record.acknowledged_root = None; record.acknowledged_absence = Some(\"mutant dropped ack\".into());"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-drops-selected-p2",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "                .map(|(_, r)| r.clone())\n                .collect();",
+        "                .take(1).map(|(_, r)| r.clone())\n                .collect();"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rotation-forgets-ack-record",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let mut evidence = bundle.evidence.clone();",
+        "        let mut evidence = bundle.evidence.iter().filter(|r| crate::rescue_record::parse(&bundle.store.read_evidence(r).unwrap()).unwrap().is_none()).cloned().collect::<Vec<_>>();"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-ack-retirement-clears-independent-evidence",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "            bundle.evidence.retain(|r| r != &old);",
+        "            let _ = &old; bundle.evidence.clear();"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-silent-recovery-omission",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_rescue.rs",
+        "|| (!self.omissions.is_empty() && !consent.omission)",
+        "|| false && (!self.omissions.is_empty() && !consent.omission)"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_omission_only_precedes_trim",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-one-consent-authorizes-both-losses",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_rescue.rs",
+        "        consent.trim = true;",
+        "        consent.trim = true; consent.omission = true;"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_trim_then_separate_omission_recomputes_closure",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-silent-history-trim",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_rescue.rs",
+        "(self.removed_undo > 0 && !consent.trim)",
+        "(false && self.removed_undo > 0 && !consent.trim)"
+      ]
+    ],
+    "witness": "c5::w04_oldest_first_trim_preserves_redo_gesture_and_inputs",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-skip-omission-alone-before-trim",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
+        "        } else if let Ok(roots) = self.rescue_graph(before, &unavailable, &limits) {",
+        "        } else if let Ok(roots) = self.rescue_graph(before, &[], &limits) {"
+      ],
+      [
+        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
+        "            let ordinary = crate::bundle_commit::select_history(before, &limits)?;",
+        "            let mut ordinary = crate::bundle_commit::select_history(before, &limits)?; ordinary.history = kinewright_core::HistoryTransition::floor(before.clone(), 1).map_err(crate::bundle::history_error)?.after().clone();"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_omission_only_precedes_trim",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-omit-available-roots-for-quota",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
+        "if !missing.entries.is_empty() || !missing.dependencies_complete {",
+        "if true {"
+      ]
+    ],
+    "witness": "c5::w13_available_recovery_roots_cannot_be_omitted_for_quota",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-omitted-inventory-reintroduced",
+    "changes": [
+      [
+        "crates/kinewright-project/src/store.rs",
+        "        self.copy_selected_graph(source, roots, true, false)",
+        "        self.copy_selected_graph(source, roots, true, true)"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_omission_only_precedes_trim",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-close-leaves-uncertain-source-reuse",
+    "changes": [
+      [
+        "crates/kinewright-project/src/store.rs",
+        "    pub(crate) fn close_originating_context(&mut self) {\n        self.uncertain = false;\n    }",
+        "    pub(crate) fn close_originating_context(&mut self) {}"
+      ]
+    ],
+    "witness": "c5::w08_context_close_fences_handles_and_retires_temporary_sources_once",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-copied-record-profile-not-admitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
+        "        for reference in &closure {\n            source.admit_rescue_record_profile(reference, limits)?;\n        }",
+        ""
+      ]
+    ],
+    "witness": "c5::w13_available_recovery_roots_cannot_be_omitted_for_quota",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-selected-graph-bounds-not-admitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
+        "        if bytes > limits.owned_bytes\n            || bytes > limits.copy_overlap_bytes\n            || closure.len() as u64 > limits.objects\n        {\n            return Err(BundleError::Capacity(\"rescue selected graph/overlap\"));\n        }",
+        ""
+      ]
+    ],
+    "witness": "c5::w06_rescue_bounds_refuse_before_destination_mutation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-late-a-replaces-active-core",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "        let state = owner.bundle()?.publication_state();",
+        "        let state = owner.bundle()?.publication_state(); self.core = self.retained_destinations[index].1.clone();"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-no-ticket-reconcile-restores-live-history",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "            self.pending_save = None;\n            return Ok(());\n        };",
+        "            if let Some(live) = live { if live.attachment_state().map_err(history_error)? == kinewright_core::AttachmentState::Live { self.attach_core(live)?.restore_history((*self.branch_history(&self.manual_branch_id)?).clone()).map_err(history_error)?; } }\n            self.pending_save = None;\n            return Ok(());\n        };"
+      ]
+    ],
+    "witness": "c5::w10_pending_command_exclusion_and_original_id_lookup",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-exact-ticket-settlement-omitted-a",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = live {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save(",
+        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = None::<&Core> {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save("
+      ]
+    ],
+    "witness": "c5::w16_first_save_a_writer_and_later_floor_continue",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-exact-ticket-settlement-omitted-b",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle.rs",
+        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = live {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save(",
+        "    pub(crate) fn settle_destination_ticket(\n        &mut self,\n        live: Option<&Core>,\n    ) -> Result<(), BundleError> {\n        let Some(attempt) = self.pending_attempt() else {\n            self.pending_save = None;\n            return Ok(());\n        };\n        if let Some(live) = None::<&Core> {\n            let attachment = self.attach_core(live)?;\n            if attachment.settle_attempt(&attempt)?\n                || (live.actor_identity() == attempt.actor()\n                    && live\n                        .pending_history_save()\n                        .map_err(history_error)?\n                        .is_none())\n            {\n                self.pending_save = None;\n            }\n        }\n        Ok(())\n    }\n\n    pub(crate) fn settle_pending_save("
+      ]
+    ],
+    "witness": "c5::w16_repeated_active_b_attempts_settle_only_their_tickets",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-published-ack-has-no-dedicated-edge",
+    "changes": [
+      [
+        "crates/kinewright-project/src/rescue_record.rs",
+        "self.acknowledged_root.iter().cloned().collect()",
+        "vec![]"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-published-ack-counted-as-third-predecessor",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "recovery.predecessors.truncate(2);",
+        "recovery.predecessors.truncate(2); if recovery.predecessors.len() == 2 && !bundle.rescue_records()?.is_empty() { return Err(BundleError::Capacity(\"third recovery root\")); }"
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_one_level_rescue_recopy_and_explicit_ack_retirement",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-preliminary-save-unknown-resumes-o",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "                    self.recovery_save_pending = true;",
+        "                    self.recovery_save_pending = true; let cut = self.attachment.capture().map_err(crate::bundle::history_error)?; self.attachment.resume(&cut).map_err(crate::bundle::history_error)?;"
+      ]
+    ],
+    "witness": "c5::w13_preliminary_save_faults_keep_exact_cut_and_do_not_select",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-completed-reply-allocates-another-r",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "            && previous == &target",
+        "            && false && previous == &target"
+      ]
+    ],
+    "witness": "c5::w13_selection_refusal_and_absence_keep_p2_for_same_target_retry",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-overwrite-l-on-later-r-save",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        branch_index.retain(|id, _| branches.contains_key(id));",
+        "        branch_index.retain(|id, _| branches.contains_key(id)); if old_switch == 1 && selection.is_none() && !metadata_only { for (id, reference) in &mut branch_index { if id != branch_id { let mut wrong = branches[branch_id].clone(); wrong.branch_id = id.clone(); wrong.head_id = HeadId::fresh()?; let mut wrong_lineage = lineage.clone(); wrong_lineage.branch_origin = id.clone(); wrong.lineage_ref = bundle.store.admit_record(&wrong_lineage)?.reference.clone(); *reference = bundle.store.admit_record(&wrong)?.reference.clone(); branches.insert(id.clone(), wrong); } } }"
+      ]
+    ],
+    "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-remint-shared-prefix-on-later-l-save",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "        let all_batch_ids = batch_ids.clone();",
+        "        if old_switch >= 2 && selection.is_none() { for id in &mut batch_ids { *id = BatchId::fresh()?; } } let all_batch_ids = batch_ids.clone();"
+      ]
+    ],
+    "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-owned-graph-copy-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "        target.store.copy_rescue_graph(source, roots)?;",
+        "        let _ = roots;"
+      ]
+    ],
+    "witness": "c5::w01_first_save_rescue_is_independent",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-rewrites-input-profile",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "        let rebound = rebind_inputs(&mut target, &selected_inputs)?;",
+        "        for entry in &mut selected_inputs.entries { entry.profile = Some(\"mutated input profile\".into()); } let rebound = rebind_inputs(&mut target, &selected_inputs)?;"
+      ]
+    ],
+    "witness": "c5::w01_first_save_rescue_is_independent",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-closes-open-gesture",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "        let b_cut = b_attachment",
+        "        if selection.history.cursor.undo.last().is_some_and(|e| e.coalesce_key.is_some()) { b_attachment.install_history_transition(kinewright_core::HistoryTransition::recovery_close(selection.history.clone(), &selection.history).map_err(crate::bundle::history_error)?).map_err(crate::bundle::history_error)?; } let b_cut = b_attachment"
+      ]
+    ],
+    "witness": "c5::w04_oldest_first_trim_preserves_redo_gesture_and_inputs",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-rescue-discards-redo",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "        let b_cut = b_attachment",
+        "        if !selection.history.cursor.redo.is_empty() { let track = &selection.history.document.tracks[0]; b_core.request(kinewright_core::Command::Do(kinewright_core::Operation::SetTrackSyncLock { track: track.id, locked: track.sync_lock })).map_err(|e| BundleError::Corrupt(e.to_string()))?; } let b_cut = b_attachment"
+      ]
+    ],
+    "witness": "c5::w04_oldest_first_trim_preserves_redo_gesture_and_inputs",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-unknown-preliminary-save-acknowledged",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "                    self.recovery_save_pending = true;",
+        "                    self.recovery_save_pending = true; let saved = self.history_digest()?; self.association.as_mut().ok_or(BundleError::Unsettled)?.saved = Some(saved);"
+      ]
+    ],
+    "witness": "c5::w13_frozen_cut_rescue_at_both_unknown_publications_and_late_a_isolation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-activate-without-selection-root",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "    fn finish_selection(",
+        "    pub(crate) fn finish_selection("
+      ],
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "        if self.manual_branch_id != prepared.target_branch\n            || self.root.as_ref().map(|r| r.manual_switch_generation)\n                != prepared.source_generation.checked_add(1)\n        {\n            return Err(BundleError::HistoryBarrierInvariant);\n        }",
+        ""
+      ],
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        let core = self.core.clone();\n        match self.active_bundle_mut() {\n            Ok(bundle) => bundle.publish_project_selection(prepared, &core),",
+        "        let core = self.core.clone();\n        match self.active_bundle_mut() {\n            Ok(bundle) => match bundle.finish_selection(prepared, &core) { Ok(report) => ProjectSelectionResult::Activated(report), Err(error) => ProjectSelectionResult::Refused(error) },"
+      ]
+    ],
+    "witness": "c5::w13_checkpoint_recovery_preserves_dirty_b_before_activation",
+    "package": "kinewright-project",
+    "kind": "--test",
+    "target": "ja_s2_rescue_record",
+    "features": "test-util",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-registered-guard-routes-to-current-project",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "    pub(super) fn registered_bundle(\n        &self,\n        guard: &DurableBranchSessionGuard,\n    ) -> Result<&crate::bundle::ProjectBundle, BundleError> {\n        self.registered(guard)?;\n        if let Ok(bundle) = self.active_bundle()\n            && bundle.store.owner_epoch() == guard.epoch\n        {\n            return Ok(bundle);\n        }\n        self.retained_destinations\n            .iter()\n            .find_map(|(owner, _)| {\n                owner\n                    .bundle()\n                    .ok()\n                    .filter(|b| b.store.owner_epoch() == guard.epoch)\n            })\n            .ok_or_else(|| {\n                BundleError::Identity(\"registered source owner is no longer retained\".into())\n            })\n    }\n",
+        "    pub(super) fn registered_bundle(&self, guard: &DurableBranchSessionGuard) -> Result<&crate::bundle::ProjectBundle, BundleError> { self.registered(guard)?; self.active_bundle() }\n"
+      ],
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "    fn registered_bundle_mut(\n        &mut self,\n        guard: &DurableBranchSessionGuard,\n    ) -> Result<&mut crate::bundle::ProjectBundle, BundleError> {\n        self.registered(guard)?;\n        if self\n            .active_bundle()\n            .is_ok_and(|b| b.store.owner_epoch() == guard.epoch)\n        {\n            return self.active_bundle_mut();\n        }\n        self.retained_destinations\n            .iter_mut()\n            .find(|(owner, _)| {\n                owner\n                    .bundle()\n                    .is_ok_and(|b| b.store.owner_epoch() == guard.epoch)\n            })\n            .ok_or_else(|| {\n                BundleError::Identity(\"registered source owner is no longer retained\".into())\n            })?\n            .0\n            .bundle_mut()\n    }\n",
+        "    fn registered_bundle_mut(&mut self, guard: &DurableBranchSessionGuard) -> Result<&mut crate::bundle::ProjectBundle, BundleError> { self.registered(guard)?; self.active_bundle_mut() }\n"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-original-guard-blocks-independent-b-copy",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        ".is_ok_and(|bundle| bundle.store.owner_epoch() == session.guard.epoch)",
+        ".is_ok_and(|_| true)"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-registered-original-ticket-not-settled",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue.rs",
+        "        let live = self.core_for_destination(self.retained_destinations[index].0.bundle()?, None);\n",
+        "        let live: Option<Core> = None;\n"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-registered-proposal-loses-floored-prefix",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "            let mut full_delta = specialist_floor_delta_from_baseline(\n                canonical.base(),\n                &original,\n                &*self.durable_branch_baseline(&canonical)?,\n            )?;\n            full_delta.extend(cut.history().applied_operations());",
+        "            let full_delta = cut.history().applied_operations();"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-specialist-base-not-in-branch-publication",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "            let reference = bundle.stage_specialist_base(guard.base())?;",
+        "            let reference = bundle.store.admit_record(guard.base())?.reference.clone();"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-registered-close-warning-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        for registered in &self.durable_sessions {\n            let bundle = self.registered_bundle(&registered.guard)?;\n            let history = registered\n                .guard\n                .core()\n                .export_history()\n                .map_err(crate::bundle::history_error)?;\n            let digest = kinewright_media::sha256_bytes(\n                &serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?,\n            );\n            if bundle.unsettled\n                || bundle\n                    .checkpoint(&registered.guard.branch)?\n                    .history_ref\n                    .sha256\n                    != digest\n            {\n                disclosure.push(' ');\n                disclosure.push_str(&registered.name);\n                disclosure.push_str(\" has unsaved work or an unresolved save in its original project. Save or close that session first; closing this context can discard its accepted work.\");\n            }\n        }\n        Ok(disclosure)",
+        "        Ok(disclosure)"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-stale-guard-replaces-canonical-state",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "        let canonical = self.durable_sessions[index].guard.clone();",
+        "        let canonical = guard.clone();"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "repeat-c5-prune-independent-root-for-rescue",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/rescue_selection.rs",
+        "        for reference in &bundle.acknowledged_evidence()? {\n            if reference.record_kind == RecordKind::OwnedEvidence\n                && let Ok(bytes) = bundle.store.read_copy_evidence(reference, true)\n                && crate::rescue_record::parse(&bytes)?.is_some()\n            {\n                continue;\n            }\n            // Unreadable evidence remains a required root. Retained admission\n            // reports its exact missing bytes/uses instead of losing that diagnostic\n            // while trying to classify an unavailable rescue record.\n            roots.push(reference.clone());\n        }\n",
+        ""
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_trim_then_separate_omission_recomputes_closure",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true
+  },
+  {
+    "name": "repeat-c5-active-b-new-unknown-uses-old-copy-status",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_copy.rs",
+        "        if destination.unsettled\n            && destination.publication_state() == crate::bundle::PublicationState::Unknown\n        {\n            self.tag.clone_from(&destination.publication_tag);\n            self.status = CopyStatus::DurabilityUnknown;\n            self.source.mark_uncertain()?;\n        }\n",
+        ""
+      ]
+    ],
+    "witness": "writer_host::c12_tests::rescue_cases::w13_recovery_on_active_rescue_copy_settles_the_new_attempt",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true
+  },
+  {
+    "name": "repeat-c4-frozen-owner-install-core-witness",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "} else if attachment == AttachmentState::Frozen {\n                    Err(HistoryError::MutationRefused(CoreMutationRefusal::Frozen))\n                } else if manual.is_some() {",
+        "} else if manual.is_some() {"
+      ]
+    ],
+    "witness": "attachment::tests::w05_seal_checks_cut_and_all_mutation_paths",
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "production": false
+  }
+]

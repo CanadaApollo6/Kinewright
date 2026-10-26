@@ -1,4 +1,4 @@
-use super::{apply, document, edit};
+use super::{Ja1EditingSession, apply, document, edit};
 use kinewright_core::{Command, Core, HistorySaveTag, Operation, TrackId};
 use kinewright_media::test_support::TempDirectory;
 use kinewright_project::{
@@ -7,7 +7,7 @@ use kinewright_project::{
     bundle_copy::{CopyStatus, SessionStore},
     bundle_records::{ObjectRef, RecordKind},
     bundle_rescue::{MissingOwnedUse, ReconcilePhase, RescueCause, RescueEligibility},
-    editing_session::{Ja1EditingSession, RescueSlots},
+    editing_session::RescueSlots,
     io_observer,
     owned_inputs::{OwnedInputEntry, OwnedInputManifest},
     receipts::{CommandEnvelope, CommandId, ReceiptLookup},
@@ -22,7 +22,7 @@ use std::{
 };
 
 fn temp(label: &str) -> TempDirectory {
-    TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), label)
+    TempDirectory::new_in(super::durable_test_root(), label)
 }
 fn limits() -> StorageLimits {
     StorageLimits {
@@ -426,22 +426,22 @@ fn w03_probe_consent_and_premutation_cancel() {
 fn w03_native_probe_causes_keep_phase_operation_and_errno() {
     for (errno, cause, eligibility) in [
         (
-            libc::EINTR,
+            rustix::io::Errno::INTR.raw_os_error(),
             RescueCause::Interrupted,
             RescueEligibility::Ineligible,
         ),
         (
-            libc::EBADF,
+            rustix::io::Errno::BADF.raw_os_error(),
             RescueCause::Invalid,
             RescueEligibility::Ineligible,
         ),
         (
-            libc::EIO,
+            rustix::io::Errno::IO.raw_os_error(),
             RescueCause::Unavailable,
             RescueEligibility::Eligible,
         ),
         (
-            libc::ENOSPC,
+            rustix::io::Errno::NOSPC.raw_os_error(),
             RescueCause::Persistence,
             RescueEligibility::Eligible,
         ),
@@ -478,16 +478,18 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
     let path = temp.path("a.kinewright");
     let mut session = unknown(temp.root(), &path, true);
     session.defer_parent_barrier_probe().unwrap();
-    let probe = io_observer::fail_native_once("directory_sync_native", libc::EINTR, || {
-        session.probe_active()
-    })
+    let probe = io_observer::fail_native_once(
+        "directory_sync_native",
+        rustix::io::Errno::INTR.raw_os_error(),
+        || session.probe_active(),
+    )
     .unwrap()
     .unwrap();
     assert_eq!(probe.operation, "sync admitted directory");
     assert_eq!(probe.cause, RescueCause::Interrupted);
     assert_eq!(probe.eligibility, RescueEligibility::Ineligible);
     assert!(
-        matches!(probe.error, BundleError::Io(ref error) if error.raw_os_error() == Some(libc::EINTR))
+        matches!(probe.error, BundleError::Io(ref error) if error.raw_os_error() == Some(rustix::io::Errno::INTR.raw_os_error()))
     );
     session.reconcile_active().unwrap();
 
@@ -516,9 +518,11 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
     let temp = self::temp("c3-cleanup-probe");
     let path = temp.path("a.kinewright");
     let mut session = unknown(temp.root(), &path, false);
-    let probe = io_observer::fail_native_once("root_cleanup_unlink", libc::EACCES, || {
-        session.probe_active()
-    })
+    let probe = io_observer::fail_native_once(
+        "root_cleanup_unlink",
+        rustix::io::Errno::ACCESS.raw_os_error(),
+        || session.probe_active(),
+    )
     .unwrap()
     .unwrap();
     assert_eq!(probe.phase, ReconcilePhase::Cleanup);
@@ -526,7 +530,7 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
     assert_eq!(probe.cause, RescueCause::CleanupOnly);
     assert_eq!(probe.eligibility, RescueEligibility::Ineligible);
     assert!(
-        matches!(probe.error, BundleError::Io(ref error) if error.raw_os_error() == Some(libc::EACCES))
+        matches!(probe.error, BundleError::Io(ref error) if error.raw_os_error() == Some(rustix::io::Errno::ACCESS.raw_os_error()))
     );
     session.reconcile_active().unwrap();
 
@@ -555,11 +559,13 @@ fn w03_native_probe_causes_keep_phase_operation_and_errno() {
     assert!(io_observer::fail_once("root_parent_sync", || owner.save(&core, &inputs)).is_err());
     let attempt = owner.pending_attempt().unwrap();
     let attachment = owner.attach_core(&core).unwrap();
-    let result = io_observer::fail_native_once("directory_sync_native", libc::EINTR, || {
-        attachment.settle_attempt(&attempt)
-    });
+    let result = io_observer::fail_native_once(
+        "directory_sync_native",
+        rustix::io::Errno::INTR.raw_os_error(),
+        || attachment.settle_attempt(&attempt),
+    );
     assert!(
-        matches!(result, Err(BundleError::Io(ref error)) if error.raw_os_error() == Some(libc::EINTR))
+        matches!(result, Err(BundleError::Io(ref error)) if error.raw_os_error() == Some(rustix::io::Errno::INTR.raw_os_error()))
     );
     assert_eq!(
         core.pending_history_save().unwrap(),
