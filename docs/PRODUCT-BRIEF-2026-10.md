@@ -191,6 +191,21 @@ used only if licensed.
 - music-synced cuts, glows and light sweeps;
 - mattes and tracking.
 
+Riel's favourite launch videos are Farza's HeyClicky videos (2026-10-26). They are
+talking-head launch videos, so they join A to E:
+
+- short (35 to 55 s teasers, about 3 min for a demo) with fast cuts, one cut every
+  1 to 3 s;
+- shot like a vlog: a handheld wide lens close to the face, natural light, a warm
+  filmic grade, 4K at 24 or 30 fps;
+- set in the office, on the street or on a rooftop, often with teammates taking turns
+  on camera, and a hand-held wireless microphone in shot;
+- small centred captions on every shot, with a few large lowercase titles ("hey
+  everyone", "everything we shipped", the URL);
+- the product shown two ways: as cut-in screen recordings, and filmed on the laptop
+  screen, with keyboard close-ups;
+- a few behind-the-scenes cutaways, and a black end card with the logo.
+
 **Stitching** separate clips with high-quality transitions shares its building
 blocks with C and E, and lands with them.
 
