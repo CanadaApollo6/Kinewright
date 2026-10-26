@@ -129,6 +129,25 @@ impl Ja1EditingSession {
         self.host_cut = None;
         Ok(permit)
     }
+    pub fn current_switch_identity(
+        &self,
+    ) -> Result<crate::bundle_switch::SwitchAttachmentIdentity, BundleError> {
+        let bundle = self.active_bundle()?;
+        if bundle.unsettled {
+            return Err(BundleError::Unsettled);
+        }
+        let root = bundle.root().ok_or(BundleError::Unsettled)?;
+        Ok(crate::bundle_switch::SwitchAttachmentIdentity {
+            project: root.project_id.clone(),
+            root_sha256: self.root_sha256()?,
+            root_generation: root.generation,
+            switch_generation: root.manual_switch_generation,
+            current: SwitchBranch::from_checkpoint(
+                bundle.checkpoint_reference(bundle.manual_branch_id())?,
+                bundle.checkpoint(bundle.manual_branch_id())?,
+            ),
+        })
+    }
     pub fn current_switch_attachment(&self) -> Result<SwitchAttachment, BundleError> {
         let bundle = self.active_bundle()?;
         if bundle.unsettled {

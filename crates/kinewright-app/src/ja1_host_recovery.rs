@@ -13,6 +13,9 @@ use std::process::Child;
 pub(super) struct RecoveredManual {
     client: HostClient,
     child: Option<Child>,
+    completion: Option<Result<CompletedRecovery, BundleError>>,
+}
+struct CompletedRecovery {
     permit: kinewright_core::ManualPermit,
     reply: HostReply,
     digest: String,
@@ -212,7 +215,10 @@ impl HostAttachment {
         let roots = self.status.admitted_roots.clone();
         let project = self.client.endpoint().project.clone();
         let executable = self.executable.clone();
-        let restart = !executable.as_os_str().is_empty();
+        let restart = !executable.as_os_str().is_empty()
+            && prior_child
+                .as_mut()
+                .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
         let callback = if restart {
             let server = if let Some(reader) = &retained_source {
                 SourceServer::start(reader.clone()).map_err(host_error)?
@@ -288,10 +294,10 @@ impl HostAttachment {
             } else {
                 RecoveryHost {
                     client: prior_client,
-                    child: None,
+                    child: prior_child.take(),
                 }
             };
-            let (permit, reply, digest) = run_barrier(
+            let completion = run_barrier(
                 &mut host,
                 endpoint,
                 identity,
@@ -300,13 +306,16 @@ impl HostAttachment {
                 live,
                 &saved_plan,
                 discard,
-            )?;
-            Ok(RecoveredManual {
-                client: host.client.clone(),
-                child: host.child.take(),
+            )
+            .map(|(permit, reply, digest)| CompletedRecovery {
                 permit,
                 reply,
                 digest,
+            });
+            Ok(RecoveredManual {
+                client: host.client.clone(),
+                child: host.child.take(),
+                completion: Some(completion),
             })
         }));
         Ok(())
@@ -331,24 +340,25 @@ impl HostAttachment {
         let mut recovered = match result {
             Ok(recovered) => recovered,
             Err(error) => {
-                self.status.frozen = true;
-                self.status.message = format!("Recovery remains paused: {error}");
-                return Ok(Some(HostReply {
-                    status: self.status.clone(),
-                    error: Some(kinewright_agent::writer_host::HostRefusal::new(
-                        "recovery_paused",
-                        &error.to_string(),
-                    )),
-                    ..HostReply::default()
-                }));
+                return Ok(Some(self.paused_recovery_reply(&error)));
             }
         };
-        owner.finish_host_manual_recovery(&recovered.digest)?;
+        // The same owned process returns even when a barrier reply was lost.
+        // Keeping it here lets Retry reconcile without killing retained authority.
         self.client = recovered.client.clone();
         self.child = recovered.child.take();
+        let completed = match recovered
+            .completion
+            .take()
+            .ok_or(BundleError::HistoryChanged)?
+        {
+            Ok(completed) => completed,
+            Err(error) => return Ok(Some(self.paused_recovery_reply(&error))),
+        };
+        owner.finish_host_manual_recovery(&completed.digest)?;
         self.manual = Some(super::super::ManualProducerGate {
             actor: owner.core().actor_identity(),
-            permit: recovered.permit.clone(),
+            permit: completed.permit,
         });
         self.cut = None;
         self.recovery_originals.clear();
@@ -356,7 +366,20 @@ impl HostAttachment {
             .recovery_plan
             .lock()
             .map_err(|_| BundleError::Unsettled)? = None;
-        self.accept_status(recovered.reply.status.clone());
-        Ok(Some(recovered.reply.clone()))
+        self.accept_status(completed.reply.status.clone());
+        Ok(Some(completed.reply))
+    }
+
+    fn paused_recovery_reply(&mut self, error: &BundleError) -> HostReply {
+        self.status.frozen = true;
+        self.status.message = format!("Recovery remains paused: {error}");
+        HostReply {
+            status: self.status.clone(),
+            error: Some(kinewright_agent::writer_host::HostRefusal::new(
+                "recovery_paused",
+                &error.to_string(),
+            )),
+            ..HostReply::default()
+        }
     }
 }

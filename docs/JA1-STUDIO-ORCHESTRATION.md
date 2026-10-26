@@ -1486,3 +1486,22 @@ Windows durability, native providers and G20 retain their separate gates.
 A non-activated rescue leaves the active association's display path and Saved identity at A.
 Only an activated outcome transfers the caller's destination spelling to B; a later proof of
 a completed capture does not change the active association.
+
+### S2-H review corrections
+
+Enable Studio refuses a named legacy project before stopping its ordinary local writer.
+Its edits stay Live and its existing legacy Save route remains available, including media
+that Studio cannot yet admit. Lower-level handover also refuses any unconverted root before
+releasing its local migration owner. A bootstrap failure before discovery reaps its child, reacquires the original writer,
+verifies the expected root under pinned authority, and resumes the exact retained GUI cut.
+Failure after host acquisition retains the existing L2 ownership rule.
+
+A missing reply freezes input while preserving original accepted envelopes and the switch
+request. An alive host reconciles that evidence through the shared recovery barrier; confirmed
+host loss still enters L2. Installing a committed switch retains B's frozen cut and prepared
+view until confirmation. Retry confirms the same identity without reinstalling or resuming A;
+a duplicate confirmation returns only that client's same current grant. Failed input acquisition
+revokes the partial grant and refreezes the shadow.
+
+The host bearer carries editor authority while no manual lease is held; S4 binds an editor
+credential at attach.

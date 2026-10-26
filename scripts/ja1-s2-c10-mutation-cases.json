@@ -404,8 +404,8 @@
     "changes": [
       [
         "crates/kinewright-project/src/bundle_commit.rs",
-        "for envelope in manual_batch.iter().chain(",
-        "for envelope in manual_batch.iter().skip(manual_batch.len().saturating_sub(1)).chain("
+        "for envelope in manual_batch\n            .iter()\n            .chain(",
+        "for envelope in manual_batch\n            .iter().skip(manual_batch.len().saturating_sub(1))\n            .chain("
       ]
     ],
     "package": "kinewright-agent",

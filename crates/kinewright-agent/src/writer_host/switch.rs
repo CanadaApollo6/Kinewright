@@ -6,6 +6,15 @@ use kinewright_project::{
     receipts::{CommandEnvelope, ReceiptLookup, ReceiptResult},
 };
 
+pub(super) struct SwitchConfirmation {
+    installed: SwitchAttachmentIdentity,
+    current: SwitchAttachmentIdentity,
+    grant: Option<(
+        kinewright_project::manual_history::ManualLease,
+        kinewright_project::owned_inputs::OwnedInputManifest,
+    )>,
+}
+
 impl HostCommandOwner {
     pub(super) fn prepare_switch(
         &mut self,
@@ -111,10 +120,30 @@ impl HostCommandOwner {
         installed: &SwitchAttachmentIdentity,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
+        let current = self.owner()?.current_switch_identity()?;
+        let continuation = self.confirmed_switch.as_ref().is_some_and(|confirmation| {
+            confirmation.installed == *installed
+                && confirmation.current.project == current.project
+                && confirmation.current.switch_generation == current.switch_generation
+                && confirmation.current.current == current.current
+        });
+        if let Some(confirmation) = &self.confirmed_switch
+            && continuation
+            && let Some((lease, inputs)) = &confirmation.grant
+            && lease.client == client
+            && self.manual.as_ref() == Some(lease)
+            && !self.switch_frozen
+            && !self.recovering
+            && !self.owner()?.has_unresolved_publication()
+        {
+            reply.manual_lease = Some(lease.clone());
+            reply.manual_inputs = Some(inputs.clone());
+            return Ok(());
+        }
         if !self.switch_frozen
             || self.manual.is_some()
             || self.owner()?.has_unresolved_publication()
-            || self.owner()?.current_switch_attachment()?.identity()? != *installed
+            || (current != *installed && !continuation)
             || kinewright_project::manual_history::history_sha256(
                 &self
                     .owner()?
@@ -128,18 +157,37 @@ impl HostCommandOwner {
         let cut = self.owner()?.freeze_manual_barrier()?;
         self.owner_mut()?.resume_manual_barrier(&cut)?;
         self.switch_frozen = false;
-        match self.acquire_manual(client) {
-            Ok(lease) => {
+        let acquisition: Result<_, HostError> = (|| {
+            let lease = self.acquire_manual(client)?;
+            let inputs = self.owner()?.manual_input_context()?;
+            Ok((lease, inputs))
+        })();
+        match acquisition {
+            Ok((lease, inputs)) => {
+                self.confirmed_switch = Some(SwitchConfirmation {
+                    installed: installed.clone(),
+                    current: self.owner()?.current_switch_identity()?,
+                    grant: Some((lease.clone(), inputs.clone())),
+                });
                 reply.manual_lease = Some(lease);
-                reply.manual_inputs = Some(self.owner()?.manual_input_context()?);
+                reply.manual_inputs = Some(inputs);
                 self.message =
                     "Current working edit and resources confirmed; fresh manual authority granted."
                         .into();
                 Ok(())
             }
             Err(error) => {
+                self.manual = None;
                 self.switch_frozen = true;
                 self.owner()?.freeze_manual_barrier()?;
+                self.confirmed_switch =
+                    self.owner()?.current_switch_identity().ok().map(|current| {
+                        SwitchConfirmation {
+                            installed: installed.clone(),
+                            current,
+                            grant: None,
+                        }
+                    });
                 Err(error)
             }
         }

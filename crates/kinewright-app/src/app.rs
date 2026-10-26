@@ -898,6 +898,10 @@ impl KinewrightApp {
             return;
         }
         let was_legacy = !self.focused().source_admission.is_studio();
+        if was_legacy && self.focused().project_path.is_some() {
+            self.status = "Studio cannot attach this legacy project yet. Your edits remain here; local editing and Save are available.".into();
+            return;
+        }
         if was_legacy {
             if let Err(error) = self.focused_mut().flush_incidents_if_changed() {
                 self.status = error.to_string();
@@ -17554,4 +17558,81 @@ pub(crate) fn ja_c9_manual_producer_gate_witness() {
     in1_tests::in2_cleanup(&mut app);
     drop(app);
     drop(engine);
+}
+
+#[cfg(test)]
+#[allow(
+    dead_code,
+    reason = "portable App helper for the Linux-only durable activation witness"
+)]
+pub(crate) fn ja_s2h_legacy_activation_witness() {
+    let root = kinewright_media::test_support::workspace_target_dir();
+    let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "s2h-legacy");
+    let path = temp.path("legacy.kinewright");
+    let asset = MediaAsset {
+        id: AssetId(7),
+        path: temp.path("source.mov"),
+        name: "legacy source".into(),
+        duration: TimeCode(90),
+        fps: Rational::new(30, 1).unwrap(),
+        kind: kinewright_core::MediaKind::Video,
+        resolution: Some((1920, 1080)),
+        source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
+        color_description: kinewright_core::ColorDescription::default(),
+        assumed_from: None,
+    };
+    let document = Document {
+        media_pool: vec![asset],
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    };
+    std::fs::write(
+        &path,
+        kinewright_project::serialize_project_document(&document).unwrap(),
+    )
+    .unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let (mut app, engine) = in2b_tests::in2b_harness(document, Some(path.clone()));
+    let core = app.focused().core.clone();
+    core.request(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let expected = core.export_history().unwrap();
+    in1_tests::in1_drain_core(&mut app, 0);
+    assert!(app.focused().recovery.writer().is_some());
+    app.enable_ja1();
+    assert!(
+        app.focused().ja1.is_none(),
+        "legacy activation must refuse before replacing its local writer"
+    );
+    assert!(
+        app.focused().recovery.writer().is_some(),
+        "the original named writer remains available"
+    );
+    assert!(!app.focused().ja1_read_only());
+    assert_eq!(
+        core.attachment_state(),
+        Ok(kinewright_core::AttachmentState::Live)
+    );
+    assert_eq!(core.export_history().unwrap(), expected);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(app.status.contains("legacy project"), "{}", app.status);
+    assert!(app.status.contains("Save are available"));
+    assert!(app.save_project(false), "{}", app.status);
+    assert_eq!(core.export_history().unwrap(), expected);
+    let serialized = kinewright_project::serialize_project_document(&expected.document).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), serialized.as_bytes());
+    let (reopened, _, _) = kinewright_project::load_document(&path).unwrap();
+    assert_eq!(reopened, *expected.document);
+    in2b_tests::in2b_quiesce_engine(&engine);
+    in1_tests::in2_cleanup(&mut app);
+    app.focused_mut()
+        .stop_threads("S2-H legacy activation witness");
 }

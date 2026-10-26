@@ -13,6 +13,7 @@ pub struct DurableBranchSessionGuard {
     floor_source: Arc<StorageReservation<HistorySnapshot>>,
 }
 pub(super) struct RegisteredSession {
+    pub(super) digest_cache: std::cell::RefCell<super::HistoryDigestCache>,
     pub(super) guard: DurableBranchSessionGuard,
     pub(super) name: String,
     pin: crate::store::StorePin,
@@ -169,6 +170,7 @@ impl Ja1EditingSession {
             epoch: bundle.store.owner_epoch(),
         };
         self.durable_sessions.push(RegisteredSession {
+            digest_cache: std::cell::RefCell::new(None),
             guard: guard.clone(),
             name: name.into(),
             pin,
@@ -246,6 +248,7 @@ impl Ja1EditingSession {
             epoch: bundle.store.owner_epoch(),
         };
         self.durable_sessions.push(RegisteredSession {
+            digest_cache: std::cell::RefCell::new(None),
             guard: guard.clone(),
             name: name.into(),
             pin,

@@ -19,8 +19,15 @@ use std::{
 
 #[path = "ja1_host_recovery.rs"]
 mod recovery;
+#[cfg(all(test, target_os = "linux"))]
+#[path = "ja1_host_transport_tests.rs"]
+mod transport_tests;
 
 pub(super) struct HostAttachment {
+    installed_switch: Option<(
+        kinewright_project::bundle_switch::SwitchAttachment,
+        super::PreparedView,
+    )>,
     pub(super) switch_envelope: Option<kinewright_project::receipts::CommandEnvelope>,
     prepared_switch: Option<(
         kinewright_project::editing_session::PreparedGuiSwitch,
@@ -61,23 +68,35 @@ impl HostAttachment {
         committed: &kinewright_project::bundle_switch::SwitchAttachment,
     ) -> Result<(HostReply, super::PreparedView), BundleError> {
         committed.verify()?;
-        let cut = self.cut.as_ref().ok_or(BundleError::HistoryChanged)?;
-        let mut prepared = None;
-        if self
-            .prepared_switch
-            .as_ref()
-            .is_some_and(|(actor, _)| !actor.matches(committed))
+        if let Some((installed, _)) = &self.installed_switch
+            && installed != committed
         {
-            self.prepared_switch = None;
+            return Err(BundleError::HistoryChanged);
         }
-        if let Some((actor, view)) = self.prepared_switch.take() {
-            owner.activate_prepared_gui_switch(cut, committed, actor)?;
-            prepared = Some(view);
-        } else {
-            owner.activate_host_switch(cut, committed, |core| {
-                prepared = Some(super::PreparedView::prepare(core)?);
-                Ok(())
-            })?;
+        if self.installed_switch.is_none() {
+            let cut = self.cut.as_ref().ok_or(BundleError::HistoryChanged)?;
+            let mut prepared = None;
+            if self
+                .prepared_switch
+                .as_ref()
+                .is_some_and(|(actor, _)| !actor.matches(committed))
+            {
+                self.prepared_switch = None;
+            }
+            if let Some((actor, view)) = self.prepared_switch.take() {
+                owner.activate_prepared_gui_switch(cut, committed, actor)?;
+                prepared = Some(view);
+            } else {
+                owner.activate_host_switch(cut, committed, |core| {
+                    prepared = Some(super::PreparedView::prepare(core)?);
+                    Ok(())
+                })?;
+            }
+            self.cut = Some(owner.recapture_host_recovery_cut()?);
+            self.installed_switch = Some((
+                committed.clone(),
+                prepared.ok_or(BundleError::HistoryChanged)?,
+            ));
         }
         // The fresh GUI actor remains Frozen while the host checks the current pointer.
         let reply = self
@@ -108,8 +127,16 @@ impl HostAttachment {
         });
         self.client = self.client.with_manual_editor(self.manual_client.clone());
         self.cut = None;
-        Ok((reply, prepared.ok_or(BundleError::HistoryChanged)?))
+        let (_, view) = self
+            .installed_switch
+            .take()
+            .ok_or(BundleError::HistoryChanged)?;
+        Ok((reply, view))
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bootstrap transaction owns writer release, child acquisition and verified rollback"
+    )]
     pub fn launch(
         owner: &mut Ja1EditingSession,
         executable: &Path,
@@ -117,25 +144,43 @@ impl HostAttachment {
         roots: SessionRoots,
         context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     ) -> Result<Self, BundleError> {
+        let manual_client = serde_json::to_value(
+            kinewright_agent::writer_host::HostAuth::generate().map_err(host_error)?,
+        )
+        .map_err(|error| BundleError::Corrupt(error.to_string()))?
+        .as_str()
+        .ok_or(BundleError::HistoryChanged)?
+        .to_owned();
         let transfer = owner.prepare_host_attachment()?;
+        let launch_path = transfer.named_path.clone();
+        let launch_root = transfer.expected_root_sha256.clone();
         let retained_context = context.clone();
-        let source_server = Some(if let Some(reader) = transfer.source_service {
-            SourceServer::start(reader).map_err(host_error)?
-        } else {
-            SourceServer::start_context(move || {
-                if context
-                    .upgrade()
-                    .is_some_and(|live| live.load(std::sync::atomic::Ordering::Acquire))
-                {
-                    Ok(())
-                } else {
-                    Err(BundleError::Identity(
-                        "the originating GUI context is closed".into(),
-                    ))
-                }
-            })
-            .map_err(host_error)?
-        });
+        let source_server = Some(
+            if let Some(reader) = transfer.source_service {
+                SourceServer::start(reader)
+            } else {
+                SourceServer::start_context(move || {
+                    if context
+                        .upgrade()
+                        .is_some_and(|live| live.load(std::sync::atomic::Ordering::Acquire))
+                    {
+                        Ok(())
+                    } else {
+                        Err(BundleError::Identity(
+                            "the originating GUI context is closed".into(),
+                        ))
+                    }
+                })
+            }
+            .map_err(|error| {
+                Self::failed_launch(
+                    owner,
+                    launch_path.as_deref(),
+                    launch_root.as_deref(),
+                    host_error(error),
+                )
+            })?,
+        );
         let retention = HostSourceBinding {
             source: transfer.source.clone(),
             inputs: transfer.source.as_ref().map(|_| transfer.inputs.clone()),
@@ -144,7 +189,7 @@ impl HostAttachment {
                 .expect("GUI source service")
                 .bootstrap(),
         };
-        let (client, mut child) = HostClient::launch(
+        let launched = HostClient::launch(
             executable,
             HostConfig {
                 project,
@@ -152,14 +197,33 @@ impl HostAttachment {
                 roots,
                 origin: HostOrigin::Gui {
                     retention,
-                    initial_snapshot: HostSnapshot::from_history(transfer.history)
-                        .map_err(host_error)?,
+                    initial_snapshot: HostSnapshot::from_history(transfer.history).map_err(
+                        |error| {
+                            Self::failed_launch(
+                                owner,
+                                launch_path.as_deref(),
+                                launch_root.as_deref(),
+                                host_error(error),
+                            )
+                        },
+                    )?,
                     expected_root_sha256: transfer.expected_root_sha256,
                     expected_project_id: transfer.project_id,
                 },
             },
-        )
-        .map_err(host_error)?;
+        );
+        let (client, mut child) = match launched {
+            Ok(launched) => launched,
+            Err(error) => {
+                if let Err(cause) =
+                    owner.restore_failed_host_launch(launch_path.as_deref(), launch_root.as_deref())
+                {
+                    owner.host_lost()?;
+                    return Err(cause);
+                }
+                return Err(host_error(error));
+            }
+        };
         let attached = client
             .request(HostCommand::Attach)
             .map_err(host_error)
@@ -177,10 +241,12 @@ impl HostAttachment {
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                owner.host_lost()?;
                 return Err(error);
             }
         };
         Ok(Self {
+            installed_switch: None,
             prepared_switch: None,
             switch_envelope: None,
             executable: executable.to_path_buf(),
@@ -198,15 +264,24 @@ impl HostAttachment {
             heartbeat: None,
             last_heartbeat: Instant::now(),
             manual: None,
-            manual_client: serde_json::to_value(
-                kinewright_agent::writer_host::HostAuth::generate().map_err(host_error)?,
-            )
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?
-            .as_str()
-            .ok_or(BundleError::HistoryChanged)?
-            .to_owned(),
+            manual_client,
             manual_inflight: None,
         })
+    }
+
+    fn failed_launch(
+        owner: &mut Ja1EditingSession,
+        path: Option<&Path>,
+        root: Option<&str>,
+        error: BundleError,
+    ) -> BundleError {
+        match owner.restore_failed_host_launch(path, root) {
+            Ok(()) => error,
+            Err(cause) => {
+                let _ = owner.host_lost();
+                cause
+            }
+        }
     }
 
     #[cfg(all(test, target_os = "linux"))]
@@ -225,6 +300,7 @@ impl HostAttachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         Ok(Self {
+            installed_switch: None,
             prepared_switch: None,
             switch_envelope: None,
             executable: PathBuf::new(),
@@ -388,6 +464,15 @@ impl HostAttachment {
         action: Action,
         owner: &mut Ja1EditingSession,
     ) -> Result<HostReply, BundleError> {
+        if matches!(action, Action::Retry)
+            && let Some((installed, _)) = &self.installed_switch
+        {
+            return Ok(HostReply {
+                switch_attachment: Some(installed.clone()),
+                status: self.status.clone(),
+                ..HostReply::default()
+            });
+        }
         if self.recovery.is_some() {
             return Err(BundleError::CoreMutationRefused(
                 kinewright_core::CoreMutationRefusal::Frozen,
@@ -642,6 +727,12 @@ impl HostAttachment {
 
     pub fn recovery_running(&self) -> bool {
         self.recovery.is_some()
+    }
+
+    pub fn confirmed_lost(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
     }
 
     pub fn close(&mut self) {

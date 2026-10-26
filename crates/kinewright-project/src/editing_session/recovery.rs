@@ -224,19 +224,41 @@ impl Ja1EditingSession {
         }
     }
     pub fn recovery_save_disclosure(&self) -> Result<String, BundleError> {
-        let history = self
+        let actor = self.core.actor_identity();
+        let revision = self
             .core
-            .export_history()
+            .history_change_id()
             .map_err(crate::bundle::history_error)?;
-        let selected = crate::bundle_commit::select_history(&history, self.store()?.limits())?;
+        let limits = self.store()?.limits();
+        if let Some((cached_actor, cached_revision, cached_limits, text)) =
+            &*self.save_disclosure_cache.borrow()
+            && *cached_actor == actor
+            && *cached_revision == revision
+            && cached_limits == limits
+        {
+            return Ok(text.clone());
+        }
+        let (revision, history) = self
+            .core
+            .export_history_identified()
+            .map_err(crate::bundle::history_error)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::namespace::note(
+            "studio_save_disclosure_select",
+            std::path::Path::new("status"),
+        );
+        let selected = crate::bundle_commit::select_history(&history, limits)?;
         let lost = history
             .cursor
             .undo
             .len()
             .saturating_sub(selected.history.cursor.undo.len());
-        Ok(format!(
+        let text = format!(
             "Saving your current work removes {lost} oldest Undo entries. Current content, complete Redo and the open gesture are preserved."
-        ))
+        );
+        *self.save_disclosure_cache.borrow_mut() =
+            Some((actor, revision, limits.clone(), text.clone()));
+        Ok(text)
     }
     pub fn selection_availability(&self) -> Result<String, BundleError> {
         let Some(prepared) = &self.prepared else {
@@ -280,14 +302,8 @@ impl Ja1EditingSession {
         }
         for registered in &self.durable_sessions {
             let bundle = self.registered_bundle(&registered.guard)?;
-            let history = registered
-                .guard
-                .core()
-                .export_history()
-                .map_err(crate::bundle::history_error)?;
-            let digest = kinewright_media::sha256_bytes(
-                &serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?,
-            );
+            let digest =
+                Self::cached_history_digest(registered.guard.core(), &registered.digest_cache)?;
             if bundle.unsettled
                 || bundle
                     .checkpoint(&registered.guard.branch)?

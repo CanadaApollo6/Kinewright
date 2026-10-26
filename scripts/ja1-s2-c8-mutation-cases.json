@@ -187,7 +187,8 @@
     "features": "test-util",
     "production": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json::old-gui-actor-never-sealed"
   },
   {
     "name": "project_failed_prepared_view_cleanup_resumes_candidate",
@@ -349,7 +350,8 @@
     "features": "",
     "production": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "s2h-prelaunch-failure-implicitly-closes-source"
   },
   {
     "name": "app_host_disconnect_implicitly_closes_gui_source",
@@ -367,7 +369,8 @@
     "features": "",
     "production": false,
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json::s2h-app-host-disconnect-implicitly-closes-source"
   },
   {
     "name": "app_ordinary_publisher_floor_uses_fresh_actor_activation",
@@ -594,8 +597,8 @@
     "changes": [
       [
         "crates/kinewright-app/src/ja1_host.rs",
-        "                    initial_snapshot: HostSnapshot::from_history(transfer.history)\n                        .map_err(host_error)?,",
-        "                    initial_snapshot: HostSnapshot::capture(\n                        &kinewright_core::Core::spawn(kinewright_core::Document::default())\n                            .map_err(|error| BundleError::Corrupt(error.to_string()))?,\n                    ).map_err(host_error)?,"
+        "initial_snapshot: HostSnapshot::from_history(transfer.history).map_err(",
+        "initial_snapshot: HostSnapshot::capture(&kinewright_core::Core::spawn(kinewright_core::Document::default()).map_err(|error| BundleError::Corrupt(error.to_string()))?).map_err("
       ]
     ],
     "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",

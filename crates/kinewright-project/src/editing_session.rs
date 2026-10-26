@@ -203,6 +203,14 @@ pub struct Ja1EditingSession {
     retained_destinations: Vec<(RetainedDestination, Core)>,
     originating_session: crate::bundle_records::SessionId,
     dirty_cache: std::cell::RefCell<HistoryDigestCache>,
+    save_disclosure_cache: std::cell::RefCell<
+        Option<(
+            kinewright_core::ActorIdentity,
+            kinewright_core::HistoryChangeId,
+            StorageLimits,
+            String,
+        )>,
+    >,
     host_attached: bool,
     host_retention_lost: bool,
     host_cut: Option<kinewright_core::AcceptedCut>,
@@ -385,6 +393,11 @@ impl Ja1EditingSession {
                 let RetainedDestination::Named(bundle) = destination else {
                     return Err(BundleError::Unsettled);
                 };
+                if bundle.root.is_none() {
+                    return Err(BundleError::Identity(
+                        "Save once to convert this legacy project to Studio format before attaching its host. Your local edits remain available and saveable.".into(),
+                    ));
+                }
                 if bundle.unsettled
                     || bundle.pending_command.is_some()
                     || bundle.pending_save.is_some()
@@ -448,6 +461,52 @@ impl Ja1EditingSession {
                 .map_err(crate::bundle::history_error)?;
         }
         result
+    }
+
+    /// A failed bootstrap has reaped its child before returning here. Reacquire
+    /// the original named destination and verify its exact root before resuming
+    /// the retained GUI cut; the dirty GUI history is never restored from disk.
+    pub fn restore_failed_host_launch(
+        &mut self,
+        path: Option<&Path>,
+        expected_root: Option<&str>,
+    ) -> Result<(), BundleError> {
+        let cut = self
+            .host_cut
+            .as_ref()
+            .ok_or(BundleError::HistoryChanged)?
+            .clone();
+        if let Some(path) = path {
+            let loaded = LoadedBundle::read(path)?;
+            if Some(kinewright_media::sha256_bytes(loaded.admission().raw_bytes()).as_str())
+                != expected_root
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            let bundle = loaded.into_writer()?;
+            // Verify again under the reacquired, identity-pinned writer.
+            bundle.store.with_namespace(|namespace| {
+                namespace.verify()?;
+                let bytes = namespace.read_root()?.ok_or(BundleError::HistoryChanged)?;
+                if Some(kinewright_media::sha256_bytes(&bytes).as_str()) != expected_root {
+                    return Err(BundleError::HistoryChanged);
+                }
+                Ok(())
+            })?;
+            self.destination = Some(RetainedDestination::Named(Box::new(bundle)));
+        }
+        self.attachment
+            .resume(&cut)
+            .map_err(crate::bundle::history_error)?;
+        self.host_cut = None;
+        self.host_attached = false;
+        self.host_source_admission = None;
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn host_retention_lost(&self) -> bool {
+        self.host_retention_lost
     }
 
     /// Capture a foreground operation. No continuous/manual stream is introduced here.
@@ -766,6 +825,7 @@ impl Ja1EditingSession {
             retained_destinations: vec![],
             originating_session: crate::bundle_records::SessionId::fresh()?,
             dirty_cache: std::cell::RefCell::new(None),
+            save_disclosure_cache: std::cell::RefCell::new(None),
             host_attached: false,
             host_retention_lost: false,
             host_cut: None,
@@ -803,6 +863,7 @@ impl Ja1EditingSession {
             durable_sessions: vec![],
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
+            save_disclosure_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
             host_attached: false,
             host_retention_lost: false,
@@ -884,6 +945,7 @@ impl Ja1EditingSession {
             durable_sessions: vec![],
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
+            save_disclosure_cache: std::cell::RefCell::new(None),
             originating_session: crate::bundle_records::SessionId::fresh()?,
             host_attached: false,
             host_retention_lost: false,
@@ -1036,19 +1098,23 @@ impl Ja1EditingSession {
             != Some(self.history_digest()?.as_str()))
     }
     fn history_digest(&self) -> Result<String, BundleError> {
-        let actor = self.core.actor_identity();
-        let revision = self
-            .core
+        Self::cached_history_digest(&self.core, &self.dirty_cache)
+    }
+    fn cached_history_digest(
+        core: &Core,
+        cache: &std::cell::RefCell<HistoryDigestCache>,
+    ) -> Result<String, BundleError> {
+        let actor = core.actor_identity();
+        let revision = core
             .history_change_id()
             .map_err(crate::bundle::history_error)?;
-        if let Some((cached_actor, cached_revision, digest)) = &*self.dirty_cache.borrow()
+        if let Some((cached_actor, cached_revision, digest)) = &*cache.borrow()
             && *cached_actor == actor
             && *cached_revision == revision
         {
             return Ok(digest.clone());
         }
-        let (revision, history) = self
-            .core
+        let (revision, history) = core
             .export_history_identified()
             .map_err(crate::bundle::history_error)?;
         #[cfg(any(test, feature = "test-util"))]
@@ -1056,7 +1122,7 @@ impl Ja1EditingSession {
         let bytes =
             serde_json::to_vec(&history).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let digest = kinewright_media::sha256_bytes(&bytes);
-        *self.dirty_cache.borrow_mut() = Some((actor, revision, digest.clone()));
+        *cache.borrow_mut() = Some((actor, revision, digest.clone()));
         Ok(digest)
     }
     pub fn store(&self) -> Result<&ProjectStore, BundleError> {

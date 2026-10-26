@@ -680,3 +680,9 @@ Concrete C12 dispositions and deviations:
 - `crates/kinewright-project/src/editing_session.rs:1149` already guards path spelling by native identity. The attempted relabel mutant survived; the redundant change/test and claimed bug credit were removed, and required App pairs reran.
 - `docs/reports/ja1-s2/c12-gate.sh:114` isolates full-App fixture output after the retained `File exists` failure. The pre-commit-only wrapper guard was also removed so the script can rerun at C12; final ancestry is checked by `scripts/ja1-s2-c12-audit.py:130`.
 - `scripts/ja1-s2-c12-measure.sh:13` isolates parent/current build environments in subshells using the same native kit. Earlier partial gate frames stay excluded; the complete frozen gate and timing run are the acceptance evidence.
+
+## S2-H review fixes
+
+| Commit | Scope | Verified evidence |
+|---|---|---|
+| A, [s2h-fix1](s2h-fix1.md), parent `334da4f` | Review findings 1-8: legacy activation and launch rollback, unknown replies and repeated reconciliation loss, installed-switch confirmation, producer admission, status caches and current mutation anchors. | Linux: 99 passing command rows; 865 expected/selected, 841 passes, 24 existing ignores; full workspace fast 4,066 passes, zero failures, 111 configured ignores; 32 runtime mutation pairs. Original 110 fixtures/index files unchanged. Warm capped-host Status 177.896 to 1.507 ms. Both Save blocks retained: combined parent/A means 243.152 / 253.467 ms, repeat 245.694 / 239.573 ms. Native Windows/hosted CI NOT RUN; added Windows runtime estimate 0 s plus 30-90 s compilation. Manual-history cost remains for B. |

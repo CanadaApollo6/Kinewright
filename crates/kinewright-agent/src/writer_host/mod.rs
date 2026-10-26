@@ -965,6 +965,7 @@ impl BorrowedSourceReader for RemoteSource {
     reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
 )]
 pub struct HostCommandOwner {
+    confirmed_switch: Option<switch::SwitchConfirmation>,
     pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
     switch_frozen: bool,
     config: HostConfig,
@@ -1095,6 +1096,7 @@ impl HostCommandOwner {
         }
         let mut host = Self {
             pending_switch: None,
+            confirmed_switch: None,
             switch_frozen,
             config,
             owner,
@@ -2622,3 +2624,5 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod c12_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod s2h_tests;

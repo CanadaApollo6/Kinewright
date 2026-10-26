@@ -382,8 +382,14 @@ impl Ja1Attachment {
                 self.start_host_manual()
             }
             Err(error) => {
-                self.operation_panicked();
-                self.message.push_str(" Host attachment failed: ");
+                if self.owner.host_retention_lost() {
+                    self.operation_panicked();
+                } else {
+                    self.frozen = self.owner.core().attachment_state() != Ok(AttachmentState::Live);
+                    self.message =
+                        "Host attachment did not start. Local editing and Save remain available. "
+                            .into();
+                }
                 self.message.push_str(&error.to_string());
                 Err(error)
             }
@@ -454,10 +460,9 @@ impl Ja1Attachment {
 
     fn apply_host(&mut self, action: Action) -> Result<(), BundleError> {
         if matches!(action, Action::Retry)
-            && self
-                .host
-                .as_ref()
-                .is_some_and(|host| host.cut.is_some() && host.manual.is_some())
+            && self.host.as_ref().is_some_and(|host| {
+                host.cut.is_some() && host.manual.is_some() && host.switch_envelope.is_none()
+            })
         {
             self.host
                 .as_mut()
@@ -472,24 +477,41 @@ impl Ja1Attachment {
             .as_mut()
             .expect("attached host")
             .request(action, &mut self.owner);
+        let known_refusal = result.as_ref().is_ok_and(|reply| reply.error.is_some());
+        let result = result.and_then(|reply| {
+            self.accept_host_reply(reply)?;
+            self.start_host_manual()
+        });
         match result {
-            Ok(reply) => {
-                self.accept_host_reply(reply)?;
-                self.start_host_manual()
-            }
+            Ok(()) => Ok(()),
             Err(error) => {
-                if matches!(
-                    &error,
-                    BundleError::CoreMutationRefused(kinewright_core::CoreMutationRefusal::Frozen)
-                ) {
-                    self.frozen = true;
-                    self.message = error.to_string();
-                } else {
-                    self.operation_panicked();
+                if !known_refusal {
+                    self.host_request_failed(&error);
                 }
                 Err(error)
             }
         }
+    }
+
+    fn host_request_failed(&mut self, error: &BundleError) {
+        let host = self.host.as_mut().expect("attached host");
+        if host.confirmed_lost() || self.owner.host_retention_lost() {
+            self.operation_panicked();
+            return;
+        }
+        // A transport error does not prove loss of the retained owner. Preserve
+        // the original manual queue and switch envelope for receipt reconciliation.
+        let Ok(cut) = self.owner.recapture_host_recovery_cut() else {
+            self.operation_panicked();
+            return;
+        };
+        host.cut = Some(cut);
+        host.status.frozen = true;
+        self.frozen = true;
+        self.panel_open = true;
+        self.message = format!(
+            "The host reply was not confirmed. Your edits remain here, read-only. Retry to reconcile the original request. {error}"
+        );
     }
 
     #[allow(
@@ -666,6 +688,10 @@ impl Ja1Attachment {
             }
             Ok(None) => false,
             Err(error) => {
+                self.host_request_failed(&error);
+                if self.retention_lost {
+                    return true;
+                }
                 let recovery = self
                     .host
                     .as_mut()

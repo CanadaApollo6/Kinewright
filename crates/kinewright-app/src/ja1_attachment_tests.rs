@@ -1263,7 +1263,7 @@ fn c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn c8_failed_host_launch_keeps_source_and_requires_explicit_close() {
+fn c8_failed_host_launch_keeps_source_and_restores_local_editing() {
     let temp = temp();
     let core = Core::spawn(doc()).unwrap();
     edit(&core, false);
@@ -1318,19 +1318,18 @@ fn c8_failed_host_launch_keeps_source_and_requires_explicit_close() {
     assert!(root.exists());
     assert!(source.has_borrowed_sources());
     assert!(source.store().usage().unwrap().reserved_copy_bytes > 0);
-    assert!(app.read_only());
-    assert_eq!(core.attachment_state(), Ok(AttachmentState::Frozen));
+    assert!(!app.read_only());
+    assert_eq!(core.attachment_state(), Ok(AttachmentState::Live));
     assert_eq!(core.export_history().unwrap(), history);
     let fresh = temp.path("elsewhere/new.kinewright");
-    assert!(app.apply(Action::FirstSave(fresh.clone())).is_err());
-    assert!(app.apply(Action::SaveAs(fresh.clone())).is_err());
-    assert!(app.apply(Action::PreviewRescue).is_err());
-    assert!(!fresh.parent().unwrap().exists());
+    app.apply(Action::FirstSave(fresh.clone())).unwrap();
+    let reopened = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&fresh)
+        .unwrap()
+        .restore_manual(&reopened)
+        .unwrap();
+    assert_eq!(reopened.export_history().unwrap(), history);
     assert_eq!(admission::tree(&root), source_bytes);
-    assert!(
-        app.close_text()
-            .contains("Close this editing context explicitly")
-    );
     app.close();
     drop(app);
     assert!(!root.exists());
@@ -1871,6 +1870,11 @@ fn g05a_first_edit_undo_and_exact_switch_back() {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn observe_c11(reply_drop: bool) -> serde_json::Value {
+    observe_c11_fault(reply_drop.then_some(("switch", false)))
+}
+
+#[cfg(target_os = "linux")]
+fn observe_c11_fault(fault: Option<(&'static str, bool)>) -> serde_json::Value {
     use kinewright_agent::writer_host::{HostCommand, SessionRoots};
     let temp = temp();
     let core = Core::spawn(doc()).unwrap();
@@ -1936,17 +1940,16 @@ pub(crate) fn observe_c11(reply_drop: bool) -> serde_json::Value {
             Event::MutationRefused { .. }
         );
     assert!(frozen);
-    if reply_drop {
-        let dropped = app
-            .host
-            .as_mut()
-            .unwrap()
-            .request(Action::OpenRecovery, &mut app.owner)
-            .unwrap();
-        assert!(dropped.switch_result.is_some());
-        assert!(dropped.manual_lease.is_none());
-        assert_eq!(dropped.status.branches.len(), 2);
-        drop(dropped);
+    let proxy =
+        fault.map(|(command, before)| app.host.as_mut().unwrap().drop_http_reply(command, before));
+    if let Some(proxy) = &proxy {
+        assert!(
+            app.apply(Action::OpenRecovery).is_err(),
+            "the real App must see the transport error"
+        );
+        assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!app.retention_lost, "reply loss is not confirmed host loss");
+        assert!(app.read_only());
         app.apply(Action::Retry).unwrap();
     } else {
         app.apply(Action::OpenRecovery).unwrap();
@@ -2045,4 +2048,227 @@ pub(crate) fn observe_c11(reply_drop: bool) -> serde_json::Value {
     );
     assert!(reopened.close());
     serde_json::json!({"query": query, "switch": { "exact": exact, "frozen": frozen, "first_undo": first_undo, "stale": stale, "saved": saved, "generation": attachment.switch_generation == 2 }})
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_confirm_reply_loss_retries_installed_b_without_reinstallation() {
+    observe_c11_fault(Some(("confirm_switch", false)));
+    observe_c11_fault(Some(("confirm_switch", true)));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_legacy_unsaved_activation_keeps_local_save_and_exact_reopen() {
+    crate::app::ja_s2h_legacy_activation_witness();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_unlaunchable_host_restores_local_writer_and_both_saves() {
+    use kinewright_agent::writer_host::SessionRoots;
+    for corrupt in [false, true] {
+        let temp = temp();
+        let path = temp.path("a.kinewright");
+        let core = Core::spawn(doc()).unwrap();
+        let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            StorageLimits::default(),
+        )
+        .unwrap();
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+        edit(&core, false);
+        let expected = core.export_history().unwrap();
+        let executable = temp.path("broken-host");
+        if corrupt {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&executable, b"invalid executable\0").unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut app = Ja1Attachment::new(owner).unwrap();
+        assert!(
+            app.launch_host_at(
+                &executable,
+                "s2h-launch".into(),
+                SessionRoots {
+                    read: vec![temp.root().into()],
+                    write: vec![temp.root().into()]
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            !app.retention_lost,
+            "pre-acquisition failure must restore local authority"
+        );
+        assert!(!app.read_only());
+        assert_eq!(core.attachment_state(), Ok(AttachmentState::Live));
+        app.apply(Action::Save).unwrap();
+        let copy = temp.path("b.kinewright");
+        app.apply(Action::SaveAs(copy.clone())).unwrap();
+        assert!(app.close());
+        drop(app);
+        for destination in [&path, &copy] {
+            let reopened =
+                kinewright_project::editing_session::Ja1EditingSession::open(destination).unwrap();
+            assert_eq!(reopened.core().export_history().unwrap(), expected);
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2() {
+    use kinewright_agent::writer_host::SessionRoots;
+    for command in ["commit_history", "save"] {
+        let temp = temp();
+        let path = temp.path("a.kinewright");
+        let core = Core::spawn(doc()).unwrap();
+        let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            StorageLimits::default(),
+        )
+        .unwrap();
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+        let mut app = Ja1Attachment::new(owner).unwrap();
+        app.launch_host_at(
+            &host::executable(),
+            "s2h-reply".into(),
+            SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+        )
+        .unwrap();
+        let permit = app
+            .host
+            .as_ref()
+            .unwrap()
+            .manual
+            .as_ref()
+            .unwrap()
+            .permit
+            .clone();
+        assert!(matches!(
+            permit
+                .request(Command::Do(Operation::SetTrackSyncLock {
+                    track: TrackId(1),
+                    locked: false
+                }))
+                .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let accepted = permit.pending().unwrap();
+        let original =
+            kinewright_project::manual_history::AcceptedManualCommand::decode(&accepted[0])
+                .unwrap()
+                .envelope;
+        let expected = core.export_history().unwrap();
+        let proxy = app.host.as_mut().unwrap().drop_http_reply(command, false);
+        assert!(app.apply(Action::Save).is_err());
+        assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(!app.retention_lost);
+        assert!(app.read_only());
+        let child = app.host.as_ref().unwrap().child_id();
+        let recovery_proxy = app
+            .host
+            .as_mut()
+            .unwrap()
+            .drop_http_reply("publish_barrier", false);
+        app.apply(Action::Retry).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.host.as_ref().unwrap().recovery_running() && std::time::Instant::now() < deadline
+        {
+            app.poll_host();
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            recovery_proxy
+                .dropped
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(app.read_only());
+        assert!(!app.retention_lost);
+        assert_eq!(
+            app.host.as_ref().unwrap().child_id(),
+            child,
+            "recovery reply loss must retain the same owned host for another Retry"
+        );
+        assert!(!app.host.as_mut().unwrap().confirmed_lost());
+        app.apply(Action::Retry).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.read_only() && std::time::Instant::now() < deadline {
+            app.poll_host();
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        assert!(!app.read_only(), "{}", app.message);
+        assert!(!app.retention_lost);
+        // Recovery-close may close the gesture; it cannot add or replay an edit.
+        let after = core.export_history().unwrap();
+        assert_eq!(after.document, expected.document);
+        assert_eq!(after.batches, expected.batches);
+        assert_eq!(after.cursor.undo, expected.cursor.undo);
+        app.host.as_mut().unwrap().kill_owned_child();
+        app.poll_host();
+        assert!(
+            app.retention_lost,
+            "confirmed host death must still reach L2"
+        );
+        assert!(
+            app.apply(Action::SaveAs(temp.path("forbidden.kinewright")))
+                .is_err()
+        );
+        assert!(app.close());
+        drop(app);
+        let writer = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+        assert!(matches!(
+            writer.receipt_lookup(&original).unwrap(),
+            kinewright_project::receipts::ReceiptLookup::Committed(_)
+                | kinewright_project::receipts::ReceiptLookup::Retired(_)
+        ));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_direct_legacy_handoff_keeps_exact_history_until_local_studio_save() {
+    use kinewright_agent::writer_host::SessionRoots;
+    let temp = temp();
+    let path = temp.path("legacy.kinewright");
+    let document = doc();
+    std::fs::write(
+        &path,
+        kinewright_project::serialize_project_document(&document).unwrap(),
+    )
+    .unwrap();
+    let core = Core::spawn(document).unwrap();
+    edit(&core, false);
+    let expected = core.export_history().unwrap();
+    let admission = BundleWriteAdmission::read(&path).unwrap();
+    let owner = kinewright_project::editing_session::Ja1EditingSession::activate(
+        &path, admission, &core, None,
+    )
+    .unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    assert!(
+        app.launch_host_at(
+            &host::executable(),
+            "s2h-direct-legacy".into(),
+            SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()]
+            }
+        )
+        .is_err()
+    );
+    assert!(!app.retention_lost);
+    assert!(!app.read_only());
+    assert_eq!(core.export_history().unwrap(), expected);
+    app.apply(Action::Save).unwrap();
+    assert!(app.close());
+    drop(app);
+    let reopened = kinewright_project::editing_session::Ja1EditingSession::open(&path).unwrap();
+    assert_eq!(reopened.core().export_history().unwrap(), expected);
 }

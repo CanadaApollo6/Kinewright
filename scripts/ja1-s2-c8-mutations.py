@@ -132,7 +132,8 @@ def cases():
         yield host_case(f"host-drop-uncharges-gui-source-{mode}", source_release_changes(),
             HOST_TEST, {"JA_C8_HOST_FAILURE_CASE": mode},
             "host Drop uncharged a GUI source reservation")
-    yield from json.loads((ROOT / "scripts/ja1-s2-c8-mutation-cases.json").read_text())
+    yield from (value for value in json.loads((ROOT / "scripts/ja1-s2-c8-mutation-cases.json").read_text())
+                if not value.get("superseded_by"))
 
 
 def write_json(path, value):
