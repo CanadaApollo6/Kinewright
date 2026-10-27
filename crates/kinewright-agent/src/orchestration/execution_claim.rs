@@ -112,7 +112,11 @@ impl MachineClaim {
                 .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed())
                 .mode(0o600);
         }
-        let lock = options.open(root.join("execution.lock"))?;
+        #[cfg(windows)]
+        let lock_name = kinewright_job_sys::execution_namespace()?.1;
+        #[cfg(not(windows))]
+        let lock_name = "execution.lock";
+        let lock = options.open(root.join(lock_name))?;
         lock.try_lock()
             .map_err(|_| io::Error::other("studio_run_active"))?;
         let mut attempts = Vec::new();
@@ -267,9 +271,7 @@ fn machine_root() -> io::Result<PathBuf> {
     }
     #[cfg(windows)]
     {
-        std::env::var_os("LOCALAPPDATA")
-            .map(|root| PathBuf::from(root).join("Kinewright/studio-execution"))
-            .ok_or_else(|| io::Error::other("OS-local machine namespace unavailable"))
+        kinewright_job_sys::execution_namespace().map(|(root, _)| root)
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     {

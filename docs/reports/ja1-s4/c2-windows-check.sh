@@ -13,6 +13,7 @@ edition = "2024"
 [features]
 default = ["eval-harness"]
 eval-harness = []
+slow-tests = []
 [dependencies]
 kinewright-job-sys = { path = "$PWD/crates/kinewright-job-sys" }
 serde = { version = "=1.0.229", features = ["derive", "rc"] }
@@ -43,4 +44,4 @@ pub mod execution_claim;
 LIBRARY
 cp Cargo.lock "$check_root/Cargo.lock"
 test "$(free -g | awk '/^Mem:/{print $7}')" -ge 6
-flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo clippy --manifest-path "$check_root/Cargo.toml" --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo clippy --manifest-path "$check_root/Cargo.toml" --all-targets --features slow-tests --target x86_64-pc-windows-msvc -- -D warnings

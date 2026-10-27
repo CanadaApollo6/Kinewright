@@ -300,6 +300,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Equip guardian user session
+        run: |
+          sudo loginctl enable-linger "$(id -un)" || true
+          sudo systemctl start "user@$(id -u).service" || true
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 

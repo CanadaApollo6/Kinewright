@@ -89,6 +89,8 @@ pub struct RecoveryIdentity {
     pub containment: String,
     pub device: u64,
     pub inode: u64,
+    pub service_device: u64,
+    pub service_inode: u64,
 }
 impl RecoveryIdentity {
     /// # Errors

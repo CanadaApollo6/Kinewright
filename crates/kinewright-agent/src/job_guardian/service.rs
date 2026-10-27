@@ -112,6 +112,18 @@ pub fn main_entry() -> io::Result<()> {
     if mode == "--shim" {
         return super::linux::shim(args);
     }
+    #[cfg(target_os = "linux")]
+    if mode == "--probe" {
+        let unit = args
+            .next()
+            .and_then(|v| v.into_string().ok())
+            .ok_or_else(|| io::Error::other("probe unit required"))?;
+        if args.next().is_some() {
+            return Err(io::Error::other("unexpected probe argument"));
+        }
+        let _tree = Tree::new(&unit)?;
+        return Ok(());
+    }
     if mode != "--serve" {
         return Err(io::Error::other("unknown guardian mode"));
     }
@@ -138,10 +150,22 @@ pub fn main_entry() -> io::Result<()> {
     if unit != identity.unit() {
         return Err(io::Error::other("unit identity mismatch"));
     }
-    let mut tree = Tree::new(&unit)
-        .map_err(|error| io::Error::other(format!("external_supervision_unavailable: {error}")))?;
+    let mut tree = match Tree::new(&unit) {
+        Ok(tree) => tree,
+        Err(error) => {
+            let reason = format!("external_supervision_unavailable: {error}");
+            let _ = send(&GuardianMessage::Refused {
+                reason: reason.clone(),
+            });
+            return Err(io::Error::other(reason));
+        }
+    };
     let process = kinewright_job_sys::ProcessHandle::open(std::process::id())?;
     let (containment, device, inode) = tree.identity();
+    #[cfg(target_os = "linux")]
+    let (service_device, service_inode) = tree.service_identity();
+    #[cfg(not(target_os = "linux"))]
+    let (service_device, service_inode) = (0, 0);
     let recovery = RecoveryIdentity {
         version: protocol::VERSION,
         attempt: identity.clone(),
@@ -150,6 +174,8 @@ pub fn main_entry() -> io::Result<()> {
         containment,
         device,
         inode,
+        service_device,
+        service_inode,
     };
     recovery.validate()?;
     atomic_record(
@@ -160,6 +186,11 @@ pub fn main_entry() -> io::Result<()> {
     let execution = execute(
         &mut tree, &receiver, &root, &identity, &program, &recovery, started,
     );
+    if let Err(error) = &execution {
+        let _ = send(&GuardianMessage::Refused {
+            reason: error.to_string(),
+        });
+    }
     cleanup(&mut tree, &root, &identity, started)?;
     execution
 }
@@ -287,10 +318,9 @@ fn cleanup(
                 protocol::RECOVERY_CAP,
             )?;
             let _ = send(&message);
-            // Remain the cleanup owner. The host keeps reservations and denies replacements.
-            loop {
-                thread::sleep(Duration::from_millis(100));
-            }
+            return Err(io::Error::other(
+                "cleanup_blocked: manager subtree escalation required",
+            ));
         }
         thread::sleep(Duration::from_millis(1));
     }

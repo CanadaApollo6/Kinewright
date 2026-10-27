@@ -6,6 +6,11 @@
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod namespace;
+#[cfg(target_os = "linux")]
+pub use namespace::*;
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;

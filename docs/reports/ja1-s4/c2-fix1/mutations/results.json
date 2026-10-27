@@ -1,0 +1,357 @@
+{
+  "source_sha256": "607c791c825da0d7f75db73779f28d1d2c8801a4ebd8b252b23741b1f50902c7",
+  "pairs": [
+    {
+      "guard": "commit-barrier",
+      "witness": "s4_precommit_cannot_execute",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.39s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/commit-barrier-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.41s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/commit-barrier-green.log.gz"
+      }
+    },
+    {
+      "guard": "failed-startup-closes-lifetime",
+      "witness": "s4_precommit_cannot_execute",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 2.87s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/failed-startup-closes-lifetime-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.40s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/failed-startup-closes-lifetime-green.log.gz"
+      }
+    },
+    {
+      "guard": "lifetime-writer",
+      "witness": "s4_real_host_death_skips_grace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 2.31s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/lifetime-writer-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/lifetime-writer-green.log.gz"
+      }
+    },
+    {
+      "guard": "native-cgroup-kill",
+      "witness": "s4_real_host_death_skips_grace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 2.34s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/native-cgroup-kill-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.33s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/native-cgroup-kill-green.log.gz"
+      }
+    },
+    {
+      "guard": "manager-whole-tree",
+      "witness": "s4_guardian_death_and_observation_loss",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 2.31s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/manager-whole-tree-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.30s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/manager-whole-tree-green.log.gz"
+      }
+    },
+    {
+      "guard": "retained-nlink",
+      "witness": "s4_retained_inode_deletion_signal",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.28s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/retained-nlink-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.38s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/retained-nlink-green.log.gz"
+      }
+    },
+    {
+      "guard": "native-identity",
+      "witness": "s4_reaped_guardian_and_identity_are_required",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.23s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/native-identity-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/native-identity-green.log.gz"
+      }
+    },
+    {
+      "guard": "zombie-scan",
+      "witness": "s4_deleted_cgroup_zombies_still_block_retirement",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.38s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/zombie-scan-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/zombie-scan-green.log.gz"
+      }
+    },
+    {
+      "guard": "guardian-reaped",
+      "witness": "s4_reaped_guardian_and_identity_are_required",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.22s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/guardian-reaped-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.24s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/guardian-reaped-green.log.gz"
+      }
+    },
+    {
+      "guard": "retained-slot",
+      "witness": "s4_guardian_death_and_observation_loss",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.33s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/retained-slot-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.31s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/retained-slot-green.log.gz"
+      }
+    },
+    {
+      "guard": "subreaper",
+      "witness": "s4_guardian_subreaps_real_orphans",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.37s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/subreaper-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.33s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/subreaper-green.log.gz"
+      }
+    },
+    {
+      "guard": "outside-service-migration",
+      "witness": "s4_c2_migration_outside_service_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.36s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/outside-service-migration-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/outside-service-migration-green.log.gz"
+      }
+    },
+    {
+      "guard": "service-root-migration",
+      "witness": "s4_c2_migration_to_service_root_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.30s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/service-root-migration-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.38s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/service-root-migration-green.log.gz"
+      }
+    },
+    {
+      "guard": "blocked-guardian-exit",
+      "witness": "s4_c2_blocked_guardian_exits_and_manager_kills",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 4.39s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/blocked-guardian-exit-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 3.39s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/blocked-guardian-exit-green.log.gz"
+      }
+    },
+    {
+      "guard": "runtime-directory-mask",
+      "witness": "s4_c2_runtime_dir_masked",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.35s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/runtime-directory-mask-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/runtime-directory-mask-green.log.gz"
+      }
+    },
+    {
+      "guard": "nsdelegate-required",
+      "witness": "s4_c2_launch_refuses_without_nsdelegate",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.52s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/nsdelegate-required-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.16s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix1/mutations/nsdelegate-required-green.log.gz"
+      }
+    }
+  ]
+}
