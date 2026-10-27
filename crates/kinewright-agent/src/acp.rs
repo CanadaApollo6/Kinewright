@@ -31,6 +31,7 @@ const WRITE_BUDGET: Duration = Duration::from_secs(2);
 
 struct PipeWrite {
     bytes: Vec<u8>,
+    restore: bool,
     finished: Sender<Result<(), AgentError>>,
 }
 
@@ -141,26 +142,17 @@ impl AcpClient {
         let writing = Arc::new(AtomicBool::new(false));
         let writer_busy = Arc::clone(&writing);
         let writer_interrupted = Arc::clone(&interrupted);
-        let mut stdin = stdin;
+        let writer_ingress_failed = Arc::clone(&ingress_failed);
         if let Err(error) = thread::Builder::new()
             .name("kinewright-acp-writer".into())
             .spawn(move || {
-                for write in queued {
-                    if writer_interrupted.load(Ordering::Acquire) {
-                        break;
-                    }
-                    writer_busy.store(true, Ordering::Release);
-                    let result = stdin
-                        .write_all(&write.bytes)
-                        .and_then(|()| stdin.flush())
-                        .map_err(|error| AgentError::Harness(error.to_string()));
-                    writer_busy.store(false, Ordering::Release);
-                    let failed = result.is_err();
-                    let _ = write.finished.try_send(result);
-                    if failed {
-                        break;
-                    }
-                }
+                write_frames(
+                    stdin,
+                    queued,
+                    &writer_busy,
+                    &writer_interrupted,
+                    &writer_ingress_failed,
+                );
             })
         {
             let _ = child.kill();
@@ -333,7 +325,11 @@ impl AcpClient {
         if self
             .inner
             .writes
-            .try_send(PipeWrite { bytes, finished })
+            .try_send(PipeWrite {
+                bytes,
+                restore,
+                finished,
+            })
             .is_err()
         {
             return self.write_failed("write_capacity");
@@ -375,6 +371,37 @@ impl AcpClient {
         let message = format!("ingress: {reason}");
         fail_pending(&self.inner.pending, &message);
         Err(AgentError::Protocol(message))
+    }
+}
+
+fn write_frames(
+    mut stdin: impl Write,
+    queued: Receiver<PipeWrite>,
+    busy: &AtomicBool,
+    interrupted: &AtomicBool,
+    ingress_failed: &AtomicBool,
+) {
+    for write in queued {
+        if interrupted.load(Ordering::Acquire) {
+            break;
+        }
+        if ingress_failed.load(Ordering::Acquire) && !write.restore {
+            let _ = write
+                .finished
+                .try_send(Err(AgentError::Protocol("ingress: interrupted".into())));
+            continue;
+        }
+        busy.store(true, Ordering::Release);
+        let result = stdin
+            .write_all(&write.bytes)
+            .and_then(|()| stdin.flush())
+            .map_err(|error| AgentError::Harness(error.to_string()));
+        busy.store(false, Ordering::Release);
+        let failed = result.is_err();
+        let _ = write.finished.try_send(result);
+        if failed {
+            break;
+        }
     }
 }
 
@@ -576,6 +603,94 @@ pub(crate) fn send_done(events: &impl EventSink, done: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s4_queued_executable_frame_stops_at_ingress_latch_but_restore_writes() {
+        struct InFlight {
+            entered: Sender<()>,
+            release: Receiver<()>,
+            written: Arc<Mutex<Vec<u8>>>,
+            first: bool,
+        }
+        impl Write for InFlight {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.first {
+                    self.first = false;
+                    self.entered.send(()).unwrap();
+                    self.release.recv().unwrap();
+                }
+                self.written.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let (entered_tx, entered) = bounded(1);
+        let (release, release_rx) = bounded(1);
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let sink = InFlight {
+            entered: entered_tx,
+            release: release_rx,
+            written: Arc::clone(&written),
+            first: true,
+        };
+        let (writes, queued) = bounded(1);
+        let failed = Arc::new(AtomicBool::new(false));
+        let writer_failed = Arc::clone(&failed);
+        let worker = thread::spawn(move || {
+            write_frames(
+                sink,
+                queued,
+                &AtomicBool::new(false),
+                &AtomicBool::new(false),
+                &writer_failed,
+            );
+        });
+        let frame = |bytes: &[u8], restore| {
+            let (finished, completion) = bounded(1);
+            (
+                PipeWrite {
+                    bytes: bytes.to_vec(),
+                    restore,
+                    finished,
+                },
+                completion,
+            )
+        };
+        let (first, first_done) = frame(b"in flight\n", false);
+        writes.send(first).unwrap();
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (executable, executable_done) = frame(b"queued executable\n", false);
+        writes.send(executable).unwrap();
+        assert_eq!(
+            writes.len(),
+            1,
+            "executable is queued behind the in-flight frame"
+        );
+        failed.store(true, Ordering::Release);
+        release.send(()).unwrap();
+        let first_result = first_done.recv_timeout(Duration::from_secs(5)).unwrap();
+        let executable_result = executable_done
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let (restore, restore_done) = frame(b"restore\n", true);
+        writes.send(restore).unwrap();
+        let restore_result = restore_done.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(writes);
+        worker.join().unwrap();
+        assert!(first_result.is_ok());
+        assert!(
+            restore_result.is_ok(),
+            "restore frame must still write after the latch"
+        );
+        assert_eq!(
+            *written.lock().unwrap(),
+            b"in flight\nrestore\n",
+            "queued executable frame must never be written after ingress latch"
+        );
+        assert!(executable_result.is_err());
+    }
 
     #[test]
     fn s4_prior_write_fault_survives_cleanup_before_eof() {

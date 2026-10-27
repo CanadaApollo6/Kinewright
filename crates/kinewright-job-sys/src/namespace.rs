@@ -45,17 +45,14 @@ pub fn enter_payload_boundary() -> io::Result<()> {
     require_nsdelegate()?;
     let uid = rustix::process::getuid().as_raw();
     let gid = rustix::process::getgid().as_raw();
-    // SAFETY: These flags never unshare the descriptor table. The caller keeps
-    // its descriptors valid; the kernel also refuses NEWUSER in a threaded task.
-    unsafe {
-        thread::unshare_unsafe(
-            thread::UnshareFlags::NEWUSER
-                | thread::UnshareFlags::NEWCGROUP
-                | thread::UnshareFlags::NEWNS
-                | thread::UnshareFlags::NEWPID,
-        )
+    for flag in [
+        thread::UnshareFlags::NEWUSER,
+        thread::UnshareFlags::NEWCGROUP,
+        thread::UnshareFlags::NEWNS,
+        thread::UnshareFlags::NEWPID,
+    ] {
+        unshare_payload_namespace(flag)?;
     }
-    .map_err(|e| io::Error::other(format!("payload_pid_namespace_unavailable: {e}")))?;
     fs::write("/proc/self/setgroups", "deny")?;
     fs::write("/proc/self/uid_map", format!("{uid} {uid} 1"))?;
     fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
@@ -63,6 +60,17 @@ pub fn enter_payload_boundary() -> io::Result<()> {
     mask_runtime_directory(uid)?;
     thread::set_no_new_privs(true)?;
     Ok(())
+}
+
+fn unshare_payload_namespace(flag: thread::UnshareFlags) -> io::Result<()> {
+    // SAFETY: These flags never unshare the descriptor table. The caller keeps
+    // its descriptors valid; the kernel also refuses NEWUSER in a threaded task.
+    unsafe { thread::unshare_unsafe(flag) }.map_err(|error| {
+        io::Error::other(format!(
+            "payload_namespace_unavailable: unshare {flag:?}: {error} (errno={})",
+            error.raw_os_error()
+        ))
+    })
 }
 
 /// Complete the boundary in the first child after NEWPID, before readiness.
@@ -231,4 +239,19 @@ pub fn verify_payload_pid_namespace(pid: u32) -> io::Result<()> {
         return Err(io::Error::other("payload_pid_namespace_unavailable"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn s4_unshare_failure_names_flag_and_errno() {
+        let error = std::thread::spawn(|| {
+            super::unshare_payload_namespace(rustix::thread::UnshareFlags::NEWUSER).unwrap_err()
+        })
+        .join()
+        .unwrap();
+        let reason = error.to_string();
+        assert!(reason.contains("NEWUSER"), "failing flag missing: {reason}");
+        assert!(reason.contains("errno="), "errno missing: {reason}");
+    }
 }

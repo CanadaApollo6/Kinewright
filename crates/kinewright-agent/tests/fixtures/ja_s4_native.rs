@@ -55,12 +55,7 @@ fn main() {
     );
     #[cfg(target_os = "linux")]
     if role == "proc-view" || role == "runtime-alias" || role == "nested-alias" {
-        use std::os::unix::net::UnixStream;
-        let pids: Vec<u32> = fs::read_dir("/proc")
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .filter_map(|s| s.to_str()?.parse().ok())
-            .collect();
+        use std::os::unix::{fs::MetadataExt as _, net::UnixStream};
         let runtime = format!(
             "run/user/{}",
             env::var("XDG_RUNTIME_DIR")
@@ -69,6 +64,42 @@ fn main() {
                 .next()
                 .unwrap()
         );
+        let runtime_path = format!("/{runtime}");
+        let proc_device = fs::metadata("/proc").unwrap().dev();
+        let runtime_device = fs::metadata(&runtime_path).unwrap().dev();
+        let mut unmount_refused = Vec::new();
+        if role == "nested-alias" {
+            for target in ["/proc", runtime_path.as_str()] {
+                unmount_refused.push(
+                    !Command::new("umount")
+                        .arg("--")
+                        .arg(target)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status()
+                        .unwrap()
+                        .success(),
+                );
+            }
+        }
+        let proc_unchanged = fs::metadata("/proc").unwrap().dev() == proc_device;
+        let runtime_unchanged = fs::metadata(&runtime_path).unwrap().dev() == runtime_device;
+        let runtime_empty = fs::read_dir(&runtime_path).unwrap().next().is_none();
+        let pids: Vec<u32> = fs::read_dir("/proc")
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter_map(|s| s.to_str()?.parse().ok())
+            .collect();
+        let init_descriptors = fs::read_dir("/proc/1/fd").and_then(|entries| {
+            entries
+                .map(|entry| {
+                    fs::read_link(entry?.path()).map(|path| path.to_string_lossy().into_owned())
+                })
+                .collect::<std::io::Result<Vec<_>>>()
+        });
+        let init_descriptors =
+            init_descriptors.map_or_else(|_| "null".into(), |paths| format!("{paths:?}"));
         let mut refused = Vec::new();
         for pid in &pids {
             for socket in ["bus", "systemd/private"] {
@@ -85,7 +116,7 @@ fn main() {
             .filter(|target| target.to_string_lossy().starts_with("pipe:"))
             .count();
         let report = format!(
-            "{{\"pids\":{pids:?},\"self\":{},\"host_visible\":{},\"refused\":{refused:?},\"pipe_descriptors\":{pipes}}}",
+            "{{\"pids\":{pids:?},\"self\":{},\"host_visible\":{},\"refused\":{refused:?},\"pipe_descriptors\":{pipes},\"init_descriptors\":{init_descriptors},\"unmount_refused\":{unmount_refused:?},\"proc_unchanged\":{proc_unchanged},\"runtime_unchanged\":{runtime_unchanged},\"runtime_empty\":{runtime_empty}}}",
             std::process::id(),
             Path::new(&format!("/proc/{host}")).exists()
         );
@@ -106,10 +137,11 @@ fn main() {
         if role == "runtime-alias" {
             assert!(
                 Command::new("unshare")
-                    .args(["--user", "--map-root-user", "--"])
+                    .args(["--user", "--map-root-user", "--mount", "--"])
                     .arg(env::current_exe().unwrap())
                     .arg(root)
                     .arg("nested-alias")
+                    .arg(host)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())

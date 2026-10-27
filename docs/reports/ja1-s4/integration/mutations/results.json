@@ -1,0 +1,235 @@
+{
+  "source_sha256": "51037604d48056a5a787d5a2a956e8082f21573c472e2e12f2b6305d90cf2f35",
+  "pairs": [
+    {
+      "guard": "init-cgroup-handles",
+      "witness": "s4_c2_proc_shows_only_the_namespace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/init-cgroup-handles-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.43s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/init-cgroup-handles-green.log.gz"
+      }
+    },
+    {
+      "guard": "pid-payload-assertion",
+      "witness": "s4_c2_proc_shows_only_the_namespace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.35s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/pid-payload-assertion-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/pid-payload-assertion-green.log.gz"
+      }
+    },
+    {
+      "guard": "nested-fresh-proc",
+      "witness": "s4_c2_runtime_alias_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.37s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/nested-fresh-proc-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/nested-fresh-proc-green.log.gz"
+      }
+    },
+    {
+      "guard": "empty-readiness",
+      "witness": "job_guardian::linux::tests::s4_empty_readiness_eof_has_named_reason",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/empty-readiness-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/empty-readiness-green.log.gz"
+      }
+    },
+    {
+      "guard": "unshare-reason",
+      "witness": "namespace::tests::s4_unshare_failure_names_flag_and_errno",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/unshare-reason-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/unshare-reason-green.log.gz"
+      }
+    },
+    {
+      "guard": "queued-frame-latch",
+      "witness": "acp::tests::s4_queued_executable_frame_stops_at_ingress_latch_but_restore_writes",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 738 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/queued-frame-latch-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 738 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/queued-frame-latch-green.log.gz"
+      }
+    },
+    {
+      "guard": "proc-view-pid-refusal",
+      "witness": "s4_c2_proc_shows_only_the_namespace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/proc-view-pid-refusal-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/proc-view-pid-refusal-green.log.gz"
+      }
+    },
+    {
+      "guard": "proc-view-fresh-proc",
+      "witness": "s4_c2_proc_shows_only_the_namespace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.35s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/proc-view-fresh-proc-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.38s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/proc-view-fresh-proc-green.log.gz"
+      }
+    },
+    {
+      "guard": "runtime-alias",
+      "witness": "s4_c2_runtime_alias_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.35s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/runtime-alias-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.36s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/runtime-alias-green.log.gz"
+      }
+    },
+    {
+      "guard": "descriptor-readiness",
+      "witness": "s4_c2_launch_under_runtime_dir",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.20s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/integration/mutations/descriptor-readiness-red.log.gz",
+        "expected_assertion": true
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 31 filtered out; finished in 0.25s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/integration/mutations/descriptor-readiness-green.log.gz"
+      }
+    }
+  ]
+}

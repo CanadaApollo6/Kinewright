@@ -566,6 +566,7 @@ fn update(envelope: &OrchestrationEnvelope, accounting_ref: ObjectRef) -> Valida
         tasks: vec![TaskRecord {
             id: id(3),
             parent: None,
+            progress: TaskProgress::default(),
             state: TaskState::Running(id(4)),
             brief: TaskBrief {
                 plan: typed_reference(b"plan", RecordKind::OwnedScript),

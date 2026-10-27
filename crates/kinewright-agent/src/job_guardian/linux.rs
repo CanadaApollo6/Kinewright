@@ -124,6 +124,7 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
     program.validate()?;
     let cgroup = Cgroup::open(&leaf)?;
     cgroup.enter()?;
+    drop(cgroup);
     let outcome = (|| -> io::Result<u32> {
         let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
         kinewright_job_sys::enter_payload_boundary()?;
@@ -156,6 +157,11 @@ fn read_ready<T: serde::de::DeserializeOwned>(mut reader: impl Read + AsFd) -> i
         }
         let mut buffer = [0; 1024];
         match reader.read(&mut buffer) {
+            Ok(0) if bytes.is_empty() => {
+                return Err(io::Error::other(
+                    "payload_namespace_unavailable: readiness closed without result",
+                ));
+            }
             Ok(0) => return Ok(serde_json::from_slice(&bytes)?),
             Ok(n) if bytes.len() + n <= super::protocol::RECOVERY_CAP => {
                 bytes.extend_from_slice(&buffer[..n]);
@@ -201,4 +207,18 @@ fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
         .stderr(Stdio::null())
         .spawn()?;
     kinewright_job_sys::reap_payload_until_exit(child.id())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn s4_empty_readiness_eof_has_named_reason() {
+        let (reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        drop(writer);
+        let error = super::read_ready::<Result<u32, String>>(reader).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "payload_namespace_unavailable: readiness closed without result"
+        );
+    }
 }

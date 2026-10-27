@@ -1,0 +1,44 @@
+{
+  "base": "24d1411993681235f404b2c5f895727c51ef6992",
+  "gate": "verified for named desktop targets",
+  "build": 0,
+  "clippy": 0,
+  "fmt": 0,
+  "windows_native_route": 0,
+  "windows_project_route": 0,
+  "job_sys": {
+    "passed": 1,
+    "ignored": 0
+  },
+  "agent": {
+    "passed": 1039,
+    "ignored": 22
+  },
+  "project": {
+    "passed": 367,
+    "ignored": 2
+  },
+  "app_attachment": {
+    "passed": 72,
+    "ignored": 0
+  },
+  "slow_manifest": {
+    "tests": 117,
+    "allowlist": 60,
+    "equipped_skip_sites": 27
+  },
+  "slow_parser_selftests": 42,
+  "mutation_pairs": 19,
+  "mutation_runtime_reds": 19,
+  "mutation_restored_greens": 19,
+  "initial_failures": "one library test in each of agent and project required the sealed JA-S1 predecessor; complete library reruns passed after setup",
+  "not_run": [
+    "native Windows runtime",
+    "complete Windows agent/app builds beyond the specified routes",
+    "hosted CI",
+    "whole-workspace runtime suites",
+    "inherited ignored H1/H3 and explicit fixture/hardware tests"
+  ],
+  "conflicts_requiring_design_decisions": [],
+  "pushed": false
+}

@@ -1860,18 +1860,40 @@ fn s4_c2_proc_shows_only_the_namespace() {
     let _cleanup = FixtureCleanup(root.clone());
     let (claim, mut owner, mut session) =
         c2_session(&root, "proc-view", &CertifiedProfile::fixture());
+    let init_pid = session.payload_identity().0;
+    let host_init_descriptors = fs::read_dir(format!("/proc/{init_pid}/fd"))
+        .unwrap()
+        .map(|entry| {
+            fs::read_link(entry.unwrap().path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
     session.commit(&mut owner).unwrap();
     wait_file(&root.join("proc-result.json"));
     let result: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("proc-result.json")).unwrap()).unwrap();
     finish_c2(claim, session);
-    assert_eq!(
-        result["self"], 2,
-        "provider must have ordinary PID-2 signal semantics"
+    let init_descriptors = result["init_descriptors"].as_array().map_or_else(
+        || host_init_descriptors,
+        |values| {
+            values
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect()
+        },
+    );
+    assert!(
+        init_descriptors
+            .iter()
+            .all(|path| path == "/dev/null" || path.starts_with("pipe:")),
+        "init retained cgroup descriptor: {init_descriptors:?}"
     );
     assert_eq!(
-        result["pipe_descriptors"], 0,
-        "readiness and COMMIT pipes must be closed before provider exec"
+        init_descriptors.len(),
+        3,
+        "init keeps only COMMIT and null stdio"
     );
     let mut pids = result["pids"]
         .as_array()
@@ -1886,6 +1908,14 @@ fn s4_c2_proc_shows_only_the_namespace() {
         "procfs must contain only namespace init and provider"
     );
     assert_eq!(result["host_visible"], false, "no outside proc-root alias");
+    assert_eq!(
+        result["self"], 2,
+        "provider must have ordinary PID-2 signal semantics"
+    );
+    assert_eq!(
+        result["pipe_descriptors"], 0,
+        "readiness and COMMIT pipes must be closed before provider exec"
+    );
     remove_root(root);
 }
 
@@ -1917,6 +1947,34 @@ fn s4_c2_runtime_alias_refused() {
             refused.iter().all(|v| v == true),
             "every visible proc-root alias must refuse both sockets: {result}"
         );
+        let mut pids = result["pids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|pid| pid.as_u64().unwrap())
+            .collect::<Vec<_>>();
+        pids.sort_unstable();
+        let mut expected = vec![1, 2, result["self"].as_u64().unwrap()];
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(pids, expected, "nested procfs must remain namespace-only");
+        assert_eq!(result["host_visible"], false, "nested host proc alias");
+        assert_eq!(
+            result["proc_unchanged"], true,
+            "fresh procfs survived umount"
+        );
+        assert_eq!(
+            result["runtime_unchanged"], true,
+            "runtime mask survived umount"
+        );
+        assert_eq!(result["runtime_empty"], true, "runtime mask remains empty");
+        if result["self"] != 2 {
+            assert_eq!(
+                result["unmount_refused"],
+                serde_json::json!([true, true]),
+                "both nested unmount attempts must be refused"
+            );
+        }
     }
     remove_root(root);
 }

@@ -1,0 +1,14 @@
+build=0
+clippy=0
+fmt=0
+windows-native=0
+windows-project=0
+job-sys=0
+agent=101
+project=101
+app-attachment=0
+slow-lint=0
+slow-selftest=0
+predecessor-setup=0
+libraries-after-prerequisite=0
+final-static-gates=0
