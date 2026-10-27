@@ -11,7 +11,7 @@
 //! path declarations with reexports from `kinewright_project`. No opaque-blob or
 //! alternative persistence adapter is provided.
 
-use kinewright_project::{bundle_records, receipts};
+use kinewright_project::{bundle_records, editing_session, receipts};
 
 #[path = "../../../kinewright-project/src/orchestration_commit.rs"]
 pub mod orchestration_commit;

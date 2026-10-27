@@ -9,7 +9,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use super::{
-    bundle_records::{BranchId, HeadId, ObjectRef, ProjectId, RecordKind, SessionId},
+    bundle_records::{BranchId, ObjectRef, ProjectId, RecordKind, SessionId},
     receipts::{CommandDigest, CommandId},
 };
 use serde::{Deserialize, Serialize};
@@ -42,14 +42,7 @@ identity!(
     EndpointId
 );
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BranchBinding {
-    pub branch: BranchId,
-    pub head: HeadId,
-    pub checkpoint: ObjectRef,
-    pub document_hash: String,
-}
+pub use super::editing_session::BranchBinding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

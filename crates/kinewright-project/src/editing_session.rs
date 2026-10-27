@@ -28,7 +28,10 @@ mod switch;
 pub use switch::PreparedGuiSwitch;
 mod rescue;
 mod rescue_selection;
-pub use durable::{DurableBranchSessionGuard, specialist_floor_delta_from_baseline};
+pub use durable::{
+    BranchBinding, DurableBranchSessionGuard, FrozenTaskResult,
+    specialist_floor_delta_from_baseline,
+};
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);
 type HistoryDigestCache = Option<(
     kinewright_core::ActorIdentity,
@@ -200,6 +203,7 @@ pub struct Ja1EditingSession {
     recovery_save_pending: bool,
     selection_result: Option<(crate::bundle_recovery::RecoverySelection, BundleSaveReport)>,
     durable_sessions: Vec<durable::RegisteredSession>,
+    pending_candidate: Option<StorageReservation<durable::PendingCandidateCommit>>,
     retained_destinations: Vec<(RetainedDestination, Core)>,
     originating_session: crate::bundle_records::SessionId,
     dirty_cache: std::cell::RefCell<HistoryDigestCache>,
@@ -822,6 +826,7 @@ impl Ja1EditingSession {
             recovery_save_pending: false,
             selection_result: None,
             durable_sessions: vec![],
+            pending_candidate: None,
             retained_destinations: vec![],
             originating_session: crate::bundle_records::SessionId::fresh()?,
             dirty_cache: std::cell::RefCell::new(None),
@@ -861,6 +866,7 @@ impl Ja1EditingSession {
             recovery_save_pending: false,
             selection_result: None,
             durable_sessions: vec![],
+            pending_candidate: None,
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
             save_disclosure_cache: std::cell::RefCell::new(None),
@@ -943,6 +949,7 @@ impl Ja1EditingSession {
             recovery_save_pending: false,
             selection_result: None,
             durable_sessions: vec![],
+            pending_candidate: None,
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
             save_disclosure_cache: std::cell::RefCell::new(None),
@@ -1268,6 +1275,10 @@ impl Ja1EditingSession {
             .cloned()
     }
     pub fn reconcile_active(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
+        if self.pending_candidate.is_some() {
+            self.settle_pending_candidate(true)?;
+            return Ok(None);
+        }
         let live = self.core_for_destination(self.active_bundle()?, Some(&self.core));
         let destination = self
             .destination
