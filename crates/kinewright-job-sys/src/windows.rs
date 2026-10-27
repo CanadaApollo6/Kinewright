@@ -1,12 +1,118 @@
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     io,
     mem::{size_of, zeroed},
-    os::windows::{ffi::OsStrExt, io::AsRawHandle},
-    path::Path,
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::AsRawHandle,
+    },
+    path::{Path, PathBuf},
     process::ChildStdin,
     ptr,
 };
+
+/// Resolve retained execution state from the account, never its environment.
+/// The SID binds both the directory and the lock name to the same account.
+///
+/// # Errors
+/// Every token or known-folder error refuses acquisition.
+pub fn execution_namespace() -> io::Result<(PathBuf, String)> {
+    use windows_sys::Win32::{
+        Foundation::LocalFree,
+        Security::{
+            Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_QUERY, TOKEN_USER,
+            TokenUser,
+        },
+        System::{
+            Com::CoTaskMemFree,
+            Threading::{GetCurrentProcess, OpenProcessToken},
+        },
+        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DONT_UNEXPAND, SHGetKnownFolderPath},
+    };
+    let mut token = ptr::null_mut();
+    // SAFETY: CurrentProcess is a valid pseudo handle and token is writable.
+    check(unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) })?;
+    let token = handle(token)?;
+    let mut required = 0;
+    // SAFETY: The null first buffer requests the exact allocation size.
+    unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &raw mut required) };
+    if required < u32::try_from(size_of::<TOKEN_USER>()).map_err(io::Error::other)?
+        || required > 65536
+    {
+        return Err(io::Error::other("account SID unavailable"));
+    }
+    let mut storage = vec![0usize; (required as usize).div_ceil(size_of::<usize>())];
+    // SAFETY: The aligned allocation has at least required writable bytes and
+    // remains alive until the SID is converted below.
+    check(unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            storage.as_mut_ptr().cast(),
+            required,
+            &raw mut required,
+        )
+    })?;
+    // SAFETY: Successful TokenUser populated this correctly aligned structure.
+    let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+    let mut sid = ptr::null_mut();
+    // SAFETY: user.Sid points into the still-live OS-populated token buffer.
+    check(unsafe { ConvertSidToStringSidW(user.User.Sid, &raw mut sid) })?;
+    // SAFETY: Success returns an allocated NUL-terminated UTF-16 SID string.
+    let sid_text = unsafe { copy_os_string(sid) };
+    // SAFETY: ConvertSidToStringSidW transfers this LocalAlloc allocation.
+    unsafe { LocalFree(sid.cast()) };
+    let sid = sid_text
+        .into_string()
+        .map_err(|_| io::Error::other("invalid account SID"))?;
+    if !sid.starts_with("S-1-")
+        || !sid
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
+    {
+        return Err(io::Error::other("invalid account SID"));
+    }
+    let mut folder = ptr::null_mut();
+    let folder_id = FOLDERID_LocalAppData;
+    // SAFETY: The null token selects this account; folder receives an owned shell allocation.
+    let result = unsafe {
+        SHGetKnownFolderPath(
+            &raw const folder_id,
+            KF_FLAG_DONT_UNEXPAND.cast_unsigned(),
+            ptr::null_mut(),
+            &raw mut folder,
+        )
+    };
+    let root = if result >= 0 && !folder.is_null() {
+        // SAFETY: Successful SHGetKnownFolderPath returns a NUL-terminated path.
+        Some(PathBuf::from(unsafe { copy_os_string(folder) }))
+    } else {
+        None
+    };
+    // SAFETY: The API requires CoTaskMemFree even on failure; null is accepted.
+    unsafe { CoTaskMemFree(folder.cast()) };
+    let root = root.filter(|p| p.is_absolute()).ok_or_else(|| {
+        io::Error::other(format!(
+            "OS-local machine namespace unavailable: HRESULT {result:#x}"
+        ))
+    })?;
+    Ok((
+        root.join("Kinewright")
+            .join(format!("studio-execution-{sid}")),
+        format!("execution-{sid}.lock"),
+    ))
+}
+
+unsafe fn copy_os_string(value: *const u16) -> OsString {
+    let mut length = 0;
+    // SAFETY: Only OS APIs returning owned, NUL-terminated UTF-16 call this helper.
+    unsafe {
+        while *value.add(length) != 0 {
+            length += 1;
+        }
+        OsString::from_wide(std::slice::from_raw_parts(value, length))
+    }
+}
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle, FILETIME, GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,

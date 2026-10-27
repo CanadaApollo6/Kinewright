@@ -10,17 +10,31 @@ use std::{
 
 pub(super) struct Tree {
     cgroup: Cgroup,
+    service: Cgroup,
     child: Option<Child>,
     gate: Option<ChildStdin>,
 }
 impl Tree {
     pub(super) fn new(unit: &str) -> io::Result<Self> {
+        kinewright_job_sys::require_nsdelegate()?;
         kinewright_job_sys::install_subreaper()?;
+        let cgroup = Cgroup::create(unit)?;
+        let service = Cgroup::open(
+            cgroup
+                .path()
+                .parent()
+                .ok_or_else(|| io::Error::other("service cgroup"))?,
+        )?;
+        service.require_deletion_signal()?;
         Ok(Self {
-            cgroup: Cgroup::create(unit)?,
+            cgroup,
+            service,
             child: None,
             gate: None,
         })
+    }
+    pub(super) fn service_identity(&self) -> (u64, u64) {
+        self.service.identity()
     }
     pub(super) fn identity(&self) -> (String, u64, u64) {
         let (device, inode) = self.cgroup.identity();
@@ -49,6 +63,25 @@ impl Tree {
         )?;
         let process = ProcessHandle::open(child.id())?;
         self.child = Some(child);
+        let deadline = std::time::Instant::now() + super::protocol::STARTUP;
+        let ready = root.join("boundary-ready.json");
+        loop {
+            match fs::read(&ready) {
+                Ok(bytes) => {
+                    let result: Result<(), String> = serde_json::from_slice(&bytes)?;
+                    result.map_err(io::Error::other)?;
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            if std::time::Instant::now() >= deadline || self.exited()? {
+                return Err(io::Error::other(
+                    "payload_namespace_unavailable: no child verification",
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         Ok(process)
     }
     pub(super) fn membership(&self, pid: u32) -> io::Result<bool> {
@@ -74,7 +107,7 @@ impl Tree {
         self.cgroup.kill()
     }
     pub(super) fn empty(&mut self) -> io::Result<bool> {
-        self.cgroup.empty()
+        Ok(self.cgroup.empty()? && self.service.no_processes_except(Some(std::process::id()))?)
     }
     #[allow(
         clippy::unused_self,
@@ -97,7 +130,7 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
     if args.next().is_some() {
         return Err(io::Error::other("unexpected shim argument"));
     }
-    let bytes = fs::read(path)?;
+    let bytes = fs::read(&path)?;
     if bytes.len() > super::protocol::WIRE_CAP {
         return Err(io::Error::other("program cap"));
     }
@@ -105,6 +138,13 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
     program.validate()?;
     let cgroup = Cgroup::open(&leaf)?;
     cgroup.enter()?;
+    let boundary = kinewright_job_sys::enter_payload_boundary().map_err(|error| error.to_string());
+    super::service::atomic_record(
+        &path.with_file_name("boundary-ready.json"),
+        &boundary,
+        super::protocol::WIRE_CAP,
+    )?;
+    boundary.map_err(io::Error::other)?;
     let mut commit = [0];
     std::io::stdin().read_exact(&mut commit)?;
     if commit != *b"C" {
@@ -113,6 +153,10 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
     drop(cgroup);
     Err(Command::new(program.executable)
         .args(program.arguments)
+        .env(
+            "XDG_RUNTIME_DIR",
+            format!("/run/user/{}", rustix::process::getuid().as_raw()),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

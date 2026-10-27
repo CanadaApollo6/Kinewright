@@ -21,6 +21,30 @@ use std::{
 
 static SPAWN: Mutex<()> = Mutex::new(());
 
+/// C3 must supply a certified filesystem/IPC profile before provider launch.
+/// C2 supplies no production constructor. Containment alone is not a sandbox.
+///
+/// ```compile_fail
+/// use kinewright_agent::guardian::CertifiedProfile;
+/// let profile = CertifiedProfile {};
+/// ```
+pub struct CertifiedProfile {
+    _private: (),
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) missing_nsdelegate: bool,
+}
+impl CertifiedProfile {
+    #[cfg(test)]
+    #[must_use]
+    pub fn fixture() -> Self {
+        Self {
+            _private: (),
+            #[cfg(target_os = "linux")]
+            missing_nsdelegate: false,
+        }
+    }
+}
+
 /// The existing serialized Studio owner supplies both durable acknowledgments.
 /// An implementation must return success only after exact-envelope root ACK.
 /// C2's native fixture implements this port without claiming Studio integration.
@@ -69,6 +93,8 @@ pub struct ContainedSession {
     payload: ProcessHandle,
     #[cfg(target_os = "linux")]
     observer: kinewright_job_sys::Cgroup,
+    #[cfg(target_os = "linux")]
+    service: kinewright_job_sys::Cgroup,
     observed: Vec<ProcessHandle>,
     executing: bool,
     cleaned: bool,
@@ -85,6 +111,7 @@ fn next_reply(
             return Err(io::Error::other("guardian startup deadline"));
         }
         match receiver.try_recv() {
+            Ok(Ok(GuardianMessage::Refused { reason })) => return Err(io::Error::other(reason)),
             Ok(result) => return result,
             Err(TryRecvError::Disconnected) => return Err(io::ErrorKind::UnexpectedEof.into()),
             Err(TryRecvError::Empty) => {}
@@ -102,10 +129,23 @@ fn next_reply(
     reason = "the transport owns one process and two bounded pipe endpoints"
 )]
 pub fn spawn_transport(
+    profile: &CertifiedProfile,
     guardian: &Path,
     root: &Path,
     identity: &AttemptIdentity,
 ) -> io::Result<(Launcher, ChildStdin, Receiver<io::Result<GuardianMessage>>)> {
+    let _ = profile;
+    #[cfg(target_os = "linux")]
+    {
+        let info = fs::read_to_string("/proc/self/mountinfo")?;
+        #[cfg(test)]
+        let info = if profile.missing_nsdelegate {
+            info.replace("nsdelegate", "fixture-no-delegation")
+        } else {
+            info
+        };
+        kinewright_job_sys::verify_nsdelegate(&info)?;
+    }
     let _spawn_guard = SPAWN
         .lock()
         .map_err(|_| io::Error::other("native spawn lock poisoned"))?;
@@ -208,6 +248,7 @@ impl ContainedSession {
         identity: AttemptIdentity,
         program: Program,
         executable: &Path,
+        profile: &CertifiedProfile,
     ) -> io::Result<Self> {
         identity.validate()?;
         program.validate()?;
@@ -218,7 +259,8 @@ impl ContainedSession {
         owner.reserve(&identity)?;
         let root = claim.root().join(format!("job-{}", identity.nonce));
         fs::create_dir(&root)?;
-        let (launcher, mut writer, replies) = spawn_transport(executable, &root, &identity)?;
+        let (launcher, mut writer, replies) =
+            spawn_transport(profile, executable, &root, &identity)?;
         protocol::write_frame(
             &mut writer,
             &HostMessage::Prepare {
@@ -258,6 +300,8 @@ impl ContainedSession {
             }
             observer
         };
+        #[cfg(target_os = "linux")]
+        let service = open_service(&recovery)?;
         claim.bind(&recovery)?;
         protocol::write_frame(
             &mut writer,
@@ -297,6 +341,8 @@ impl ContainedSession {
             payload,
             #[cfg(target_os = "linux")]
             observer,
+            #[cfg(target_os = "linux")]
+            service,
             observed: Vec::new(),
             executing: false,
             cleaned: false,
@@ -460,7 +506,10 @@ impl ContainedSession {
             && self.observed.iter().all(|p| p.reaped().unwrap_or(false));
         #[cfg(target_os = "linux")]
         {
-            Ok(exited && self.observer.empty()? && self.observer.no_processes()?)
+            Ok(exited
+                && self.observer.empty()?
+                && self.service.empty()?
+                && self.service.no_processes()?)
         }
         #[cfg(windows)]
         {
@@ -501,6 +550,7 @@ pub struct RecoveryObserver {
     recovery: RecoveryIdentity,
     guardian: ProcessHandle,
     cgroup: kinewright_job_sys::Cgroup,
+    service: kinewright_job_sys::Cgroup,
     members: Vec<ProcessHandle>,
 }
 #[cfg(target_os = "linux")]
@@ -518,10 +568,12 @@ impl RecoveryObserver {
             return Err(io::Error::other("replaced cgroup"));
         }
         let members = cgroup.members()?;
+        let service = open_service(recovery)?;
         Ok(Self {
             recovery: recovery.clone(),
             guardian,
             cgroup,
+            service,
             members,
         })
     }
@@ -538,7 +590,8 @@ impl RecoveryObserver {
             let observed: io::Result<bool> = (|| {
                 Ok(self.guardian.reaped()?
                     && self.cgroup.empty()?
-                    && self.cgroup.no_processes()?
+                    && self.service.empty()?
+                    && self.service.no_processes()?
                     && self.members.iter().all(|p| p.reaped().unwrap_or(false)))
             })();
             if matches!(observed, Ok(true)) && Instant::now() < deadline {
@@ -556,8 +609,28 @@ impl RecoveryObserver {
     /// # Errors
     /// Returns a whole-cgroup kill failure.
     pub fn stop_tree(&mut self) -> io::Result<()> {
-        self.cgroup.kill()
+        self.service.kill()
     }
+}
+
+#[cfg(target_os = "linux")]
+fn open_service(recovery: &RecoveryIdentity) -> io::Result<kinewright_job_sys::Cgroup> {
+    let leaf = Path::new(&recovery.containment);
+    let path = leaf
+        .parent()
+        .ok_or_else(|| io::Error::other("missing service cgroup"))?;
+    if leaf.file_name().is_none_or(|part| part != "payload")
+        || path
+            .file_name()
+            .is_none_or(|part| part != recovery.attempt.unit().as_str())
+    {
+        return Err(io::Error::other("foreign service cgroup"));
+    }
+    let service = kinewright_job_sys::Cgroup::open(path)?;
+    if service.identity() != (recovery.service_device, recovery.service_inode) {
+        return Err(io::Error::other("replaced service cgroup"));
+    }
+    Ok(service)
 }
 
 #[cfg(test)]

@@ -1,0 +1,2 @@
+16 archived runtime red/restored-green pairs verified.
+26 source-file hashes match.

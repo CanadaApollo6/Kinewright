@@ -2,7 +2,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 source scripts/setup-ffmpeg.sh >/dev/null
-report=docs/reports/ja1-s4
+exec 9>/tmp/kinewright-cargo-heavy.lock
+flock 9
+report=${C2_REPORT_DIR:-docs/reports/ja1-s4}
 snapshot() {
     date --utc --iso-8601=ns
     uptime
@@ -13,13 +15,15 @@ snapshot() {
 timed_fixture="$PWD/target/c2-native-timed"
 nice -n 19 rustc --edition 2024 crates/kinewright-agent/tests/fixtures/ja_s4_native.rs -o "$timed_fixture"
 snapshot > "$report/c2-timing-context.log"
-runner=
+runner=${C2_TIMING_RUNNER:?set the exact freshly built slow-feature test executable}
+[[ -x "$runner" && -f "$runner" ]]
+matches=0
 for candidate in target/debug/deps/ja_s4_guardian-*; do
-    if [[ -x "$candidate" && -f "$candidate" ]]; then runner=$candidate; fi
+    if [[ "$candidate" -ef "$runner" ]]; then matches=$((matches + 1)); fi
 done
-[[ -n "$runner" ]]
+[[ "$matches" -eq 1 ]]
 sha256sum "$runner" target/debug/kinewright-job-guardian "$timed_fixture" crates/kinewright-agent/tests/fixtures/ja_s4_native.rs > "$report/c2-timing-identities.sha256"
-setsid nohup timeout 60s env KINEWRIGHT_S4_PREBUILT_NATIVE="$timed_fixture" nice -n 19 "$runner" --test-threads=1 --nocapture > "$report/c2-timing.log" 2>&1 &
+setsid nohup timeout 60s env KINEWRIGHT_S4_PREBUILT_NATIVE="$timed_fixture" nice -n 19 "$runner" --test-threads=1 --nocapture 9>&- > "$report/c2-timing.log" 2>&1 &
 lane_pid=$!
 (
     while kill -0 "$lane_pid" 2>/dev/null; do

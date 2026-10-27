@@ -44,7 +44,7 @@ pub fn install_subreaper() -> io::Result<()> {
 /// Returns unexpected wait errors. A live child returns false.
 pub fn reap_all() -> io::Result<bool> {
     loop {
-        match rustix::process::waitpid(None, WaitOptions::NOHANG) {
+        match rustix::process::wait(WaitOptions::NOHANG) {
             Ok(Some(_)) => {}
             Ok(None) => return Ok(false),
             Err(rustix::io::Errno::CHILD) => return Ok(true),
@@ -265,6 +265,28 @@ impl Cgroup {
 }
 
 impl Cgroup {
+    /// Certify the retained-inode deletion signal on this hierarchy and kernel.
+    ///
+    /// # Errors
+    /// Missing zero-link evidence refuses launch, with no alternate proof route.
+    pub fn require_deletion_signal(&self) -> io::Result<()> {
+        let sample = (|| {
+            let leaf = self.create_child("kernel-deletion-probe")?;
+            let live = leaf.link_count()?;
+            leaf.try_remove()?;
+            let removed = leaf.link_count()?;
+            if live == 0 || removed != 0 || !leaf.kernel_deleted()? {
+                return Err(invalid(&format!(
+                    "live_nlink={live}, deleted_nlink={removed}"
+                )));
+            }
+            Ok(())
+        })();
+        sample.map_err(|error: io::Error| {
+            invalid(&format!("kernel_deletion_signal_unavailable: {error}"))
+        })
+    }
+
     /// The retained cgroup inode is the only source of deletion evidence.
     /// Linux forbids live members/children at rmdir and joining a removed group.
     ///
@@ -309,6 +331,14 @@ impl Cgroup {
     /// # Errors
     /// Any unreadable potentially owned process prevents cleanup proof.
     pub fn no_processes(&self) -> io::Result<bool> {
+        self.no_processes_except(None)
+    }
+
+    /// Inspect the whole retained subtree, optionally excluding the supervisor.
+    ///
+    /// # Errors
+    /// Every error except an exited per-PID entry invalidates the sample.
+    pub fn no_processes_except(&self, excluded: Option<u32>) -> io::Result<bool> {
         let relative = self
             .path
             .strip_prefix("/sys/fs/cgroup")
@@ -316,12 +346,11 @@ impl Cgroup {
         let expected = format!("0::/{}", relative.display());
         for entry in fs::read_dir("/proc")? {
             let entry = entry?;
-            if entry
+            let pid = entry
                 .file_name()
                 .to_str()
-                .and_then(|v| v.parse::<u32>().ok())
-                .is_none()
-            {
+                .and_then(|v| v.parse::<u32>().ok());
+            if pid.is_none() || pid == excluded {
                 continue;
             }
             match fs::read_to_string(entry.path().join("cgroup")) {
@@ -336,6 +365,7 @@ impl Cgroup {
                     return Ok(false);
                 }
                 Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(io::Error::other(format!(
                         "cgroup scan {}: {error}",
