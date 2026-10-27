@@ -513,7 +513,12 @@ fn spawn_muse_incoming(
             let mut tool_names = HashMap::new();
             let mut turn_saw_usage = false;
             let mut reported_malformed = false;
+            let mut fault_stopped = false;
             for message in incoming {
+                if client.ingress_failed() && !fault_stopped {
+                    client.kill();
+                    fault_stopped = true;
+                }
                 if events.failed() {
                     client.kill();
                     break;
@@ -888,6 +893,122 @@ mod tests {
     const FRAME_BOUND: Duration = Duration::from_secs(1);
 
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one live session witness keeps the unread pipe and raw overflow ordered"
+    )]
+    fn s4_full_reply_pipe_cannot_block_raw_fault_cleanup() {
+        struct ReapClient(AcpClient);
+        impl Drop for ReapClient {
+            fn drop(&mut self) {
+                self.0.kill();
+            }
+        }
+        let parent = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        fs::create_dir_all(&parent).unwrap();
+        let root = kinewright_media::test_support::TempDirectory::new_in(&parent, "c5-full-pipe");
+        let fixture = root.path("pipe-fixture");
+        assert!(
+            ProcessCommand::new("rustc")
+                .args(["--edition", "2024", "-C", "debuginfo=0"])
+                .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ja_s4_c5_pipe.rs"))
+                .arg("-o")
+                .arg(&fixture)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut command = ProcessCommand::new(&fixture);
+        command.arg("blocked").arg(root.root());
+        let client = AcpClient::spawn(command, "full response pipe").unwrap();
+        let _reap = ReapClient(client.clone());
+        let (events, received) = event_channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let pending = client.begin_request("turn/start", &json!({})).unwrap();
+        let mut session = MuseSession {
+            client: client.clone(),
+            session_id: "blocked".into(),
+            requested: SessionConfig {
+                working_directory: None,
+                model: None,
+                effort: None,
+                service_tier: None,
+                max_turns: None,
+                mcp_url: None,
+                tool_names: None,
+            },
+            scratch_directory: root.path("session-scratch"),
+            events_rx: received.clone(),
+            events_tx: events.clone(),
+            done: Arc::clone(&done),
+            turns: 1,
+        };
+        spawn_muse_incoming(
+            client.clone(),
+            client.incoming(),
+            "blocked".into(),
+            events,
+            Arc::clone(&done),
+        )
+        .unwrap();
+        pending.wait(Duration::from_secs(5)).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.path("request-sent").exists() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        while !client.inner_writer_busy_for_test() {
+            assert!(
+                Instant::now() < deadline,
+                "consumer must enter its response write"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            client.inner_writer_busy_for_test(),
+            "the response exceeds the unread pipe capacity"
+        );
+        assert!(
+            !client.ingress_failed(),
+            "the fixture waits before overflowing raw ingress"
+        );
+        assert!(!client.child_reaped());
+        assert_eq!(
+            received.len(),
+            1,
+            "accepted text remains queued through the fault"
+        );
+        fs::write(root.path("overflow"), b"").unwrap();
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AgentEvent::Text("accepted before fault".into())
+        );
+        assert!(
+            matches!(received.recv_timeout(Duration::from_secs(5)).unwrap(), AgentEvent::Error(reason) if reason.contains("event_capacity")),
+            "raw overflow must reach cleanup while provider stdin remains unread"
+        );
+        assert!(
+            client.child_reaped(),
+            "cleanup precedes terminal observation"
+        );
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AgentEvent::Done
+        );
+        assert!(done.load(Ordering::Acquire));
+        assert!(
+            session
+                .send_user_message("cannot spend after fault".into())
+                .is_err()
+        );
+        session.interrupt();
+        assert!(client.begin_request("turn/start", &json!({})).is_err());
+        assert!(received.try_recv().is_err());
+    }
 
     #[test]
     #[cfg(unix)]

@@ -1,0 +1,212 @@
+{
+  "source_sha256": "cb8908ee0e670f0060c6c14df2165b8834fd637f412be561b88c348baf2807ee",
+  "pairs": [
+    {
+      "guard": "first-turn-coverage",
+      "witness": "s4_first_unreported_turn_blocks_next_send",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/first-turn-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/first-turn-coverage-green.log.gz"
+      }
+    },
+    {
+      "guard": "later-turn-coverage",
+      "witness": "s4_unreported_turn_after_settlement_blocks_next_send",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/later-turn-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/later-turn-coverage-green.log.gz"
+      }
+    },
+    {
+      "guard": "crash-coverage",
+      "witness": "s4_reply_before_usage_publication_crash_blocks_new_attempt",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.08s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/crash-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.08s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/crash-coverage-green.log.gz",
+        "binary_sha256": "574a69f8de380545eee69e418d9b01ce29313da8190f69386d94b2714e2a4938"
+      }
+    },
+    {
+      "guard": "matching-turn-coverage",
+      "witness": "s4_usage_settlement_requires_acknowledged_matching_turn",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/matching-turn-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/matching-turn-coverage-green.log.gz",
+        "binary_sha256": "574a69f8de380545eee69e418d9b01ce29313da8190f69386d94b2714e2a4938"
+      }
+    },
+    {
+      "guard": "acknowledged-settlement",
+      "witness": "s4_usage_settlement_requires_acknowledged_matching_turn",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/acknowledged-settlement-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/acknowledged-settlement-green.log.gz",
+        "binary_sha256": "574a69f8de380545eee69e418d9b01ce29313da8190f69386d94b2714e2a4938"
+      }
+    },
+    {
+      "guard": "cancellable-reply-write",
+      "witness": "muse::tests::s4_full_reply_pipe_cannot_block_raw_fault_cleanup",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 5.17s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/cancellable-reply-write-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.18s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/cancellable-reply-write-green.log.gz",
+        "binary_sha256": "ca04b4d61bda2454f6a5ed09e9bf9a642cd342e8dcf688cb8291603f5788a5e9"
+      }
+    },
+    {
+      "guard": "fault-reap-before-terminal",
+      "witness": "muse::tests::s4_full_reply_pipe_cannot_block_raw_fault_cleanup",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.18s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/fault-reap-before-terminal-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.17s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/fault-reap-before-terminal-green.log.gz",
+        "binary_sha256": "ca04b4d61bda2454f6a5ed09e9bf9a642cd342e8dcf688cb8291603f5788a5e9"
+      }
+    },
+    {
+      "guard": "fault-publication-after-cleanup",
+      "witness": "acp::tests::s4_raw_fault_is_retained_when_cleanup_races_publication",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/fault-publication-after-cleanup-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/fault-publication-after-cleanup-green.log.gz",
+        "binary_sha256": "ca04b4d61bda2454f6a5ed09e9bf9a642cd342e8dcf688cb8291603f5788a5e9"
+      }
+    },
+    {
+      "guard": "prior-write-fault-publication",
+      "witness": "acp::tests::s4_prior_write_fault_survives_cleanup_before_eof",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/prior-write-fault-publication-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-wire-v1/prior-write-fault-publication-green.log.gz",
+        "binary_sha256": "ca04b4d61bda2454f6a5ed09e9bf9a642cd342e8dcf688cb8291603f5788a5e9"
+      }
+    }
+  ],
+  "fixture_sha256": "e7bf4ebc6cd057a65e4d4dc0481f2bb7fc259c7478736c23ac30914b1af633c2",
+  "credit": "superseded by explicit JSON-RPC 2.0 fixture envelopes; excluded from final count"
+}

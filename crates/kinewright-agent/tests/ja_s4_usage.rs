@@ -90,8 +90,183 @@ fn send(n: u64, attempt: u64) -> SendConsumption {
             sequence: n,
         },
         attempt: id(attempt),
+        turn: n,
         payload: reference(b"one admitted prompt"),
     }
+}
+
+#[test]
+fn s4_first_unreported_turn_blocks_next_send() {
+    let mut record = accounting(Some(100));
+    let task = record.task_mut(&id(3)).unwrap();
+    task.consume_send(send(1, 4)).unwrap();
+    assert_eq!(
+        task.consume_send(send(2, 4)),
+        Err(AccountingRefusal::UsageUnavailable)
+    );
+    assert_eq!(task.sends, vec![send(1, 4)]);
+}
+
+#[test]
+fn s4_unreported_turn_after_settlement_blocks_next_send() {
+    let mut record = accounting(Some(100));
+    let task = record.task_mut(&id(3)).unwrap();
+    task.consume_send(send(1, 4)).unwrap();
+    ingest_usage(
+        task,
+        sample(4, 1, 1, UsageMode::Cumulative, Some(2), Some(3)),
+    )
+    .unwrap();
+    task.consume_send(send(2, 4)).unwrap();
+    assert!(task.totals.tokens_complete);
+    assert_eq!(
+        task.consume_send(send(3, 5)),
+        Err(AccountingRefusal::UsageUnavailable)
+    );
+}
+
+#[test]
+fn s4_usage_settlement_requires_acknowledged_matching_turn() {
+    let mut previous = accounting(Some(100));
+    previous.tasks[0].consume_send(send(1, 4)).unwrap();
+    let mut next = previous.successor().unwrap();
+    ingest_usage(
+        &mut next.tasks[0],
+        sample(4, 1, 1, UsageMode::Cumulative, Some(2), Some(3)),
+    )
+    .unwrap();
+    next.tasks[0].consume_send(send(2, 4)).unwrap();
+    assert_eq!(
+        next.validate_successor(&previous),
+        Err(AccountingRefusal::UsageUnavailable),
+        "usage and the next send cannot share an unacknowledged cut"
+    );
+    next.tasks[0].sends.pop();
+    next.validate_successor(&previous).unwrap();
+    let mut send_after_ack = next.successor().unwrap();
+    send_after_ack.tasks[0].consume_send(send(2, 4)).unwrap();
+    send_after_ack.validate_successor(&next).unwrap();
+    let mut unrelated = previous.successor().unwrap();
+    ingest_usage(
+        &mut unrelated.tasks[0],
+        sample(5, 1, 1, UsageMode::Cumulative, Some(2), Some(3)),
+    )
+    .unwrap();
+    unrelated.validate_successor(&previous).unwrap();
+    assert_eq!(
+        unrelated.tasks[0].consume_send(send(2, 5)),
+        Err(AccountingRefusal::UsageUnavailable)
+    );
+    let mut relabelled = send_after_ack.clone();
+    relabelled.tasks[0].sends[0].turn = 9;
+    assert_eq!(
+        relabelled.validate_successor(&next),
+        Err(AccountingRefusal::Scope)
+    );
+}
+
+#[test]
+fn s4_reply_before_usage_publication_crash_child() {
+    use std::io::{BufRead, Write};
+    struct ReplySession(std::process::Child);
+    impl Drop for ReplySession {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    impl kinewright_core::AgentSession for ReplySession {
+        fn send_user_message(&mut self, text: String) -> Result<(), kinewright_core::AgentError> {
+            writeln!(self.0.stdin.as_mut().unwrap(), "{text}").unwrap();
+            let mut reply = String::new();
+            std::io::BufReader::new(self.0.stdout.as_mut().unwrap())
+                .read_line(&mut reply)
+                .unwrap();
+            assert_eq!(reply, "provider replied\n");
+            assert!(self.0.wait().unwrap().success());
+            Ok(())
+        }
+        fn events(&self) -> crossbeam_channel::Receiver<kinewright_core::AgentEvent> {
+            crossbeam_channel::bounded(1).1
+        }
+        fn interrupt(&mut self) {}
+    }
+    let Some(root) = std::env::var_os("C5_ACCOUNTING_CRASH_ROOT") else {
+        return;
+    };
+    let root = std::path::Path::new(&root);
+    let fixture = root.join(format!("reply-fixture{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        std::process::Command::new("rustc")
+            .args(["--edition", "2024", "-C", "debuginfo=0"])
+            .arg(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/ja_s4_c5_pipe.rs")
+            )
+            .arg("-o")
+            .arg(&fixture)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let current = accounting(Some(100));
+    let envelope = envelope();
+    let prepared = PreparedSend::new(&current, &id(3), send(1, 4), &envelope, clock()).unwrap();
+    let cut = update(&envelope, prepared.reference().clone());
+    let mut committed = std::fs::File::create(root.join("acknowledged-accounting.json")).unwrap();
+    committed
+        .write_all(&encode(prepared.record(), RECORD_BYTES).unwrap())
+        .unwrap();
+    committed.sync_all().unwrap();
+    let permit = prepared.acknowledge(&cut, cut.receipt()).unwrap();
+    let mut session = ReplySession(
+        std::process::Command::new(&fixture)
+            .arg("reply")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    permit
+        .dispatch(&id(4), &mut session, "one admitted prompt".into())
+        .unwrap();
+    drop(session);
+    std::fs::write(root.join("provider-replied"), b"").unwrap();
+    std::process::exit(86);
+}
+
+#[test]
+fn s4_reply_before_usage_publication_crash_blocks_new_attempt() {
+    let parent = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let root = kinewright_media::test_support::TempDirectory::new_in(parent, "c5-usage-crash");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "s4_reply_before_usage_publication_crash_child",
+            "--test-threads=1",
+        ])
+        .env("C5_ACCOUNTING_CRASH_ROOT", root.root())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(86),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(root.path("provider-replied").exists());
+    let mut acknowledged: AccountingRecord =
+        serde_json::from_slice(&std::fs::read(root.path("acknowledged-accounting.json")).unwrap())
+            .unwrap();
+    acknowledged.validate().unwrap();
+    assert!(acknowledged.tasks[0].usage.is_empty());
+    assert_eq!(
+        acknowledged
+            .task_mut(&id(3))
+            .unwrap()
+            .consume_send(send(2, 5)),
+        Err(AccountingRefusal::UsageUnavailable)
+    );
 }
 
 #[test]
@@ -175,8 +350,21 @@ fn s4_registered_accounting_bytes_and_predecessor_contract() {
     let reference = current.record_reference().unwrap();
     assert_eq!(reference.sha256, kinewright_media::sha256_bytes(&bytes));
     assert_eq!(reference.byte_length, bytes.len() as u64);
+    let archive = current.archive().unwrap();
+    let archive_record = OrchestrationRecord {
+        version: 1,
+        payload: OrchestrationPayload::AccountingArchive(Box::new(archive.clone())),
+    };
+    assert_eq!(
+        archive.record_bytes().unwrap(),
+        serde_json::to_vec(&archive_record).unwrap()
+    );
+    assert_eq!(archive.original, reference);
     let next = current.successor().unwrap();
-    assert_eq!(next.dependencies().unwrap(), vec![reference]);
+    assert_eq!(
+        next.dependencies().unwrap(),
+        vec![archive.record_reference().unwrap()]
+    );
     next.validate_successor(&current).unwrap();
 }
 

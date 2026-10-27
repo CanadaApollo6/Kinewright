@@ -194,6 +194,9 @@ impl OrchestrationRecord {
             OrchestrationPayload::Accounting(record) => {
                 refs.extend(record.dependencies().map_err(|_| Refusal::InvalidState)?);
             }
+            OrchestrationPayload::AccountingArchive(record) => {
+                refs.extend(record.dependencies().map_err(|_| Refusal::InvalidState)?);
+            }
             OrchestrationPayload::RunIndex(index) => {
                 if index.len() > ITEM_LIMIT {
                     return Err(Refusal::Capacity);

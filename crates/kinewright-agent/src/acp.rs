@@ -7,19 +7,17 @@
 
 use std::{
     collections::HashMap,
-    io::Read,
-    process::{Child, ChildStdin, Command as ProcessCommand, Stdio},
+    io::{Read, Write},
+    process::{Child, Command as ProcessCommand, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use crate::protocol::limits::{
-    EVENTS, EventSink, Frames, encoded_frame, stderr_capture, write_frame,
-};
+use crate::protocol::limits::{EVENTS, EventSink, Frames, encoded_frame, stderr_capture};
 #[cfg(test)]
 use crossbeam_channel::unbounded;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -29,6 +27,12 @@ use serde_json::{Value, json};
 use crate::child_process::hide_console_window;
 
 type PendingReply = Result<Value, AgentError>;
+const WRITE_BUDGET: Duration = Duration::from_secs(2);
+
+struct PipeWrite {
+    bytes: Vec<u8>,
+    finished: Sender<Result<(), AgentError>>,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum AcpIncoming {
@@ -95,7 +99,9 @@ pub(crate) struct AcpClient {
 
 struct AcpInner {
     child: Mutex<Child>,
-    stdin: Mutex<ChildStdin>,
+    writes: Sender<PipeWrite>,
+    #[cfg(all(test, target_os = "linux"))]
+    writing: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<u64, Sender<PendingReply>>>>,
     incoming_rx: Receiver<AcpIncoming>,
     next_id: AtomicU64,
@@ -131,6 +137,36 @@ impl AcpClient {
         let (incoming_tx, incoming_rx) = bounded(EVENTS);
         let interrupted = Arc::new(AtomicBool::new(false));
         let ingress_failed = Arc::new(AtomicBool::new(false));
+        let (writes, queued) = bounded::<PipeWrite>(1);
+        let writing = Arc::new(AtomicBool::new(false));
+        let writer_busy = Arc::clone(&writing);
+        let writer_interrupted = Arc::clone(&interrupted);
+        let mut stdin = stdin;
+        if let Err(error) = thread::Builder::new()
+            .name("kinewright-acp-writer".into())
+            .spawn(move || {
+                for write in queued {
+                    if writer_interrupted.load(Ordering::Acquire) {
+                        break;
+                    }
+                    writer_busy.store(true, Ordering::Release);
+                    let result = stdin
+                        .write_all(&write.bytes)
+                        .and_then(|()| stdin.flush())
+                        .map_err(|error| AgentError::Harness(error.to_string()));
+                    writer_busy.store(false, Ordering::Release);
+                    let failed = result.is_err();
+                    let _ = write.finished.try_send(result);
+                    if failed {
+                        break;
+                    }
+                }
+            })
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AgentError::Harness(error.to_string()));
+        }
         spawn_reader(
             stdout,
             stderr,
@@ -144,7 +180,9 @@ impl AcpClient {
         Ok(Self {
             inner: Arc::new(AcpInner {
                 child: Mutex::new(child),
-                stdin: Mutex::new(stdin),
+                writes,
+                #[cfg(all(test, target_os = "linux"))]
+                writing,
                 pending,
                 incoming_rx,
                 next_id: AtomicU64::new(1),
@@ -156,6 +194,10 @@ impl AcpClient {
 
     pub(crate) fn ingress_failed(&self) -> bool {
         self.inner.ingress_failed.load(Ordering::Acquire)
+    }
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) fn inner_writer_busy_for_test(&self) -> bool {
+        self.inner.writing.load(Ordering::Acquire)
     }
     #[cfg(all(test, unix))]
     pub(crate) fn child_reaped(&self) -> bool {
@@ -178,13 +220,24 @@ impl AcpClient {
         params: &Value,
         timeout: Duration,
     ) -> Result<Value, AgentError> {
-        self.begin_request(method, params)?.wait(timeout)
+        let started = Instant::now();
+        self.begin_request_with_budget(method, params, timeout.min(WRITE_BUDGET))?
+            .wait(timeout.saturating_sub(started.elapsed()))
     }
 
     pub(crate) fn begin_request(
         &self,
         method: &str,
         params: &Value,
+    ) -> Result<AcpPendingRequest, AgentError> {
+        self.begin_request_with_budget(method, params, WRITE_BUDGET)
+    }
+
+    fn begin_request_with_budget(
+        &self,
+        method: &str,
+        params: &Value,
+        budget: Duration,
     ) -> Result<AcpPendingRequest, AgentError> {
         if self.inner.interrupted.load(Ordering::Acquire)
             || (self.ingress_failed() && !restore_or_cancel(method))
@@ -204,7 +257,7 @@ impl AcpClient {
             "method": method,
             "params": params,
         });
-        if let Err(error) = self.write_message(&message) {
+        if let Err(error) = self.write_message_with_budget(&message, budget) {
             if let Ok(mut pending) = self.inner.pending.lock() {
                 pending.remove(&id);
             }
@@ -246,6 +299,10 @@ impl AcpClient {
 
     pub(crate) fn kill(&self) {
         self.inner.interrupted.store(true, Ordering::Release);
+        self.stop_child();
+    }
+
+    fn stop_child(&self) {
         if let Ok(mut child) = self.inner.child.lock() {
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill();
@@ -255,20 +312,69 @@ impl AcpClient {
     }
 
     fn write_message(&self, message: &Value) -> Result<(), AgentError> {
-        if self.ingress_failed()
-            && !message
-                .get("method")
-                .and_then(Value::as_str)
-                .is_some_and(restore_or_cancel)
-        {
+        self.write_message_with_budget(message, WRITE_BUDGET)
+    }
+
+    fn write_message_with_budget(
+        &self,
+        message: &Value,
+        budget: Duration,
+    ) -> Result<(), AgentError> {
+        let restore = message
+            .get("method")
+            .and_then(Value::as_str)
+            .is_some_and(restore_or_cancel);
+        if self.inner.interrupted.load(Ordering::Acquire) || (self.ingress_failed() && !restore) {
             return Err(AgentError::Protocol("ingress: interrupted".into()));
         }
-        let mut stdin = self
+        let mut bytes = encoded_frame(message)?;
+        bytes.push(b'\n');
+        let (finished, completion) = bounded(1);
+        if self
             .inner
-            .stdin
-            .lock()
-            .map_err(|_| AgentError::Harness("ACP stdin lock was poisoned".to_owned()))?;
-        write_frame(&mut *stdin, message)
+            .writes
+            .try_send(PipeWrite { bytes, finished })
+            .is_err()
+        {
+            return self.write_failed("write_capacity");
+        }
+        self.wait_write(&completion, budget, restore)
+    }
+
+    fn wait_write(
+        &self,
+        completion: &Receiver<Result<(), AgentError>>,
+        budget: Duration,
+        restore: bool,
+    ) -> Result<(), AgentError> {
+        let deadline = Instant::now() + budget;
+        loop {
+            if self.inner.interrupted.load(Ordering::Acquire) || (self.ingress_failed() && !restore)
+            {
+                return Err(AgentError::Protocol("ingress: interrupted".into()));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return self.write_failed("write_timeout");
+            }
+            match completion.recv_timeout(remaining.min(Duration::from_millis(10))) {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(_)) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return self.write_failed("write_closed");
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    fn write_failed(&self, reason: &str) -> Result<(), AgentError> {
+        self.inner.ingress_failed.store(true, Ordering::Release);
+        // Reaping uses only the process lock. The blocked writer owns its pipe.
+        // Leave the reader free to publish Fault after the child closes stdout.
+        self.stop_child();
+        let message = format!("ingress: {reason}");
+        fail_pending(&self.inner.pending, &message);
+        Err(AgentError::Protocol(message))
     }
 }
 
@@ -338,6 +444,10 @@ fn spawn_reader(
                     break;
                 }
             }
+            // Read interruption first so cleanup cannot hide an earlier write fault.
+            // Freeze this decision before exposing the raw-reader failure latch.
+            let notify_fault =
+                !interrupted.load(Ordering::Acquire) || ingress_failed.load(Ordering::Acquire);
             ingress_failed.store(true, Ordering::Release);
             let stderr_text = if stderr_reader.is_finished() {
                 stderr_reader.join().unwrap_or_default()
@@ -353,7 +463,7 @@ fn spawn_reader(
                 }
             });
             fail_pending(&pending, &message);
-            if !interrupted.load(Ordering::Acquire) {
+            if notify_fault {
                 let _ = incoming.try_send(AcpIncoming::Fault(message));
             }
         })
@@ -466,6 +576,61 @@ pub(crate) fn send_done(events: &impl EventSink, done: &AtomicBool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn s4_prior_write_fault_survives_cleanup_before_eof() {
+        let (sender, receiver) = bounded(EVENTS);
+        spawn_reader(
+            std::io::empty(),
+            std::io::empty(),
+            Arc::new(Mutex::new(HashMap::new())),
+            sender,
+            Arc::new(AtomicBool::new(true)),
+            "write fault before EOF fixture",
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+                AcpIncoming::Fault(_)
+            ),
+            "an already latched write fault must retain its terminal signal"
+        );
+    }
+
+    #[test]
+    fn s4_raw_fault_is_retained_when_cleanup_races_publication() {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let publication_barrier = pending.lock().unwrap();
+        let failed = Arc::new(AtomicBool::new(false));
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = bounded(EVENTS);
+        spawn_reader(
+            std::io::Cursor::new(vec![b'x'; crate::protocol::limits::FRAME_BYTES + 1]),
+            std::io::empty(),
+            Arc::clone(&pending),
+            sender,
+            Arc::clone(&interrupted),
+            "publication race fixture",
+            Arc::clone(&failed),
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !failed.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "raw failure must precede publication"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        interrupted.store(true, Ordering::Release);
+        drop(publication_barrier);
+        assert!(
+            matches!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), AcpIncoming::Fault(reason) if reason.contains("frame_capacity")),
+            "cleanup cannot suppress the retained fault"
+        );
+    }
 
     #[test]
     fn s4_acp_pending_reply_map_is_bounded() {

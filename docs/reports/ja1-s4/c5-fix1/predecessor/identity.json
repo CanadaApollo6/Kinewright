@@ -1,0 +1,40 @@
+{
+  "source_root": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/target/ja-s1-predecessor/source",
+  "source_head": "076a96c922b2f05984df4bb839ad7cf0900e6183",
+  "binary": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/target/ja-s1-predecessor/sealed/kinewright-ja-baseline",
+  "binary_sha256": "df555ed94cdd397234a5a22783731da9f302b908ae7287cb682becc466e031eb",
+  "source_clean": true,
+  "os": "Linux-7.2.8-10-omarchy-x86_64-with-glibc2.44",
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "reports": {
+    "format-corpus": {
+      "run_sha256": "97b49e798c5cb0af9d8d395e2327996b672947b8a7a0e87688ab7f841f3c9859",
+      "fixture_sha256": "f53ae88d6d9e75606b46614b6ebe522578fbddebb35fe1152a091ef39feadb02",
+      "output": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/target/ja-s1-predecessor/evidence/controls-8gEApf47/format-corpus"
+    },
+    "history-loss": {
+      "run_sha256": "6ba695c1950284d7d1da0deaedfef95e0ef4ebd5739a0346896f4e10fb32f318",
+      "fixture_sha256": "04a27d0104a44e3d246c73cb899e9fa9fbde8b9763981d2c525cdf3a590b7b81",
+      "output": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/target/ja-s1-predecessor/evidence/controls-8gEApf47/history-loss"
+    },
+    "reply-retry": {
+      "run_sha256": "e420c416a065a84aabf825968b9b22990d21791495617614bcc7f94ee45e8832",
+      "fixture_sha256": "13dedb1ed3fc7a467cff88e865eef6cae4ab9dfe1229c92d60ea6720df837831",
+      "output": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/target/ja-s1-predecessor/evidence/controls-8gEApf47/reply-retry"
+    },
+    "legacy-io": {
+      "run_sha256": "5d02ceb993876cbc54dd71ee1b9d999a98b50f9482e09e34ecefd40e4219a3f6",
+      "fixture_sha256": "68d55f261e2c2213623b6d0c68f1970c1c92d3f115bd2d2a2ca731eb93aeaa20",
+      "output": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/target/ja-s1-predecessor/evidence/controls-8gEApf47/legacy-io"
+    }
+  },
+  "max2_binary": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/target/ja-s1-predecessor/sealed/max2-control",
+  "max2_binary_sha256": "85e75cb87a6b2b100c3e40acadf42171ed773bc12b0324ca43ce0f7591cb9dc3",
+  "observer_source_sha256": "c39ad8eb3b79f4ad92aac8139bd0a2e178cba183fdb7b23f528957203cb98149",
+  "pre_strip_binary_sha256": "880891fda5515ace4e94d4d4c4b3606988f4ff16b48ba3c060cee32912885fe9",
+  "strip_version": "GNU strip (GNU Binutils) 2.47",
+  "strip_arguments": [
+    "--strip-all"
+  ],
+  "build_provenance": "source HEAD and clean tree checked before build and after controls within this script run; run.json source_head identifies its working directory"
+}

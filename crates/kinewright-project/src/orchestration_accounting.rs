@@ -19,6 +19,7 @@ pub const TASKS: usize = 128;
 pub const ITEMS: usize = 256;
 pub const RECORD_BYTES: usize = 64 * 1024 * 1024;
 pub const USAGE_EVENTS: usize = 10_000;
+pub const HISTORY_RECORDS: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,6 +125,7 @@ pub struct UsageTotals {
 pub struct SendConsumption {
     pub command: CommandId,
     pub attempt: SessionId,
+    pub turn: u64,
     pub payload: ObjectRef,
 }
 
@@ -160,6 +162,7 @@ pub struct AccountingRecord {
     pub project: ProjectId,
     pub run: SessionId,
     pub previous: Option<ObjectRef>,
+    pub history: Vec<ObjectRef>,
     pub revision: u64,
     pub start_unix_ms: u64,
     pub deadline_unix_ms: u64,
@@ -168,6 +171,16 @@ pub struct AccountingRecord {
     pub clock_uncertain: bool,
     pub durable_event_bytes: u64,
     pub tasks: Vec<TaskAccounting>,
+}
+
+/// Exact predecessor bytes can be reconstructed without following its old edges.
+/// The current index retains every archive directly, so graph depth stays fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountingArchive {
+    pub version: u32,
+    pub original: ObjectRef,
+    pub record: Box<AccountingRecord>,
 }
 
 /// A bounded encoder includes transient serialized bytes in admission.
@@ -215,10 +228,11 @@ fn reference(reference: &ObjectRef) -> Result<(), AccountingRefusal> {
 impl AccountingRecord {
     pub fn new(project: ProjectId, run: SessionId, now: u64) -> Result<Self, AccountingRefusal> {
         Ok(Self {
-            version: 1,
+            version: 2,
             project,
             run,
             previous: None,
+            history: vec![],
             revision: 0,
             start_unix_ms: now,
             deadline_unix_ms: now
@@ -234,7 +248,7 @@ impl AccountingRecord {
 
     pub fn dependencies(&self) -> Result<Vec<ObjectRef>, AccountingRefusal> {
         self.validate()?;
-        let mut refs = self.previous.iter().cloned().collect::<Vec<_>>();
+        let mut refs = self.history.clone();
         for task in &self.tasks {
             refs.extend(task.sends.iter().map(|send| send.payload.clone()));
         }
@@ -243,20 +257,32 @@ impl AccountingRecord {
         Ok(refs)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one boundary validates the bounded accounting record"
+    )]
     pub fn validate(&self) -> Result<(), AccountingRefusal> {
-        if self.version != 1
+        if self.version != 2
             || self.deadline_unix_ms.checked_sub(self.start_unix_ms) != Some(RUN_MILLIS)
             || self.last_unix_ms < self.start_unix_ms
             || self.elapsed_ms < self.last_unix_ms - self.start_unix_ms
             || (self.revision == 0) != self.previous.is_none()
+            || usize::try_from(self.revision).ok() != Some(self.history.len())
         {
             return Err(AccountingRefusal::Invalid);
         }
         if self.durable_event_bytes > RECORD_BYTES as u64 {
             return Err(AccountingRefusal::Capacity);
         }
-        if self.tasks.len() > TASKS {
+        if self.tasks.len() > TASKS || self.history.len() > HISTORY_RECORDS {
             return Err(AccountingRefusal::Capacity);
+        }
+        let mut history = std::collections::BTreeSet::new();
+        for archive in &self.history {
+            reference(archive)?;
+            if archive.record_kind != RecordKind::RunIndex || !history.insert(archive) {
+                return Err(AccountingRefusal::Invalid);
+            }
         }
         if let Some(previous) = &self.previous {
             reference(previous)?;
@@ -292,8 +318,12 @@ impl AccountingRecord {
                 reference(&send.payload)?;
                 if send.payload.byte_length > 256 * 1024
                     || send.command.sequence == 0
+                    || send.turn == 0
                     || !task.providers.iter().any(|p| p.attempt == send.attempt)
-                    || task.sends[..n].iter().any(|s| s.command == send.command)
+                    || task.sends[..n].iter().any(|s| {
+                        s.command == send.command
+                            || (s.attempt == send.attempt && s.turn == send.turn)
+                    })
                 {
                     return Err(AccountingRefusal::Scope);
                 }
@@ -338,11 +368,15 @@ impl AccountingRecord {
         Ok(())
     }
 
-    /// Admission starts from the acknowledged record and retains its exact edge.
+    /// H1 stages `self.archive()` before this successor, retaining exact history.
     pub fn successor(&self) -> Result<Self, AccountingRefusal> {
         self.validate()?;
         let mut next = self.clone();
         next.previous = Some(self.record_reference()?);
+        if next.history.len() >= HISTORY_RECORDS {
+            return Err(AccountingRefusal::Capacity);
+        }
+        next.history.push(self.archive()?.record_reference()?);
         next.revision = next
             .revision
             .checked_add(1)
@@ -368,6 +402,7 @@ impl AccountingRecord {
         if self.project != previous.project
             || self.run != previous.run
             || self.previous != expected.previous
+            || self.history != expected.history
             || self.revision != expected.revision
             || self.start_unix_ms != previous.start_unix_ms
             || self.deadline_unix_ms != previous.deadline_unix_ms
@@ -402,7 +437,34 @@ impl AccountingRecord {
                 }
             }
         }
+        for new in &self.tasks {
+            let mut admitted = previous
+                .tasks
+                .iter()
+                .find(|task| task.task == new.task)
+                .cloned()
+                .unwrap_or_else(|| TaskAccounting {
+                    sends: vec![],
+                    usage: vec![],
+                    totals: UsageTotals::default(),
+                    ..new.clone()
+                });
+            admitted.providers.clone_from(&new.providers);
+            for send in &new.sends[admitted.sends.len()..] {
+                // New usage in this cut has not yet been acknowledged.
+                admitted.consume_send(send.clone())?;
+            }
+        }
         Ok(())
+    }
+
+    pub fn archive(&self) -> Result<AccountingArchive, AccountingRefusal> {
+        self.validate()?;
+        Ok(AccountingArchive {
+            version: 1,
+            original: self.record_reference()?,
+            record: Box::new(self.clone()),
+        })
     }
 
     /// Canonical bytes of `OrchestrationRecord::Accounting`, including its tag.
@@ -593,6 +655,21 @@ pub fn normalize(samples: &[UsageSample]) -> Result<UsageTotals, AccountingRefus
 }
 
 impl TaskAccounting {
+    fn outstanding_usage(&self) -> Result<bool, AccountingRefusal> {
+        for send in &self.sends {
+            let samples: Vec<_> = self
+                .usage
+                .iter()
+                .filter(|sample| sample.attempt == send.attempt && sample.turn == send.turn)
+                .cloned()
+                .collect();
+            if !normalize(&samples)?.tokens_complete {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn select_provider(&mut self, provider: ProviderMetadata) -> Result<(), AccountingRefusal> {
         if let Some(old) = self
             .providers
@@ -644,6 +721,21 @@ impl TaskAccounting {
         }
         if self.token_limit.is_some() && !self.usage.is_empty() && !self.totals.tokens_complete {
             return Err(AccountingRefusal::UsageUnavailable);
+        }
+        if self.token_limit.is_some() && self.outstanding_usage()? {
+            return Err(AccountingRefusal::UsageUnavailable);
+        }
+        if send.turn == 0
+            || self
+                .sends
+                .iter()
+                .any(|old| old.attempt == send.attempt && old.turn == send.turn)
+            || self
+                .usage
+                .iter()
+                .any(|sample| sample.attempt == send.attempt && sample.turn == send.turn)
+        {
+            return Err(AccountingRefusal::Scope);
         }
         self.sends.push(send);
         Ok(())
@@ -707,6 +799,57 @@ impl TaskAccounting {
     }
 }
 
+impl AccountingArchive {
+    pub fn dependencies(&self) -> Result<Vec<ObjectRef>, AccountingRefusal> {
+        self.record.validate()?;
+        if self.version != 1 || self.original != self.record.record_reference()? {
+            return Err(AccountingRefusal::Invalid);
+        }
+        let mut refs: Vec<_> = self
+            .record
+            .tasks
+            .iter()
+            .flat_map(|task| &task.sends)
+            .map(|send| send.payload.clone())
+            .collect();
+        refs.sort();
+        refs.dedup();
+        Ok(refs)
+    }
+
+    pub fn record_bytes(&self) -> Result<Vec<u8>, AccountingRefusal> {
+        #[derive(Serialize)]
+        struct Payload<'a> {
+            kind: &'static str,
+            record: &'a AccountingArchive,
+        }
+        #[derive(Serialize)]
+        struct Record<'a> {
+            version: u32,
+            payload: Payload<'a>,
+        }
+        encode(
+            &Record {
+                version: 1,
+                payload: Payload {
+                    kind: "accounting_archive",
+                    record: self,
+                },
+            },
+            RECORD_BYTES,
+        )
+    }
+
+    pub fn record_reference(&self) -> Result<ObjectRef, AccountingRefusal> {
+        let bytes = self.record_bytes()?;
+        Ok(ObjectRef {
+            sha256: kinewright_media::sha256_bytes(&bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::RunIndex,
+        })
+    }
+}
+
 impl ProviderMetadata {
     fn validate_selection(&self) -> Result<(), AccountingRefusal> {
         for selection in [&self.requested, &self.resolved] {
@@ -729,5 +872,183 @@ impl ProviderMetadata {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use crate::{
+        namespace::ProjectNamespace,
+        storage_budget::StorageLimits,
+        store::{ProjectStore, SealedObject},
+    };
+    use kinewright_media::test_support::TempDirectory;
+
+    fn id<T: serde::de::DeserializeOwned>(n: u64) -> T {
+        serde_json::from_value(serde_json::json!(format!("{n:032x}"))).unwrap()
+    }
+    fn contract_ref(mut reference: ObjectRef) -> ObjectRef {
+        // H1 has not enabled RunIndex. Exercise its exact bytes and graph edges
+        // through the real store's supported immutable evidence contract.
+        if reference.record_kind == RecordKind::RunIndex {
+            reference.record_kind = RecordKind::OwnedEvidence;
+        }
+        reference
+    }
+    fn stage(store: &mut ProjectStore, bytes: &[u8], deps: Vec<ObjectRef>) -> SealedObject {
+        let reference = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::OwnedEvidence,
+        };
+        let mut reader = bytes;
+        store
+            .admit_blob(
+                &mut reader,
+                &reference,
+                &deps.into_iter().map(contract_ref).collect::<Vec<_>>(),
+            )
+            .unwrap()
+    }
+    fn publish(
+        store: &mut ProjectStore,
+        previous: &AccountingRecord,
+        next: &AccountingRecord,
+    ) -> SealedObject {
+        next.validate_successor(previous).unwrap();
+        let archive = previous.archive().unwrap();
+        let _archive = stage(
+            store,
+            &archive.record_bytes().unwrap(),
+            archive.dependencies().unwrap(),
+        );
+        stage(
+            store,
+            &next.record_bytes().unwrap(),
+            next.dependencies().unwrap(),
+        )
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one receiving-store history and retention witness"
+    )]
+    fn s4_eighty_send_usage_publications_through_receiving_store() {
+        use std::io::Read as _;
+        let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+        std::fs::create_dir_all(&parent).unwrap();
+        let root = TempDirectory::new_in(&parent, "c5-accounting-depth");
+        let project = ProjectId::fresh().unwrap();
+        let mut store = ProjectStore::new(
+            ProjectNamespace::acquire(&root.path("test.kinewright")).unwrap(),
+            Some(project.clone()),
+            None,
+            StorageLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(store.limits().graph_depth, 32);
+        let payload = b"admitted prompt";
+        let payload_ref = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(payload),
+            byte_length: payload.len() as u64,
+            record_kind: RecordKind::OwnedData,
+        };
+        let _payload = store
+            .admit_blob(&mut &payload[..], &payload_ref, &[])
+            .unwrap();
+        let mut current = AccountingRecord::new(project, id(1), 1000).unwrap();
+        current.add_task(id(2), Some(1000)).unwrap();
+        let selection = ProviderSelection {
+            connector: "fixture".into(),
+            model: "fixture".into(),
+            options: vec![],
+        };
+        current.tasks[0]
+            .select_provider(ProviderMetadata {
+                attempt: id(3),
+                requested: selection.clone(),
+                resolved: selection,
+                cli_version: "fixture-1".into(),
+            })
+            .unwrap();
+        let mut retained = stage(
+            &mut store,
+            &current.record_bytes().unwrap(),
+            current.dependencies().unwrap(),
+        );
+        let mut exact_history = vec![];
+        for turn in 1..=80 {
+            let mut next = current.successor().unwrap();
+            next.tasks[0]
+                .consume_send(SendConsumption {
+                    command: CommandId {
+                        issuer: id(4),
+                        sequence: turn,
+                    },
+                    attempt: id(3),
+                    turn,
+                    payload: payload_ref.clone(),
+                })
+                .unwrap();
+            exact_history.push((
+                current.record_reference().unwrap(),
+                current.record_bytes().unwrap(),
+            ));
+            let published = publish(&mut store, &current, &next);
+            drop(retained);
+            retained = published;
+            current = next;
+            let mut next = current.successor().unwrap();
+            next.tasks[0].usage.push(UsageSample {
+                attempt: id(3),
+                turn,
+                event: format!("turn-{turn}"),
+                ordinal: 1,
+                mode: UsageMode::Cumulative,
+                values: UsageValues {
+                    input: Some(1),
+                    output: Some(1),
+                    ..UsageValues::default()
+                },
+                complete: true,
+                input_includes_cache: true,
+                output_includes_reasoning: true,
+            });
+            next.tasks[0].totals = normalize(&next.tasks[0].usage).unwrap();
+            exact_history.push((
+                current.record_reference().unwrap(),
+                current.record_bytes().unwrap(),
+            ));
+            let published = publish(&mut store, &current, &next);
+            drop(retained);
+            retained = published;
+            current = next;
+            store.collect_unpublished().unwrap();
+        }
+        assert_eq!(current.tasks[0].sends.len(), 80);
+        assert_eq!(current.tasks[0].totals.token_lower_bound, 160);
+        assert_eq!(current.history.len(), 160);
+        store
+            .closure(&[contract_ref(current.record_reference().unwrap())])
+            .unwrap();
+        for (reference, (original, bytes)) in current.history.iter().zip(&exact_history) {
+            let mut archive_bytes = vec![];
+            store
+                .open_verified(&contract_ref(reference.clone()))
+                .unwrap()
+                .read_to_end(&mut archive_bytes)
+                .unwrap();
+            let wrapper: serde_json::Value = serde_json::from_slice(&archive_bytes).unwrap();
+            let archive: AccountingArchive =
+                serde_json::from_value(wrapper["payload"]["record"].clone()).unwrap();
+            assert_eq!(&archive.original, original);
+            assert_eq!(&archive.record.record_bytes().unwrap(), bytes);
+        }
+        let mut forged = current.successor().unwrap();
+        forged.history.remove(0);
+        assert!(forged.validate_successor(&current).is_err());
+        drop(retained);
     }
 }
