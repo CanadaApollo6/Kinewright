@@ -32,6 +32,10 @@ pub struct CertifiedProfile {
     _private: (),
     #[cfg(all(test, target_os = "linux"))]
     pub(crate) missing_nsdelegate: bool,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) missing_pid_namespace: bool,
+    #[cfg(all(test, target_os = "linux"))]
+    pub(crate) manager_process_only: bool,
 }
 impl CertifiedProfile {
     #[cfg(test)]
@@ -41,6 +45,10 @@ impl CertifiedProfile {
             _private: (),
             #[cfg(target_os = "linux")]
             missing_nsdelegate: false,
+            #[cfg(target_os = "linux")]
+            missing_pid_namespace: false,
+            #[cfg(target_os = "linux")]
+            manager_process_only: false,
         }
     }
 }
@@ -145,6 +153,10 @@ pub fn spawn_transport(
             info
         };
         kinewright_job_sys::verify_nsdelegate(&info)?;
+        #[cfg(test)]
+        if profile.missing_pid_namespace {
+            kinewright_job_sys::verify_payload_pid_namespace(0)?;
+        }
     }
     let _spawn_guard = SPAWN
         .lock()
@@ -152,6 +164,13 @@ pub fn spawn_transport(
     #[cfg(target_os = "linux")]
     let mut command = {
         let mut command = Command::new("systemd-run");
+        let kill_mode = "--property=KillMode=control-group";
+        #[cfg(test)]
+        let kill_mode = if profile.manager_process_only {
+            "--property=KillMode=process"
+        } else {
+            kill_mode
+        };
         command
             .args([
                 "--user",
@@ -164,15 +183,15 @@ pub fn spawn_transport(
             .arg(format!("--unit={}", identity.unit()))
             .args([
                 "--property=Delegate=yes",
-                "--property=KillMode=control-group",
+                kill_mode,
                 "--property=SendSIGKILL=yes",
                 "--property=TimeoutStopSec=1s",
                 "--property=Restart=no",
                 "--property=ExitType=main",
                 "--property=OOMPolicy=stop",
                 "--property=TasksMax=64",
-            ])
-            .arg(guardian);
+            ]);
+        command.arg(guardian);
         command
     };
     #[cfg(not(target_os = "linux"))]
@@ -520,6 +539,36 @@ impl ContainedSession {
             Ok(false)
         }
     }
+    #[cfg(all(test, target_os = "linux"))]
+    #[allow(
+        dead_code,
+        reason = "the native integration target includes this module to isolate each service observation guard"
+    )]
+    pub(crate) fn fixture_alias_service(
+        &mut self,
+        observer: &mut RecoveryObserver,
+    ) -> io::Result<()> {
+        for service in [&mut self.service, &mut observer.service] {
+            let alias = service
+                .path()
+                .parent()
+                .ok_or_else(|| io::Error::other("service parent"))?
+                .join(".")
+                .join(
+                    service
+                        .path()
+                        .file_name()
+                        .ok_or_else(|| io::Error::other("service name"))?,
+                );
+            let aliased = kinewright_job_sys::Cgroup::open(&alias)?;
+            if aliased.identity() != service.identity() {
+                return Err(io::Error::other("service alias identity"));
+            }
+            *service = aliased;
+        }
+        Ok(())
+    }
+
     fn blocked<T>(&self, reason: &str) -> io::Result<T> {
         let message = GuardianMessage::CleanupBlocked {
             nonce: self.identity.nonce.clone(),
@@ -614,7 +663,7 @@ impl RecoveryObserver {
 }
 
 #[cfg(target_os = "linux")]
-fn open_service(recovery: &RecoveryIdentity) -> io::Result<kinewright_job_sys::Cgroup> {
+pub(crate) fn open_service(recovery: &RecoveryIdentity) -> io::Result<kinewright_job_sys::Cgroup> {
     let leaf = Path::new(&recovery.containment);
     let path = leaf
         .parent()

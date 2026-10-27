@@ -128,9 +128,25 @@ def result_lines(log: str):
     """
     pending = None  # (number, "test name ... ") awaiting its outcome
     probe_advice_pending = False
+    captured = False
     for number, raw in enumerate(log.splitlines(), 1):
-        if re.fullmatch(r"C2_NATIVE_NOT_RUN test=s4_\w+ reason=.+", raw):
-            continue
+        if re.fullmatch(r"---- .+ (?:stdout|stderr) ----", raw):
+            captured = True
+        if captured:
+            if raw == "successes:" or raw.startswith("test result:"):
+                captured = False
+            else:
+                continue
+        marker = re.search(r"C2_NATIVE_NOT_RUN test=s4_\w+ reason=.+$", raw)
+        if marker:
+            prefix = raw[:marker.start()]
+            if not prefix:
+                continue
+            if re.fullmatch(r"test .+? \.\.\. ", prefix):
+                if pending is not None:
+                    yield pending
+                pending = (number, prefix)
+                continue
         probe_advice = probe_advice_pending and FFMPEG_PROBE_ADVICE.fullmatch(raw)
         probe_advice_pending = bool(FFMPEG_PROBE_MESSAGE.search(raw))
         line = strip_ffmpeg_log(raw)
@@ -345,7 +361,8 @@ def lint() -> int:
             problems.append(f"{file} has no {name}")
     lint_ignored(problems, {(b, p) for b, p, _, _ in entries})
     guardian_source = "crates/kinewright-agent/tests/ja_s4_guardian.rs"
-    guarded = set(re.findall(r'equipped_session\("(s4_\w+)"\)', (ROOT / guardian_source).read_text()))
+    guardian_path = ROOT / guardian_source
+    guarded = set(re.findall(r'equipped_session\("(s4_\w+)"\)', guardian_path.read_text())) if guardian_path.is_file() else set()
     listed_guardians = {p for b, p, f, scope in entries if b == "ja_s4_guardian" and f == guardian_source and scope.startswith("linux")}
     for name in sorted(guarded - listed_guardians):
         problems.append(f"equipped-session skip has no slow-tier accounting: {name}")
@@ -610,7 +627,7 @@ def main(argv: list[str]) -> int:
             "--features", feature_list(entries),
             "--lib", "--bins", "--tests",
             *extra,
-            "--", "--exact", *names,
+            "--", "--show-output", "--exact", *names,
         ]
         code, log = run_cargo(cargo)
         if code != 0:

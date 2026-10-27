@@ -172,3 +172,15 @@ ja_s4_guardian s4_c2_runtime_dir_masked crates/kinewright-agent/tests/ja_s4_guar
 ja_s4_guardian s4_c2_launch_refuses_without_nsdelegate crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 ja_s4_guardian s4_c2_blocked_guardian_exits_and_manager_kills crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
 ja_s4_guardian s4_c2_windows_claim_ignores_localappdata crates/kinewright-agent/tests/ja_s4_guardian.rs windows-only # native account namespace, first execution in Windows CI
+ja_s4_guardian s4_c2_proc_shows_only_the_namespace crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_runtime_alias_refused crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_launch_under_runtime_dir crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_launch_refuses_without_pid_namespace crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_init_reaps_and_exits_with_provider crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_session_live crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_recovery_live crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_session_zombie crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_recovery_zombie crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_identity_refused crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_events_session crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_events_recovery crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip

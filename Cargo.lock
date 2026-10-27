@@ -2374,6 +2374,7 @@ version = "0.1.0"
 name = "kinewright-job-sys"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]

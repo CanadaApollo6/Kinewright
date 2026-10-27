@@ -20,8 +20,13 @@ fn publish(root: &Path, role: &str) {
         .to_owned();
     #[cfg(not(target_os = "linux"))]
     let start = "0";
+    let pid_field = if cfg!(target_os = "linux") {
+        "namespace_pid"
+    } else {
+        "pid"
+    };
     let text = format!(
-        "{{\"version\":1,\"role\":\"{role}\",\"pid\":{},\"start\":{start}}}",
+        "{{\"version\":1,\"role\":\"{role}\",\"{pid_field}\":{},\"start\":{start}}}",
         std::process::id()
     );
     let path = root.join(format!("{role}.json"));
@@ -40,6 +45,133 @@ fn main() {
             role
         },
     );
+    #[cfg(target_os = "linux")]
+    if role == "proc-view" || role == "runtime-alias" || role == "nested-alias" {
+        use std::os::unix::net::UnixStream;
+        let pids: Vec<u32> = fs::read_dir("/proc")
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter_map(|s| s.to_str()?.parse().ok())
+            .collect();
+        let runtime = format!(
+            "run/user/{}",
+            env::var("XDG_RUNTIME_DIR")
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+        );
+        let mut refused = Vec::new();
+        for pid in &pids {
+            for socket in ["bus", "systemd/private"] {
+                refused.push(
+                    UnixStream::connect(format!("/proc/{pid}/root/{runtime}/{socket}")).is_err(),
+                );
+            }
+        }
+        let host = args.get(3).and_then(|s| s.to_str()).unwrap_or("0");
+        let pipes = fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .filter(|target| target.to_string_lossy().starts_with("pipe:"))
+            .count();
+        let report = format!(
+            "{{\"pids\":{pids:?},\"self\":{},\"host_visible\":{},\"refused\":{refused:?},\"pipe_descriptors\":{pipes}}}",
+            std::process::id(),
+            Path::new(&format!("/proc/{host}")).exists()
+        );
+        let name = if role == "nested-alias" {
+            "nested-result"
+        } else {
+            "proc-result"
+        };
+        fs::write(root.join(format!("{name}.partial")), report).unwrap();
+        fs::rename(
+            root.join(format!("{name}.partial")),
+            root.join(format!("{name}.json")),
+        )
+        .unwrap();
+        if role == "nested-alias" {
+            return;
+        }
+        if role == "runtime-alias" {
+            assert!(
+                Command::new("unshare")
+                    .args(["--user", "--map-root-user", "--"])
+                    .arg(env::current_exe().unwrap())
+                    .arg(root)
+                    .arg("nested-alias")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            fs::write(root.join("nested-done"), b"").unwrap();
+        }
+    }
+    if role == "controlled-exit" {
+        while !root.join("exit-now").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    if role == "init-reap-provider" {
+        let mut middle = Command::new(env::current_exe().unwrap())
+            .arg(root)
+            .arg("init-reap-middle")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(middle.wait().unwrap().success());
+        while !root.join("init-reap-leaf.json").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let leaf = fs::read_to_string(root.join("orphan-local-pid")).unwrap();
+        fs::write(root.join("exit-orphan"), b"").unwrap();
+        while Path::new(&format!("/proc/{}", leaf.trim())).exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        fs::write(root.join("orphan-reaped"), b"").unwrap();
+        let mut survivor = Command::new(env::current_exe().unwrap())
+            .arg(root)
+            .arg("init-survivor")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let _ = &mut survivor;
+        while !root.join("exit-now").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        std::process::exit(42);
+    }
+    #[cfg(target_os = "linux")]
+    if role == "init-reap-middle" {
+        let mut leaf = Command::new(env::current_exe().unwrap())
+            .arg(root)
+            .arg("init-reap-leaf")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        fs::write(root.join("orphan-local-pid"), leaf.id().to_string()).unwrap();
+        let _ = &mut leaf;
+        return;
+    }
+    if role == "init-reap-leaf" {
+        while !root.join("exit-orphan").exists() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        return;
+    }
     if role == "writer-holder" {
         thread::sleep(Duration::from_secs(4));
         return;
