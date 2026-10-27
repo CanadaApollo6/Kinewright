@@ -228,6 +228,78 @@ pub fn initialize_ffmpeg() -> Result<(), MediaError> {
     ffmpeg::init().map_err(|error| MediaError::Backend(error.to_string()))
 }
 
+/// Transfer normalized points through the compositor's evaluated scale and rotation.
+/// Crops, reframes, offsets and other effects require a richer visibility proof.
+/// Unsupported geometry or any point outside either visible image returns `None`.
+#[must_use]
+pub fn map_feedback_geometry(
+    original: &[kinewright_core::Effect],
+    candidate: &[kinewright_core::Effect],
+    raster: [u32; 2],
+    points: &[[f64; 2]],
+) -> Option<Vec<[f64; 2]>> {
+    fn matrix(effects: &[kinewright_core::Effect], raster: [u32; 2]) -> Option<[f64; 6]> {
+        if raster.contains(&0)
+            || effects.iter().any(|effect| {
+                effect.enabled
+                    && (effect.name != "transform"
+                        || ["x_percent", "y_percent", "x_basis_points", "y_basis_points"]
+                            .iter()
+                            .any(|name| {
+                                effect
+                                    .static_integer_parameter(name)
+                                    .is_some_and(|value| value != 0)
+                            }))
+            })
+        {
+            return None;
+        }
+        let params = compositor::params_for(effects, timeline::TransitionRenderParams::default());
+        let (sx, sy) = (f64::from(params.scale_x), f64::from(params.scale_y));
+        let aspect = f64::from(raster[1]) / f64::from(raster[0]);
+        let (sine, cosine) = f64::from(params.rotation).sin_cos();
+        let (ax, ay) = (f64::from(params.anchor_x), f64::from(params.anchor_y));
+        let (xx, xy, yx, yy) = (
+            sx * cosine,
+            -sy * sine * aspect,
+            sx * sine / aspect,
+            sy * cosine,
+        );
+        Some([
+            xx,
+            xy,
+            ax - xx * ax - xy * ay,
+            yx,
+            yy,
+            ay - yx * ax - yy * ay,
+        ])
+    }
+    let old = matrix(original, raster)?;
+    let new = matrix(candidate, raster)?;
+    let determinant = old[0] * old[4] - old[1] * old[3];
+    let new_determinant = new[0] * new[4] - new[1] * new[3];
+    if determinant.abs() < 1e-12 || new_determinant.abs() < 1e-12 || points.len() > 512 {
+        return None;
+    }
+    points
+        .iter()
+        .map(|&[x, y]| {
+            let inside = |v: f64| v.is_finite() && (0.0..=1.0).contains(&v);
+            if !inside(x) || !inside(y) {
+                return None;
+            }
+            let (dx, dy) = (x - old[2], y - old[5]);
+            let u = (old[4] * dx - old[1] * dy) / determinant;
+            let v = (old[0] * dy - old[3] * dx) / determinant;
+            let mapped = [
+                new[0] * u + new[1] * v + new[2],
+                new[3] * u + new[4] * v + new[5],
+            ];
+            (inside(u) && inside(v) && inside(mapped[0]) && inside(mapped[1])).then_some(mapped)
+        })
+        .collect()
+}
+
 /// Limit `FFmpeg`'s own logging to warnings and errors, once per process.
 ///
 /// `FFmpeg` logs at info level by default, straight to the process's stderr:

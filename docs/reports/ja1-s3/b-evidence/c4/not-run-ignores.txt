@@ -1,0 +1,72 @@
+test au3_delivery_audio_verification_measures_the_written_file ... ignored, slow tier: cargo test --features slow-tests
+test au3_encoded_fixtures_land_within_the_loudness_and_true_peak_budgets ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_a_the_duck_depth_is_invisible_at_the_track_point ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_a_the_interview_clears_the_bed_and_matches_the_voices ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_a_the_nominal_dbfs_trim_is_worse_than_none ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_a_the_unducked_document_does_not_clear_the_bed ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_a_the_untrimmed_voices_are_not_matched ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_b_the_chain_matches_the_voices_and_reduces_the_spread ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_b_the_raw_trims_do_not_match_the_voices ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_c_a_chain_without_the_hum_node_leaves_the_mains_alone ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_c_an_over_reduced_profile_eats_the_dialogue ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_c_the_dialogue_survives_the_repair ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_d_an_unmuted_scratch_track_reaches_the_mix ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_d_the_mix_is_the_master ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_d_the_scratch_tracks_contribute_nothing ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_d_the_unmuted_scratch_moves_the_master ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_e_an_unnormalized_export_misses_the_target ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_e_both_deliveries_land_on_their_targets ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_e_the_two_deliveries_separate_by_the_target_difference ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_every_scenario_mix_does_not_clip ... ignored, slow tier: cargo test --features slow-tests
+test au6_fixtures::au6_the_learn_gap_is_the_longest_detected_silence ... ignored, slow tier: cargo test --features slow-tests
+test audio::tests::measure_mix_levels_equals_the_meter_over_every_stem_family ... ignored, slow tier: cargo test --features slow-tests
+test audio_device_play_pause_and_seek_smoke_test ... ignored, requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
+test cc1_fixtures::cc1_gpu_compositor_matches_canonical_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture
+test cc1_fixtures::cc1_managed_cache_memory_bound_is_measured_in_working_bytes ... ignored, slow tier: cargo test --features slow-tests
+test cc3_fixtures::cc3_gpu_compositor_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture
+test cc4_fixtures::cc4_gpu_compositor_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture
+test cc5_fixtures::cc5_gpu_compositor_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture
+test cc5_fixtures::cc5_performance_evidence_is_recorded_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture
+test cc5_fixtures::cc5_performance_evidence_is_recorded_on_software_fallback ... ignored, on demand: performance evidence on the software renderer
+test cc5_fixtures::cc5_tracked_shot_window_contains_the_subject_at_every_frame ... ignored, slow tier: cargo test --features slow-tests
+test cc6_fixtures::cc6_eight_bit_encoded_delivery_passes_tag_luma_and_difference_budgets ... ignored, slow tier: cargo test --features slow-tests
+test cc6_fixtures::cc6_performance_evidence_is_recorded_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture
+test cc6_fixtures::cc6_performance_evidence_is_recorded_on_software_fallback ... ignored, on demand: performance evidence on the software renderer
+test cc6_fixtures::cc6_starved_bitrate_export_trips_the_decoded_difference_budget ... ignored, slow tier: cargo test --features slow-tests
+test cc6_fixtures::cc6_starved_bitrate_ten_bit_export_trips_the_decoded_difference_budget ... ignored, slow tier: cargo test --features slow-tests
+test cc6_fixtures::cc6_ten_bit_encoded_delivery_passes_tag_luma_and_difference_budgets ... ignored, slow tier: cargo test --features slow-tests
+test cc7_fixtures::cc7_canonical_node_stack_matches_the_cpu_reference_on_hardware ... ignored, requires a real GPU adapter; the default lane is fallback_gpu()
+test cc7_fixtures::cc7_g_a_starved_encode_trips_the_decoded_difference_budget ... ignored, slow tier: cargo test --features slow-tests
+test compositor::tests::cc5_matte_gpu_anchors_hold_on_hardware ... ignored, requires a real (non-fallback) GPU adapter
+test compositor::tests::cc6_working_proof_matches_the_cpu_reference_on_hardware ... ignored, requires a physical supported GPU; run explicitly with --ignored --nocapture
+test display::tests::s3a_g7b_play_timing ... ignored, S3a G7b/LL timing: release binary, isolated lane, load recorded
+test lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed ... ignored, historical uncooperative journal injection; C7 covers the real GUI writer
+test loudness::tests::tech_3341_integrated_cases_1_to_5_read_their_pinned_values ... ignored, slow tier: cargo test --features slow-tests
+test loudness::tests::tech_3342_loudness_range_cases_1_to_4_read_their_pinned_values ... ignored, slow tier: cargo test --features slow-tests
+test loudness::tests::the_997_hz_calibration_tone_reads_its_pinned_values ... ignored, slow tier: cargo test --features slow-tests
+test loudness::tests::the_relative_gate_case_and_the_one_window_floor_hold ... ignored, slow tier: cargo test --features slow-tests
+test media_matrix_tests::full_media_matrix_covers_4k_hevc_and_long_gop_sources ... ignored, long-running 4K/HEVC matrix; run with KINEWRIGHT_MEDIA_MATRIX=1 and --ignored
+test media_matrix_tests::proxy_preview_performance_on_heavy_matrix_media ... ignored, performance measurement; run with KINEWRIGHT_PERF_TEST=1 and --ignored
+test mo2_fixtures::mo2_gates_on_hardware ... ignored, requires a physical GPU adapter; run with --ignored
+test mo2_fixtures::review_probes::mo2_gates_on_hardware ... ignored, requires a physical GPU adapter; run with --ignored
+test mo2_fixtures::review_probes::review1_all_geometric_frames_independent_oracle ... ignored, slow tier: cargo test --features slow-tests
+test mo2_perf_fixtures::blend_heavy_holds_floors_on_hardware ... ignored, R28 hardware lane (the RTX 3090)
+test mo2_perf_fixtures::blend_heavy_holds_floors_on_the_fallback_adapter ... ignored, R28 perf lane: cargo test --release -p kinewright-media --lib blend_heavy_holds_floors -- --ignored
+test mo2_perf_fixtures::r28_end_to_end_tracked ... ignored, R28 end-to-end tracked lane (decode-bound until PF1)
+test mo2_perf_fixtures::r28_ledger_holds_the_ceilings_and_releases_every_charge ... ignored, slow tier: cargo test --features slow-tests
+test multi_track_audio_device_play_pause_and_seek_smoke_test ... ignored, requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored
+test pf1_export_lane::pf1_export_lane ... ignored, PF1 G18: cargo test --release -p kinewright-media --lib pf1_export_lane -- --ignored --nocapture --test-threads=1
+test pf1_harness::pf1_play_baseline ... ignored, PF1 P-play lane: cargo test --release -p kinewright-media --lib pf1_play_baseline -- --ignored --nocapture --test-threads=1
+test pf1_harness::pf1_rss_baseline ... ignored, PF1 P-rss lane (LL pinned): cargo test --release -p kinewright-media --lib pf1_rss_baseline -- --ignored --nocapture --test-threads=1
+test pf1_harness::pf1_rss_child ... ignored, PF1 P-rss child: spawned by pf1_rss_baseline
+test pf1_harness::pf1_seek_baseline ... ignored, PF1 P-seek lane: cargo test --release -p kinewright-media --lib pf1_seek_baseline -- --ignored --nocapture --test-threads=1
+test pf1_harness::s3b_d12_working_step_lane ... ignored, S3b D12 R57 working-step paired lane; isolated release with recorded load
+test pf1_harness::s3b_i4_lane ... ignored, S3b I4 paired R28 30+300 frame lane; isolated release with recorded load
+test pf1_harness::s3b_native_play_lane ... ignored, S3b R75 native P-play timing lane; isolated release with recorded load
+test pf1_harness::s4_d13_active ... ignored, PF1 D13 parent: release LL development series
+test pf1_harness::s4_prepare_inputs ... ignored, PF1 frozen-input preparation; run before pinning and measurement
+test preview::tests::idle_readers_retire_after_natural_quiescence ... ignored, slow tier: cargo test --features slow-tests
+test project::tests::mo2_old_reader_corpus ... ignored, manual pre-land check: scripts/mo2-old-reader-check.sh
+test sched::accounting::the_readers_accounting_holds_for_300k_seeded_sequences ... ignored, slow tier: cargo test --features slow-tests
+test sched::tests::the_reader_model_holds_for_every_short_sequence ... ignored, slow tier: cargo test --features slow-tests
+test timeline_audio_crosses_a_clip_boundary_and_gap_smoke_test ... ignored, requires an audio device; run with KINEWRIGHT_AUDIO_TEST=1 and --ignored

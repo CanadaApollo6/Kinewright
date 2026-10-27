@@ -11,6 +11,8 @@ pub mod bundle_recovery;
 pub mod bundle_rescue;
 pub mod bundle_switch;
 pub mod editing_session;
+// JA-1 S3 C4
+pub mod feedback_mapping;
 mod history_save;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};

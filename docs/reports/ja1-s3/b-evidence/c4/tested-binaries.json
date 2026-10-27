@@ -1,0 +1,98 @@
+{
+  "target/debug/deps/kinewright_project-ac1c0816a8f67bdc": {
+    "sha256": "abb7a424066d2cb4511928bb268921cf0f104da574956a35a31bad151211f3e9",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s1_copy-cb7ef578543d64e5": {
+    "sha256": "f9a8f02f5db09ab4e1ccf8cacb038e3d540625b9083eb530a9cb1afd21afe673",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s1_receipts-6514bf998e0c8ad2": {
+    "sha256": "85c3e706f4e9088eb56648716f96a05d0f4013c08c4bb6ef661e7f8bbf749421",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s1_storage-6d4adb0bd8f50829": {
+    "sha256": "8faf4c7e14459ebbc4e3b04527be87bac6b4df032cbd678f7765a3c1577500b3",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s2_rescue-a844b96e0bd12b19": {
+    "sha256": "fb6c15de72d76693f8840e2a9a0af34d138493bbcdce4afb458efae38d7a41a7",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s2_rescue_record-751d8eda6795127e": {
+    "sha256": "f30410d424f7aeb04ca7dad05c2f9844423b0b3223a14e40de3648539a76a878",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s2_save-af38d699783ccb90": {
+    "sha256": "9a71b229a29836421098717aab4f5950216fa963df53f1a54d11b5149a236ba1",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s2_save_cost-5313cf776f4f209d": {
+    "sha256": "af27b97a4dc6215e5a5ad7ddd29b8e4bf2c2dbad8b695ede0f3c7678c0813cbd",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s2_source_boundary-d12025ea1f2e2f22": {
+    "sha256": "c7f4525a6c150fcff4fefc5ee58e070341317595e686e57518fa847aa021e5b0",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s2_switch-57a282b9fb375014": {
+    "sha256": "7b66eef8f69beecde2dbc2dd96d198c4838f3e82871c6b207e1263ad090b0512",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s2_writer-d4b3633b9bac1169": {
+    "sha256": "79bd2c5b946a94e36728088e444028a820b69f42ad8370b19fbc0dfe8d875a60",
+    "log": "project-final.log.gz"
+  },
+  "target/debug/deps/ja_s3_lineage-a06187e7809e787c": {
+    "sha256": "823250eec51bfac3df5730f1693f51542d91013114273c6af2e0b3b7e20e4737",
+    "log": "witness-accepted.log.gz"
+  },
+  "target/debug/deps/ja_s3_owned_inputs-546237a7fef8ca86": {
+    "sha256": "cf5d6e48fbf980a41a4e55c703595265b483577a2ff5de29b12cab20ace7dac7",
+    "log": "project-remaining.log.gz"
+  },
+  "target/debug/deps/ja_s3_read_only_inputs-f576b2792e43bdb0": {
+    "sha256": "78b0afb0d561b209e18a51373f8d6157cb0ea7f6b37d4e2c703a08c40bc4d748",
+    "log": "project-remaining.log.gz"
+  },
+  "target/debug/deps/ja_s3_store-65039c4fedb7d594": {
+    "sha256": "aa98329a2a0b6507bd20057eb21186a194072cb794665c493c7a4a6dbde38ec5",
+    "log": "project-remaining.log.gz"
+  },
+  "target/debug/deps/ja_s4_candidate-d69c2f53847bae7c": {
+    "sha256": "38197badc812521cfb889b982d63fc0bd96c713f4242a424d09c1148506d4cbf",
+    "log": "project-remaining.log.gz"
+  },
+  "target/debug/deps/ja_s4_store-aa55c57562722ba1": {
+    "sha256": "8821ecbebd6bd860f31a2f9645b62276edf60b32f360b9276017fff322de0378",
+    "log": "project-remaining.log.gz"
+  },
+  "target/debug/deps/kinewright_media-d3b3fce673611395": {
+    "sha256": "02c973f664abd9ddc55ccce2a073886245bd5ef8c86a6b456a82f15f0658fe0f",
+    "log": "media.log.gz"
+  },
+  "target/debug/deps/au3_fixtures-668b67ee525bf23c": {
+    "sha256": "3f869dcce31e0d60d81a52b363101dee9cc76ae5cedcce7a1328473f8cc45815",
+    "log": "media.log.gz"
+  },
+  "target/debug/deps/au5_fixtures-427061326a9225eb": {
+    "sha256": "8d7a23c31c50a873e6fd1d1ad449f953a18c8436d7fed2aec5ebcf5138f0ddeb",
+    "log": "media.log.gz"
+  },
+  "target/debug/deps/generated_media-b0eb72bee85564e0": {
+    "sha256": "194e58d35bb610b7587633bcc01edb419e726cd5482f92d7490e685dc7b67683",
+    "log": "media.log.gz"
+  },
+  "target/debug/deps/transcript_e2e-296723ce4e5cfa66": {
+    "sha256": "a4a936619323e093e0c760341844cbe67760973c20078d30f8b01fb419bb6b54",
+    "log": "media.log.gz"
+  },
+  "target/debug/deps/kinewright_app-45054198156c72b2": {
+    "sha256": "024468d5ea4ac868c4921fe9b0bb436dc291de51732ea7beecac256d294a0f15",
+    "log": "presenter.log.gz"
+  },
+  "target/debug/deps/ja_s1_branches-dc5dae88e7d47cac": {
+    "sha256": "87e6c7046f2423d74fe2fb699a63a0f15cccefa06c81243cded752a2e8cb0e2a",
+    "log": "m31-equipped.log.gz"
+  }
+}
