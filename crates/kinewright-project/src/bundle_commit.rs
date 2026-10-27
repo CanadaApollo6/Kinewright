@@ -1924,7 +1924,12 @@ mod fu1_tests {
 
     #[test]
     fn fu1_unknown_branch_refuses_after_receipt_lookup() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fu1-unit");
+        // A durable filesystem, not /tmp, and no `..`: Windows bundles refuse traversal.
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let root = workspace.join("target").join("fu1-unit");
         let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "unknown-branch");
         let core = Core::spawn(Document {
             tracks: vec![Track {
