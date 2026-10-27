@@ -8,6 +8,22 @@ use kinewright_project::{
     studio_records::*,
 };
 
+#[cfg(test)]
+fn test_only_attach_editor_bypassing_issuance(
+    host: &WriterHost,
+    subject: String,
+    roots: SessionRoots,
+) -> Result<HostClient, HostError> {
+    // Recreate multiple Editors solely to exercise the retained defence-in-depth rules.
+    let owner = host.owner.upgrade().unwrap();
+    let mut owner = owner.lock().unwrap();
+    let auth = owner.issue_attachment(subject, AttachmentRole::Viewer, roots.clone())?;
+    let index = owner.resolve_attachment(Some(&auth.bearer()))?;
+    owner.attachments[index].role = AttachmentRole::Editor;
+    drop(owner);
+    HostClient::connect(host.endpoint.clone(), auth, roots)
+}
+
 fn fixture() -> (
     kinewright_media::test_support::TempDirectory,
     WriterHost,
@@ -61,14 +77,10 @@ fn s3_gui_source_admission_stays_private_and_command_bound() {
     let private = host.client();
     let roots = private.bootstrap().roots;
     let client = "s".repeat(64);
-    let editor = host
-        .attach(
-            "narrow-editor".into(),
-            AttachmentRole::Editor,
-            roots.clone(),
-        )
-        .unwrap()
-        .with_manual_editor(client.clone());
+    let editor =
+        test_only_attach_editor_bypassing_issuance(&host, "narrow-editor".into(), roots.clone())
+            .unwrap()
+            .with_manual_editor(client.clone());
     let private = private.with_manual_editor(client.clone());
     accepted(
         private
@@ -737,7 +749,7 @@ fn s3_attachment_scope_cap_and_wire_spoofing() {
     assert!(
         host.attach(
             "wide".into(),
-            AttachmentRole::Editor,
+            AttachmentRole::Viewer,
             SessionRoots {
                 read: vec![temp.root().parent().unwrap().into()],
                 write: vec![]
@@ -815,22 +827,20 @@ fn s3_viewer_snapshot_replay() {
 #[test]
 fn s3_foreground_replay_is_attachment_subject_bound() {
     let (_temp, host, _refs) = fixture();
-    let first = host
-        .attach(
-            "shared-editor".into(),
-            AttachmentRole::Editor,
-            host.roots.clone(),
-        )
-        .unwrap()
-        .with_manual_editor("e".repeat(64));
-    let second = host
-        .attach(
-            "shared-editor".into(),
-            AttachmentRole::Editor,
-            host.roots.clone(),
-        )
-        .unwrap()
-        .with_manual_editor("e".repeat(64));
+    let first = test_only_attach_editor_bypassing_issuance(
+        &host,
+        "shared-editor".into(),
+        host.roots.clone(),
+    )
+    .unwrap()
+    .with_manual_editor("e".repeat(64));
+    let second = test_only_attach_editor_bypassing_issuance(
+        &host,
+        "shared-editor".into(),
+        host.roots.clone(),
+    )
+    .unwrap()
+    .with_manual_editor("e".repeat(64));
     let snapshot =
         HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
     let command = HostCommand::Save { snapshot };
@@ -973,14 +983,13 @@ fn s3_foreground_replay_rejects_non_editor_direct_before_lease() {
 fn s3_foreground_replay_detach_clears_only_owned_slot() {
     for (over_http, detach_operation) in [(false, None), (true, Some(2))] {
         let (_temp, host, _refs) = fixture();
-        let first = host
-            .attach(
-                "departing-editor".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("e".repeat(64));
+        let first = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "departing-editor".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("e".repeat(64));
         let empty = foreground_state(&host);
         accepted(foreground_request(
             &host,
@@ -1028,14 +1037,13 @@ fn s3_foreground_replay_detach_clears_only_owned_slot() {
             revoked.error.as_ref().map(|error| error.code.as_str()),
             Some("attachment_refused")
         );
-        let next = host
-            .attach(
-                "next-editor".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("n".repeat(64));
+        let next = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "next-editor".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("n".repeat(64));
         acquire_and_save_foreground(&host, &next, over_http);
     }
 }
@@ -1156,14 +1164,13 @@ fn assert_original_foreground(mut repeated: HostReply, original: &HostReply, mar
 fn s3_fix2_same_subject_detach_preserves_lost_grant() {
     for over_http in [false, true] {
         let (_temp, host, _refs) = fixture();
-        let editor = host
-            .attach(
-                "shared-subject".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("a".repeat(64));
+        let editor = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "shared-subject".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("a".repeat(64));
         let command = HostCommand::AcquireManual {
             client: editor.editor.clone().unwrap(),
         };
@@ -1199,14 +1206,13 @@ fn s3_fix2_same_subject_detach_preserves_lost_grant() {
                 assert_original_foreground(repeated, &original, "C2_ORIGINAL_GRANT_PAYLOAD");
             }
         }
-        let second = host
-            .attach(
-                "shared-subject".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor(editor.editor.clone().unwrap());
+        let second = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "shared-subject".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor(editor.editor.clone().unwrap());
         let before = foreground_state(&host);
         let denied = foreground_request(&host, &second, command.clone(), Some(1), over_http);
         assert_eq!(
@@ -1236,14 +1242,13 @@ fn s3_fix2_unnumbered_lease_guards_empty_slot() {
     for over_http in [false, true] {
         let (temp, host, _refs) = fixture();
         let editor = host.client().with_manual_editor("a".repeat(64));
-        let other = host
-            .attach(
-                "other-editor".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("b".repeat(64));
+        let other = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "other-editor".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("b".repeat(64));
         let original = accepted(foreground_request(
             &host,
             &editor,
@@ -1346,14 +1351,13 @@ fn s3_fix2_unnumbered_lease_guards_empty_slot() {
 fn s3_fix2_detach_reattach_replays_lost_save() {
     for over_http in [false, true] {
         let (_temp, host, _refs) = fixture();
-        let editor = host
-            .attach(
-                "shared-subject".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("a".repeat(64));
+        let editor = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "shared-subject".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("a".repeat(64));
         let lease = accepted(foreground_request(
             &host,
             &editor,
@@ -1410,14 +1414,13 @@ fn s3_fix2_detach_reattach_replays_lost_save() {
                 "C2_DETACH_RETAINS_SAVE"
             );
         }
-        let other = host
-            .attach(
-                "shared-subject".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("b".repeat(64));
+        let other = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "shared-subject".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("b".repeat(64));
         let before = foreground_state(&host);
         for command in [
             HostCommand::Status,
@@ -1433,14 +1436,13 @@ fn s3_fix2_detach_reattach_replays_lost_save() {
             );
             assert_eq!(foreground_state(&host), before);
         }
-        let resumed = host
-            .attach(
-                "shared-subject".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor(editor.editor.clone().unwrap());
+        let resumed = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "shared-subject".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor(editor.editor.clone().unwrap());
         accepted(foreground_request(
             &host,
             &resumed,
@@ -1525,14 +1527,13 @@ fn s3_fix2_no_lease_acquisition_preempts_non_authority_slot() {
                 .manual
                 .is_none()
         );
-        let second = host
-            .attach(
-                "second-editor".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("b".repeat(64));
+        let second = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "second-editor".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("b".repeat(64));
         let grant = foreground_request(
             &host,
             &second,
@@ -1579,14 +1580,13 @@ fn s3_fix2_no_lease_reads_and_refusals_cannot_replace_slot() {
             Some(1),
             over_http,
         ));
-        let other = host
-            .attach(
-                "other-editor".into(),
-                AttachmentRole::Editor,
-                host.roots.clone(),
-            )
-            .unwrap()
-            .with_manual_editor("b".repeat(64));
+        let other = test_only_attach_editor_bypassing_issuance(
+            &host,
+            "other-editor".into(),
+            host.roots.clone(),
+        )
+        .unwrap()
+        .with_manual_editor("b".repeat(64));
         let before = foreground_state(&host);
         let denied = foreground_request(&host, &other, HostCommand::Status, Some(1), over_http);
         assert_eq!(
@@ -1633,6 +1633,344 @@ fn s3_fix2_no_lease_reads_and_refusals_cannot_replace_slot() {
             over_http,
         ));
         assert_original_foreground(repeated, &original, "C2_NO_LEASE_ORIGINAL_REPLY");
+    }
+}
+
+fn issuance_state(host: &WriterHost) -> Vec<u8> {
+    let observable = state(host);
+    let foreground = foreground_state(host);
+    let owner = host.owner.upgrade().unwrap();
+    let owner = owner.lock().unwrap();
+    let attachments: Vec<_> = owner
+        .attachments
+        .iter()
+        .map(|grant| {
+            (
+                grant.id,
+                grant.auth.bearer(),
+                &grant.incarnation,
+                &grant.project,
+                &grant.subject,
+                grant.role,
+                &grant.roots,
+                grant.bootstrap,
+                grant.read_pins.len(),
+            )
+        })
+        .collect();
+    serde_json::to_vec(&(
+        observable,
+        foreground,
+        owner.next_attachment_id,
+        attachments,
+    ))
+    .unwrap()
+}
+
+#[test]
+fn s3_fix3_second_editor_refused() {
+    let (_temp, host, _refs) = fixture();
+    let before = issuance_state(&host);
+    let error = host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .issue_attachment(
+            "issued-editor".into(),
+            AttachmentRole::Editor,
+            host.roots.clone(),
+        )
+        .map(|_| ())
+        .expect_err("C3_SECOND_EDITOR_REFUSED")
+        .refusal();
+    assert_eq!(error.code, "attachment_role");
+    assert_eq!(error.message, "one live Editor attachment");
+    assert_eq!(issuance_state(&host), before, "C3_ISSUANCE_UNCHANGED");
+    let error = host
+        .attach(
+            "attached-editor".into(),
+            AttachmentRole::Editor,
+            host.roots.clone(),
+        )
+        .map(|_| ())
+        .expect_err("C3_ATTACH_SECOND_EDITOR_REFUSED")
+        .refusal();
+    assert_eq!(error.code, "attachment_role");
+    assert_eq!(error.message, "one live Editor attachment");
+    assert_eq!(issuance_state(&host), before, "C3_ATTACH_UNCHANGED");
+    for role in [AttachmentRole::Viewer, AttachmentRole::Producer] {
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .issue_attachment("same-subject".into(), role, host.roots.clone())
+            .unwrap();
+        host.attach("same-subject".into(), role, host.roots.clone())
+            .unwrap();
+    }
+    accepted(host.client().request(HostCommand::Detach).unwrap());
+    let auth = host
+        .owner
+        .upgrade()
+        .unwrap()
+        .lock()
+        .unwrap()
+        .issue_attachment(
+            "reattached-editor".into(),
+            AttachmentRole::Editor,
+            host.roots.clone(),
+        )
+        .expect("C3_ISSUE_AFTER_DETACH");
+    let editor = HostClient::connect(host.endpoint.clone(), auth, host.roots.clone()).unwrap();
+    let before = issuance_state(&host);
+    assert_eq!(
+        host.attach(
+            "another-editor".into(),
+            AttachmentRole::Editor,
+            host.roots.clone()
+        )
+        .map(|_| ())
+        .expect_err("C3_ISSUED_EDITOR_COUNTS")
+        .refusal()
+        .code,
+        "attachment_role"
+    );
+    assert_eq!(issuance_state(&host), before);
+    accepted(mcp(&editor, HostCommand::Detach).unwrap());
+    host.attach(
+        "next-editor".into(),
+        AttachmentRole::Editor,
+        host.roots.clone(),
+    )
+    .expect("C3_ATTACH_AFTER_DETACH");
+    {
+        let owner = host.owner.upgrade().unwrap();
+        let mut owner = owner.lock().unwrap();
+        while owner.attachments.len() < super::auth::ATTACHMENT_CAPACITY {
+            let role = if owner.attachments.len().is_multiple_of(2) {
+                AttachmentRole::Viewer
+            } else {
+                AttachmentRole::Producer
+            };
+            owner
+                .issue_attachment("within-cap".into(), role, host.roots.clone())
+                .unwrap();
+        }
+    }
+    let before = issuance_state(&host);
+    for (role, expected) in [
+        (AttachmentRole::Editor, "attachment_role"),
+        (AttachmentRole::Viewer, "attachment_capacity"),
+        (AttachmentRole::Producer, "attachment_capacity"),
+    ] {
+        assert_eq!(
+            host.attach("over-cap".into(), role, host.roots.clone())
+                .map(|_| ())
+                .expect_err("C3_SHARED_ATTACHMENT_CAP")
+                .refusal()
+                .code,
+            expected
+        );
+        assert_eq!(issuance_state(&host), before);
+    }
+}
+
+#[test]
+fn s3_fix3_lost_save_as_and_switch_retry() {
+    for over_http in [false, true] {
+        for switching in [false, true] {
+            let (temp, host, _refs) = fixture();
+            let editor = host.client().with_manual_editor("a".repeat(64));
+            accepted(foreground_request(
+                &host,
+                &editor,
+                HostCommand::AcquireManual {
+                    client: editor.editor.clone().unwrap(),
+                },
+                Some(1),
+                over_http,
+            ));
+            let command = if switching {
+                let target = {
+                    let owner = host.owner.upgrade().unwrap();
+                    let owner = owner.lock().unwrap();
+                    let kinewright_project::bundle_recovery::RecoverySelection::Checkpoint {
+                        root,
+                        branch,
+                    } = owner
+                        .owner()
+                        .unwrap()
+                        .list_recovery_points()
+                        .unwrap()
+                        .remove(0)
+                    else {
+                        panic!("checkpoint required")
+                    };
+                    kinewright_project::bundle_switch::SwitchTarget::Checkpoint { root, branch }
+                };
+                let envelope = accepted(foreground_request(
+                    &host,
+                    &editor,
+                    HostCommand::PrepareSwitch { target },
+                    None,
+                    over_http,
+                ))
+                .switch_envelope
+                .unwrap();
+                HostCommand::Switch {
+                    envelope: Box::new(envelope),
+                }
+            } else {
+                let snapshot =
+                    HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
+                        .unwrap();
+                HostCommand::SaveAs {
+                    destination: temp.path("saved-as.kinewright"),
+                    snapshot,
+                }
+            };
+            let original = discard_foreground_reply(&host, &editor, command.clone(), 2, over_http);
+            let (root, identity) = {
+                let owner = host.owner.upgrade().unwrap();
+                let owner = owner.lock().unwrap();
+                assert!(owner.manual.is_none(), "C3_HANDOFF_RELEASES_LEASE");
+                assert_eq!(owner.switch_frozen, switching);
+                (
+                    owner.owner().unwrap().root_sha256().unwrap(),
+                    owner.owner().unwrap().current_switch_identity().unwrap(),
+                )
+            };
+            assert_eq!(original.switch_result.is_some(), switching);
+            if !switching {
+                assert_eq!(
+                    original.saved.as_ref().unwrap().path,
+                    temp.path("saved-as.kinewright")
+                );
+            }
+            let retained = foreground_state(&host);
+            for role in [AttachmentRole::Viewer, AttachmentRole::Producer] {
+                let other = host
+                    .attach("private-bootstrap".into(), role, host.roots.clone())
+                    .unwrap()
+                    .with_manual_editor("b".repeat(64));
+                accepted(direct(&host, &other, HostCommand::Status));
+                accepted(other.request(HostCommand::CurrentAttachment).unwrap());
+                accepted(mcp(&other, HostCommand::CurrentAttachment).unwrap());
+                refused(
+                    &host,
+                    &other,
+                    HostCommand::AcquireManual {
+                        client: other.editor.clone().unwrap(),
+                    },
+                    "C3_LOWER_ROLE_CANNOT_ACQUIRE",
+                );
+                refused(
+                    &host,
+                    &other,
+                    HostCommand::ConfirmSwitch {
+                        client: other.editor.clone().unwrap(),
+                        installed: Box::new(identity.clone()),
+                    },
+                    "C3_LOWER_ROLE_CANNOT_CONFIRM",
+                );
+                let denied =
+                    foreground_request(&host, &other, HostCommand::Status, Some(3), over_http);
+                assert_eq!(
+                    denied.error.as_ref().map(|error| error.code.as_str()),
+                    Some("role_refused")
+                );
+                accepted(mcp(&other, HostCommand::Detach).unwrap());
+                assert_eq!(
+                    foreground_state(&host),
+                    retained,
+                    "C3_LOWER_ROLE_SLOT_UNCHANGED"
+                );
+            }
+            accepted(foreground_request(
+                &host,
+                &editor,
+                HostCommand::Detach,
+                None,
+                over_http,
+            ));
+            assert!(
+                host.owner
+                    .upgrade()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .foreground_reply
+                    .is_some(),
+                "C3_DETACH_RETAINS_HANDOFF"
+            );
+            let resumed = host
+                .attach(
+                    "reattached-editor".into(),
+                    AttachmentRole::Editor,
+                    host.roots.clone(),
+                )
+                .unwrap()
+                .with_manual_editor(editor.editor.clone().unwrap());
+            let repeated = foreground_request(&host, &resumed, command, Some(2), over_http);
+            assert!(
+                repeated.error.is_none(),
+                "C3_REATTACH_REPLAYS_HANDOFF: {:?}",
+                repeated.error
+            );
+            assert_original_foreground(repeated, &original, "C3_ORIGINAL_HANDOFF_RESULT");
+            {
+                let owner = host.owner.upgrade().unwrap();
+                let owner = owner.lock().unwrap();
+                assert_eq!(
+                    owner.owner().unwrap().root_sha256().unwrap(),
+                    root,
+                    "C3_NO_SECOND_PUBLICATION"
+                );
+                assert_eq!(
+                    owner.owner().unwrap().current_switch_identity().unwrap(),
+                    identity
+                );
+                assert!(owner.manual.is_none());
+            }
+            let grant = if switching {
+                HostCommand::ConfirmSwitch {
+                    client: resumed.editor.clone().unwrap(),
+                    installed: Box::new(original.switch_attachment.unwrap().identity().unwrap()),
+                }
+            } else {
+                HostCommand::AcquireManual {
+                    client: resumed.editor.clone().unwrap(),
+                }
+            };
+            assert!(
+                accepted(foreground_request(
+                    &host,
+                    &resumed,
+                    grant,
+                    Some(3),
+                    over_http
+                ))
+                .manual_lease
+                .is_some()
+            );
+            let snapshot =
+                HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
+                    .unwrap();
+            assert!(
+                accepted(foreground_request(
+                    &host,
+                    &resumed,
+                    HostCommand::Save { snapshot },
+                    Some(4),
+                    over_http
+                ))
+                .saved
+                .is_some()
+            );
+        }
     }
 }
 

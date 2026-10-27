@@ -210,7 +210,7 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/auth.rs",
-        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() || retained_handoff {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
         "                let _ = removed;"
       ]
     ],
@@ -227,7 +227,7 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/auth.rs",
-        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() || retained_handoff {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
         "                let _ = removed;"
       ]
     ],

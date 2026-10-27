@@ -1,0 +1,276 @@
+[
+  {
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "name": "fix3-single-editor-guard",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "        if role == super::AttachmentRole::Editor\n            && self\n                .attachments\n                .iter()\n                .any(|grant| grant.role == super::AttachmentRole::Editor)\n        {\n            return Err(HostRefusal::new(\"attachment_role\", \"one live Editor attachment\").into());\n        }\n",
+        ""
+      ]
+    ],
+    "witness": "writer_host::ja_s3_host::s3_fix3_second_editor_refused",
+    "red_text": "C3_SECOND_EDITOR_REFUSED"
+  },
+  {
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "name": "fix3-bootstrap-editor-counted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "        if role == super::AttachmentRole::Editor\n            && self\n                .attachments\n                .iter()\n                .any(|grant| grant.role == super::AttachmentRole::Editor)\n        {\n            return Err(HostRefusal::new(\"attachment_role\", \"one live Editor attachment\").into());\n        }\n",
+        "        if role == super::AttachmentRole::Editor\n            && self\n                .attachments\n                .iter()\n                .any(|grant| grant.role == super::AttachmentRole::Editor && !grant.bootstrap)\n        {\n            return Err(HostRefusal::new(\"attachment_role\", \"one live Editor attachment\").into());\n        }\n"
+      ]
+    ],
+    "witness": "writer_host::ja_s3_host::s3_fix3_second_editor_refused",
+    "red_text": "C3_SECOND_EDITOR_REFUSED"
+  },
+  {
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "name": "fix3-retain-detached-handoff",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                    if self.manual.is_some() || retained_handoff {",
+        "                    if self.manual.is_some() {"
+      ]
+    ],
+    "witness": "writer_host::ja_s3_host::s3_fix3_lost_save_as_and_switch_retry",
+    "red_text": "C3_DETACH_RETAINS_HANDOFF"
+  },
+  {
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "name": "fix3-resume-unbound-handoff-client",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                        ((owner.attachment.is_none() || owner.attachment == Some(grant.id))\n                            && owner.client == client)",
+        "                        (owner.attachment == Some(grant.id) && owner.client == client)"
+      ]
+    ],
+    "witness": "writer_host::ja_s3_host::s3_fix3_lost_save_as_and_switch_retry",
+    "red_text": "C3_REATTACH_REPLAYS_HANDOFF"
+  },
+  {
+    "name": "fix1-foreground-editor-guard-http",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            if request.operation.is_some() && grant.role != super::AttachmentRole::Editor {\n                return Err(HostRefusal::new(\n                    \"role_refused\",\n                    \"foreground operations require an Editor attachment\",\n                )\n                .into());\n            }\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_rejects_non_editor_http_before_lease",
+    "red_text": "C1_FOREGROUND_ROLE_REFUSED",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix1-foreground-editor-guard-direct",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            if request.operation.is_some() && grant.role != super::AttachmentRole::Editor {\n                return Err(HostRefusal::new(\n                    \"role_refused\",\n                    \"foreground operations require an Editor attachment\",\n                )\n                .into());\n            }\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_rejects_non_editor_direct_before_lease",
+    "red_text": "C1_FOREGROUND_ROLE_REFUSED",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix1-foreground-detach-only_owned_slot",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() || retained_handoff {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                let _ = removed;"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_detach_clears_only_owned_slot",
+    "red_text": "C1_FOREGROUND_DETACH_CLEARS_OWNED_SLOT",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix1-foreground-detach-stale_non_editor_slot",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() || retained_handoff {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                let _ = removed;"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_detach_clears_stale_non_editor_slot",
+    "red_text": "C1_FOREGROUND_DETACH_CLEARS_STALE_NON_EDITOR_SLOT",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix2-lease-client-guard",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "        if self\n            .manual\n            .as_ref()\n            .is_some_and(|lease| lease.client != client)\n        {\n            return Err(HostRefusal::new(\n                \"manual_busy\",\n                \"foreground operation belongs to the active manual lease client\",\n            )\n            .into());\n        }\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot",
+    "red_text": "C2_LEASE_CLIENT_GUARD",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix2-detach-subject-alias",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                    && owner.attachment == Some(removed.id)",
+        "                    && (owner.attachment == Some(removed.id) || self.attachments.iter().any(|grant| Some(grant.id) == owner.attachment && grant.subject == removed.subject))"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_fix2_same_subject_detach_preserves_lost_grant",
+    "red_text": "C2_SAME_SUBJECT_DETACH_UNCHANGED",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix2-refusals-not-cached",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "        if reply.error.is_none() {\n            self.foreground_reply = Some((client, operation, digest, reply.clone()));\n        }",
+        "        self.foreground_reply = Some((client, operation, digest, reply.clone()));"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_fix2_no_lease_reads_and_refusals_cannot_replace_slot",
+    "red_text": "C2_REFUSAL_NOT_CACHED",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix2-retain-lease-replay-on-detach",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                        owner.attachment = None;",
+        "                        owner.attachment = None;\n                        self.foreground_reply = None;"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_fix2_detach_reattach_replays_lost_save",
+    "red_text": "C2_DETACH_RETAINS_SAVE",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix2-no-lease-acquire-preemption",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                            || matches!(request.command, super::HostCommand::AcquireManual { .. })",
+        "                            || false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_fix2_no_lease_acquisition_preempts_non_authority_slot",
+    "red_text": "C2_NO_LEASE_ACQUIRE_PREEMPTS",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix2-unnumbered-renewal-instance",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            if request.operation.is_none()\n                && self.manual.is_some()\n                && matches!(\n                    request.command,\n                    super::HostCommand::ConfirmSwitch { .. }\n                        | super::HostCommand::PrepareOwnedMedia { .. }\n                        | super::HostCommand::PrepareMediaInterpretation { .. }\n                        | super::HostCommand::ConfirmBarrier { .. }\n                )\n                && self\n                    .foreground_owner\n                    .as_ref()\n                    .is_some_and(|owner| owner.attachment.is_some_and(|id| id != grant.id))\n            {\n                return Err(HostRefusal::new(\n                    \"operation_changed\",\n                    \"manual lease renewal belongs to another attachment instance\",\n                )\n                .into());\n            }\n",
+        ""
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot",
+    "red_text": "C2_LEASE_RENEWAL_INSTANCE",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "c1-foreground-subject-before-replay",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "                    if !permitted {",
+        "                    if false && !permitted {"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_foreground_replay_is_attachment_subject_bound",
+    "red_text": "C1_FOREGROUND_SUBJECT_REPLAY",
+    "production": true,
+    "build_host": false,
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  },
+  {
+    "name": "fix2-unnumbered-reattach-binds",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            } else if !detach\n",
+        "            } else if false && !detach\n"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "",
+    "witness": "writer_host::ja_s3_host::s3_fix2_detach_reattach_replays_lost_save",
+    "red_text": "C2_UNNUMBERED_REATTACH_BINDS",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs"
+  }
+]

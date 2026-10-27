@@ -516,13 +516,7 @@ fn host_owns_scripted_session_after_gui_detach() {
     let directory = root.path("source-电影-🎬");
     std::fs::create_dir(&directory).unwrap();
     let host = WriterHost::start(config(&directory, None)).unwrap();
-    let gui = host
-        .attach(
-            "gui-editor".into(),
-            AttachmentRole::Editor,
-            roots(&directory),
-        )
-        .unwrap();
+    let gui = host.client();
     let reply = successful(
         &gui,
         HostCommand::StartScripted {

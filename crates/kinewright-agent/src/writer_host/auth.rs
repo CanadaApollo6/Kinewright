@@ -147,6 +147,14 @@ impl super::HostCommandOwner {
         roots: SessionRoots,
         bootstrap: bool,
     ) -> Result<(), HostError> {
+        if role == super::AttachmentRole::Editor
+            && self
+                .attachments
+                .iter()
+                .any(|grant| grant.role == super::AttachmentRole::Editor)
+        {
+            return Err(HostRefusal::new("attachment_role", "one live Editor attachment").into());
+        }
         if self.attachments.len() >= ATTACHMENT_CAPACITY {
             return Err(
                 HostRefusal::new("attachment_capacity", "64 active attachments maximum").into(),
@@ -248,7 +256,8 @@ impl super::HostCommandOwner {
                     let permitted = if self.manual.is_some() {
                         owner.attachment.is_none() || owner.attachment == Some(grant.id)
                     } else {
-                        (owner.attachment == Some(grant.id) && owner.client == client)
+                        ((owner.attachment.is_none() || owner.attachment == Some(grant.id))
+                            && owner.client == client)
                             || matches!(request.command, super::HostCommand::AcquireManual { .. })
                     };
                     if !permitted {
@@ -372,11 +381,17 @@ impl super::HostCommandOwner {
                 self.attachments[index].roots = reply.status.admitted_roots.clone();
             }
             if detach {
+                let retained_handoff =
+                    self.foreground_reply
+                        .as_ref()
+                        .is_some_and(|(_, _, _, reply)| {
+                            reply.saved.is_some() || reply.switch_result.is_some()
+                        });
                 let removed = self.attachments.remove(index);
                 if let Some(owner) = &mut self.foreground_owner
                     && owner.attachment == Some(removed.id)
                 {
-                    if self.manual.is_some() {
+                    if self.manual.is_some() || retained_handoff {
                         owner.attachment = None;
                     } else {
                         self.foreground_reply = None;

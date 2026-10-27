@@ -112,11 +112,16 @@
     "docs/reports/ja1-s3/c1-evidence/fix2/windows.command": "6778df7f5b333b7878e8f96a5973efe19a78f28e8446ed15695a89a0595c61b2",
     "docs/reports/ja1-s3/c1-evidence/fix2/windows.exit": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c",
     "docs/reports/ja1-s3/c1-evidence/fix2/windows.log.gz": "408eab4628279a410ab14083c1f3f18f1a1b424a9808524392e04cce59ce7b62",
-    "docs/reports/ja1-s3/c1.md": "4063fcd466b9c7c17a6b24a220ab24af083a944b7a336636489af4803ab54c7c",
+    "docs/reports/ja1-s3/c1.md": "8895dc11025c54f5130e821b5878ccde24b73dab4fbf8f5f130d25e0ed8e4f41",
     "scripts/ja1-s3-c1-fix1-mutation-cases.json": "94742efd97ada6675b739a58bde8b4ab361e73a594ea3ae8709ee0cfce28065d",
     "scripts/ja1-s3-c1-fix2-gate.sh": "a2b99268662b1ce331228210ab562aa3302f47beb79b6e14d3a8e17668699814",
     "scripts/ja1-s3-c1-fix2-mutation-cases.json": "796933131e9271fbee1c25389d718421cb439ea55a2e6e1ee1a1b2020fa37599",
     "scripts/ja1-s3-c1-mutation-cases.json": "ecefb00d515651df7142b9cadd2fbcc807a40fd79367dbef6a46228b95ceca7b",
     "scripts/ja1-s3-c1-mutations.py": "2020a5726dd42eb988144ea762d5e9ce5ae117ae210db0d191535207f4fe777b"
+  },
+  "report_rebind": {
+    "reason": "Fix 3 lead attribution correction and appended round; historical source and runtime bindings unchanged",
+    "previous_report_sha256": "4063fcd466b9c7c17a6b24a220ab24af083a944b7a336636489af4803ab54c7c",
+    "historical_source_commit": "0ea01f27b674682fad32cfa12be7deb97cdde0ed"
   }
 }
