@@ -143,15 +143,31 @@ impl HostClient {
         }
     }
     pub fn request(&self, command: HostCommand) -> Result<HostReply, HostError> {
+        self.request_operation(command, None)
+    }
+    /// One GUI foreground operation may retry its exact in-memory result.
+    pub fn request_operation(
+        &self,
+        command: HostCommand,
+        operation: Option<u64>,
+    ) -> Result<HostReply, HostError> {
         let request = HostRequest {
             editor: self.editor.clone(),
+            operation,
             protocol: self.endpoint().protocol,
             project: self.endpoint().project.clone(),
             roots: self.bootstrap.roots.clone(),
             command,
         };
         let response = self.post("host", &serde_json::to_vec(&request)?)?;
-        Ok(serde_json::from_slice(&response)?)
+        let reply: HostReply = serde_json::from_slice(&response)?;
+        if operation.is_some()
+            && let Some(error) = &reply.error
+            && matches!(error.code.as_str(), "operation_changed" | "manual_client")
+        {
+            return Err(error.clone().into());
+        }
+        Ok(reply)
     }
     /// Admit one destination chosen explicitly by the person. Connector/MCP ingress refuses
     /// this command; returned roots only enable this exact retained destination capability.
@@ -508,7 +524,12 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
                 ..HostReply::default()
             },
             |mut owner| {
-                owner.execute_client(request.command, request.roots, request.editor.as_deref())
+                owner.execute_operation(
+                    request.command,
+                    request.roots,
+                    request.editor.as_deref(),
+                    request.operation,
+                )
             },
         );
         if shutting_down && reply.error.is_none() {
@@ -987,6 +1008,10 @@ pub struct HostCommandOwner {
     next_manual_generation: u64,
     recovering: bool,
     recovery: Option<RecoveryBarrier>,
+    recovery_request: Option<String>,
+    foreground_reply: Option<(String, u64, String, HostReply)>,
+    recovery_handoff: Option<(RecoveryBarrier, RecoveryBarrier)>,
+    confirmed_recovery: Option<(RecoveryBarrier, HostReply)>,
 }
 enum Choice {
     Rescue {
@@ -1117,6 +1142,10 @@ impl HostCommandOwner {
             next_manual_generation: 1,
             recovering: false,
             recovery: None,
+            recovery_request: None,
+            foreground_reply: None,
+            recovery_handoff: None,
+            confirmed_recovery: None,
         };
         // Initial attachment seeds the one validation shadow before it can serve sessions.
         // This is a bootstrap snapshot, not the C9 continuous manual stream.
@@ -1384,8 +1413,9 @@ impl HostCommandOwner {
                 self.confirm_barrier(*barrier, installed, reply)?;
             }
             HostCommand::AcquireManual { client } => {
+                let inputs = self.owner()?.manual_input_context()?;
                 reply.manual_lease = Some(self.acquire_manual(client)?);
-                reply.manual_inputs = Some(self.owner()?.manual_input_context()?);
+                reply.manual_inputs = Some(inputs);
             }
             HostCommand::CommitHistory { client, messages } => {
                 self.commit_history(&client, &messages, reply)?;
@@ -1883,6 +1913,9 @@ impl HostCommandOwner {
                 "destination admission requires the originating GUI attachment",
             )
             .into());
+        }
+        if self.admitted.contains_key(&path) {
+            return Ok(());
         }
         if self.admitted.len() >= 32
             || self.admitted_roots().read.len() + self.admitted_roots().write.len() >= 64

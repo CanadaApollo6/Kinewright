@@ -27,6 +27,62 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
     )
 }
 impl HostCommandOwner {
+    pub(super) fn execute_operation(
+        &mut self,
+        command: HostCommand,
+        roots: SessionRoots,
+        editor: Option<&str>,
+        operation: Option<u64>,
+    ) -> HostReply {
+        let Some(operation) = operation else {
+            return self.execute_client(command, roots, editor);
+        };
+        let checked = (|| -> Result<_, HostError> {
+            let client = editor
+                .filter(|client| (32..=128).contains(&client.len()))
+                .ok_or_else(|| {
+                    HostRefusal::new("manual_client", "private GUI operation identity required")
+                })?;
+            let digest = kinewright_media::sha256_bytes(&serde_json::to_vec(&(&command, &roots))?);
+            if let Some((previous_client, previous, payload, reply)) = &self.foreground_reply {
+                if previous_client != client
+                    || operation < *previous
+                    || (operation == *previous && *payload != digest)
+                {
+                    return Err(HostRefusal::new(
+                        "operation_changed",
+                        "retry must preserve the client, operation and payload",
+                    )
+                    .into());
+                }
+                if operation == *previous {
+                    let reply = reply.clone();
+                    self.prove_retention()?;
+                    return Ok((client.to_owned(), digest, Some(reply)));
+                }
+            }
+            Ok((client.to_owned(), digest, None))
+        })();
+        let (client, digest, retained) = match checked {
+            Ok(value) => value,
+            Err(error) => {
+                return HostReply {
+                    status: self.status(),
+                    error: Some(error.refusal()),
+                    ..HostReply::default()
+                };
+            }
+        };
+        if let Some(reply) = retained {
+            return reply;
+        }
+        let reply = self.execute_client(command, roots, editor);
+        // A single serialized GUI request is outstanding. Heartbeats and manual
+        // publications cannot evict its result, including across an authority change.
+        self.foreground_reply = Some((client, operation, digest, reply.clone()));
+        reply
+    }
+
     pub(super) fn execute_client(
         &mut self,
         command: HostCommand,

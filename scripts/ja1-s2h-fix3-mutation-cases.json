@@ -1,0 +1,338 @@
+[
+  {
+    "name": "lost-begin-refuses-matching-original",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "if self.recovery_request.as_ref() == Some(&request) {",
+        "if false {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_begin_recovery_reply_loss_retries_original_plan",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": true,
+    "red_text": "Retry must complete recovery"
+  },
+  {
+    "name": "begin-retry-accepts-another-client-or-cut",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "if self.recovery_request.as_ref() == Some(&request) {",
+        "if true {"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_recovery_plan_retries_bind_original_client_cut_and_chain",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "production": true,
+    "features": "",
+    "build_host": false
+  },
+  {
+    "name": "lost-floor-confirm-discards-close-handoff",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "&& self.recovery.as_ref() == Some(next)",
+        "&& false && self.recovery.as_ref() == Some(next)"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_floor_confirm_reply_loss_adopts_recorded_close_plan",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": true,
+    "red_text": "Retry must complete recovery"
+  },
+  {
+    "name": "gui-republishes-floor-after-lost-confirm",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host_recovery.rs",
+        "if matches!(plan, RecoveryPlan::Publish(_)) {",
+        "if true {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_floor_confirm_reply_loss_adopts_recorded_close_plan",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false,
+    "red_text": "Retry must complete recovery"
+  },
+  {
+    "name": "lost-close-confirm-discards-current-grant",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "&& self.manual == confirmed.manual_lease",
+        "&& false && self.manual == confirmed.manual_lease"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_close_confirm_reply_loss_reuses_delivered_authority",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": true,
+    "red_text": "Retry must complete recovery"
+  },
+  {
+    "name": "completed-switch-keeps-original-envelope",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "        self.switch_envelope = None;\n        self.switch_state = SwitchState::Complete;",
+        "        self.switch_state = SwitchState::Complete;"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_completed_switch_then_lost_save_uses_c10_on_same_actor",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false,
+    "red_text": "completed switch envelope must retire"
+  },
+  {
+    "name": "status-thaws-unknown-operation",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "let can_resume = !host.unknown_operation\n            && !manual_failed",
+        "let can_resume = !manual_failed"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false,
+    "red_text": "heartbeat must keep producers fenced"
+  },
+  {
+    "name": "unknown-operation-ignores-bootstrap-without-permit",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "        host.unknown_operation = true;",
+        "        host.unknown_operation = host.manual.is_some();"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_lost_save_floor_stays_frozen_until_exact_publisher_result",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false
+  },
+  {
+    "name": "replayed-foreground-result-executes-again",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "        if let Some(reply) = retained {\n            return reply;\n        }",
+        "        let _ = retained;"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_foreground_result_replay_is_exact_bounded_and_client_bound",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "production": true,
+    "features": "",
+    "build_host": false
+  },
+  {
+    "name": "save-as-lost-result-is-not-retained",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "        self.pending_operation = Some((operation, command.clone()));",
+        "        self.pending_operation = None;"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_lost_save_as_and_preview_replies_replay_original_results",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false,
+    "red_text": "could not re-establish this session's retained data"
+  },
+  {
+    "name": "first-save-admission-lost-result-is-not-retained",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "        self.pending_operation = Some((operation, command.clone()));",
+        "        self.pending_operation = None;"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_lost_destination_admission_and_manual_grant_replies_retry_in_context",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false
+  },
+  {
+    "name": "rescue-lost-result-executes-without-choice-again",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "        if let Some(reply) = retained {\n            return reply;\n        }",
+        "        let _ = retained;"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_lost_rescue_result_returns_original_activation_without_second_copy",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "production": true,
+    "features": "",
+    "build_host": false,
+    "red_text": "Retry must return the original activation"
+  },
+  {
+    "name": "lost-manual-grant-is-replaced-by-current-query",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "        if self.status.frozen\n            && !self.unknown_operation",
+        "        if self.status.frozen"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_lost_destination_admission_and_manual_grant_replies_retry_in_context",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false,
+    "red_text": "acquire_manual:"
+  },
+  {
+    "name": "read-only-heartbeat-error-freezes-an-operation",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        ".join()\n                .ok()\n                .and_then(Result::ok);\n            self.last_heartbeat = Instant::now();\n            return Ok(reply);",
+        ".join()\n                .map_err(|_| BundleError::HistoryChanged)?\n                .map_err(host_error)?;\n            self.last_heartbeat = Instant::now();\n            return Ok(Some(reply));"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false,
+    "red_text": "a lost read-only heartbeat creates no unknown publication"
+  },
+  {
+    "name": "post-grant-identity-escapes-revoke-transaction",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            let current = self.owner()?.current_switch_identity()?;\n            Ok((lease, inputs, current))\n        })();\n        match acquisition {\n            Ok((lease, inputs, current)) => {",
+        "            Ok((lease, inputs))\n        })();\n        match acquisition {\n            Ok((lease, inputs)) => {\n                let current = self.owner()?.current_switch_identity()?;"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_post_grant_identity_failure_revokes_and_retries_one_lease",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "production": true,
+    "features": "",
+    "build_host": false,
+    "red_text": "undelivered identity grant must be revoked"
+  },
+  {
+    "name": "initial-attach-reply-loss-kills-live-owner",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "            Err(_) if unknown => HostStatus {",
+        "            Err(_) if false => HostStatus {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_lost_initial_attach_reply_keeps_owned_host_and_retries",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false
+  },
+  {
+    "name": "initial-manual-acquisition-error-is-not-fenced",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "            Err(error) => {\n                self.host_request_failed(&error);\n                return Err(error);\n            }",
+        "            Err(error) => {\n                return Err(error);\n            }"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_lost_initial_manual_grant_keeps_original_request_for_retry",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": false,
+    "red_text": "initial manual grant loss must be pending"
+  },
+  {
+    "name": "destination-admission-reinspects-an-already-committed-target",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "        if self.admitted.contains_key(&path) {\n            return Ok(());\n        }",
+        ""
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_lost_save_as_and_preview_replies_replay_original_results",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": true
+  },
+  {
+    "name": "identity-refusal-is-treated-as-an-original-result",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "        if operation.is_some()\n            && let Some(error) = &reply.error",
+        "        if false\n            && let Some(error) = &reply.error"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_foreground_identity_refusal_cannot_thaw_unknown_operation",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false,
+    "features": "",
+    "build_host": true,
+    "red_text": "identity refusal cannot resolve the original operation"
+  }
+]

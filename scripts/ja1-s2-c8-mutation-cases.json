@@ -449,8 +449,8 @@
     "changes": [
       [
         "crates/kinewright-app/src/ja1_host.rs",
-        "                self.client\n                    .admit_destination(destination)\n                    .map_err(host_error)?",
-        "                let _ = destination;\n                self.client.clone()"
+        "                client.admit_destination(destination).map_err(host_error)?",
+        "                let _ = destination; client.clone()"
       ]
     ],
     "witness": "ja1_attachment::tests::c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_authority",
@@ -467,8 +467,8 @@
     "changes": [
       [
         "crates/kinewright-app/src/ja1_host.rs",
-        "                self.client\n                    .admit_destination(destination)\n                    .map_err(host_error)?",
-        "                let _ = self.client\n                    .admit_destination(destination)\n                    .map_err(host_error)?;\n                self.client.clone()"
+        "                client.admit_destination(destination).map_err(host_error)?",
+        "                let _ = client.admit_destination(destination).map_err(host_error)?; client.clone()"
       ]
     ],
     "witness": "ja1_attachment::tests::c8_person_picked_external_first_save_and_save_as_keep_source_and_narrowed_authority",

@@ -12,7 +12,10 @@ CASES = json.loads((ROOT / os.environ.get("JA_S2H_MUTATION_CASES", "scripts/ja1-
 def write(path, value):
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 def case(name):
-    return next(value for value in CASES if value["name"] == name)
+    value = next(value for value in CASES if value["name"] == name)
+    if value.get("superseded_by"):
+        raise RuntimeError(f"superseded by {value['superseded_by']}")
+    return value
 def check(value):
     changed = {}
     for name, before, after in value["changes"]:
@@ -25,6 +28,8 @@ def main():
     operation = sys.argv[1]
     if operation == "list":
         for value in CASES:
+            if value.get("superseded_by"):
+                continue
             check(value)
             print(value["name"])
         return

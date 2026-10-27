@@ -160,13 +160,14 @@ impl HostCommandOwner {
         let acquisition: Result<_, HostError> = (|| {
             let lease = self.acquire_manual(client)?;
             let inputs = self.owner()?.manual_input_context()?;
-            Ok((lease, inputs))
+            let current = self.owner()?.current_switch_identity()?;
+            Ok((lease, inputs, current))
         })();
         match acquisition {
-            Ok((lease, inputs)) => {
+            Ok((lease, inputs, current)) => {
                 self.confirmed_switch = Some(SwitchConfirmation {
                     installed: installed.clone(),
-                    current: self.owner()?.current_switch_identity()?,
+                    current,
                     grant: Some((lease.clone(), inputs.clone())),
                 });
                 reply.manual_lease = Some(lease);
@@ -179,7 +180,6 @@ impl HostCommandOwner {
             Err(error) => {
                 self.manual = None;
                 self.switch_frozen = true;
-                self.owner()?.freeze_manual_barrier()?;
                 self.confirmed_switch =
                     self.owner()?.current_switch_identity().ok().map(|current| {
                         SwitchConfirmation {
@@ -188,6 +188,7 @@ impl HostCommandOwner {
                             grant: None,
                         }
                     });
+                self.owner()?.freeze_manual_barrier()?;
                 Err(error)
             }
         }

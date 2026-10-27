@@ -129,7 +129,8 @@ def main():
     arguments = parser.parse_args()
     packages = {"host": "kinewright-agent", "project": "kinewright-project", "app": "kinewright-app", "core": "kinewright-core"}
     chosen = [case for case in cases()
-              if (not arguments.case or case["name"] in arguments.case)
+              if not case.get("superseded_by")
+              and (not arguments.case or case["name"] in arguments.case)
               and (not arguments.group or case["package"] == packages[arguments.group])]
     if not chosen or set(arguments.case) - {case["name"] for case in chosen}:
         raise SystemExit("empty or unknown mutation selection")

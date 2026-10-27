@@ -468,8 +468,8 @@
     "changes": [
       [
         "crates/kinewright-app/src/ja1_attachment.rs",
-        "        if let Some(view) = host.start_manual(&mut self.owner)? {\n            self.view = Some(view);\n        }",
-        "        let _ = host.start_manual(&mut self.owner)?;"
+        "        if let Some(view) = view {\n            self.view = Some(view);\n            host.complete_switch_handoff();\n        }",
+        "        if let Some(view) = view {\n            let _ = view;\n            host.complete_switch_handoff();\n        }"
       ]
     ],
     "witness": "ja1_attachment::tests::g05a_first_edit_undo_and_exact_switch_back",

@@ -253,3 +253,213 @@ fn s2h_status_and_save_cost_observer() {
         serde_json::json!({"history_commands":history.batches.len(), "registered_sessions":2, "status_ms":status_ms, "save_ms":save_ms})
     );
 }
+
+#[test]
+fn s2h_post_grant_identity_failure_revokes_and_retries_one_lease() {
+    let (_temp, mut host) = fixture();
+    let client = "i".repeat(64);
+    host.acquire_manual(client.clone()).unwrap();
+    let target = host
+        .owner()
+        .unwrap()
+        .list_recovery_points()
+        .unwrap()
+        .remove(0);
+    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let prepared = checked(
+        &mut host,
+        HostCommand::PreviewRecovery {
+            target: target.into(),
+            snapshot,
+        },
+    );
+    let selected = checked(
+        &mut host,
+        HostCommand::Switch {
+            envelope: Box::new(prepared.switch_envelope.unwrap()),
+        },
+    );
+    let installed = selected.switch_attachment.unwrap().identity().unwrap();
+    let command = HostCommand::ConfirmSwitch {
+        client,
+        installed: Box::new(installed),
+    };
+    let failed = io_observer::fail_nth("manual_switch_identity", 2, || {
+        run(&mut host, command.clone())
+    });
+    assert!(failed.error.is_some(), "post-grant identity read must fail");
+    assert!(
+        host.manual.is_none(),
+        "undelivered identity grant must be revoked"
+    );
+    assert!(host.switch_frozen);
+    assert_eq!(host.core().attachment_state(), Ok(AttachmentState::Frozen));
+    let reply = checked(&mut host, command.clone());
+    let generation = host.next_manual_generation;
+    let duplicate = checked(&mut host, command);
+    assert_eq!(reply.manual_lease, duplicate.manual_lease);
+    assert_eq!(host.next_manual_generation, generation);
+}
+
+#[test]
+fn s2h_recovery_plan_retries_bind_original_client_cut_and_chain() {
+    let (_temp, mut host) = fixture();
+    let frozen = HostSnapshot::capture(host.core()).unwrap();
+    let begin = HostCommand::BeginRecovery {
+        client: "r".repeat(64),
+        frozen: Some(frozen.clone()),
+        pending: vec![],
+        discard_batches: None,
+    };
+    let original = checked(&mut host, begin.clone()).recovery.unwrap();
+    let retry = checked(&mut host, begin).recovery.unwrap();
+    assert_eq!(retry, original);
+    for changed in [
+        HostCommand::BeginRecovery {
+            client: "x".repeat(64),
+            frozen: Some(frozen),
+            pending: vec![],
+            discard_batches: None,
+        },
+        HostCommand::BeginRecovery {
+            client: "r".repeat(64),
+            frozen: None,
+            pending: vec![],
+            discard_batches: None,
+        },
+        HostCommand::BeginRecovery {
+            client: "r".repeat(64),
+            frozen: None,
+            pending: vec![],
+            discard_batches: Some(1),
+        },
+    ] {
+        assert!(run(&mut host, changed).error.is_some());
+    }
+    let changed_chain = HostCommand::BeginRecovery {
+        client: "r".repeat(64),
+        frozen: Some(original.before.clone()),
+        pending: vec![kinewright_core::AcceptedHistory {
+            sequence: 1,
+            batch_id: "changed-chain".into(),
+            digest: "0".repeat(64),
+            envelope: vec![],
+        }],
+        discard_batches: None,
+    };
+    assert!(run(&mut host, changed_chain).error.is_some());
+    assert_eq!(host.recovery, Some(original));
+}
+
+#[test]
+fn s2h_foreground_result_replay_is_exact_bounded_and_client_bound() {
+    let (_temp, mut host) = fixture();
+    let roots = host.config.roots.clone();
+    let client = "g".repeat(64);
+    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let save = HostCommand::Save { snapshot };
+    let reply = host.execute_operation(save.clone(), roots.clone(), Some(&client), Some(1));
+    assert!(reply.error.is_none(), "{:?}", reply.error);
+    let root = host.owner().unwrap().root_sha256().unwrap();
+    let repeated = host.execute_operation(save, roots.clone(), Some(&client), Some(1));
+    assert_eq!(
+        serde_json::to_vec(&reply).unwrap(),
+        serde_json::to_vec(&repeated).unwrap()
+    );
+    assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
+    for (identity, operation) in [
+        (client.clone(), 0),
+        ("x".repeat(64), 1),
+        (client.clone(), 1),
+    ] {
+        assert!(
+            host.execute_operation(
+                HostCommand::Cancel,
+                roots.clone(),
+                Some(&identity),
+                Some(operation)
+            )
+            .error
+            .is_some()
+        );
+    }
+    let next = host.execute_operation(HostCommand::Status, roots, Some(&client), Some(2));
+    assert!(next.error.is_none());
+    assert_eq!(host.foreground_reply.as_ref().unwrap().1, 2);
+}
+
+#[test]
+fn s2h_lost_rescue_result_returns_original_activation_without_second_copy() {
+    use kinewright_project::bundle::LoadedBundle;
+    let parent = kinewright_media::test_support::workspace_target_dir();
+    let temp = kinewright_media::test_support::TempDirectory::new_in(&parent, "fix3-rescue-result");
+    let drive = temp.path("drive");
+    std::fs::create_dir(&drive).unwrap();
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let mut owner = Ja1EditingSession::new(&drive, &core, StorageLimits::default()).unwrap();
+    owner
+        .first_save(&drive.join("a.kinewright"), StorageLimits::default())
+        .unwrap();
+    edit(&core, false);
+    assert!(io_observer::fail_once("root_parent_sync", || owner.save_active()).is_err());
+    let expected = core.export_history().unwrap();
+    std::fs::rename(&drive, temp.path("hidden-drive")).unwrap();
+    let roots = SessionRoots {
+        read: vec![temp.root().into()],
+        write: vec![temp.root().into()],
+    };
+    let mut host = HostCommandOwner::open(HostConfig {
+        project: "fix3-rescue-result".into(),
+        path: None,
+        roots: roots.clone(),
+        origin: HostOrigin::Headless,
+    })
+    .unwrap();
+    host.initial_core = core.clone();
+    host.owner = Some(owner);
+    checked(
+        &mut host,
+        HostCommand::PreviewRescue {
+            snapshot: HostSnapshot::capture(&core).unwrap(),
+        },
+    );
+    let destination = temp.path("rescue.kinewright");
+    let command = HostCommand::RescueTo {
+        destination: destination.clone(),
+    };
+    let client = "s".repeat(64);
+    let lost = host.execute_operation(command.clone(), roots.clone(), Some(&client), Some(1));
+    assert!(lost.error.is_none(), "{:?}", lost.error);
+    assert!(lost.activation.is_some());
+    assert_eq!(core.attachment_state(), Ok(AttachmentState::Sealed));
+    let actor = host.core().actor_identity();
+    let root = host.owner().unwrap().root_sha256().unwrap();
+    let retry = host.execute_operation(command, roots, Some(&client), Some(1));
+    assert_eq!(
+        serde_json::to_vec(&retry).unwrap(),
+        serde_json::to_vec(&lost).unwrap(),
+        "Retry must return the original activation"
+    );
+    assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
+    assert_eq!(host.core().actor_identity(), actor);
+    assert_eq!(
+        host.core().export_history().unwrap().document,
+        expected.document
+    );
+    drop(host);
+    let restored = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&destination)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(restored.export_history().unwrap(), lost.history.unwrap());
+}

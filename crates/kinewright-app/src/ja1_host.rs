@@ -21,7 +21,13 @@ use std::{
 mod recovery;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "ja1_host_transport_tests.rs"]
-mod transport_tests;
+pub(super) mod transport_tests;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SwitchState {
+    Complete,
+    Pending,
+}
 
 pub(super) struct HostAttachment {
     installed_switch: Option<(
@@ -33,11 +39,14 @@ pub(super) struct HostAttachment {
         kinewright_project::editing_session::PreparedGuiSwitch,
         super::PreparedView,
     )>,
+    pub(super) unknown_operation: bool,
+    switch_state: SwitchState,
+    next_operation: u64,
+    pending_operation: Option<(u64, HostCommand)>,
     executable: PathBuf,
     context: std::sync::Weak<std::sync::atomic::AtomicBool>,
     recovery: Option<JoinHandle<Result<recovery::RecoveredManual, BundleError>>>,
-    recovery_plan:
-        std::sync::Arc<std::sync::Mutex<Option<kinewright_agent::writer_host::RecoveryBarrier>>>,
+    recovery_plan: std::sync::Arc<std::sync::Mutex<Option<recovery::RecoveryPlan>>>,
     recovery_originals: Vec<kinewright_core::AcceptedHistory>,
     pub client: HostClient,
     pub status: HostStatus,
@@ -133,6 +142,12 @@ impl HostAttachment {
             .ok_or(BundleError::HistoryChanged)?;
         Ok((reply, view))
     }
+    pub(super) fn complete_switch_handoff(&mut self) {
+        self.switch_envelope = None;
+        self.switch_state = SwitchState::Complete;
+        self.pending_operation = None;
+        self.unknown_operation = false;
+    }
     #[allow(
         clippy::too_many_lines,
         reason = "one bootstrap transaction owns writer release, child acquisition and verified rollback"
@@ -224,20 +239,27 @@ impl HostAttachment {
                 return Err(host_error(error));
             }
         };
-        let attached = client
-            .request(HostCommand::Attach)
-            .map_err(host_error)
-            .and_then(|reply| {
-                if let Some(error) = reply.error {
-                    return Err(BundleError::Identity(error.to_string()));
-                }
-                if !reply.status.retention_proven {
-                    return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
-                }
-                Ok(reply.status)
-            });
+        #[cfg(all(test, target_os = "linux"))]
+        let client = transport_tests::intercept_launch(client, &manual_client);
+        let response = client.request(HostCommand::Attach);
+        let unknown = response.is_err() && child.try_wait().map_err(BundleError::Io)?.is_none();
+        let attached = response.map_err(host_error).and_then(|reply| {
+            if let Some(error) = reply.error {
+                return Err(BundleError::Identity(error.to_string()));
+            }
+            if !reply.status.retention_proven {
+                return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
+            }
+            Ok(reply.status)
+        });
         let status = match attached {
             Ok(status) => status,
+            Err(_) if unknown => HostStatus {
+                frozen: true,
+                admitted_roots: client.bootstrap().roots,
+                message: "The host attachment reply was not confirmed. Retry while this context stays read-only.".into(),
+                ..HostStatus::default()
+            },
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -245,7 +267,16 @@ impl HostAttachment {
                 return Err(error);
             }
         };
+        let cut = if unknown {
+            Some(owner.recapture_host_recovery_cut()?)
+        } else {
+            None
+        };
         Ok(Self {
+            unknown_operation: unknown,
+            switch_state: SwitchState::Complete,
+            next_operation: if unknown { 2 } else { 1 },
+            pending_operation: unknown.then_some((1, HostCommand::Attach)),
             installed_switch: None,
             prepared_switch: None,
             switch_envelope: None,
@@ -254,13 +285,13 @@ impl HostAttachment {
             recovery: None,
             recovery_plan: std::sync::Arc::default(),
             recovery_originals: vec![],
-            client,
+            client: client.with_manual_editor(manual_client.clone()),
             status,
             source: transfer.source,
             inputs: transfer.inputs,
             source_server,
             child: Some(child),
-            cut: None,
+            cut,
             heartbeat: None,
             last_heartbeat: Instant::now(),
             manual: None,
@@ -300,6 +331,10 @@ impl HostAttachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         Ok(Self {
+            unknown_operation: false,
+            switch_state: SwitchState::Complete,
+            next_operation: 1,
+            pending_operation: None,
             installed_switch: None,
             prepared_switch: None,
             switch_envelope: None,
@@ -333,6 +368,14 @@ impl HostAttachment {
         &mut self,
         owner: &mut Ja1EditingSession,
     ) -> Result<Option<super::PreparedView>, BundleError> {
+        if self.unknown_operation
+            && !matches!(
+                self.pending_operation,
+                Some((_, HostCommand::AcquireManual { .. }))
+            )
+        {
+            return Ok(None);
+        }
         if self
             .manual
             .as_ref()
@@ -353,14 +396,12 @@ impl HostAttachment {
             return Ok(None);
         }
         if self.status.frozen
+            && !self.unknown_operation
             && self.status.association.is_some()
             && !self.status.prepared_selection
             && !self.status.unresolved
         {
-            let current = self
-                .client
-                .request(HostCommand::CurrentAttachment)
-                .map_err(host_error)?;
+            let current = self.foreground_request(HostCommand::CurrentAttachment)?;
             if let Some(committed) = current.switch_attachment
                 && committed.switch_generation != 0
             {
@@ -372,23 +413,49 @@ impl HostAttachment {
                 return Ok(Some(view));
             }
         }
-        let reply = self
-            .client
-            .request(HostCommand::AcquireManual {
+        let reply = if self.unknown_operation {
+            let (operation, command) = self
+                .pending_operation
+                .clone()
+                .ok_or(BundleError::HistoryChanged)?;
+            self.client
+                .with_manual_editor(self.manual_client.clone())
+                .request_operation(command, Some(operation))
+                .map_err(host_error)?
+        } else {
+            self.foreground_request(HostCommand::AcquireManual {
                 client: self.manual_client.clone(),
-            })
-            .map_err(host_error)?;
+            })?
+        };
         if let Some(error) = reply.error {
+            self.pending_operation = None;
+            self.unknown_operation = false;
+            self.accept_status(reply.status);
             return Err(BundleError::Identity(error.to_string()));
         }
         let lease = reply.manual_lease.ok_or(BundleError::HistoryChanged)?;
         let inputs = reply.manual_inputs.ok_or(BundleError::HistoryChanged)?;
-        let permit = owner.bind_manual_producer(lease, inputs)?;
+        let permit = if let Some(cut) = &self.cut {
+            let digest = lease.history_sha256.clone();
+            let endpoint = owner.manual_recovery_endpoint(cut, vec![])?;
+            let permit = endpoint.finish(
+                lease,
+                inputs,
+                self.context.upgrade().ok_or(BundleError::HistoryChanged)?,
+            )?;
+            owner.finish_host_manual_recovery(&digest)?;
+            permit
+        } else {
+            owner.bind_manual_producer(lease, inputs)?
+        };
         self.client = self.client.with_manual_editor(self.manual_client.clone());
         self.manual = Some(super::ManualProducerGate {
             actor: owner.core().actor_identity(),
             permit,
         });
+        self.pending_operation = None;
+        self.unknown_operation = false;
+        self.cut = None;
         self.accept_status(reply.status);
         Ok(None)
     }
@@ -455,6 +522,48 @@ impl HostAttachment {
         self.child.as_ref().map(Child::id)
     }
 
+    pub(super) fn needs_manual_recovery(&self) -> bool {
+        self.cut.is_some()
+            && self.manual.is_some()
+            && !self.pending_switch()
+            && self
+                .pending_operation
+                .as_ref()
+                .is_none_or(|(_, command)| matches!(command, HostCommand::Save { .. }))
+    }
+
+    pub(super) fn pending_switch(&self) -> bool {
+        self.switch_state == SwitchState::Pending
+    }
+
+    fn foreground_request(&mut self, command: HostCommand) -> Result<HostReply, BundleError> {
+        let operation = self.next_operation;
+        self.next_operation = operation
+            .checked_add(1)
+            .ok_or(BundleError::HistoryChanged)?;
+        self.pending_operation = Some((operation, command.clone()));
+        self.send_operation(command, operation)
+    }
+
+    fn send_operation(
+        &self,
+        command: HostCommand,
+        operation: u64,
+    ) -> Result<HostReply, BundleError> {
+        let client = self.client.with_manual_editor(self.manual_client.clone());
+        let client = match &command {
+            HostCommand::FirstSave { destination, .. }
+            | HostCommand::SaveAs { destination, .. }
+            | HostCommand::RescueTo { destination } => {
+                client.admit_destination(destination).map_err(host_error)?
+            }
+            _ => client,
+        };
+        client
+            .request_operation(command, Some(operation))
+            .map_err(host_error)
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "one exhaustive mapping of App choices to host commands"
@@ -473,13 +582,34 @@ impl HostAttachment {
                 ..HostReply::default()
             });
         }
+        if matches!(action, Action::Retry)
+            && self.unknown_operation
+            && matches!(
+                self.pending_operation,
+                Some((_, HostCommand::AcquireManual { .. }))
+            )
+        {
+            self.start_manual(owner)?;
+            return Ok(HostReply {
+                status: self.status.clone(),
+                ..HostReply::default()
+            });
+        }
         if self.recovery.is_some() {
             return Err(BundleError::CoreMutationRefused(
                 kinewright_core::CoreMutationRefusal::Frozen,
             ));
         }
+        let retry_original = matches!(action, Action::Retry)
+            && self.unknown_operation
+            && self.pending_operation.is_some();
+        if self.unknown_operation && !matches!(action, Action::Retry) {
+            return Err(BundleError::CoreMutationRefused(
+                kinewright_core::CoreMutationRefusal::Frozen,
+            ));
+        }
         let needs_cut = (matches!(&action, Action::Retry)
-            && self.switch_envelope.is_some()
+            && self.pending_switch()
             && self.status.prepared_selection)
             || matches!(
                 &action,
@@ -493,7 +623,9 @@ impl HostAttachment {
         if needs_cut && self.cut.is_none() {
             self.cut = Some(owner.freeze_host_cut()?);
         }
-        self.drain_manual(owner)?;
+        if !retry_original {
+            self.drain_manual(owner)?;
+        }
         if matches!(
             &action,
             Action::SaveAs(_) | Action::FirstSave(_) | Action::OpenRecovery | Action::RescueTo(_)
@@ -503,7 +635,7 @@ impl HostAttachment {
         // A status response issued before this command cannot replace its newer metadata.
         self.heartbeat = None;
         self.last_heartbeat = Instant::now();
-        if !self.status.retention_proven {
+        if !self.status.retention_proven && !retry_original {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         if needs_cut && self.cut.is_none() {
@@ -546,15 +678,13 @@ impl HostAttachment {
                     .ok_or(BundleError::HistoryChanged)?
                     .bootstrap(),
             },
-            Action::Retry if self.switch_envelope.is_some() && self.status.frozen => {
-                HostCommand::Switch {
-                    envelope: Box::new(
-                        self.switch_envelope
-                            .clone()
-                            .ok_or(BundleError::HistoryChanged)?,
-                    ),
-                }
-            }
+            Action::Retry if self.pending_switch() && self.status.frozen => HostCommand::Switch {
+                envelope: Box::new(
+                    self.switch_envelope
+                        .clone()
+                        .ok_or(BundleError::HistoryChanged)?,
+                ),
+            },
             Action::Retry => HostCommand::Retry,
             Action::PreviewRecovery(target) => HostCommand::PreviewRecovery {
                 target: target.into(),
@@ -591,25 +721,26 @@ impl HostAttachment {
                 ));
             }
         };
-        let client = match &command {
-            HostCommand::FirstSave { destination, .. }
-            | HostCommand::SaveAs { destination, .. }
-            | HostCommand::RescueTo { destination } => {
-                // These paths came from the person's explicit file picker. The host admits
-                // only this pinned destination; connectors cannot invoke this GUI-only route.
-                self.client
-                    .admit_destination(destination)
-                    .map_err(host_error)?
-            }
-            _ => self.client.clone(),
+        let mut reply = if retry_original {
+            let (operation, original) = self
+                .pending_operation
+                .clone()
+                .ok_or(BundleError::HistoryChanged)?;
+            self.send_operation(original, operation)?
+        } else {
+            self.foreground_request(command)?
         };
-        let mut reply = client.request(command).map_err(host_error)?;
+        // Only this exact foreground result resolves its unknown operation.
+        self.unknown_operation = false;
+        self.pending_operation = None;
         if reply.activation.is_some() {
             self.switch_envelope = None;
+            self.switch_state = SwitchState::Complete;
             self.prepared_switch = None;
         }
         if let Some(envelope) = &reply.switch_envelope {
             self.switch_envelope = Some(envelope.clone());
+            self.switch_state = SwitchState::Pending;
         }
         if let Some(payload) = reply.switch_preview.take() {
             let staged = owner.prepare_gui_switch(payload).and_then(|actor| {
@@ -620,7 +751,7 @@ impl HostAttachment {
                 Ok(staged) => self.prepared_switch = Some(staged),
                 Err(error) => {
                     self.prepared_switch = None;
-                    reply = client.request(HostCommand::Abandon).map_err(host_error)?;
+                    reply = self.foreground_request(HostCommand::Abandon)?;
                     reply.error = Some(kinewright_agent::writer_host::HostRefusal::new(
                         "switch_prepare",
                         &error.to_string(),
@@ -652,6 +783,7 @@ impl HostAttachment {
     pub fn accept_status(&mut self, status: HostStatus) {
         self.client = self.client.with_roots(status.admitted_roots.clone());
         self.status = status;
+        self.status.frozen |= self.unknown_operation;
     }
 
     /// The frame thread polls only completed work or the child process handle.
@@ -711,10 +843,10 @@ impl HostAttachment {
                 .take()
                 .expect("completed heartbeat")
                 .join()
-                .map_err(|_| BundleError::Identity(RETENTION_LOST_TEXT.into()))?
-                .map_err(host_error)?;
+                .ok()
+                .and_then(Result::ok);
             self.last_heartbeat = Instant::now();
-            return Ok(Some(reply));
+            return Ok(reply);
         }
         if self.heartbeat.is_none() && self.last_heartbeat.elapsed() >= Duration::from_secs(1) {
             let client = self.client.clone();

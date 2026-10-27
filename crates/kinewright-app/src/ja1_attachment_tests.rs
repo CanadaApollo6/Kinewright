@@ -2272,3 +2272,538 @@ fn s2h_direct_legacy_handoff_keeps_exact_history_until_local_studio_save() {
     let reopened = kinewright_project::editing_session::Ja1EditingSession::open(&path).unwrap();
     assert_eq!(reopened.core().export_history().unwrap(), expected);
 }
+
+#[cfg(target_os = "linux")]
+fn s2h_fix3_app(dirty: bool) -> (TempDirectory, Ja1Attachment, PathBuf) {
+    use kinewright_agent::writer_host::SessionRoots;
+    let temp = temp();
+    let path = temp.path("fix3.kinewright");
+    let core = Core::spawn(doc()).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    owner.first_save(&path, StorageLimits::default()).unwrap();
+    if dirty {
+        edit(&core, false);
+    }
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    app.launch_host_at(
+        &host::executable(),
+        "fix3-app".into(),
+        SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+    )
+    .unwrap();
+    (temp, app, path)
+}
+
+#[cfg(target_os = "linux")]
+fn s2h_fix3_wait(app: &mut Ja1Attachment) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while app.host.as_ref().unwrap().recovery_running() && std::time::Instant::now() < deadline {
+        app.poll_host();
+        std::thread::park_timeout(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        !app.host.as_ref().unwrap().recovery_running(),
+        "recovery timed out"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
+    use kinewright_agent::writer_host::HostCommand;
+    let (_temp, mut app, path) = s2h_fix3_app(false);
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: true,
+    }))
+    .unwrap();
+    let expected = app.owner.core().export_history().unwrap();
+    let actor = app.owner.core().actor_identity();
+    let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
+    assert!(app.apply(Action::Save).is_err());
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    let barrier_proxy = app.host.as_mut().unwrap().drop_http_reply(command, false);
+    if floor {
+        app.host
+            .as_mut()
+            .unwrap()
+            .begin_manual_recovery_with_floor(&mut app.owner, Some(1))
+            .unwrap();
+    } else {
+        app.apply(Action::Retry).unwrap();
+    }
+    s2h_fix3_wait(&mut app);
+    assert!(
+        barrier_proxy
+            .dropped
+            .load(std::sync::atomic::Ordering::Acquire)
+    );
+    assert!(app.read_only());
+    assert!(!app.retention_lost);
+    app.apply(Action::Retry).unwrap();
+    s2h_fix3_wait(&mut app);
+    assert!(
+        !app.read_only(),
+        "Retry must complete recovery: {}",
+        app.message
+    );
+    assert_eq!(app.owner.core().actor_identity(), actor);
+    let base = if floor {
+        kinewright_core::HistoryTransition::floor(expected, 1)
+            .unwrap()
+            .after()
+            .clone()
+    } else {
+        expected
+    };
+    let exact = kinewright_core::HistoryTransition::recovery_close(base.clone(), &base)
+        .unwrap()
+        .after()
+        .clone();
+    assert_eq!(app.owner.core().export_history().unwrap(), exact);
+    let host_history = app
+        .host_client()
+        .unwrap()
+        .request(HostCommand::ReadHistory)
+        .unwrap()
+        .history
+        .unwrap();
+    assert_eq!(host_history, exact);
+    assert!(app.close());
+    drop(app);
+    let restored = Core::spawn(kinewright_core::Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(restored.export_history().unwrap(), exact);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_begin_recovery_reply_loss_retries_original_plan() {
+    s2h_fix3_barrier_reply("begin_recovery", false);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_floor_confirm_reply_loss_adopts_recorded_close_plan() {
+    s2h_fix3_barrier_reply("confirm_barrier", true);
+}
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_close_confirm_reply_loss_reuses_delivered_authority() {
+    s2h_fix3_barrier_reply("confirm_barrier", false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
+    use kinewright_agent::writer_host::HostCommand;
+    let (_temp, mut app, _path) = s2h_fix3_app(false);
+    let target = app.host.as_ref().unwrap().status.recovery_points[0].clone();
+    app.apply(Action::PreviewRecovery(target.into())).unwrap();
+    app.apply(Action::OpenRecovery).unwrap();
+    assert!(
+        app.host.as_ref().unwrap().switch_envelope.is_none(),
+        "completed switch envelope must retire"
+    );
+    let actor = app.owner.core().actor_identity();
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let expected = app.owner.core().export_history().unwrap();
+    // Drain the acknowledgement before losing the later Save response.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while app.host.as_ref().unwrap().pending_count() > 0 && std::time::Instant::now() < deadline {
+        app.poll_host();
+        std::thread::park_timeout(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(app.host.as_ref().unwrap().pending_count(), 0);
+    let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
+    assert!(app.apply(Action::Save).is_err());
+    app.apply(Action::Retry).unwrap();
+    s2h_fix3_wait(&mut app);
+    assert!(!app.read_only(), "{}", app.message);
+    assert_eq!(app.owner.core().actor_identity(), actor);
+    let exact = kinewright_core::HistoryTransition::recovery_close(expected.clone(), &expected)
+        .unwrap()
+        .after()
+        .clone();
+    assert_eq!(app.owner.core().export_history().unwrap(), exact);
+    assert_eq!(
+        app.host_client()
+            .unwrap()
+            .request(HostCommand::ReadHistory)
+            .unwrap()
+            .history,
+        Some(exact)
+    );
+    assert!(matches!(
+        app.host
+            .as_ref()
+            .unwrap()
+            .manual
+            .as_ref()
+            .unwrap()
+            .permit
+            .request(Command::Undo)
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    drop(proxy);
+    assert!(app.close());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit() {
+    for dirty in [false, true] {
+        let (_temp, mut app, _path) = s2h_fix3_app(dirty);
+        assert_eq!(app.host.as_ref().unwrap().manual.is_none(), dirty);
+        let before = app.owner.core().export_history().unwrap();
+        let status_proxy = app.host.as_mut().unwrap().drop_http_reply("status", false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1300);
+        while std::time::Instant::now() < deadline {
+            app.poll_host();
+            assert!(
+                !app.host.as_ref().unwrap().unknown_operation,
+                "a lost read-only heartbeat creates no unknown publication"
+            );
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            status_proxy
+                .dropped
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
+        assert!(app.apply(Action::Save).is_err());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1300);
+        let mut replies = 0;
+        while std::time::Instant::now() < deadline {
+            replies += usize::from(app.poll_host());
+            assert!(app.read_only(), "Status cannot resolve an unknown Save");
+            assert_eq!(
+                app.owner.core().attachment_state(),
+                Ok(AttachmentState::Frozen),
+                "heartbeat must keep producers fenced"
+            );
+            assert_eq!(app.owner.core().export_history().unwrap(), before);
+            assert!(matches!(
+                app.owner.core().request(Command::Undo).unwrap(),
+                Event::MutationRefused { .. }
+            ));
+            std::thread::park_timeout(std::time::Duration::from_millis(5));
+        }
+        assert!(replies > 0, "normal heartbeat must actually complete");
+        app.apply(Action::Retry).unwrap();
+        s2h_fix3_wait(&mut app);
+        assert!(!app.read_only(), "{}", app.message);
+        assert!(!app.retention_lost);
+        assert!(app.close());
+        drop(proxy);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_lost_save_as_and_preview_replies_replay_original_results() {
+    use kinewright_agent::writer_host::HostCommand;
+    let (temp, mut app, _path) = s2h_fix3_app(false);
+    let expected = app.owner.core().export_history().unwrap();
+    let actor = app.owner.core().actor_identity();
+    let proxy = app.host.as_mut().unwrap().drop_http_reply("save_as", false);
+    let destination = temp.path("saved-as.kinewright");
+    assert!(app.apply(Action::SaveAs(destination.clone())).is_err());
+    assert!(app.host.as_ref().unwrap().manual.is_none());
+    app.apply(Action::Retry).unwrap();
+    assert!(
+        !app.read_only(),
+        "Save As Retry must install its exact result: {}",
+        app.message
+    );
+    assert_eq!(app.owner.core().actor_identity(), actor);
+    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    let target = app.host.as_ref().unwrap().status.recovery_points[0].clone();
+    let preview_proxy = app
+        .host
+        .as_mut()
+        .unwrap()
+        .drop_http_reply("preview_recovery", false);
+    assert!(app.apply(Action::PreviewRecovery(target.into())).is_err());
+    app.apply(Action::Retry).unwrap();
+    assert!(app.host.as_ref().unwrap().pending_switch());
+    app.apply(Action::OpenRecovery).unwrap();
+    assert!(!app.read_only());
+    assert!(
+        app.host_client()
+            .unwrap()
+            .request(HostCommand::Status)
+            .unwrap()
+            .error
+            .is_none()
+    );
+    assert!(app.close());
+    drop(app);
+    let restored = Core::spawn(kinewright_core::Document::default()).unwrap();
+    LoadedBundle::read(&destination)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(
+        restored.export_history().unwrap().document,
+        expected.document
+    );
+    drop((proxy, preview_proxy));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_lost_save_floor_stays_frozen_until_exact_publisher_result() {
+    use kinewright_agent::writer_host::{HostCommand, SessionRoots};
+    let temp = temp();
+    let path = temp.path("floor.kinewright");
+    let core = Core::spawn(doc()).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    owner.first_save(&path, StorageLimits::default()).unwrap();
+    for index in 0..12_000 {
+        edit(&core, index % 2 == 0);
+    }
+    let before = core.export_history().unwrap();
+    assert!(
+        kinewright_project::bundle_commit::history_cost_probe(&before, &StorageLimits::default())
+            .map_or(true, |cost| cost
+                > StorageLimits::default().branch_history_bytes),
+        "fixture must require a real Save floor"
+    );
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    app.launch_host_at(
+        &host::executable(),
+        "fix3-save-floor".into(),
+        SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![temp.root().into()],
+        },
+    )
+    .unwrap();
+    assert!(app.host.as_ref().unwrap().manual.is_none());
+    let proxy = app.host.as_mut().unwrap().drop_http_reply("save", false);
+    assert!(app.apply(Action::Save).is_err());
+    let remote = app
+        .host_client()
+        .unwrap()
+        .request(HostCommand::ReadHistory)
+        .unwrap()
+        .history
+        .unwrap();
+    assert!(
+        remote.floor_offset > before.floor_offset,
+        "lost Save must actually install a floor"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1400);
+    let mut replies = 0;
+    while std::time::Instant::now() < deadline {
+        replies += usize::from(app.poll_host());
+        assert!(
+            app.read_only(),
+            "heartbeat must not thaw the old unfloored cut"
+        );
+        assert_eq!(core.export_history().unwrap(), before);
+        std::thread::park_timeout(std::time::Duration::from_millis(5));
+    }
+    assert!(replies > 0);
+    app.apply(Action::Retry).unwrap();
+    assert!(!app.read_only(), "{}", app.message);
+    assert_eq!(core.export_history().unwrap(), remote);
+    assert!(app.close());
+    drop(app);
+    let restored = Core::spawn(kinewright_core::Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(restored.export_history().unwrap(), remote);
+    drop(proxy);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_lost_destination_admission_and_manual_grant_replies_retry_in_context() {
+    for command in ["admit_destination", "acquire_manual", "first_save"] {
+        use kinewright_agent::writer_host::SessionRoots;
+        let temp = temp();
+        let core = Core::spawn(doc()).unwrap();
+        let owner = kinewright_project::editing_session::Ja1EditingSession::new(
+            temp.root(),
+            &core,
+            StorageLimits::default(),
+        )
+        .unwrap();
+        let mut app = Ja1Attachment::new(owner).unwrap();
+        app.launch_host_at(
+            &host::executable(),
+            "fix3-first-save".into(),
+            SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+        )
+        .unwrap();
+        let expected = core.export_history().unwrap();
+        let proxy = app.host.as_mut().unwrap().drop_http_reply(command, false);
+        assert!(
+            app.apply(Action::FirstSave(temp.path("first.kinewright")))
+                .is_err()
+        );
+        assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+        app.apply(Action::Retry)
+            .unwrap_or_else(|error| panic!("{command}: {error}"));
+        assert!(!app.read_only(), "{command}: {}", app.message);
+        assert_eq!(core.export_history().unwrap(), expected);
+        assert!(!app.retention_lost);
+        assert!(app.close());
+        drop(proxy);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_lost_initial_attach_reply_keeps_owned_host_and_retries() {
+    for dirty in [false, true] {
+        let ((_temp, mut app, _path), proxy) =
+            host::transport_tests::drop_launch_reply("attach", || s2h_fix3_app(dirty));
+        assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(app.read_only());
+        assert!(
+            !app.retention_lost,
+            "an initial lost read reply must retain the live host"
+        );
+        let child = app.host.as_ref().unwrap().child_id();
+        let actor = app.owner.core().actor_identity();
+        let expected = app.owner.core().export_history().unwrap();
+        app.apply(Action::Retry).unwrap();
+        if dirty {
+            assert!(app.read_only());
+            app.apply(Action::Save).unwrap();
+        }
+        assert!(
+            !app.read_only(),
+            "Attach Retry must recover in context: {}",
+            app.message
+        );
+        assert_eq!(app.host.as_ref().unwrap().child_id(), child);
+        assert_eq!(app.owner.core().actor_identity(), actor);
+        assert_eq!(app.owner.core().export_history().unwrap(), expected);
+        assert!(app.close());
+        drop(proxy);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_lost_initial_manual_grant_keeps_original_request_for_retry() {
+    use kinewright_agent::writer_host::SessionRoots;
+    let temp = temp();
+    let core = Core::spawn(doc()).unwrap();
+    let mut owner = kinewright_project::editing_session::Ja1EditingSession::new(
+        temp.root(),
+        &core,
+        StorageLimits::default(),
+    )
+    .unwrap();
+    owner
+        .first_save(
+            &temp.path("initial-grant.kinewright"),
+            StorageLimits::default(),
+        )
+        .unwrap();
+    let expected = core.export_history().unwrap();
+    let mut app = Ja1Attachment::new(owner).unwrap();
+    let (launched, proxy) = host::transport_tests::drop_launch_reply("acquire_manual", || {
+        app.launch_host_at(
+            &host::executable(),
+            "fix3-initial-grant".into(),
+            SessionRoots {
+                read: vec![temp.root().into()],
+                write: vec![temp.root().into()],
+            },
+        )
+    });
+    assert!(launched.is_err());
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert!(
+        app.host.as_ref().unwrap().unknown_operation,
+        "initial manual grant loss must be pending"
+    );
+    assert!(app.read_only());
+    assert!(!app.retention_lost);
+    let child = app.host.as_ref().unwrap().child_id();
+    app.apply(Action::Retry).unwrap();
+    assert!(
+        !app.read_only(),
+        "initial lease Retry must complete: {}",
+        app.message
+    );
+    assert_eq!(app.host.as_ref().unwrap().child_id(), child);
+    assert_eq!(core.export_history().unwrap(), expected);
+    assert!(app.close());
+    drop(proxy);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s2h_foreground_identity_refusal_cannot_thaw_unknown_operation() {
+    use kinewright_agent::writer_host::SessionRoots;
+    let (_temp, mut app, _path) = s2h_fix3_app(false);
+    let actor = app.owner.core().actor_identity();
+    let expected = app.owner.core().export_history().unwrap();
+    let proxy = app.host.as_mut().unwrap().drop_http_reply("cancel", false);
+    assert!(app.apply(Action::Cancel).is_err());
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    let original = app.host.as_ref().unwrap().client.clone();
+    let roots = original.bootstrap().roots;
+    app.host.as_mut().unwrap().client = original.with_roots(SessionRoots {
+        read: roots.read,
+        write: vec![],
+    });
+    assert!(app.apply(Action::Retry).is_err());
+    assert!(
+        app.host.as_ref().unwrap().unknown_operation,
+        "identity refusal cannot resolve the original operation"
+    );
+    assert_eq!(
+        app.owner.core().attachment_state(),
+        Ok(AttachmentState::Frozen)
+    );
+    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    app.host.as_mut().unwrap().client = original;
+    app.apply(Action::Retry).unwrap();
+    assert!(
+        !app.read_only(),
+        "exact original result must resolve the retained cut: {}",
+        app.message
+    );
+    assert_eq!(app.owner.core().actor_identity(), actor);
+    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    assert!(app.close());
+    drop(proxy);
+}

@@ -40,13 +40,14 @@ fn packet(stream: &mut TcpStream) -> Vec<u8> {
     bytes
 }
 
-impl HostAttachment {
-    pub(in crate::ja1_attachment) fn drop_http_reply(
-        &mut self,
+impl ReplyDropProxy {
+    fn install(
+        client: &mut HostClient,
+        identity: &str,
         command: &'static str,
         before: bool,
-    ) -> ReplyDropProxy {
-        let upstream = self.client.endpoint().address;
+    ) -> Self {
+        let upstream = client.endpoint().address;
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -88,11 +89,11 @@ impl HostAttachment {
                 }
             }
         });
-        let mut bootstrap = self.client.bootstrap();
+        let mut bootstrap = client.bootstrap();
         bootstrap.endpoint.address = address;
-        self.client = HostClient::connect(bootstrap.endpoint, bootstrap.auth, bootstrap.roots)
+        *client = HostClient::connect(bootstrap.endpoint, bootstrap.auth, bootstrap.roots)
             .unwrap()
-            .with_manual_editor(self.manual_client.clone());
+            .with_manual_editor(identity.to_owned());
         ReplyDropProxy {
             stop,
             dropped,
@@ -106,4 +107,42 @@ impl Drop for ReplyDropProxy {
         self.stop.store(true, Ordering::Release);
         self.worker.take().unwrap().join().unwrap();
     }
+}
+
+impl HostAttachment {
+    pub(in crate::ja1_attachment) fn drop_http_reply(
+        &mut self,
+        command: &'static str,
+        before: bool,
+    ) -> ReplyDropProxy {
+        ReplyDropProxy::install(&mut self.client, &self.manual_client, command, before)
+    }
+}
+thread_local! {
+    static LAUNCH_DROP: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    static LAUNCH_PROXY: std::cell::RefCell<Option<ReplyDropProxy>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn intercept_launch(mut client: HostClient, identity: &str) -> HostClient {
+    if let Some(command) = LAUNCH_DROP.with(|enabled| enabled.replace(None)) {
+        LAUNCH_PROXY.with_borrow_mut(|slot| {
+            *slot = Some(ReplyDropProxy::install(
+                &mut client,
+                identity,
+                command,
+                false,
+            ));
+        });
+    }
+    client
+}
+pub(in crate::ja1_attachment) fn drop_launch_reply<T>(
+    command: &'static str,
+    run: impl FnOnce() -> T,
+) -> (T, ReplyDropProxy) {
+    LAUNCH_DROP.with(|enabled| enabled.set(Some(command)));
+    let result = run();
+    let proxy = LAUNCH_PROXY
+        .with_borrow_mut(Option::take)
+        .expect("launch proxy");
+    (result, proxy)
 }

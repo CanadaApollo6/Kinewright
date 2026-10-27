@@ -9,7 +9,8 @@ export CARGO_TARGET_DIR="$root/target/c12" TMPDIR="$root/target/c12-tmp" CARGO_B
 mkdir -p "$TMPDIR"
 source scripts/setup-ffmpeg.sh
 helper=(nice -n 19 python3 -I scripts/ja1-s2h-mutations.py)
-mapfile -t names < <("${helper[@]}" list)
+"${helper[@]}" list > "$evidence/selected-cases.txt"
+mapfile -t names < "$evidence/selected-cases.txt"
 if (( $# )); then names=("$@"); fi
 current=''
 owned_pid=''

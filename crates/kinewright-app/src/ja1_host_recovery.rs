@@ -10,6 +10,12 @@ use kinewright_project::{
 };
 use std::process::Child;
 
+#[derive(Clone)]
+pub(super) enum RecoveryPlan {
+    Publish(kinewright_agent::writer_host::RecoveryBarrier),
+    Confirm(kinewright_agent::writer_host::RecoveryBarrier),
+}
+
 pub(super) struct RecoveredManual {
     client: HostClient,
     child: Option<Child>,
@@ -60,7 +66,7 @@ fn run_barrier(
     frozen: HostSnapshot,
     pending: Vec<kinewright_core::AcceptedHistory>,
     live: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    saved_plan: &std::sync::Mutex<Option<kinewright_agent::writer_host::RecoveryBarrier>>,
+    saved_plan: &std::sync::Mutex<Option<RecoveryPlan>>,
     discard: Option<usize>,
 ) -> Result<(kinewright_core::ManualPermit, HostReply, String), BundleError> {
     let original_undo = pending
@@ -74,7 +80,7 @@ fn run_barrier(
         .lock()
         .map_err(|_| BundleError::Unsettled)?
         .clone();
-    let mut barrier = if let Some(retained) = retained {
+    let mut plan = if let Some(retained) = retained {
         retained
     } else {
         let reply = checked(
@@ -87,26 +93,33 @@ fn run_barrier(
                 })
                 .map_err(host_error)?,
         )?;
-        reply.recovery.ok_or(BundleError::HistoryChanged)?
+        RecoveryPlan::Publish(reply.recovery.ok_or(BundleError::HistoryChanged)?)
     };
-    *saved_plan.lock().map_err(|_| BundleError::Unsettled)? = Some(barrier.clone());
     loop {
-        let published = checked(
-            host.client
-                .request(HostCommand::PublishBarrier {
-                    barrier: Box::new(barrier.clone()),
-                })
-                .map_err(host_error)?,
-        )?;
-        if published.history.as_ref() != Some(&barrier.after.history)
-            || published
-                .barrier_checkpoint
-                .as_ref()
-                .is_none_or(|c| c.history_ref.sha256 != barrier.after.history_sha256)
-        {
-            return Err(BundleError::HistoryChanged);
+        *saved_plan.lock().map_err(|_| BundleError::Unsettled)? = Some(plan.clone());
+        let barrier = match &plan {
+            RecoveryPlan::Publish(barrier) | RecoveryPlan::Confirm(barrier) => barrier.clone(),
+        };
+        if matches!(plan, RecoveryPlan::Publish(_)) {
+            let published = checked(
+                host.client
+                    .request(HostCommand::PublishBarrier {
+                        barrier: Box::new(barrier.clone()),
+                    })
+                    .map_err(host_error)?,
+            )?;
+            if published.history.as_ref() != Some(&barrier.after.history)
+                || published
+                    .barrier_checkpoint
+                    .as_ref()
+                    .is_none_or(|c| c.history_ref.sha256 != barrier.after.history_sha256)
+            {
+                return Err(BundleError::HistoryChanged);
+            }
+            endpoint.install(barrier.after.history.clone())?;
+            *saved_plan.lock().map_err(|_| BundleError::Unsettled)? =
+                Some(RecoveryPlan::Confirm(barrier.clone()));
         }
-        endpoint.install(barrier.after.history.clone())?;
         let installed = HostSnapshot::from_history(endpoint.snapshot()?).map_err(host_error)?;
         let mut reply = checked(
             host.client
@@ -117,8 +130,7 @@ fn run_barrier(
                 .map_err(host_error)?,
         )?;
         if let Some(next) = reply.recovery.clone() {
-            barrier = next;
-            *saved_plan.lock().map_err(|_| BundleError::Unsettled)? = Some(barrier.clone());
+            plan = RecoveryPlan::Publish(next);
             continue;
         }
         let removed = original_undo.saturating_sub(barrier.after.history.cursor.undo.len());
@@ -361,6 +373,8 @@ impl HostAttachment {
             permit: completed.permit,
         });
         self.cut = None;
+        self.unknown_operation = false;
+        self.pending_operation = None;
         self.recovery_originals.clear();
         *self
             .recovery_plan

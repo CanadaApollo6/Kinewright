@@ -3,7 +3,7 @@
     "name": "accepted-command-count-overflow",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "self.pending.len() >= crate::MANUAL_COMMANDS",
         "self.pending.len() > crate::MANUAL_COMMANDS"
       ]
@@ -21,7 +21,7 @@
     "name": "exact-byte-boundary-refused",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "bytes > crate::MANUAL_BYTES.saturating_sub(self.bytes)",
         "bytes >= crate::MANUAL_BYTES.saturating_sub(self.bytes)"
       ]
@@ -39,7 +39,7 @@
     "name": "accepted-byte-overflow",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "bytes > crate::MANUAL_BYTES.saturating_sub(self.bytes)",
         "false"
       ]
@@ -57,7 +57,7 @@
     "name": "pending-byte-charge-omitted",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "self.bytes += bytes;",
         "self.bytes += 0;"
       ]
@@ -453,7 +453,7 @@
     "name": "capacity-check-after-live-mutation",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "let after = candidate.history();",
         "*state = candidate.clone();\n        let after = candidate.history();"
       ]
@@ -465,7 +465,8 @@
     "production": false,
     "witness": "attachment::tests::g05l_exact_byte_boundary_and_one_beyond",
     "environment": {},
-    "red_text": null
+    "red_text": null,
+    "superseded_by": "scripts/ja1-s2h-fix2-mutation-cases.json:refused-candidate-keeps-open-operations"
   },
   {
     "name": "foreign-owner-releases-ack-capacity",
@@ -490,7 +491,7 @@
     "changes": [
       [
         "crates/kinewright-project/src/manual_history.rs",
-        "crate::bundle_commit::validate_document_inputs(&after.document, &self.input_manifest)",
+        "crate::bundle_commit::validate_document_inputs(candidate.document, &self.input_manifest)",
         "Ok::<(), BundleError>(())"
       ]
     ],

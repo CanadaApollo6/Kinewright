@@ -21,13 +21,23 @@ impl HostCommandOwner {
                 HostRefusal::new("manual_client", "private attachment identity required").into(),
             );
         }
-        if self.recovery.is_some() {
+        let request = kinewright_media::sha256_bytes(&serde_json::to_vec(&(
+            &client, frozen, pending, discard,
+        ))?);
+        if let Some(barrier) = &self.recovery {
+            if self.recovery_request.as_ref() == Some(&request) {
+                reply.recovery = Some(barrier.clone());
+                return Ok(());
+            }
             return Err(HostRefusal::new(
                 "recovery_pending",
                 "resolve the original barrier before starting another",
             )
             .into());
         }
+        self.recovery_request = Some(request);
+        self.recovery_handoff = None;
+        self.confirmed_recovery = None;
         // Fence first, including every error path. Submitted GUI sends are in its frozen cut.
         self.recovering = true;
         self.manual = None;
@@ -258,6 +268,28 @@ impl HostCommandOwner {
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
         installed.verify()?;
+        if let Some((original, next)) = &self.recovery_handoff
+            && original == &barrier
+            && installed == barrier.after
+            && self.recovery.as_ref() == Some(next)
+        {
+            reply.recovery = Some(next.clone());
+            return Ok(());
+        }
+        if let Some((original, confirmed)) = &self.confirmed_recovery
+            && original == &barrier
+            && installed == barrier.after
+            && self.manual == confirmed.manual_lease
+            && !self.recovering
+            && !self.owner()?.has_unresolved_publication()
+            && self.owner()?.manual_switch_generation()? == barrier.switch_generation
+            && HostSnapshot::capture(self.core())? == installed
+        {
+            reply.manual_lease = confirmed.manual_lease.clone();
+            reply.manual_inputs = confirmed.manual_inputs.clone();
+            reply.history = confirmed.history.clone();
+            return Ok(());
+        }
         let checkpoint = self.owner()?.manual_barrier_result(&barrier.envelope)?;
         if self.owner()?.manual_switch_generation()? != barrier.switch_generation
             || self.recovery.as_ref() != Some(&barrier)
@@ -278,7 +310,14 @@ impl HostCommandOwner {
             )
         {
             self.recovery = None;
-            self.prepare_barrier(barrier.client, None, reply)?;
+            self.prepare_barrier(barrier.client.clone(), None, reply)?;
+            self.recovery_handoff = Some((
+                barrier,
+                reply
+                    .recovery
+                    .clone()
+                    .ok_or_else(|| HostError::Protocol("recovery close plan".into()))?,
+            ));
         } else {
             let cut = self.owner()?.freeze_manual_barrier()?;
             self.owner_mut()?.resume_manual_barrier(&cut)?;
@@ -301,6 +340,7 @@ impl HostCommandOwner {
             reply.manual_lease = Some(lease);
             reply.manual_inputs = Some(inputs);
             reply.history = Some(installed.history);
+            self.confirmed_recovery = Some((barrier, reply.clone()));
         }
         Ok(())
     }

@@ -154,6 +154,7 @@ fn auth_and_project_protocol_guard_every_read_and_command() {
         },
     ] {
         let request = serde_json::to_vec(&HostRequest {
+            operation: None,
             editor: None,
             protocol: HOST_PROTOCOL,
             project: bootstrap.endpoint.project.clone(),

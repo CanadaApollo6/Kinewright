@@ -1494,7 +1494,7 @@ Its edits stay Live and its existing legacy Save route remains available, includ
 that Studio cannot yet admit. Lower-level handover also refuses any unconverted root before
 releasing its local migration owner. A bootstrap failure before discovery reaps its child, reacquires the original writer,
 verifies the expected root under pinned authority, and resumes the exact retained GUI cut.
-Failure after host acquisition retains the existing L2 ownership rule.
+Confirmed ownership loss after host acquisition retains the existing L2 rule.
 
 A missing reply freezes input while preserving original accepted envelopes and the switch
 request. An alive host reconciles that evidence through the shared recovery barrier; confirmed
@@ -1505,3 +1505,21 @@ revokes the partial grant and refreezes the shadow.
 
 The host bearer carries editor authority while no manual lease is held; S4 binds an editor
 credential at attach.
+
+Unknown operations stay explicit until their validated original result or the completed C10
+barrier installs the exact history. Status can disclose this state but cannot resume producers.
+A lost read-only heartbeat creates no unknown publication. A lost initial Attach reply retains
+the discovered live child and its frozen GUI cut for Retry; it does not establish retention proof.
+
+BeginRecovery retries bind the same private client, original cut and command chain. Floor
+confirmation retains its recovery-close continuation, and final confirmation retains the same
+current grant. The GUI preserves publication versus confirmation progress across reply loss.
+Completed switch confirmation and GUI handoff retire the pending switch envelope.
+
+Foreground GUI requests use an optional in-memory operation number on HostRequest. The host
+retains one bounded response, including exact publication and activation results, for the same
+client, operation and payload. A later operation replaces that slot; Status, manual messages
+and C10 do not evict it. First Save, Save As, rescue and choice/retirement replies can therefore
+be retried without repeating their effects. Destination admission reuses the existing pinned
+capability on retry. This is volatile protocol state, with no new durable ledger or history
+identity. Original manual envelopes, v1 history identities and source ownership stay unchanged.

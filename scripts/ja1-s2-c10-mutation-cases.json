@@ -3,7 +3,7 @@
     "name": "unfrozen-discrete",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::Do(_)) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]
@@ -19,7 +19,7 @@
     "name": "unfrozen-batch-import",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::DoBatch(_)) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]
@@ -35,7 +35,7 @@
     "name": "unfrozen-live-coalesced",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::DoBatchCoalesced { .. }) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]
@@ -51,7 +51,7 @@
     "name": "unfrozen-keyboard-undo",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::Undo) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]
@@ -67,7 +67,7 @@
     "name": "unfrozen-keyboard-redo",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::Redo) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]
@@ -83,7 +83,7 @@
     "name": "unfrozen-router-incident",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::DoIfRevision { .. }) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]
@@ -99,7 +99,7 @@
     "name": "unfrozen-queued-revision-batch",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::DoBatchIfRevision { .. }) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]
@@ -339,7 +339,7 @@
     "name": "additive-fixtures-require-frozen-producers",
     "changes": [
       [
-        "crates/kinewright-core/src/actor.rs",
+        "crates/kinewright-core/src/actor/manual_history.rs",
         "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
         "        let attachment = if matches!(command, Command::Do(_)) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
       ]

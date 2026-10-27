@@ -374,11 +374,13 @@ impl Ja1Attachment {
         );
         match result {
             Ok(mut host) => {
-                let cut = self.owner.freeze_host_cut()?;
-                self.owner.complete_host_cut(&cut, None, None)?;
-                host.cut = None;
+                if !host.unknown_operation {
+                    let cut = self.owner.freeze_host_cut()?;
+                    self.owner.complete_host_cut(&cut, None, None)?;
+                    host.cut = None;
+                }
+                self.message.clone_from(&host.status.message);
                 self.host = Some(host);
-                self.message = "Studio writer host attached.".into();
                 self.start_host_manual()
             }
             Err(error) => {
@@ -398,8 +400,23 @@ impl Ja1Attachment {
 
     fn start_host_manual(&mut self) -> Result<(), BundleError> {
         let host = self.host.as_mut().expect("attached host");
-        if let Some(view) = host.start_manual(&mut self.owner)? {
+        if host.unknown_operation {
+            self.frozen = true;
+            self.panel_open = true;
+            return Ok(());
+        }
+        let outcome = host.start_manual(&mut self.owner);
+        let view = match outcome {
+            Ok(view) => view,
+            Err(error) => {
+                self.host_request_failed(&error);
+                return Err(error);
+            }
+        };
+        let host = self.host.as_mut().expect("attached host");
+        if let Some(view) = view {
             self.view = Some(view);
+            host.complete_switch_handoff();
         }
         self.frozen = self.owner.core().attachment_state() != Ok(AttachmentState::Live);
         self.message = manual_status_message(&self.message, host.manual.is_some());
@@ -460,9 +477,10 @@ impl Ja1Attachment {
 
     fn apply_host(&mut self, action: Action) -> Result<(), BundleError> {
         if matches!(action, Action::Retry)
-            && self.host.as_ref().is_some_and(|host| {
-                host.cut.is_some() && host.manual.is_some() && host.switch_envelope.is_none()
-            })
+            && self
+                .host
+                .as_ref()
+                .is_some_and(host::HostAttachment::needs_manual_recovery)
         {
             self.host
                 .as_mut()
@@ -506,6 +524,7 @@ impl Ja1Attachment {
             return;
         };
         host.cut = Some(cut);
+        host.unknown_operation = true;
         host.status.frozen = true;
         self.frozen = true;
         self.panel_open = true;
@@ -566,6 +585,7 @@ impl Ja1Attachment {
             self.view = Some(view);
             self.message.clone_from(&confirmed.status.message);
             self.frozen = confirmed.status.frozen;
+            host.complete_switch_handoff();
             host.accept_status(confirmed.status);
             if let Some(error) = reply.error {
                 return Err(BundleError::Identity(error.to_string()));
@@ -589,7 +609,8 @@ impl Ja1Attachment {
         }
         // A bootstrap cut stays frozen through Status/Retry, including errors.
         // Only a successful foreground publication can establish its manual base.
-        let can_resume = !manual_failed
+        let can_resume = !host.unknown_operation
+            && !manual_failed
             && !reply.status.frozen
             && reply.status.choice.is_none()
             && (host.manual.is_some() || (reply.error.is_none() && reply.saved.is_some()));
@@ -663,7 +684,12 @@ impl Ja1Attachment {
         self.frozen = reply.status.frozen
             || self.owner.core().attachment_state() != Ok(AttachmentState::Live);
         host.accept_status(reply.status);
-        self.message = manual_status_message(&self.message, !self.manual_save_required());
+        if host.unknown_operation {
+            self.frozen = true;
+            self.message = "The host reply was not confirmed. Your edits remain here, read-only. Retry to reconcile the original request.".into();
+        } else {
+            self.message = manual_status_message(&self.message, !self.manual_save_required());
+        }
         if let Some(error) = reply.error {
             return Err(BundleError::Identity(error.to_string()));
         }

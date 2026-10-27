@@ -123,8 +123,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/switch.rs",
-        "            Err(error) => {\n                self.manual = None;\n                self.switch_frozen = true;\n                self.owner()?.freeze_manual_barrier()?;",
-        "            Err(error) => {\n                self.switch_frozen = true;\n                self.owner()?.freeze_manual_barrier()?;"
+        "            Err(error) => {\n                self.manual = None;\n                self.switch_frozen = true;",
+        "            Err(error) => {\n                self.switch_frozen = true;"
       ]
     ],
     "witness": "writer_host::s2h_tests::s2h_confirm_inputs_failure_revokes_partial_grant_and_refreezes",

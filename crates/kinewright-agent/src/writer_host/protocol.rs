@@ -285,6 +285,8 @@ pub enum HostCommand {
 pub struct HostRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<u64>,
     pub protocol: u32,
     pub project: String,
     pub roots: SessionRoots,

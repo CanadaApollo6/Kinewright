@@ -132,6 +132,8 @@ impl Ja1EditingSession {
     pub fn current_switch_identity(
         &self,
     ) -> Result<crate::bundle_switch::SwitchAttachmentIdentity, BundleError> {
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::check_failure("manual_switch_identity", std::path::Path::new(""))?;
         let bundle = self.active_bundle()?;
         if bundle.unsettled {
             return Err(BundleError::Unsettled);

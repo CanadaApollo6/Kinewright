@@ -354,7 +354,8 @@
     "target": "ja_s2_host",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json:confirmation-trusts-supplied-pointer"
   },
   {
     "name": "receipt-grants-real-manual-authority",
@@ -468,8 +469,8 @@
     "changes": [
       [
         "crates/kinewright-app/src/ja1_attachment.rs",
-        "        if let Some(view) = host.start_manual(&mut self.owner)? {\n            self.view = Some(view);\n        }",
-        "        let _ = host.start_manual(&mut self.owner)?;"
+        "        if let Some(view) = view {\n            self.view = Some(view);\n            host.complete_switch_handoff();\n        }",
+        "        if let Some(view) = view {\n            let _ = view;\n            host.complete_switch_handoff();\n        }"
       ]
     ],
     "witness": "ja1_attachment::tests::g05a_first_edit_undo_and_exact_switch_back",
@@ -595,7 +596,8 @@
     "target": "",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json:host-fork-without-registration"
   },
   {
     "name": "host-reopen-without-registration",
@@ -612,7 +614,8 @@
     "target": "",
     "features": "kinewright-project/test-util",
     "production": true,
-    "build_host": false
+    "build_host": false,
+    "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json:host-reopen-without-registration"
   },
   {
     "name": "host-ignores-live-session",
