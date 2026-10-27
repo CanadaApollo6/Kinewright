@@ -2797,6 +2797,10 @@ fn s2h_fix3_barrier_reply(command: &'static str, floor: bool) {
 fn s2h_begin_recovery_reply_loss_retries_original_plan() {
     s2h_fix3_barrier_reply("begin_recovery", false);
 }
+
+#[path = "ja1_s3_attachment_tests.rs"]
+mod s3;
+
 #[cfg(target_os = "linux")]
 #[test]
 fn s2h_floor_confirm_reply_loss_adopts_recorded_close_plan() {
@@ -2844,7 +2848,11 @@ fn s2h_completed_switch_then_lost_save_uses_c10_on_same_actor() {
         .unwrap()
         .after()
         .clone();
-    assert_eq!(app.owner.core().export_history().unwrap(), exact);
+    assert_eq!(
+        app.owner.core().export_history().unwrap(),
+        exact,
+        "completed switch must route a later lost Save through C10"
+    );
     assert_eq!(
         app.host_client()
             .unwrap()

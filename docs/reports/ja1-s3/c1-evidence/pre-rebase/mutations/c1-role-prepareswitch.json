@@ -1,0 +1,36 @@
+{
+  "name": "c1-role-prepareswitch",
+  "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/auth.rs",
+      "HostCommand::PrepareSwitch { .. } => self.role == AttachmentRole::Editor,",
+      "HostCommand::PrepareSwitch { .. } => true,"
+    ]
+  ],
+  "expected_red": {
+    "text": "C1_PREPARE_SWITCH_ROLE",
+    "location": null
+  },
+  "baseline_manifest_sha256": "40d9d5a707dd057beb85c45471f0d9127f5fc36edf1bc399fbe7019404d6e00c",
+  "witness_sha256": "bb0331ff447cba708ed8bb4c8b771020f83de7a516b692957fd9f2dc2be088a1",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "3ece41d572cd39e60fb06f0046890729109393e1e0f1ab5267ee8314331455e0"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$c1_runtime/local-app\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "bd389a95266d7b062b754872d74eda9a1629aca9bf4ea99e64cecf1253eaea77",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 711 filtered out; finished in 0.72s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "75a2f1eb0328969f718bcb3ec21d3f0ad93eddfe827ec5814c46a77b3b7544e3",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 711 filtered out; finished in 10.82s"
+  ],
+  "restored": true
+}

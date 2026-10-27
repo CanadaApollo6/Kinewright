@@ -110,6 +110,10 @@ impl Drop for ReplyDropProxy {
 }
 
 impl HostAttachment {
+    pub(in crate::ja1_attachment) fn manual_identity_for_test(&self) -> String {
+        self.manual_client.clone()
+    }
+
     pub(in crate::ja1_attachment) fn drop_http_reply(
         &mut self,
         command: &'static str,

@@ -442,7 +442,16 @@ impl Ja1Attachment {
         let view = match outcome {
             Ok(view) => view,
             Err(error) => {
-                self.host_request_failed(&error);
+                if self
+                    .host
+                    .as_ref()
+                    .is_some_and(|host| host.unknown_operation || host.pending_foreground())
+                {
+                    self.host_request_failed(&error);
+                } else {
+                    self.frozen = self.owner.core().attachment_state() != Ok(AttachmentState::Live);
+                    self.message = error.to_string();
+                }
                 return Err(error);
             }
         };
@@ -515,10 +524,15 @@ impl Ja1Attachment {
                 .as_ref()
                 .is_some_and(host::HostAttachment::needs_manual_recovery)
         {
-            self.host
+            if let Err(error) = self
+                .host
                 .as_mut()
                 .expect("attached host")
-                .begin_manual_recovery(&mut self.owner)?;
+                .begin_manual_recovery(&mut self.owner)
+            {
+                self.host_request_failed(&error);
+                return Err(error);
+            }
             self.frozen = true;
             self.message = "Editing is read-only while accepted history is recovered.".into();
             return Ok(());

@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(transparent)]
 pub struct IssuerId(pub(crate) String);
 impl IssuerId {
-    fn fresh() -> Result<Self, BundleError> {
+    pub(crate) fn fresh() -> Result<Self, BundleError> {
         Ok(Self(SessionId::fresh()?.as_str().to_owned()))
     }
     fn validate(&self) -> Result<(), BundleError> {
@@ -111,6 +111,19 @@ impl CommandEnvelope {
             ));
         }
         match self.action.as_str() {
+            "metadata"
+                if self.switch.is_none()
+                    && self.manual.is_none()
+                    && self.lease.is_none()
+                    && self.transition.is_none()
+                    && self.command.is_none()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.len() == 1
+                    && self.evidence[0].record_kind == RecordKind::OwnedEvidence =>
+            {
+                self.evidence[0].validate()?;
+            }
             "switch"
                 if self.switch.is_some()
                     && self.lease.is_some()
@@ -187,6 +200,9 @@ impl CommandEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReceiptResult {
+    Metadata {
+        result: crate::studio_records::MetadataResult,
+    },
     Switch {
         result: Box<crate::bundle_switch::SwitchResult>,
     },
@@ -205,6 +221,7 @@ pub enum ReceiptResult {
 impl ReceiptResult {
     fn dependencies(&self) -> Vec<ObjectRef> {
         match self {
+            Self::Metadata { result } => result.references(),
             Self::Switch { result } => {
                 vec![result.old.checkpoint.clone(), result.new.checkpoint.clone()]
             }
@@ -652,6 +669,7 @@ impl ProjectBundle {
         self.reconcile_destination(Some(core))?;
         self.pending_command = None;
         self.pending_result = None;
+        self.pending_metadata = None;
         Ok(())
     }
     /// Explicit ordinary attachment operation, separate from destination reconciliation.
@@ -764,7 +782,7 @@ pub(crate) fn stage_comment(
     })
 }
 
-fn validate_strokes(bytes: &[u8], limit: u64) -> Result<(), BundleError> {
+pub(crate) fn validate_strokes(bytes: &[u8], limit: u64) -> Result<(), BundleError> {
     use serde::de::{Error, SeqAccess, Visitor};
     struct Points<'a> {
         limit: u64,

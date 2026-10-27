@@ -1,0 +1,162 @@
+{
+  "agent-affected.log.gz": {
+    "sha256": "60efe1ed39f32f283c7f6d933a0decce4b2b8aab9dc53e034e671901e8708115",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.47s",
+      "test result: ok. 58 passed; 0 failed; 0 ignored; 0 measured; 654 filtered out; finished in 107.45s"
+    ]
+  },
+  "agent-architecture.log.gz": {
+    "sha256": "4b5c429eb80fd6005b7d5ec95d884013a88dfaff29d237f3cf29dc7c7e8a0419",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.60s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 711 filtered out; finished in 0.02s"
+    ]
+  },
+  "app-affected.log.gz": {
+    "sha256": "5bea8544e052b0c2069a3f65cf722cc716eebb11ace522d866a26333891c2214",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.05s",
+      "test ja1_attachment::tests::s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save ... ok",
+      "test result: ok. 79 passed; 0 failed; 1 ignored; 0 measured; 814 filtered out; finished in 321.21s"
+    ]
+  },
+  "app-architecture.log.gz": {
+    "sha256": "35fd6f6e9c52097327ff5e58f519b09d2b885f09c825fbeb7711ea7e4a097b53",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 893 filtered out; finished in 0.02s"
+    ]
+  },
+  "app-c1.log.gz": {
+    "sha256": "ad9497a5573bede601dcb2593fae29930f4042a89294faf63f4b82cf224f88eb",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.30s",
+      "test ja1_attachment::tests::s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save ... ok",
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 886 filtered out; finished in 10.65s"
+    ]
+  },
+  "build.log.gz": {
+    "sha256": "e3827dc4fbb19c973f3642bab862408fcdd01262d77a6016d8af105584ad21ad",
+    "exit": "0",
+    "summaries": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 35.51s"
+    ]
+  },
+  "clippy.log.gz": {
+    "sha256": "3671ab61461adf57a8829a888820a514a1a75bb518d0028e49b73890e32916bf",
+    "exit": "0",
+    "summaries": [
+      "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s"
+    ]
+  },
+  "fmt.log.gz": {
+    "sha256": "7f5c3189031dffe5ae3f86faa81e49ed2039f9767dd32ab6b71ea0b6aa2213ca",
+    "exit": "0",
+    "summaries": []
+  },
+  "g05a_switch_reply_drop_and_participant_death.log.gz": {
+    "sha256": "59c55c461b4849ee64e36f809ee1c5712b35a915cc42041ca233efdc8f5ed418",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.69s"
+    ]
+  },
+  "g05l_host_death_recovers_absent_and_committed_drag_suffix.log.gz": {
+    "sha256": "e88fe4e0a7eb74b653abe9703072989f455ad2efe535bf6f225619555af19a7c",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.38s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 15.23s"
+    ]
+  },
+  "g05l_shared_floor_and_recovery_close_reply_drop.log.gz": {
+    "sha256": "2746cca9ad1ec38fab3539f40b820de99cae6873d591b2589fb9107919938a4d",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 14.82s"
+    ]
+  },
+  "host-c1.log.gz": {
+    "sha256": "7c514bc5bee89986d7c19c9e33c0634ff9cc7a5cf54a237572e12ea1e38b368d",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.35s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 706 filtered out; finished in 12.98s"
+    ]
+  },
+  "host-portable.log.gz": {
+    "sha256": "7cdb0edbddfc4e9ee0a5807869159f4b093a61f59f32e60a76a15b7b6512fdc1",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 711 filtered out; finished in 0.25s"
+    ]
+  },
+  "m31-branches.log.gz": {
+    "sha256": "afe830061c636bed944378dbbeffa7c8ecee604a8b941cc3b4b5a01c8dd0c6f5",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.60s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.34s"
+    ]
+  },
+  "presenter.log.gz": {
+    "sha256": "d76613c9ba330d4f5ab85fa8d19ed17f84144bc847b36c99dae1f04a9e5e5a3e",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 887 filtered out; finished in 0.15s"
+    ]
+  },
+  "project-affected.log.gz": {
+    "sha256": "0ed43df8784e159a771daf6ba7e4271e1759ced1bd59f819538d876cb645c4b7",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.63s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.19s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.45s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 67.01s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.10s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.34s"
+    ]
+  },
+  "project-store.log.gz": {
+    "sha256": "bc814b676219018e8eded12c2b29ef9bdc9f6bb4f811efcc98031d3125627873",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.21s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 81 filtered out; finished in 0.41s"
+    ]
+  },
+  "s2-host.log.gz": {
+    "sha256": "e6ad6fcb31c801860749487be9e0bb87cde4eaa9945449d5f6c14623eb8866ad",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.40s",
+      "test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 37.59s"
+    ]
+  },
+  "save-cost.log.gz": {
+    "sha256": "2505baffbc723641b624b5642c027cc6c58c84a83ecedcb365d194b250ee3e94",
+    "exit": "0",
+    "summaries": [
+      "    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.69s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.43s"
+    ]
+  },
+  "slow-lint.log.gz": {
+    "sha256": "62cfd39b703653c1b0d0fdc75c1a5d3e91c3a761265e32e2c85eb69e296ab843",
+    "exit": "0",
+    "summaries": [
+      "slow-test manifest and markers agree: 89 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 56 allowlist entries well-formed"
+    ]
+  }
+}

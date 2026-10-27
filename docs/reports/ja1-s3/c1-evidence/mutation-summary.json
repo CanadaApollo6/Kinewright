@@ -1,0 +1,1558 @@
+{
+  "accepted_pairs": 43,
+  "pairs": [
+    {
+      "name": "c1-active-credential-cap",
+      "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "self.attachments.len() >= ATTACHMENT_CAPACITY",
+          "self.attachments.len() > ATTACHMENT_CAPACITY"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_ATTACHMENT_CAP",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "1b5e847c9cd30954064df0da2a740710f7567754ac0aa516e89fa752f7c6f007"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "93f6316b198b9032dcdbdea4aa6df80fe5a9af5c19f9401bdd25528d7166513e",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.39s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "a2ac50be24eeb278543f0626b758a3ac40f2e16e17be84c486fae1b32e35d2c3",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.40s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-attach-role-binding",
+      "witness": "writer_host::ja_s3_host::s3_attachment_role_binding",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "            role,\n            roots,",
+          "            role: super::AttachmentRole::Editor,\n            roots,"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_ATTACH_ROLE_BINDING",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "b8a33ce48501aea3baaa09bf44717c69745d19dea7e772fb63f021693575a01f"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_attachment_role_binding -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "196a23620e307b6e947276bea53ad9fbb50605dcb0d17352a0504c36bd73df70",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.45s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "7b88b8dca9bb7897f7952329665fc1c91b7379ef6bd87d0092732413444efe58",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.40s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-bearer-resolution",
+      "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "grant.auth.accepts(bearer)",
+          "true"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_UNKNOWN_CREDENTIAL",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "1156d66e869270ea1c5cc9b9a9ddb2a49dc03a6c9e22a27e034c7fae00615458"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "983962eeb3ebcdfe2f79797162eb86d13fed9f8be5204648167e48e8c2727f0c",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.24s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "60d598bdabf50d04aeba4119ffc1f53b3fbb5dfc2d4938a986be97f6e2baab24",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.40s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-default-deny-save",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "_ => self.role == AttachmentRole::Editor,",
+          "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::Save { .. }),"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SAVE_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "952ba9d3c4c2210869a8d4e780e8208d8f5270abbf04ecab1fae21a02458f93a"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "60fdee4108ad63d839784fbab3c2eeb23e46bff4b6c5184166e866dc0350c754",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.82s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "7d90027fa72599d9f3c6940b509d5d7b5052f182f230963d766ac0fa33acb886",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 11.00s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-default-deny-scripted",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "_ => self.role == AttachmentRole::Editor,",
+          "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::StartScripted { .. }),"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SESSION_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "e5355d6a08e90eb580a7ca71f7c30664b21163b892579e867b77bf137c70f9aa"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "081b659561a1b7b33c5260b47cda112d41aa5e654a883a71072d6d21e51cfeaf",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.91s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "d79aa75d5d5b9d5d1b160a80a8759c0c11e12de42730f6beec2b2c54476d044d",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.79s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-default-deny-session-control",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "_ => self.role == AttachmentRole::Editor,",
+          "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::SendMessage { .. }),"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SESSION_CONTROL_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "11ad3eac9ee3a947ec6f07a0daab9a49d075c17af3434bb94b2c37f69be20409"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "4a47c08b5be9951da99b26c03195c0e5f45889e279652b9dc46f51d8504a1c26",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.91s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "686057f4759f55e303e98198752731cf6cbcf80faeaa57546dede886944b59c1",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.97s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-default-deny-session",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "_ => self.role == AttachmentRole::Editor,",
+          "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::StartSession { .. }),"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SESSION_START_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3c5e1a21de8ae10c3be6aa7da4df015147fa923d0a8faf2a0e48aeaf9966ad4c"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "7367c064de354e4e760f6c2bf6d528a3eb7ab43a40e9d7f362d94f8e3f4d9bdf",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.71s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "1a83738fd872b946f857ccc54d29d85bfe8a28b0e3c5ab2d9b81aacafed749cc",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.82s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-default-deny-shutdown",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "_ => self.role == AttachmentRole::Editor,",
+          "_ => self.role == AttachmentRole::Editor || matches!(command, HostCommand::Shutdown),"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SHUTDOWN_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "abc081239d1f983d44438b2069a0afb0271187a51b6cb7357dbb7abfd9ff8991"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "33a46af4393ceb60df34e6b3e3cdcd403d25d63efded7aa40d98f693a54e1199",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.90s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "45e25188676bb2a357751a65df0de1bd57b9419971b108010e7d35fbc1edd4db",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.62s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-detach-revocation",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "self.attachments.remove(index);",
+          ""
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_DETACH_REVOKES",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "6adf24c18eb650c5a10619435e9022e6651488adcaefded2569e920e69f1e691"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "ea7f95db076a3897429d10d8e19b696d7f532e1c8f99bab0fa25ca9afa198ac3",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 8.02s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "860333c749e027907f30147ef4b7ce0e710e5cba6eacdf19e94bdd6f6aa36725",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.73s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-foreground-subject-before-replay",
+      "witness": "writer_host::ja_s3_host::s3_foreground_replay_is_attachment_subject_bound",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "&& self.foreground_subject.as_deref() != Some(grant.subject.as_str())",
+          "&& false && self.foreground_subject.as_deref() != Some(grant.subject.as_str())"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_FOREGROUND_SUBJECT_REPLAY",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "d9bab41da9fc214433a2aa47dfa208745d1a9231547b68f6d9a1cfccb5925195"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_foreground_replay_is_attachment_subject_bound -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "6018ae26ad06d3db1d5b03473dd7a2abda9b20453b049d6fa17d7ee4b2b07536",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.39s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "03dc4fea8823faff8335bb7e1837f88e6ed5a036241824a89bac234d2212f158",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.41s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-narrowed-issued-roots",
+      "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "Self::check_narrowed_roots(&self.config.roots, &roots)?;",
+          ""
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_ISSUANCE_ROOTS",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "df958cc93531382d10b5d5f76f1667b92a3f16108f2072926312c6835b1b662c"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "64ededd6773531c3469b9d7cc578c8b209550467aa3d8775619639871dc00a87",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.37s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "80795e5b75037ab3c716bcd54ef7d64c24413095306b7e9fa38bafaaead634d0",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.46s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-narrowed-request-roots",
+      "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "Self::check_narrowed_roots(&command_roots, &roots)?;",
+          ""
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_ROOT_NARROWING",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "c3e2253ddbc0daeef15066d7e17969fa72df764688e9224f553ff93774a22b67"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "9222dffd27a04308250f38d999d06151a374ef3989da73caadb07579549441d5",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.32s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "5125020f4bcb5eaf381809a9dca85854d6dc9e404930e496e9da7ddc05469a9d",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.48s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-request-project-binding",
+      "witness": "writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "request.project != grant.project || request.protocol != super::HOST_PROTOCOL",
+          "request.protocol != super::HOST_PROTOCOL"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_PROJECT_BINDING",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "240c0a39d44b1aa121ecf4881ad95811977b9c2e668e2993be5af2e9bf49e373"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_attachment_scope_cap_and_wire_spoofing -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "e65f0f6fe801e75db1bd3a8c16020542f2bbbeefa1cab7a40aa3a0b948e34b17",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.30s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "cf39e49aadf23cb5f5cc4c172ae360b24b81234c1634b223a736b5228bff38f2",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.43s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-acquiremanual",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "HostCommand::AcquireManual { .. } => self.role == AttachmentRole::Editor,",
+          "HostCommand::AcquireManual { .. } => true,"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_MANUAL_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "68c21492147ea953162686e5250d93b3907b5564a10ddd5840fdd4a15e80ec1c"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "61958edeccd6f8f1e0ecbac41a4ed05b5a8743d3fd0f328c21b09539868e543c",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.53s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "b3aada0f8a9653ead7c2de80ee82f2d1f3cec0f4ae9ffbbcca64994d4d505f9d",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.79s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-commithistory",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "HostCommand::CommitHistory { .. } => self.role == AttachmentRole::Editor,",
+          "HostCommand::CommitHistory { .. } => true,"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_MANUAL_STREAM_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "5e45f2d46b5db0d2e49d43575450d039e9eaa353d88ca7857f76cb200bfbaf17"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "caab1e44bc1024f79ae069e60e54a82027f807829e6ab5ed29cf658d8bee4e2a",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.50s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "798b53df81e7ffd490f5cc1edba72523469470811502fe94cd83259adb367a17",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.57s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-confirmswitch",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "HostCommand::ConfirmSwitch { .. } => self.role == AttachmentRole::Editor,",
+          "HostCommand::ConfirmSwitch { .. } => true,"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_CONFIRM_SWITCH_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "a6afafaf7ac99de4236656c512d45bf3d452307242982973eab906d8c8b461f0"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "048e832c5e5eeab91997b5823bdc24829cc5d8c7796a4c2ff57fd3f0625fcdb5",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.79s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "2369d33b035968663909e378ff621b6e7bcf5b1f396a73c6b87ed879e4c812a5",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.86s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-prepareswitch",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "HostCommand::PrepareSwitch { .. } => self.role == AttachmentRole::Editor,",
+          "HostCommand::PrepareSwitch { .. } => true,"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_PREPARE_SWITCH_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3ece41d572cd39e60fb06f0046890729109393e1e0f1ab5267ee8314331455e0"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "a33620d9d25ffd10079cbb36b52f13c2aae13028cab138551e54a496e863a313",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.49s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "f847e6cc99031778c0009470e1d7fca5dc2f1dc76d032a113238be96bf94e35e",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.71s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-snapshot-new",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "self.role == AttachmentRole::Producer",
+          "true"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SNAPSHOT_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "1cc98865f483c24670c499b2b246443c4e20cfeae563cf049c648059d03e56ea"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "d97b9d10afd5bcd667eebdfb5e32e5c49da08fe1cb184844073aba4dbe7e0ca9",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 1.23s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "5ad15f1741c16b78070c2a1fa7af0ad918c558fc05227c259243cc1ffb71966a",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.74s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-snapshot-replay",
+      "witness": "writer_host::ja_s3_host::s3_viewer_snapshot_replay",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "self.role == AttachmentRole::Producer",
+          "true"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SNAPSHOT_REPLAY_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "1cc98865f483c24670c499b2b246443c4e20cfeae563cf049c648059d03e56ea"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_snapshot_replay -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "fd202386f88c1c02ce587fdc5c034299180e979dcafbc645b924e82c3ae7f4f7",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.48s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "24bd4bbcaa141217e3eaf4f3cd2110c4d9635646e37e7b0075ae68ed87b80777",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.60s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-switch",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "HostCommand::Switch { .. } => self.role == AttachmentRole::Editor,",
+          "HostCommand::Switch { .. } => true,"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SWITCH_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "a68db614f7d2ca589763186ba8a07b45a50a1139111205416c57ee6546906714"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "ce20431f6e4d9f2dab2b7f31a3c0f693a26f6f11d8870baa334a494d161fff78",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.55s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "7da82ef85aff7357a04d1fe163c2542bcf159b6a7e0f12c42cb9c8a4b6f337d6",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 12.27s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-role-switchreceipt",
+      "witness": "writer_host::ja_s3_host::s3_viewer_capabilities",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "HostCommand::SwitchReceipt { .. } => self.role == AttachmentRole::Editor,",
+          "HostCommand::SwitchReceipt { .. } => true,"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_SWITCH_REPLAY_ROLE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "70e56c517b8fe6604a6e86340c1ebda03202312e2d5d67fbac13721c18d5736e"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_viewer_capabilities -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "481f5c97cb6bca6bc09169cedb46b931ce62b394e3bb6df8a0f1580b8c5f17c6",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.59s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "b55fd041e1f7b27f282a63474dcdb2e12c5060605a59b2c8517d37906a3d57e9",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 10.71s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "c1-source-admission-private-bootstrap",
+      "witness": "writer_host::ja_s3_host::s3_gui_source_admission_stays_private_and_command_bound",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-agent/src/writer_host/auth.rs",
+          "if grant.bootstrap\n                && grant.role == super::AttachmentRole::Editor",
+          "if grant.role == super::AttachmentRole::Editor"
+        ]
+      ],
+      "expected_red": {
+        "text": "C1_GUI_SOURCE_SCOPE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "22c721b84bf15de98b027fcb57cafbfd5b5979a01f3462a8b79230551baf315e",
+      "source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "3bb3c2821c7f4092f1f76c90168ded23beab6bb521b05abe9fcfb7fb307efa73"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-agent/src/writer_host/auth.rs": "b9bedb7a4a56bee10d689288a3b2f0cf811d46ffdf3e34fa2513c97ac59cca97"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_gui_source_admission_stays_private_and_command_bound -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "e3a23c68202084ada1e97d16fc237692def6c52616977cfad4f436fbbfcf95a9",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.55s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "0b890d8289d6535be50775626e1786fb1fd2c37275580c82407986f952e0874a",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 712 filtered out; finished in 0.60s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "completed-switch-keeps-pending-state",
+      "witness": "ja1_attachment::tests::s2h_completed_switch_then_lost_save_uses_c10_on_same_actor",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-app/src/ja1_host.rs",
+          "        self.switch_envelope = None;\n        self.switch_state = SwitchState::Complete;",
+          "        self.switch_envelope = None;"
+        ]
+      ],
+      "expected_red": {
+        "text": "HistoryChanged",
+        "location": "crates/kinewright-app/src/ja1_attachment_tests.rs:2843:30:"
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "470e98f842620c61f5139d4f7e02377092cf663b0fd7f91ad32f5f7b4dd51afa",
+      "source_sha256": {
+        "crates/kinewright-app/src/ja1_host.rs": "a5b21fdddde5b113de889f1fa87ba9776f808c0f2d0ab66538f36f083556829c"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-app/src/ja1_host.rs": "7704ec4bfad2b68404567556cc63514fc1f6fe0f24786124cd1ff71ed56936bf"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-app --bin kinewright-app ja1_attachment::tests::s2h_completed_switch_then_lost_save_uses_c10_on_same_actor -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "0e99dab1c1a17480ef1e4bc8dded9ffc5ebe1ef6ba8e69cb5ef407a59c121a57",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 895 filtered out; finished in 1.22s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "9b806b4ee70462ccd61c463d2348d5b4c9f8025a524dceed225ab3c42197f542",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 7.00s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-a1-acknowledged-feedback-index",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_commit.rs",
+          "        let mut metadata_root = bundle.root.clone();",
+          "        let mut metadata_root = bundle.root.clone();\n        if rescue_source.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_EXACT_FEEDBACK_INDEX",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "297b38be868bfd4c57ff1aedfdcb2f726247421d3abe4652a952c26799743e1c"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "143afd1eef6af0bab9f8e95b0936fd93c700e6ea244869a86a4bf4277d00bacf",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 4.87s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "6acd435188286e35d4bdbb2ca64221a09988f3172add44bf0cc9efc860083643",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.12s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-atomic-batch-consumption",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "                    submitted.consumed_by = Some(run.clone());",
+          "                    let _ = run;"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_ATOMIC_RUN_BATCH",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "a86c2b540a3620d26b471d293fa8fa333b086ae0e3698641b734143a3cc3ca1e"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "1fc495606d7b1ee3f20912c3439f8d2e6ab027c85efb9fa7a05a40b568bb794e",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.86s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "092a17bd034b1b20ba32c1eeb4557230fb043e428cf23309de861494945c59be",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.21s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-candidate-feedback-index",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_commit.rs",
+          "        let mut metadata_root = bundle.root.clone();",
+          "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_CANDIDATE_PRESERVATION",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "37f96e1d6aba719f60cb227d2ffdbf4833d8fa8a8f76daf747543afc06cc0c4f"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "b46cd907420f0a89d837f0af31191fa1ee1bc12c0ca01bcb76c7096ae6c85f2e",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.29s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "cc981705da233c7e61b988a24d09a7426f6d46ec46571dca69ccacfbafe646a0",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.03s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-candidate-run-index",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_commit.rs",
+          "        let mut metadata_root = bundle.root.clone();",
+          "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.run_index_ref = None; }\n        }"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_RUN_ONLY_CANDIDATE_PRESERVATION",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "06862a1de2a1758114162736d4e6a868ae219ec5befd1b7f696fc6e02451bac4"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "067d95c96aa365dcdf1001ce1b90ad22613491978742aad4bc80bdd487657d3f",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.90s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "efab34cbbb008f40c1763f785b764dcdc55e06bf27eaab15b48664f0d2ef95bd",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.62s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-candidate-version-index",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_commit.rs",
+          "        let mut metadata_root = bundle.root.clone();",
+          "        let mut metadata_root = bundle.root.clone();\n        if branch_id != &bundle.manual_branch_id {\n            if let Some(root) = &mut metadata_root { root.version_index_ref = None; }\n        }"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_VERSION_ONLY_CANDIDATE_PRESERVATION",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "999c154faf61b9e8c645a72e9bbf71ea0325c436e26661516d361c845f839e3f"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "31d3c8a74822c5cff477d8d10008e9761573ba0398f39941fa774eaba74227f0",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.44s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "c50bdd379060172a2be2825d5a2bb305580db3082b3d5017c06ab40dd74a386b",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 4.99s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-copy-feedback-index",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_copy.rs",
+          "            root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();",
+          "            root.input_manifest_ref = branches[&self.manual_branch_id].input_manifest_ref.clone();\n            root.feedback_index_ref = None;"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_EXACT_FEEDBACK_INDEX",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_copy.rs": "9bba24b21074c50e7616faef8d47793cd943a36751fbd4d2ada16db423d6d92d"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_copy.rs": "40bce3cd33577ed5c52d023543ff91a8bde8ac9d834f21f47b1c09381943a816"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "d789a023df150211c1b5fef1db2f12add1d6bc56a4ba5d8a4e8d3a9d5058958f",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.49s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "652be5d5e3e8a29181d424cc9e66f41674ae6b4eb773dbf9ac8292854a1fb29a",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.13s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-feedback-proof-dependency",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_records.rs",
+          "            self.frame_proof_ref.clone(),\n",
+          ""
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_FRAME_PROOF_RETAINED",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_records.rs": "96b2be77256b6ed871cbf8481f285a884c660e317a4de009de0308b6eee42d0e"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_records.rs": "2a63f527a971ec48467a840bb21d5593da9d8a3d5833baaa3dc82bebf9713257"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "5c17fda4afe6a4c06dcb4342505d51dcbc9a6e9ab22ef598d1456739232aedf2",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.29s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "d5bf7db47e2806ca5e942e4f2278b4c579e97939692575d9f0e2c680c93e2b8e",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 4.95s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-floor-feedback-index",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_commit.rs",
+          "        let mut metadata_root = bundle.root.clone();",
+          "        let mut metadata_root = bundle.root.clone();\n        if explicit_floor {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_FLOOR_FEEDBACK_PRESERVATION",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "10f5f444ed6186033f6f7c576004750979877a2af4e3da9ae5f41cb5dca949d8"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "3263275b02b1e148d86d5a475d143b63d60c14f0c9cb6e7d3504cefa5bb3f267",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.63s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "b30c494c9e0bbac89d08bce37125fa4e7f9634bc57281a7e8838e17934a650f1",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.01s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-comment-count",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "                if previous.is_none()\n                    && feedback.revisions.len() as u64 >= self.store.limits().comments",
+          "                if false"
+        ],
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "        if v.revisions.len() as u64 > l.comments\n            || v.batches.len() as u64 > l.comments",
+          "        if v.batches.len() as u64 > l.comments"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_COMMENT_LIMIT",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "1b00eb9577a2b0d33e1a8f8b7d27008ac6e18f4ee6187598b326366192afc387"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "4c407f8792427ad1da861f431b4dc7a8aad1b6e44169719b779acc16cd3d642f",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.85s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "4fd5ee3b9d5535e84c76df630a924417119259205158c028c168f15865a0653a",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.91s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-digest",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/receipts.rs",
+          "                return if expected != digest {",
+          "                return if false && expected != digest {"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_DIGEST",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/receipts.rs": "d824ac8ea66d8ad5223008083832772da886e3ae08a683b542afd6ae2a70862b"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/receipts.rs": "7990f8d9eaaae7f9c24f9fa44952055012f780e0aee89cda07a151c53625fde3"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "100b68963bac59144a32f2d6df1e7e11d383edb898eea119ea91ebd3dd6092ea",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.65s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "5baac6489bb8c0c5281df13aec91dc92bef3639574f1ed8396d7e9dc944563c2",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.94s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-epoch",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "            || envelope.owner_epoch != self.store.owner_epoch()\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let issuer = self",
+          "        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let issuer = self"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_EPOCH",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "5b914af645783517d8e9488ece3feea158900f1bc01657e2d083ed4c99bc31d8"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "50c7a87f2905e1e5874ae978167cd33dc225a123be996e00c4a9117639a32fea",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.60s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "70bcca2cabeb68b53065091ed04dcb2e5fb19763606579f698c9bb4257623c3b",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.91s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-generation",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "        if update.expected_root_generation != self.generation\n            || envelope.target_branch != self.manual_branch_id",
+          "        if envelope.target_branch != self.manual_branch_id"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_GENERATION",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "efe8346728f6136bed5a9781ec798aa7be1cdcef276ead9dd28ea77ee43f5e41"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "e090e9461da98b47b3143ccaa39a71b96a7beb2365096b3df271d81151321833",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.61s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "943877b523e92fbdc9c2453d316b5b6811a44b32885e554f9df9c5d0f1e950f5",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.91s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-point-limit",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/receipts.rs",
+          "                if count > self.limit {",
+          "                if false && count > self.limit {"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_POINTS_LIMIT",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/receipts.rs": "d824ac8ea66d8ad5223008083832772da886e3ae08a683b542afd6ae2a70862b"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/receipts.rs": "f8b0c8209ef4e6b82263c468421d349e2e40adbcd242a1eba71a181dd8560691"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "68299e3299da8287b0cac002f7fedd49206e324480bafa2fa1ec75f03301c4b6",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.05s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "66a02ac4e506e2975a6570ea47d4d89a1f003cf190129f230eebc374a3aa6527",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.95s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-project",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "        if !allowed || envelope.project_id != self.project_id {",
+          "        if !allowed {"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_PROJECT",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "c657818a85fd6d10d1dec9e692e7d83668ad708acb6de2279043d055af1ce7bd"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "f0b6b52dbdce4421b0affe2eb0aa6bcbbdea9c926a3b8b35174a4901a1919c6e",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.60s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "098ba5c58b40fd7e5f93318e2f5edd56d410eac022319af3ba9bdc6356f7c7d2",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.91s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-scope",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "        if !allowed || envelope.project_id != self.project_id {",
+          "        if false && !allowed || envelope.project_id != self.project_id {"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_SCOPE",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "eba9c71d78509dbe681544fc530fcc08f779498ced6994bb8ee98354d7af4b00"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "a5866bcbe923fa74896dff0a603e72afc53fa64e2b871e1debb528f13074c158",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.59s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "b219b36a435cc4a8aa4bd02ac2cf2eab8fcfed5ff23bb26973c1ded9e3c8fdee",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.92s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-metadata-text-limit",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "        if v.original_text_ref.byte_length > l.comment_text_bytes\n            || v.strokes_ref.byte_length > l.command_bytes",
+          "        if v.strokes_ref.byte_length > l.command_bytes"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_METADATA_TEXT_LIMIT",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "8c85c148da03bf71c17dce0e95d8b80682613197ef1de8c5a409636565cec757"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "0265c7345f7eda0c2e223f28f8799fbcefda8113101c95bb5965c82243820780",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.06s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "42b106c3c230bd7222df03b1a9591b4a9adabfb64a0ade5c66d6571815621ba0",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.94s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-orchestration-support-declaration",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_store.rs",
+          "            apis.insert(\"orchestration\".into(), 1);",
+          "            let _ = &apis;"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_ORCHESTRATION_REQUIRED_SUPPORT",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_store.rs": "85f33214d4015214c6c3e1f67a7eea6d002faa37f54dacc3b555ab38eccfa841"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "d511840d63e6ec993ff006b07d866d5b699ac014e8a95efc8c6c6115551fa8c1",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 2.12s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "42a6f38aa5119e0fc10f70dd5aec79fb0ac40b8adb1a1b367cd6a0ea8912f32e",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.53s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-run-reader-dependency",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/studio_records.rs",
+          "        let mut refs = self.review_state.evidence_refs.clone();",
+          "        let mut refs = Vec::new();"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_READER_DEPENDENCY_PIN",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/studio_records.rs": "96b2be77256b6ed871cbf8481f285a884c660e317a4de009de0308b6eee42d0e"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/studio_records.rs": "48dd34aa62d4f23f3a3d0619652d39c3cfaa6cdbfd7a1d91237c9d86421e1235"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "bd783a4049a03a7d27a50ce034fee77fafdc3cf242f3b90fe487f6f0f3e2551a",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.80s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "89ceacc1a9d1764a5bea728ed993014cd71c84bd203f4af0e277162a4a935e2c",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.19s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-switch-feedback-index",
+      "witness": "linux::s3_indexes_survive_all_root_producers",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_commit.rs",
+          "        let mut metadata_root = bundle.root.clone();",
+          "        let mut metadata_root = bundle.root.clone();\n        if selection.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_EXACT_FEEDBACK_INDEX",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "1b43f7d6374d22c313425754701af37cfd78c6014c7c138d1a4a431769b4d430"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "be938c3e9285dce0e68b96c5252f973023d4e47952755884c0ade1626cb321f7",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 3.77s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "efb8234d9eb68593503945a4c62a22cd21ead1eb881d5d2981d863fbd8824d5c",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 5.00s"
+      ],
+      "restored": true
+    },
+    {
+      "name": "store-typed-metadata-ingress",
+      "witness": "linux::s3_metadata_retry_and_admission",
+      "accepted": true,
+      "changes": [
+        [
+          "crates/kinewright-project/src/bundle_commit.rs",
+          "        if envelope.action == \"metadata\" {\n            return Err(BundleError::Unsupported(\n                \"metadata requires typed owner ingress\".into(),\n            ));\n        }\n",
+          ""
+        ]
+      ],
+      "expected_red": {
+        "text": "S3_TYPED_METADATA_INGRESS",
+        "location": null
+      },
+      "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+      "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+      "source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+      },
+      "mutated_source_sha256": {
+        "crates/kinewright-project/src/bundle_commit.rs": "0f336ea906fb329ff30a8a35660139d8281b89e2fec127c19d2ec46b72a01e4e"
+      },
+      "red_exit": 101,
+      "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+      "red_log_sha256": "9b53931b5dc5a15fc54bf2a6e51d0c84f0e8e67cdcb57142f277fbaeba7d7a2a",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.63s"
+      ],
+      "green_exit": 0,
+      "green_log_sha256": "90fb41dc9e0f35eea5110aeffa3c3e710d3a70c48c67c85dbd3ce45ed03618f2",
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 1.02s"
+      ],
+      "restored": true
+    }
+  ]
+}

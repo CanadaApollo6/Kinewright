@@ -10,7 +10,11 @@ use kinewright_project::{
 pub(super) fn connector_command(command: &HostCommand) -> bool {
     matches!(
         command,
-        HostCommand::Attach
+        HostCommand::Metadata { .. }
+            | HostCommand::ReadSnapshot { .. }
+            | HostCommand::ReadFeedback { .. }
+            | HostCommand::ReadSubmittedBatch { .. }
+            | HostCommand::Attach
             | HostCommand::CurrentAttachment
             | HostCommand::SwitchReceipt { .. }
             | HostCommand::Status
@@ -56,8 +60,9 @@ impl HostCommandOwner {
                     .into());
                 }
                 if operation == *previous {
-                    let reply = reply.clone();
+                    let mut reply = reply.clone();
                     self.prove_retention()?;
+                    reply.status = self.status();
                     return Ok((client.to_owned(), digest, Some(reply)));
                 }
             }

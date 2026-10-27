@@ -1,0 +1,5 @@
+# Retain runtime evidence bytes, including manifest hashes, on every platform.
+* -text
+*.log -diff
+*.log.gz -diff
+*.command -diff

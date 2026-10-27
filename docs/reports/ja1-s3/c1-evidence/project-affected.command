@@ -1,0 +1,1 @@
+cargo_locked test -p kinewright-project --features test-util --test ja_s3_store --test ja_s3_owned_inputs --test ja_s1_receipts --test ja_s1_copy --test ja_s2_save --test ja_s2_switch --no-fail-fast -- --test-threads=1 

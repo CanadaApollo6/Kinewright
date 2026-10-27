@@ -61,6 +61,249 @@ impl<'de> Deserialize<'de> for HostAuth {
     }
 }
 
+pub(super) const ATTACHMENT_CAPACITY: usize = 64;
+
+pub(super) struct Attachment {
+    pub auth: HostAuth,
+    pub incarnation: String,
+    pub project: String,
+    pub subject: String,
+    pub role: super::AttachmentRole,
+    pub roots: SessionRoots,
+    pub bootstrap: bool,
+    pub read_pins: Vec<kinewright_project::store::StorePin>,
+}
+
+impl Attachment {
+    #[expect(
+        clippy::match_same_arms,
+        reason = "Manual and switch phases have explicit authority rules and independent refusal witnesses"
+    )]
+    pub fn permits(&self, command: &super::HostCommand) -> bool {
+        use super::{AttachmentRole, HostCommand};
+        match command {
+            HostCommand::Metadata { update, .. } => match &update.change {
+                kinewright_project::studio_records::MetadataChange::PublishSnapshot(_) => {
+                    self.role == AttachmentRole::Producer
+                }
+                kinewright_project::studio_records::MetadataChange::SaveFeedback(_)
+                | kinewright_project::studio_records::MetadataChange::SaveVoice(_)
+                | kinewright_project::studio_records::MetadataChange::SubmitBatch { .. } => {
+                    matches!(self.role, AttachmentRole::Viewer | AttachmentRole::Editor)
+                }
+                kinewright_project::studio_records::MetadataChange::Orchestration { .. } => false,
+            },
+            HostCommand::ReadSnapshot { .. } | HostCommand::ReadSubmittedBatch { .. } => true,
+            HostCommand::ReadFeedback { .. } => self.role != AttachmentRole::Producer,
+            HostCommand::Attach
+            | HostCommand::Status
+            | HostCommand::ReadHistory
+            | HostCommand::CurrentAttachment
+            | HostCommand::Detach => true,
+            HostCommand::AcquireManual { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::CommitHistory { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::PrepareSwitch { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::Switch { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::SwitchReceipt { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::ConfirmSwitch { .. } => self.role == AttachmentRole::Editor,
+            HostCommand::AdmitDestination { .. } => {
+                self.role == AttachmentRole::Editor && self.bootstrap
+            }
+            _ => self.role == AttachmentRole::Editor,
+        }
+    }
+}
+
+impl super::HostCommandOwner {
+    /// The local owner is the trusted issuer. No request may call this port.
+    pub fn issue_attachment(
+        &mut self,
+        subject: String,
+        role: super::AttachmentRole,
+        roots: SessionRoots,
+    ) -> Result<HostAuth, HostError> {
+        let auth = HostAuth::generate()?;
+        self.register_attachment(auth.clone(), subject, role, roots, false)?;
+        Ok(auth)
+    }
+
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Issuance owns the submitted scope before retaining its canonical form"
+    )]
+    pub(super) fn register_attachment(
+        &mut self,
+        auth: HostAuth,
+        subject: String,
+        role: super::AttachmentRole,
+        roots: SessionRoots,
+        bootstrap: bool,
+    ) -> Result<(), HostError> {
+        if self.attachments.len() >= ATTACHMENT_CAPACITY {
+            return Err(
+                HostRefusal::new("attachment_capacity", "64 active attachments maximum").into(),
+            );
+        }
+        if subject.is_empty() || subject.len() > 256 {
+            return Err(HostRefusal::new(
+                "attachment_subject",
+                "bounded nonempty subject required",
+            )
+            .into());
+        }
+        let roots = roots.canonicalize()?;
+        Self::check_narrowed_roots(&self.config.roots, &roots)?;
+        self.attachments.push(Attachment {
+            auth,
+            incarnation: self.instance.clone(),
+            project: self.config.project.clone(),
+            subject,
+            role,
+            roots,
+            bootstrap,
+            read_pins: Vec::new(),
+        });
+        Ok(())
+    }
+
+    pub(super) fn resolve_attachment(&self, bearer: Option<&str>) -> Result<usize, HostError> {
+        self.attachments
+            .iter()
+            .position(|grant| {
+                grant.auth.accepts(bearer)
+                    && grant.incarnation == self.instance
+                    && grant.project == self.config.project
+            })
+            .ok_or_else(|| {
+                HostRefusal::new(
+                    "attachment_refused",
+                    "attachment is unknown, revoked or expired",
+                )
+                .into()
+            })
+    }
+
+    fn check_narrowed_roots(
+        admitted: &SessionRoots,
+        roots: &SessionRoots,
+    ) -> Result<(), HostError> {
+        if roots.read.iter().any(|root| !admitted.permits(root, false))
+            || roots.write.iter().any(|root| !admitted.permits(root, true))
+        {
+            return Err(
+                HostRefusal::roots("attachment roots cannot widen their admitted scope").into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Direct-owner ingress uses exactly the HTTP/MCP authorization boundary.
+    pub fn execute_attached(
+        &mut self,
+        auth: &HostAuth,
+        request: super::HostRequest,
+    ) -> super::HostReply {
+        self.execute_bearer(Some(&auth.bearer()), request)
+    }
+
+    pub(super) fn execute_bearer(
+        &mut self,
+        bearer: Option<&str>,
+        request: super::HostRequest,
+    ) -> super::HostReply {
+        let checked = (|| -> Result<_, HostError> {
+            let index = self.resolve_attachment(bearer)?;
+            let grant = &self.attachments[index];
+            if request.project != grant.project || request.protocol != super::HOST_PROTOCOL {
+                return Err(HostRefusal::new(
+                    "project_refused",
+                    "exact attachment project and protocol required",
+                )
+                .into());
+            }
+            if !grant.permits(&request.command) {
+                return Err(HostRefusal::new(
+                    "role_refused",
+                    "command is outside this attachment role",
+                )
+                .into());
+            }
+            if matches!(
+                request.command,
+                super::HostCommand::ReadSnapshot { .. }
+                    | super::HostCommand::ReadFeedback { .. }
+                    | super::HostCommand::ReadSubmittedBatch { .. }
+            ) && grant.read_pins.len() >= 64
+            {
+                return Err(HostRefusal::new(
+                    "attachment_capacity",
+                    "64 pinned reads per attachment maximum",
+                )
+                .into());
+            }
+            let roots = request.roots.canonicalize()?;
+            let mut command_roots = grant.roots.clone();
+            if grant.bootstrap
+                && grant.role == super::AttachmentRole::Editor
+                && matches!(self.config.origin, super::HostOrigin::Gui { .. })
+                && let super::HostCommand::PrepareOwnedMedia { path, .. } = &request.command
+            {
+                // The private GUI's file picker admits this command's source parent only.
+                // It grants no persistent root and no authority to a delegated attachment.
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| HostRefusal::roots("chosen source parent"))?;
+                command_roots.read.push(parent.canonicalize()?);
+            }
+            Self::check_narrowed_roots(&command_roots, &roots)?;
+            if request.operation.is_some()
+                && self.foreground_reply.is_some()
+                && self.foreground_subject.as_deref() != Some(grant.subject.as_str())
+            {
+                return Err(HostRefusal::new(
+                    "operation_changed",
+                    "foreground reply belongs to another attachment subject",
+                )
+                .into());
+            }
+            Ok((index, grant.subject.clone(), roots))
+        })();
+        let (index, subject, roots) = match checked {
+            Ok(value) => value,
+            Err(error) => {
+                return super::HostReply {
+                    status: self.status(),
+                    error: Some(error.refusal()),
+                    ..super::HostReply::default()
+                };
+            }
+        };
+        let detach = matches!(request.command, super::HostCommand::Detach);
+        let admit = matches!(request.command, super::HostCommand::AdmitDestination { .. });
+        let operation = request.operation;
+        let reply = if detach {
+            super::HostReply::default()
+        } else {
+            self.execute_operation(request.command, roots, request.editor.as_deref(), operation)
+        };
+        if let Some(pin) = self.pending_read_pin.take() {
+            self.attachments[index].read_pins.push(pin);
+        }
+        if operation.is_some() {
+            self.foreground_subject = Some(subject);
+        }
+        if reply.error.is_none() {
+            if admit {
+                self.attachments[index].roots = reply.status.admitted_roots.clone();
+            }
+            if detach {
+                self.attachments.remove(index);
+            }
+        }
+        reply
+    }
+}
+
 impl SessionRoots {
     /// JSON stays ASCII in HTTP headers; decoding restores each exact Unicode path.
     pub(crate) fn wire_header(&self) -> Result<String, HostError> {

@@ -16,6 +16,15 @@ pub const HOST_BODY_BYTES: usize = 40 * 1024 * 1024;
 pub const HOST_COMMAND_CAPACITY: usize = 64;
 pub const RETENTION_LOST: &str = "The host could not re-establish this session's retained data. Your edits remain here. Saving and rescue are paused, including saving elsewhere. Close this editing context explicitly to end it.";
 
+/// Resolved only from a privately issued attachment, never from request fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentRole {
+    Viewer,
+    Editor,
+    Producer,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRoots {
@@ -164,6 +173,19 @@ pub struct RecoveryBarrier {
     reason = "The bounded foreground wire command owns its snapshot and source binding without another boxed API layer"
 )]
 pub enum HostCommand {
+    Metadata {
+        envelope: kinewright_project::studio_records::MetadataEnvelope,
+        update: kinewright_project::studio_records::MetadataUpdate,
+    },
+    ReadSnapshot {
+        key: kinewright_project::studio_records::SnapshotKey,
+    },
+    ReadFeedback {
+        reference: ObjectRef,
+    },
+    ReadSubmittedBatch {
+        batch: kinewright_project::studio_records::FeedbackBatchId,
+    },
     PrepareSwitch {
         target: kinewright_project::bundle_switch::SwitchTarget,
     },
@@ -476,6 +498,13 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    pub metadata: Option<kinewright_project::receipts::CommandReceipt>,
+    pub revise_result: Option<kinewright_project::studio_records::ReviseResult>,
+    #[serde(default)]
+    pub submitted_revisions: Vec<kinewright_project::studio_records::FeedbackRevision>,
+    pub snapshot: Option<kinewright_project::studio_records::SnapshotDescriptor>,
+    pub feedback: Option<kinewright_project::studio_records::FeedbackRevision>,
+    pub submitted_batch: Option<kinewright_project::studio_records::FeedbackBatch>,
     #[serde(default)]
     pub unsaved_inputs_refreshed: bool,
     pub owned_media: Option<kinewright_core::MediaAsset>,

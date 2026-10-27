@@ -377,6 +377,42 @@ pub(super) fn validate(
             }};
         }
         match reference.record_kind {
+            RecordKind::VersionIndex => {
+                control!(crate::studio_records::VersionIndex);
+            }
+            RecordKind::FeedbackIndex => {
+                control!(crate::studio_records::FeedbackIndex);
+            }
+            RecordKind::FeedbackRevision => {
+                control!(crate::studio_records::FeedbackRevision);
+            }
+            RecordKind::FeedbackBatch => {
+                control!(crate::studio_records::FeedbackBatch);
+            }
+            RecordKind::RunIndex => {
+                control!(crate::studio_records::RunIndex);
+            }
+            RecordKind::RunSnapshot => {
+                control!(crate::studio_records::RunSnapshotRecord);
+            }
+            RecordKind::RunEventSegment => {
+                control!(crate::studio_records::RunEventSegment);
+            }
+            RecordKind::RunEffect => {
+                control!(crate::studio_records::RunEffectRecord);
+            }
+            RecordKind::RunRequest => {
+                control!(crate::studio_records::RunRequestRecord);
+            }
+            RecordKind::RunDelivery => {
+                control!(crate::studio_records::RunDeliveryRecord);
+            }
+            RecordKind::RunResult => {
+                control!(crate::studio_records::RunResultRecord);
+            }
+            RecordKind::RunUsage => {
+                control!(crate::studio_records::RunUsageRecord);
+            }
             RecordKind::Document => {
                 payload!(Document);
             }
@@ -474,6 +510,7 @@ pub(super) fn validate(
             }
         }
     }
+    super::validate_studio_records(namespace, root, usage, limits)?;
     if fields != manifest.required_fields {
         return Err(BundleError::Unsupported(
             "raw field inventory differs from declaration".into(),

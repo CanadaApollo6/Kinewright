@@ -57,6 +57,11 @@ impl BundleCommit {
         install: bool,
     ) -> Result<ReceiptLookup, BundleError> {
         use kinewright_core::{Command, Event, Query, QueryResult};
+        if envelope.action == "metadata" {
+            return Err(BundleError::Unsupported(
+                "metadata requires typed owner ingress".into(),
+            ));
+        }
         if install {
             crate::bundle::reconcile_core_save(core)?;
         } else if core
@@ -1175,6 +1180,16 @@ impl BundleCommit {
             branch_index_ref.clone(),
             branches[&manual_branch_id].input_manifest_ref.clone(),
         ];
+        let mut metadata_root = bundle.root.clone();
+        if let Some(pending) = &bundle.pending_metadata {
+            pending.apply(metadata_root.as_mut().ok_or(BundleError::Unsettled)?);
+        }
+        if let Some(root) = &metadata_root {
+            roots.extend(root.version_index_ref.clone());
+            roots.extend(root.feedback_index_ref.clone());
+            roots.extend(root.run_index_ref.clone());
+            roots.extend(root.claim_index_ref.clone());
+        }
         roots.extend(receipt_index_ref.clone());
         roots.extend(issuer_state_ref.clone());
         let mut inventory = SupportInventory {
@@ -1195,6 +1210,10 @@ impl BundleCommit {
         if bundle.store.has_host_switch_receipts(&closure)? {
             inventory.required_apis.insert("host-switch".into(), 1);
         }
+        crate::studio_store::add_required_apis(
+            &mut inventory.required_apis,
+            closure.iter().map(|r| r.record_kind),
+        );
         let store_manifest = bundle.store.selected_manifest(
             &roots,
             &evidence,
@@ -1217,10 +1236,16 @@ impl BundleCommit {
                 .cloned()
                 .collect(),
             branch_index_ref,
-            version_index_ref: None,
-            feedback_index_ref: None,
-            run_index_ref: None,
-            claim_index_ref: None,
+            version_index_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.version_index_ref.clone()),
+            feedback_index_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.feedback_index_ref.clone()),
+            run_index_ref: metadata_root.as_ref().and_then(|r| r.run_index_ref.clone()),
+            claim_index_ref: metadata_root
+                .as_ref()
+                .and_then(|r| r.claim_index_ref.clone()),
             input_manifest_ref: branches[&manual_branch_id].input_manifest_ref.clone(),
             receipt_index_ref,
             issuer_state_ref,

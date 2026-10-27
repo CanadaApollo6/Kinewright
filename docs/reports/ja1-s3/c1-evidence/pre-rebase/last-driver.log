@@ -1,0 +1,91 @@
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Checking kinewright-agent v0.1.0 (/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/crates/kinewright-agent)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+test host_owns_scripted_session_after_gui_detach ... ok
+test rescue_and_switch_share_one_owner_after_restart ... ok
+test roots_and_forwarded_roots_cover_all_file_surfaces ... ok
+test stdio_proxy_preserves_auth_roots_and_protocol_stdout ... ok
+test w14_headless_and_agent_admission_precedes_mutation ... ok
+
+test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 37.59s
+
+test equal_bytes_new_head_and_equal_counter_other_head_conflict ... ok
+test floored_specialist_reopens_original_full_delta_and_merges_once ... ok
+test merge_lost_reply_preserves_one_undo_entry ... ok
+test reopened_exact_base_merges_once_with_fresh_runtime_revision ... ok
+test restored_lineage_tracks_siblings_reuse_and_undone_splits ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.34s
+
+test presenter::tests::a_marker_that_never_paints_is_never_acked ... ok
+test presenter::tests::playback_binds_only_the_clocks_frame ... ok
+test presenter::tests::seeded_interleavings_bind_and_ack_only_current_frames ... ok
+test presenter::tests::the_marker_marks_what_is_bound_when_it_paints ... ok
+test presenter::tests::the_real_paint_callback_acks_only_painted_images ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 887 filtered out; finished in 0.15s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.38s
+     Running tests/ja_s2_host.rs (target/debug/deps/ja_s2_host-b64326489c64d352)
+
+running 1 test
+test g05l_host_death_recovers_absent_and_committed_drag_suffix ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 15.23s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running tests/ja_s2_host.rs (target/debug/deps/ja_s2_host-b64326489c64d352)
+
+running 1 test
+test g05l_shared_floor_and_recovery_close_reply_drop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 14.82s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+     Running tests/ja_s2_host.rs (target/debug/deps/ja_s2_host-b64326489c64d352)
+
+running 1 test
+test g05a_switch_reply_drop_and_participant_death ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 7.69s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.60s
+     Running unittests src/lib.rs (target/debug/deps/kinewright_agent-6bb796ebd1b6717c)
+
+running 1 test
+test session::tests::in2_the_agent_crate_has_one_agent_event_loop ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 711 filtered out; finished in 0.02s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running unittests src/main.rs (target/debug/deps/kinewright_app-ff739c02a286c15e)
+
+running 1 test
+test investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 893 filtered out; finished in 0.02s
+
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.
+slow-test manifest and markers agree: 89 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 56 allowlist entries well-formed
+FFmpeg root: /home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/third_party/ffmpeg
+libavcodec: 62.11.100
+ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers
+FFmpeg build environment is active in this shell.

@@ -41,15 +41,22 @@ separately exercised by Save As and First Save.
 
 ## Host command audit
 
+C1 corrects the audit cells below and supersedes the N2 envelope-hygiene mutation with
+`completed-switch-keeps-pending-state`. Historical raw gate and mutation records here retain
+their original source identities and names. C1's current-source evidence is in
+`docs/reports/ja1-s3/c1.md`.
+
 The table covers each command sent by the production GUI attachment, its HostClient destination
 helper and its chat adapter. `PrepareSwitch`, `SwitchReceipt`, scripted/probe commands and
-`ReadHistory` have no production GUI send site; host-internal dispatches and test calls are not
+`ReadHistory` and `Detach` have no production GUI send site; host-internal dispatches and test calls are not
 invented GUI rows. `E/gui-command-sites.txt` and `E/host-command-audit.json` retain the inventory.
 
 F is the single outstanding foreground operation on the same live host. It retains one bounded
 reply and exact request identity. A later GUI operation replaces the slot; heartbeats, manual
 messages, recovery and chat cannot evict it. A replay proves current source retention and binds
-the same private client, operation, payload and forwarded roots. It is volatile protocol state,
+the same private client, operation, payload and forwarded roots. C1 refreshes current status
+after that proof while retaining the original saved/history/lease/input/activation result.
+It is volatile protocol state,
 not a second store, actor, publisher or durable ledger. Confirmed host loss retains L2.
 
 C10 reconciles the original manual chain, installs the exact durable floor/close result on both
@@ -61,7 +68,7 @@ pre-existing C10 exit; this change adds no retry timeout or editable paused stat
 
 | GUI HostCommand | Host state change | Repeated request after reply loss | Message allowed to thaw its freeze | Witness or reason |
 |---|---|---|---|---|
-| `Attach` | Read current attachment state; initial launch has already transferred write authority. | Idempotent read. Initial loss retains the owned child and original Attach for Retry. | F: validated original foreground result; Status cannot complete it. | U s2h_lost_initial_attach_reply_keeps_owned_host_and_retries D10. |
+| `Attach` | Read current attachment state; initial launch has already transferred write authority. | Idempotent read. Initial loss retains the owned child and original Attach for Retry. | Fresh idempotent Attach result; Status cannot complete it. | U s2h_lost_initial_attach_reply_keeps_owned_host_and_retries D10. |
 | `Status` | Read current owner state; no manual publication. | Another heartbeat reads state again. A failed heartbeat creates no unknown publication. An existing unknown operation remains frozen. | None. Status never resolves an unknown operation. | U s2h_status_heartbeat_never_thaws_unknown_save_with_or_without_permit; U s2h_lost_save_floor_stays_frozen_until_exact_publisher_result D04, D12. |
 | `CurrentAttachment` | Read the current committed switch attachment. | F retains the original read; its result cannot evict an undelivered AcquireManual. | S: exact switch confirmation, then completed GUI handoff. | U s2h_lost_initial_manual_grant_keeps_original_request_for_retry; existing g05a_first_edit_undo_and_exact_switch_back |
 | `AdmitDestination` | Retain the native pin for the explicit person-picked destination. | The same path reuses its existing pinned capability before capacity or source/destination reinspection. The original enclosing First Save/Save As/rescue request remains retained. | F: validated original foreground result; Status cannot complete it. | U s2h_lost_destination_admission_and_manual_grant_replies_retry_in_context; U s2h_lost_save_as_and_preview_replies_replay_original_results D08. |
@@ -94,10 +101,10 @@ pre-existing C10 exit; this change adds no retry timeout or editable paused stat
 | `SaveSession` | Persist the registered isolated branch session. | F returns the original result without another session publication. | F: validated original foreground result; Status cannot complete it. This does not authorize a manual history change. | Existing registered live-session/save-or-close witnesses and shared F mechanism. |
 | `CloseSession` | Stop matching isolated sessions, persist their branch and close its registration. | F returns the original result after registration/choice consumption. | F: validated original foreground result; Status cannot complete it. This does not authorize a manual history change. | Existing registered-session retirement/close witnesses and shared F mechanism. |
 | `Shutdown` | Explicit originating Close ends the owned host. | Close still ends the context if the response is lost; child wait/kill and actual GUI source cleanup remain owned and idempotent. | None. The editing context is closing. | Existing L2/explicit-Close/host-Drop ownership witnesses; no recoverable editor freeze is created. |
-| `StartSession` | Create an isolated registered chat/agent branch session. | No automatic resend. Its registered branch remains visible in Studio and can be saved/closed there. A new chat request is a separate person action. | None. Chat never resolves a manual unknown operation. | Existing host session and registration targets; isolated branch session control creates no manual freeze. |
-| `SendMessage` | Enqueue input to the identified isolated agent session. | No automatic resend of an uncertain message. Session status and explicit stop/save/close remain available. | None. No manual authority is granted. | Existing host/chat/session tests. No editor freeze or publication result installation uses this reply. |
+| `StartSession` | Create an isolated registered chat/agent branch session. | No automatic resend. An unconfirmed reply does not latch manual L2. Its registered branch remains visible in Studio and can be saved/closed there. A new chat request is a separate person action. | None. Chat never resolves a manual unknown operation. | C1 keeps an unconfirmed transport result separate from confirmed retention loss. |
+| `SendMessage` | Enqueue input to the identified isolated agent session. | No automatic resend of an uncertain message. Retain its known session ID and retry read-only status. Explicit stop/save/close remain available. | None. No manual authority is granted. | C1 retains session identity across an unconfirmed message result. |
 | `InterruptSession` | Request stop for the identified isolated session. | Repeated stop converges; status/save/close remain available. | None. No manual authority is granted. | Existing host/chat stop tests; no manual freeze is created. |
-| `SessionStatus` | Read isolated session progress. | Repeat the read; missing chat status does not change manual authority. | None. It never resolves a manual unknown operation. | Existing chat polling/session tests; pure session read, no manual result installation. |
+| `SessionStatus` | Read isolated session progress. | Repeat the read for the retained session ID; missing chat status does not change manual authority. Confirmed retention loss follows L2. | None. It never resolves a manual unknown operation. | C1 s3_chat_status_reply_loss_keeps_pending_manual_work drops a real status reply with pending manual work. |
 
 ## Scope, identities and platform limits
 

@@ -1,0 +1,2306 @@
+{
+  "active_anchors": 443,
+  "catalog_count": 9,
+  "catalogs": [
+    {
+      "anchors": [
+        {
+          "case": "unfrozen-discrete",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "unfrozen-batch-import",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "unfrozen-live-coalesced",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "unfrozen-keyboard-undo",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "unfrozen-keyboard-redo",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "unfrozen-router-incident",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "unfrozen-queued-revision-batch",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "frozen-install-owner-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "frozen-install-cut-revision-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "frozen-install-pending-prefix-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "old-permit-generation-reused",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "closed-context-resumed",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "shadow-floor-install-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "shadow-recovery_close-install-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "gui-floor-install-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "gui-close-install-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "committed-command-reapplied",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "original-to-new-link-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "lease-before-close-publication",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "gesture-closed-before-suffix-reconciliation",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "full-floor-matrix-requires-shared-install",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "additive-fixtures-require-frozen-producers",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "replacement-parent-treated-as-continuous",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "pressure-floor-selection-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "recovery-batch-ids-replaced",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "intermediate-recovery-receipts-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        }
+      ],
+      "cases": 26,
+      "path": "scripts/ja1-s2-c10-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "source-project-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-branch-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-epoch-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-head-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-checkpoint-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-checkpoint-generation-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-floor-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-switch-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-revision-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-sequence-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "legacy-switch-field-not-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/receipts.rs"
+        },
+        {
+          "case": "original-id-digest-conflict-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/receipts.rs"
+        },
+        {
+          "case": "switch-receipt-not-atomic",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "receipt-publication-agreement-skipped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/publication.rs"
+        },
+        {
+          "case": "receipt-reader-agreement-skipped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery.rs"
+        },
+        {
+          "case": "raw-host-switch-declaration-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery.rs"
+        },
+        {
+          "case": "next-save-resets-switch-generation",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "selection-drops-saved-l",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "definite-refusal-keeps-old-actor-frozen",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "lease-before-restored-equivalence",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "confirmation-trusts-supplied-pointer",
+          "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json:confirmation-trusts-supplied-pointer"
+        },
+        {
+          "case": "receipt-grants-real-manual-authority",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "delayed-old-lease-acknowledged-after-return",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "delayed-old-lease-acknowledged-after-return",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "old-gui-actor-never-sealed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "shadow-resumed-before-gui-confirmation",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "restart-forgets-switch-confirmation",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "gui-resources-not-staged",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "cold-open-drops-restored-view",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "host-releases-target-pin-before-quota-retry",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-releases-target-pin-before-quota-retry",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-offers-prepared-target-for-retirement",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-removes-prepared-target-directly",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-ignores-existing-target-head",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-ignores-existing-target-head",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "host-resurrects-retired-target",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-resurrects-retired-target",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-fork-without-registration",
+          "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json:host-fork-without-registration"
+        },
+        {
+          "case": "host-reopen-without-registration",
+          "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json:host-reopen-without-registration"
+        },
+        {
+          "case": "host-ignores-live-session",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-ignores-live-specialist-base",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-resumes-after-failed-rescue",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "host-resumes-after-unknown-rescue",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "host-late-a-replaces-b",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "later-r-save-drops-l",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "later-l-save-drops-r",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "first-r-save-remints-shared-batches",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "return-save-remints-old-batches",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "original-retry-starts-another-selection",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "superseded-receipt-selects-historical-branch",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "superseded-receipt-selects-historical-branch",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "rescue-handoff-keeps-host-switch-freeze",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        }
+      ],
+      "cases": 47,
+      "path": "scripts/ja1-s2-c11-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "source-project-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-branch-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-epoch-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-head-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-checkpoint-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-checkpoint-generation-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-floor-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-switch-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-revision-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "source-sequence-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "legacy-switch-field-not-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/receipts.rs"
+        },
+        {
+          "case": "original-id-digest-conflict-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/receipts.rs"
+        },
+        {
+          "case": "switch-receipt-not-atomic",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "receipt-publication-agreement-skipped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/publication.rs"
+        },
+        {
+          "case": "receipt-reader-agreement-skipped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery.rs"
+        },
+        {
+          "case": "raw-host-switch-declaration-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery.rs"
+        },
+        {
+          "case": "next-save-resets-switch-generation",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "selection-drops-saved-l",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "definite-refusal-keeps-old-actor-frozen",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "lease-before-restored-equivalence",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "confirmation-trusts-supplied-pointer",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "receipt-grants-real-manual-authority",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "delayed-old-lease-acknowledged-after-return",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "delayed-old-lease-acknowledged-after-return",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/manual.rs"
+        },
+        {
+          "case": "old-gui-actor-never-sealed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "shadow-resumed-before-gui-confirmation",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "restart-forgets-switch-confirmation",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "gui-resources-not-staged",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "cold-open-drops-restored-view",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "host-releases-target-pin-before-quota-retry",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-releases-target-pin-before-quota-retry",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-offers-prepared-target-for-retirement",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-removes-prepared-target-directly",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-ignores-existing-target-head",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-ignores-existing-target-head",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "host-resurrects-retired-target",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-resurrects-retired-target",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "host-fork-without-registration",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "host-reopen-without-registration",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "host-ignores-live-session",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-ignores-live-specialist-base",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "host-resumes-after-failed-rescue",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "host-resumes-after-unknown-rescue",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "host-late-a-replaces-b",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "later-r-save-drops-l",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "later-l-save-drops-r",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "first-r-save-remints-shared-batches",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "return-save-remints-old-batches",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "original-retry-starts-another-selection",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "superseded-receipt-selects-historical-branch",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "superseded-receipt-selects-historical-branch",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "rescue-handoff-keeps-host-switch-freeze",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "n2-resume-sealed-a-again",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "n2-sealed-disclosure-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "n2-app-claims-unknown-and-live-a",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "n2-open-b-choice-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "n2-host-capture-enters-saved-path",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "missing-evidence-fails-before-bounded-diagnostic",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue_selection.rs"
+        },
+        {
+          "case": "pin-refusal-reply-decodes-current-history-again",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/switch.rs"
+        },
+        {
+          "case": "composed-gui-source-not-sealed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "composed-receipt-grants-lease",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "host-drop-deletes-gui-root-orderly",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-orderly",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-orderly",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-orderly",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-orderly",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-orderly",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/storage_budget.rs"
+        },
+        {
+          "case": "host-drop-deletes-gui-root-unwind",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-unwind",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-unwind",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-unwind",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-unwind",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "host-drop-uncharges-gui-source-unwind",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/storage_budget.rs"
+        },
+        {
+          "case": "composed-host-drop-uncharges-source",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "composed-host-drop-uncharges-source",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "composed-host-drop-uncharges-source",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "composed-host-drop-uncharges-source",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "composed-host-drop-uncharges-source",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/storage_budget.rs"
+        },
+        {
+          "case": "host-compaction-loses-warning-summary",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "host-missing-byte-details-hidden",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_rescue.rs"
+        },
+        {
+          "case": "repeat-c4-fresh-open-guard-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "repeat-c4-committed-selection-phase-erased",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c4-portable-nonzero-switch-refused",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c4-compaction-attachment-drops-independent-root",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-ack-exact-receipt-lookup-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/receipts.rs"
+        },
+        {
+          "case": "repeat-c4-selected-pin-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c4-selected-pin-released-before-activation",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c4-resolve-by-automatic-list-position",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c4-require-continued-automatic-membership",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c4-restored-history-truncated",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-shared-prefix-batches-reminted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c4-occurrences-restamped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c4-floor-forgets-shared-origins",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c4-definite-pointer-not-refreshed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c4-reconciled-pointer-not-refreshed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c4-later-save-resets-switch-generation",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c4-retry-allocates-new-target",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c4-frozen-direct-save-allowed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c4-pin-admission-charge-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c4-raw-switch-requirement-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-supported-switch-unconditionally-refused",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c4-record-ack-edge-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-record-digest-only-ack",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-two-predecessor-validator-weakened",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "repeat-c4-record-role-admission-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-record-edge-admission-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-record-schema-accepted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-record-omitted-before-publication",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-provenance-count-unbounded",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-provenance-overflow-lost",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-provenance-treated-as-absent",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-origin-digest-conflict-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-l1-document-payload-change",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-l1-document-payload-change",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-l1-batch-payload-change",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-l1-batch-payload-change",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-l1-input-payload-change",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-l1-input-payload-change",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-independent-projection-root-dropped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/restore.rs"
+        },
+        {
+          "case": "repeat-c4-current-provenance-summarized",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-current-omission-dropped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-oversized-raw-role-hidden",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery.rs"
+        },
+        {
+          "case": "repeat-c4-archived-raw-switch-requirement-skipped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery.rs"
+        },
+        {
+          "case": "repeat-c4-missing-raw-requirement-accepted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c4-rack-counted-as-third-predecessor",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c4-selected-predecessor-dropped",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "repeat-c4-b-activation-rewrites-origin-inputs",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-target-only-ordinary-publisher",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/publication.rs"
+        },
+        {
+          "case": "repeat-c5-target-only-c5-sparse-cache",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_recovery/publication.rs"
+        },
+        {
+          "case": "repeat-c5-select-before-definite-ordinary-save",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-refuse-legal-ordinary-floor",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c5-bypass-ordinary-select-history",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c5-unfreeze-selection-unknown",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c5-drop-l-on-later-r-save",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-drop-r-on-later-l-save",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-remint-shared-prefix-on-first-r-save",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-omit-quota-retirement-action",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-release-target-pin-before-quota-retry",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c5-release-target-pin-before-quota-retry",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-offer-prepared-target-for-retirement",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-remove-prepared-target-directly",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-existing-target-head-not-revalidated",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c5-resurrect-missing-existing-target",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c5-resurrect-missing-existing-target",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c5-retire-active-working-branch",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-retire-active-working-branch",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-retirement-without-explicit-consent",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-duplicate-retirement-acknowledged",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-resume-after-frozen-cancel",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "repeat-c5-resume-after-frozen-preview-refusal",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-resume-after-frozen-publication-failure",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-resume-after-frozen-unknown-b",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-late-a-seals-b",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-shares-original-core",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-record-not-published",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-drops-default-ack",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-drops-selected-p2",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "repeat-c5-rotation-forgets-ack-record",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-ack-retirement-clears-independent-evidence",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-silent-recovery-omission",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_rescue.rs"
+        },
+        {
+          "case": "repeat-c5-one-consent-authorizes-both-losses",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_rescue.rs"
+        },
+        {
+          "case": "repeat-c5-silent-history-trim",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_rescue.rs"
+        },
+        {
+          "case": "repeat-c5-skip-omission-alone-before-trim",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue_selection.rs"
+        },
+        {
+          "case": "repeat-c5-skip-omission-alone-before-trim",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue_selection.rs"
+        },
+        {
+          "case": "repeat-c5-omit-available-roots-for-quota",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue_selection.rs"
+        },
+        {
+          "case": "repeat-c5-omitted-inventory-reintroduced",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "repeat-c5-close-leaves-uncertain-source-reuse",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "repeat-c5-copied-record-profile-not-admitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue_selection.rs"
+        },
+        {
+          "case": "repeat-c5-selected-graph-bounds-not-admitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue_selection.rs"
+        },
+        {
+          "case": "repeat-c5-late-a-replaces-active-core",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-no-ticket-reconcile-restores-live-history",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c5-exact-ticket-settlement-omitted-a",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c5-exact-ticket-settlement-omitted-b",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle.rs"
+        },
+        {
+          "case": "repeat-c5-published-ack-has-no-dedicated-edge",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/rescue_record.rs"
+        },
+        {
+          "case": "repeat-c5-published-ack-counted-as-third-predecessor",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-preliminary-save-unknown-resumes-o",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-completed-reply-allocates-another-r",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-overwrite-l-on-later-r-save",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-remint-shared-prefix-on-later-l-save",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-owned-graph-copy-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-rewrites-input-profile",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-closes-open-gesture",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-rescue-discards-redo",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-unknown-preliminary-save-acknowledged",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-activate-without-selection-root",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c5-activate-without-selection-root",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_switch.rs"
+        },
+        {
+          "case": "repeat-c5-activate-without-selection-root",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-registered-guard-routes-to-current-project",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "repeat-c5-registered-guard-routes-to-current-project",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "repeat-c5-original-guard-blocks-independent-b-copy",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-registered-original-ticket-not-settled",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue.rs"
+        },
+        {
+          "case": "repeat-c5-registered-proposal-loses-floored-prefix",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "repeat-c5-specialist-base-not-in-branch-publication",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "repeat-c5-registered-close-warning-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "repeat-c5-stale-guard-replaces-canonical-state",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "repeat-c5-prune-independent-root-for-rescue",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/rescue_selection.rs"
+        },
+        {
+          "case": "repeat-c5-active-b-new-unknown-uses-old-copy-status",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "repeat-c4-frozen-owner-install-core-witness",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "s2h-app-host-disconnect-implicitly-closes-source",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        }
+      ],
+      "cases": 172,
+      "path": "scripts/ja1-s2-c12-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "project_snapshot_growth_omits_actual_delta_charge",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/storage_budget.rs"
+        },
+        {
+          "case": "project_snapshot_proof_ignores_exact_current_digest",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "project_snapshot_growth_omits_metadata_scratch_admission",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "project_foreground_cut_skips_owner_snapshot_growth",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "project_originating_close_keeps_old_service_clones_open",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "project_reader_drops_actual_snapshot_reservation_before_retirement",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "project_explicit_close_attempts_cleanup_while_real_reader_is_live",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "project_explicit_close_attempts_cleanup_while_real_reader_is_live",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "project_failed_cleanup_is_falsely_marked_closed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "project_failed_cleanup_is_falsely_marked_closed",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/store.rs"
+        },
+        {
+          "case": "project_cleanup_reply_retry_unlinks_reused_session_name",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/namespace/linux.rs"
+        },
+        {
+          "case": "project_prepared_actor_resumes_before_old_seal_and_leaks_on_failure",
+          "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json::old-gui-actor-never-sealed"
+        },
+        {
+          "case": "project_failed_prepared_view_cleanup_resumes_candidate",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "project_publication_reply_reads_live_actor_after_io",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "project_publisher_report_ignores_exact_head_identity",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "project_save_as_reopens_path_instead_of_consuming_inspection",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "project_selection_discards_actual_preliminary_save_report",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "project_preliminary_report_uses_active_r_instead_of_surviving_l",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "project_selection_discards_committed_preliminary_reconciliation_report",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "app_l2_action_gate_omitted_for_lost_retention",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "app_failed_host_launch_implicitly_closes_originating_source",
+          "superseded_by": "s2h-prelaunch-failure-implicitly-closes-source"
+        },
+        {
+          "case": "app_host_disconnect_implicitly_closes_gui_source",
+          "superseded_by": "scripts/ja1-s2-c12-mutation-cases.json::s2h-app-host-disconnect-implicitly-closes-source"
+        },
+        {
+          "case": "app_ordinary_publisher_floor_uses_fresh_actor_activation",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "app_recovery_activation_retains_hidden_rescue_actor",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "app_publisher_digest_replaced_by_post_io_live_core_digest",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "app_committed_activation_rejects_matching_publisher_digest",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "app_person_picked_destination_skips_explicit_host_grant",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "app_person_picked_destination_discards_granted_forwarded_scope",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "project_source_read_chunk_bound_omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "project_source_open_ignores_exact_admitted_descriptor",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/source_boundary.rs"
+        },
+        {
+          "case": "host_snapshot_digest_guard_omitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "claude_child_authorization_value_omitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/drivers.rs"
+        },
+        {
+          "case": "gui-bootstrap-initial-shadow-snapshot-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "named-gui-shadow-snapshot-install-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "app-bootstrap-replaces-frozen-gui-history-with-empty-core",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "app-orderly-host-close-does-not-reap-child",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "root-header-unicode-escaping-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "root-header-path-expands-child-environment",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        }
+      ],
+      "cases": 36,
+      "path": "scripts/ja1-s2-c8-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "accepted-command-count-overflow",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "exact-byte-boundary-refused",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "accepted-byte-overflow",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "pending-byte-charge-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "nonprefix-ack-releases-capacity",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "stale-permit-generation-admitted",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "raw-send-bypasses-permit",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "raw-request-bypasses-permit",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "manual-owner-install-bypass",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "manual-owner-floor-bypass",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "frozen-permit-admitted",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "sealed-permit-admitted",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "second-editor-admitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "wrong-client-history-admitted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "viewer-controls-manual",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "dropped-intermediate-message",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "ack-without-b5",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "manual-predecessor-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "accepted-history-hash-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "accepted-batch-identity-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "accepted-cursor-hash-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "actor-batch-id-replaced",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "snapshot-replaces-history-stream",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "app-producer-sends-without-permit",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "app-pending-labelled-saved",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "capacity-check-after-live-mutation",
+          "superseded_by": "scripts/ja1-s2h-fix2-mutation-cases.json:refused-candidate-keeps-open-operations"
+        },
+        {
+          "case": "foreign-owner-releases-ack-capacity",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        },
+        {
+          "case": "unadmitted-input-accepted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/manual_history.rs"
+        },
+        {
+          "case": "input-context-hash-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/manual_history.rs"
+        },
+        {
+          "case": "accepted-command-digest-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/manual_history.rs"
+        },
+        {
+          "case": "accepted-command-id-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/manual_history.rs"
+        },
+        {
+          "case": "accepted-outer-batch-id-ignored",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/manual_history.rs"
+        },
+        {
+          "case": "role-refusal-leaks-unadmitted-metadata",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "local-preview-event-withheld",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor.rs"
+        }
+      ],
+      "cases": 34,
+      "path": "scripts/ja1-s2-c9-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "legacy-enable-replaces-local-writer",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/app.rs"
+        },
+        {
+          "case": "legacy-handover-releases-before-studio-save",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "failed-bootstrap-never-reacquires-local-writer",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "unknown-reply-latches-retention-loss",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "confirmed-death-is-treated-as-unknown",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "installed-switch-state-is-discarded",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "duplicate-confirm-refuses-original-grant",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "failed-confirm-keeps-undelivered-lease",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "source-dispatch-bypasses-permit",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_workflow.rs"
+        },
+        {
+          "case": "relink-dispatch-bypasses-input-refusal",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_workflow.rs"
+        },
+        {
+          "case": "lut-dispatch-bypasses-input-refusal",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_workflow.rs"
+        },
+        {
+          "case": "relink-starts-probe-before-admission",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_workflow.rs"
+        },
+        {
+          "case": "lut-starts-worker-before-admission",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_workflow.rs"
+        },
+        {
+          "case": "still-placement-bypasses-permit",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_bin.rs"
+        },
+        {
+          "case": "av-placement-bypasses-permit",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_bin.rs"
+        },
+        {
+          "case": "video-placement-bypasses-permit",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/media_bin.rs"
+        },
+        {
+          "case": "stranded-ab-restore-bypasses-permit",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/inspector_ui.rs"
+        },
+        {
+          "case": "save-disclosure-cache-is-never-used",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "registered-digest-cache-is-never-used",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "registered-digest-never-invalidates",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session.rs"
+        },
+        {
+          "case": "save-disclosure-never-invalidates",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "known-refusal-becomes-unknown-reply",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "duplicate-confirm-binds-unrelated-root-metadata",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "s2h-prelaunch-failure-implicitly-closes-source",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "recovery-reply-loss-drops-owned-host",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host_recovery.rs"
+        },
+        {
+          "case": "confirmation-trusts-supplied-pointer",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "host-fork-without-registration",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "host-reopen-without-registration",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/durable.rs"
+        },
+        {
+          "case": "repeat-c5-registered-close-warning-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/editing_session/recovery.rs"
+        },
+        {
+          "case": "s2h-app-host-disconnect-implicitly-closes-source",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "app-bootstrap-replaces-frozen-gui-history-with-empty-core",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "intermediate-recovery-receipts-omitted",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        }
+      ],
+      "cases": 32,
+      "path": "scripts/ja1-s2h-fix1-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "stale-cached-history-segment",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "sha-ni-round-word-order",
+          "matches": 1,
+          "path": "crates/kinewright-hash/src/x86.rs"
+        },
+        {
+          "case": "refused-candidate-keeps-open-operations",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "floor-keeps-stale-history-cache",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "history-byte-accounting-skips-total-cap",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        },
+        {
+          "case": "serialized-chunk-allocates-before-cap-refusal",
+          "matches": 1,
+          "path": "crates/kinewright-core/src/actor/manual_history.rs"
+        }
+      ],
+      "cases": 6,
+      "path": "scripts/ja1-s2h-fix2-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "lost-begin-refuses-matching-original",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "begin-retry-accepts-another-client-or-cut",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "lost-floor-confirm-discards-close-handoff",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "gui-republishes-floor-after-lost-confirm",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host_recovery.rs"
+        },
+        {
+          "case": "lost-close-confirm-discards-current-grant",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/recovery.rs"
+        },
+        {
+          "case": "completed-switch-keeps-pending-state",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "status-thaws-unknown-operation",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "unknown-operation-ignores-bootstrap-without-permit",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "replayed-foreground-result-executes-again",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "save-as-lost-result-is-not-retained",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "first-save-admission-lost-result-is-not-retained",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "rescue-lost-result-executes-without-choice-again",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/manual.rs"
+        },
+        {
+          "case": "lost-manual-grant-is-replaced-by-current-query",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "read-only-heartbeat-error-freezes-an-operation",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "post-grant-identity-escapes-revoke-transaction",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/switch.rs"
+        },
+        {
+          "case": "initial-attach-reply-loss-kills-live-owner",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "initial-manual-acquisition-error-is-not-fenced",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_attachment.rs"
+        },
+        {
+          "case": "destination-admission-reinspects-an-already-committed-target",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        },
+        {
+          "case": "identity-refusal-is-treated-as-an-original-result",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/mod.rs"
+        }
+      ],
+      "cases": 19,
+      "path": "scripts/ja1-s2h-fix3-mutation-cases.json"
+    },
+    {
+      "anchors": [
+        {
+          "case": "completed-switch-keeps-pending-state",
+          "matches": 1,
+          "path": "crates/kinewright-app/src/ja1_host.rs"
+        },
+        {
+          "case": "c1-attach-role-binding",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-acquiremanual",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-commithistory",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-prepareswitch",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-switch",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-switchreceipt",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-confirmswitch",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-snapshot-new",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-role-snapshot-replay",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-default-deny-save",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-default-deny-scripted",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-default-deny-session",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-default-deny-session-control",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-default-deny-shutdown",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-narrowed-request-roots",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-narrowed-issued-roots",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-bearer-resolution",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-detach-revocation",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-active-credential-cap",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-request-project-binding",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-foreground-subject-before-replay",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "c1-source-admission-private-bootstrap",
+          "matches": 1,
+          "path": "crates/kinewright-agent/src/writer_host/auth.rs"
+        },
+        {
+          "case": "store-candidate-version-index",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "store-candidate-feedback-index",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "store-candidate-run-index",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "store-floor-feedback-index",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "store-switch-feedback-index",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "store-a1-acknowledged-feedback-index",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "store-copy-feedback-index",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_copy.rs"
+        },
+        {
+          "case": "store-feedback-proof-dependency",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_records.rs"
+        },
+        {
+          "case": "store-run-reader-dependency",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_records.rs"
+        },
+        {
+          "case": "store-atomic-batch-consumption",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-orchestration-support-declaration",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-metadata-scope",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-metadata-project",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-metadata-epoch",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-metadata-generation",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-typed-metadata-ingress",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/bundle_commit.rs"
+        },
+        {
+          "case": "store-metadata-digest",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/receipts.rs"
+        },
+        {
+          "case": "store-metadata-text-limit",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-metadata-point-limit",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/receipts.rs"
+        },
+        {
+          "case": "store-metadata-comment-count",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        },
+        {
+          "case": "store-metadata-comment-count",
+          "matches": 1,
+          "path": "crates/kinewright-project/src/studio_store.rs"
+        }
+      ],
+      "cases": 43,
+      "path": "scripts/ja1-s3-c1-mutation-cases.json"
+    }
+  ],
+  "multi_match": 0,
+  "superseded": 7,
+  "zero_match": 0
+}

@@ -671,6 +671,36 @@ fn s2h_foreground_result_replay_is_exact_bounded_and_client_bound() {
         serde_json::to_vec(&repeated).unwrap()
     );
     assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
+    let branch = host
+        .owner_mut()
+        .unwrap()
+        .fork_durable_branch("M3-interleaved-session")
+        .unwrap()
+        .branch_id()
+        .clone();
+    let interleaved = run(&mut host, HostCommand::SaveSession { branch });
+    assert!(interleaved.error.is_none(), "{:?}", interleaved.error);
+    let current_status = serde_json::to_value(host.status()).unwrap();
+    let cached_result = host.execute_operation(
+        HostCommand::Save {
+            snapshot: HostSnapshot::capture(host.core()).unwrap(),
+        },
+        roots.clone(),
+        Some(&client),
+        Some(1),
+    );
+    assert!(cached_result.error.is_none(), "{:?}", cached_result.error);
+    assert_eq!(
+        serde_json::to_value(&cached_result.status).unwrap(),
+        current_status,
+        "M3_REPLAY_CURRENT_STATUS"
+    );
+    let mut exact = cached_result;
+    exact.status = reply.status.clone();
+    assert_eq!(
+        serde_json::to_value(exact).unwrap(),
+        serde_json::to_value(reply).unwrap()
+    );
     for (identity, operation) in [
         (client.clone(), 0),
         ("x".repeat(64), 1),

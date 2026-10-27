@@ -2,8 +2,9 @@
 use kinewright_agent::{
     ScriptedCall, ScriptedTurn,
     writer_host::{
-        HOST_PROTOCOL, HostAuth, HostClient, HostCommand, HostCommandOwner, HostConfig, HostError,
-        HostOrigin, HostRequest, HostSnapshot, SessionRoots, WriterHost,
+        AttachmentRole, HOST_PROTOCOL, HostAuth, HostClient, HostCommand,
+        HostCommandOwner as RawHostCommandOwner, HostConfig, HostError, HostOrigin, HostRequest,
+        HostSnapshot, SessionRoots, WriterHost,
     },
 };
 use kinewright_core::{Core, Document};
@@ -16,6 +17,72 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+
+struct HostCommandOwner {
+    owner: RawHostCommandOwner,
+    auth: HostAuth,
+    project: String,
+    editor: Option<String>,
+}
+
+impl HostCommandOwner {
+    fn open(configuration: HostConfig) -> Result<Self, HostError> {
+        let project = configuration.project.clone();
+        let roots = configuration.roots.clone();
+        let mut owner = RawHostCommandOwner::open(configuration)?;
+        let auth =
+            owner.issue_attachment("s2-direct-fixture".into(), AttachmentRole::Editor, roots)?;
+        Ok(Self {
+            owner,
+            auth,
+            project,
+            editor: None,
+        })
+    }
+
+    fn execute(
+        &mut self,
+        command: HostCommand,
+        roots: SessionRoots,
+    ) -> kinewright_agent::writer_host::HostReply {
+        let editor = match &command {
+            HostCommand::AcquireManual { client }
+            | HostCommand::CommitHistory { client, .. }
+            | HostCommand::BeginRecovery { client, .. }
+            | HostCommand::ConfirmSwitch { client, .. } => Some(client.clone()),
+            HostCommand::PublishBarrier { barrier }
+            | HostCommand::ConfirmBarrier { barrier, .. } => Some(barrier.client.clone()),
+            _ => self.editor.clone(),
+        };
+        let reply = self.owner.execute_attached(
+            &self.auth,
+            HostRequest {
+                editor,
+                operation: None,
+                protocol: HOST_PROTOCOL,
+                project: self.project.clone(),
+                roots,
+                command,
+            },
+        );
+        if let Some(lease) = &reply.manual_lease {
+            self.editor = Some(lease.client.clone());
+        }
+        reply
+    }
+}
+
+impl std::ops::Deref for HostCommandOwner {
+    type Target = RawHostCommandOwner;
+    fn deref(&self) -> &Self::Target {
+        &self.owner
+    }
+}
+impl std::ops::DerefMut for HostCommandOwner {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.owner
+    }
+}
 
 fn durable_test_root() -> &'static Path {
     Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -448,9 +515,16 @@ fn host_owns_scripted_session_after_gui_detach() {
     let root = temp("c8-session");
     let directory = root.path("source-电影-🎬");
     std::fs::create_dir(&directory).unwrap();
-    let mut host = ProcessHost::start(config(&directory, None));
+    let host = WriterHost::start(config(&directory, None)).unwrap();
+    let gui = host
+        .attach(
+            "gui-editor".into(),
+            AttachmentRole::Editor,
+            roots(&directory),
+        )
+        .unwrap();
     let reply = successful(
-        &host.client,
+        &gui,
         HostCommand::StartScripted {
             turns: vec![ScriptedTurn::new(
                 vec![ScriptedCall {
@@ -463,17 +537,19 @@ fn host_owns_scripted_session_after_gui_detach() {
         },
     );
     let session = reply.session.expect("host assigned a session").id;
-    successful(&host.client, HostCommand::Detach);
-    let viewer = HostClient::connect(
-        host.client.endpoint().clone(),
-        host.client.bootstrap().auth,
-        roots(&directory),
-    )
-    .unwrap();
+    successful(&gui, HostCommand::Detach);
+    assert!(gui.request(HostCommand::SessionStatus { session }).is_err());
+    let observer = host
+        .attach(
+            "gui-editor".into(),
+            AttachmentRole::Editor,
+            roots(&directory),
+        )
+        .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut events = Vec::new();
     loop {
-        let status = successful(&viewer, HostCommand::SessionStatus { session })
+        let status = successful(&observer, HostCommand::SessionStatus { session })
             .session
             .unwrap();
         assert_eq!(status.id, session);
@@ -499,7 +575,7 @@ fn host_owns_scripted_session_after_gui_detach() {
         );
         std::thread::park_timeout(Duration::from_millis(5));
     }
-    host.orderly();
+    host.shutdown().unwrap();
 }
 
 fn lifetime_participant() {
@@ -1080,11 +1156,16 @@ fn lost_callback_refuses_all_host_publication_routes() {
         HostCommand::CloseSession { branch },
     ];
     for command in commands {
+        let expected = if matches!(command, HostCommand::AdmitDestination { .. }) {
+            "role_refused"
+        } else {
+            "retention_lost"
+        };
         let reply = host.execute(command, roots(root.root()));
         assert_eq!(
             reply.error.as_ref().map(|e| e.code.as_str()),
-            Some("retention_lost"),
-            "all publication routes must refuse at ownership admission before their ordinary preconditions"
+            Some(expected),
+            "role admission precedes ownership proof; authorized publication routes refuse before ordinary preconditions"
         );
         assert!(!reply.status.retention_proven);
         assert_eq!(admission::tree(root.root()), before);

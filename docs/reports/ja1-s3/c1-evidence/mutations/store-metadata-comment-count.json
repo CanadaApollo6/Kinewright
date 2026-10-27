@@ -1,0 +1,41 @@
+{
+  "name": "store-metadata-comment-count",
+  "witness": "linux::s3_metadata_retry_and_admission",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-project/src/studio_store.rs",
+      "                if previous.is_none()\n                    && feedback.revisions.len() as u64 >= self.store.limits().comments",
+      "                if false"
+    ],
+    [
+      "crates/kinewright-project/src/studio_store.rs",
+      "        if v.revisions.len() as u64 > l.comments\n            || v.batches.len() as u64 > l.comments",
+      "        if v.batches.len() as u64 > l.comments"
+    ]
+  ],
+  "expected_red": {
+    "text": "S3_METADATA_COMMENT_LIMIT",
+    "location": null
+  },
+  "baseline_manifest_sha256": "67edb9d029a17c4eb22b15fb860cd6167841fc3bcd12e3b4a4a5928a9f22bf81",
+  "witness_sha256": "c3e043d4e5f041bbdbed9c83dafb815b265f3a057269715763611077d3fa18bf",
+  "source_sha256": {
+    "crates/kinewright-project/src/studio_store.rs": "e04bc73e80c393f4e765a3259a429959381b649d3e4dc2384a6c3e9cc6da61d4"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-project/src/studio_store.rs": "1b00eb9577a2b0d33e1a8f8b7d27008ac6e18f4ee6187598b326366192afc387"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_metadata_retry_and_admission -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "4c407f8792427ad1da861f431b4dc7a8aad1b6e44169719b779acc16cd3d642f",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.85s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "4fd5ee3b9d5535e84c76df630a924417119259205158c028c168f15865a0653a",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.91s"
+  ],
+  "restored": true
+}

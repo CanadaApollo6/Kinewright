@@ -155,9 +155,6 @@ impl StudioRoot {
         }
         if let Some(reference) = [
             self.creation_brief_ref.as_ref(),
-            self.version_index_ref.as_ref(),
-            self.feedback_index_ref.as_ref(),
-            self.run_index_ref.as_ref(),
             self.claim_index_ref.as_ref(),
         ]
         .into_iter()
@@ -179,6 +176,15 @@ impl StudioRoot {
                 return Err(BundleError::Corrupt(
                     "Studio reference kind mismatch".into(),
                 ));
+            }
+        }
+        for (reference, kind) in [
+            (&self.version_index_ref, RecordKind::VersionIndex),
+            (&self.feedback_index_ref, RecordKind::FeedbackIndex),
+            (&self.run_index_ref, RecordKind::RunIndex),
+        ] {
+            if let Some(reference) = reference {
+                crate::studio_records::kind(reference, kind)?;
             }
         }
         if self.receipt_index_ref.is_some() && self.issuer_state_ref.is_none() {
@@ -205,6 +211,10 @@ impl StudioRoot {
             self.input_manifest_ref.clone(),
             self.store_manifest_ref.clone(),
         ];
+        refs.extend(self.version_index_ref.clone());
+        refs.extend(self.feedback_index_ref.clone());
+        refs.extend(self.run_index_ref.clone());
+        refs.extend(self.claim_index_ref.clone());
         refs.extend(self.receipt_index_ref.clone());
         refs.extend(self.issuer_state_ref.clone());
         refs
@@ -731,6 +741,7 @@ impl LoadedBundle {
                 .map_or_else(BTreeMap::new, |v| (**v).clone()),
             pending_command: None,
             pending_result: None,
+            pending_metadata: None,
             last_collection_error: None,
             pending_save: None,
             pending_copy_source: None,
@@ -785,6 +796,7 @@ pub struct ProjectBundle {
     pub(crate) issuers: BTreeMap<crate::receipts::IssuerId, crate::receipts::IssuerState>,
     pub(crate) pending_command: Option<StorageReservation<crate::receipts::CommandEnvelope>>,
     pub(crate) pending_result: Option<crate::receipts::ReceiptResult>,
+    pub(crate) pending_metadata: Option<crate::studio_store::ValidatedMetadataUpdate>,
 }
 pub(crate) struct PendingSave {
     pub(crate) core: Core,
@@ -1002,6 +1014,7 @@ impl ProjectBundle {
                 issuers: BTreeMap::new(),
                 pending_command: None,
                 pending_result: None,
+                pending_metadata: None,
                 last_collection_error: None,
                 pending_save: None,
                 pending_copy_source: None,
@@ -1065,6 +1078,10 @@ impl ProjectBundle {
             root.input_manifest_ref.clone(),
             root.store_manifest_ref.clone(),
         ];
+        refs.extend(root.version_index_ref.clone());
+        refs.extend(root.feedback_index_ref.clone());
+        refs.extend(root.run_index_ref.clone());
+        refs.extend(root.claim_index_ref.clone());
         refs.extend(root.receipt_index_ref.clone());
         refs.extend(root.issuer_state_ref.clone());
         Ok(refs)

@@ -610,6 +610,10 @@ impl HostAttachment {
         self.switch_state == SwitchState::Pending
     }
 
+    pub(super) fn pending_foreground(&self) -> bool {
+        self.pending_operation.is_some()
+    }
+
     fn foreground_request(&mut self, command: HostCommand) -> Result<HostReply, BundleError> {
         let operation = self.next_operation;
         self.next_operation = operation

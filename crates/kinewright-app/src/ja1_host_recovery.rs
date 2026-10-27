@@ -173,6 +173,16 @@ impl HostAttachment {
         if self.recovery.is_some() {
             return Ok(());
         }
+        let confirm_pending = self
+            .recovery_plan
+            .lock()
+            .map_err(|_| BundleError::Unsettled)?
+            .as_ref()
+            .is_some_and(|plan| matches!(plan, RecoveryPlan::Confirm(_)));
+        // Confirm belongs to the retained owner; initial recovery still uses C10.
+        if confirm_pending && self.confirmed_lost() {
+            return Err(BundleError::Identity(super::RETENTION_LOST_TEXT.into()));
+        }
         // This barrier precedes joining the submitted stream worker and every child operation.
         let cut = owner.recapture_host_recovery_cut()?;
         self.cut = Some(cut.clone());
@@ -231,6 +241,11 @@ impl HostAttachment {
             && prior_child
                 .as_mut()
                 .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
+        if restart && confirm_pending {
+            self.child = prior_child;
+            self.manual_inflight = inflight;
+            return Err(BundleError::Identity(super::RETENTION_LOST_TEXT.into()));
+        }
         let callback = if restart {
             let server = if let Some(reader) = &retained_source {
                 SourceServer::start(reader.clone()).map_err(host_error)?

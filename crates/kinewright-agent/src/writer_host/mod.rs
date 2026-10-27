@@ -356,13 +356,22 @@ pub struct WriterHost {
     auth: HostAuth,
     roots: SessionRoots,
     server: ServerThread,
+    owner: std::sync::Weak<Mutex<HostCommandOwner>>,
 }
 impl WriterHost {
     pub fn start(config: HostConfig) -> Result<Self, HostError> {
         Self::start_with_auth(config, HostAuth::generate()?)
     }
     pub fn start_with_auth(config: HostConfig, auth: HostAuth) -> Result<Self, HostError> {
-        let owner = HostCommandOwner::open(config.clone())?;
+        let mut owner = HostCommandOwner::open(config.clone())?;
+        owner.register_attachment(
+            auth.clone(),
+            "private-bootstrap".into(),
+            AttachmentRole::Editor,
+            config.roots.clone(),
+            true,
+        )?;
+        let owner = Arc::new(Mutex::new(owner));
         let roots = config.roots.canonicalize()?;
         let (listener, address) = bind_loopback()?;
         let endpoint = HostEndpoint {
@@ -378,7 +387,7 @@ impl WriterHost {
                 auth: auth.clone(),
                 roots: roots.clone(),
             },
-            owner: Mutex::new(owner),
+            owner: Arc::clone(&owner),
             ingress: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         let router = axum::Router::new()
@@ -391,7 +400,25 @@ impl WriterHost {
             auth,
             roots,
             server,
+            owner: Arc::downgrade(&owner),
         })
+    }
+    /// Trusted local issuance. This method is never exposed as an HTTP or MCP command.
+    pub fn attach(
+        &self,
+        subject: String,
+        role: AttachmentRole,
+        roots: SessionRoots,
+    ) -> Result<HostClient, HostError> {
+        let owner = self
+            .owner
+            .upgrade()
+            .ok_or_else(|| HostRefusal::new("attachment_refused", "host stopped"))?;
+        let auth = owner
+            .lock()
+            .map_err(|_| HostRefusal::new("retention_lost", RETENTION_LOST))?
+            .issue_attachment(subject, role, roots.clone())?;
+        HostClient::connect(self.endpoint.clone(), auth, roots)
     }
     #[must_use]
     pub fn client(&self) -> HostClient {
@@ -469,7 +496,7 @@ fn serve(
 struct HttpState {
     stop: Arc<tokio::sync::Notify>,
     bootstrap: HostBootstrap,
-    owner: Mutex<HostCommandOwner>,
+    owner: Arc<Mutex<HostCommandOwner>>,
     ingress: Arc<tokio::sync::Semaphore>,
 }
 fn check_headers(headers: &HeaderMap, bootstrap: &HostBootstrap) -> Result<(), StatusCode> {
@@ -484,10 +511,28 @@ fn check_headers(headers: &HeaderMap, bootstrap: &HostBootstrap) -> Result<(), S
     }
     Ok(())
 }
-async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
-    if let Err(status) = check_headers(request.headers(), &state.bootstrap) {
-        return status.into_response();
+fn check_host_headers(headers: &HeaderMap, state: &HttpState) -> Result<String, StatusCode> {
+    let value = |name| headers.get(name).and_then(|v| v.to_str().ok());
+    if value("x-kinewright-project") != Some(state.bootstrap.endpoint.project.as_str())
+        || value("x-kinewright-protocol") != Some("1")
+    {
+        return Err(StatusCode::FORBIDDEN);
     }
+    let bearer = value("authorization").ok_or(StatusCode::UNAUTHORIZED)?;
+    let owner = state
+        .owner
+        .lock()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    owner
+        .resolve_attachment(Some(bearer))
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    Ok(bearer.to_owned())
+}
+async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
+    let bearer = match check_host_headers(request.headers(), &state) {
+        Ok(bearer) => bearer,
+        Err(status) => return status.into_response(),
+    };
     let Ok(permit) = Arc::clone(&state.ingress).try_acquire_owned() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
@@ -524,14 +569,7 @@ async fn host_request(State(state): State<Arc<HttpState>>, request: Request) -> 
                 error: Some(HostRefusal::new("retention_lost", RETENTION_LOST)),
                 ..HostReply::default()
             },
-            |mut owner| {
-                owner.execute_operation(
-                    request.command,
-                    request.roots,
-                    request.editor.as_deref(),
-                    request.operation,
-                )
-            },
+            |mut owner| owner.execute_bearer(Some(&bearer), request),
         );
         if shutting_down && reply.error.is_none() {
             state.stop.notify_one();
@@ -551,9 +589,10 @@ fn json_response(value: &impl Serialize) -> Response {
     }
 }
 async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> Response {
-    if let Err(status) = check_headers(request.headers(), &state.bootstrap) {
-        return status.into_response();
-    }
+    let bearer = match check_host_headers(request.headers(), &state) {
+        Ok(bearer) => bearer,
+        Err(status) => return status.into_response(),
+    };
     let roots = request
         .headers()
         .get("x-kinewright-roots")
@@ -619,7 +658,17 @@ async fn mcp_request(State(state): State<Arc<HttpState>>, request: Request) -> R
                 state
                     .owner
                     .lock()
-                    .map(|mut owner| owner.execute(command, roots))
+                    .map(|mut owner| {
+                        let request = HostRequest {
+                            editor: None,
+                            operation: None,
+                            protocol: HOST_PROTOCOL,
+                            project: state.bootstrap.endpoint.project.clone(),
+                            roots,
+                            command,
+                        };
+                        owner.execute_bearer(Some(&bearer), request)
+                    })
                     .map_err(|_| ())
             })
             .await;
@@ -987,6 +1036,11 @@ impl BorrowedSourceReader for RemoteSource {
     reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
 )]
 pub struct HostCommandOwner {
+    attachments: Vec<auth::Attachment>,
+    #[cfg(test)]
+    dispatches: u64,
+    foreground_subject: Option<String>,
+    pending_read_pin: Option<kinewright_project::store::StorePin>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
     pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
@@ -1122,6 +1176,11 @@ impl HostCommandOwner {
             owner.freeze_manual_barrier()?;
         }
         let mut host = Self {
+            attachments: Vec::new(),
+            #[cfg(test)]
+            dispatches: 0,
+            foreground_subject: None,
+            pending_read_pin: None,
             prepared_owned_media: None,
             pending_switch: None,
             confirmed_switch: None,
@@ -1227,12 +1286,15 @@ impl HostCommandOwner {
         clippy::needless_pass_by_value,
         reason = "The same owned request boundary serves HTTP ingress and scoped observer callers"
     )]
-    pub fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
+    fn execute(&mut self, command: HostCommand, roots: SessionRoots) -> HostReply {
         let mut reply = HostReply::default();
         let result = roots.canonicalize().and_then(|roots| {
             let write = !matches!(
                 command,
-                HostCommand::Attach
+                HostCommand::ReadSnapshot { .. }
+                    | HostCommand::ReadFeedback { .. }
+                    | HostCommand::ReadSubmittedBatch { .. }
+                    | HostCommand::Attach
                     | HostCommand::CurrentAttachment
                     | HostCommand::SwitchReceipt { .. }
                     | HostCommand::Status
@@ -1376,6 +1438,10 @@ impl HostCommandOwner {
         roots: &SessionRoots,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
+        #[cfg(test)]
+        {
+            self.dispatches += 1;
+        }
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
         if self.recovering
             && !manual::connector_command(&command)
@@ -1394,6 +1460,60 @@ impl HostCommandOwner {
             .into());
         }
         match command {
+            HostCommand::Metadata { envelope, update } => {
+                use kinewright_project::{
+                    receipts::ReceiptLookup,
+                    studio_records::{MetadataChange, MetadataScope, ReviseResult},
+                };
+                let scope = match &update.change {
+                    MetadataChange::PublishSnapshot(_) => MetadataScope::Snapshot,
+                    MetadataChange::SaveFeedback(_)
+                    | MetadataChange::SaveVoice(_)
+                    | MetadataChange::SubmitBatch { .. } => MetadataScope::Feedback,
+                    MetadataChange::Orchestration { .. } => {
+                        return Err(HostRefusal::new(
+                            "unsupported_command",
+                            "orchestration dispatch belongs to H3",
+                        )
+                        .into());
+                    }
+                };
+                let result = self
+                    .owner_mut()?
+                    .metadata_command(&envelope, scope, &update)?;
+                reply.metadata = Some(match result {
+                    ReceiptLookup::Committed(receipt) | ReceiptLookup::Retired(receipt) => receipt,
+                    ReceiptLookup::IdPayloadConflict => {
+                        return Err(HostRefusal::new(
+                            "id_payload_conflict",
+                            "metadata retry changed the original payload",
+                        )
+                        .into());
+                    }
+                    _ => return Err(BundleError::Unsettled.into()),
+                });
+                if matches!(update.change, MetadataChange::SubmitBatch { .. }) {
+                    reply.revise_result = Some(ReviseResult::Waiting {
+                        reason: "Feedback is saved. No scheduler is attached.".into(),
+                    });
+                }
+            }
+            HostCommand::ReadSnapshot { key } => {
+                let pinned = self.owner()?.read_snapshot(&key)?;
+                reply.snapshot = Some(pinned.descriptor);
+                self.pending_read_pin = Some(pinned.pin);
+            }
+            HostCommand::ReadFeedback { reference } => {
+                let pinned = self.owner()?.read_feedback(&reference)?;
+                reply.feedback = Some(pinned.revision);
+                self.pending_read_pin = Some(pinned.pin);
+            }
+            HostCommand::ReadSubmittedBatch { batch } => {
+                let pinned = self.owner()?.read_submitted_batch(&batch)?;
+                reply.submitted_batch = Some(pinned.batch);
+                reply.submitted_revisions = pinned.revisions;
+                self.pending_read_pin = Some(pinned.pin);
+            }
             HostCommand::PrepareSwitch { target } => self.prepare_switch(target, reply)?,
             HostCommand::Switch { envelope } => self.publish_switch(&envelope, reply)?,
             HostCommand::SwitchReceipt { envelope } => self.lookup_switch(&envelope, reply)?,
@@ -2615,6 +2735,86 @@ pub(crate) async fn guard_mcp(
 mod tests {
     use super::*;
     #[test]
+    fn s3_portable_roles_revoke_and_refuse_before_manual_write_admission() {
+        let configuration = || HostConfig {
+            project: "portable-s3-roles".into(),
+            path: None,
+            roots: SessionRoots::default(),
+            origin: HostOrigin::Headless,
+        };
+        let host = WriterHost::start(configuration()).unwrap();
+        let viewer = host
+            .attach(
+                "person-viewer".into(),
+                AttachmentRole::Viewer,
+                SessionRoots::default(),
+            )
+            .unwrap();
+        let old = viewer.bootstrap();
+        let producer = host
+            .attach(
+                "snapshot-producer".into(),
+                AttachmentRole::Producer,
+                SessionRoots::default(),
+            )
+            .unwrap();
+        let before = host
+            .client()
+            .request(HostCommand::ReadHistory)
+            .unwrap()
+            .history;
+        for client in [&viewer, &producer] {
+            let reply = client
+                .request(HostCommand::AcquireManual {
+                    client: "x".repeat(64),
+                })
+                .unwrap();
+            assert_eq!(reply.error.unwrap().code, "role_refused");
+            assert_eq!(
+                host.client()
+                    .request(HostCommand::ReadHistory)
+                    .unwrap()
+                    .history,
+                before
+            );
+        }
+        assert_eq!(
+            viewer
+                .request(HostCommand::Shutdown)
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "role_refused"
+        );
+        assert!(viewer.request(HostCommand::Detach).unwrap().error.is_none());
+        assert!(viewer.request(HostCommand::Status).is_err());
+        host.shutdown().unwrap();
+        let replacement = WriterHost::start(configuration()).unwrap();
+        let stale =
+            HostClient::connect(replacement.endpoint().clone(), old.auth, old.roots).unwrap();
+        assert!(stale.request(HostCommand::Status).is_err());
+        let fresh = replacement
+            .attach(
+                "person-viewer".into(),
+                AttachmentRole::Viewer,
+                SessionRoots::default(),
+            )
+            .unwrap();
+        assert!(fresh.request(HostCommand::Status).unwrap().error.is_none());
+        assert_eq!(
+            fresh
+                .request(HostCommand::Shutdown)
+                .unwrap()
+                .error
+                .unwrap()
+                .code,
+            "role_refused"
+        );
+        replacement.shutdown().unwrap();
+    }
+
+    #[test]
     fn protocol_refusals_preserve_native_error_and_do_not_disclose_credentials() {
         let error = HostRefusal::from(BundleError::Io(std::io::Error::from_raw_os_error(13)));
         assert_eq!(error.code, "io");
@@ -2679,5 +2879,7 @@ mod tests {
 
 #[cfg(all(test, target_os = "linux"))]
 mod c12_tests;
+#[cfg(test)]
+mod ja_s3_host;
 #[cfg(all(test, target_os = "linux"))]
 mod s2h_tests;

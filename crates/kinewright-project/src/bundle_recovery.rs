@@ -171,6 +171,8 @@ pub(crate) fn base_apis() -> BTreeMap<String, u32> {
 }
 pub(crate) fn supported_apis() -> BTreeMap<String, u32> {
     let mut apis = base_apis();
+    apis.insert("studio".into(), 1);
+    apis.insert("orchestration".into(), 1);
     apis.insert("manual-switch".into(), 1);
     apis.insert("host-switch".into(), 1);
     apis.insert("rescue-copy".into(), 1);
@@ -196,10 +198,13 @@ pub(crate) fn validate_manifest_apis(
             return Err(BundleError::Unsupported("evidence attachment role".into()));
         }
     }
-    crate::rescue_record::check_apis(
-        &manifest.required_apis,
-        &crate::rescue_record::required_apis(generation, !manifest.evidence_roles.is_empty()),
-    )
+    let mut required =
+        crate::rescue_record::required_apis(generation, !manifest.evidence_roles.is_empty());
+    crate::studio_store::add_required_apis(
+        &mut required,
+        manifest.objects.iter().map(|r| r.record_kind),
+    );
+    crate::rescue_record::check_apis(&manifest.required_apis, &required)
 }
 pub(crate) fn validate_evidence(
     namespace: &ProjectNamespace,
@@ -847,6 +852,42 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             }};
         }
         match reference.record_kind {
+            RecordKind::VersionIndex => {
+                admit!(crate::studio_records::VersionIndex);
+            }
+            RecordKind::FeedbackIndex => {
+                admit!(crate::studio_records::FeedbackIndex);
+            }
+            RecordKind::FeedbackRevision => {
+                admit!(crate::studio_records::FeedbackRevision);
+            }
+            RecordKind::FeedbackBatch => {
+                admit!(crate::studio_records::FeedbackBatch);
+            }
+            RecordKind::RunIndex => {
+                admit!(crate::studio_records::RunIndex);
+            }
+            RecordKind::RunSnapshot => {
+                admit!(crate::studio_records::RunSnapshotRecord);
+            }
+            RecordKind::RunEventSegment => {
+                admit!(crate::studio_records::RunEventSegment);
+            }
+            RecordKind::RunEffect => {
+                admit!(crate::studio_records::RunEffectRecord);
+            }
+            RecordKind::RunRequest => {
+                admit!(crate::studio_records::RunRequestRecord);
+            }
+            RecordKind::RunDelivery => {
+                admit!(crate::studio_records::RunDeliveryRecord);
+            }
+            RecordKind::RunResult => {
+                admit!(crate::studio_records::RunResultRecord);
+            }
+            RecordKind::RunUsage => {
+                admit!(crate::studio_records::RunUsageRecord);
+            }
             RecordKind::Document => {
                 let _value = admit!(Document);
             }
@@ -941,6 +982,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             }
         }
     }
+    validate_studio_records(namespace, root, usage, limits)?;
     if fields != manifest.required_fields {
         return Err(BundleError::Unsupported(
             "raw field inventory differs from declaration".into(),
@@ -1329,4 +1371,141 @@ pub fn without_api_probe<T>(name: &str, run: impl FnOnce() -> T) -> T {
     MASKED_API.with(|mask| *mask.borrow_mut() = Some(name.into()));
     let _reset = Reset;
     run()
+}
+
+/// Cross-record binding is checked on fresh open and before root replacement.
+#[allow(clippy::too_many_lines)]
+pub(super) fn validate_studio_records(
+    namespace: &ProjectNamespace,
+    root: &crate::bundle::StudioRoot,
+    usage: &Arc<Mutex<StorageUsage>>,
+    limits: &StorageLimits,
+) -> Result<(), BundleError> {
+    use crate::studio_records::{
+        FeedbackBatch, FeedbackIndex, FeedbackRevision, RunDeliveryRecord, RunEffectRecord,
+        RunEventSegment, RunIndex, RunRequestRecord, RunResultRecord, RunSnapshotRecord,
+        RunUsageRecord, VersionIndex,
+    };
+    macro_rules! load {
+        ($ty:ty, $reference:expr) => {
+            read_record::<$ty>(namespace, $reference, usage, &mut BTreeSet::new(), limits)?
+        };
+    }
+    let versions = if let Some(r) = &root.version_index_ref {
+        Some(load!(VersionIndex, r))
+    } else {
+        None
+    };
+    if let Some(index) = &versions {
+        for descriptor in index.snapshots.values() {
+            let checkpoint = load!(BranchCheckpoint, &descriptor.checkpoint_ref);
+            if descriptor.key.project != root.project_id
+                && !root.origin_project_ids.contains(&descriptor.key.project)
+            {
+                return Err(BundleError::Identity("snapshot origin project".into()));
+            }
+            if checkpoint.head_id != descriptor.key.head
+                || checkpoint.document_ref != descriptor.document_ref
+                || checkpoint.document_hash != descriptor.key.document_hash
+                || checkpoint.input_manifest_ref != descriptor.input_manifest_ref
+                || checkpoint.lineage_ref != descriptor.lineage_ref
+            {
+                return Err(BundleError::Corrupt("snapshot checkpoint binding".into()));
+            }
+        }
+    }
+    let runs = if let Some(r) = &root.run_index_ref {
+        Some(load!(RunIndex, r))
+    } else {
+        None
+    };
+    if let Some(index) = &runs {
+        for run in index.runs.values() {
+            macro_rules! run_records {
+                ($refs:expr, $ty:ty, $field:ident) => {
+                    for r in $refs {
+                        let record = load!($ty, r);
+                        if record.$field != run.run_id {
+                            return Err(BundleError::Identity(
+                                "orchestration record run binding".into(),
+                            ));
+                        }
+                    }
+                };
+            }
+            for r in &run.snapshot_refs {
+                let record = load!(RunSnapshotRecord, r);
+                if record.view.run_id != run.run_id {
+                    return Err(BundleError::Identity("run snapshot binding".into()));
+                }
+            }
+            run_records!(&run.event_segment_refs, RunEventSegment, run_id);
+            run_records!(&run.effect_refs, RunEffectRecord, run_id);
+            run_records!(&run.request_refs, RunRequestRecord, run_id);
+            run_records!(&run.delivery_refs, RunDeliveryRecord, run_id);
+            run_records!(&run.result_refs, RunResultRecord, run_id);
+            run_records!(&run.usage_refs, RunUsageRecord, run_id);
+        }
+    }
+    if let Some(reference) = &root.feedback_index_ref {
+        let feedback = load!(FeedbackIndex, reference);
+        for (comment, revisions) in &feedback.revisions {
+            let mut previous = None;
+            for (ordinal, reference) in revisions.iter().enumerate() {
+                let revision = load!(FeedbackRevision, reference);
+                if revision.comment_id != *comment
+                    || revision.revision != ordinal as u64 + 1
+                    || revision.predecessor.as_ref() != previous
+                {
+                    return Err(BundleError::Corrupt("feedback revision chain".into()));
+                }
+                if versions
+                    .as_ref()
+                    .and_then(|v| v.snapshots.get(&revision.anchor.snapshot.version))
+                    .is_none_or(|d| d.key != revision.anchor.snapshot)
+                {
+                    return Err(BundleError::Corrupt("feedback snapshot binding".into()));
+                }
+                let (text, _text_charge) =
+                    read_bytes(namespace, &revision.original_text_ref, usage, limits)?;
+                std::str::from_utf8(&text).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                let (strokes, _strokes_charge) =
+                    read_bytes(namespace, &revision.strokes_ref, usage, limits)?;
+                crate::receipts::validate_strokes(&strokes, limits.comment_points)?;
+                if let Some(voice) = &revision.voice_ref
+                    && feedback.notes.get(&voice.note_id).is_none_or(|saved| {
+                        saved.audio_ref != voice.audio_ref
+                            || saved.playhead_log_ref != voice.playhead_log_ref
+                            || saved.original_asr_ref != voice.original_asr_ref
+                    })
+                {
+                    return Err(BundleError::Corrupt("feedback voice binding".into()));
+                }
+                previous = Some(reference);
+            }
+        }
+        for (id, submitted) in &feedback.batches {
+            let batch = load!(FeedbackBatch, &submitted.batch_ref);
+            if &batch.batch_id != id
+                || batch.revision_refs.iter().any(|r| {
+                    !feedback
+                        .revisions
+                        .values()
+                        .flatten()
+                        .any(|known| known == r)
+                })
+            {
+                return Err(BundleError::Corrupt(
+                    "submitted batch revision binding".into(),
+                ));
+            }
+            if submitted.consumed_by.as_ref().is_some_and(|id| {
+                runs.as_ref()
+                    .is_none_or(|index| !index.runs.contains_key(id))
+            }) {
+                return Err(BundleError::Corrupt("batch consumption run binding".into()));
+            }
+        }
+    }
+    Ok(())
 }
