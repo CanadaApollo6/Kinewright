@@ -1,0 +1,1 @@
+{"actual":true,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"pass_control","evidence_class":"control","expected":true,"id":"fallback-observed","observation":7,"oracle":"true","oracle_pointer":"","passed":true,"pointer":"/in_place_fallback_observed","positive_control":null}

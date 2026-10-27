@@ -1,0 +1,24 @@
+{
+  "name": "store-a1-acknowledged-feedback-index",
+  "witness": "linux::s3_indexes_survive_all_root_producers",
+  "accepted": false,
+  "changes": [
+    [
+      "crates/kinewright-project/src/bundle_commit.rs",
+      "        let mut metadata_root = bundle.root.clone();",
+      "        let mut metadata_root = bundle.root.clone();\n        if rescue_source.is_some() {\n            if let Some(root) = &mut metadata_root { root.feedback_index_ref = None; }\n        }"
+    ]
+  ],
+  "expected_red": {
+    "text": "S3_EXACT_FEEDBACK_INDEX",
+    "location": null
+  },
+  "baseline_manifest_sha256": "6d37eded39414a97b14f3f57df943d894dec52bdc4d5bfcfd071fa0d9c95d37c",
+  "witness_sha256": "83ee3910835d7519665fbcd2ebebdea01b2a264c077fe2bcf33d9bda4df36455",
+  "source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "297b38be868bfd4c57ff1aedfdcb2f726247421d3abe4652a952c26799743e1c"
+  }
+}

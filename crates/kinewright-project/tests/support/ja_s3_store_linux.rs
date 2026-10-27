@@ -284,6 +284,76 @@ fn assert_retained(
     assert_eq!(segment.run_id, *run, "S3_RUN_GRAPH_PRESERVATION");
     b.reconcile_metadata().unwrap();
 }
+fn index_bytes(path: &Path, root: &kinewright_project::bundle::StudioRoot) -> Vec<Vec<u8>> {
+    [
+        &root.version_index_ref,
+        &root.feedback_index_ref,
+        &root.run_index_ref,
+    ]
+    .into_iter()
+    .map(|reference| {
+        let reference = reference.as_ref().expect("S3_RESCUE_NONEMPTY_INDEX");
+        std::fs::read(
+            path.with_extension("kinewright-assets")
+                .join("studio/objects")
+                .join(&reference.sha256),
+        )
+        .unwrap()
+    })
+    .collect()
+}
+
+fn assert_projection_oracle(bundle: &mut ProjectBundle, path: &Path, source: &ObjectRef) {
+    use kinewright_project::bundle_recovery::verify_projection_payloads;
+    let bytes = std::fs::read(
+        path.with_extension("kinewright-assets")
+            .join("studio/objects")
+            .join(&source.sha256),
+    )
+    .unwrap();
+    for field in ["version_index_ref", "feedback_index_ref", "run_index_ref"] {
+        let mut file: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        file["studio"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field)
+            .unwrap();
+        let root: kinewright_project::bundle::StudioRoot =
+            serde_json::from_value(file["studio"].clone()).unwrap();
+        let dependencies = [
+            Some(root.branch_index_ref),
+            Some(root.input_manifest_ref),
+            Some(root.store_manifest_ref),
+            root.version_index_ref,
+            root.feedback_index_ref,
+            root.run_index_ref,
+            root.claim_index_ref,
+            root.receipt_index_ref,
+            root.issuer_state_ref,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let changed = serde_json::to_vec(&file).unwrap();
+        let reference = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(&changed),
+            byte_length: changed.len() as u64,
+            record_kind: RecordKind::RootCheckpoint,
+        };
+        let hold = bundle
+            .store_mut()
+            .unwrap()
+            .admit_blob(&mut &*changed, &reference, &dependencies)
+            .unwrap();
+        assert!(
+            matches!(
+                verify_projection_payloads(bundle, source, &hold.reference),
+                Err(BundleError::Corrupt(message)) if message == "L1 non-linkage payload changed"
+            ),
+            "S3_RESCUE_INDEX_ORACLE: {field}"
+        );
+    }
+}
 #[test]
 fn s3_indexes_survive_all_root_producers() {
     let version_only_path = temp("s3-version-only");
@@ -550,13 +620,15 @@ fn s3_indexes_survive_all_root_producers() {
         .preview_rescue(capture, StorageLimits::default())
         .unwrap();
     let consent = selected.consent();
-    let rescued = tmp.path("rescued.kinewright");
+    let rescued_drive = tmp.path("rescued-drive");
+    std::fs::create_dir(&rescued_drive).unwrap();
+    let rescued = rescued_drive.join("rescued.kinewright");
     let destination = session.inspect_rescue_destination(&rescued).unwrap();
     let outcome = session.rescue(selected, &consent, &destination).unwrap();
     assert!(outcome.activated, "S3_RESCUE_ACTIVATED");
     drop(session);
     assert_retained(&rescued, &key, &revision, &batch, &run, &old);
-    let rescued_owner = LoadedBundle::read(&rescued).unwrap().into_writer().unwrap();
+    let mut rescued_owner = LoadedBundle::read(&rescued).unwrap().into_writer().unwrap();
     assert!(
         !rescued_owner
             .feedback_index()
@@ -576,6 +648,234 @@ fn s3_indexes_survive_all_root_producers() {
         ReceiptLookup::UnresolvedOrigin,
         "S3_A1_TENTATIVE_RECEIPT"
     );
+    let (fresh_key, fresh_revision, fresh_batch, fresh_run) = seed(&mut rescued_owner);
+    let expected_root = rescued_owner.root().unwrap().clone();
+    for (before, after) in [
+        (&old.version_index_ref, &expected_root.version_index_ref),
+        (&old.feedback_index_ref, &expected_root.feedback_index_ref),
+        (&old.run_index_ref, &expected_root.run_index_ref),
+    ] {
+        assert_ne!(before, after, "S3_RESCUE_FRESH_INDEX_CONTROL");
+    }
+    let expected_bytes = index_bytes(&rescued, &expected_root);
+    drop(rescued_owner);
+    let mut session = Ja1EditingSession::open(&rescued).unwrap();
+    let locked = !session.core().export_history().unwrap().document.tracks[0].sync_lock;
+    assert!(matches!(
+        session
+            .core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked,
+            }))
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    assert!(io_observer::fail_once("root_parent_sync", || session.save_active()).is_err());
+    std::fs::rename(&rescued_drive, tmp.path("hidden-rescued-drive")).unwrap();
+    let offer = session.probe_active().unwrap().unwrap();
+    let capture = session.prepare_rescue(&offer).unwrap().unwrap();
+    let selected = session
+        .preview_rescue(capture, StorageLimits::default())
+        .unwrap();
+    let consent = selected.consent();
+    let twice = tmp.path("rescued-twice.kinewright");
+    let destination = session.inspect_rescue_destination(&twice).unwrap();
+    assert!(
+        session
+            .rescue(selected, &consent, &destination)
+            .expect("S3_RESCUE_OF_RESCUE_PUBLISHED")
+            .activated,
+        "S3_RESCUE_OF_RESCUE_ACTIVATED"
+    );
+    drop(session);
+    let mut owner = LoadedBundle::read(&twice)
+        .expect("S3_RESCUE_PROJECTED_ROOT_READABLE")
+        .into_writer()
+        .unwrap();
+    let records = owner.rescue_records().unwrap();
+    let record = records
+        .iter()
+        .find(|record| record.recovery_origin.as_ref().is_some_and(|o| o.rebound))
+        .unwrap();
+    let acknowledged = record.acknowledged_root.clone().unwrap();
+    let projected: kinewright_project::ProjectFile = serde_json::from_slice(
+        &std::fs::read(
+            twice
+                .with_extension("kinewright-assets")
+                .join("studio/objects")
+                .join(&acknowledged.sha256),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let projected_root = projected.studio.unwrap();
+    let manifest = owner
+        .store()
+        .read_record::<kinewright_project::store::StoreManifest>(&projected_root.store_manifest_ref)
+        .unwrap();
+    for reference in [
+        &projected_root.version_index_ref,
+        &projected_root.feedback_index_ref,
+        &projected_root.run_index_ref,
+    ] {
+        let reference = reference.as_ref().expect("S3_RESCUE_NONEMPTY_INDEX");
+        assert!(
+            manifest.objects.contains(reference),
+            "S3_RESCUE_PROJECTED_INDEX_DECLARED: {:?}",
+            reference.record_kind
+        );
+    }
+    drop(manifest);
+    assert_projection_oracle(&mut owner, &twice, &acknowledged);
+    drop(owner);
+    let mut session = Ja1EditingSession::open(&twice).unwrap();
+    let point = session
+        .list_recovery_points()
+        .unwrap()
+        .into_iter()
+        .find(|point| matches!(point, RecoverySelection::Checkpoint { root, .. } if root == &acknowledged))
+        .expect("S3_RESCUE_PROJECTED_ACK_LISTED");
+    session
+        .prepare_recovery(point)
+        .expect("S3_RESCUE_PROJECTED_ACK_PREPARED");
+    assert!(
+        matches!(
+            session.select_local(),
+            kinewright_project::bundle_switch::ProjectSelectionResult::Activated(_)
+        ),
+        "S3_RESCUE_PROJECTED_ACK_RESTORED"
+    );
+    drop(session);
+    let restored = LoadedBundle::read(&twice).unwrap();
+    assert_eq!(
+        index_bytes(&twice, restored.root().unwrap()),
+        expected_bytes,
+        "S3_RESCUE_PROJECTED_INDEX_BYTES"
+    );
+    drop(restored);
+    assert_retained(&twice, &key, &revision, &batch, &run, &expected_root);
+    assert_retained(
+        &twice,
+        &fresh_key,
+        &fresh_revision,
+        &fresh_batch,
+        &fresh_run,
+        &expected_root,
+    );
+}
+
+#[test]
+fn s3_late_asr_preserves_audio_only_feedback_and_note_duration() {
+    let tmp = temp("s3-late-asr");
+    let path = tmp.path("studio.kinewright");
+    let (core, mut bundle, inputs) = setup(&path);
+    let key = snapshot(&mut bundle);
+    let audio = blob(&mut bundle, b"acknowledged voice audio");
+    let mut voice = VoiceRef {
+        note_id: NoteId::fresh().unwrap(),
+        audio_ref: audio.reference.clone(),
+        duration_micros: 1_500_000,
+        range: Some(AudioRange {
+            start_micros: 0,
+            end_micros: 1_500_000,
+        }),
+        playhead_log_ref: None,
+        original_asr_ref: None,
+        chosen_transcript_revision: None,
+    };
+    let issuer = bundle.issue_metadata_issuer().unwrap();
+    let save = update(&bundle, MetadataChange::SaveVoice(voice.clone()));
+    committed(
+        bundle
+            .metadata_command(
+                &envelope(&bundle, &issuer, 1),
+                MetadataScope::Feedback,
+                &save,
+            )
+            .unwrap(),
+    );
+    let (mut revision, blobs) = feedback(&mut bundle, key);
+    revision.voice_ref = Some(voice.clone());
+    let original_ref = save_feedback(&mut bundle, revision.clone());
+    let original_path = path
+        .with_extension("kinewright-assets")
+        .join("studio/objects")
+        .join(&original_ref.sha256);
+    let original_bytes = std::fs::read(&original_path).unwrap();
+    let asr = blob(&mut bundle, b"original transcription arrived later");
+    voice.original_asr_ref = Some(asr.reference.clone());
+    let save = update(&bundle, MetadataChange::SaveVoice(voice.clone()));
+    committed(
+        bundle
+            .metadata_command(
+                &envelope(&bundle, &issuer, 2),
+                MetadataScope::Feedback,
+                &save,
+            )
+            .expect("S3_LATE_ASR_ACKNOWLEDGED"),
+    );
+    bundle.save(&core, &inputs).expect("S3_LATE_ASR_PUBLISHED");
+    drop((audio, asr, blobs));
+    drop(bundle);
+    let mut bundle = LoadedBundle::read(&path)
+        .expect("S3_LATE_ASR_REOPENED")
+        .into_writer()
+        .unwrap();
+    assert_eq!(
+        bundle.read_feedback(&original_ref).unwrap().revision,
+        revision,
+        "S3_LATE_ASR_ORIGINAL_REVISION"
+    );
+    assert_eq!(
+        std::fs::read(&original_path).unwrap(),
+        original_bytes,
+        "S3_LATE_ASR_ORIGINAL_BYTES"
+    );
+    assert_eq!(
+        bundle.feedback_index().unwrap().notes[&voice.note_id],
+        voice
+    );
+    let issuer = bundle.issue_metadata_issuer().unwrap();
+    let mut later = revision.clone();
+    later.comment_id = CommentId::fresh().unwrap();
+    save_feedback(&mut bundle, later);
+    let mut with_asr = revision.clone();
+    with_asr.comment_id = CommentId::fresh().unwrap();
+    with_asr.voice_ref = Some(voice.clone());
+    save_feedback(&mut bundle, with_asr.clone());
+    let other = blob(&mut bundle, b"different ASR is never the original");
+    with_asr.comment_id = CommentId::fresh().unwrap();
+    with_asr.voice_ref.as_mut().unwrap().original_asr_ref = Some(other.reference.clone());
+    let bad = update(&bundle, MetadataChange::SaveFeedback(with_asr));
+    let e = envelope(&bundle, &issuer, 1);
+    assert!(
+        bundle
+            .metadata_command(&e, MetadataScope::Feedback, &bad)
+            .is_err(),
+        "S3_LATE_ASR_MISMATCH_REFUSED"
+    );
+    let before = std::fs::read(&path).unwrap();
+    for change in ["duration", "replace_asr", "remove_asr"] {
+        let mut changed = voice.clone();
+        match change {
+            "duration" => changed.duration_micros += 1,
+            "replace_asr" => changed.original_asr_ref = Some(other.reference.clone()),
+            _ => changed.original_asr_ref = None,
+        }
+        let bad = update(&bundle, MetadataChange::SaveVoice(changed));
+        assert!(
+            bundle
+                .metadata_command(&e, MetadataScope::Feedback, &bad)
+                .is_err(),
+            "S3_IMMUTABLE_VOICE: {change}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "S3_IMMUTABLE_VOICE_REFUSAL_ROOT"
+        );
+    }
 }
 #[test]
 fn s3_metadata_retry_and_admission() {

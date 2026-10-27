@@ -9,3 +9,8 @@ docs/reports/pf1-s4/example/** text eol=lf
 # Job A S0/S1/S2: harness fixtures are byte-exact, hashed inputs (byte_length +
 # sha256 in fixtures-index.json); never convert their line endings.
 crates/kinewright-agent/tests/fixtures/ja/** -text
+# C1 fix evidence and its selector sources are checked by byte hash.
+docs/reports/ja1-s3/c1-evidence/fix1/** -text
+scripts/ja1-s3-c1-fix1-mutation-cases.json text eol=lf
+scripts/ja1-s3-c1-mutation-cases.json text eol=lf
+scripts/ja1-s3-c1-mutations.py text eol=lf

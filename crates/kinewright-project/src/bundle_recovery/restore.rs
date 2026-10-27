@@ -232,14 +232,11 @@ impl ProjectBundle {
         if !changed {
             return Ok((source.clone(), origin));
         }
-        let roots = [
-            root.branch_index_ref.clone(),
-            root.input_manifest_ref.clone(),
-        ]
-        .into_iter()
-        .chain(root.receipt_index_ref.clone())
-        .chain(root.issuer_state_ref.clone())
-        .collect::<Vec<_>>();
+        let roots = root
+            .references()
+            .into_iter()
+            .filter(|reference| reference != &root.store_manifest_ref)
+            .collect::<Vec<_>>();
         let inventory = SupportInventory {
             required_fields: manifest.required_fields.clone(),
             required_kinds: manifest.required_kinds.clone(),
@@ -348,6 +345,10 @@ pub fn verify_projection_payloads(
     if before.inspection_document() != after.inspection_document()
         || left.branch_index_ref != right.branch_index_ref
         || left.input_manifest_ref != right.input_manifest_ref
+        || left.version_index_ref != right.version_index_ref
+        || left.feedback_index_ref != right.feedback_index_ref
+        || left.run_index_ref != right.run_index_ref
+        || left.claim_index_ref != right.claim_index_ref
         || left.receipt_index_ref != right.receipt_index_ref
         || left.issuer_state_ref != right.issuer_state_ref
     {

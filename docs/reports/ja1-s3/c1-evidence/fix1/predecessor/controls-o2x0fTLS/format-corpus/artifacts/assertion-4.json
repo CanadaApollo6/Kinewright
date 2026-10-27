@@ -1,0 +1,1 @@
+{"actual":true,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"pass_control","evidence_class":"control","expected":true,"id":"v3-studio-loads-advisory","observation":15,"oracle":"true","oracle_pointer":"","passed":true,"pointer":"/loaded","positive_control":null}

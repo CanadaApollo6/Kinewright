@@ -1473,11 +1473,10 @@ pub(super) fn validate_studio_records(
                     read_bytes(namespace, &revision.strokes_ref, usage, limits)?;
                 crate::receipts::validate_strokes(&strokes, limits.comment_points)?;
                 if let Some(voice) = &revision.voice_ref
-                    && feedback.notes.get(&voice.note_id).is_none_or(|saved| {
-                        saved.audio_ref != voice.audio_ref
-                            || saved.playhead_log_ref != voice.playhead_log_ref
-                            || saved.original_asr_ref != voice.original_asr_ref
-                    })
+                    && feedback
+                        .notes
+                        .get(&voice.note_id)
+                        .is_none_or(|saved| !voice.matches_note(saved))
                 {
                     return Err(BundleError::Corrupt("feedback voice binding".into()));
                 }

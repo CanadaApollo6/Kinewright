@@ -844,6 +844,248 @@ fn s3_foreground_replay_is_attachment_subject_bound() {
     accepted(first.request_operation(command, Some(1)).unwrap());
 }
 
+fn foreground_state(host: &WriterHost) -> Vec<u8> {
+    let owner = host.owner.upgrade().unwrap();
+    let owner = owner.lock().unwrap();
+    serde_json::to_vec(&(
+        &owner.foreground_subject,
+        &owner.foreground_reply,
+        &owner.foreground_history,
+    ))
+    .unwrap()
+}
+
+fn foreground_request(
+    host: &WriterHost,
+    client: &HostClient,
+    command: HostCommand,
+    operation: Option<u64>,
+    over_http: bool,
+) -> HostReply {
+    let mut request = request(client, command);
+    request.operation = operation;
+    if over_http {
+        serde_json::from_slice(
+            &client
+                .post("host", &serde_json::to_vec(&request).unwrap())
+                .unwrap(),
+        )
+        .unwrap()
+    } else {
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .execute_attached(&client.bootstrap.auth, request)
+    }
+}
+
+fn acquire_and_save_foreground(host: &WriterHost, editor: &HostClient, over_http: bool) {
+    let grant = accepted(foreground_request(
+        host,
+        editor,
+        HostCommand::AcquireManual {
+            client: editor.editor.clone().unwrap(),
+        },
+        Some(1),
+        over_http,
+    ));
+    assert!(
+        grant.manual_lease.is_some(),
+        "C1_FOREGROUND_EDITOR_ACQUIRES"
+    );
+    let snapshot =
+        HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+    let saved = accepted(foreground_request(
+        host,
+        editor,
+        HostCommand::Save { snapshot },
+        Some(2),
+        over_http,
+    ));
+    assert!(saved.saved.is_some(), "C1_FOREGROUND_EDITOR_SAVES");
+}
+
+fn non_editor_cannot_poison_foreground(over_http: bool) {
+    let (_temp, host, _refs) = fixture();
+    let editor = host.client().with_manual_editor("e".repeat(64));
+    {
+        let owner = host.owner.upgrade().unwrap();
+        let owner = owner.lock().unwrap();
+        assert!(owner.manual.is_none(), "C1_FOREGROUND_BEFORE_ANY_LEASE");
+        assert!(
+            owner.foreground_subject.is_none() && owner.foreground_reply.is_none(),
+            "C1_FOREGROUND_BEFORE_FIRST_OPERATION"
+        );
+    }
+    let empty = foreground_state(&host);
+    for (subject, role) in [
+        ("forged-viewer", AttachmentRole::Viewer),
+        ("forged-producer", AttachmentRole::Producer),
+    ] {
+        let client = host
+            .attach(subject.into(), role, host.roots.clone())
+            .unwrap();
+        accepted(foreground_request(
+            &host,
+            &client,
+            HostCommand::Status,
+            None,
+            over_http,
+        ));
+        for length in [32, 64, 128] {
+            let forged = client.with_manual_editor("x".repeat(length));
+            let before = state(&host);
+            let denied =
+                foreground_request(&host, &forged, HostCommand::Status, Some(1), over_http);
+            assert_eq!(
+                denied.error.as_ref().map(|error| error.code.as_str()),
+                Some("role_refused"),
+                "C1_FOREGROUND_ROLE_REFUSED: {subject}, editor length {length}"
+            );
+            assert_eq!(
+                foreground_state(&host),
+                empty,
+                "C1_FOREGROUND_REFUSAL_PRESERVES_BYTES: {subject}, editor length {length}"
+            );
+            assert_eq!(
+                state(&host),
+                before,
+                "C1_FOREGROUND_REFUSAL_HAS_NO_SIDE_EFFECTS: {subject}, editor length {length}"
+            );
+        }
+    }
+    acquire_and_save_foreground(&host, &editor, over_http);
+}
+
+#[test]
+fn s3_foreground_replay_rejects_non_editor_http_before_lease() {
+    non_editor_cannot_poison_foreground(true);
+}
+
+#[test]
+fn s3_foreground_replay_rejects_non_editor_direct_before_lease() {
+    non_editor_cannot_poison_foreground(false);
+}
+
+#[test]
+fn s3_foreground_replay_detach_clears_only_owned_slot() {
+    for (over_http, detach_operation) in [(false, None), (true, Some(2))] {
+        let (_temp, host, _refs) = fixture();
+        let first = host
+            .attach(
+                "departing-editor".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("e".repeat(64));
+        let empty = foreground_state(&host);
+        accepted(foreground_request(
+            &host,
+            &first,
+            HostCommand::Status,
+            Some(1),
+            over_http,
+        ));
+        let retained = foreground_state(&host);
+        assert_ne!(retained, empty, "C1_FOREGROUND_DETACH_POPULATED_CONTROL");
+        for (subject, role) in [
+            ("unrelated-viewer", AttachmentRole::Viewer),
+            ("unrelated-producer", AttachmentRole::Producer),
+        ] {
+            let unrelated = host
+                .attach(subject.into(), role, host.roots.clone())
+                .unwrap();
+            accepted(foreground_request(
+                &host,
+                &unrelated,
+                HostCommand::Detach,
+                None,
+                over_http,
+            ));
+            assert_eq!(
+                foreground_state(&host),
+                retained,
+                "C1_FOREGROUND_UNRELATED_DETACH_PRESERVES_BYTES"
+            );
+        }
+        accepted(foreground_request(
+            &host,
+            &first,
+            HostCommand::Detach,
+            detach_operation,
+            over_http,
+        ));
+        assert_eq!(
+            foreground_state(&host),
+            empty,
+            "C1_FOREGROUND_DETACH_CLEARS_OWNED_SLOT"
+        );
+        let revoked = direct(&host, &first, HostCommand::Status);
+        assert_eq!(
+            revoked.error.as_ref().map(|error| error.code.as_str()),
+            Some("attachment_refused")
+        );
+        let next = host
+            .attach(
+                "next-editor".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("n".repeat(64));
+        acquire_and_save_foreground(&host, &next, over_http);
+    }
+}
+
+#[test]
+fn s3_foreground_replay_detach_clears_stale_non_editor_slot() {
+    for (subject, role, over_http) in [
+        ("stale-viewer", AttachmentRole::Viewer, false),
+        ("stale-producer", AttachmentRole::Producer, true),
+    ] {
+        let (_temp, host, _refs) = fixture();
+        let stale = host
+            .attach(subject.into(), role, host.roots.clone())
+            .unwrap()
+            .with_manual_editor("x".repeat(64));
+        let empty = foreground_state(&host);
+        {
+            let owner = host.owner.upgrade().unwrap();
+            let mut owner = owner.lock().unwrap();
+            // Recreate the cached state admitted before the attachment-role guard existed.
+            accepted(owner.execute_operation(
+                HostCommand::Status,
+                host.roots.clone(),
+                stale.editor.as_deref(),
+                Some(1),
+            ));
+            owner.foreground_subject = Some(subject.into());
+        }
+        assert_ne!(
+            foreground_state(&host),
+            empty,
+            "C1_FOREGROUND_STALE_SLOT_CONTROL"
+        );
+        accepted(foreground_request(
+            &host,
+            &stale,
+            HostCommand::Detach,
+            None,
+            over_http,
+        ));
+        assert_eq!(
+            foreground_state(&host),
+            empty,
+            "C1_FOREGROUND_DETACH_CLEARS_STALE_NON_EDITOR_SLOT: {subject}"
+        );
+        let editor = host.client().with_manual_editor("e".repeat(64));
+        acquire_and_save_foreground(&host, &editor, over_http);
+    }
+}
+
 #[test]
 fn s3_attachment_role_binding() {
     let (_temp, host, _refs) = fixture();

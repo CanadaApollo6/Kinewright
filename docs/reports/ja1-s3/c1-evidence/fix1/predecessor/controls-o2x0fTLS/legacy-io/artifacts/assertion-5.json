@@ -1,0 +1,1 @@
+{"actual":false,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"baseline_red","evidence_class":"baseline_property","expected":true,"id":"strict-parent-directory-sync","observation":2,"oracle":"directory-sync-trace","oracle_pointer":"","passed":false,"pointer":"/directory_sync_observed","positive_control":"reopen-full-bytes"}

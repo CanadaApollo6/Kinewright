@@ -1,0 +1,367 @@
+{
+  "artifacts": [
+    {
+      "byte_length": 0,
+      "relative_file": "artifacts/source.diff",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "byte_length": 313,
+      "relative_file": "artifacts/source-manifest.json",
+      "sha256": "875cde57e7e129af6988244615474fa719e0be854ec5e9173ffb9eb9d850fbd1"
+    },
+    {
+      "byte_length": 4185,
+      "relative_file": "artifacts/fixture.json",
+      "sha256": "13dedb1ed3fc7a467cff88e865eef6cae4ab9dfe1229c92d60ea6720df837831"
+    },
+    {
+      "byte_length": 91,
+      "relative_file": "artifacts/input-0.bin",
+      "sha256": "15afc89b3c02e8ff7ce7caf1c3f0efa66e7a4d1a19e1e964e1fb8fb93d53df3e"
+    },
+    {
+      "byte_length": 1089,
+      "relative_file": "artifacts/input-1.bin",
+      "sha256": "bb17fd2cad27cc7e168555e3cdd0cb360f72d7ce18d1d64b50ee3479c05e0958"
+    },
+    {
+      "byte_length": 3,
+      "relative_file": "artifacts/input-2.bin",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    {
+      "byte_length": 6,
+      "relative_file": "artifacts/input-3.bin",
+      "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
+    },
+    {
+      "byte_length": 2,
+      "relative_file": "artifacts/input-4.bin",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "byte_length": 5,
+      "relative_file": "artifacts/input-5.bin",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74"
+    },
+    {
+      "byte_length": 7,
+      "relative_file": "artifacts/input-6.bin",
+      "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751"
+    },
+    {
+      "byte_length": 863,
+      "relative_file": "artifacts/observation-1.json",
+      "sha256": "e5cee01a301f52c2a25f5f44130c1333d5c33dc6a8f8e378114232b31b733fb2"
+    },
+    {
+      "byte_length": 2711,
+      "relative_file": "artifacts/observation-2.json",
+      "sha256": "b44d66e72349422414632bbe2cabe681d1a0f231ff5f6efd1e4f07008f3654ae"
+    },
+    {
+      "byte_length": 308,
+      "relative_file": "artifacts/assertion-0.json",
+      "sha256": "9cdd616ae035e5b1ee86e8c9ddeaa33c9de0395e92419cf0350d1d07168c307c"
+    },
+    {
+      "byte_length": 2644,
+      "relative_file": "artifacts/observation-4.json",
+      "sha256": "62fb31b43268547b2dcdcfd4e7d01fe588f53f8011c87c7b9d20801fe69d2e74"
+    },
+    {
+      "byte_length": 15,
+      "relative_file": "artifacts/observation-5.json",
+      "sha256": "04ff9db86e378512c45e20e1f3bf856d97f531818fe7aec741a1ae412b9bc338"
+    },
+    {
+      "byte_length": 2760,
+      "relative_file": "artifacts/observation-6.json",
+      "sha256": "89d981a8d94bbf5e2aacf4640bd648f6325716e0429edbbfb2ef6415acfea5d9"
+    },
+    {
+      "byte_length": 1840,
+      "relative_file": "artifacts/observation-7.json",
+      "sha256": "3fe413059816d90b819459625adb97b52be016d9339e37b8e5b0edb353c77814"
+    },
+    {
+      "byte_length": 306,
+      "relative_file": "artifacts/assertion-1.json",
+      "sha256": "06e1b9fbe0a7b3898f9373eaebf6824118d8fef10232036909ca2eacc1c78449"
+    },
+    {
+      "byte_length": 3690,
+      "relative_file": "artifacts/observation-9.json",
+      "sha256": "9944c5df6519e2efd458c87b2d2eff6b0b9f784fb348a3f9f22001d33ffc3350"
+    },
+    {
+      "byte_length": 2770,
+      "relative_file": "artifacts/observation-10.json",
+      "sha256": "941ce1abb7f68b7415e14caf8781861b5ea9bd9f55726e5a6aad050dee884082"
+    },
+    {
+      "byte_length": 346,
+      "relative_file": "artifacts/assertion-2.json",
+      "sha256": "19ff79d00a264df3e31a9a63e5c00b4469c2276cb799f95096acbe0da34dc96a"
+    },
+    {
+      "byte_length": 0,
+      "relative_file": "artifacts/stderr-A.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "byte_length": 292,
+      "relative_file": "artifacts/observation-12.json",
+      "sha256": "b6dcdd78f7555906bb8a63578b39d508ef86087c03b201d05238609b38208232"
+    },
+    {
+      "byte_length": 0,
+      "relative_file": "artifacts/stderr-B.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "byte_length": 292,
+      "relative_file": "artifacts/observation-13.json",
+      "sha256": "825901b0df895e577f2c5540809938d54294d6ba327ab942388a81249fd6747a"
+    },
+    {
+      "byte_length": 591,
+      "relative_file": "supervisor-process.json",
+      "sha256": "6909b9a5e54fe7528c4bfd51d8a520a1ef6af37b5c4e2b90a40307c1461a7b7e"
+    },
+    {
+      "byte_length": 62,
+      "relative_file": "supervisor-deadline.json",
+      "sha256": "48649d35fd5db231a83bf454cdfa947e9f442909e4cee6c8b1257110eb7e4308"
+    },
+    {
+      "byte_length": 0,
+      "relative_file": "supervisor-stdout.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "byte_length": 0,
+      "relative_file": "supervisor-stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "assertions": [
+    {
+      "artifact": {
+        "byte_length": 308,
+        "relative_file": "artifacts/assertion-0.json",
+        "sha256": "9cdd616ae035e5b1ee86e8c9ddeaa33c9de0395e92419cf0350d1d07168c307c"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "ordinary-edit-one-entry",
+      "observation": 2,
+      "oracle": "one",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/history/undo_count",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 306,
+        "relative_file": "artifacts/assertion-1.json",
+        "sha256": "06e1b9fbe0a7b3898f9373eaebf6824118d8fef10232036909ca2eacc1c78449"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "accepted-lost-reply-one-entry",
+      "observation": 7,
+      "oracle": "one",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/undo_count",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 346,
+        "relative_file": "artifacts/assertion-2.json",
+        "sha256": "19ff79d00a264df3e31a9a63e5c00b4469c2276cb799f95096acbe0da34dc96a"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "baseline_red",
+      "evidence_class": "baseline_property",
+      "id": "retry-must-not-add-second-undo",
+      "observation": 10,
+      "oracle": "one",
+      "oracle_pointer": "",
+      "passed": false,
+      "pointer": "/undo_count",
+      "positive_control": "accepted-lost-reply-one-entry"
+    }
+  ],
+  "disposition": "observed",
+  "elapsed_ns": "4863321444",
+  "exit_code": 1,
+  "fixture_id": "reply-retry",
+  "gates": [
+    {
+      "disposition": "pending_baseline_witness",
+      "fixture_slot": "baseline-slot-JA1-G1-R",
+      "gate": "JA1.G1-R",
+      "observer": "Accepted edit, suppressed result, retry; count exact undo/history effects and saved bytes",
+      "owner": "project/JA-1 receipt owner",
+      "reason": "Edit missing-dedup property is reachable once observed. Durable comment receipt and branch-switch cases need actual comment/S1/S2 seams; no synthetic receipt service.",
+      "stage": "S1/S2"
+    }
+  ],
+  "lane": "portable",
+  "missing_requirements": null,
+  "mode": "baseline",
+  "observations": [
+    {
+      "action_id": 1,
+      "artifact": {
+        "byte_length": 863,
+        "relative_file": "artifacts/observation-1.json",
+        "sha256": "e5cee01a301f52c2a25f5f44130c1333d5c33dc6a8f8e378114232b31b733fb2"
+      },
+      "participant": "A",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 2,
+      "artifact": {
+        "byte_length": 2711,
+        "relative_file": "artifacts/observation-2.json",
+        "sha256": "b44d66e72349422414632bbe2cabe681d1a0f231ff5f6efd1e4f07008f3654ae"
+      },
+      "participant": "A",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 4,
+      "artifact": {
+        "byte_length": 2644,
+        "relative_file": "artifacts/observation-4.json",
+        "sha256": "62fb31b43268547b2dcdcfd4e7d01fe588f53f8011c87c7b9d20801fe69d2e74"
+      },
+      "participant": "A",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 5,
+      "artifact": {
+        "byte_length": 15,
+        "relative_file": "artifacts/observation-5.json",
+        "sha256": "04ff9db86e378512c45e20e1f3bf856d97f531818fe7aec741a1ae412b9bc338"
+      },
+      "participant": "controller",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 6,
+      "artifact": {
+        "byte_length": 2760,
+        "relative_file": "artifacts/observation-6.json",
+        "sha256": "89d981a8d94bbf5e2aacf4640bd648f6325716e0429edbbfb2ef6415acfea5d9"
+      },
+      "participant": "A",
+      "reply_delivered": false
+    },
+    {
+      "action_id": 7,
+      "artifact": {
+        "byte_length": 1840,
+        "relative_file": "artifacts/observation-7.json",
+        "sha256": "3fe413059816d90b819459625adb97b52be016d9339e37b8e5b0edb353c77814"
+      },
+      "participant": "A",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 9,
+      "artifact": {
+        "byte_length": 3690,
+        "relative_file": "artifacts/observation-9.json",
+        "sha256": "9944c5df6519e2efd458c87b2d2eff6b0b9f784fb348a3f9f22001d33ffc3350"
+      },
+      "participant": "A",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 10,
+      "artifact": {
+        "byte_length": 2770,
+        "relative_file": "artifacts/observation-10.json",
+        "sha256": "941ce1abb7f68b7415e14caf8781861b5ea9bd9f55726e5a6aad050dee884082"
+      },
+      "participant": "A",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 12,
+      "artifact": {
+        "byte_length": 292,
+        "relative_file": "artifacts/observation-12.json",
+        "sha256": "b6dcdd78f7555906bb8a63578b39d508ef86087c03b201d05238609b38208232"
+      },
+      "participant": "A",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 13,
+      "artifact": {
+        "byte_length": 292,
+        "relative_file": "artifacts/observation-13.json",
+        "sha256": "825901b0df895e577f2c5540809938d54294d6ba327ab942388a81249fd6747a"
+      },
+      "participant": "B",
+      "reply_delivered": true
+    }
+  ],
+  "pending": [],
+  "positive_controls": [
+    {
+      "artifact": {
+        "byte_length": 308,
+        "relative_file": "artifacts/assertion-0.json",
+        "sha256": "9cdd616ae035e5b1ee86e8c9ddeaa33c9de0395e92419cf0350d1d07168c307c"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "ordinary-edit-one-entry",
+      "observation": 2,
+      "oracle": "one",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/history/undo_count",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 306,
+        "relative_file": "artifacts/assertion-1.json",
+        "sha256": "06e1b9fbe0a7b3898f9373eaebf6824118d8fef10232036909ca2eacc1c78449"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "accepted-lost-reply-one-entry",
+      "observation": 7,
+      "oracle": "one",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/undo_count",
+      "positive_control": null
+    }
+  ],
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "run_id": "902530-1793123219187023401"
+}

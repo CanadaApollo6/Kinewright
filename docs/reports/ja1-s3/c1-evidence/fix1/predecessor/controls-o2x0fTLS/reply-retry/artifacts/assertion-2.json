@@ -1,0 +1,1 @@
+{"actual":2,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"baseline_red","evidence_class":"baseline_property","expected":1,"id":"retry-must-not-add-second-undo","observation":10,"oracle":"one","oracle_pointer":"","passed":false,"pointer":"/undo_count","positive_control":"accepted-lost-reply-one-entry"}

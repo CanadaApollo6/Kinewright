@@ -1,0 +1,93 @@
+{
+  "architecture": "x86_64",
+  "binary": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja-s1-predecessor/sealed/kinewright-ja-baseline",
+  "binary_sha256": "0c4de8626e57b40d04bd2ecabd2f92f4bf721ea0d86b60932ad7a84ca7149306",
+  "command_line": [
+    "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja-s1-predecessor/sealed/kinewright-ja-baseline",
+    "--role",
+    "fixture",
+    "--mode",
+    "baseline",
+    "--fixture",
+    "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja-s1-predecessor/source/crates/kinewright-agent/tests/fixtures/ja/reply-retry.json",
+    "--output",
+    "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/docs/reports/ja1-s3/c1-evidence/fix1/predecessor/controls-o2x0fTLS/reply-retry"
+  ],
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1",
+  "controller_os_start_identity": "b2f19550-357d-4b12-8c5b-4102440238f2:103843",
+  "controller_pid": 902530,
+  "dirty_diff": {
+    "byte_length": 0,
+    "relative_file": "artifacts/source.diff",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "ffmpeg": "ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers\nbuilt with gcc 15.2.0 (crosstool-NG 1.28.0.1_403899e)\nconfiguration: --prefix=/ffbuild/prefix --pkg-config-flags=--static --pkg-config=pkg-config --cross-prefix=x86_64-ffbuild-linux-gnu- --arch=x86_64 --target-os=linux --enable-gpl --enable-version3 --disable-debug --enable-shared --disable-static --enable-iconv --enable-zlib --enable-libxml2 --enable-libsoxr --enable-openssl --enable-libvmaf --enable-fontconfig --enable-libharfbuzz --enable-libfreetype --enable-libfribidi --enable-vulkan --enable-libshaderc --enable-libvorbis --enable-libxcb --enable-xlib --enable-libpulse --enable-opencl --enable-gmp --enable-lzma --enable-amf --enable-libaom --enable-libaribb24 --enable-avisynth --enable-chromaprint --enable-libdav1d --enable-libdavs2 --enable-libdvdread --enable-libdvdnav --disable-libfdk-aac --enable-ffnvcodec --enable-cuda-llvm --enable-frei0r --enable-libgme --enable-libkvazaar --enable-libaribcaption --enable-libass --enable-libbluray --enable-libjxl --enable-libmp3lame --enable-libopus --enable-libplacebo --enable-librist --enable-libssh --enable-libtheora --enable-libvpx --enable-libwebp --enable-libzmq --enable-lv2 --enable-libvpl --enable-openal --enable-liboapv --enable-libopencore-amrnb --enable-libopencore-amrwb --enable-libopenh264 --enable-libopenjpeg --enable-libopenmpt --enable-librav1e --enable-librubberband --disable-schannel --enable-sdl2 --enable-libsnappy --enable-libsrt --enable-libsvtav1 --enable-libtwolame --enable-libuavs3d --enable-libdrm --enable-vaapi --enable-libvidstab --enable-libvvenc --enable-whisper --enable-libx264 --enable-libx265 --enable-libxavs2 --enable-libxvid --enable-libzimg --enable-libzvbi --extra-cflags=-DLIBTWOLAME_STATIC --extra-cxxflags= --extra-libs='-lgomp -ldl' --extra-ldflags=-pthread --extra-ldexeflags='-pie -Wl,-rpath=\\$$ORIGIN -Wl,-rpath=\\$$ORIGIN/../lib' --cc=x86_64-ffbuild-linux-gnu-gcc --cxx=x86_64-ffbuild-linux-gnu-g++ --ar=x86_64-ffbuild-linux-gnu-gcc-ar --ranlib=x86_64-ffbuild-linux-gnu-gcc-ranlib --nm=x86_64-ffbuild-linux-gnu-gcc-nm --extra-version=20251022\nlibavutil      60.  8.100 / 60.  8.100\nlibavcodec     62. 11.100 / 62. 11.100\nlibavformat    62.  3.100 / 62.  3.100\nlibavdevice    62.  1.100 / 62.  1.100\nlibavfilter    11.  4.100 / 11.  4.100\nlibswscale      9.  1.100 /  9.  1.100\nlibswresample   6.  1.100 /  6.  1.100\n\nExiting with exit code 0",
+  "fixture_id": "reply-retry",
+  "fixture_sha256": "13dedb1ed3fc7a467cff88e865eef6cae4ab9dfe1229c92d60ea6720df837831",
+  "gpu_driver": "615.78.08, P2, 1935 MHz, 9501 MHz, 76 %",
+  "inputs": {
+    "edit": {
+      "byte_length": 91,
+      "kind": "input",
+      "relative_file": "command-sync-lock.json",
+      "sha256": "15afc89b3c02e8ff7ce7caf1c3f0efa66e7a4d1a19e1e964e1fb8fb93d53df3e"
+    },
+    "initial": {
+      "byte_length": 1089,
+      "kind": "project",
+      "relative_file": "writer-v1-track.kinewright",
+      "sha256": "bb17fd2cad27cc7e168555e3cdd0cb360f72d7ce18d1d64b50ee3479c05e0958"
+    },
+    "undo": {
+      "byte_length": 7,
+      "kind": "input",
+      "relative_file": "command-undo.json",
+      "sha256": "88548ff516edecf40c1d91fca8fa2b6222d1485dd9786ae4d33e19f5bae09751"
+    }
+  },
+  "lane": "portable",
+  "load_annotation": "13:47:00 up 17 min,  1 user,  load average: 4.82, 4.46, 3.07",
+  "mode": "baseline",
+  "oracles": {
+    "empty": {
+      "byte_length": 3,
+      "kind": "input",
+      "relative_file": "oracle-empty-array.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    },
+    "false": {
+      "byte_length": 6,
+      "kind": "input",
+      "relative_file": "oracle-false.json",
+      "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
+    },
+    "one": {
+      "byte_length": 2,
+      "kind": "input",
+      "relative_file": "oracle-one.json",
+      "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    "true": {
+      "byte_length": 5,
+      "kind": "input",
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74"
+    }
+  },
+  "os": "linux",
+  "profile": "debug/test",
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "requirements": [],
+  "rss_bytes": 57307136,
+  "run_id": "902530-1793123219187023401",
+  "source_head": "076a96c922b2f05984df4bb839ad7cf0900e6183",
+  "source_manifest": {
+    "byte_length": 313,
+    "relative_file": "artifacts/source-manifest.json",
+    "sha256": "875cde57e7e129af6988244615474fa719e0be854ec5e9173ffb9eb9d850fbd1"
+  },
+  "time_unix_ms": "1793123220804",
+  "unobserved_counters": null,
+  "vram_bytes": null
+}

@@ -175,20 +175,6 @@ impl HostChat {
         Ok(None)
     }
 
-    #[cfg(all(test, target_os = "linux"))]
-    pub(crate) fn observe_for_test(client: HostClient, session: u64) -> Self {
-        Self {
-            client,
-            id: Some(session),
-            pending: None,
-            last_poll: Instant::now()
-                .checked_sub(Duration::from_secs(1))
-                .unwrap_or_else(Instant::now),
-            running: true,
-            cancelled: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
     /// Explicit Stop only. Dropping/detaching this client never sends cancellation.
     pub(crate) fn interrupt(&self) {
         self.cancelled.store(true, Ordering::Release);
@@ -200,3 +186,7 @@ impl HostChat {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "ja1_chat_tests.rs"]
+mod tests;

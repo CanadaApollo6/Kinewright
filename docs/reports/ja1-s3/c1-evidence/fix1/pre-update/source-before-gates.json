@@ -1,0 +1,21 @@
+{
+  "parent": "203f3612e5d5631ca83ae6902a51118d809a1f36",
+  "branch": "ja1/s3",
+  "sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "c0f2ad8d4d2bb8f49a9e27312eff2cb55cad8a464bc5d6a3ba0df335b7aaee4f",
+    "crates/kinewright-agent/src/writer_host/ja_s3_host.rs": "be689a48402d9195010c58ad113187fe7bd9ff08e6fdaf6ff983db347152feff",
+    "crates/kinewright-app/src/ja1_chat.rs": "2592138d55a101591e096e0cfddd95908de18eccd4df94cb682e0145f2db9b91",
+    "crates/kinewright-app/src/ja1_chat_tests.rs": "cc3483002eddeff1b11c08ddf5b1ecbb29306e727e8863ff92f4137d19cce280",
+    "crates/kinewright-project/src/bundle_commit.rs": "cfe4e846ac1100e9b3397fbee2932fdfa80946e8fa07c7cc7fd4fa9d31201445",
+    "crates/kinewright-project/src/bundle_copy.rs": "9bba24b21074c50e7616faef8d47793cd943a36751fbd4d2ada16db423d6d92d",
+    "crates/kinewright-project/src/bundle_recovery.rs": "9d6f26a410e1c61f86b6736b47840492b81b85ecb77d328f2d9fd1ec16714d0e",
+    "crates/kinewright-project/src/bundle_recovery/restore.rs": "cb33bf8d23202a538390ab094fad42756b653849b65aab4a456496e3ce0ca49c",
+    "crates/kinewright-project/src/studio_records.rs": "9222cbef0c0a963fc30e033116ecab063d39e375bc1382d51dad06692003a317",
+    "crates/kinewright-project/src/studio_store.rs": "8cd2cdd39779ea5c6cc111e1ca7ce2a027800879ad4ad43a70a3c74f86544408",
+    "crates/kinewright-project/tests/support/ja_s3_store_linux.rs": "a5ea752b6cd63f3124a6b60ff8661ccff8a3e0d805ee27c09562556de5d5bc32",
+    "scripts/ja1-s3-c1-fix1-gate.sh": "81452582d1f4466f821683825682d4d7d1e99a827ba9acac8e13e169be8926ec",
+    "scripts/ja1-s3-c1-fix1-mutation-cases.json": "028f54907a9e9826f5cd81d47f7220b2106a2c0b73a0a7bedb3ccb1f5bf430f3",
+    "scripts/ja1-s3-c1-mutation-cases.json": "1e89c35b6664964ae069c43d259e0c0cde7ecb3d8c63a7021b857df9d7d34f9a",
+    "scripts/ja1-s3-c1-mutations.py": "2020a5726dd42eb988144ea762d5e9ce5ae117ae210db0d191535207f4fe777b"
+  }
+}

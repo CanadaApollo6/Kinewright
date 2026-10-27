@@ -60,6 +60,7 @@ def main():
     parser.add_argument("--cases", default="scripts/ja1-s3-c1-mutation-cases.json")
     parser.add_argument("--case", action="append", default=[])
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--evidence", default="docs/reports/ja1-s3/c1-evidence/mutations")
     args = parser.parse_args()
     cases = json.loads((ROOT / args.cases).read_text())
     selected = [c for c in cases if not args.case or c["name"] in args.case]
@@ -73,7 +74,7 @@ def main():
             print(case["name"], case["witness"], sep="\t")
     if args.list:
         return
-    evidence = ROOT / "docs/reports/ja1-s3/c1-evidence/mutations"
+    evidence = ROOT / args.evidence
     evidence.mkdir(parents=True, exist_ok=True)
     manifest_bytes = (evidence.parent / "source-before-gates.json").read_bytes()
     manifest = json.loads(manifest_bytes)["sha256"]

@@ -1,0 +1,24 @@
+{
+  "cleanup": {
+    "completed": true,
+    "deadline_ms": 2000,
+    "descendants_reaped": [],
+    "elapsed_ms": 5,
+    "error": null,
+    "leader_identity_held_through_cleanup": true,
+    "termination_requested": true
+  },
+  "fixture_group_termination_requested": true,
+  "os_start_identity": "b2f19550-357d-4b12-8c5b-4102440238f2:103674",
+  "phase": {
+    "action_id": 4294967295,
+    "phase": "cleanup",
+    "timeout_ms": 60000
+  },
+  "phase_elapsed_ms": 7,
+  "pid": 901789,
+  "production_guardian_certified": false,
+  "reaped": true,
+  "status": "exit status: 1",
+  "timed_out": false
+}

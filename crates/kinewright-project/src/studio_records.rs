@@ -128,6 +128,16 @@ pub struct VoiceRef {
     pub original_asr_ref: Option<ObjectRef>,
     pub chosen_transcript_revision: Option<ObjectRef>,
 }
+impl VoiceRef {
+    pub(crate) fn matches_note(&self, saved: &Self) -> bool {
+        self.audio_ref == saved.audio_ref
+            && self.playhead_log_ref == saved.playhead_log_ref
+            && self
+                .original_asr_ref
+                .as_ref()
+                .is_none_or(|reference| saved.original_asr_ref.as_ref() == Some(reference))
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackRevision {

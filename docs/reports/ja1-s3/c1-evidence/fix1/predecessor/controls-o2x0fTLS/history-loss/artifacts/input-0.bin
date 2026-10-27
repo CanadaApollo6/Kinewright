@@ -1,0 +1,12 @@
+{
+  "Do": {
+    "AddTrack": {
+      "track": {
+        "id": 71,
+        "kind": "Video",
+        "sync_lock": true,
+        "clips": []
+      }
+    }
+  }
+}

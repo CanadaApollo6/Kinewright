@@ -221,6 +221,13 @@ impl super::HostCommandOwner {
                 )
                 .into());
             }
+            if request.operation.is_some() && grant.role != super::AttachmentRole::Editor {
+                return Err(HostRefusal::new(
+                    "role_refused",
+                    "foreground operations require an Editor attachment",
+                )
+                .into());
+            }
             if !grant.permits(&request.command) {
                 return Err(HostRefusal::new(
                     "role_refused",
@@ -289,7 +296,7 @@ impl super::HostCommandOwner {
         if let Some(pin) = self.pending_read_pin.take() {
             self.attachments[index].read_pins.push(pin);
         }
-        if operation.is_some() {
+        if operation.is_some() && self.foreground_reply.is_some() {
             self.foreground_subject = Some(subject);
         }
         if reply.error.is_none() {
@@ -297,7 +304,11 @@ impl super::HostCommandOwner {
                 self.attachments[index].roots = reply.status.admitted_roots.clone();
             }
             if detach {
-                self.attachments.remove(index);
+                let removed = self.attachments.remove(index);
+                if self.foreground_subject.as_deref() == Some(removed.subject.as_str()) {
+                    self.foreground_reply = None;
+                    self.foreground_subject = None;
+                }
             }
         }
         reply

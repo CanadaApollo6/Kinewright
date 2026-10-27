@@ -345,8 +345,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/auth.rs",
-        "self.attachments.remove(index);",
-        ""
+        "let removed = self.attachments.remove(index);",
+        "let removed = &self.attachments[index];"
       ]
     ],
     "package": "kinewright-agent",

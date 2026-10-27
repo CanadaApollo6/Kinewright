@@ -1,0 +1,1 @@
+{"actual":1,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"pass_control","evidence_class":"control","expected":1,"id":"edit-history-present","observation":2,"oracle":"one","oracle_pointer":"","passed":true,"pointer":"/history/undo_count","positive_control":null}

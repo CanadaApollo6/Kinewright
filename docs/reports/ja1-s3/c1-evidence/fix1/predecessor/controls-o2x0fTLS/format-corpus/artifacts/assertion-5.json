@@ -1,0 +1,1 @@
+{"actual":false,"assertion":"actual == independently frozen expected","comparison":"equal","disposition":"pass_control","evidence_class":"control","expected":false,"id":"v3-studio-overwrite-refused-by-ceiling","observation":15,"oracle":"false","oracle_pointer":"","passed":true,"pointer":"/can_overwrite","positive_control":null}

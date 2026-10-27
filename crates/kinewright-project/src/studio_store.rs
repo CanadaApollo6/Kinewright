@@ -686,11 +686,10 @@ impl ProjectBundle {
                 let strokes = self.store.read_evidence(&revision.strokes_ref)?;
                 crate::receipts::validate_strokes(&strokes, self.store.limits().comment_points)?;
                 if let Some(voice) = &revision.voice_ref
-                    && feedback.notes.get(&voice.note_id).is_none_or(|saved| {
-                        saved.audio_ref != voice.audio_ref
-                            || saved.playhead_log_ref != voice.playhead_log_ref
-                            || saved.original_asr_ref != voice.original_asr_ref
-                    })
+                    && feedback
+                        .notes
+                        .get(&voice.note_id)
+                        .is_none_or(|saved| !voice.matches_note(saved))
                 {
                     return Err(BundleError::Identity(
                         "voice must be saved before feedback".into(),
@@ -710,6 +709,7 @@ impl ProjectBundle {
                 validate_voice(voice, self.store.limits())?;
                 if let Some(previous) = feedback.notes.get(&voice.note_id)
                     && (previous.audio_ref != voice.audio_ref
+                        || previous.duration_micros != voice.duration_micros
                         || previous.playhead_log_ref != voice.playhead_log_ref
                         || previous
                             .original_asr_ref
