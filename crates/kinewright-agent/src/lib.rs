@@ -1,5 +1,12 @@
 //! `MCP` tools and installed-agent CLI drivers for the live `Kinewright` process.
 
+// S4 C2
+#[path = "orchestration/execution_claim.rs"]
+pub mod execution_claim;
+#[path = "orchestration/guardian.rs"]
+pub mod guardian;
+pub mod job_guardian;
+
 mod acp;
 mod acp_drivers;
 mod acp_session;
