@@ -3,7 +3,7 @@ use kinewright_job_sys::{Cgroup, ProcessHandle};
 use std::{
     fs,
     io::{self, Read, Write},
-    os::unix::process::CommandExt,
+    os::fd::AsFd,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
 };
@@ -52,7 +52,7 @@ impl Tree {
             .arg(self.cgroup.path())
             .arg(&program_path)
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?;
         self.gate = child.stdin.take();
@@ -61,27 +61,13 @@ impl Tree {
                 .as_ref()
                 .ok_or_else(|| io::Error::other("shim gate"))?,
         )?;
-        let process = ProcessHandle::open(child.id())?;
+        let ready = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("shim readiness"))?;
         self.child = Some(child);
-        let deadline = std::time::Instant::now() + super::protocol::STARTUP;
-        let ready = root.join("boundary-ready.json");
-        loop {
-            match fs::read(&ready) {
-                Ok(bytes) => {
-                    let result: Result<(), String> = serde_json::from_slice(&bytes)?;
-                    result.map_err(io::Error::other)?;
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            if std::time::Instant::now() >= deadline || self.exited()? {
-                return Err(io::Error::other(
-                    "payload_namespace_unavailable: no child verification",
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        let result: Result<u32, String> = read_ready(ready)?;
+        let process = ProcessHandle::open(result.map_err(io::Error::other)?)?;
         Ok(process)
     }
     pub(super) fn membership(&self, pid: u32) -> io::Result<bool> {
@@ -138,20 +124,73 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
     program.validate()?;
     let cgroup = Cgroup::open(&leaf)?;
     cgroup.enter()?;
-    let boundary = kinewright_job_sys::enter_payload_boundary().map_err(|error| error.to_string());
-    super::service::atomic_record(
-        &path.with_file_name("boundary-ready.json"),
-        &boundary,
-        super::protocol::WIRE_CAP,
-    )?;
+    let outcome = (|| -> io::Result<u32> {
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        kinewright_job_sys::enter_payload_boundary()?;
+        let Some(pid) = kinewright_job_sys::fork_payload_init()? else {
+            drop(read);
+            let result = init(program, std::fs::File::from(write));
+            std::process::exit(result.unwrap_or(1));
+        };
+        drop(write);
+        let result: Result<(), String> = read_ready(std::fs::File::from(read))?;
+        result.map_err(io::Error::other)?;
+        Ok(pid)
+    })();
+    let boundary = outcome.as_ref().copied().map_err(ToString::to_string);
+    write_ready(&mut std::io::stdout(), &boundary)?;
+    kinewright_job_sys::close_payload_readiness()?;
+    std::process::exit(kinewright_job_sys::wait_payload_init(outcome?)?)
+}
+
+fn read_ready<T: serde::de::DeserializeOwned>(mut reader: impl Read + AsFd) -> io::Result<T> {
+    let flags = rustix::fs::fcntl_getfl(&reader)?;
+    rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK)?;
+    let deadline = std::time::Instant::now() + super::protocol::STARTUP;
+    let mut bytes = Vec::new();
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::other(
+                "payload_namespace_unavailable: readiness deadline",
+            ));
+        }
+        let mut buffer = [0; 1024];
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(serde_json::from_slice(&bytes)?),
+            Ok(n) if bytes.len() + n <= super::protocol::RECOVERY_CAP => {
+                bytes.extend_from_slice(&buffer[..n]);
+            }
+            Ok(_) => return Err(io::Error::other("boundary readiness cap")),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn write_ready(writer: &mut impl Write, result: &impl serde::Serialize) -> io::Result<()> {
+    let bytes = serde_json::to_vec(result)?;
+    if bytes.len() > super::protocol::RECOVERY_CAP {
+        return Err(io::Error::other("boundary readiness cap"));
+    }
+    writer.write_all(&bytes)?;
+    writer.flush()
+}
+
+fn init(program: Program, mut ready: std::fs::File) -> io::Result<i32> {
+    kinewright_job_sys::close_payload_readiness()?;
+    let boundary = kinewright_job_sys::mount_payload_proc().map_err(|error| error.to_string());
+    write_ready(&mut ready, &boundary)?;
+    drop(ready);
     boundary.map_err(io::Error::other)?;
     let mut commit = [0];
     std::io::stdin().read_exact(&mut commit)?;
     if commit != *b"C" {
         return Err(io::Error::other("missing shim COMMIT"));
     }
-    drop(cgroup);
-    Err(Command::new(program.executable)
+    let child = Command::new(program.executable)
         .args(program.arguments)
         .env(
             "XDG_RUNTIME_DIR",
@@ -160,5 +199,6 @@ pub(super) fn shim(mut args: impl Iterator<Item = std::ffi::OsString>) -> io::Re
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .exec())
+        .spawn()?;
+    kinewright_job_sys::reap_payload_until_exit(child.id())
 }

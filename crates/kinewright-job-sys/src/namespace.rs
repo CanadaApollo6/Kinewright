@@ -40,7 +40,7 @@ pub fn verify_nsdelegate(info: &str) -> io::Result<()> {
 /// No provider code runs in this process before this function succeeds.
 ///
 /// # Errors
-/// Refuses unavailable user/cgroup/mount namespaces, identity maps or masks.
+/// Refuses unavailable user/cgroup/mount/PID namespaces, identity maps or masks.
 pub fn enter_payload_boundary() -> io::Result<()> {
     require_nsdelegate()?;
     let uid = rustix::process::getuid().as_raw();
@@ -51,10 +51,11 @@ pub fn enter_payload_boundary() -> io::Result<()> {
         thread::unshare_unsafe(
             thread::UnshareFlags::NEWUSER
                 | thread::UnshareFlags::NEWCGROUP
-                | thread::UnshareFlags::NEWNS,
+                | thread::UnshareFlags::NEWNS
+                | thread::UnshareFlags::NEWPID,
         )
     }
-    .map_err(|e| io::Error::other(format!("payload_namespace_unavailable: {e}")))?;
+    .map_err(|e| io::Error::other(format!("payload_pid_namespace_unavailable: {e}")))?;
     fs::write("/proc/self/setgroups", "deny")?;
     fs::write("/proc/self/uid_map", format!("{uid} {uid} 1"))?;
     fs::write("/proc/self/gid_map", format!("{gid} {gid} 1"))?;
@@ -62,6 +63,71 @@ pub fn enter_payload_boundary() -> io::Result<()> {
     mask_runtime_directory(uid)?;
     thread::set_no_new_privs(true)?;
     Ok(())
+}
+
+/// Complete the boundary in the first child after NEWPID, before readiness.
+///
+/// # Errors
+/// Refuses a missing PID namespace or unavailable fresh procfs.
+pub fn mount_payload_proc() -> io::Result<()> {
+    verify_payload_pid_namespace(
+        rustix::process::getpid()
+            .as_raw_nonzero()
+            .get()
+            .cast_unsigned(),
+    )?;
+    let previous = fs::metadata("/proc")?;
+    mount::mount(
+        "proc",
+        "/proc",
+        "proc",
+        mount::MountFlags::NOSUID | mount::MountFlags::NODEV | mount::MountFlags::NOEXEC,
+        None::<&std::ffi::CStr>,
+    )
+    .map_err(|e| io::Error::other(format!("payload_proc_mount_unavailable: {e}")))?;
+    let mut pids = Vec::new();
+    for entry in fs::read_dir("/proc")? {
+        if let Some(pid) = entry?
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+        {
+            pids.push(pid);
+        }
+    }
+    if previous.dev() == fs::metadata("/proc")?.dev() || pids != [1] {
+        return Err(io::Error::other("payload_proc_mount_unavailable"));
+    }
+    verify_cgroup_namespace()?;
+    verify_runtime_mask(&runtime_directory(rustix::process::getuid().as_raw()))?;
+    Ok(())
+}
+
+/// Close the readiness writer before starting the provider.
+///
+/// # Errors
+/// Refuses a failed descriptor replacement.
+pub fn close_payload_readiness() -> io::Result<()> {
+    rustix::stdio::dup2_stdout(fs::File::options().write(true).open("/dev/null")?)?;
+    Ok(())
+}
+
+/// PID 1 reaps all adopted children until its direct provider exits.
+///
+/// # Errors
+/// Refuses unexpected wait failures or disappearance of the provider.
+pub fn reap_payload_until_exit(provider: u32) -> io::Result<i32> {
+    loop {
+        match rustix::process::wait(rustix::process::WaitOptions::empty()) {
+            Ok(Some((pid, status))) if pid.as_raw_nonzero().get().cast_unsigned() == provider => {
+                return Ok(status
+                    .exit_status()
+                    .unwrap_or_else(|| 128 + status.terminating_signal().unwrap_or(0)));
+            }
+            Ok(_) | Err(rustix::io::Errno::INTR) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 fn mask_runtime_directory(uid: u32) -> io::Result<()> {
@@ -114,6 +180,55 @@ fn verify_runtime_mask(runtime: &Path) -> io::Result<()> {
             });
     if !masked || fs::read_dir(runtime)?.next().is_some() {
         return Err(io::Error::other("runtime_directory_mask_unavailable"));
+    }
+    Ok(())
+}
+
+/// Fork the dedicated, single-threaded shim without losing namespace capabilities.
+///
+/// # Errors
+/// Refuses a threaded caller or a failed fork. The parent receives the host PID.
+pub fn fork_payload_init() -> io::Result<Option<u32>> {
+    if fs::read_dir("/proc/self/task")?.count() != 1 {
+        return Err(io::Error::other("payload_init_requires_single_thread"));
+    }
+    // SAFETY: The separately exec'd shim has exactly one thread, no held locks
+    // or shared mappings. libc fork runs its runtime hooks; descriptors remain owned.
+    let pid = unsafe { libc::fork() };
+    match pid {
+        -1 => Err(io::Error::last_os_error()),
+        0 => Ok(None),
+        pid => Ok(Some(pid.cast_unsigned())),
+    }
+}
+
+/// Reap the namespace init from the outer shim using its host PID.
+///
+/// # Errors
+/// Refuses wait failures or a missing child.
+pub fn wait_payload_init(pid: u32) -> io::Result<i32> {
+    let pid = rustix::process::Pid::from_raw(i32::try_from(pid).map_err(io::Error::other)?)
+        .ok_or_else(|| io::Error::other("invalid init PID"))?;
+    loop {
+        match rustix::process::waitpid(Some(pid), rustix::process::WaitOptions::empty()) {
+            Ok(Some((_, status))) => {
+                return Ok(status
+                    .exit_status()
+                    .unwrap_or_else(|| 128 + status.terminating_signal().unwrap_or(0)));
+            }
+            Err(rustix::io::Errno::INTR) | Ok(None) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Verify that the first child entered the requested PID namespace.
+///
+/// # Errors
+/// Refuses a missing namespace before procfs or provider execution.
+pub fn verify_payload_pid_namespace(pid: u32) -> io::Result<()> {
+    if pid != 1 {
+        return Err(io::Error::other("payload_pid_namespace_unavailable"));
     }
     Ok(())
 }

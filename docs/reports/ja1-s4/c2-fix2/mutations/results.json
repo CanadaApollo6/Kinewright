@@ -1,0 +1,687 @@
+{
+  "source_sha256": "f654d9c30ccd1f4b021d1c1069332927a9748098d6f48802200761deefdcd344",
+  "pairs": [
+    {
+      "guard": "commit-barrier",
+      "witness": "s4_precommit_cannot_execute",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.41s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/commit-barrier-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.41s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/commit-barrier-green.log.gz"
+      }
+    },
+    {
+      "guard": "failed-startup-closes-lifetime",
+      "witness": "s4_precommit_cannot_execute",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.91s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/failed-startup-closes-lifetime-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.41s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/failed-startup-closes-lifetime-green.log.gz"
+      }
+    },
+    {
+      "guard": "lifetime-writer",
+      "witness": "s4_real_host_death_skips_grace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.35s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/lifetime-writer-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.48s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/lifetime-writer-green.log.gz"
+      }
+    },
+    {
+      "guard": "native-cgroup-kill",
+      "witness": "s4_real_host_death_skips_grace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.38s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/native-cgroup-kill-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.36s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/native-cgroup-kill-green.log.gz"
+      }
+    },
+    {
+      "guard": "manager-whole-tree",
+      "witness": "s4_guardian_death_and_observation_loss",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.33s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/manager-whole-tree-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.31s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/manager-whole-tree-green.log.gz"
+      }
+    },
+    {
+      "guard": "retained-nlink",
+      "witness": "s4_retained_inode_deletion_signal",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.28s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/retained-nlink-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/retained-nlink-green.log.gz"
+      }
+    },
+    {
+      "guard": "native-identity",
+      "witness": "s4_reaped_guardian_and_identity_are_required",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.27s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/native-identity-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 4.27s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/native-identity-green.log.gz"
+      }
+    },
+    {
+      "guard": "zombie-scan",
+      "witness": "s4_deleted_cgroup_zombies_still_block_retirement",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.39s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/zombie-scan-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.39s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/zombie-scan-green.log.gz"
+      }
+    },
+    {
+      "guard": "guardian-reaped",
+      "witness": "s4_reaped_guardian_and_identity_are_required",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.25s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/guardian-reaped-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 4.28s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/guardian-reaped-green.log.gz"
+      }
+    },
+    {
+      "guard": "retained-slot",
+      "witness": "s4_guardian_death_and_observation_loss",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.35s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/retained-slot-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/retained-slot-green.log.gz"
+      }
+    },
+    {
+      "guard": "subreaper",
+      "witness": "s4_guardian_subreaps_real_orphans",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.31s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/subreaper-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.30s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/subreaper-green.log.gz"
+      }
+    },
+    {
+      "guard": "outside-service-migration",
+      "witness": "s4_c2_migration_outside_service_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/outside-service-migration-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/outside-service-migration-green.log.gz"
+      }
+    },
+    {
+      "guard": "service-root-migration",
+      "witness": "s4_c2_migration_to_service_root_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.31s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/service-root-migration-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.34s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/service-root-migration-green.log.gz"
+      }
+    },
+    {
+      "guard": "blocked-guardian-exit",
+      "witness": "s4_c2_blocked_guardian_exits_and_manager_kills",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 4.57s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/blocked-guardian-exit-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 3.45s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/blocked-guardian-exit-green.log.gz"
+      }
+    },
+    {
+      "guard": "runtime-directory-mask",
+      "witness": "s4_c2_runtime_dir_masked",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.28s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/runtime-directory-mask-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.40s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/runtime-directory-mask-green.log.gz"
+      }
+    },
+    {
+      "guard": "nsdelegate-required",
+      "witness": "s4_c2_launch_refuses_without_nsdelegate",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/nsdelegate-required-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.25s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/nsdelegate-required-green.log.gz"
+      }
+    },
+    {
+      "guard": "pid-namespace",
+      "witness": "s4_c2_proc_shows_only_the_namespace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.30s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/pid-namespace-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/pid-namespace-green.log.gz"
+      }
+    },
+    {
+      "guard": "fresh-proc",
+      "witness": "s4_c2_proc_shows_only_the_namespace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.39s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/fresh-proc-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/fresh-proc-green.log.gz"
+      }
+    },
+    {
+      "guard": "runtime-alias-mask",
+      "witness": "s4_c2_runtime_alias_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.33s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/runtime-alias-mask-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.33s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/runtime-alias-mask-green.log.gz"
+      }
+    },
+    {
+      "guard": "init-orphan-reaping",
+      "witness": "s4_c2_init_reaps_and_exits_with_provider",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 5.37s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/init-orphan-reaping-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.38s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/init-orphan-reaping-green.log.gz"
+      }
+    },
+    {
+      "guard": "init-provider-status",
+      "witness": "s4_c2_init_reaps_and_exits_with_provider",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.32s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/init-provider-status-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.39s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/init-provider-status-green.log.gz"
+      }
+    },
+    {
+      "guard": "descriptor-readiness",
+      "witness": "s4_c2_launch_under_runtime_dir",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.22s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/descriptor-readiness-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.22s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/descriptor-readiness-green.log.gz"
+      }
+    },
+    {
+      "guard": "pid-namespace-refusal",
+      "witness": "s4_c2_launch_refuses_without_pid_namespace",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.31s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/pid-namespace-refusal-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.18s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/pid-namespace-refusal-green.log.gz"
+      }
+    },
+    {
+      "guard": "session-service-live",
+      "witness": "s4_c2_service_proof_session_live",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.29s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/session-service-live-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.82s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/session-service-live-green.log.gz"
+      }
+    },
+    {
+      "guard": "recovery-service-live",
+      "witness": "s4_c2_service_proof_recovery_live",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.30s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/recovery-service-live-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.32s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/recovery-service-live-green.log.gz"
+      }
+    },
+    {
+      "guard": "session-service-zombie",
+      "witness": "s4_c2_service_proof_session_zombie",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.29s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/session-service-zombie-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.80s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/session-service-zombie-green.log.gz"
+      }
+    },
+    {
+      "guard": "recovery-service-zombie",
+      "witness": "s4_c2_service_proof_recovery_zombie",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.28s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/recovery-service-zombie-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.29s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/recovery-service-zombie-green.log.gz"
+      }
+    },
+    {
+      "guard": "session-service-events",
+      "witness": "s4_c2_service_events_session",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.29s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/session-service-events-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.88s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/session-service-events-green.log.gz"
+      }
+    },
+    {
+      "guard": "recovery-service-events",
+      "witness": "s4_c2_service_events_recovery",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.30s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/recovery-service-events-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 2.31s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/recovery-service-events-green.log.gz"
+      }
+    },
+    {
+      "guard": "service-device",
+      "witness": "s4_c2_service_identity_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.29s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/service-device-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.31s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/service-device-green.log.gz"
+      }
+    },
+    {
+      "guard": "service-inode",
+      "witness": "s4_c2_service_identity_refused",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.29s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/service-inode-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.28s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c2-fix2/mutations/service-inode-green.log.gz"
+      }
+    }
+  ]
+}
