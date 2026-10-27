@@ -1,3 +1,7 @@
+// S4 C5. Reader adapters compile these B-owned ports until A registers them.
+#[path = "orchestration/limits.rs"]
+pub mod limits;
+
 use std::collections::{HashMap, HashSet};
 
 use kinewright_core::{AgentError, AgentEvent};
@@ -10,12 +14,15 @@ pub(crate) struct ClaudeProtocol {
 
 impl ClaudeProtocol {
     pub(crate) fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, AgentError> {
+        if line.len() > limits::FRAME_BYTES {
+            return Err(AgentError::Protocol("ingress: frame_capacity".into()));
+        }
         let value: Value = serde_json::from_str(line).map_err(|error| {
             AgentError::Protocol(format!("invalid Claude stream JSON: {error}"))
         })?;
         let mut events = Vec::new();
         match value.get("type").and_then(Value::as_str) {
-            Some("assistant") => self.parse_assistant(&value, &mut events),
+            Some("assistant") => self.parse_assistant(&value, &mut events)?,
             Some("user") => self.parse_tool_results(&value, &mut events),
             Some("result") => parse_claude_result(&value, &mut events),
             Some(other) if value.get("error").is_some() => {
@@ -29,10 +36,17 @@ impl ClaudeProtocol {
         Ok(events)
     }
 
-    fn parse_assistant(&mut self, value: &Value, events: &mut Vec<AgentEvent>) {
+    fn parse_assistant(
+        &mut self,
+        value: &Value,
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<(), AgentError> {
         let Some(content) = value.pointer("/message/content").and_then(Value::as_array) else {
-            return;
+            return Ok(());
         };
+        if content.len() > limits::EVENTS {
+            return Err(AgentError::Protocol("ingress: event_capacity".into()));
+        }
         for block in content {
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
@@ -51,6 +65,11 @@ impl ClaudeProtocol {
                     let input = block.get("input").unwrap_or(&Value::Null);
                     let name = display_tool_call_name(raw_name, input);
                     if !id.is_empty() {
+                        if self.tool_names.len() >= limits::EVENTS
+                            && !self.tool_names.contains_key(id)
+                        {
+                            return Err(AgentError::Protocol("ingress: reply_capacity".into()));
+                        }
                         self.tool_names.insert(id.to_owned(), name.clone());
                     }
                     events.push(AgentEvent::ToolCall {
@@ -61,6 +80,7 @@ impl ClaudeProtocol {
                 _ => {}
             }
         }
+        Ok(())
     }
 
     fn parse_tool_results(&mut self, value: &Value, events: &mut Vec<AgentEvent>) {
@@ -148,11 +168,14 @@ pub(crate) struct CodexProtocol {
 
 impl CodexProtocol {
     pub(crate) fn parse_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, AgentError> {
+        if line.len() > limits::FRAME_BYTES {
+            return Err(AgentError::Protocol("ingress: frame_capacity".into()));
+        }
         let value: Value = serde_json::from_str(line)
             .map_err(|error| AgentError::Protocol(format!("invalid Codex JSONL: {error}")))?;
         let mut events = Vec::new();
         match value.get("type").and_then(Value::as_str) {
-            Some("item.started" | "item.completed") => self.parse_item(&value, &mut events),
+            Some("item.started" | "item.completed") => self.parse_item(&value, &mut events)?,
             Some("turn.completed") => {
                 let usage = value.get("usage").unwrap_or(&Value::Null);
                 events.push(AgentEvent::Cost {
@@ -201,9 +224,13 @@ impl CodexProtocol {
         Ok(events)
     }
 
-    fn parse_item(&mut self, value: &Value, events: &mut Vec<AgentEvent>) {
+    fn parse_item(
+        &mut self,
+        value: &Value,
+        events: &mut Vec<AgentEvent>,
+    ) -> Result<(), AgentError> {
         let Some(item) = value.get("item") else {
-            return;
+            return Ok(());
         };
         match item.get("type").and_then(Value::as_str) {
             Some("agent_message") => {
@@ -227,6 +254,12 @@ impl CodexProtocol {
                     || "tool".to_owned(),
                     |name| display_tool_call_name(name, arguments),
                 );
+                if self.tool_names.len() >= limits::EVENTS && !self.tool_names.contains_key(&id) {
+                    return Err(AgentError::Protocol("ingress: reply_capacity".into()));
+                }
+                if self.announced.len() >= 256 && !self.announced.contains(&id) {
+                    return Err(AgentError::Protocol("ingress: identity_capacity".into()));
+                }
                 self.tool_names.insert(id.clone(), name.clone());
                 if self.announced.insert(id.clone()) {
                     events.push(AgentEvent::ToolCall {
@@ -253,6 +286,7 @@ impl CodexProtocol {
             }
             _ => {}
         }
+        Ok(())
     }
 }
 

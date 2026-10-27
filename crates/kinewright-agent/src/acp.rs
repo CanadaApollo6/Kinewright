@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    io::{BufRead as _, BufReader, Read, Write as _},
+    io::Read,
     process::{Child, ChildStdin, Command as ProcessCommand, Stdio},
     sync::{
         Arc, Mutex,
@@ -17,11 +17,16 @@ use std::{
     time::Duration,
 };
 
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use crate::protocol::limits::{
+    EVENTS, EventSink, Frames, encoded_frame, stderr_capture, write_frame,
+};
+#[cfg(test)]
+use crossbeam_channel::unbounded;
+use crossbeam_channel::{Receiver, Sender, bounded};
 use kinewright_core::{AgentError, AgentEvent};
 use serde_json::{Value, json};
 
-use crate::child_process::{hide_console_window, spawn_stderr_capture};
+use crate::child_process::hide_console_window;
 
 type PendingReply = Result<Value, AgentError>;
 
@@ -95,6 +100,7 @@ struct AcpInner {
     incoming_rx: Receiver<AcpIncoming>,
     next_id: AtomicU64,
     interrupted: Arc<AtomicBool>,
+    ingress_failed: Arc<AtomicBool>,
 }
 
 impl AcpClient {
@@ -122,8 +128,9 @@ impl AcpClient {
         })?;
 
         let pending = Arc::new(Mutex::new(HashMap::new()));
-        let (incoming_tx, incoming_rx) = unbounded();
+        let (incoming_tx, incoming_rx) = bounded(EVENTS);
         let interrupted = Arc::new(AtomicBool::new(false));
+        let ingress_failed = Arc::new(AtomicBool::new(false));
         spawn_reader(
             stdout,
             stderr,
@@ -131,6 +138,7 @@ impl AcpClient {
             incoming_tx,
             Arc::clone(&interrupted),
             process_name,
+            Arc::clone(&ingress_failed),
         )?;
 
         Ok(Self {
@@ -141,8 +149,23 @@ impl AcpClient {
                 incoming_rx,
                 next_id: AtomicU64::new(1),
                 interrupted,
+                ingress_failed,
             }),
         })
+    }
+
+    pub(crate) fn ingress_failed(&self) -> bool {
+        self.inner.ingress_failed.load(Ordering::Acquire)
+    }
+    #[cfg(all(test, unix))]
+    pub(crate) fn child_reaped(&self) -> bool {
+        self.inner
+            .child
+            .lock()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_some()
     }
 
     pub(crate) fn incoming(&self) -> Receiver<AcpIncoming> {
@@ -163,13 +186,18 @@ impl AcpClient {
         method: &str,
         params: &Value,
     ) -> Result<AcpPendingRequest, AgentError> {
+        if self.inner.interrupted.load(Ordering::Acquire)
+            || (self.ingress_failed() && !restore_or_cancel(method))
+        {
+            return Err(AgentError::Protocol("ingress: interrupted".into()));
+        }
+        if method.len() > 256 {
+            return Err(AgentError::Protocol("ingress: method_capacity".into()));
+        }
+        encoded_frame(params)?;
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let (reply_tx, reply) = bounded(1);
-        self.inner
-            .pending
-            .lock()
-            .map_err(|_| AgentError::Harness("ACP pending-request lock was poisoned".to_owned()))?
-            .insert(id, reply_tx);
+        reserve_reply(&self.inner.pending, id, reply_tx)?;
         let message = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -190,6 +218,10 @@ impl AcpClient {
     }
 
     pub(crate) fn notify(&self, method: &str, params: &Value) -> Result<(), AgentError> {
+        encoded_frame(params)?;
+        if method.len() > 256 {
+            return Err(AgentError::Protocol("ingress: method_capacity".into()));
+        }
         // `params` is optional in JSON-RPC: a null params member is not the
         // same as an absent one (MSP's `initialized` rejects the former).
         let mut message = json!({
@@ -203,6 +235,8 @@ impl AcpClient {
     }
 
     pub(crate) fn respond(&self, id: &Value, result: &Value) -> Result<(), AgentError> {
+        encoded_frame(id)?;
+        encoded_frame(result)?;
         self.write_message(&json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -221,17 +255,20 @@ impl AcpClient {
     }
 
     fn write_message(&self, message: &Value) -> Result<(), AgentError> {
+        if self.ingress_failed()
+            && !message
+                .get("method")
+                .and_then(Value::as_str)
+                .is_some_and(restore_or_cancel)
+        {
+            return Err(AgentError::Protocol("ingress: interrupted".into()));
+        }
         let mut stdin = self
             .inner
             .stdin
             .lock()
             .map_err(|_| AgentError::Harness("ACP stdin lock was poisoned".to_owned()))?;
-        serde_json::to_writer(&mut *stdin, message)
-            .map_err(|error| AgentError::Protocol(error.to_string()))?;
-        stdin
-            .write_all(b"\n")
-            .and_then(|()| stdin.flush())
-            .map_err(|error| AgentError::Harness(format!("could not write to ACP agent: {error}")))
+        write_frame(&mut *stdin, message)
     }
 }
 
@@ -265,44 +302,59 @@ fn spawn_reader(
     incoming: Sender<AcpIncoming>,
     interrupted: Arc<AtomicBool>,
     process_name: &'static str,
+    ingress_failed: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
-    let stderr_reader = spawn_stderr_capture(stderr, "kinewright-acp-stderr")?;
+    let stderr_reader = stderr_capture(stderr, "kinewright-acp-stderr")?;
 
     thread::Builder::new()
         .name("kinewright-acp-reader".to_owned())
         .spawn(move || {
-            for line in BufReader::new(stdout).lines() {
+            let mut failure = None;
+            for line in Frames::new(stdout) {
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
-                        let _ = incoming.send(AcpIncoming::Fault(format!(
-                            "{process_name} stream error: {error}"
-                        )));
+                        failure = Some(format!("{process_name} stream error: {error}"));
                         break;
                     }
                 };
                 let message = match serde_json::from_str::<Value>(&line) {
                     Ok(message) => message,
                     Err(error) => {
-                        let _ = incoming.send(AcpIncoming::Malformed(format!(
-                            "{process_name} sent invalid NDJSON: {error}"
-                        )));
+                        if !offer_incoming(
+                            &incoming,
+                            AcpIncoming::Malformed(format!(
+                                "{process_name} sent invalid NDJSON: {error}"
+                            )),
+                        ) {
+                            failure = Some("ingress: event_capacity; attempt interrupted".into());
+                            break;
+                        }
                         continue;
                     }
                 };
-                route_message(&message, &pending, &incoming);
+                if !route_message(&message, &pending, &incoming) {
+                    failure = Some("ingress: event_capacity; attempt interrupted".into());
+                    break;
+                }
             }
-
-            let stderr_text = stderr_reader.join().unwrap_or_default();
-            let detail = stderr_text.trim();
-            let message = if detail.is_empty() {
-                format!("{process_name} closed its ACP stream")
+            ingress_failed.store(true, Ordering::Release);
+            let stderr_text = if stderr_reader.is_finished() {
+                stderr_reader.join().unwrap_or_default()
             } else {
-                format!("{process_name} closed its ACP stream: {detail}")
+                String::new()
             };
+            let detail = stderr_text.trim();
+            let message = failure.unwrap_or_else(|| {
+                if detail.is_empty() {
+                    format!("{process_name} closed its ACP stream")
+                } else {
+                    format!("{process_name} closed its ACP stream: {detail}")
+                }
+            });
             fail_pending(&pending, &message);
             if !interrupted.load(Ordering::Acquire) {
-                let _ = incoming.send(AcpIncoming::Fault(message));
+                let _ = incoming.try_send(AcpIncoming::Fault(message));
             }
         })
         .map(|_| ())
@@ -313,29 +365,35 @@ fn route_message(
     message: &Value,
     pending: &Mutex<HashMap<u64, Sender<PendingReply>>>,
     incoming: &Sender<AcpIncoming>,
-) {
+) -> bool {
     if let Some(method) = message.get("method").and_then(Value::as_str) {
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         if let Some(id) = message.get("id") {
-            let _ = incoming.send(AcpIncoming::Request {
-                id: id.clone(),
-                method: method.to_owned(),
-                params,
-            });
-        } else {
-            let _ = incoming.send(AcpIncoming::Notification {
-                method: method.to_owned(),
-                params,
-            });
+            return offer_incoming(
+                incoming,
+                AcpIncoming::Request {
+                    id: id.clone(),
+                    method: method.to_owned(),
+                    params,
+                },
+            );
         }
-        return;
+        return offer_incoming(
+            incoming,
+            AcpIncoming::Notification {
+                method: method.to_owned(),
+                params,
+            },
+        );
     }
 
     let Some(id) = message.get("id").and_then(Value::as_u64) else {
-        let _ = incoming.send(AcpIncoming::Malformed(
-            "ACP message had neither a method nor a numeric reply id".to_owned(),
-        ));
-        return;
+        return offer_incoming(
+            incoming,
+            AcpIncoming::Malformed(
+                "ACP message had neither a method nor a numeric reply id".to_owned(),
+            ),
+        );
     };
     let sender = pending.lock().ok().and_then(|mut map| map.remove(&id));
     if let Some(sender) = sender {
@@ -344,8 +402,38 @@ fn route_message(
         } else {
             Ok(message.get("result").cloned().unwrap_or(Value::Null))
         };
-        let _ = sender.send(reply);
+        let _ = sender.try_send(reply);
     }
+    true
+}
+
+fn reserve_reply(
+    pending: &Mutex<HashMap<u64, Sender<PendingReply>>>,
+    id: u64,
+    reply: Sender<PendingReply>,
+) -> Result<(), AgentError> {
+    let mut pending = pending
+        .lock()
+        .map_err(|_| AgentError::Harness("ACP pending-request lock was poisoned".into()))?;
+    if pending.len() >= EVENTS {
+        return Err(AgentError::Protocol("ingress: reply_capacity".into()));
+    }
+    pending.insert(id, reply);
+    Ok(())
+}
+
+fn restore_or_cancel(method: &str) -> bool {
+    matches!(
+        method,
+        "session/set_config_option" | "session/cancel" | "turn/cancel"
+    )
+}
+
+fn offer_incoming(incoming: &Sender<AcpIncoming>, value: AcpIncoming) -> bool {
+    if incoming.len() >= EVENTS - 1 {
+        return false;
+    }
+    incoming.try_send(value).is_ok()
 }
 
 fn rpc_error_text(error: &Value) -> String {
@@ -369,9 +457,9 @@ fn fail_pending(pending: &Mutex<HashMap<u64, Sender<PendingReply>>>, message: &s
     }
 }
 
-pub(crate) fn send_done(events: &Sender<AgentEvent>, done: &AtomicBool) {
+pub(crate) fn send_done(events: &impl EventSink, done: &AtomicBool) {
     if !done.swap(true, Ordering::AcqRel) {
-        let _ = events.send(AgentEvent::Done);
+        events.emit(AgentEvent::Done);
     }
 }
 
@@ -380,11 +468,94 @@ mod tests {
     use super::*;
 
     #[test]
+    fn s4_acp_pending_reply_map_is_bounded() {
+        let pending = Mutex::new(HashMap::new());
+        let mut receivers = vec![];
+        for n in 0..EVENTS {
+            let (sender, receiver) = bounded(1);
+            reserve_reply(&pending, n as u64, sender).unwrap();
+            receivers.push(receiver);
+        }
+        assert!(reserve_reply(&pending, 99, bounded(1).0).is_err());
+        assert_eq!(
+            pending
+                .lock()
+                .unwrap()
+                .keys()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            (0..EVENTS as u64).collect()
+        );
+        fail_pending(&pending, "retained interruption");
+        for receiver in receivers {
+            assert!(
+                matches!(receiver.try_recv().unwrap(),Err(AgentError::Harness(reason)) if reason=="retained interruption")
+            );
+        }
+    }
+
+    #[test]
+    fn s4_acp_reader_capacity_retains_accepted_and_fails_waiters() {
+        use std::fmt::Write as _;
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (reply, waiter) = bounded(1);
+        pending.lock().unwrap().insert(7, reply);
+        let (sender, receiver) = bounded(EVENTS);
+        let mut bytes = String::new();
+        for n in 0..EVENTS + 4 {
+            writeln!(bytes, "{{\"method\":\"event-{n}\",\"params\":{{}}}}").unwrap();
+        }
+        spawn_reader(
+            std::io::Cursor::new(bytes.into_bytes()),
+            std::io::empty(),
+            Arc::clone(&pending),
+            sender,
+            Arc::new(AtomicBool::new(false)),
+            "fixture",
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(
+            waiter
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_err()
+        );
+        for n in 0..EVENTS - 1 {
+            assert!(
+                matches!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(),AcpIncoming::Notification {method,..} if method==format!("event-{n}"))
+            );
+        }
+        assert!(
+            matches!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(),AcpIncoming::Fault(reason) if reason.contains("event_capacity"))
+        );
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn s4_acp_oversized_malformed_frame_is_interrupted_before_json() {
+        let (sender, receiver) = bounded(EVENTS);
+        spawn_reader(
+            std::io::Cursor::new(vec![b'x'; 2 * crate::protocol::limits::FRAME_BYTES]),
+            std::io::empty(),
+            Arc::new(Mutex::new(HashMap::new())),
+            sender,
+            Arc::new(AtomicBool::new(false)),
+            "fixture",
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(
+            matches!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(),AcpIncoming::Fault(reason) if reason.contains("frame_capacity"))
+        );
+    }
+
+    #[test]
     fn routes_replies_requests_and_notifications_without_reader_contention() {
         let pending = Mutex::new(HashMap::new());
         let (reply_tx, reply_rx) = bounded(1);
         pending.lock().unwrap().insert(7, reply_tx);
-        let (incoming_tx, incoming_rx) = unbounded();
+        let (incoming_tx, incoming_rx) = bounded(EVENTS);
 
         route_message(
             &json!({"jsonrpc":"2.0","id":7,"result":{"sessionId":"s1"}}),
@@ -450,7 +621,7 @@ mod tests {
         let pending = Arc::new(Mutex::new(HashMap::new()));
         let (reply_tx, reply_rx) = bounded(1);
         pending.lock().unwrap().insert(1, reply_tx);
-        let (incoming_tx, incoming_rx) = unbounded();
+        let (incoming_tx, incoming_rx) = bounded(EVENTS);
         spawn_reader(
             std::io::Cursor::new(stdout.as_bytes().to_vec()),
             std::io::empty(),
@@ -458,6 +629,7 @@ mod tests {
             incoming_tx,
             Arc::new(AtomicBool::new(false)),
             "Fake ACP",
+            Arc::new(AtomicBool::new(false)),
         )
         .unwrap();
 

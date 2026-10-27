@@ -190,6 +190,10 @@ impl OrchestrationRecord {
         encoded(self, CONTROL_BYTES)?;
         let mut refs = Vec::new();
         match &self.payload {
+            // S4 C5
+            OrchestrationPayload::Accounting(record) => {
+                refs.extend(record.dependencies().map_err(|_| Refusal::InvalidState)?);
+            }
             OrchestrationPayload::RunIndex(index) => {
                 if index.len() > ITEM_LIMIT {
                     return Err(Refusal::Capacity);

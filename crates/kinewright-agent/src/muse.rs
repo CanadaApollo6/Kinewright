@@ -21,7 +21,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+#[cfg(test)]
+use crate::protocol::limits::event_channel as unbounded;
+use crate::protocol::limits::{EventSender as Sender, event_channel};
+use crossbeam_channel::Receiver;
 use kinewright_core::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
@@ -278,7 +281,7 @@ struct MuseSession {
     requested: SessionConfig,
     scratch_directory: PathBuf,
     events_rx: Receiver<AgentEvent>,
-    events_tx: Sender<AgentEvent>,
+    events_tx: Sender,
     done: Arc<AtomicBool>,
     turns: u32,
 }
@@ -326,7 +329,7 @@ impl MuseSession {
                 return Err(error);
             }
         };
-        let (events_tx, events_rx) = unbounded();
+        let (events_tx, events_rx) = event_channel();
         let done = Arc::new(AtomicBool::new(true));
         spawn_muse_incoming(
             client.clone(),
@@ -387,6 +390,12 @@ fn start_muse_session(
 
 impl AgentSession for MuseSession {
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError> {
+        if self.events_tx.failed() || self.client.ingress_failed() {
+            return Err(AgentError::Protocol("ingress: interrupted".into()));
+        }
+        if text.len() > crate::protocol::limits::FRAME_BYTES / 2 {
+            return Err(AgentError::Protocol("ingress: prompt_capacity".into()));
+        }
         if text.trim().is_empty() {
             return Err(AgentError::Protocol("user message is empty".to_owned()));
         }
@@ -425,20 +434,15 @@ impl AgentSession for MuseSession {
         self.done.store(false, Ordering::Release);
         self.turns += 1;
 
-        let events = self.events_tx.clone();
-        let done = Arc::clone(&self.done);
-        thread::Builder::new()
-            .name("kinewright-muse-turn".to_owned())
-            .spawn(move || {
-                if let Err(error) = pending.wait(MSP_REQUEST_TIMEOUT) {
-                    let _ = events.send(AgentEvent::Error(error.to_string()));
-                    send_done(&events, &done);
-                }
-            })
-            .map_err(|error| {
-                self.done.store(true, Ordering::Release);
-                AgentError::Harness(error.to_string())
-            })?;
+        spawn_muse_acknowledgement(
+            pending,
+            self.events_tx.clone(),
+            Arc::clone(&self.done),
+            self.client.clone(),
+        )
+        .inspect_err(|_| {
+            self.done.store(true, Ordering::Release);
+        })?;
         Ok(())
     }
 
@@ -451,6 +455,9 @@ impl AgentSession for MuseSession {
     /// stopped answering — the reason Stop was pressed — would otherwise
     /// freeze the whole UI for the full 30-second request budget.
     fn interrupt(&mut self) {
+        if self.client.ingress_failed() {
+            return;
+        }
         let was_running = !self.done.load(Ordering::Acquire);
         if was_running {
             let _ = self.client.begin_request(
@@ -473,11 +480,31 @@ impl Drop for MuseSession {
     }
 }
 
+fn spawn_muse_acknowledgement(
+    pending: crate::acp::AcpPendingRequest,
+    events: Sender,
+    done: Arc<AtomicBool>,
+    client: AcpClient,
+) -> Result<thread::JoinHandle<()>, AgentError> {
+    thread::Builder::new()
+        .name("kinewright-muse-turn".into())
+        .spawn(move || {
+            if let Err(error) = pending.wait(MSP_REQUEST_TIMEOUT) {
+                if client.ingress_failed() {
+                    return;
+                }
+                let _ = events.send(AgentEvent::Error(error.to_string()));
+                send_done(&events, &done);
+            }
+        })
+        .map_err(|error| AgentError::Harness(error.to_string()))
+}
+
 fn spawn_muse_incoming(
     client: AcpClient,
     incoming: Receiver<AcpIncoming>,
     session_id: String,
-    events: Sender<AgentEvent>,
+    events: Sender,
     done: Arc<AtomicBool>,
 ) -> Result<(), AgentError> {
     thread::Builder::new()
@@ -487,6 +514,10 @@ fn spawn_muse_incoming(
             let mut turn_saw_usage = false;
             let mut reported_malformed = false;
             for message in incoming {
+                if events.failed() {
+                    client.kill();
+                    break;
+                }
                 match message {
                     AcpIncoming::Request { id, method, params } => {
                         handle_muse_request(&client, &session_id, &id, &method, &params);
@@ -521,12 +552,18 @@ fn spawn_muse_incoming(
                         }
                     }
                     AcpIncoming::Fault(message) => {
-                        if !done.load(Ordering::Acquire) {
-                            let _ = events.send(AgentEvent::Error(message));
-                            send_done(&events, &done);
+                        client.kill();
+                        if done.swap(true, Ordering::AcqRel) {
+                            events.close_admission();
+                        } else {
+                            events.interrupt(&message);
                         }
                         break;
                     }
+                }
+                if events.failed() {
+                    client.kill();
+                    break;
                 }
             }
         })
@@ -639,7 +676,7 @@ fn approval_decision(params: &Value) -> Option<String> {
 fn translate_muse_notification(
     method: &str,
     params: &Value,
-    events: &Sender<AgentEvent>,
+    events: &Sender,
     done: &AtomicBool,
     tool_names: &mut HashMap<String, String>,
     turn_saw_usage: &mut bool,
@@ -702,7 +739,7 @@ fn translate_muse_notification(
 
 fn translate_muse_item_started(
     item: &Value,
-    events: &Sender<AgentEvent>,
+    events: &Sender,
     tool_names: &mut HashMap<String, String>,
 ) {
     if item.get("kind").and_then(Value::as_str) != Some("toolCall") {
@@ -719,6 +756,10 @@ fn translate_muse_item_started(
         item.get("args").and_then(Value::as_str),
     );
     if !id.is_empty() {
+        if tool_names.len() >= crate::protocol::limits::EVENTS && !tool_names.contains_key(id) {
+            events.interrupt("ingress: reply_capacity");
+            return;
+        }
         tool_names.insert(id.to_owned(), name.clone());
     }
     events
@@ -735,7 +776,7 @@ fn translate_muse_item_started(
 
 fn translate_muse_item_completed(
     item: &Value,
-    events: &Sender<AgentEvent>,
+    events: &Sender,
     tool_names: &mut HashMap<String, String>,
 ) {
     match item.get("kind").and_then(Value::as_str) {
@@ -847,6 +888,110 @@ mod tests {
     const FRAME_BOUND: Duration = Duration::from_secs(1);
 
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn s4_raw_acp_overflow_reaps_before_terminal_and_rejects_sends() {
+        struct ReapClient(AcpClient);
+        impl Drop for ReapClient {
+            fn drop(&mut self) {
+                self.0.kill();
+            }
+        }
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c",r#"IFS= read -r request; i=0; while [ "$i" -lt 32 ]; do printf '{"jsonrpc":"2.0","method":"noise","params":{"ordinal":%s}}\n' "$i"; i=$((i+1)); done; exec sleep 30"#]);
+        let client = AcpClient::spawn(command, "ACP overflow fixture").unwrap();
+        let _reap = ReapClient(client.clone());
+        let raw = client.incoming();
+        let (events, received) = event_channel();
+        let failure = events.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let pending = client
+            .begin_request("turn/start", &json!({"sessionId":"unrelated-session"}))
+            .unwrap();
+        let acknowledgement =
+            spawn_muse_acknowledgement(pending, events.clone(), Arc::clone(&done), client.clone())
+                .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !client.ingress_failed() {
+            assert!(Instant::now() < deadline, "raw ingress failure must latch");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        acknowledgement.join().unwrap();
+        assert!(
+            received.try_recv().is_err(),
+            "ack failure cannot publish terminal events ahead of fault cleanup"
+        );
+        assert!(!done.load(Ordering::Acquire));
+        assert!(
+            !client.child_reaped(),
+            "the retained raw fault precedes consumer cleanup"
+        );
+        assert!(client.begin_request("turn/start", &json!({})).is_err());
+        let (forward, routed_input) = crossbeam_channel::bounded(crate::protocol::limits::EVENTS);
+        for n in 0..crate::protocol::limits::EVENTS - 1 {
+            let message = raw.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(
+                matches!(&message,AcpIncoming::Notification {params,..} if params["ordinal"]==n)
+            );
+            forward.send(message).unwrap();
+        }
+        let fault = raw.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(&fault,AcpIncoming::Fault(reason) if reason.contains("event_capacity")));
+        forward.send(fault).unwrap();
+        drop(forward);
+        spawn_muse_incoming(
+            client.clone(),
+            routed_input,
+            "unrelated-session".into(),
+            events,
+            Arc::clone(&done),
+        )
+        .unwrap();
+        assert!(
+            matches!(received.recv_timeout(Duration::from_secs(5)).unwrap(),AgentEvent::Error(reason) if reason.contains("event_capacity"))
+        );
+        assert!(
+            client.child_reaped(),
+            "kill and reap precede terminal observation"
+        );
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(5)).unwrap(),
+            AgentEvent::Done
+        );
+        assert!(failure.failed());
+        assert!(done.load(Ordering::Acquire));
+        assert!(client.begin_request("turn/start", &json!({})).is_err());
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn s4_muse_tool_map_interrupts_without_losing_accepted_identities() {
+        let (sender, receiver) = event_channel();
+        let mut names = HashMap::new();
+        for n in 0..crate::protocol::limits::EVENTS {
+            translate_muse_item_started(
+                &json!({"kind":"toolCall","itemId":format!("tool-{n}"),"tool":"get_timeline_state","args":"{}"}),
+                &sender,
+                &mut names,
+            );
+            assert!(matches!(
+                receiver.try_recv().unwrap(),
+                AgentEvent::ToolCall { .. }
+            ));
+        }
+        let accepted = names.clone();
+        translate_muse_item_started(
+            &json!({"kind":"toolCall","itemId":"unaccepted-overflow","tool":"get_timeline_state","args":"{}"}),
+            &sender,
+            &mut names,
+        );
+        assert_eq!(names, accepted);
+        assert!(
+            matches!(receiver.try_recv().unwrap(),AgentEvent::Error(reason) if reason.contains("reply_capacity"))
+        );
+        assert_eq!(receiver.try_recv().unwrap(), AgentEvent::Done);
+    }
 
     #[test]
     fn driver_id_matches_the_public_harness_name() {

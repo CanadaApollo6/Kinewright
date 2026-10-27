@@ -37,6 +37,14 @@ fn main() {
     let args: Vec<_> = env::args_os().collect();
     let root = Path::new(&args[1]);
     let role = args[2].to_str().unwrap();
+    if role == "ingress" {
+        use std::io::Write as _;
+        std::io::stderr()
+            .write_all(&vec![b'e'; 192 * 1024])
+            .unwrap();
+        let _ = std::io::stdout().write_all(&vec![b'x'; 192 * 1024]);
+        return;
+    }
     publish(
         root,
         if role == "stubborn-payload" {

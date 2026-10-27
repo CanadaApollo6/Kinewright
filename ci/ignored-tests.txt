@@ -109,3 +109,6 @@ ja_s2_host c11_switch_gui_participant crates/kinewright-agent/tests/ja_s2_host.r
 kinewright_agent server::tests::s4_editor_result_to_candidate crates/kinewright-agent/src/orchestration/server_tests.rs linux inherited-gap  # H3 resolved attachment dispatch and C2 contained connector integration are not merged
 ja_s4_lifecycle s4_durable_owner_lifecycle_reopen crates/kinewright-agent/tests/ja_s4_lifecycle.rs any inherited-gap  # H1 durable orchestration publication and owner reopen are not merged
 ja_s4_lifecycle s4_person_holder_approval_and_secret crates/kinewright-agent/tests/ja_s4_lifecycle.rs any inherited-gap  # H3 person-facing holder and attachment roles are not merged
+
+# S4 C5
+ja_s4_usage s4_usage_durable_reopen_h1 crates/kinewright-agent/tests/ja_s4_usage.rs any inherited-gap  # S3 H1 durable orchestration publisher and independent reopen are not integrated

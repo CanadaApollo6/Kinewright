@@ -1,0 +1,28 @@
+{
+  "parent": "e5727249baeef4cfa02a1a97a9101109f7434fef",
+  "branch": "t3/ja1-s4-b-c2",
+  "protected_source_sha256": "0b9ef9fe83f433a7144d14de8e4041b1c3ada2181a0226ca2150843b222896ba",
+  "source_manifest_sha256": "8629fad66f10df7ee6a888d67b458b95522a28da5496de52de92316aa20be093",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "os": "Linux 7.2.8-10-omarchy x86_64 GNU/Linux",
+  "binaries": [
+    {
+      "path": "target/debug/kinewright-job-guardian",
+      "sha256": "36d2641958d6ed42c7a12b883d1a74261ab8c4630bca388fbcd8205dc3177fc2"
+    },
+    {
+      "path": "target/debug/kinewright",
+      "sha256": "1e15b459fe59f0dde6c154c65e13972a1744b355559376d8dfee7e4bb8560817"
+    },
+    {
+      "path": "target/debug/deps/kinewright_agent-913b0afc8b9a64d0",
+      "sha256": "d2a67bc742feb4f089a08e43b6d6f6c1391dc03f3ce9a9dd3815692635c28270"
+    }
+  ],
+  "gate": {
+    "passed": 214,
+    "failed": 0,
+    "ignored": 1
+  },
+  "mutation_pairs": 16
+}
