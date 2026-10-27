@@ -27,11 +27,11 @@ CARGO = (
 )
 WITNESSES = {
     "auto": (
-        "app::in1_tests::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+        "app::in1_tests::c0_studio_owned::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
         "c0-colour-auto: the automatic fix must not reach Core unstaged",
     ),
     "card": (
-        "app::in1_tests::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+        "app::in1_tests::c0_studio_owned::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
         "c0-colour-card: the card's fix must not reach Core unstaged",
     ),
 }
