@@ -1030,6 +1030,18 @@ enum Choice {
     },
     Release(std::path::PathBuf),
 }
+// Only the checked, immutable snapshot may skip repeated digest and capacity scans.
+struct VerifiedHostSnapshot(HostSnapshot);
+impl VerifiedHostSnapshot {
+    fn new(snapshot: HostSnapshot) -> Result<Self, HostError> {
+        snapshot.verify()?;
+        Ok(Self(snapshot))
+    }
+    fn copy_from(snapshot: &HostSnapshot) -> Result<Self, HostError> {
+        snapshot.verify()?;
+        Ok(Self(snapshot.clone()))
+    }
+}
 impl HostCommandOwner {
     pub fn open(mut config: HostConfig) -> Result<Self, HostError> {
         if config.project.is_empty() || config.project.len() > 256 {
@@ -1041,10 +1053,7 @@ impl HostCommandOwner {
         let bootstrap_snapshot = match &config.origin {
             HostOrigin::Gui {
                 initial_snapshot, ..
-            } => {
-                initial_snapshot.verify()?;
-                Some(initial_snapshot.clone())
-            }
+            } => Some(VerifiedHostSnapshot::copy_from(initial_snapshot)?),
             HostOrigin::Headless => None,
         };
         let mut nonce = [0_u8; 16];
@@ -1071,7 +1080,7 @@ impl HostCommandOwner {
             {
                 remote.prove_snapshot(
                     &source,
-                    &BorrowedSnapshotBinding::from_history(&initial_snapshot.history)?,
+                    &BorrowedSnapshotBinding::from_history(&initial_snapshot.0.history)?,
                 )?;
             }
         }
@@ -1150,7 +1159,7 @@ impl HostCommandOwner {
         // Initial attachment seeds the one validation shadow before it can serve sessions.
         // This is a bootstrap snapshot, not the C9 continuous manual stream.
         if let Some(initial_snapshot) = bootstrap_snapshot {
-            host.install(initial_snapshot)?;
+            host.install_verified(initial_snapshot)?;
         }
         Ok(host)
     }
@@ -1188,7 +1197,10 @@ impl HostCommandOwner {
         Ok(())
     }
     fn install(&mut self, snapshot: HostSnapshot) -> Result<(), HostError> {
-        snapshot.verify()?;
+        self.install_verified(VerifiedHostSnapshot::new(snapshot)?)
+    }
+    fn install_verified(&mut self, snapshot: VerifiedHostSnapshot) -> Result<(), HostError> {
+        let VerifiedHostSnapshot(snapshot) = snapshot;
         if self.manual.is_some()
             && self
                 .core()
@@ -2636,6 +2648,72 @@ mod tests {
         .unwrap();
         assert!(bad.request(HostCommand::ReadHistory).is_err());
         host.shutdown().unwrap();
+    }
+    #[test]
+    fn fu3_bootstrap_checks_snapshot_before_retention_and_installs_exact_history() {
+        use kinewright_core::{Command, Event, Operation, Track, TrackId, TrackKind};
+        let core = Core::spawn(Document::default()).unwrap();
+        assert!(matches!(
+            core.request(Command::Do(Operation::AddTrack {
+                track: Track {
+                    id: TrackId(1),
+                    kind: TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![],
+                },
+            }))
+            .unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let expected = core.export_history().unwrap();
+        for corrupt in [true, false] {
+            let proved = Arc::new(AtomicBool::new(false));
+            let called = Arc::clone(&proved);
+            let source = SourceServer::start_context(move || {
+                called.store(true, Ordering::Release);
+                Ok(())
+            })
+            .unwrap();
+            let mut snapshot = HostSnapshot::from_history(expected.clone()).unwrap();
+            if corrupt {
+                snapshot.history_sha256 = "0".repeat(64);
+            }
+            let result = HostCommandOwner::open(HostConfig {
+                project: "fu3-bootstrap".into(),
+                path: None,
+                roots: SessionRoots::default(),
+                origin: HostOrigin::Gui {
+                    retention: HostSourceBinding {
+                        source: None,
+                        inputs: None,
+                        callback: source.bootstrap(),
+                    },
+                    initial_snapshot: snapshot,
+                    expected_root_sha256: None,
+                    expected_project_id: None,
+                },
+            });
+            if corrupt {
+                let Err(HostError::Refused(error)) = result else {
+                    panic!("corrupt bootstrap snapshot must be refused");
+                };
+                assert_eq!(error.code, "history_changed");
+                assert!(!proved.load(Ordering::Acquire));
+            } else {
+                let mut owner = result.unwrap();
+                assert!(proved.load(Ordering::Acquire));
+                assert_eq!(owner.core().export_history().unwrap(), expected);
+                let empty = Core::spawn(Document::default()).unwrap();
+                let mut invalid = HostSnapshot::capture(&empty).unwrap();
+                invalid.history_sha256 = "0".repeat(64);
+                let reply = owner.execute(
+                    HostCommand::Save { snapshot: invalid },
+                    SessionRoots::default(),
+                );
+                assert_eq!(reply.error.unwrap().code, "history_changed");
+                assert_eq!(owner.core().export_history().unwrap(), expected);
+            }
+        }
     }
     #[test]
     fn snapshot_digest_refusal_precedes_any_owner_install() {

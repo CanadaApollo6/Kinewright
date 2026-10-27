@@ -229,6 +229,7 @@ enum CoreMessage {
         AcceptedCut,
         HistorySnapshot,
         Vec<crate::AcceptedHistory>,
+        bool,
         Sender<Result<AcceptedCut, HistoryError>>,
     ),
     RestoreHistory(
@@ -332,6 +333,7 @@ impl Core {
         cut: AcceptedCut,
         after: HistorySnapshot,
         pending: Vec<crate::AcceptedHistory>,
+        checkpoint: bool,
     ) -> Result<AcceptedCut, HistoryError> {
         let (reply, result) = crossbeam_channel::bounded(1);
         self.sender
@@ -340,6 +342,7 @@ impl Core {
                 cut,
                 after,
                 pending,
+                checkpoint,
                 reply,
             ))
             .map_err(|_| HistoryError::Disconnected)?;
@@ -1375,7 +1378,7 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                 // Publication chooses and records any floor before the owner installs it.
                 let _ = reply.send(Ok((state.history_change_id(), state.history())));
             }
-            CoreMessage::InstallFrozen(requested, cut, after, pending, reply) => {
+            CoreMessage::InstallFrozen(requested, cut, after, pending, checkpoint, reply) => {
                 let result = (|| {
                     authorize_attachment(attachment, owner, Some(requested))?;
                     if attachment != AttachmentState::Frozen
@@ -1389,23 +1392,30 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: A
                     {
                         return Err(HistoryError::CaptureChanged);
                     }
-                    let discard = after
-                        .floor_offset
-                        .checked_sub(cut.history.floor_offset)
-                        .and_then(|n| usize::try_from(n).ok())
-                        .ok_or(HistoryError::Corrupt)?;
-                    let floored = if discard == 0 {
-                        cut.history.clone()
-                    } else {
-                        crate::HistoryTransition::floor(cut.history.clone(), discard)?
-                            .after()
-                            .clone()
-                    };
-                    if floored != after {
-                        let close =
-                            crate::HistoryTransition::recovery_close(floored.clone(), &floored)?;
-                        if close.after() != &after {
-                            return Err(HistoryError::Corrupt);
+                    if checkpoint && (manual.is_some() || !pending.is_empty()) {
+                        return Err(HistoryError::CaptureChanged);
+                    }
+                    if !checkpoint {
+                        let discard = after
+                            .floor_offset
+                            .checked_sub(cut.history.floor_offset)
+                            .and_then(|n| usize::try_from(n).ok())
+                            .ok_or(HistoryError::Corrupt)?;
+                        let floored = if discard == 0 {
+                            cut.history.clone()
+                        } else {
+                            crate::HistoryTransition::floor(cut.history.clone(), discard)?
+                                .after()
+                                .clone()
+                        };
+                        if floored != after {
+                            let close = crate::HistoryTransition::recovery_close(
+                                floored.clone(),
+                                &floored,
+                            )?;
+                            if close.after() != &after {
+                                return Err(HistoryError::Corrupt);
+                            }
                         }
                     }
                     let mut candidate = CoreState::restore(&after)?;

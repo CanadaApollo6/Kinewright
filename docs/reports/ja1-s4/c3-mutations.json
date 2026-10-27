@@ -1,0 +1,146 @@
+[
+  {
+    "name": "prepare_scope",
+    "source": "crates/kinewright-agent/src/server.rs",
+    "witness": "server::tests::s4_role_scope_closure",
+    "restored_sha256": "e5f26e8e132ee3a61d8d24bcf526d86aeb51260e592b45ab84d6c963088fef16",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "commit_scope",
+    "source": "crates/kinewright-agent/src/server.rs",
+    "witness": "server::tests::s4_role_scope_closure",
+    "restored_sha256": "e5f26e8e132ee3a61d8d24bcf526d86aeb51260e592b45ab84d6c963088fef16",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "capability_scope",
+    "source": "crates/kinewright-agent/src/server.rs",
+    "witness": "server::tests::s4_role_scope_closure",
+    "restored_sha256": "e5f26e8e132ee3a61d8d24bcf526d86aeb51260e592b45ab84d6c963088fef16",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "planner_scope",
+    "source": "crates/kinewright-agent/src/server.rs",
+    "witness": "server::tests::s4_role_scope_closure",
+    "restored_sha256": "e5f26e8e132ee3a61d8d24bcf526d86aeb51260e592b45ab84d6c963088fef16",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "endpoint_identity",
+    "source": "crates/kinewright-agent/src/server.rs",
+    "witness": "server::tests::s4_role_scope_closure",
+    "restored_sha256": "e5f26e8e132ee3a61d8d24bcf526d86aeb51260e592b45ab84d6c963088fef16",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "live_authority",
+    "source": "crates/kinewright-agent/src/orchestration/tasks.rs",
+    "witness": "server::tests::s4_role_scope_closure",
+    "restored_sha256": "404b8905f39b72a3f7221ec16549c393fc8cd1bde442a8b3fc185d14bcd94f1f",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "freeze_ingress",
+    "source": "crates/kinewright-agent/src/orchestration/tasks.rs",
+    "witness": "server::tests::s4_drain_and_durable_base",
+    "restored_sha256": "404b8905f39b72a3f7221ec16549c393fc8cd1bde442a8b3fc185d14bcd94f1f",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "merge_scope",
+    "source": "crates/kinewright-agent/src/orchestration/tasks.rs",
+    "witness": "server::tests::s4_drain_and_durable_base",
+    "restored_sha256": "404b8905f39b72a3f7221ec16549c393fc8cd1bde442a8b3fc185d14bcd94f1f",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "owner_project",
+    "source": "crates/kinewright-agent/src/orchestration/tasks.rs",
+    "witness": "server::tests::s4_drain_and_durable_base",
+    "restored_sha256": "404b8905f39b72a3f7221ec16549c393fc8cd1bde442a8b3fc185d14bcd94f1f",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "owner_epoch",
+    "source": "crates/kinewright-agent/src/orchestration/tasks.rs",
+    "witness": "server::tests::s4_drain_and_durable_base",
+    "restored_sha256": "404b8905f39b72a3f7221ec16549c393fc8cd1bde442a8b3fc185d14bcd94f1f",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "owner_expiry",
+    "source": "crates/kinewright-agent/src/orchestration/tasks.rs",
+    "witness": "server::tests::s4_drain_and_durable_base",
+    "restored_sha256": "404b8905f39b72a3f7221ec16549c393fc8cd1bde442a8b3fc185d14bcd94f1f",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "frozen_result_identity",
+    "source": "crates/kinewright-agent/src/orchestration/mailbox.rs",
+    "witness": "s4_task_assignment_and_frozen_result_delivery_share_a_cut",
+    "restored_sha256": "5407344fb5250a9541595c28eef38a8277d59304e6a58e0d46caac52de9e9955",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "result_publication_freeze",
+    "source": "crates/kinewright-agent/src/orchestration/machine.rs",
+    "witness": "s4_unknown_publication_freezes_original_envelope_contract",
+    "restored_sha256": "ec57ccf19510970f7043f596e5df721562a361fc96dad56902b4ce43c2ee1ada",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "audio_role",
+    "source": "crates/kinewright-agent/src/orchestration/policy.rs",
+    "witness": "server::tests::s4_role_scope_closure",
+    "restored_sha256": "6f9335b661a3af21c5a3b364bd5a874c8073873bd9dc6db60ccdaf0012b330cf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "solo_collateral",
+    "source": "crates/kinewright-agent/src/orchestration/policy.rs",
+    "witness": "server::tests::s4_solo_removal_and_director_routing",
+    "restored_sha256": "6f9335b661a3af21c5a3b364bd5a874c8073873bd9dc6db60ccdaf0012b330cf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "director_routing",
+    "source": "crates/kinewright-agent/src/orchestration/policy.rs",
+    "witness": "server::tests::s4_solo_removal_and_director_routing",
+    "restored_sha256": "6f9335b661a3af21c5a3b364bd5a874c8073873bd9dc6db60ccdaf0012b330cf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "editor_direct_effect_authority",
+    "source": "crates/kinewright-agent/src/orchestration/policy.rs",
+    "witness": "orchestration::policy::tests::editor_structural_edits_preserve_effects_without_direct_effect_authority",
+    "restored_sha256": "6f9335b661a3af21c5a3b364bd5a874c8073873bd9dc6db60ccdaf0012b330cf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "routing_closure",
+    "source": "crates/kinewright-agent/src/orchestration/policy.rs",
+    "witness": "orchestration::policy::tests::shared_bus_and_sidechain_closure_is_transitive_and_checks_old_routing",
+    "restored_sha256": "6f9335b661a3af21c5a3b364bd5a874c8073873bd9dc6db60ccdaf0012b330cf",
+    "red": 101,
+    "green": 0
+  }
+]

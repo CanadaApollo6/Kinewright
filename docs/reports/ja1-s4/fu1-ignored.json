@@ -1,0 +1,224 @@
+[
+  {
+    "lane": "project",
+    "target": "unittests src/lib.rs",
+    "witness": "lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed",
+    "reason": "historical uncooperative journal injection; C7 covers the real GUI writer"
+  },
+  {
+    "lane": "project",
+    "target": "unittests src/lib.rs",
+    "witness": "project::tests::mo2_old_reader_corpus",
+    "reason": "manual pre-land check: scripts/mo2-old-reader-check.sh"
+  },
+  {
+    "lane": "agent",
+    "target": "unittests src/lib.rs",
+    "witness": "server::tests::s4_editor_result_to_candidate",
+    "reason": "H3 resolved attachment dispatch and C2 contained connector integration are not merged"
+  },
+  {
+    "lane": "agent",
+    "target": "unittests src/lib.rs",
+    "witness": "server::tests::served_tools_direct_vs_legacy_filtered_microbench",
+    "reason": "manual release performance measurement"
+  },
+  {
+    "lane": "agent",
+    "target": "unittests src/bin/kinewright-eval.rs",
+    "witness": "tests::cc7_every_color_fixture_builds_a_valid_document",
+    "reason": "constructs a real media engine, whose process-exit teardown raises the known SIGSEGV"
+  },
+  {
+    "lane": "agent",
+    "target": "unittests src/bin/kinewright-eval.rs",
+    "witness": "tests::v3_fixture_builds_with_authored_and_recognized_truth",
+    "reason": "requires local speech synthesis and Whisper analysis"
+  },
+  {
+    "lane": "agent",
+    "target": "unittests src/bin/kinewright-eval.rs",
+    "witness": "tests::v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels",
+    "reason": "requires the explicitly prepared M40 event fixture pack"
+  },
+  {
+    "lane": "agent",
+    "target": "unittests src/bin/kinewright-eval.rs",
+    "witness": "tests::v5_fixture_builds_from_verified_real_media",
+    "reason": "requires the explicitly prepared M40 fixture pack and Whisper analysis"
+  },
+  {
+    "lane": "agent",
+    "target": "unittests src/bin/kinewright-eval.rs",
+    "witness": "tests::v5_music_fixture_builds_with_real_media_and_pinned_beats",
+    "reason": "requires the explicitly prepared M40 music fixture pack and beat analysis"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_baseline.rs",
+    "witness": "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_baseline.rs",
+    "witness": "native_app_bridge_rejects_abnormal_exit_after_completed_report",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_baseline.rs",
+    "witness": "native_app_bridge_retains_exercised_control_and_property_failures",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s1.rs",
+    "witness": "s2_additive_app_fixture_observes_real_controls",
+    "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s2_host.rs",
+    "witness": "c11_switch_gui_participant",
+    "reason": "on-demand C11 GUI process participant: private bootstrap required"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s2_host.rs",
+    "witness": "g05a_switch_reply_drop_and_participant_death",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s2_host.rs",
+    "witness": "g05l_host_death_recovers_absent_and_committed_drag_suffix",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s2_host.rs",
+    "witness": "g05l_shared_floor_and_recovery_close_reply_drop",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s2_rescue_e2e.rs",
+    "witness": "rescue_reopen_recopy_retention_stress",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s4_lifecycle.rs",
+    "witness": "s4_durable_owner_lifecycle_reopen",
+    "reason": "H1 durable owner publication and reopen are not merged"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/ja_s4_lifecycle.rs",
+    "witness": "s4_person_holder_approval_and_secret",
+    "reason": "H3 person-facing holder and attachment roles are not merged"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au3_queue_export_normalizes_and_verifies_audio",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au4_plan_audio_ducking_converges_through_the_real_engine",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au5_the_repair_and_normalization_planners_agree_in_either_order",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au6_a1_the_interview_ducks_the_bed_and_matches_the_voices",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au6_a2_the_podcast_chain_matches_the_voices_and_tames_the_ride",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au6_a3_the_location_dialogue_is_repaired_and_its_gap_filled",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au6_a4_the_multicam_cuts_leave_the_master_audio_untouched",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "au6_a5a_the_delivery_lands_on_the_ebu_r128_target",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "r28_solo_peak_resources_and_elapsed",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/mcp_server.rs",
+    "witness": "solo_strip_inside_byte_budget",
+    "reason": "slow tier: cargo test --features slow-tests"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/new_harness_e2e.rs",
+    "witness": "copilot_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/new_harness_e2e.rs",
+    "witness": "devin_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/new_harness_e2e.rs",
+    "witness": "kimi_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/new_harness_e2e.rs",
+    "witness": "kiro_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/new_harness_e2e.rs",
+    "witness": "muse_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/new_harness_e2e.rs",
+    "witness": "opencode_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  },
+  {
+    "lane": "agent",
+    "target": "tests/new_harness_e2e.rs",
+    "witness": "qwen_splits_then_deletes_via_the_live_mcp_server",
+    "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+  }
+]

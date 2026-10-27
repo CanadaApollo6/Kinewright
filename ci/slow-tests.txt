@@ -12,7 +12,8 @@ kinewright_app ja1_attachment::tests::rescue_complete_app_lifecycle_stress crate
 #   36377867892 (ubuntu-latest / windows-latest); they are the reason a test is
 #   here, not part of the contract.
 #
-# - <os> is `any`, `linux` or `windows`, matching ci/ignored-tests.txt.
+# - <os> is `any`, `linux`, `windows`, `linux-only` or `windows-only`.
+#   The -only scopes name tests compiled only on that platform.
 #   OS-scoped tests must run and pass in the other OS fast tier.
 #
 # Each `any` test carries, right after its `#[test]`:
@@ -153,3 +154,33 @@ ja_s2_host g05l_host_death_recovers_absent_and_committed_drag_suffix crates/kine
 ja_s2_host g05l_shared_floor_and_recovery_close_reply_drop crates/kinewright-agent/tests/ja_s2_host.rs any # C10 shared floor and close reply loss
 
 ja_s2_host g05a_switch_reply_drop_and_participant_death crates/kinewright-agent/tests/ja_s2_host.rs any # C11 two-participant switch process cuts
+
+# S4 C2 equipped user-session witnesses.
+ja_s4_guardian s4_precommit_cannot_execute crates/kinewright-agent/tests/ja_s4_guardian.rs linux # equipped user manager and namespaces
+ja_s4_guardian s4_cancel_tree_and_retire_once crates/kinewright-agent/tests/ja_s4_guardian.rs linux # equipped user manager and namespaces
+ja_s4_guardian s4_guardian_death_and_observation_loss crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_real_host_death_skips_grace crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_lost_startup_acknowledgments crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_retained_inode_deletion_signal crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_reaped_guardian_and_identity_are_required crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_deleted_cgroup_zombies_still_block_retirement crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_guardian_subreaps_real_orphans crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_startup_deadline_kills_a_contained_shim crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped user manager and namespaces
+ja_s4_guardian s4_c2_migration_outside_service_refused crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_migration_to_service_root_refused crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_runtime_dir_masked crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_launch_refuses_without_nsdelegate crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_blocked_guardian_exits_and_manager_kills crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_windows_claim_ignores_localappdata crates/kinewright-agent/tests/ja_s4_guardian.rs windows-only # native account namespace, first execution in Windows CI
+ja_s4_guardian s4_c2_proc_shows_only_the_namespace crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_runtime_alias_refused crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_launch_under_runtime_dir crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_launch_refuses_without_pid_namespace crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_init_reaps_and_exits_with_provider crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_session_live crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_recovery_live crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_session_zombie crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_proof_recovery_zombie crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_identity_refused crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_events_session crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip
+ja_s4_guardian s4_c2_service_events_recovery crates/kinewright-agent/tests/ja_s4_guardian.rs linux-only # equipped-session probe with counted skip

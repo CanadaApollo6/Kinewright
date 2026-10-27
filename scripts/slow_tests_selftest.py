@@ -80,8 +80,9 @@ def build_log(rows, **kwargs) -> str:
 
 def fast_rows(os_name: str, extra_ok=True):
     rows = [
-        (b, p, f"ignored, {st.REASON}" if scope in ("any", os_name) else "ok")
+        (b, p, f"ignored, {st.REASON}" if scope in ("any", os_name, os_name + "-only") else "ok")
         for b, p, _, scope in st.read_manifest()
+        if not scope.endswith("-only") or scope == os_name + "-only"
     ]
     applies = st.allowlist_for(os_name)
     rows += [(b, p, "ignored, allowlisted") for b, p in sorted(applies)]
@@ -91,7 +92,8 @@ def fast_rows(os_name: str, extra_ok=True):
 
 
 def slow_rows():
-    return [(b, p, "ok") for b, p, _, _ in st.read_manifest()]
+    return [(b, p, "ok") for b, p, _, scope in st.read_manifest()
+            if not scope.endswith("-only") or scope == st.host_os() + "-only"]
 
 
 def check(verify, *args) -> tuple[int, str]:
@@ -155,7 +157,8 @@ class PlainAndColour(unittest.TestCase):
     def test_plain_and_coloured_slow_logs_pass(self):
         for windows in (False, True):
             for colour in (False, True):
-                code, out = check(st.verify_slow, build_log(slow_rows(), colour=colour, windows=windows))
+                with mock.patch.object(st.sys, "platform", "win32" if windows else "linux"):
+                    code, out = check(st.verify_slow, build_log(slow_rows(), colour=colour, windows=windows))
                 self.assertEqual(code, 0, out)
 
     def test_coloured_log_still_reports_a_real_unexpected_skip(self):
@@ -563,6 +566,7 @@ class RunCargoTests(unittest.TestCase):
                 self.assertEqual(code, 0, out)
                 args = run.call_args.args[0]
                 self.assertIn("kinewright-media/slow-tests", args[args.index("--features") + 1])
+                self.assertIn("--show-output", args)
                 self.assertEqual(args[args.index("--exact") + 1:], [p for _, p, _, _ in st.read_manifest()])
 
     def test_child_gets_no_colour_even_when_the_parent_asks_for_it(self):
@@ -580,6 +584,72 @@ class RunCargoTests(unittest.TestCase):
                 os.environ["CARGO_TERM_COLOR"] = old
         self.assertEqual(code, 0)
         self.assertIn("COLOR=never", captured)
+
+
+class NativeGuardianAccounting(unittest.TestCase):
+    def test_platform_only_fixtures_match_compiled_fast_skips(self):
+        windows_test = "s4_c2_windows_claim_ignores_localappdata"
+        linux_test = "s4_c2_blocked_guardian_exits_and_manager_kills"
+        for os_name in ("linux", "windows"):
+            rows = fast_rows(os_name)
+            present = {path: result for binary, path, result in rows if binary == "ja_s4_guardian"}
+            local, foreign = (linux_test, windows_test) if os_name == "linux" else (windows_test, linux_test)
+            self.assertEqual(present[local], f"ignored, {st.REASON}")
+            self.assertNotIn(foreign, present)
+            code, out = check(st.verify_fast, build_log(rows, windows=os_name == "windows"), os_name)
+            self.assertEqual(code, 0, out)
+
+    def test_hosted_deletion_signal_markers_between_names_and_outcomes(self):
+        reason = "kernel_deletion_signal_unavailable: live_nlink=2, deleted_nlink=2"
+        with mock.patch.object(st.sys, "platform", "linux"):
+            rows = slow_rows()
+            guardians = [path for binary, path, _, scope in st.read_manifest()
+                         if binary == "ja_s4_guardian" and scope == "linux-only"]
+            for glued in (False, True):
+                log = build_log(rows)
+                for path in guardians:
+                    marker = f"C2_NATIVE_NOT_RUN test={path} reason={reason}"
+                    split = "" if glued else "\n"
+                    log = log.replace(f"test {path} ... ok", f"test {path} ... {split}{marker}\nok")
+                code, out = check(st.verify_slow, log)
+                self.assertEqual(code, 0, out)
+                self.assertIn(f"{len(guardians)} equipped-session NOT RUN", out)
+                code, out = check(st.verify_slow, log.replace("reason=", "invalid=", 1))
+                self.assertEqual(code, 1, out)
+
+    def test_hosted_fifteen_skips_with_four_split_results(self):
+        names = [
+            "s4_precommit_cannot_execute", "s4_cancel_tree_and_retire_once",
+            "s4_guardian_death_and_observation_loss", "s4_real_host_death_skips_grace",
+            "s4_lost_startup_acknowledgments", "s4_retained_inode_deletion_signal",
+            "s4_reaped_guardian_and_identity_are_required", "s4_deleted_cgroup_zombies_still_block_retirement",
+            "s4_guardian_subreaps_real_orphans", "s4_startup_deadline_kills_a_contained_shim",
+            "s4_c2_migration_outside_service_refused", "s4_c2_migration_to_service_root_refused",
+            "s4_c2_runtime_dir_masked", "s4_c2_launch_refuses_without_nsdelegate",
+            "s4_c2_blocked_guardian_exits_and_manager_kills",
+        ]
+        entries = [("ja_s4_guardian", name, "source", "linux-only") for name in names]
+        log = build_log([("ja_s4_guardian", name, "ok") for name in names], filtered=4)
+        for index, name in enumerate(names):
+            marker = f"C2_NATIVE_NOT_RUN test={name} reason=kernel_deletion_signal_unavailable: live_nlink=2, deleted_nlink=2"
+            old = f"test {name} ... ok"
+            replacement = f"test {name} ... {marker}\nok" if index < 4 else f"{marker}\n{old}"
+            log = log.replace(old, replacement)
+        with mock.patch.object(st, "read_manifest", return_value=entries), mock.patch.object(st.sys, "platform", "linux"):
+            code, out = check(st.verify_slow, log)
+        self.assertEqual(code, 0, out)
+        self.assertIn("0 passed; 15 equipped-session NOT RUN", out)
+
+    def test_captured_marker_output_counts_not_run(self):
+        with mock.patch.object(st.sys, "platform", "linux"):
+            log = build_log(slow_rows())
+            name = "s4_c2_blocked_guardian_exits_and_manager_kills"
+            marker = f"\nC2_NATIVE_NOT_RUN test={name} reason=kernel_deletion_signal_unavailable: live_nlink=2, deleted_nlink=2\n"
+            at = log.index("test result:", log.index("ja_s4_guardian-"))
+            log = log[:at] + f"successes:\n\n---- {name} stdout ----\n{marker}test captured_noise ... ok\nRunning tests/fake.rs (target/debug/deps/fake-0123456789abcdef)\nsuccesses:\n    {name}\n\n" + log[at:]
+            code, out = check(st.verify_slow, log)
+            self.assertEqual(code, 0, out)
+            self.assertIn("1 equipped-session NOT RUN", out)
 
 
 if __name__ == "__main__":

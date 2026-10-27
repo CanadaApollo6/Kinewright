@@ -1,5 +1,12 @@
 //! `MCP` tools and installed-agent CLI drivers for the live `Kinewright` process.
 
+// S4 C2
+#[path = "orchestration/execution_claim.rs"]
+pub mod execution_claim;
+#[path = "orchestration/guardian.rs"]
+pub mod guardian;
+pub mod job_guardian;
+
 mod acp;
 mod acp_drivers;
 mod acp_session;
@@ -32,6 +39,8 @@ mod models;
 pub use local_editing::LocalEditingSession;
 mod motion;
 mod muse;
+/// Studio command kernel. Persistence remains disabled until the S3 H1 handoff.
+pub mod orchestration;
 mod pacing;
 mod protocol;
 mod render;
@@ -89,8 +98,10 @@ pub use server::{
 };
 pub use session::{
     BudgetKind, CANCELLED_BY_OWNER, ConfirmationPolicy, INVESTIGATOR_CONFIRMATION_REFUSAL,
-    QuietObserver, SessionCost, SessionCounters, SessionFlow, SessionLimits, SessionObserver,
-    SessionStop, SharedCounters, StopReason, pump_session,
+    PromptPoll, QuietObserver, SessionCost, SessionCounters, SessionFlow, SessionLimits,
+    SessionObserver, SessionStop, SharedCounters, StopReason, StudioPromptQueue,
+    StudioPromptSender, StudioResponseQueue, StudioResponseSender, pump_session,
+    studio_prompt_queue, studio_response_queue,
 };
 pub use silence::{
     shrink_silence_span_for_cutting, shrink_silence_span_for_cutting_with_transcript,

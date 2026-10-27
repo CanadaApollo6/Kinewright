@@ -1,0 +1,410 @@
+{
+  "source_manifest_sha256": "19fabe069c44e36bbbd64574ddf93fb54d120b494cbcb4f3da0e977adbecd224",
+  "summary": {
+    "passed": 1337,
+    "failed": 0,
+    "ignored": 22
+  },
+  "target_count": 33,
+  "targets": [
+    {
+      "target": "unittests src/lib.rs",
+      "binary": "target/debug/deps/kinewright_agent-c6e2ada66e0bef34",
+      "passed": 733,
+      "failed": 0,
+      "ignored": 2,
+      "raw_summary": "test result: ok. 733 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 143.64s"
+    },
+    {
+      "target": "unittests src/bin/kinewright.rs",
+      "binary": "target/debug/deps/kinewright-3e3239e168c32b0e",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "target": "unittests src/bin/kinewright-eval.rs",
+      "binary": "target/debug/deps/kinewright_eval-85aedacd43775484",
+      "passed": 42,
+      "failed": 0,
+      "ignored": 5,
+      "raw_summary": "test result: ok. 42 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 2.50s"
+    },
+    {
+      "target": "unittests src/bin/kinewright-ja-baseline.rs",
+      "binary": "target/debug/deps/kinewright_ja_baseline-4b4dbdef0d4e7e51",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "target": "unittests src/bin/kinewright-job-guardian.rs",
+      "binary": "target/debug/deps/kinewright_job_guardian-f4f4cf6ffac36c40",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "target": "tests/agent_e2e.rs",
+      "binary": "target/debug/deps/agent_e2e-e8ea2096108b0131",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "target": "tests/ja_baseline.rs",
+      "binary": "target/debug/deps/ja_baseline-1dec1e7a5e4dc394",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 3,
+      "raw_summary": "test result: ok. 10 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 10.28s"
+    },
+    {
+      "target": "tests/ja_s1.rs",
+      "binary": "target/debug/deps/ja_s1-ce9e94f22dba0577",
+      "passed": 19,
+      "failed": 0,
+      "ignored": 1,
+      "raw_summary": "test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 15.84s"
+    },
+    {
+      "target": "tests/ja_s1_branches.rs",
+      "binary": "target/debug/deps/ja_s1_branches-09a3a105b0d12bcc",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.92s"
+    },
+    {
+      "target": "tests/ja_s2_host.rs",
+      "binary": "target/debug/deps/ja_s2_host-5563d2b22aed0f66",
+      "passed": 20,
+      "failed": 0,
+      "ignored": 1,
+      "raw_summary": "test result: ok. 20 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 72.95s"
+    },
+    {
+      "target": "tests/ja_s2_rescue_admission.rs",
+      "binary": "target/debug/deps/ja_s2_rescue_admission-5008d36c64804622",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s"
+    },
+    {
+      "target": "tests/ja_s2_rescue_e2e.rs",
+      "binary": "target/debug/deps/ja_s2_rescue_e2e-e939cfb68cbd1655",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.12s"
+    },
+    {
+      "target": "tests/ja_s4_admission.rs",
+      "binary": "target/debug/deps/ja_s4_admission-d31391429b5424fc",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s"
+    },
+    {
+      "target": "tests/ja_s4_guardian.rs",
+      "binary": "target/debug/deps/ja_s4_guardian-35e28d670f20ce47",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.52s"
+    },
+    {
+      "target": "tests/ja_s4_kernel.rs",
+      "binary": "target/debug/deps/ja_s4_kernel-2f779a8e642d2357",
+      "passed": 23,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s"
+    },
+    {
+      "target": "tests/ja_s4_usage.rs",
+      "binary": "target/debug/deps/ja_s4_usage-bd822413e2c0601d",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 1,
+      "raw_summary": "test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.10s"
+    },
+    {
+      "target": "tests/mcp_server.rs",
+      "binary": "target/debug/deps/mcp_server-c6590b3d3a277480",
+      "passed": 86,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 198.60s"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "binary": "target/debug/deps/new_harness_e2e-ba7b0fe4e0ae1557",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 7,
+      "raw_summary": "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "target": "tests/silence_agent_e2e.rs",
+      "binary": "target/debug/deps/silence_agent_e2e-226d873b6263c3e1",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "target": "tests/transcript_agent_e2e.rs",
+      "binary": "target/debug/deps/transcript_agent_e2e-8c889a82a9d834d6",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "binary": "target/debug/deps/kinewright_project-462af73f9eba815a",
+      "passed": 139,
+      "failed": 0,
+      "ignored": 2,
+      "raw_summary": "test result: ok. 139 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 27.64s"
+    },
+    {
+      "target": "tests/ja_s1_copy.rs",
+      "binary": "target/debug/deps/ja_s1_copy-882f273e9f8d02da",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.64s"
+    },
+    {
+      "target": "tests/ja_s1_receipts.rs",
+      "binary": "target/debug/deps/ja_s1_receipts-5e2801aafb1bd192",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.14s"
+    },
+    {
+      "target": "tests/ja_s1_storage.rs",
+      "binary": "target/debug/deps/ja_s1_storage-9507b8ea57a3b513",
+      "passed": 86,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 227.82s"
+    },
+    {
+      "target": "tests/ja_s2_rescue.rs",
+      "binary": "target/debug/deps/ja_s2_rescue-0977afe18e41dc75",
+      "passed": 35,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.49s"
+    },
+    {
+      "target": "tests/ja_s2_rescue_record.rs",
+      "binary": "target/debug/deps/ja_s2_rescue_record-0385cd7ffe4c8c6b",
+      "passed": 33,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 212.09s"
+    },
+    {
+      "target": "tests/ja_s2_save.rs",
+      "binary": "target/debug/deps/ja_s2_save-e7fdd996cb06e081",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.49s"
+    },
+    {
+      "target": "tests/ja_s2_save_cost.rs",
+      "binary": "target/debug/deps/ja_s2_save_cost-a033706aa4a12c09",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.35s"
+    },
+    {
+      "target": "tests/ja_s2_source_boundary.rs",
+      "binary": "target/debug/deps/ja_s2_source_boundary-990014bc9826928c",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.86s"
+    },
+    {
+      "target": "tests/ja_s2_switch.rs",
+      "binary": "target/debug/deps/ja_s2_switch-a210967939861607",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.09s"
+    },
+    {
+      "target": "tests/ja_s2_writer.rs",
+      "binary": "target/debug/deps/ja_s2_writer-cbc4c76b8f9d3cd2",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.94s"
+    },
+    {
+      "target": "tests/ja_s4_candidate.rs",
+      "binary": "target/debug/deps/ja_s4_candidate-cfe04293c879b8bd",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.47s"
+    },
+    {
+      "target": "tests/ja_s4_store.rs",
+      "binary": "target/debug/deps/ja_s4_store-0440fdd16fd3904d",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "raw_summary": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s"
+    }
+  ],
+  "not_run_ignored": [
+    {
+      "target": "unittests src/lib.rs",
+      "test": "server::tests::s4_editor_result_to_candidate",
+      "reason": "H3 resolved attachment dispatch and C2 contained connector integration are not merged"
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "test": "server::tests::served_tools_direct_vs_legacy_filtered_microbench",
+      "reason": "manual release performance measurement"
+    },
+    {
+      "target": "unittests src/bin/kinewright-eval.rs",
+      "test": "tests::cc7_every_color_fixture_builds_a_valid_document",
+      "reason": "constructs a real media engine, whose process-exit teardown raises the known SIGSEGV"
+    },
+    {
+      "target": "unittests src/bin/kinewright-eval.rs",
+      "test": "tests::v3_fixture_builds_with_authored_and_recognized_truth",
+      "reason": "requires local speech synthesis and Whisper analysis"
+    },
+    {
+      "target": "unittests src/bin/kinewright-eval.rs",
+      "test": "tests::v5_event_fixture_builds_with_real_sync_audio_and_speaker_labels",
+      "reason": "requires the explicitly prepared M40 event fixture pack"
+    },
+    {
+      "target": "unittests src/bin/kinewright-eval.rs",
+      "test": "tests::v5_fixture_builds_from_verified_real_media",
+      "reason": "requires the explicitly prepared M40 fixture pack and Whisper analysis"
+    },
+    {
+      "target": "unittests src/bin/kinewright-eval.rs",
+      "test": "tests::v5_music_fixture_builds_with_real_media_and_pinned_beats",
+      "reason": "requires the explicitly prepared M40 music fixture pack and beat analysis"
+    },
+    {
+      "target": "tests/ja_baseline.rs",
+      "test": "native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two",
+      "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+    },
+    {
+      "target": "tests/ja_baseline.rs",
+      "test": "native_app_bridge_rejects_abnormal_exit_after_completed_report",
+      "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+    },
+    {
+      "target": "tests/ja_baseline.rs",
+      "test": "native_app_bridge_retains_exercised_control_and_property_failures",
+      "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+    },
+    {
+      "target": "tests/ja_s1.rs",
+      "test": "s2_additive_app_fixture_observes_real_controls",
+      "reason": "on-demand App bridge: requires JA_HARNESS_APP_TEST_BINARY"
+    },
+    {
+      "target": "tests/ja_s2_host.rs",
+      "test": "c11_switch_gui_participant",
+      "reason": "on-demand C11 GUI process participant: private bootstrap required"
+    },
+    {
+      "target": "tests/ja_s4_usage.rs",
+      "test": "s4_usage_durable_reopen_h1",
+      "reason": "S3 H1 durable orchestration publisher/reopen is not integrated"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "test": "copilot_splits_then_deletes_via_the_live_mcp_server",
+      "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "test": "devin_splits_then_deletes_via_the_live_mcp_server",
+      "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "test": "kimi_splits_then_deletes_via_the_live_mcp_server",
+      "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "test": "kiro_splits_then_deletes_via_the_live_mcp_server",
+      "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "test": "muse_splits_then_deletes_via_the_live_mcp_server",
+      "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "test": "opencode_splits_then_deletes_via_the_live_mcp_server",
+      "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "test": "qwen_splits_then_deletes_via_the_live_mcp_server",
+      "reason": "live subscription run: also needs KINEWRIGHT_NEW_AGENT_TEST=1"
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "test": "lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed",
+      "reason": "historical uncooperative journal injection; C7 covers the real GUI writer"
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "test": "project::tests::mo2_old_reader_corpus",
+      "reason": "manual pre-land check: scripts/mo2-old-reader-check.sh"
+    }
+  ],
+  "linux_gate_exit": 0,
+  "workspace_build": "passed",
+  "workspace_clippy_all_targets": "passed",
+  "formatting": "passed",
+  "app_architecture": {
+    "passed": 1,
+    "failed": 0
+  },
+  "slow_lint": {
+    "slow_tests": 89,
+    "allowlist_entries": 58
+  },
+  "slow_selftest": {
+    "passed": 38,
+    "failed": 0
+  },
+  "windows": {
+    "full_crates_exit": 101,
+    "full_crates_result": "blocked in native C dependencies before touched crates compiled",
+    "isolated_native_contract_exit": 0
+  },
+  "mutation_pairs": 9,
+  "distinct_source_mutations": 7
+}

@@ -1,0 +1,15 @@
+{
+  "parent": "72c5518",
+  "sources": {
+    "crates/kinewright-core/src/actor.rs": "9be8b2b065d187b90add487aa45c621a6e7e1a06bb37b75c75a7e38f0ccfd885",
+    "crates/kinewright-core/src/attachment.rs": "afeb18ffb0693703c04054d32dc662f65b9b5315c0b49842669f258a69b9943e",
+    "crates/kinewright-project/src/history_save.rs": "0ad9c7db52dc11a817c34f2f1d86c436b5fd1d783e380ecf96d652431b9670d5",
+    "crates/kinewright-project/src/editing_session.rs": "f8f682e19d42497083598f68b5d42f6f70091ddf4b8bc2b80792e77dcb1ea6a9",
+    "crates/kinewright-project/src/editing_session/durable.rs": "ecb05591a1b9447a4bd0c3537d1edaefb75084a9458e987a92d8e239085694bf",
+    "crates/kinewright-project/src/bundle_commit.rs": "b58f0e075aff66d16b23c45a59718d75ace7ec48a28115811125abaaff7bc997",
+    "crates/kinewright-project/src/orchestration_records.rs": "e0591d5c8c4b7e744604c4caa53dd69c08371200a2a24034399279eb415b8cdd",
+    "crates/kinewright-project/tests/ja_s4_store.rs": "6ead31b6dc925fb000288937f031bd6b3e5fe3de600337fe881c60b4787dc926",
+    "crates/kinewright-project/tests/ja_s4_candidate.rs": "0b1b87f2145a255d15de666a6c21f924ece95bd557a5d07b77180a45865d7c7d",
+    "crates/kinewright-agent/src/orchestration/mod.rs": "54a2052b9f45a02e91425dfb6e3b59e8d93172fc1c86a77e8da36ff2acce1af2"
+  }
+}

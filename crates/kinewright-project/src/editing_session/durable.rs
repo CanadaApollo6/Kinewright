@@ -4,6 +4,49 @@ use crate::bundle_records::{BranchId, SpecialistBaseRecord};
 use kinewright_core::{Command, Document, Event, HistorySnapshot};
 use std::sync::Arc;
 
+/// Exact durable identity. Runtime revision counters never substitute for this binding.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchBinding {
+    pub branch: BranchId,
+    pub head: crate::bundle_records::HeadId,
+    pub checkpoint: ObjectRef,
+    pub document_hash: String,
+}
+
+/// Constructed only by freezing a registered, persisted specialist.
+#[derive(Debug, Clone)]
+pub struct FrozenTaskResult {
+    base: BranchBinding,
+    source: BranchBinding,
+    base_ref: ObjectRef,
+    delta: Vec<kinewright_core::Operation>,
+}
+impl FrozenTaskResult {
+    #[must_use]
+    pub const fn base(&self) -> &BranchBinding {
+        &self.base
+    }
+    #[must_use]
+    pub const fn source(&self) -> &BranchBinding {
+        &self.source
+    }
+    #[must_use]
+    pub const fn base_ref(&self) -> &ObjectRef {
+        &self.base_ref
+    }
+    #[must_use]
+    pub fn delta(&self) -> &[kinewright_core::Operation] {
+        &self.delta
+    }
+}
+
+pub(super) struct PendingCandidateCommit {
+    pub(super) core: Core,
+    cut: kinewright_core::AcceptedCut,
+    pub(super) envelope: crate::receipts::CommandEnvelope,
+}
+
 #[derive(Clone)]
 pub struct DurableBranchSessionGuard {
     pub(super) branch: BranchId,
@@ -95,6 +138,267 @@ impl Ja1EditingSession {
             .try_reserve(1)
             .map_err(|_| BundleError::Capacity("durable session registrations"))?;
         self.store()?.reserve(0, name.len() as u64 + 512, 0, false)
+    }
+    pub fn candidate_binding(&self, branch: &BranchId) -> Result<BranchBinding, BundleError> {
+        let bundle = self.active_bundle()?;
+        if branch == bundle.manual_branch_id() {
+            return Err(BundleError::HistoryChanged);
+        }
+        let checkpoint = bundle.checkpoint(branch)?;
+        Ok(BranchBinding {
+            branch: branch.clone(),
+            head: checkpoint.head_id.clone(),
+            checkpoint: bundle.checkpoint_reference(branch)?,
+            document_hash: checkpoint.document_hash.clone(),
+        })
+    }
+    fn candidate_core(&self, binding: &BranchBinding) -> Result<Core, BundleError> {
+        if self.candidate_binding(&binding.branch)? != *binding {
+            return Err(BundleError::HistoryChanged);
+        }
+        let bundle = self.active_bundle()?;
+        let registered = self
+            .durable_sessions
+            .iter()
+            .find(|r| {
+                r.guard.branch == binding.branch && r.guard.epoch == bundle.store.owner_epoch()
+            })
+            .ok_or(BundleError::HistoryChanged)?;
+        let core = registered.guard.core.clone();
+        if core
+            .export_history()
+            .map_err(crate::bundle::history_error)?
+            != *bundle.branch_history(&binding.branch)?
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        Ok(core)
+    }
+    pub fn fork_registered_from_candidate(
+        &mut self,
+        base: &BranchBinding,
+        name: &str,
+    ) -> Result<DurableBranchSessionGuard, BundleError> {
+        self.candidate_core(base)?;
+        let charge = self.registration_capacity(name)?;
+        let bundle = self.active_bundle_mut()?;
+        let checkpoint = bundle.checkpoint(&base.branch)?.clone();
+        let history = bundle.branch_history(&base.branch)?;
+        let core = Core::spawn((*history.document).clone())
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let frozen = core
+            .export_history()
+            .map_err(crate::bundle::history_error)?;
+        let specialist = SpecialistBaseRecord {
+            target_branch: base.branch.clone(),
+            base_head: base.head.clone(),
+            base_document_hash: base.document_hash.clone(),
+            original_baseline_ref: checkpoint.document_ref,
+            frozen_checkpoint_ref: base.checkpoint.clone(),
+            full_applied_delta: vec![],
+        };
+        let pin = bundle.store.pin(std::slice::from_ref(&base.checkpoint))?;
+        let encoded =
+            serde_json::to_vec(&specialist).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let specialist = Arc::new(
+            bundle
+                .store
+                .reserve_retained_capture(&encoded)?
+                .hold(specialist),
+        );
+        let encoded =
+            serde_json::to_vec(&frozen).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+        let floor_source = Arc::new(
+            bundle
+                .store
+                .reserve_retained_capture(&encoded)?
+                .hold(frozen),
+        );
+        let branch = bundle.fork_branch(&base.branch)?;
+        bundle.attach_core(&core)?;
+        let guard = DurableBranchSessionGuard {
+            branch,
+            base: specialist,
+            core,
+            epoch: bundle.store.owner_epoch(),
+            floor_source,
+        };
+        self.durable_sessions.push(RegisteredSession {
+            digest_cache: std::cell::RefCell::new(None),
+            guard: guard.clone(),
+            name: name.into(),
+            pin,
+            _charge: charge,
+        });
+        Ok(guard)
+    }
+    pub fn reopen_registered_candidate(
+        &mut self,
+        branch: BranchId,
+        base: &ObjectRef,
+    ) -> Result<DurableBranchSessionGuard, BundleError> {
+        self.reopen_durable_branch(branch, base, "candidate")
+    }
+    pub fn freeze_registered_candidate(
+        &mut self,
+        guard: &mut DurableBranchSessionGuard,
+    ) -> Result<FrozenTaskResult, BundleError> {
+        let base_ref = self.persist_durable_branch_inner(guard, false)?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::test_hook("candidate_frozen_persisted");
+        let base = guard.base();
+        Ok(FrozenTaskResult {
+            base: BranchBinding {
+                branch: base.target_branch.clone(),
+                head: base.base_head.clone(),
+                checkpoint: base.frozen_checkpoint_ref.clone(),
+                document_hash: base.base_document_hash.clone(),
+            },
+            source: self.candidate_binding(guard.branch_id())?,
+            base_ref,
+            delta: base.full_applied_delta.clone(),
+        })
+    }
+    pub fn candidate_merge_envelope(
+        &self,
+        frozen: &FrozenTaskResult,
+        id: crate::receipts::CommandId,
+    ) -> Result<crate::receipts::CommandEnvelope, BundleError> {
+        use kinewright_core::{Query, QueryResult};
+        let core = self.candidate_core(frozen.base())?;
+        let Event::QueryResult(QueryResult::Snapshot { revision, .. }) = core
+            .request(Command::Query(Query::Snapshot))
+            .map_err(|e| BundleError::Corrupt(e.to_string()))?
+        else {
+            return Err(BundleError::HistoryChanged);
+        };
+        let bundle = self.active_bundle()?;
+        Ok(crate::receipts::CommandEnvelope {
+            version: 1,
+            action: "edit".into(),
+            id,
+            project_id: bundle.project_id().clone(),
+            target_branch: frozen.base.branch.clone(),
+            owner_epoch: bundle.store.owner_epoch(),
+            expected_head: Some(frozen.base.head.clone()),
+            expected_revision: revision,
+            command: Some(kinewright_core::JournalCommand::DoBatch(
+                frozen.delta.clone(),
+            )),
+            switch: None,
+            manual: None,
+            lease: None,
+            comment_text: None,
+            comment_strokes: None,
+            evidence: vec![],
+            transition: None,
+        })
+    }
+    pub fn commit_candidate(
+        &mut self,
+        frozen: &FrozenTaskResult,
+        envelope: &crate::receipts::CommandEnvelope,
+    ) -> Result<crate::receipts::ReceiptLookup, BundleError> {
+        if let Some(pending) = &self.pending_candidate {
+            if pending.envelope != *envelope {
+                return Err(BundleError::Unsettled);
+            }
+            if let Err(error) = self.reconcile_active() {
+                return match self.active_bundle()?.receipt_lookup(envelope)? {
+                    receipt @ (crate::receipts::ReceiptLookup::Committed(_)
+                    | crate::receipts::ReceiptLookup::Retired(_)) => Ok(receipt),
+                    _ => Err(error),
+                };
+            }
+        }
+        let bundle = self.active_bundle()?;
+        let previous = bundle.receipt_lookup(envelope)?;
+        if previous != crate::receipts::ReceiptLookup::Absent {
+            return Ok(previous);
+        }
+        if bundle.unsettled || bundle.pending_command.is_some() {
+            return Err(BundleError::Unsettled);
+        }
+        let core = self.candidate_core(frozen.base())?;
+        if self.candidate_binding(&frozen.source.branch)? != frozen.source
+            || *envelope != self.candidate_merge_envelope(frozen, envelope.id.clone())?
+        {
+            return Err(BundleError::HistoryChanged);
+        }
+        let target = frozen.base.branch.clone();
+        let inputs = self
+            .active_bundle()?
+            .checkpoint(&target)?
+            .input_manifest_ref
+            .clone();
+        let attachment = self.active_bundle()?.attach_core(&core)?;
+        let cut = attachment.freeze().map_err(crate::bundle::history_error)?;
+        let charge = match (|| {
+            let encoded = serde_json::to_vec(&(cut.history(), envelope))
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            self.store()?.reserve_retained_capture(&encoded)
+        })() {
+            Ok(charge) => charge,
+            Err(error) => {
+                attachment
+                    .resume(&cut)
+                    .map_err(crate::bundle::history_error)?;
+                return Err(error);
+            }
+        };
+        self.pending_candidate = Some(charge.hold(PendingCandidateCommit {
+            core: core.clone(),
+            cut,
+            envelope: envelope.clone(),
+        }));
+        let bundle = self.active_bundle_mut()?;
+        let result = crate::bundle_commit::BundleCommit::command_target(
+            bundle,
+            envelope,
+            &core,
+            &inputs,
+            &[],
+            false,
+            &target,
+        );
+        if result.is_ok() {
+            // Settlement can retry through reconcile_active without hiding a durable receipt.
+            let _ = self.settle_pending_candidate();
+        } else if !bundle.unsettled && bundle.pending_command.is_none() {
+            self.settle_pending_candidate()?;
+        }
+        result
+    }
+    pub(super) fn settle_pending_candidate(&mut self) -> Result<(), BundleError> {
+        let Some(pending) = &self.pending_candidate else {
+            return Ok(());
+        };
+        let core = pending.core.clone();
+        let cut = pending.cut.clone();
+        let envelope = pending.envelope.clone();
+        let bundle = self.active_bundle_mut()?;
+        let attachment = bundle.attach_core(&core)?;
+        let cut = match bundle.receipt_lookup(&envelope)? {
+            crate::receipts::ReceiptLookup::Committed(_)
+            | crate::receipts::ReceiptLookup::Retired(_) => {
+                #[cfg(any(test, feature = "test-util"))]
+                crate::io_observer::check_failure(
+                    "candidate_settlement",
+                    &bundle.store.resolved_root()?,
+                )?;
+                let after = bundle.branch_history(&envelope.target_branch)?;
+                attachment
+                    .install_frozen_checkpoint(&cut, (*after).clone())
+                    .map_err(crate::bundle::history_error)?
+            }
+            crate::receipts::ReceiptLookup::Absent => cut,
+            _ => return Err(BundleError::Unsettled),
+        };
+        attachment
+            .resume(&cut)
+            .map_err(crate::bundle::history_error)?;
+        self.pending_candidate = None;
+        Ok(())
     }
     pub fn fork_durable_branch(
         &mut self,
@@ -297,6 +601,13 @@ impl Ja1EditingSession {
         &mut self,
         guard: &mut DurableBranchSessionGuard,
     ) -> Result<ObjectRef, BundleError> {
+        self.persist_durable_branch_inner(guard, true)
+    }
+    fn persist_durable_branch_inner(
+        &mut self,
+        guard: &mut DurableBranchSessionGuard,
+        resume: bool,
+    ) -> Result<ObjectRef, BundleError> {
         let index = self.registered(guard)?;
         let canonical = self.durable_sessions[index].guard.clone();
         if self
@@ -379,9 +690,11 @@ impl Ja1EditingSession {
             Ok(reference)
         })();
         let current = owner.capture().map_err(crate::bundle::history_error)?;
-        owner
-            .resume(&current)
-            .map_err(crate::bundle::history_error)?;
+        if resume || result.is_err() {
+            owner
+                .resume(&current)
+                .map_err(crate::bundle::history_error)?;
+        }
         result
     }
     /// Fence a persisted session. The agent close route persists its full proposal first.
@@ -465,4 +778,124 @@ pub fn specialist_floor_delta_from_baseline(
         }
     }
     Ok(base.full_applied_delta[..split].to_vec())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fu2_tests {
+    use super::*;
+    use crate::{
+        receipts::{CommandId, ReceiptLookup},
+        storage_budget::StorageLimits,
+    };
+    use kinewright_core::{AttachmentState, Operation, Track, TrackId, TrackKind};
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one candidate settlement and manual-history oracle across issuer retirement"
+    )]
+    fn fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit() {
+        let root = kinewright_media::test_support::workspace_target_dir().join("fu2-unit");
+        let temp =
+            kinewright_media::test_support::TempDirectory::new_in(&root, "retired-candidate");
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        owner
+            .first_save(&temp.path("project.kinewright"), StorageLimits::default())
+            .unwrap();
+        let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+        owner.persist_durable_branch(&mut candidate).unwrap();
+        let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
+        let mut specialist = owner
+            .fork_registered_from_candidate(&binding, "Editor")
+            .unwrap();
+        specialist
+            .core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }))
+            .unwrap();
+        let frozen = owner.freeze_registered_candidate(&mut specialist).unwrap();
+        let issuer = owner
+            .issue_manual_lease("candidate".into(), "candidate-private".into())
+            .unwrap()
+            .issuer;
+        let envelope = owner
+            .candidate_merge_envelope(
+                &frozen,
+                CommandId {
+                    issuer: issuer.clone(),
+                    sequence: 1,
+                },
+            )
+            .unwrap();
+        core.request(Command::Do(Operation::AddSolidClip {
+            track: TrackId(1),
+            timeline_start: kinewright_core::TimeCode(0),
+            duration: kinewright_core::TimeCode(100),
+            color: kinewright_core::SolidColor::default(),
+        }))
+        .unwrap();
+        let manual = core.export_history().unwrap();
+        assert_eq!(manual.document.tracks[0].clips.len(), 1);
+        let result = crate::io_observer::fail_once("candidate_settlement", || {
+            owner.commit_candidate(&frozen, &envelope)
+        });
+        let retry = crate::io_observer::fail_once("candidate_settlement", || {
+            owner.commit_candidate(&frozen, &envelope)
+        });
+        assert_eq!(
+            candidate.core().attachment_state().unwrap(),
+            AttachmentState::Frozen
+        );
+        assert!(owner.pending_candidate.is_some());
+        assert_eq!(core.export_history().unwrap(), manual);
+        let expected = owner
+            .active_bundle()
+            .unwrap()
+            .branch_history(candidate.branch_id())
+            .unwrap();
+        assert!(expected.document.tracks[0].clips.is_empty());
+        assert_ne!(*expected, manual);
+        let bundle = owner.active_bundle_mut().unwrap();
+        let inputs = bundle
+            .checkpoint(bundle.manual_branch_id())
+            .unwrap()
+            .input_manifest_ref
+            .clone();
+        bundle
+            .acknowledge_issuer(&issuer, 1, &core, &inputs)
+            .unwrap();
+        bundle
+            .retire_issuer(&issuer, false, &core, &inputs)
+            .unwrap();
+        let ReceiptLookup::Retired(retired) = bundle.receipt_lookup(&envelope).unwrap() else {
+            panic!("retired receipt");
+        };
+        owner
+            .reconcile_active()
+            .expect("a retired committed receipt must settle");
+        assert_eq!(
+            candidate.core().attachment_state().unwrap(),
+            AttachmentState::Live
+        );
+        assert!(owner.pending_candidate.is_none());
+        assert_eq!(candidate.core().export_history().unwrap(), *expected);
+        assert_eq!(core.export_history().unwrap(), manual);
+        owner.save_active().unwrap();
+        assert_eq!(core.export_history().unwrap(), manual);
+        assert_eq!(result.unwrap(), ReceiptLookup::Committed(retired.clone()));
+        assert_eq!(retry.unwrap(), ReceiptLookup::Committed(retired));
+    }
 }

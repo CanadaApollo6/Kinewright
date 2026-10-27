@@ -56,6 +56,19 @@ impl BundleCommit {
         blobs: &[(&ObjectRef, &[u8])],
         install: bool,
     ) -> Result<ReceiptLookup, BundleError> {
+        let target = bundle.manual_branch_id.clone();
+        Self::command_target(bundle, envelope, core, inputs, blobs, install, &target)
+    }
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+    pub(crate) fn command_target(
+        bundle: &mut ProjectBundle,
+        envelope: &CommandEnvelope,
+        core: &Core,
+        inputs: &ObjectRef,
+        blobs: &[(&ObjectRef, &[u8])],
+        install: bool,
+        target: &crate::bundle_records::BranchId,
+    ) -> Result<ReceiptLookup, BundleError> {
         use kinewright_core::{Command, Event, Query, QueryResult};
         if install {
             crate::bundle::reconcile_core_save(core)?;
@@ -67,7 +80,8 @@ impl BundleCommit {
                 .pending_history_save()
                 .map_err(crate::bundle::history_error)?
                 .is_some()
-            || envelope.transition.is_none()
+            || (envelope.transition.is_none()
+                && !(target != &bundle.manual_branch_id && envelope.action == "edit"))
         {
             return Err(BundleError::HistoryBarrierInvariant);
         }
@@ -75,14 +89,18 @@ impl BundleCommit {
         if lookup != ReceiptLookup::Absent {
             return Ok(lookup);
         }
+        let checkpoint = bundle
+            .branches
+            .get(target)
+            .ok_or_else(|| BundleError::Unsupported("unknown branch".into()))?;
         if bundle.unsettled || bundle.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
         if envelope.project_id != bundle.project_id
-            || envelope.target_branch != bundle.manual_branch_id
+            || envelope.target_branch != *target
             || envelope.owner_epoch != bundle.store.owner_epoch()
             || envelope.lease.is_some()
-            || envelope.expected_head.as_ref() != bundle.manual_head()
+            || envelope.expected_head.as_ref() != Some(&checkpoint.head_id)
         {
             return Err(BundleError::Unsupported(
                 "stale command authority/head".into(),
@@ -128,9 +146,8 @@ impl BundleCommit {
             .export_history()
             .map_err(|e| BundleError::Corrupt(e.to_string()))?;
         let original = before.clone();
-        if let Some(checkpoint) = bundle.branches.get(&bundle.manual_branch_id) {
-            let acknowledged = if let Some(cached) = bundle.cached_history(&bundle.manual_branch_id)
-            {
+        {
+            let acknowledged = if let Some(cached) = bundle.cached_history(target) {
                 std::sync::Arc::clone(cached)
             } else {
                 std::sync::Arc::new(
@@ -188,15 +205,9 @@ impl BundleCommit {
                 .restore_history(before.clone())
                 .map_err(|e| BundleError::Corrupt(e.to_string()))?;
             if let Some(transition) = &envelope.transition {
-                let checkpoint =
-                    bundle
-                        .branches
-                        .get(&bundle.manual_branch_id)
-                        .ok_or_else(|| {
-                            BundleError::Corrupt(
-                                "transition without acknowledged checkpoint".into(),
-                            )
-                        })?;
+                let checkpoint = bundle.branches.get(target).ok_or_else(|| {
+                    BundleError::Corrupt("transition without acknowledged checkpoint".into())
+                })?;
                 let install =
                     crate::bundle_branch::transition(transition, checkpoint, before.clone())?;
                 attachment
@@ -247,9 +258,9 @@ impl BundleCommit {
             .ok_or_else(|| BundleError::Corrupt("admitted issuer disappeared".into()))?
             .next_sequence = next_sequence;
         let publication = if install {
-            Self::publish(bundle, &after, inputs)
+            Self::publish_branch(bundle, &after, inputs, target, None)
         } else {
-            let branch = bundle.manual_branch_id.clone();
+            let branch = target.clone();
             Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))
         };
         if let Err(error) = publication {
@@ -265,9 +276,9 @@ impl BundleCommit {
         bundle.pending_command = None;
         bundle.pending_result = None;
         let published =
-            std::sync::Arc::clone(bundle.cached_history(&bundle.manual_branch_id).ok_or_else(
-                || BundleError::Corrupt("published history missing from owner".into()),
-            )?);
+            std::sync::Arc::clone(bundle.cached_history(target).ok_or_else(|| {
+                BundleError::Corrupt("published history missing from owner".into())
+            })?);
         if install
             && **published != original
             && bundle
@@ -1132,7 +1143,7 @@ impl BundleCommit {
                             .manual
                             .as_ref()
                             .map(|m| m.batch_id.clone())
-                            .or_else(|| branches[&manual_branch_id].batch_ids.last().cloned()),
+                            .or_else(|| branches[branch_id].batch_ids.last().cloned()),
                     })
             };
             if matches!(result, ReceiptResult::Comment { .. }) {
@@ -1902,4 +1913,94 @@ pub fn history_cost_probe(
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
     record_cost(history, limits)
+}
+
+// G1-W: durable bundle activation and receipt publication are unsupported on Windows.
+#[cfg(all(test, target_os = "linux"))]
+mod fu1_tests {
+    use super::*;
+    use kinewright_core::{
+        Command, Document, Event, Operation, Query, QueryResult, Track, TrackId, TrackKind,
+    };
+
+    #[test]
+    fn fu1_unknown_branch_refuses_after_receipt_lookup() {
+        // Receipt ordering needs a real durable publisher, outside tmpfs.
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let root = workspace.join("target").join("fu1-unit");
+        let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "unknown-branch");
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut bundle = ProjectBundle::activate(
+            &temp.path("project.kinewright"),
+            BundleWriteAdmission::new_document(),
+        )
+        .unwrap();
+        let inputs = bundle.empty_inputs().unwrap().reference.clone();
+        bundle.save(&core, &inputs).unwrap();
+        let issuer = bundle.issue_issuer(&core, &inputs, 1).unwrap();
+        let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
+            core.request(Command::Query(Query::Snapshot)).unwrap()
+        else {
+            panic!("snapshot");
+        };
+        let target = crate::bundle_records::BranchId::fresh().unwrap();
+        let mut envelope = CommandEnvelope {
+            version: 1,
+            action: "edit".into(),
+            id: crate::receipts::CommandId {
+                issuer,
+                sequence: 1,
+            },
+            project_id: bundle.project_id().clone(),
+            target_branch: target.clone(),
+            owner_epoch: bundle.store.owner_epoch(),
+            expected_head: None,
+            expected_revision: revision,
+            command: Some(JournalCommand::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            })),
+            switch: None,
+            manual: None,
+            lease: None,
+            comment_text: None,
+            comment_strokes: None,
+            evidence: vec![],
+            transition: None,
+        };
+        assert!(
+            matches!(BundleCommit::command_target(&mut bundle, &envelope, &core, &inputs, &[], true, &target), Err(BundleError::Unsupported(message)) if message == "unknown branch")
+        );
+        envelope.target_branch = bundle.manual_branch_id.clone();
+        envelope.expected_head = bundle.manual_head().cloned();
+        let receipt = bundle.command(&envelope, &core, &inputs, &[]).unwrap();
+        assert!(matches!(receipt, ReceiptLookup::Committed(_)));
+        let target = envelope.target_branch.clone();
+        bundle.branches.remove(&target).unwrap();
+        assert_eq!(
+            BundleCommit::command_target(
+                &mut bundle,
+                &envelope,
+                &core,
+                &inputs,
+                &[],
+                true,
+                &target
+            )
+            .unwrap(),
+            receipt
+        );
+    }
 }

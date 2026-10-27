@@ -33,6 +33,11 @@ slow-tests = []
 name = "kinewright"
 path = "src/bin/kinewright.rs"
 
+# S4 C2
+[[bin]]
+name = "kinewright-job-guardian"
+path = "src/bin/kinewright-job-guardian.rs"
+
 [[bin]]
 name = "kinewright-eval"
 path = "src/bin/kinewright-eval.rs"
@@ -44,6 +49,8 @@ path = "src/bin/kinewright-ja-baseline.rs"
 required-features = ["eval-harness"]
 
 [dependencies]
+# S4 C2
+kinewright-job-sys.workspace = true
 axum.workspace = true
 base64.workspace = true
 crossbeam-channel.workspace = true

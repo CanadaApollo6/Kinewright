@@ -1,0 +1,259 @@
+{
+  "project": [
+    {
+      "target": "unittests src/lib.rs",
+      "raw": "test result: FAILED. 138 passed; 1 failed; 2 ignored; 0 measured; 0 filtered out; finished in 17.93s",
+      "passed": 138,
+      "failed": 1,
+      "ignored": 2
+    },
+    {
+      "target": "tests/ja_s1_copy.rs",
+      "raw": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.22s",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s1_receipts.rs",
+      "raw": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 63.14s",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s1_storage.rs",
+      "raw": "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 229.85s",
+      "passed": 86,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_rescue.rs",
+      "raw": "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.62s",
+      "passed": 35,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_rescue_record.rs",
+      "raw": "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 205.65s",
+      "passed": 33,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_save.rs",
+      "raw": "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 66.89s",
+      "passed": 13,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_save_cost.rs",
+      "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.09s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_source_boundary.rs",
+      "raw": "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.74s",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_switch.rs",
+      "raw": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.81s",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_writer.rs",
+      "raw": "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s4_candidate.rs",
+      "raw": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.00s",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s4_store.rs",
+      "raw": "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests kinewright_project",
+      "raw": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "project-lib": [
+    {
+      "target": "unittests src/lib.rs",
+      "raw": "test result: ok. 139 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 19.74s",
+      "passed": 139,
+      "failed": 0,
+      "ignored": 2
+    }
+  ],
+  "agent": [
+    {
+      "target": "unittests src/lib.rs",
+      "raw": "test result: ok. 723 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 145.30s",
+      "passed": 723,
+      "failed": 0,
+      "ignored": 2
+    },
+    {
+      "target": "unittests src/bin/kinewright.rs",
+      "raw": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "unittests src/bin/kinewright-eval.rs",
+      "raw": "test result: ok. 42 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 2.56s",
+      "passed": 42,
+      "failed": 0,
+      "ignored": 5
+    },
+    {
+      "target": "unittests src/bin/kinewright-ja-baseline.rs",
+      "raw": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/agent_e2e.rs",
+      "raw": "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_baseline.rs",
+      "raw": "test result: ok. 10 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 10.33s",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 3
+    },
+    {
+      "target": "tests/ja_s1.rs",
+      "raw": "test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 16.48s",
+      "passed": 19,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "tests/ja_s1_branches.rs",
+      "raw": "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.84s",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_host.rs",
+      "raw": "test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 35.57s",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 4
+    },
+    {
+      "target": "tests/ja_s2_rescue_admission.rs",
+      "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.88s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s2_rescue_e2e.rs",
+      "raw": "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "target": "tests/ja_s4_kernel.rs",
+      "raw": "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s",
+      "passed": 23,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/ja_s4_lifecycle.rs",
+      "raw": "test result: ok. 36 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 2.18s",
+      "passed": 36,
+      "failed": 0,
+      "ignored": 2
+    },
+    {
+      "target": "tests/mcp_server.rs",
+      "raw": "test result: ok. 76 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 72.02s",
+      "passed": 76,
+      "failed": 0,
+      "ignored": 10
+    },
+    {
+      "target": "tests/new_harness_e2e.rs",
+      "raw": "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 7
+    },
+    {
+      "target": "tests/silence_agent_e2e.rs",
+      "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "tests/transcript_agent_e2e.rs",
+      "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "target": "Doc-tests kinewright_agent",
+      "raw": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "app-architecture": [
+    {
+      "target": "unittests src/main.rs",
+      "raw": "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 883 filtered out; finished in 0.02s",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "effective_project_totals": {
+    "passed": 365,
+    "failed": 0,
+    "ignored": 2,
+    "scope": "Replace the missing-prerequisite lib result in the initial full run with the successful full lib rerun; retain the 226 integration passes."
+  },
+  "agent_totals": {
+    "passed": 960,
+    "failed": 0,
+    "ignored": 35
+  }
+}

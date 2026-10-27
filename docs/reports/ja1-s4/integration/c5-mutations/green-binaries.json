@@ -1,0 +1,13 @@
+{
+  "source_sha256": "c2cfa3f1cfe0566454aaccc1cb7cd66c808cb619e84671d89f781f402d777c02",
+  "binaries": {
+    "ja_s4_usage": {
+      "path": "/home/riels/.t3/worktrees/Kinewright/ja1-s4-int/target/int-c5-green/ja_s4_usage-43b03963c9a03463",
+      "sha256": "43b03963c9a034635fd60c8579adac23658648c53670afb1375e18356f3f6654"
+    },
+    "@lib": {
+      "path": "/home/riels/.t3/worktrees/Kinewright/ja1-s4-int/target/int-c5-green/lib-5082397b83dcf9f8",
+      "sha256": "5082397b83dcf9f80fbd55bcf91ea7354d0c6afc7826cdbd32a5aa56d7816da4"
+    }
+  }
+}

@@ -1,0 +1,138 @@
+{
+  "base": "e5727249baeef4cfa02a1a97a9101109f7434fef",
+  "scope": "C5 uncommitted behavior; final gates and mutations independently required",
+  "rounds": [
+    {
+      "round": 1,
+      "result": {
+        "taskId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r1",
+        "childThreadId": "thread:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r1",
+        "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r1:ordinal:1",
+        "childNodeId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r1",
+        "status": "completed",
+        "workState": "result_available",
+        "hasPendingChildRuns": false,
+        "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r1:ordinal:1",
+        "latestTerminalStatus": "completed",
+        "latestTerminalSummary": null,
+        "latestTerminalResultContextTransferId": null,
+        "providerInstanceId": "codex",
+        "model": "gpt-6-astra",
+        "options": [
+          {
+            "id": "reasoningEffort",
+            "value": "xhigh"
+          },
+          {
+            "id": "serviceTier",
+            "value": "priority"
+          }
+        ],
+        "summary": "VERDICT CHANGES\n\n- **S1 [blocker]** [ja_s4_usage.rs:328](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/tests/ja_s4_usage.rs:328): `update`’s `reference: ObjectRef` parameter shadows the helper function. Calls here and elsewhere attempt to call an `ObjectRef`, preventing test compilation. **Fix:** rename the parameter.\n\n- **S2 [should]** [drivers.rs:681](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/drivers.rs:681): Codex emits `Done` before cleanup. Once that process exits, another turn can replace the shared child slot; the old reader then kills and waits on the new process. **Fix:** bind cleanup and terminal signaling to the reader’s original process/turn identity.\n\n- **S3 [blocker]** [usage.rs:219](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/orchestration/usage.rs:219), [orchestration_accounting.rs:344](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-project/src/orchestration_accounting.rs:344): Send and predecessor references hash bare `AccountingRecord` bytes, whereas C1 registers the tagged `OrchestrationRecord::Accounting` representation. Publishing that registered representation produces different hashes and lengths, breaking dependency resolution and acknowledgment matching. **Fix:** derive both references from the canonical registered encoding; add a contract round-trip witness.\n\n- **S4 [should]** [orchestration_accounting.rs:529](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-project/src/orchestration_accounting.rs:529): Completeness checks whether a category was ever present. Two incremental samples—first with input/output, second with missing input—can yield `tokens_complete=true` despite unknown consumed input, allowing further sends under a configured cap. **Fix:** retain per-category incremental coverage; only a sufficient cumulative observation can close missing coverage.\n\n- **S5 [should]** [usage.rs:128](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/orchestration/usage.rs:128): Late usage can replace persisted `UsageUnavailable` with `Tokens`, but `validate_successor` rejects every change to an existing pause. Consequently, legitimate final usage becomes unpublishable. **Fix:** preserve the existing pause while recording totals, or explicitly validate that escalation.\n\n- **S6 [should]** [limits.rs:157](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/orchestration/limits.rs:157): Ordinary `Error` events can consume both reserved slots. With 32 queued parse errors, overflow silently loses its reason and `Done`; the pump can wait until cancellation or timeout. **Fix:** reserve terminal capacity independently of ordinary errors and test that saturation sequence.\n\n- **S7 [should]** [muse.rs:739](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:739): Distinct unfinished tool calls grow `tool_names` without limit while consumers drain the bounded queues. **Fix:** check map capacity before insertion and interrupt with a retained reason.\n\nBrief/evidence gaps: current-source build/clippy, focused tests, required mutations, and Windows execution remain unverified. Prior passes exclude the latest edits. H1 durable root/reopen and production-owner wiring, plus the explicit `acp_session.rs` handoff, are authorized deferrals—not regressions above. Review was static; no edits, Cargo/Python, or subagents.",
+        "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r1:target-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9ce97571-8925-4822-873c-d526c846a0e8%253Adelegate-task%253Aja1-s4-b-c5-r3:070271d5-e72a-49ae-9e12-1743572341ff",
+        "hasPendingQuestion": false,
+        "pendingApproval": null,
+        "waitTimedOut": false
+      }
+    },
+    {
+      "round": 2,
+      "result": {
+        "taskId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r2",
+        "childThreadId": "thread:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r2",
+        "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r2:ordinal:1",
+        "childNodeId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r2",
+        "status": "completed",
+        "workState": "result_available",
+        "hasPendingChildRuns": false,
+        "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r2:ordinal:1",
+        "latestTerminalStatus": "completed",
+        "latestTerminalSummary": null,
+        "latestTerminalResultContextTransferId": null,
+        "providerInstanceId": "codex",
+        "model": "gpt-6-astra",
+        "options": [
+          {
+            "id": "reasoningEffort",
+            "value": "xhigh"
+          },
+          {
+            "id": "serviceTier",
+            "value": "priority"
+          }
+        ],
+        "summary": "VERDICT: **CHANGES**\n\nS1–S7 are resolved by static inspection:\n\n- **S1 resolved:** `accounting_ref` no longer shadows the `reference` helper.\n- **S2 resolved:** Codex reader events, cleanup, and terminal signaling check the original turn ordinal. Slot replacement and terminal signaling share the mutex; the barrier-controlled witness checks replacement-process survival and absence of stale terminal events.\n- **S3 resolved:** Accounting references and predecessor edges use the registered tagged representation. The new witness compares exact serialized bytes, digest, and length.\n- **S4 resolved:** Missing incremental categories invalidate coverage; later incremental values cannot restore it. A sufficient cumulative observation can close the gap.\n- **S5 resolved:** Late usage updates totals without replacing an existing pause, preserving successor validity.\n- **S6 resolved:** Ordinary errors obey reserved-capacity admission. The witness checks accepted errors, retained overflow reason, and `Done` in order.\n- **S7 resolved:** Muse checks map capacity before inserting another identity. Its witness compares the complete accepted map and checks interruption events.\n\n**S8 [blocker] — raw ACP overflow can leave execution alive after terminal delivery.** At [acp.rs:308](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/acp.rs:308), the new bounded-reader refusal exits the reader without setting `interrupted` or stopping the child. For example, a burst of notifications that Muse ignores can fill the raw queue while leaving its translated event queue empty. Muse then handles the retained fault by sending Error/Done and breaking at [muse.rs:541](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:541), bypassing the newly added cleanup below it. The session still owns the child, and both admission failure flags remain clear. Execution can continue without an output reader, and another prompt can reach the process after the reported interruption.\n\nSmallest in-scope fix: latch raw-ingress failure and route it through the existing ACP kill/reap path before terminal observation, preserving queued accepted events. Keep this in the owned ACP/Muse code. Add a live-process witness that saturates raw ingress while translated ingress remains available, verifies cleanup and retained events, and rejects subsequent sends. This protects the production interruption boundary, beyond the resolved terminal-slot and map bounds.\n\n**Explicit prerequisite gaps:** H1 durable publication/reopen and production-owner wiring, A’s module registration and authorized `acp_session.rs` receiving changes remain pending handoffs. Final workspace gates and protected mutation pairs remain unverified here; the supplied focused passes do not establish final acceptance. The draft report correctly preserves those distinctions.\n\nReview was read-only against the specified worktree and base. No edits, Cargo/Python execution, commits, pushes, or subagents.",
+        "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r2:target-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9ce97571-8925-4822-873c-d526c846a0e8%253Adelegate-task%253Aja1-s4-b-c5-r3:89a955fb-6e81-4241-9952-160e1b1bc30c",
+        "hasPendingQuestion": false,
+        "pendingApproval": null,
+        "waitTimedOut": false
+      }
+    },
+    {
+      "round": 3,
+      "result": {
+        "taskId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r3",
+        "childThreadId": "thread:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r3",
+        "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r3:ordinal:1",
+        "childNodeId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r3",
+        "status": "completed",
+        "workState": "result_available",
+        "hasPendingChildRuns": false,
+        "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r3:ordinal:1",
+        "latestTerminalStatus": "completed",
+        "latestTerminalSummary": null,
+        "latestTerminalResultContextTransferId": null,
+        "providerInstanceId": "codex",
+        "model": "gpt-6-astra",
+        "options": [
+          {
+            "id": "reasoningEffort",
+            "value": "xhigh"
+          },
+          {
+            "id": "serviceTier",
+            "value": "priority"
+          }
+        ],
+        "summary": "**VERDICT: CHANGES**\n\n**S8 [security blocker]: still open.** The latch and Fault-arm cleanup fix the direct consumer path, but pending acknowledgements can still publish terminal events before reaping.\n\nOn overflow, [acp.rs:341](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/acp.rs:341) latches failure, then fails pending replies before delivering Fault. With `turn/start` awaiting acknowledgement, this wakes the Muse worker at [muse.rs:442](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:442), which immediately sends Error/Done. The consumer can remain delayed with the process alive. Its new kill/reap at [muse.rs:537](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:537) consequently occurs **after terminal observation**. This is the remaining S8 path, not a separate reopening of unchanged behavior.\n\nSmallest fix: give the acknowledgement worker access to the raw failure flag and, when latched, leave terminal publication to the Fault consumer. Extend the witness with a pending production `turn/start` acknowledgement and controlled consumer delay; verify no Error/Done precedes reap.\n\nThe [new witness](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:876) usefully checks retained ordinals, admission refusal, and consumer cleanup ordering, but creates no pending acknowledgement worker.\n\nAuthorized handoffs remain separate: H1 publication/durable reopen, production owner wiring, and A’s registrations are prerequisites. `acp_session.rs` stays excluded; its receiving report must specify the bounded adapter and `restore.run → client.kill → Done`, preserving lease ordering.\n\nStatic review only, limited to S8 changes and their immediate interactions in the specified checkout. S1–S7 remain closed. I read the recorded **9 passed / 0 failed / 1 ignored** result; ran no Cargo/Python, edits, commits, pushes, or agents. No mutation, workspace, or runtime gate approval is inferred.",
+        "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r3:target-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9ce97571-8925-4822-873c-d526c846a0e8%253Adelegate-task%253Aja1-s4-b-c5-r3:509d7eaf-8fd3-4517-856f-6bd62e1394b6",
+        "hasPendingQuestion": false,
+        "pendingApproval": null,
+        "waitTimedOut": false
+      }
+    },
+    {
+      "round": 4,
+      "result": {
+        "taskId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r4",
+        "childThreadId": "thread:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r4",
+        "childRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r4:ordinal:1",
+        "childNodeId": "node:delegated-task:command%3Amcp%3A3c87135d-6a73-4267-bd7c-eab102322a97%3Adelegate-task%3Aja1-s4-b-c5-sol-review-r4",
+        "status": "completed",
+        "workState": "result_available",
+        "hasPendingChildRuns": false,
+        "latestTerminalRunId": "run:thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r4:ordinal:1",
+        "latestTerminalStatus": "completed",
+        "latestTerminalSummary": null,
+        "latestTerminalResultContextTransferId": null,
+        "providerInstanceId": "codex",
+        "model": "gpt-6-astra",
+        "options": [
+          {
+            "id": "reasoningEffort",
+            "value": "xhigh"
+          },
+          {
+            "id": "serviceTier",
+            "value": "priority"
+          }
+        ],
+        "summary": "VERDICT: APPROVE\n\nS8 resolved for the remaining acknowledgement race. The reader latches `ingress_failed` before `fail_pending` wakes reply waiters ([acp.rs:341](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/acp.rs:341)). The production acknowledgement worker checks that latch after the failed wait and returns without publishing Error/Done or changing `done` ([muse.rs:493](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:493)). For this failure route, the Fault consumer retains terminal ownership and calls kill/reap before updating `done` and emitting terminal events ([muse.rs:555](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:555)). Normal non-ingress acknowledgement errors retain their existing behavior.\n\nThe revised witness creates a real pending `turn/start`, invokes the production acknowledgement worker, and joins it while the Fault consumer remains absent. It checks no terminal events, `done=false`, a live child, and send refusal; then forwards the retained ordinals and exact Fault into the production consumer ([muse.rs:910](/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/crates/kinewright-agent/src/muse.rs:910)). This directly covers the missing R3 interleaving. No remaining concrete security defect found in that changed route.\n\nPrerequisite handoffs remain separate: H1 publication/durable reopen, production owner wiring, A registrations, and excluded `acp_session.rs` restoration ordering.\n\nStatic review only. No edits, Cargo/Python, commits, pushes, or subagents. Final workspace gates and pending mutation pairs are **not accepted by this verdict**; S1–S7 were not reopened.",
+        "resultContextTransferId": "context-transfer:type:subagent_result:source-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A3c87135d-6a73-4267-bd7c-eab102322a97%253Adelegate-task%253Aja1-s4-b-c5-sol-review-r4:target-thread:thread%3Adelegated-task%3Acommand%253Amcp%253A9ce97571-8925-4822-873c-d526c846a0e8%253Adelegate-task%253Aja1-s4-b-c5-r3:b351b504-1a0b-438f-9550-b09f2c7091db",
+        "hasPendingQuestion": false,
+        "pendingApproval": null,
+        "waitTimedOut": false
+      }
+    }
+  ]
+}

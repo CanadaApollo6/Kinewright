@@ -1,0 +1,22 @@
+{
+  "c2-and-new": {
+    "source_sha256": "51037604d48056a5a787d5a2a956e8082f21573c472e2e12f2b6305d90cf2f35",
+    "files": [
+      "crates/kinewright-agent/src/acp.rs",
+      "crates/kinewright-agent/src/job_guardian/linux.rs",
+      "crates/kinewright-job-sys/src/namespace.rs",
+      "crates/kinewright-agent/tests/ja_s4_guardian.rs",
+      "crates/kinewright-agent/tests/fixtures/ja_s4_native.rs"
+    ],
+    "pairs": 10
+  },
+  "c5-fix1": {
+    "source_sha256": "c2cfa3f1cfe0566454aaccc1cb7cd66c808cb619e84671d89f781f402d777c02",
+    "files": [
+      "crates/kinewright-project/src/orchestration_accounting.rs",
+      "crates/kinewright-agent/src/acp.rs",
+      "crates/kinewright-agent/src/muse.rs"
+    ],
+    "pairs": 9
+  }
+}

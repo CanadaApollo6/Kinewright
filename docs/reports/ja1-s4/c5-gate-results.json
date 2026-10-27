@@ -1,0 +1,48 @@
+{
+  "base": "e5727249baeef4cfa02a1a97a9101109f7434fef",
+  "passed": 214,
+  "failed": 0,
+  "ignored": 1,
+  "lanes": [
+    {
+      "lane": "focused",
+      "summary": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.73s",
+        "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+        "test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+      ]
+    },
+    {
+      "lane": "project-contracts",
+      "summary": [
+        "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 221.32s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s"
+      ]
+    },
+    {
+      "lane": "agent-unit",
+      "summary": [
+        "test result: ok. 73 passed; 0 failed; 0 ignored; 0 measured; 659 filtered out; finished in 15.97s"
+      ]
+    },
+    {
+      "lane": "app-architecture",
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 883 filtered out; finished in 0.02s"
+      ]
+    },
+    {
+      "lane": "authority",
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 1.45s"
+      ]
+    },
+    {
+      "lane": "lost-reply",
+      "summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.43s"
+      ]
+    }
+  ]
+}

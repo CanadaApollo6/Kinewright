@@ -28,7 +28,10 @@ mod switch;
 pub use switch::PreparedGuiSwitch;
 mod rescue;
 mod rescue_selection;
-pub use durable::{DurableBranchSessionGuard, specialist_floor_delta_from_baseline};
+pub use durable::{
+    BranchBinding, DurableBranchSessionGuard, FrozenTaskResult,
+    specialist_floor_delta_from_baseline,
+};
 type RescueSource<'a> = (&'a ProjectStore, Vec<(ObjectRef, MissingOwnedUse)>);
 type HistoryDigestCache = Option<(
     kinewright_core::ActorIdentity,
@@ -200,6 +203,7 @@ pub struct Ja1EditingSession {
     recovery_save_pending: bool,
     selection_result: Option<(crate::bundle_recovery::RecoverySelection, BundleSaveReport)>,
     durable_sessions: Vec<durable::RegisteredSession>,
+    pending_candidate: Option<StorageReservation<durable::PendingCandidateCommit>>,
     retained_destinations: Vec<(RetainedDestination, Core)>,
     originating_session: crate::bundle_records::SessionId,
     dirty_cache: std::cell::RefCell<HistoryDigestCache>,
@@ -822,6 +826,7 @@ impl Ja1EditingSession {
             recovery_save_pending: false,
             selection_result: None,
             durable_sessions: vec![],
+            pending_candidate: None,
             retained_destinations: vec![],
             originating_session: crate::bundle_records::SessionId::fresh()?,
             dirty_cache: std::cell::RefCell::new(None),
@@ -861,6 +866,7 @@ impl Ja1EditingSession {
             recovery_save_pending: false,
             selection_result: None,
             durable_sessions: vec![],
+            pending_candidate: None,
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
             save_disclosure_cache: std::cell::RefCell::new(None),
@@ -943,6 +949,7 @@ impl Ja1EditingSession {
             recovery_save_pending: false,
             selection_result: None,
             durable_sessions: vec![],
+            pending_candidate: None,
             retained_destinations: vec![],
             dirty_cache: std::cell::RefCell::new(None),
             save_disclosure_cache: std::cell::RefCell::new(None),
@@ -1247,6 +1254,11 @@ impl Ja1EditingSession {
         Ok(())
     }
     fn core_for_destination(&self, bundle: &ProjectBundle, default: Option<&Core>) -> Option<Core> {
+        let default = self
+            .pending_candidate
+            .as_ref()
+            .filter(|pending| bundle.pending_command.as_deref() == Some(&pending.envelope))
+            .map_or(default, |pending| Some(&pending.core));
         let eligible = |core: &&Core| {
             core.attachment_state()
                 .is_ok_and(|state| state != kinewright_core::AttachmentState::Sealed)
@@ -1260,10 +1272,13 @@ impl Ja1EditingSession {
         {
             return Some(core.clone());
         }
-        self.durable_sessions
-            .iter()
-            .filter(|registered| registered.guard.epoch == bundle.store.owner_epoch())
-            .map(|registered| registered.guard.core())
+        std::iter::once(&self.core)
+            .chain(
+                self.durable_sessions
+                    .iter()
+                    .filter(|registered| registered.guard.epoch == bundle.store.owner_epoch())
+                    .map(|registered| registered.guard.core()),
+            )
             .find(|core| eligible(core) && core.actor_identity() == attempt.actor())
             .cloned()
     }
@@ -1286,7 +1301,9 @@ impl Ja1EditingSession {
             self.rescue
                 .settle(&tag, destination.bundle()?.publication_state());
         }
-        result
+        let report = result?;
+        self.settle_pending_candidate()?;
+        Ok(report)
     }
     /// Foreground probe. Only a failed unknown attempt can supply an offer.
     pub fn probe_active(&mut self) -> Result<Option<RescueProbe>, BundleError> {
