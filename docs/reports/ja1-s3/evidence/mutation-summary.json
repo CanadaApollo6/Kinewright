@@ -1,0 +1,804 @@
+{
+  "media": [
+    {
+      "guard": "chunk-sha256",
+      "selector": "owned_io::tests::s3_certified_cache_is_private_and_evict_refetch_verifies_again",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_cache_is_private_and_evict_refetch_verifies_again",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "d7b4fc37240df2ebb2a4cc87601b300be0c160206256355e3f82df47e58aeeed"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "tamper-after-open-video",
+      "selector": "owned_io::tests::s3_certified_uncached_video_seek_tamper_after_open_is_latched",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_uncached_video_seek_tamper_after_open_is_latched",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "d7b4fc37240df2ebb2a4cc87601b300be0c160206256355e3f82df47e58aeeed"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "tamper-after-open-audio",
+      "selector": "owned_io::tests::s3_certified_uncached_audio_seek_tamper_after_open_is_latched",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_uncached_audio_seek_tamper_after_open_is_latched",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "d7b4fc37240df2ebb2a4cc87601b300be0c160206256355e3f82df47e58aeeed"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "premature-short-read",
+      "selector": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+      "red_marker": "C0_SHORT_READ_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1664,
+        "marker_macro_lines": [
+          1664
+        ],
+        "witness_source_sha256": "937eee608bb6ec74ab7508cfada501741b47e6473595931f47e2dc30f4197ed4"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "size-change-cache-hit",
+      "selector": "owned_io::tests::s3_certified_size_changes_refuse_cache_hits_seek_and_size_queries",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_size_changes_refuse_cache_hits_seek_and_size_queries",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "4cc849efaea907b5d6fab04c9c4f0aa46c2a91a874574335de4f79a8d4495520"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "size-change-during-fill",
+      "selector": "owned_io::tests::s3_certified_size_change_during_fill_refuses_before_publication",
+      "red_marker": "C0_SIZE_DURING_FILL_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_size_change_during_fill_refuses_before_publication",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1727,
+        "marker_macro_lines": [
+          1727
+        ],
+        "witness_source_sha256": "4cc849efaea907b5d6fab04c9c4f0aa46c2a91a874574335de4f79a8d4495520"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "verified-only-publication",
+      "selector": "owned_io::tests::s3_certified_avio_exposes_zero_unverified_scratch_bytes_at_barrier",
+      "red_marker": "C0_VERIFIED_ONLY_PUBLICATION",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_avio_exposes_zero_unverified_scratch_bytes_at_barrier",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1704,
+        "marker_macro_lines": [
+          1704
+        ],
+        "witness_source_sha256": "d95e4e1c232b1739b64bf60c6c095f406821e388a92f39eb8da60e1e65b73612"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "certified-avio-routing",
+      "selector": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+      "red_marker": "C0_SHORT_READ_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1670,
+        "marker_macro_lines": [
+          1670
+        ],
+        "witness_source_sha256": "1bfb0faa78b9eede00f4b700a208e784eb2d81f5e6ec4ac56452d587b906423f"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "latched-output-rejection",
+      "selector": "owned_io::tests::s3_certified_latched_error_rejects_already_buffered_video_and_audio",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_latched_error_rejects_already_buffered_video_and_audio",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "9c49217f16714e5974e0aca3eb66d98e79eb5aabbe28e51f81ea11d19fbc57b5"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "source-pin-lifetime",
+      "selector": "owned_io::tests::s3_certified_cursor_capacity_and_decoder_pin_charge_lifetime",
+      "red_marker": "C0_SOURCE_AUTHORITY_RETAINED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_cursor_capacity_and_decoder_pin_charge_lifetime",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2298,
+        "marker_macro_lines": [
+          2298
+        ],
+        "witness_source_sha256": "523ff39d83e47773fb66bd42d845f0f44b63e75d52c523b76e939758da1f3b27"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "cursor-charge-lifetime",
+      "selector": "owned_io::tests::s3_certified_cursor_charge_survives_source_until_final_cursor_close",
+      "red_marker": "C0_CURSOR_CHARGE_RETAINED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_cursor_charge_survives_source_until_final_cursor_close",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2419,
+        "marker_macro_lines": [
+          2419
+        ],
+        "witness_source_sha256": "9b18092dd774953aac7b6f7046da53280abda0e3ac030c23f30c7ba69ee23ea2"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "decoder-allocation-preflight",
+      "selector": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+      "red_marker": "C0_DECODER_ALLOCATION_PREFLIGHT",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2452,
+        "marker_macro_lines": [
+          2452
+        ],
+        "witness_source_sha256": "876a2259edf4fb13419079443c868add92f37a33846aea14025417edfe5bbab0"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "frame-allocation-preflight",
+      "selector": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+      "red_marker": "C0_FRAME_ALLOCATION_PREFLIGHT",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2457,
+        "marker_macro_lines": [
+          2457
+        ],
+        "witness_source_sha256": "0efae743bdad0b416c9e0ffea399168aa932696cecff3b52d50ae229fe971a04"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations"
+    },
+    {
+      "guard": "selected-video-interpretation",
+      "selector": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+      "red_marker": "C0_SELECTED_VIDEO_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2323,
+        "marker_macro_lines": [
+          2323
+        ],
+        "witness_source_sha256": "bfcedd8e317bbf9393d1e30bd3fb91de46e84205ef0d134faaceada742c23257"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-lock-retry"
+    },
+    {
+      "guard": "selected-audio-interpretation",
+      "selector": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+      "red_marker": "C0_SELECTED_AUDIO_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2339,
+        "marker_macro_lines": [
+          2339
+        ],
+        "witness_source_sha256": "4d51e74de0f8093c485e9bc2cde860883e11c7d8df31d5d46b3761ca35dcca00"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-lock-retry"
+    },
+    {
+      "guard": "nested-protocol-inheritance",
+      "selector": "owned_io::tests::s3_certified_nested_protocol_policy_is_inherited_by_concat",
+      "red_marker": "C0_PROTOCOL_OUTPUT_ZERO",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_nested_protocol_policy_is_inherited_by_concat",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2204,
+        "marker_macro_lines": [
+          2204
+        ],
+        "witness_source_sha256": "1876bc96b54975f35be4fff266d9cca8109109b9900f2cd8da673635e6c42bd4"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-lock-retry"
+    },
+    {
+      "guard": "nested-format-policy",
+      "selector": "owned_io::tests::s3_certified_nested_format_policy_precedes_concat_and_hls_opens",
+      "red_marker": "C0_FORMAT_OUTPUT_ZERO",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_nested_format_policy_precedes_concat_and_hls_opens",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2218,
+        "marker_macro_lines": [
+          2218
+        ],
+        "witness_source_sha256": "cab0f695eb5eba89dd3e3a97ca2ec06ddb0d03009e8262720eb7a463c71c9cfb"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-lock-retry"
+    },
+    {
+      "guard": "secondary-open-callback",
+      "selector": "owned_io::tests::s3_certified_secondary_open_is_denied_and_latched",
+      "red_marker": "C0_SECONDARY_OPEN_DENIED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_secondary_open_is_denied_and_latched",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2011,
+        "marker_macro_lines": [
+          2011
+        ],
+        "witness_source_sha256": "a0a4c56028698f97c92b3baab9ad05da14ba3156e2ddd84d9badd79c25afb728"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    },
+    {
+      "guard": "selected-audio-probe-index",
+      "selector": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+      "red_marker": "C0_SELECTED_STREAM_TYPED_REFUSAL",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2376,
+        "marker_macro_lines": [
+          2376
+        ],
+        "witness_source_sha256": "b22357c500512ae834d3d959a3b67ca34cac44430d806e6e8a18276954570a2c"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    },
+    {
+      "guard": "selected-audio-probe-kind",
+      "selector": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+      "red_marker": "C0_SELECTED_STREAM_TYPED_REFUSAL",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2376,
+        "marker_macro_lines": [
+          2376
+        ],
+        "witness_source_sha256": "b6c8481cbb112ae22eaf9e5072f948db71415abaf2ca6dc604a0bcb456740583"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    },
+    {
+      "guard": "incomplete-stream-table",
+      "selector": "owned_io::tests::s3_certified_mpegps_refuses_incomplete_table_before_probe",
+      "red_marker": "C0_INCOMPLETE_PROBE_NOT_ENTERED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_mpegps_refuses_incomplete_table_before_probe",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2076,
+        "marker_macro_lines": [
+          2076
+        ],
+        "witness_source_sha256": "9f7832e4eb171aeadb98b7e1fff94b006fe31e9c73cb6e0a80601928cb0a3c8c"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    },
+    {
+      "guard": "non-av-probe-kind",
+      "selector": "owned_io::tests::s3_certified_subtitle_refuses_unsupported_kind_before_probe",
+      "red_marker": "C0_NON_AV_PROBE_NOT_ENTERED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_subtitle_refuses_unsupported_kind_before_probe",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2137,
+        "marker_macro_lines": [
+          2137
+        ],
+        "witness_source_sha256": "fdbca309846cf56f04ae5ba2864d72b32d8df7769a9411c2ace1e5c7c614c624"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    },
+    {
+      "guard": "probe-stream-limit",
+      "selector": "owned_io::tests::s3_certified_probe_stream_limit_refuses_before_new_stream_allocation",
+      "red_marker": "C0_PROBE_NEW_STREAM_ALLOCATION_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_probe_stream_limit_refuses_before_new_stream_allocation",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2167,
+        "marker_macro_lines": [
+          2167
+        ],
+        "witness_source_sha256": "a064101354b0c80c65c3be55d56df5d14aec1e7f89dfa0c7feaed88b091115f8"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    },
+    {
+      "guard": "production-incomplete-stream-table",
+      "selector": "s3_owned_import_refuses_dynamic_mpegps_before_probe",
+      "red_marker": "C0_PRODUCTION_INCOMPLETE_PROBE_NOT_ENTERED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "s3_owned_import_refuses_dynamic_mpegps_before_probe",
+        "file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs",
+        "line": 80,
+        "marker_macro_lines": [
+          80
+        ],
+        "witness_source_sha256": "88ac3ad63016c34c011471ad4801a6037cf25cae0dc2e1763e7417be0730c165"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    },
+    {
+      "guard": "production-certified-through-use",
+      "selector": "s3_certified_input_through_use",
+      "red_marker": "no accepted video output after uncached payload tamper",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "s3_certified_input_through_use",
+        "file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs",
+        "line": 527,
+        "marker_macro_lines": [
+          527
+        ],
+        "witness_source_sha256": "88ac3ad63016c34c011471ad4801a6037cf25cae0dc2e1763e7417be0730c165"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+      "evidence_dir": "media-mutations-after-hls"
+    }
+  ],
+  "project": [
+    {
+      "case": "fingerprint-digest",
+      "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+      "expected_panic": "C0_SOURCE_DIGEST_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "b13bbb3f3ab7b145115cd5f5baae712d7838317f396b4eddd139d5b74f6cb00d",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "fingerprint-length",
+      "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+      "expected_panic": "C0_SOURCE_LENGTH_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "cc749659fd97bd6b2f0d837379fb14ca321d76e6b046f0f87d74bbc62219fe45",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "document-interpretation",
+      "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+      "expected_panic": "C0_SOURCE_INTERPRETATION_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "f24a7db4584ad1028cf5257d32e567dfecd049632c6bd81fc6852b88910503de",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "probe-origin",
+      "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+      "expected_panic": "C0_PROBE_ORIGIN_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "5cf02c407d6133c2727008217b216b262d5872d8273bc8b4a8966639b7d9af34",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "unknown-video-profile",
+      "selector": "s3_fingerprint_digest_length_and_interpretation_admission",
+      "expected_panic": "C0_UNKNOWN_VIDEO_PROFILE_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "06ad3a7daf26b4717ff27a147ffe7fcc4652643a000aac5dc974dfaff3873f54",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "table-source-binding",
+      "selector": "s3_table_binding_and_cursor_pin_charges_survive_last_consumer",
+      "expected_panic": "C0_CONFLICTING_TABLE_BINDING_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "8ec5bd25a9d885ab6c323fc0fc35d5325526e6df58e3b23c76955dd6d378014a",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "import-short-read",
+      "selector": "s3_import_refuses_short_growing_and_overflow_without_leaked_charges",
+      "expected_panic": "C0_IMPORT_SHORT_READ_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "846cfd908dac0190fd6b918ce59b81f42208a703e8f9d38639809735e1367dcb",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "import-growth",
+      "selector": "s3_import_refuses_short_growing_and_overflow_without_leaked_charges",
+      "expected_panic": "C0_IMPORT_GROWTH_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "279194d4012b43c76f79a74df21c1d5468989140771fe4459bbd74c9340bd58e",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "source-pin-lifetime",
+      "selector": "s3_table_binding_and_cursor_pin_charges_survive_last_consumer",
+      "expected_panic": "C0_SOURCE_PIN_THROUGH_LAST_CURSOR",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "a446bfb9ad6ac38891f0986cec77c7cad705c6f1077bb494f90e3e135c59b171",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "manifest-table-edge",
+      "selector": "s3_manifest_chunk_table_dependency_survives_collection",
+      "expected_panic": "C0_MANIFEST_TABLE_EDGE_PRESERVED",
+      "source_sha256": "8b618dce14c96453dfa70e4c2567ab7ab63c6e0e92dc096454af1bd7cb88c723",
+      "mutant_sha256": "26c8d960efb42bb02c4f65a35bfc133677c01de33692d1c583825ea99d6cfeb0",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "import-nofollow",
+      "selector": "s3_nofollow_import_refuses_alias_and_preserves_document",
+      "expected_panic": "C0_NOFOLLOW_SOURCE_REFUSED",
+      "source_sha256": "c2e7062de30d591e4c56355143fbcd8b18dbd932103fcafc9e3092d923e122f1",
+      "mutant_sha256": "747151287caceb3f4ec3e6f6a881eb684874386040554c3859d367e963871677",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "historical-complete-identity",
+      "selector": "s3_historical_same_asset_id_preserves_complete_input_identity",
+      "expected_panic": "C0_HISTORICAL_COMPLETE_IDENTITY_PRESERVED",
+      "source_sha256": "c3b181933717b46b61ecda7dc8879428577228d8b4f63e196f9f2d5f9af567aa",
+      "mutant_sha256": "c60b7d9ce39fdfd4e5148f13532933a19c5d1584b969872ab46070e56c15091a",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "unsaved-admission-before-install",
+      "selector": "s3_unsaved_source_capacity_refuses_before_document_install",
+      "expected_panic": "C0_CAPACITY_DOCUMENT_PRESERVED",
+      "source_sha256": "c2e7062de30d591e4c56355143fbcd8b18dbd932103fcafc9e3092d923e122f1",
+      "mutant_sha256": "5e6714fa62b991b72fb7d5813849ff95abae29cb3ac3d30bba27a3c3274290d8",
+      "witness_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-source-full-digest",
+      "selector": "s3_read_only_source_digest_and_length_refuse",
+      "expected_panic": "C0_READONLY_SOURCE_DIGEST_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "bfb09fca1fe8f1d99da100e404b0bf204db899821f170f793b16ee584a05ac18",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-record-digest",
+      "selector": "s3_read_only_record_digest_and_canonical_refuse",
+      "expected_panic": "C0_READONLY_RECORD_DIGEST_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "7441f99f5626ee1987838d27fdb83b3df7adca23e228e12e72595c12cadd5900",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-record-canonical",
+      "selector": "s3_read_only_record_digest_and_canonical_refuse",
+      "expected_panic": "C0_READONLY_RECORD_CANONICAL_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "255ab40a5995b225c299421903ba93fc2cb50d011bda7a31bbf058d54d8e0dc2",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-manifest-epoch",
+      "selector": "s3_read_only_manifest_digest_owner_and_membership_refuse",
+      "expected_panic": "C0_READONLY_MANIFEST_EPOCH_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "b1c4c770cb13b08071bdf19618f2ca3d8f0dada8fd55a540729b1a2e43d57777",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-manifest-owner",
+      "selector": "s3_read_only_manifest_digest_owner_and_membership_refuse",
+      "expected_panic": "C0_READONLY_MANIFEST_OWNER_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "0d5fda2f2ef0cace0a83d6e7ea38f1dc06e3573f817ed5a26723385346cd3ffc",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-manifest-membership",
+      "selector": "s3_read_only_manifest_digest_owner_and_membership_refuse",
+      "expected_panic": "exact entry includes every dependency",
+      "assertion_line": 472,
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "4ed8506ceebd64bcb3ab3bfed027a6ae169d30646738b43be933b6b0d0b8bb73",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0,
+      "attribution": "Exact dependency-membership assertion, requalified from masked entry-ID variant; catalog unchanged",
+      "red_log": "project-membership-qualification/readonly-manifest-membership-red.log.gz",
+      "green_log": "project-membership-qualification/readonly-manifest-membership-green.log.gz",
+      "command": "source scripts/setup-ffmpeg.sh && flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_read_only_inputs s3_read_only_manifest_digest_owner_and_membership_refuse -- --test-threads=1",
+      "mutation_edits": [
+        {
+          "old": "            || !manifest_value.entries.contains(&binding.input.entry)\n",
+          "new": ""
+        }
+      ],
+      "restored_reviewed_files": 49
+    },
+    {
+      "case": "readonly-selected-document-membership",
+      "selector": "s3_read_only_document_fingerprint_and_interpretation_refuse",
+      "expected_panic": "C0_READONLY_DOCUMENT_MEMBERSHIP_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "e6986a9fd0508b424b874a0a556d22eeee0406b80dbe36e898e5c1c0e9aaaa0f",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-table-binding",
+      "selector": "s3_read_only_table_binding_and_probe_interpretation_refuse",
+      "expected_panic": "C0_READONLY_TABLE_BINDING_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "a9c764bbe34bb5c981d57dbfaf1eea6239f59a6613caab44f51e537f1bf5760d",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-owned-native-identity",
+      "selector": "s3_read_only_production_fixture_and_store_identity_ledger",
+      "expected_panic": "C0_READONLY_NATIVE_IDENTITY_REFUSED",
+      "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+      "mutant_sha256": "fdabd79f351234f5535305f62e80c6b37f49851fb781932b0e9c900b3fcd09fb",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "readonly-probe-interpretation",
+      "selector": "s3_read_only_table_binding_and_probe_interpretation_refuse",
+      "expected_panic": "C0_READONLY_PROBE_INTERPRETATION_REFUSED",
+      "source_sha256": "b1c7aa2f373f22ba0ceaf908317c75ef5b9263ffb003bd439a7570504dee55ff",
+      "mutant_sha256": "93150f27f3d107b8a93ffeceba3587a5ca1422097395b4f5ae65c62eda043fa6",
+      "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+      "red_exit": 101,
+      "green_exit": 0
+    },
+    {
+      "case": "duplicate-publication-full-digest",
+      "selector": "s3_duplicate_publication_full_digest_refuses_late_corruption_with_warm_memo",
+      "expected_panic": "C0_DUPLICATE_FULL_DIGEST_REFUSED",
+      "source_sha256": "deb56f21156e67f4c405d4fb5ba69de89a4ea0272de54ad37202c23cdefb7545",
+      "mutant_sha256": "66b76bdef87377a7dfd55ade1b0e8446a392b9a922c9371c8fef317aceb62ee7",
+      "witness_sha256": "88ac3ad63016c34c011471ad4801a6037cf25cae0dc2e1763e7417be0730c165",
+      "red_exit": 101,
+      "green_exit": 0
+    }
+  ],
+  "host": {
+    "source": "crates/kinewright-agent/src/writer_host/owned_media.rs",
+    "source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5",
+    "results": [
+      {
+        "guard": "editor-binding",
+        "selector": "writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut",
+        "red": "1 assertion failure",
+        "green": "1 passed",
+        "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+      },
+      {
+        "guard": "exact-drained-cut",
+        "selector": "writer_host::s2h_tests::s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut",
+        "red": "1 assertion failure",
+        "green": "1 passed",
+        "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+      },
+      {
+        "guard": "unsaved-source-owner",
+        "selector": "s3_owned_unsaved_host_import_transfers_its_new_manifest_on_first_save",
+        "red": "1 assertion failure",
+        "green": "1 passed",
+        "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+      },
+      {
+        "guard": "forwarded-input-scope",
+        "selector": "writer_host::s2h_tests::s3_gui_owned_input_forwarded_scope_refuses_before_admission",
+        "red": "1 assertion failure",
+        "green": "1 passed",
+        "restored_source_sha256": "5fbf7a6e5ae630e8c42035a1b539846f771b7441a4429a716183d2ad5c54eef5"
+      }
+    ],
+    "restored": true
+  },
+  "incident": {
+    "source": "crates/kinewright-app/src/app.rs",
+    "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819",
+    "restored": true,
+    "tests": [
+      "app::in1_tests::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+      "app::in1_tests::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+      "app::in1_tests::in1_the_undo_sticks_and_the_reopen_is_suppressed",
+      "app::in1_tests::in1b_a_refused_card_press_is_reported_where_an_auto_apply_is_not"
+    ],
+    "rows": [
+      {
+        "phase": "baseline",
+        "exit": 0,
+        "accepted": true,
+        "not_green": [],
+        "log": "baseline.log.gz",
+        "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819"
+      },
+      {
+        "phase": "auto-apply-guard",
+        "exit": 101,
+        "accepted": true,
+        "red_witness": "app::in1_tests::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+        "red_at": "crates/kinewright-app/src/app.rs:11262",
+        "unexpected": [],
+        "log": "auto-apply-guard.log.gz",
+        "source_sha256": "ff3bcd5869c12b3bb3da27b7aa6801701ee57a8b07ff02c769660530214a1da9"
+      },
+      {
+        "phase": "auto-apply-guard-restored",
+        "exit": 0,
+        "accepted": true,
+        "not_green": [],
+        "log": "auto-apply-guard-restored.log.gz",
+        "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819"
+      },
+      {
+        "phase": "card-press-guard",
+        "exit": 101,
+        "accepted": true,
+        "red_witness": "app::in1_tests::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+        "red_at": "crates/kinewright-app/src/app.rs:11296",
+        "unexpected": [],
+        "log": "card-press-guard.log.gz",
+        "source_sha256": "feee9e15c6f86523a019445811436f5914c9be9f121f76f2a41d48815887dd3b"
+      },
+      {
+        "phase": "card-press-guard-restored",
+        "exit": 0,
+        "accepted": true,
+        "not_green": [],
+        "log": "card-press-guard-restored.log.gz",
+        "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819"
+      }
+    ]
+  },
+  "accepted_pairs": 55,
+  "uncredited": {
+    "hls-format-policy": "survived; withdrawn, no credit"
+  }
+}

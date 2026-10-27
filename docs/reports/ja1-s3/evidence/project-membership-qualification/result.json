@@ -1,0 +1,22 @@
+{
+  "case": "readonly-manifest-membership",
+  "selector": "s3_read_only_manifest_digest_owner_and_membership_refuse",
+  "expected_panic": "exact entry includes every dependency",
+  "assertion_line": 472,
+  "source_sha256": "939d8da4f0d298d0374bd1336a5f38f0d770310b6fc7ca5e37f722d7c7ac1b5e",
+  "mutant_sha256": "4ed8506ceebd64bcb3ab3bfed027a6ae169d30646738b43be933b6b0d0b8bb73",
+  "witness_sha256": "80821a3ffeaac6a90f485deef89ba30a1cb71d5b72117ad7f55d38d9ab5951e5",
+  "red_exit": 101,
+  "green_exit": 0,
+  "attribution": "Exact dependency-membership assertion, requalified from masked entry-ID variant; catalog unchanged",
+  "red_log": "project-membership-qualification/readonly-manifest-membership-red.log.gz",
+  "green_log": "project-membership-qualification/readonly-manifest-membership-green.log.gz",
+  "command": "source scripts/setup-ffmpeg.sh && flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_read_only_inputs s3_read_only_manifest_digest_owner_and_membership_refuse -- --test-threads=1",
+  "mutation_edits": [
+    {
+      "old": "            || !manifest_value.entries.contains(&binding.input.entry)\n",
+      "new": ""
+    }
+  ],
+  "restored_reviewed_files": 49
+}

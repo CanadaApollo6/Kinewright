@@ -27,7 +27,7 @@ pub(crate) enum VideoRotation {
 }
 
 impl VideoRotation {
-    fn display_dimensions(self, width: u32, height: u32) -> (u32, u32) {
+    pub(crate) fn display_dimensions(self, width: u32, height: u32) -> (u32, u32) {
         match self {
             Self::Clockwise90 | Self::Clockwise270 => (height, width),
             Self::None | Self::HalfTurn => (width, height),
@@ -179,7 +179,7 @@ pub(crate) fn probe_path(path: &Path, id: AssetId) -> Result<MediaAsset, MediaEr
     })
 }
 
-fn color_description_from_decoder(
+pub(crate) fn color_description_from_decoder(
     decoder: &ffmpeg::codec::decoder::Video,
     negotiated_pixel_format: Option<ffmpeg::format::Pixel>,
 ) -> ColorDescription {
@@ -634,7 +634,7 @@ fn valid_rate(rate: ffmpeg::Rational) -> Option<Rational> {
     Rational::new(numerator, denominator).ok()
 }
 
-fn duration_us_to_frames(duration: i64, fps: Rational) -> i64 {
+pub(crate) fn duration_us_to_frames(duration: i64, fps: Rational) -> i64 {
     if duration <= 0 {
         return 0;
     }
@@ -754,7 +754,11 @@ fn timing_values_differ(lhs: i64, rhs: i64) -> bool {
     lhs.abs_diff(rhs) > u64::try_from(tolerance).unwrap_or(u64::MAX)
 }
 
-fn timestamp_to_grid_ceil(timestamp: i64, time_base: ffmpeg::Rational, fps: Rational) -> i64 {
+pub(crate) fn timestamp_to_grid_ceil(
+    timestamp: i64,
+    time_base: ffmpeg::Rational,
+    fps: Rational,
+) -> i64 {
     if timestamp <= 0 {
         return 0;
     }
@@ -1044,7 +1048,7 @@ pub(crate) fn ensure_decoder(
     Ok(())
 }
 
-fn stream_rotation(stream: &ffmpeg::Stream<'_>) -> Result<VideoRotation, MediaError> {
+pub(crate) fn stream_rotation(stream: &ffmpeg::Stream<'_>) -> Result<VideoRotation, MediaError> {
     let side_data_rotation = stream.side_data().find_map(|side_data| {
         (side_data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
             .then(|| rotation_from_display_matrix(side_data.data()))
@@ -3204,7 +3208,7 @@ pub(crate) const MAX_STILL_DIMENSION: u32 = 8192;
 
 /// MO1 R7: the still-image codec set — PNG and JPEG, per the design's
 /// parenthetical. Other image codecs probe exactly as before (video).
-fn is_still_image_codec(id: ffmpeg::codec::Id) -> bool {
+pub(crate) fn is_still_image_codec(id: ffmpeg::codec::Id) -> bool {
     matches!(id, ffmpeg::codec::Id::PNG | ffmpeg::codec::Id::MJPEG)
 }
 

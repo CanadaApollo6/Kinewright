@@ -62,6 +62,8 @@ impl PreparedView {
 }
 
 pub(crate) enum Action {
+    ImportMedia(PathBuf),
+    ChangeMediaInterpretation(Box<kinewright_core::Operation>),
     Save,
     ConfirmSuccessorSave,
     SaveAs(PathBuf),
@@ -119,6 +121,7 @@ impl ManualProducerGate {
 }
 
 pub(crate) struct Ja1Attachment {
+    pub(crate) imported_media: Option<kinewright_core::AssetId>,
     pub owner: Ja1EditingSession,
     pub message: String,
     choice: Option<Choice>,
@@ -158,6 +161,7 @@ impl Ja1Attachment {
     pub fn new(owner: Ja1EditingSession) -> Result<Self, BundleError> {
         let view = Some(PreparedView::prepare(owner.core())?);
         let mut this = Self {
+            imported_media: None,
             owner,
             message: "Studio editing. Saved means a verified durable save.".into(),
             choice: None,
@@ -292,6 +296,35 @@ impl Ja1Attachment {
     }
     pub fn apply(&mut self, action: Action) -> Result<(), BundleError> {
         self.require_retention()?;
+        if let Action::ImportMedia(path) = &action
+            && self.host.is_some()
+            && self.owner.association().is_none()
+        {
+            let result = self
+                .host
+                .as_mut()
+                .expect("attached host")
+                .import_unsaved_media(&mut self.owner, path);
+            return match result {
+                Ok((id, reply)) => {
+                    self.imported_media = Some(id);
+                    self.view = Some(PreparedView::prepare(self.owner.core())?);
+                    self.accept_host_reply(reply)
+                }
+                Err(error) => {
+                    if self
+                        .host
+                        .as_ref()
+                        .is_some_and(host::HostAttachment::unsaved_import_pending)
+                    {
+                        self.host_request_failed(&error);
+                    } else {
+                        self.message = error.to_string();
+                    }
+                    Err(error)
+                }
+            };
+        }
         if self.host.is_some() {
             return self.apply_host(action);
         }
@@ -539,7 +572,7 @@ impl Ja1Attachment {
     )]
     fn accept_host_reply(
         &mut self,
-        reply: kinewright_agent::writer_host::HostReply,
+        mut reply: kinewright_agent::writer_host::HostReply,
     ) -> Result<(), BundleError> {
         if !reply.status.retention_proven
             || reply
@@ -551,6 +584,54 @@ impl Ja1Attachment {
             return Err(BundleError::Identity(RETENTION_LOST_TEXT.into()));
         }
         let host = self.host.as_mut().expect("attached host");
+        if reply.unsaved_inputs_refreshed && reply.error.is_none() {
+            self.imported_media = host.accept_unsaved_inputs()?;
+        }
+        if let Some(asset) = reply.owned_media.take() {
+            let media_edit = reply.owned_media_edit.take();
+            let is_import = media_edit.is_none();
+            if reply.error.is_some() || host.unknown_operation {
+                return Err(BundleError::HistoryChanged);
+            }
+            let cut = host.cut.as_ref().ok_or(BundleError::HistoryChanged)?;
+            let lease = reply
+                .manual_lease
+                .take()
+                .ok_or(BundleError::HistoryChanged)?;
+            let inputs = reply
+                .manual_inputs
+                .take()
+                .ok_or(BundleError::HistoryChanged)?;
+            let digest = lease.history_sha256.clone();
+            let endpoint = self.owner.manual_recovery_endpoint(cut, vec![])?;
+            let permit = endpoint.finish(lease, inputs, Arc::clone(&self.originating_context))?;
+            self.owner.finish_host_manual_recovery(&digest)?;
+            host.manual = Some(ManualProducerGate {
+                actor: self.owner.core().actor_identity(),
+                permit,
+            });
+            host.cut = None;
+            host.accept_status(reply.status);
+            host.manual
+                .as_ref()
+                .ok_or(BundleError::HistoryChanged)?
+                .send(Command::Do(media_edit.unwrap_or_else(|| {
+                    kinewright_core::Operation::AddAsset {
+                        asset: asset.clone(),
+                    }
+                })))
+                .map_err(|_| BundleError::HistoryChanged)?;
+            if is_import {
+                self.imported_media = Some(asset.id);
+            }
+            self.frozen = false;
+            self.message = if is_import {
+                format!("Imported {}. Saving is pending.", asset.name)
+            } else {
+                "Colour interpretation changed. Saving is pending.".into()
+            };
+            return Ok(());
+        }
         if let Some(committed) = &reply.switch_attachment {
             if reply.error.is_some()
                 && host.cut.as_ref().is_some_and(|cut| {
@@ -767,6 +848,39 @@ impl Ja1Attachment {
     #[allow(clippy::too_many_lines)]
     fn apply_inner(&mut self, action: Action) -> Result<(), BundleError> {
         match action {
+            Action::ChangeMediaInterpretation(operation) => {
+                let kinewright_core::Operation::SetAssetColorDescription { asset: id, .. } =
+                    operation.as_ref()
+                else {
+                    return Err(BundleError::Unsupported(
+                        "media interpretation operation".into(),
+                    ));
+                };
+                let mut document = self
+                    .owner
+                    .core()
+                    .export_history()
+                    .map_err(|_| BundleError::HistoryChanged)?
+                    .document;
+                let document = std::sync::Arc::make_mut(&mut document);
+                operation
+                    .apply(document)
+                    .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                let asset = document
+                    .media_pool
+                    .iter()
+                    .find(|asset| asset.id == *id)
+                    .ok_or(BundleError::HistoryChanged)?;
+                self.owner.apply_owned_media_interpretation(asset)?;
+                self.view = Some(PreparedView::prepare(self.owner.core())?);
+                self.message = "Colour interpretation changed.".into();
+            }
+            Action::ImportMedia(path) => {
+                let (asset, _) = self.owner.import_owned_media(&path)?;
+                self.imported_media = Some(asset.id);
+                self.view = Some(PreparedView::prepare(self.owner.core())?);
+                self.message = format!("Imported {}.", asset.name);
+            }
             Action::Save => {
                 if self
                     .owner

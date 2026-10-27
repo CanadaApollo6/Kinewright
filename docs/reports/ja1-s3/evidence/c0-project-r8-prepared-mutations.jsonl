@@ -1,0 +1,11 @@
+{"id": "fingerprint-digest", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_fingerprint_digest_length_and_interpretation_admission", "target": "lib"}
+{"id": "fingerprint-length", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_fingerprint_digest_length_and_interpretation_admission", "target": "lib"}
+{"id": "document-interpretation", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_fingerprint_digest_length_and_interpretation_admission", "target": "lib"}
+{"id": "probe-origin", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_fingerprint_digest_length_and_interpretation_admission", "target": "lib"}
+{"id": "unknown-video-profile", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_fingerprint_digest_length_and_interpretation_admission", "target": "lib"}
+{"id": "table-source-binding", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_table_binding_and_cursor_pin_charges_survive_last_consumer", "target": "lib"}
+{"id": "import-short-read", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_import_refuses_short_growing_and_overflow_without_leaked_charges", "target": "lib"}
+{"id": "import-growth", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_import_refuses_short_growing_and_overflow_without_leaked_charges", "target": "lib"}
+{"id": "source-pin-lifetime", "file": "crates/kinewright-project/src/owned_media.rs", "selector": "s3_table_binding_and_cursor_pin_charges_survive_last_consumer", "target": "lib"}
+{"id": "manifest-table-edge", "file": "crates/kinewright-project/src/store.rs", "selector": "s3_owned_input_identity", "target": "ja_s3_owned_inputs"}
+{"id": "import-nofollow", "file": "crates/kinewright-project/src/editing_session/owned_media.rs", "selector": "s3_nofollow_import_refuses_alias_and_preserves_document", "target": "lib"}

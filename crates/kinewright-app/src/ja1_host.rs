@@ -54,6 +54,8 @@ pub(super) struct HostAttachment {
     inputs: ObjectRef,
     // Callback execution borrows the real GUI admission; it has no source Close callback.
     source_server: Option<SourceServer>,
+    pending_source_server: Option<SourceServer>,
+    pending_imported_media: Option<kinewright_core::AssetId>,
     child: Option<Child>,
     pub cut: Option<AcceptedCut>,
     heartbeat: Option<JoinHandle<Result<HostReply, kinewright_agent::writer_host::HostError>>>,
@@ -65,6 +67,74 @@ pub(super) struct HostAttachment {
 }
 
 impl HostAttachment {
+    pub fn import_unsaved_media(
+        &mut self,
+        owner: &mut Ja1EditingSession,
+        path: &Path,
+    ) -> Result<(kinewright_core::AssetId, HostReply), BundleError> {
+        if self.unknown_operation || self.pending_source_server.is_some() || self.recovery.is_some()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let (asset, _) = owner.import_owned_media(path)?;
+        let transfer = owner.refresh_unsaved_host_source()?;
+        self.cut = Some(owner.recapture_host_recovery_cut()?);
+        self.source = transfer.source;
+        self.inputs = transfer.inputs;
+        self.pending_imported_media = Some(asset.id);
+        self.unknown_operation = true;
+        let reply = self.resume_unsaved_import(owner)?;
+        Ok((asset.id, reply))
+    }
+
+    pub fn unsaved_import_pending(&self) -> bool {
+        self.pending_imported_media.is_some()
+    }
+
+    fn resume_unsaved_import(
+        &mut self,
+        owner: &Ja1EditingSession,
+    ) -> Result<HostReply, BundleError> {
+        let source = self.source.as_ref().ok_or(BundleError::HistoryChanged)?;
+        let service = owner
+            .source()
+            .ok_or(BundleError::HistoryChanged)?
+            .borrowed_source_service(source)?;
+        let server = SourceServer::start(service).map_err(host_error)?;
+        let binding = HostSourceBinding {
+            source: Some(source.clone()),
+            inputs: Some(self.inputs.clone()),
+            callback: server.bootstrap(),
+        };
+        self.pending_source_server = Some(server);
+        let snapshot = HostSnapshot::from_history(
+            self.cut
+                .as_ref()
+                .ok_or(BundleError::HistoryChanged)?
+                .history()
+                .clone(),
+        )
+        .map_err(host_error)?;
+        let reply =
+            self.foreground_request(HostCommand::RefreshUnsavedInputs { binding, snapshot })?;
+        if reply.error.is_none() {
+            self.pending_operation = None;
+            self.unknown_operation = false;
+        }
+        Ok(reply)
+    }
+
+    pub fn accept_unsaved_inputs(
+        &mut self,
+    ) -> Result<Option<kinewright_core::AssetId>, BundleError> {
+        let server = self
+            .pending_source_server
+            .take()
+            .ok_or(BundleError::HistoryChanged)?;
+        self.source_server = Some(server);
+        Ok(self.pending_imported_media.take())
+    }
+
     #[cfg(all(test, target_os = "linux"))]
     pub(super) fn prepared_switch_probe(&self) -> Option<kinewright_core::Core> {
         self.prepared_switch
@@ -290,6 +360,8 @@ impl HostAttachment {
             source: transfer.source,
             inputs: transfer.inputs,
             source_server,
+            pending_source_server: None,
+            pending_imported_media: None,
             child: Some(child),
             cut,
             heartbeat: None,
@@ -348,6 +420,8 @@ impl HostAttachment {
             source,
             inputs,
             source_server: Some(source_server),
+            pending_source_server: None,
+            pending_imported_media: None,
             child: None,
             cut: None,
             heartbeat: None,
@@ -552,6 +626,13 @@ impl HostAttachment {
     ) -> Result<HostReply, BundleError> {
         let client = self.client.with_manual_editor(self.manual_client.clone());
         let client = match &command {
+            HostCommand::PrepareOwnedMedia { path, .. } => {
+                let mut roots = client.bootstrap().roots;
+                roots
+                    .read
+                    .push(path.parent().ok_or(BundleError::HistoryChanged)?.into());
+                client.with_roots(roots)
+            }
             HostCommand::FirstSave { destination, .. }
             | HostCommand::SaveAs { destination, .. }
             | HostCommand::RescueTo { destination } => {
@@ -573,6 +654,12 @@ impl HostAttachment {
         action: Action,
         owner: &mut Ja1EditingSession,
     ) -> Result<HostReply, BundleError> {
+        if matches!(action, Action::Retry)
+            && self.unsaved_import_pending()
+            && self.pending_operation.is_none()
+        {
+            return self.resume_unsaved_import(owner);
+        }
         if matches!(action, Action::Retry)
             && let Some((installed, _)) = &self.installed_switch
         {
@@ -613,7 +700,9 @@ impl HostAttachment {
             && self.status.prepared_selection)
             || matches!(
                 &action,
-                Action::Save
+                Action::ImportMedia(_)
+                    | Action::ChangeMediaInterpretation(_)
+                    | Action::Save
                     | Action::ConfirmSuccessorSave
                     | Action::SaveAs(_)
                     | Action::FirstSave(_)
@@ -660,6 +749,33 @@ impl HostAttachment {
             })
         };
         let command = match action {
+            Action::ChangeMediaInterpretation(operation) => {
+                HostCommand::PrepareMediaInterpretation {
+                    client: self.manual_client.clone(),
+                    operation: *operation,
+                    snapshot: snapshot()?,
+                }
+            }
+            Action::ImportMedia(path) => {
+                let asset_id = kinewright_core::AssetId(
+                    snapshot()?
+                        .history
+                        .document
+                        .media_pool
+                        .iter()
+                        .map(|asset| asset.id.0)
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(BundleError::Capacity("media asset identity"))?,
+                );
+                HostCommand::PrepareOwnedMedia {
+                    client: self.manual_client.clone(),
+                    path,
+                    asset_id,
+                    snapshot: snapshot()?,
+                }
+            }
             Action::Save | Action::ConfirmSuccessorSave => HostCommand::Save {
                 snapshot: snapshot()?,
             },

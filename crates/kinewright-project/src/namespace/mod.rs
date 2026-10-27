@@ -755,6 +755,20 @@ impl ProjectNamespace {
     pub fn inspect_windows_parents(path: &Path) -> Result<Vec<std::fs::File>, BundleError> {
         windows::pin_parents(path)
     }
+    pub(crate) fn publish_hashed(
+        &mut self,
+        write: impl FnOnce(&mut std::fs::File) -> Result<crate::bundle_records::ObjectRef, BundleError>,
+    ) -> Result<crate::bundle_records::ObjectRef, BundleError> {
+        #[cfg(target_os = "linux")]
+        {
+            linux::publish_hashed(self, write)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = write;
+            Err(BundleError::DurabilityUnsupported)
+        }
+    }
     pub(crate) fn publish_with(
         &mut self,
         path: &PortablePath,

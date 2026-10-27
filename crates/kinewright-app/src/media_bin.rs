@@ -40,6 +40,17 @@ impl KinewrightApp {
     /// one-gesture import pipeline (asset, timeline, monitor cue). Shared by
     /// the file dialog, drag-and-drop, and /import.
     pub(crate) fn import_media_path(&mut self, path: std::path::PathBuf) {
+        if self.focused().ja1_job.is_some() {
+            self.status = format!(
+                "A Studio operation is in progress. Import {} again when it finishes.",
+                path.display()
+            );
+            return;
+        }
+        if self.focused().ja1.is_some() {
+            self.start_ja1(crate::ja1_attachment::Action::ImportMedia(path));
+            return;
+        }
         self.status = format!("Probing {}…", path.display());
         let session_id = self.focused().id;
         let media = Arc::clone(&self.analysis);

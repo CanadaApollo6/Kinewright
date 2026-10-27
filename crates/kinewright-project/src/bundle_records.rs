@@ -60,6 +60,7 @@ pub enum RecordKind {
     Lineage,
     StoreManifest,
     InputManifest,
+    InputChunkTable,
     OwnedMedia,
     OwnedFont,
     OwnedNotice,
@@ -98,6 +99,7 @@ impl RecordKind {
                 | Self::RecoveryClose
                 | Self::StoreManifest
                 | Self::InputManifest
+                | Self::InputChunkTable
                 | Self::ReceiptIndex
                 | Self::IssuerState
                 | Self::OwnedMedia

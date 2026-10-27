@@ -1,0 +1,128 @@
+{
+  "source": "crates/kinewright-media/src/owned_io.rs",
+  "source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11",
+  "command": "nice -n 19 python3 -I scripts/ja1-s3-c0-media-mutations.py",
+  "results": [
+    {
+      "guard": "chunk-sha256",
+      "selector": "owned_io::tests::s3_certified_cache_is_private_and_evict_refetch_verifies_again",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "tamper-after-open-video",
+      "selector": "owned_io::tests::s3_certified_uncached_video_seek_tamper_after_open_is_latched",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "tamper-after-open-audio",
+      "selector": "owned_io::tests::s3_certified_uncached_audio_seek_tamper_after_open_is_latched",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "premature-short-read",
+      "selector": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+      "red_marker": "C0_SHORT_READ_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "size-change-cache-hit",
+      "selector": "owned_io::tests::s3_certified_size_changes_refuse_cache_hits_seek_and_size_queries",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "size-change-during-fill",
+      "selector": "owned_io::tests::s3_certified_size_change_during_fill_refuses_before_publication",
+      "red_marker": "C0_SIZE_DURING_FILL_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "verified-only-publication",
+      "selector": "owned_io::tests::s3_certified_avio_exposes_zero_unverified_scratch_bytes_at_barrier",
+      "red_marker": "C0_VERIFIED_ONLY_PUBLICATION",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "certified-avio-routing",
+      "selector": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+      "red_marker": "C0_SHORT_READ_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "latched-output-rejection",
+      "selector": "owned_io::tests::s3_certified_latched_error_rejects_already_buffered_video_and_audio",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "source-pin-lifetime",
+      "selector": "owned_io::tests::s3_certified_cursor_capacity_and_decoder_pin_charge_lifetime",
+      "red_marker": "C0_SOURCE_AUTHORITY_RETAINED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "cursor-charge-lifetime",
+      "selector": "owned_io::tests::s3_certified_cursor_charge_survives_source_until_final_cursor_close",
+      "red_marker": "C0_CURSOR_CHARGE_RETAINED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "decoder-allocation-preflight",
+      "selector": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+      "red_marker": "C0_DECODER_ALLOCATION_PREFLIGHT",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "frame-allocation-preflight",
+      "selector": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+      "red_marker": "C0_FRAME_ALLOCATION_PREFLIGHT",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "selected-video-interpretation",
+      "selector": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+      "red_marker": "C0_SELECTED_VIDEO_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    },
+    {
+      "guard": "selected-audio-interpretation",
+      "selector": "owned_io::tests::s3_certified_selected_streams_cannot_be_opened_or_widened",
+      "red_marker": "C0_SELECTED_AUDIO_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "restored_source_sha256": "9782df9078da6904ad6d442c6e4030a981a5c5e0e835cfacd93e0690270d5b11"
+    }
+  ],
+  "restored": true
+}

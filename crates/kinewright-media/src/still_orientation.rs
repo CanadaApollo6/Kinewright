@@ -80,7 +80,11 @@ pub(crate) fn still_file_orientation(path: &Path) -> Option<StillOrientation> {
         .ok()?;
     #[cfg(test)]
     count_orientation_bytes_read(bytes.len() as u64 - signature_len);
-    let value = jpeg_exif_orientation(&bytes).or_else(|| png_exif_orientation(&bytes))?;
+    still_bytes_orientation(&bytes)
+}
+
+pub(crate) fn still_bytes_orientation(bytes: &[u8]) -> Option<StillOrientation> {
+    let value = jpeg_exif_orientation(bytes).or_else(|| png_exif_orientation(bytes))?;
     let (rotation, flip_horizontal) = match value {
         1 => (VideoRotation::None, false),
         2 => (VideoRotation::None, true),

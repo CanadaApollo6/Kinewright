@@ -1,0 +1,185 @@
+{
+  "gates": {
+    "media": {
+      "passed": 27,
+      "raw_summaries": [
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 1199 filtered out; finished in 1.07s"
+      ],
+      "log_sha256": "a6c4b0c4aef38a60ffd4375bcf495c6f3c7cd2a2fecc72172a9c43e9e1d3a28d"
+    },
+    "project": {
+      "passed": 33,
+      "raw_summaries": [
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 1.72s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.91s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.88s"
+      ],
+      "log_sha256": "2dc831f90baa124a6df1e75d62a3d9160d2018714076d0481bf049fff3d801fe"
+    },
+    "host": {
+      "passed": 2,
+      "raw_summaries": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 703 filtered out; finished in 1.36s"
+      ],
+      "log_sha256": "94f9278f6718d54b8458118609b8b34a13816ed3482b69b5f2b0e9bd170ba951"
+    },
+    "app": {
+      "passed": 4,
+      "raw_summaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 886 filtered out; finished in 5.26s"
+      ],
+      "log_sha256": "ec1c716f79902c0f57a4a7d64ac25739c48d41bb5f9b2cf544250a9c82d31bf5"
+    },
+    "incident-controls": {
+      "passed": 4,
+      "raw_summaries": [
+        "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 886 filtered out; finished in 2.91s"
+      ],
+      "log_sha256": "564ad56d3fe237de531b16c4d9c9de9066f84ba1567106529738a9a66ccf0248"
+    },
+    "agent-architecture": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 704 filtered out; finished in 0.01s"
+      ],
+      "log_sha256": "9f83975cd07a24247caf149b00da64c745e5cb47c83d57a90fbc44ec04240991"
+    },
+    "app-architecture": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 889 filtered out; finished in 0.02s"
+      ],
+      "log_sha256": "b646d1623f562120d760fcce3322bfdc478869904ad536297fde8fd3f31fdcfe"
+    },
+    "regression-copy": {
+      "passed": 6,
+      "raw_summaries": [
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.91s"
+      ],
+      "log_sha256": "26a8414d1974409fe246315bb10a0a578558ac45b0d7599354729f52b1904e90"
+    },
+    "regression-storage": {
+      "passed": 5,
+      "raw_summaries": [
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 81 filtered out; finished in 0.43s"
+      ],
+      "log_sha256": "ec4d5eac8da9671607708c7a245ed5b15c4000b22cb289ff3f6c8da1d06c5262"
+    },
+    "regression-manual-inputs": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.66s"
+      ],
+      "log_sha256": "7c25a7705b2f68450075400942502d3561f052932271b6ff2b5f70f429ee2d82"
+    },
+    "regression-c11-switch": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 4.81s"
+      ],
+      "log_sha256": "e07857e7913c081b4c2d839a1d9c913f5c08c75a4e4bd28c932c83b797d366e9"
+    },
+    "regression-c12-composed": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 3.31s"
+      ],
+      "log_sha256": "509586a3463a6fdd962fb4b00a3d4503be46d49c533c4f338f22ce1de25c33d2"
+    },
+    "regression-manual-ingress": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 9.21s"
+      ],
+      "log_sha256": "e7860f8c93c65f1cdabcc10230b22b28ccba5b569c593c61fb7f4d54978c12d1"
+    },
+    "regression-manual-restart": {
+      "passed": 2,
+      "raw_summaries": [
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 5.68s"
+      ],
+      "log_sha256": "ab65b325a6a305bed70a92d44634376334e6f038ee9539562e015f6a8707c972"
+    },
+    "regression-n2": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 704 filtered out; finished in 0.91s"
+      ],
+      "log_sha256": "927813e66771048dc675143e954c2ba68925584880b591e472b7e071da805ec9"
+    },
+    "regression-operation-replay": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 704 filtered out; finished in 0.38s"
+      ],
+      "log_sha256": "76b06940a1d0c5c9376c7e6238187a0b6ba0b24199440ca3a1eaf1d4c804ff99"
+    },
+    "regression-unknown-status": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 889 filtered out; finished in 7.17s"
+      ],
+      "log_sha256": "5674068fa7eab40bb82ef60647afda8e338ffa2115546171b18cf6c4eac66ca3"
+    },
+    "regression-recovery-retry": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 889 filtered out; finished in 1.67s"
+      ],
+      "log_sha256": "52860fa893b5fd955b652e7ea849eafa1a5c4eda3011d41cd3ef18e4d710d1ba"
+    },
+    "regression-switch-confirm": {
+      "passed": 1,
+      "raw_summaries": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 889 filtered out; finished in 4.68s"
+      ],
+      "log_sha256": "e3959e12323bf92709b3bed122165634df8100a7864e0d18ce88e83b48305c27"
+    },
+    "regression-project-switch": {
+      "passed": 7,
+      "raw_summaries": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.71s"
+      ],
+      "log_sha256": "38ff0fce28e662c79588ce3bcea22b94bf19b5338004d349b4111cba5ce7d30a"
+    },
+    "regression-orientation": {
+      "passed": 7,
+      "raw_summaries": [
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 1219 filtered out; finished in 0.06s"
+      ],
+      "log_sha256": "5862ebf0aeb227f64cf19c511a1b4242d51a322aee2c1daee711c4c5023b2080"
+    },
+    "build": {
+      "result": "passed",
+      "log_sha256": "459fcefc7f1b80082cf30edaeabe8fe00e2249249e6f31d02c74e8dc7764eed4"
+    },
+    "clippy": {
+      "result": "passed",
+      "log_sha256": "b0698428f04e7b0e807806b7dec2d964a4522d2a51694275208e28edf1e62ace"
+    },
+    "fmt": {
+      "result": "passed",
+      "log_sha256": "6242e75c9031ff1a99b725e0f90d92ab457b9245c8f2b9ebc930c9fc8cfbc7da"
+    },
+    "slow-lint": {
+      "result": "passed",
+      "log_sha256": "96bd66a2d9bc5feec6083efd10d2430b3950032b472769933282c7dc5685397b"
+    }
+  },
+  "tests_passed": 108,
+  "mutation_pairs": {
+    "media": 25,
+    "project": 24,
+    "host": 4,
+    "incident": 2,
+    "total": 55
+  },
+  "uncredited": {
+    "hls-format-policy": "survived because format detection is masked by the inert label"
+  },
+  "not_run": [
+    "native Windows",
+    "hosted CI",
+    "full suites"
+  ]
+}

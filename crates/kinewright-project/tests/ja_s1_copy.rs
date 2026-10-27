@@ -9,7 +9,7 @@ use kinewright_project::{
     owned_inputs::{InputRequest, OwnedInputEntry, OwnedInputManifest, OwnedInputRef},
     receipts::{CommandEnvelope, CommandId, ReceiptLookup},
     storage_budget::StorageLimits,
-    store::ProjectStore,
+    store::{ProjectStore, SealedObject},
 };
 use std::{
     collections::BTreeMap,
@@ -34,20 +34,9 @@ fn apply(core: &Core, command: Command) {
         Event::DocumentChanged { .. }
     ));
 }
-fn core() -> Core {
+fn core(asset: MediaAsset) -> Core {
     let mut doc = Document::default();
-    doc.media_pool.push(MediaAsset {
-        id: AssetId(1),
-        path: "/missing/source.wav".into(),
-        name: "owned source".into(),
-        duration: TimeCode(60),
-        fps: Rational::new(30, 1).unwrap(),
-        kind: MediaKind::Audio,
-        resolution: None,
-        source_fingerprint: MediaSourceFingerprint::default(),
-        color_description: ColorDescription::default(),
-        assumed_from: None,
-    });
+    doc.media_pool.push(asset);
     doc.tracks.push(Track {
         id: TrackId(1),
         kind: TrackKind::Video,
@@ -98,16 +87,39 @@ fn core() -> Core {
     );
     core
 }
-fn assets(store: &mut ProjectStore) -> (Vec<OwnedInputEntry>, BTreeMap<String, Vec<u8>>) {
+fn known_wav_f32(tone: f32) -> Vec<u8> {
+    let data_length = 4_800_u32 * 4;
+    let mut bytes = Vec::new();
+    bytes.extend(b"RIFF");
+    bytes.extend((data_length + 36).to_le_bytes());
+    bytes.extend(b"WAVEfmt ");
+    bytes.extend(16_u32.to_le_bytes());
+    bytes.extend(3_u16.to_le_bytes());
+    bytes.extend(1_u16.to_le_bytes());
+    bytes.extend(48_000_u32.to_le_bytes());
+    bytes.extend(192_000_u32.to_le_bytes());
+    bytes.extend(4_u16.to_le_bytes());
+    bytes.extend(32_u16.to_le_bytes());
+    bytes.extend(b"data");
+    bytes.extend(data_length.to_le_bytes());
+    for sample in 0..4_800_u16 {
+        let value = 0.25 * (std::f32::consts::TAU * tone * f32::from(sample) / 48_000.0).sin();
+        bytes.extend(value.to_le_bytes());
+    }
+    bytes
+}
+fn assets(
+    store: &mut ProjectStore,
+) -> (
+    MediaAsset,
+    Vec<OwnedInputEntry>,
+    Vec<SealedObject>,
+    BTreeMap<String, Vec<u8>>,
+) {
     let mut entries = vec![];
     let mut exact = BTreeMap::new();
     for (id, kind, bytes) in [
         ("font:Inter", RecordKind::OwnedFont, title_font_bytes()),
-        (
-            "media:1",
-            RecordKind::OwnedMedia,
-            b"exact owned source bytes\0\r\n".as_slice(),
-        ),
         ("lut:1", RecordKind::OwnedLut, LUT),
         (
             "notice",
@@ -151,12 +163,24 @@ fn assets(store: &mut ProjectStore) -> (Vec<OwnedInputEntry>, BTreeMap<String, V
         exact.insert(id.into(), bytes.to_vec());
         drop(sealed);
     }
-    (entries, exact)
+    let bytes = known_wav_f32(440.0);
+    let (asset, entry, pins) = store
+        .import_media(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            AssetId(1),
+            Path::new("/missing/source.wav"),
+            None,
+        )
+        .unwrap();
+    exact.insert(entry.entry_id.clone(), bytes);
+    entries.insert(1, entry);
+    (asset, entries, pins, exact)
 }
 fn named(path: &Path) -> (Core, ProjectBundle, ObjectRef, BTreeMap<String, Vec<u8>>) {
-    let core = core();
     let mut bundle = ProjectBundle::activate(path, BundleWriteAdmission::new_document()).unwrap();
-    let (entries, exact) = assets(bundle.store_mut().unwrap());
+    let (asset, entries, pins, exact) = assets(bundle.store_mut().unwrap());
+    let core = core(asset);
     let manifest = OwnedInputManifest {
         project_id: Some(bundle.project_id().clone()),
         session_id: None,
@@ -166,6 +190,7 @@ fn named(path: &Path) -> (Core, ProjectBundle, ObjectRef, BTreeMap<String, Vec<u
     let inputs = bundle.admit_inputs(&manifest).unwrap();
     let reference = inputs.reference.clone();
     bundle.save(&core, &reference).unwrap();
+    drop(pins);
     (core, bundle, reference, exact)
 }
 fn copied(outcome: SaveAsOutcome) -> BundleCopy {
@@ -222,6 +247,9 @@ fn read_assets(bundle: &ProjectBundle, expected: &BTreeMap<String, Vec<u8>>) {
         .unwrap();
     assert_eq!(manifest.project_id.as_ref(), Some(bundle.project_id()));
     for entry in &manifest.entries {
+        for dependency in &entry.dependencies {
+            bundle.store().verify(dependency).unwrap();
+        }
         let mut reader = bundle
             .store()
             .lease_input(&OwnedInputRef {
@@ -702,9 +730,9 @@ fn first_save_failure_undo_live_reader() {
     let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "ja-s1-first-save");
     let path = temp.path("saved.kinewright");
     let mut session = SessionStore::create(temp.root(), StorageLimits::default()).unwrap();
-    let core = core();
+    let (asset, entries, pins, exact) = assets(session.store_mut());
+    let core = core(asset);
     let history = core.export_history().unwrap();
-    let (entries, exact) = assets(session.store_mut());
     let inputs = session
         .admit_inputs(&OwnedInputManifest {
             project_id: None,
@@ -713,6 +741,7 @@ fn first_save_failure_undo_live_reader() {
             entries,
         })
         .unwrap();
+    drop(pins);
     let input_ref = inputs.reference.clone();
     let manifest = session.store().read_input_manifest(&input_ref).unwrap();
     let source_ref = OwnedInputRef {

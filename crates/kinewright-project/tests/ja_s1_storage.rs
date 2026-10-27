@@ -305,7 +305,7 @@ mod bounded_store {
         ObjectRef {
             sha256: kinewright_media::sha256_bytes(bytes),
             byte_length: bytes.len() as u64,
-            record_kind: RecordKind::OwnedMedia,
+            record_kind: RecordKind::OwnedEvidence,
         }
     }
     fn named(root: &Path, limits: StorageLimits) -> ProjectStore {

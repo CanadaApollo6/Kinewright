@@ -194,6 +194,21 @@ pub enum HostCommand {
     AcquireManual {
         client: String,
     },
+    PrepareOwnedMedia {
+        client: String,
+        path: PathBuf,
+        asset_id: kinewright_core::AssetId,
+        snapshot: HostSnapshot,
+    },
+    PrepareMediaInterpretation {
+        client: String,
+        operation: kinewright_core::Operation,
+        snapshot: HostSnapshot,
+    },
+    RefreshUnsavedInputs {
+        binding: HostSourceBinding,
+        snapshot: HostSnapshot,
+    },
     CommitHistory {
         client: String,
         messages: Vec<kinewright_core::AcceptedHistory>,
@@ -461,6 +476,10 @@ pub struct HostActivation {
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostReply {
+    #[serde(default)]
+    pub unsaved_inputs_refreshed: bool,
+    pub owned_media: Option<kinewright_core::MediaAsset>,
+    pub owned_media_edit: Option<kinewright_core::Operation>,
     pub switch_preview: Option<kinewright_project::bundle_switch::SwitchPayload>,
     pub switch_envelope: Option<kinewright_project::receipts::CommandEnvelope>,
     pub switch_result: Option<kinewright_project::bundle_switch::SwitchResult>,

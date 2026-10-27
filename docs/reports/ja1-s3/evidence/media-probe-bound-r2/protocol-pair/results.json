@@ -1,0 +1,25 @@
+{
+  "source": "crates/kinewright-media/src/owned_io.rs",
+  "source_sha256": "5e9dd06d37adca9c95c8f23c24cfc7e3f765c48483c4f8a98b942702d7dbbf8d",
+  "command": "nice -n 19 python3 -I scripts/ja1-s3-c0-media-mutations.py",
+  "results": [
+    {
+      "guard": "nested-protocol-inheritance",
+      "selector": "owned_io::tests::s3_certified_nested_protocol_policy_is_inherited_by_concat",
+      "red_marker": "C0_PROTOCOL_OUTPUT_ZERO",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_nested_protocol_policy_is_inherited_by_concat",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2204,
+        "marker_macro_lines": [
+          2204
+        ],
+        "witness_source_sha256": "5116b609672325f3dc6d719e83fea9cc3cb1e1c1faf0fecd44b0a611aab205ad"
+      },
+      "restored_source_sha256": "5e9dd06d37adca9c95c8f23c24cfc7e3f765c48483c4f8a98b942702d7dbbf8d"
+    }
+  ],
+  "restored": true
+}

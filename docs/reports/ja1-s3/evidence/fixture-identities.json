@@ -1,0 +1,55 @@
+{
+  "origin": "project.log.gz C0_FIXTURE production controls",
+  "fixtures": [
+    {
+      "audio_hz": 440,
+      "history_sha256": "35c49935fbfe7d8aa176e37df388387eb6afe695e4fccd9b54314bbab8d6f2de",
+      "lut": {
+        "byte_length": 116,
+        "record_kind": "owned_lut",
+        "sha256": "aa31bdd2c4568fd19e74da134147301c029e42b50d61e66b3b3b2159790e9d95"
+      },
+      "manifest": {
+        "byte_length": 1678,
+        "record_kind": "input_manifest",
+        "sha256": "ceb8451de1e76dc1b31c7139623963e93475f95bc1642627a1f7c780f7c2e52c"
+      },
+      "source": {
+        "byte_length": 50317,
+        "record_kind": "owned_media",
+        "sha256": "f16f579ea0b4a63f779ae5ce8362b137e7613e6b8089290ebc733734ccfe4aac"
+      },
+      "table": {
+        "byte_length": 296,
+        "record_kind": "input_chunk_table",
+        "sha256": "7e1fbc085a501f437943f70d411479c23de2342e15a3a99bf14dc3711bf3ca9e"
+      },
+      "video_luma": 62
+    },
+    {
+      "audio_hz": 880,
+      "history_sha256": "175faada3c729f40017d8d074acd7b3dbf4cc280cacff6705356deb9deda33ac",
+      "lut": {
+        "byte_length": 116,
+        "record_kind": "owned_lut",
+        "sha256": "3ff72d6e50714d7e66479400cca4830b46714c936c99e26e6633b6fae0e02876"
+      },
+      "manifest": {
+        "byte_length": 1677,
+        "record_kind": "input_manifest",
+        "sha256": "cad4cee502ac1150cdc05e5ce2e143a6e37d5cbbd3ef4f9f62a116292bf65223"
+      },
+      "source": {
+        "byte_length": 50327,
+        "record_kind": "owned_media",
+        "sha256": "a28cdaf0e170c7be431586531ec1d0adb18cb5d918241d185841a0d173e4aa33"
+      },
+      "table": {
+        "byte_length": 296,
+        "record_kind": "input_chunk_table",
+        "sha256": "ae8168d38597ccbc18108b56e0c853b74f3ad599518bd770873a7fb43ce29e85"
+      },
+      "video_luma": 31
+    }
+  ]
+}

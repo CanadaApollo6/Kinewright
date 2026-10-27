@@ -202,6 +202,9 @@ impl HostCommandOwner {
             }
             reply.manual_ack.push(message.clone());
         }
+        if !messages.is_empty() {
+            self.prepared_owned_media = None;
+        }
         self.message = "Accepted manual history is durably saved.".into();
         Ok(())
     }

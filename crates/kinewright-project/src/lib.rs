@@ -14,7 +14,13 @@ pub mod editing_session;
 mod history_save;
 pub mod rescue_record;
 pub use history_save::{AttemptBinding, ProjectAttachment};
+#[cfg(feature = "test-util")]
+pub mod c0_fixtures;
+mod certified_resources;
 pub mod owned_inputs;
+mod owned_media;
+mod read_only_inputs;
+pub use read_only_inputs::{ReadOnlyInputBinding, ReadOnlyInputFiles, ReadOnlyInputs};
 pub mod receipts;
 pub mod source_boundary;
 pub mod storage_budget;

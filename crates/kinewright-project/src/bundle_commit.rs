@@ -317,7 +317,6 @@ impl BundleCommit {
                 .root()
                 .is_none_or(|r| r.manual_switch_generation != binding.switch_generation)
             || inputs != &binding.inputs
-            || checkpoint.input_manifest_ref != *inputs
             || checkpoint.batch_ids.last() != manual.predecessor.as_ref()
             || checkpoint.history_ref.sha256 != manual.before_sha256
         {
@@ -325,6 +324,7 @@ impl BundleCommit {
                 "manual chain authority/predecessor".into(),
             ));
         }
+        validate_manifest_extension(&bundle.store, &checkpoint.input_manifest_ref, inputs)?;
         let issuer = bundle
             .issuers
             .get(&envelope.id.issuer)
@@ -1591,7 +1591,7 @@ pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut Ow
             document
                 .media_pool
                 .iter()
-                .any(|a| entry.entry_id == format!("media:{}", a.id.0))
+                .any(|a| entry.matches_media_asset(a))
                 || document.lut_assets.iter().any(|a| {
                     lut_entry_id_matches(&entry.entry_id, a)
                         && entry.object.sha256 == a.sha256
@@ -1616,23 +1616,8 @@ pub(crate) fn retain_history_inputs(history: &HistorySnapshot, manifest: &mut Ow
             entry.entry_id = format!("lut:{}:{}:{}", asset.id.0, asset.sha256, asset.byte_len);
         }
     }
-    // Merge dependency metadata for identical entries; conflicting non-LUT identities refuse.
-    let mut unique: BTreeMap<String, crate::owned_inputs::OwnedInputEntry> = BTreeMap::new();
-    for entry in std::mem::take(&mut manifest.entries) {
-        if let Some(prior) = unique.get_mut(&entry.entry_id) {
-            if prior.object == entry.object {
-                prior.dependencies.extend(entry.dependencies);
-                prior.dependencies.sort();
-                prior.dependencies.dedup();
-            } else {
-                // Retain the conflict so manifest validation refuses before any root publication.
-                manifest.entries.push(entry);
-            }
-        } else {
-            unique.insert(entry.entry_id.clone(), entry);
-        }
-    }
-    manifest.entries.extend(unique.into_values());
+    manifest.entries.sort_by(|a, b| a.entry_id.cmp(&b.entry_id));
+    manifest.entries.dedup();
 }
 fn lut_entry_id_matches(id: &str, asset: &kinewright_core::LutAsset) -> bool {
     id == format!("lut:{}", asset.id.0)
@@ -1644,14 +1629,14 @@ pub(crate) fn validate_document_inputs(
     manifest: &OwnedInputManifest,
 ) -> Result<(), BundleError> {
     for asset in &document.media_pool {
-        let id = format!("media:{}", asset.id.0);
         if !manifest
             .entries
             .iter()
-            .any(|e| e.entry_id == id && e.object.record_kind == RecordKind::OwnedMedia)
+            .any(|entry| entry.matches_media_asset(asset))
         {
             return Err(BundleError::Unsupported(format!(
-                "retained asset {id} lacks owned input"
+                "retained asset media:{} lacks exact fingerprint/interpretation/table",
+                asset.id.0
             )));
         }
     }
@@ -1666,6 +1651,7 @@ pub(crate) fn validate_document_inputs(
             e.entry_id == "font:Inter"
                 && e.object.record_kind == RecordKind::OwnedFont
                 && e.object.sha256 == digest
+                && e.object.byte_length == kinewright_core::title_font_bytes().len() as u64
         }) {
             return Err(BundleError::Unsupported(
                 "retained title requires its owned embedded font".into(),
@@ -1902,4 +1888,26 @@ pub fn history_cost_probe(
     limits: &crate::storage_budget::StorageLimits,
 ) -> Result<u64, BundleError> {
     record_cost(history, limits)
+}
+
+pub(crate) fn validate_manifest_extension(
+    store: &crate::store::ProjectStore,
+    previous: &ObjectRef,
+    next: &ObjectRef,
+) -> Result<(), BundleError> {
+    let before = store.read_input_manifest(previous)?;
+    let after = store.read_input_manifest(next)?;
+    if before.project_id != after.project_id
+        || before.session_id != after.session_id
+        || before.owner_epoch != after.owner_epoch
+        || before
+            .entries
+            .iter()
+            .any(|entry| !after.entries.contains(entry))
+    {
+        return Err(BundleError::Identity(
+            "manual input manifest is not an exact superset".into(),
+        ));
+    }
+    Ok(())
 }

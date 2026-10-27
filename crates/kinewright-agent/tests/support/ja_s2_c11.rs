@@ -72,7 +72,13 @@ pub(super) mod linux {
         storage_budget::StorageLimits,
     };
 
-    pub(super) fn setup() -> (TempDirectory, PathBuf, Ja1EditingSession, SwitchTarget) {
+    pub(super) fn setup() -> (
+        TempDirectory,
+        PathBuf,
+        Ja1EditingSession,
+        SwitchTarget,
+        kinewright_project::owned_inputs::OwnedInputEntry,
+    ) {
         let root = temp("c11-switch");
         let path = root.path("a.kinewright");
         let core = Core::spawn(Document {
@@ -88,51 +94,20 @@ pub(super) mod linux {
         .unwrap();
         let mut source =
             Ja1EditingSession::new(root.root(), &core, StorageLimits::default()).unwrap();
-        let bytes = b"C11 exact owned input bytes, retained across adoption and return";
-        let object = kinewright_project::bundle_records::ObjectRef {
-            sha256: kinewright_media::sha256_bytes(bytes),
-            byte_length: bytes.len() as u64,
-            record_kind: kinewright_project::bundle_records::RecordKind::OwnedMedia,
-        };
-        let media = source
-            .source_mut()
-            .unwrap()
-            .store_mut()
-            .admit_blob(&mut &bytes[..], &object, &[])
-            .unwrap();
         let store = source.source_mut().unwrap();
+        let (asset, entry, media, _expected_bytes) =
+            import_known_wav(store.store_mut(), 700, &root.path("source.wav"), 550.0);
         let inputs = store
             .admit_inputs(&kinewright_project::owned_inputs::OwnedInputManifest {
                 project_id: None,
                 session_id: Some(store.session_id().clone()),
                 owner_epoch: store.store().owner_epoch(),
-                entries: vec![kinewright_project::owned_inputs::OwnedInputEntry {
-                    entry_id: "media:700".into(),
-                    object,
-                    dependencies: vec![],
-                    selected_stream: Some("audio:0".into()),
-                    time_base: Some((1, 48000)),
-                    origin: Some(11),
-                    profile: Some("c11-fixture".into()),
-                }],
+                entries: vec![entry.clone()],
             })
             .unwrap();
         source.set_unsaved_inputs(inputs.reference.clone()).unwrap();
-        core.request(Edit::Do(Operation::AddAsset {
-            asset: kinewright_core::MediaAsset {
-                id: kinewright_core::AssetId(700),
-                path: root.path("source.wav"),
-                name: "owned-source".into(),
-                duration: kinewright_core::TimeCode(30),
-                fps: kinewright_core::Rational::new(30, 1).unwrap(),
-                kind: kinewright_core::MediaKind::Audio,
-                resolution: None,
-                source_fingerprint: kinewright_core::MediaSourceFingerprint::default(),
-                color_description: kinewright_core::ColorDescription::default(),
-                assumed_from: None,
-            },
-        }))
-        .unwrap();
+        core.request(Edit::Do(Operation::AddAsset { asset }))
+            .unwrap();
         source.first_save(&path, StorageLimits::default()).unwrap();
         drop(inputs);
         drop(media);
@@ -157,7 +132,7 @@ pub(super) mod linux {
         source.prepare_host_attachment().unwrap();
         let cut = source.freeze_host_cut().unwrap();
         source.complete_host_cut(&cut, None, None).unwrap();
-        (root, path, source, target)
+        (root, path, source, target, entry)
     }
     fn acquire(
         host: &ProcessHost,
@@ -211,7 +186,7 @@ pub(super) mod linux {
         }
     }
     pub(super) fn restart(restored: bool) {
-        let (root, path, mut source, target) = setup();
+        let (root, path, mut source, target, expected_input) = setup();
         let mut host = switch_host(config(root.root(), Some(path.clone())));
         let identity = "d".repeat(64);
         let old_permit = acquire(&host, &source, &identity);
@@ -268,10 +243,7 @@ pub(super) mod linux {
         assert_eq!(committed.lineage, payload.lineage);
         assert!(!committed.lineage.current.is_empty());
         assert_eq!(committed.inputs.entries.len(), 1);
-        assert_eq!(
-            committed.inputs.entries[0].profile.as_deref(),
-            Some("c11-fixture")
-        );
+        assert_eq!(committed.inputs.entries[0], expected_input);
         assert_ne!(committed.current.branch, original.old.branch);
         assert!(
             host.client
@@ -638,7 +610,7 @@ pub(super) mod linux {
     pub(crate) fn matrix() {
         for gui_death in [false, true] {
             for after_restore in [false, true] {
-                let (root, path, source, target) = setup();
+                let (root, path, source, target, _) = setup();
                 let mut host = switch_host(config(root.root(), Some(path.clone())));
                 let identity = "c".repeat(64);
                 successful(
@@ -724,7 +696,7 @@ pub(super) mod linux {
     }
     fn publication_cuts() {
         for committed in [false, true] {
-            let (root, path, mut source, target) = setup();
+            let (root, path, mut source, target, _) = setup();
             let signals = root.path("signals");
             std::fs::create_dir(&signals).unwrap();
             let configuration = config(root.root(), Some(path.clone()));

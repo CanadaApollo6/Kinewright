@@ -20,6 +20,15 @@ mod frame;
 mod loudness;
 mod lut;
 mod lut_store;
+pub mod owned_io;
+
+/// The existing SDR renderer's explicit white-point assumption for a source.
+#[must_use]
+pub fn source_profile_assumption(
+    description: &kinewright_core::ColorDescription,
+) -> Option<kinewright_core::ColorSourceProfileAssumption> {
+    render::d65_assumption(description)
+}
 mod preview;
 mod render;
 mod room_tone_store;

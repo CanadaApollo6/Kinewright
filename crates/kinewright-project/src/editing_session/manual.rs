@@ -121,6 +121,10 @@ impl Ja1EditingSession {
             &core,
             &lease.inputs,
         )?;
+        self.inputs = bundle
+            .checkpoint(bundle.manual_branch_id())?
+            .input_manifest_ref
+            .clone();
         if let Some(report) = &result.1 {
             self.association
                 .as_mut()
@@ -657,6 +661,7 @@ impl ManualRecoveryEndpoint {
         if history_sha256(self.cut.history())? != lease.history_sha256 {
             return Err(BundleError::HistoryChanged);
         }
+        crate::bundle_commit::validate_inputs(self.cut.history(), &inputs)?;
         self.attachment
             .resume_manual(&self.cut, lease.into_encoder(inputs)?, live)
             .map_err(crate::bundle::history_error)

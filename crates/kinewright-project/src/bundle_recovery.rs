@@ -612,7 +612,9 @@ fn account_graph_storage(
             .map_err(|_| BundleError::Capacity("usage poisoned"))?;
         if metadata
             .checked_add(state.decoded_bytes)
+            .and_then(|bytes| bytes.checked_sub(state.decoder_bytes))
             .is_none_or(|n| n > limits.metadata_bytes)
+            || state.decoder_bytes > limits.decoder_bytes
         {
             return Err(BundleError::Capacity("graph and decoded overlap"));
         }
@@ -826,6 +828,7 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
     let mut memo = VerifiedIdentityMemo::default();
     let mut indexes = BTreeMap::new();
     let mut input_manifests = BTreeMap::new();
+    let mut chunk_tables = BTreeMap::new();
     for reference in &manifest.objects {
         macro_rules! admit {
             ($ty:ty) => {{
@@ -874,6 +877,26 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             RecordKind::InputManifest => {
                 input_manifests.insert(reference.sha256.clone(), admit!(OwnedInputManifest));
             }
+            RecordKind::InputChunkTable => {
+                let value = admit!(crate::owned_inputs::InputChunkTable);
+                let _encoded = StorageReservation::reserve(
+                    usage,
+                    limits,
+                    0,
+                    reference.byte_length,
+                    0,
+                    false,
+                    u64::MAX,
+                )?;
+                let canonical =
+                    serde_json::to_vec(&*value).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+                if canonical.len() as u64 != reference.byte_length
+                    || kinewright_media::sha256_bytes(&canonical) != reference.sha256
+                {
+                    return Err(BundleError::Corrupt("noncanonical chunk table".into()));
+                }
+                chunk_tables.insert(reference.sha256.clone(), value);
+            }
             RecordKind::ReceiptIndex => {
                 let value = admit!(crate::receipts::ReceiptLedger);
                 validate_switch_receipts(namespace, &value, &manifest, usage, &mut fields, limits)?;
@@ -906,6 +929,17 @@ pub(crate) fn read_graph<N: Borrow<ProjectNamespace>>(
             _ => return Err(BundleError::Unsupported("inactive record producer".into())),
         }
         verified.insert(reference.sha256.clone());
+    }
+    for inputs in input_manifests.values() {
+        for entry in &inputs.entries {
+            if entry.object.record_kind == RecordKind::OwnedMedia {
+                let reference = entry.chunk_table_ref()?;
+                chunk_tables
+                    .get(&reference.sha256)
+                    .ok_or_else(|| BundleError::Corrupt("missing admitted chunk table".into()))?
+                    .validate_binding(&entry.object, limits)?;
+            }
+        }
     }
     if fields != manifest.required_fields {
         return Err(BundleError::Unsupported(

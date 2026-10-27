@@ -50,6 +50,205 @@ fn checked(host: &mut HostCommandOwner, command: HostCommand) -> HostReply {
     assert!(reply.error.is_none(), "{:?}", reply.error);
     reply
 }
+
+#[test]
+fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
+    let (temp, mut host) = fixture();
+    let path = temp.path("owned.wav");
+    std::fs::write(
+        &path,
+        kinewright_media::test_support::wav_f32(
+            &kinewright_media::test_support::tone(440.0, 0.25, 48_000, 48_000),
+            48_000,
+            1,
+        ),
+    )
+    .unwrap();
+    let client = "p".repeat(64);
+    checked(
+        &mut host,
+        HostCommand::AcquireManual {
+            client: client.clone(),
+        },
+    );
+    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    let original_lease = host.manual.clone();
+    let before_refusal_root = host.owner().unwrap().root_sha256().unwrap();
+    let altered = Core::spawn(Document::default()).unwrap();
+    altered.restore_history(snapshot.history.clone()).unwrap();
+    edit(&altered, false);
+    for (request_client, request_snapshot, code) in [
+        ("x".repeat(64), snapshot.clone(), "manual_lease"),
+        (
+            client.clone(),
+            HostSnapshot::capture(&altered).unwrap(),
+            "history_changed",
+        ),
+    ] {
+        let refused = run(
+            &mut host,
+            HostCommand::PrepareOwnedMedia {
+                client: request_client,
+                path: path.clone(),
+                asset_id: kinewright_core::AssetId(1),
+                snapshot: request_snapshot,
+            },
+        );
+        assert_eq!(
+            refused.error.as_ref().map(|error| error.code.as_str()),
+            Some(code)
+        );
+        assert_eq!(host.manual, original_lease);
+        assert_eq!(
+            host.owner().unwrap().root_sha256().unwrap(),
+            before_refusal_root
+        );
+    }
+    let command = HostCommand::PrepareOwnedMedia {
+        client: client.clone(),
+        path: path.clone(),
+        asset_id: kinewright_core::AssetId(1),
+        snapshot: snapshot.clone(),
+    };
+    let roots = host.config.roots.clone();
+    let prepared = host.execute_operation(command.clone(), roots.clone(), Some(&client), Some(1));
+    assert!(prepared.error.is_none(), "{:?}", prepared.error);
+    assert_eq!(
+        HostSnapshot::capture(host.core()).unwrap(),
+        snapshot,
+        "admission cannot publish the asset"
+    );
+    let root = host.owner().unwrap().root_sha256().unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let replay = host.execute_operation(command, roots, Some(&client), Some(1));
+    assert_eq!(
+        serde_json::to_vec(&prepared).unwrap(),
+        serde_json::to_vec(&replay).unwrap()
+    );
+    assert_eq!(host.owner().unwrap().root_sha256().unwrap(), root);
+    let replica_core = Core::spawn(Document::default()).unwrap();
+    replica_core
+        .restore_history(snapshot.history.clone())
+        .unwrap();
+    let replica =
+        Ja1EditingSession::new(temp.root(), &replica_core, StorageLimits::default()).unwrap();
+    let permit = replica
+        .bind_manual_producer(
+            prepared.manual_lease.unwrap(),
+            prepared.manual_inputs.unwrap(),
+        )
+        .unwrap();
+    let asset = prepared.owned_media.unwrap();
+    assert!(matches!(
+        permit
+            .request(CoreCommand::Do(Operation::AddAsset {
+                asset: asset.clone()
+            }))
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    checked(
+        &mut host,
+        HostCommand::CommitHistory {
+            client,
+            messages: permit.pending().unwrap(),
+        },
+    );
+    assert_eq!(
+        HostSnapshot::capture(host.core())
+            .unwrap()
+            .history
+            .document
+            .media_pool,
+        vec![asset]
+    );
+    assert!(
+        run(
+            &mut host,
+            HostCommand::PrepareOwnedMedia {
+                client: "x".repeat(64),
+                path,
+                asset_id: kinewright_core::AssetId(2),
+                snapshot
+            }
+        )
+        .error
+        .is_some()
+    );
+}
+#[test]
+fn s3_gui_owned_input_forwarded_scope_refuses_before_admission() {
+    let (temp, mut host) = fixture();
+    let path = temp.path("chosen.wav");
+    std::fs::write(
+        &path,
+        kinewright_media::test_support::wav_f32(&vec![0.25; 4800].into_boxed_slice(), 48_000, 1),
+    )
+    .unwrap();
+    let client = "g".repeat(64);
+    checked(
+        &mut host,
+        HostCommand::AcquireManual {
+            client: client.clone(),
+        },
+    );
+    let snapshot = HostSnapshot::capture(host.core()).unwrap();
+    host.config.origin = HostOrigin::Gui {
+        initial_snapshot: snapshot.clone(),
+        retention: HostSourceBinding {
+            source: None,
+            inputs: None,
+            callback: HostBootstrap {
+                endpoint: HostEndpoint {
+                    address: "127.0.0.1:1".parse().unwrap(),
+                    project: "unused".into(),
+                    protocol: HOST_PROTOCOL,
+                },
+                auth: HostAuth::generate().unwrap(),
+                roots: SessionRoots::default(),
+            },
+        },
+        expected_root_sha256: None,
+        expected_project_id: None,
+    };
+    let before = host.owner().unwrap().root_sha256().unwrap();
+    let lease = host.manual.clone();
+    let refusal = host
+        .prepare_owned_media(
+            &client,
+            &path,
+            kinewright_core::AssetId(1),
+            &snapshot,
+            &SessionRoots::default(),
+            &mut HostReply::default(),
+        )
+        .err()
+        .map(|error| error.refusal().code);
+    assert_eq!(
+        refusal.as_deref(),
+        Some("root_refused"),
+        "forwarded input scope must refuse before admission"
+    );
+    assert_eq!(host.owner().unwrap().root_sha256().unwrap(), before);
+    assert_eq!(host.manual, lease);
+    assert!(host.prepared_owned_media.is_none());
+    let mut reply = HostReply::default();
+    host.prepare_owned_media(
+        &client,
+        &path,
+        kinewright_core::AssetId(1),
+        &snapshot,
+        &SessionRoots {
+            read: vec![temp.root().into()],
+            write: vec![],
+        },
+        &mut reply,
+    )
+    .unwrap();
+    assert!(reply.owned_media.is_some());
+    assert_eq!(HostSnapshot::capture(host.core()).unwrap(), snapshot);
+}
+
 fn edit(core: &Core, locked: bool) {
     assert!(matches!(
         core.request(CoreCommand::Do(Operation::SetTrackSyncLock {

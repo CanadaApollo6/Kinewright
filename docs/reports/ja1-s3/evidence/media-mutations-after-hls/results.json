@@ -1,0 +1,144 @@
+{
+  "source": "crates/kinewright-media/src/owned_io.rs",
+  "source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+  "command": "nice -n 19 python3 -I scripts/ja1-s3-c0-media-mutations.py",
+  "results": [
+    {
+      "guard": "secondary-open-callback",
+      "selector": "owned_io::tests::s3_certified_secondary_open_is_denied_and_latched",
+      "red_marker": "C0_SECONDARY_OPEN_DENIED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_secondary_open_is_denied_and_latched",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2011,
+        "marker_macro_lines": [
+          2011
+        ],
+        "witness_source_sha256": "a0a4c56028698f97c92b3baab9ad05da14ba3156e2ddd84d9badd79c25afb728"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "selected-audio-probe-index",
+      "selector": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+      "red_marker": "C0_SELECTED_STREAM_TYPED_REFUSAL",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2376,
+        "marker_macro_lines": [
+          2376
+        ],
+        "witness_source_sha256": "b22357c500512ae834d3d959a3b67ca34cac44430d806e6e8a18276954570a2c"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "selected-audio-probe-kind",
+      "selector": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+      "red_marker": "C0_SELECTED_STREAM_TYPED_REFUSAL",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_probe_rejects_missing_and_wrong_kind_selected_streams",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2376,
+        "marker_macro_lines": [
+          2376
+        ],
+        "witness_source_sha256": "b6c8481cbb112ae22eaf9e5072f948db71415abaf2ca6dc604a0bcb456740583"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "incomplete-stream-table",
+      "selector": "owned_io::tests::s3_certified_mpegps_refuses_incomplete_table_before_probe",
+      "red_marker": "C0_INCOMPLETE_PROBE_NOT_ENTERED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_mpegps_refuses_incomplete_table_before_probe",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2076,
+        "marker_macro_lines": [
+          2076
+        ],
+        "witness_source_sha256": "9f7832e4eb171aeadb98b7e1fff94b006fe31e9c73cb6e0a80601928cb0a3c8c"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "non-av-probe-kind",
+      "selector": "owned_io::tests::s3_certified_subtitle_refuses_unsupported_kind_before_probe",
+      "red_marker": "C0_NON_AV_PROBE_NOT_ENTERED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_subtitle_refuses_unsupported_kind_before_probe",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2137,
+        "marker_macro_lines": [
+          2137
+        ],
+        "witness_source_sha256": "fdbca309846cf56f04ae5ba2864d72b32d8df7769a9411c2ace1e5c7c614c624"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "probe-stream-limit",
+      "selector": "owned_io::tests::s3_certified_probe_stream_limit_refuses_before_new_stream_allocation",
+      "red_marker": "C0_PROBE_NEW_STREAM_ALLOCATION_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_probe_stream_limit_refuses_before_new_stream_allocation",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2167,
+        "marker_macro_lines": [
+          2167
+        ],
+        "witness_source_sha256": "a064101354b0c80c65c3be55d56df5d14aec1e7f89dfa0c7feaed88b091115f8"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "production-incomplete-stream-table",
+      "selector": "s3_owned_import_refuses_dynamic_mpegps_before_probe",
+      "red_marker": "C0_PRODUCTION_INCOMPLETE_PROBE_NOT_ENTERED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "s3_owned_import_refuses_dynamic_mpegps_before_probe",
+        "file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs",
+        "line": 80,
+        "marker_macro_lines": [
+          80
+        ],
+        "witness_source_sha256": "88ac3ad63016c34c011471ad4801a6037cf25cae0dc2e1763e7417be0730c165"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "production-certified-through-use",
+      "selector": "s3_certified_input_through_use",
+      "red_marker": "no accepted video output after uncached payload tamper",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "s3_certified_input_through_use",
+        "file": "crates/kinewright-project/tests/ja_s3_owned_inputs.rs",
+        "line": 527,
+        "marker_macro_lines": [
+          527
+        ],
+        "witness_source_sha256": "88ac3ad63016c34c011471ad4801a6037cf25cae0dc2e1763e7417be0730c165"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    }
+  ],
+  "restored": true
+}

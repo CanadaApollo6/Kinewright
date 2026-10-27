@@ -1046,6 +1046,17 @@ impl KinewrightApp {
     }
 
     fn import_recorded_file(&mut self, path: PathBuf) {
+        if self.focused().ja1_job.is_some() {
+            self.status = format!(
+                "Recording retained at {}. Import the recording when the Studio operation finishes.",
+                path.display()
+            );
+            return;
+        }
+        if self.focused().ja1.is_some() {
+            self.start_ja1(crate::ja1_attachment::Action::ImportMedia(path));
+            return;
+        }
         self.status = format!("Importing {}…", path.display());
         let session_id = self.focused().id;
         let media = Arc::clone(&self.analysis);

@@ -1,0 +1,229 @@
+{
+  "source": "crates/kinewright-media/src/owned_io.rs",
+  "source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43",
+  "command": "nice -n 19 python3 -I scripts/ja1-s3-c0-media-mutations.py",
+  "results": [
+    {
+      "guard": "chunk-sha256",
+      "selector": "owned_io::tests::s3_certified_cache_is_private_and_evict_refetch_verifies_again",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_cache_is_private_and_evict_refetch_verifies_again",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "d7b4fc37240df2ebb2a4cc87601b300be0c160206256355e3f82df47e58aeeed"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "tamper-after-open-video",
+      "selector": "owned_io::tests::s3_certified_uncached_video_seek_tamper_after_open_is_latched",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_uncached_video_seek_tamper_after_open_is_latched",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "d7b4fc37240df2ebb2a4cc87601b300be0c160206256355e3f82df47e58aeeed"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "tamper-after-open-audio",
+      "selector": "owned_io::tests::s3_certified_uncached_audio_seek_tamper_after_open_is_latched",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_uncached_audio_seek_tamper_after_open_is_latched",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "d7b4fc37240df2ebb2a4cc87601b300be0c160206256355e3f82df47e58aeeed"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "premature-short-read",
+      "selector": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+      "red_marker": "C0_SHORT_READ_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1664,
+        "marker_macro_lines": [
+          1664
+        ],
+        "witness_source_sha256": "937eee608bb6ec74ab7508cfada501741b47e6473595931f47e2dc30f4197ed4"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "size-change-cache-hit",
+      "selector": "owned_io::tests::s3_certified_size_changes_refuse_cache_hits_seek_and_size_queries",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_size_changes_refuse_cache_hits_seek_and_size_queries",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "4cc849efaea907b5d6fab04c9c4f0aa46c2a91a874574335de4f79a8d4495520"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "size-change-during-fill",
+      "selector": "owned_io::tests::s3_certified_size_change_during_fill_refuses_before_publication",
+      "red_marker": "C0_SIZE_DURING_FILL_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_size_change_during_fill_refuses_before_publication",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1727,
+        "marker_macro_lines": [
+          1727
+        ],
+        "witness_source_sha256": "4cc849efaea907b5d6fab04c9c4f0aa46c2a91a874574335de4f79a8d4495520"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "verified-only-publication",
+      "selector": "owned_io::tests::s3_certified_avio_exposes_zero_unverified_scratch_bytes_at_barrier",
+      "red_marker": "C0_VERIFIED_ONLY_PUBLICATION",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_avio_exposes_zero_unverified_scratch_bytes_at_barrier",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1704,
+        "marker_macro_lines": [
+          1704
+        ],
+        "witness_source_sha256": "d95e4e1c232b1739b64bf60c6c095f406821e388a92f39eb8da60e1e65b73612"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "certified-avio-routing",
+      "selector": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+      "red_marker": "C0_SHORT_READ_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_short_read_with_unchanged_descriptor_length_refuses",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1670,
+        "marker_macro_lines": [
+          1670
+        ],
+        "witness_source_sha256": "1bfb0faa78b9eede00f4b700a208e784eb2d81f5e6ec4ac56452d587b906423f"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "latched-output-rejection",
+      "selector": "owned_io::tests::s3_certified_latched_error_rejects_already_buffered_video_and_audio",
+      "red_marker": "C0_DAMAGED_INPUT_REFUSED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_latched_error_rejects_already_buffered_video_and_audio",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 1559,
+        "marker_macro_lines": [
+          1559
+        ],
+        "witness_source_sha256": "9c49217f16714e5974e0aca3eb66d98e79eb5aabbe28e51f81ea11d19fbc57b5"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "source-pin-lifetime",
+      "selector": "owned_io::tests::s3_certified_cursor_capacity_and_decoder_pin_charge_lifetime",
+      "red_marker": "C0_SOURCE_AUTHORITY_RETAINED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_cursor_capacity_and_decoder_pin_charge_lifetime",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2298,
+        "marker_macro_lines": [
+          2298
+        ],
+        "witness_source_sha256": "523ff39d83e47773fb66bd42d845f0f44b63e75d52c523b76e939758da1f3b27"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "cursor-charge-lifetime",
+      "selector": "owned_io::tests::s3_certified_cursor_charge_survives_source_until_final_cursor_close",
+      "red_marker": "C0_CURSOR_CHARGE_RETAINED",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_cursor_charge_survives_source_until_final_cursor_close",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2419,
+        "marker_macro_lines": [
+          2419
+        ],
+        "witness_source_sha256": "9b18092dd774953aac7b6f7046da53280abda0e3ac030c23f30c7ba69ee23ea2"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "decoder-allocation-preflight",
+      "selector": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+      "red_marker": "C0_DECODER_ALLOCATION_PREFLIGHT",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2452,
+        "marker_macro_lines": [
+          2452
+        ],
+        "witness_source_sha256": "876a2259edf4fb13419079443c868add92f37a33846aea14025417edfe5bbab0"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    },
+    {
+      "guard": "frame-allocation-preflight",
+      "selector": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+      "red_marker": "C0_FRAME_ALLOCATION_PREFLIGHT",
+      "red": "1 assertion failure",
+      "green": "1 passed",
+      "red_assertion": {
+        "thread": "owned_io::tests::s3_certified_decoder_and_output_frame_preflight_refuse_before_use",
+        "file": "crates/kinewright-media/src/owned_io.rs",
+        "line": 2457,
+        "marker_macro_lines": [
+          2457
+        ],
+        "witness_source_sha256": "0efae743bdad0b416c9e0ffea399168aa932696cecff3b52d50ae229fe971a04"
+      },
+      "restored_source_sha256": "d091ef51db3ef40bcbe173d8315d6265301ec4ffe327155c72b78569545fdb43"
+    }
+  ],
+  "restored": true
+}

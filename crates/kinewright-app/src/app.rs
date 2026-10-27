@@ -68,6 +68,7 @@ fn inspect_project_document(
     Ok((document, admission.read_version(), digest, admission))
 }
 const DEFAULT_TRACK_ID: TrackId = TrackId(1);
+const STUDIO_SOURCE_COLOUR_REFUSAL: &str = "Studio keeps source colour with the project's media, so this colour fix was not applied. Use Assume SDR Rec.709 metadata in the Media Bin.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectAction {
@@ -1017,7 +1018,7 @@ impl KinewrightApp {
             }
         }
     }
-    fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
+    pub(crate) fn start_ja1(&mut self, action: crate::ja1_attachment::Action) {
         if let crate::ja1_attachment::Action::OpenCapture(path) = &action {
             self.open_project(path);
             return;
@@ -1075,10 +1076,13 @@ impl KinewrightApp {
             {
                 let job = session.ja1_job.take().expect("finished job");
                 match job.join() {
-                    Ok(attachment) => {
+                    Ok(mut attachment) => {
                         if index == focused {
                             self.status.clone_from(&attachment.message);
                             changed = true;
+                        }
+                        if let Some(asset) = attachment.imported_media.take() {
+                            session.pending_timeline_adds.push(asset);
                         }
                         session.ja1 = Some(attachment);
                         session.install_ja1_view();
@@ -1090,6 +1094,32 @@ impl KinewrightApp {
             } else if session.ja1_job.is_some() {
                 ctx.request_repaint_after(Duration::from_millis(20));
             }
+        }
+        let ready_imports: Vec<_> = self
+            .projects
+            .iter()
+            .enumerate()
+            .filter(|(_, project)| !project.ja1_read_only())
+            .flat_map(|(index, project)| {
+                project
+                    .pending_timeline_adds
+                    .iter()
+                    .filter(|id| {
+                        project
+                            .document
+                            .media_pool
+                            .iter()
+                            .any(|asset| asset.id == **id)
+                    })
+                    .map(move |id| (index, *id))
+            })
+            .collect();
+        for (index, asset) in ready_imports {
+            self.projects[index]
+                .pending_timeline_adds
+                .retain(|pending| *pending != asset);
+            self.projects[index].cue_source_asset(asset);
+            self.add_asset_to_timeline_for(index, asset);
         }
         if changed {
             let path = self.focused().project_path.clone();
@@ -2292,6 +2322,14 @@ impl KinewrightApp {
         if self.refuse_ja1_manual_edit() {
             return;
         }
+        if matches!(&operation, Operation::SetAssetColorDescription { .. })
+            && self.focused().ja1.is_some()
+        {
+            self.start_ja1(crate::ja1_attachment::Action::ChangeMediaInterpretation(
+                Box::new(operation),
+            ));
+            return;
+        }
         // The operation names the narrowest subject the refusal is about, but
         // a stopped actor is not that operation's problem — it is the whole
         // document's, and a second stopped send must not open a second
@@ -2539,6 +2577,9 @@ impl KinewrightApp {
         let Some(operation) = operation else {
             return;
         };
+        if self.studio_source_colour_refused(project_index, &operation) {
+            return;
+        }
         // `Command::DoIfRevision`, never `Command::Do`: the apply the router
         // planned against one revision must not land on another (rule 9).
         // The token is what the conflict is matched by (`IN1b` §4 rule 6).
@@ -2566,6 +2607,21 @@ impl KinewrightApp {
             });
             auto_applied.push(id);
         }
+    }
+
+    fn studio_source_colour_refused(
+        &mut self,
+        project_index: usize,
+        operation: &Operation,
+    ) -> bool {
+        let project = &self.projects[project_index];
+        if !matches!(operation, Operation::SetAssetColorDescription { .. })
+            || (project.ja1.is_none() && project.ja1_job.is_none())
+        {
+            return false;
+        }
+        STUDIO_SOURCE_COLOUR_REFUSAL.clone_into(&mut self.status);
+        true
     }
 
     /// Allocate the next correlation token (`IN1b` §4 rule 6).
@@ -2867,6 +2923,9 @@ impl KinewrightApp {
         operation: Operation,
         outcome: IncidentOutcome,
     ) {
+        if self.studio_source_colour_refused(project_index, &operation) {
+            return;
+        }
         let expected = self.projects[project_index].revision;
         let token = self.next_command_token();
         if self.projects[project_index]
@@ -11072,6 +11131,181 @@ pub(crate) mod in1_tests {
             "every returned-open pair dedups on a later observation"
         );
         in2_cleanup(&mut app);
+    }
+
+    #[cfg(target_os = "linux")]
+    struct StudioOwnedColour {
+        _fixture: GeneratedMedia,
+        _temp: TempDirectory,
+        app: KinewrightApp,
+        _engine: Arc<FfmpegMediaEngine>,
+        path: std::path::PathBuf,
+        saved: kinewright_core::HistorySnapshot,
+        observation: IncidentObservation,
+    }
+
+    /// A saved Studio project with the untagged fixture admitted as owned
+    /// media through a local owner, plus the unknown-colour observation the
+    /// router would open for that owned asset.
+    #[cfg(target_os = "linux")]
+    fn studio_owned_colour() -> StudioOwnedColour {
+        use crate::ja1_attachment::{Action, Ja1Attachment};
+        use kinewright_project::{
+            editing_session::Ja1EditingSession, storage_budget::StorageLimits,
+        };
+        let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+        let (fixture, probed) = in1_untagged(&probe_engine);
+        let error = in1_playback_error(&probe_engine, &probed);
+        let temp = TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "c0-studio-colour",
+        );
+        let path = temp.path("owned-colour.kinewright");
+        let (mut app, engine) = in1_harness(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        });
+        let core = app.projects[0].core.clone();
+        app.projects[0].recovery.stop_for_studio();
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+        let mut attachment = Ja1Attachment::new(owner).unwrap();
+        let Operation::SetAssetColorDescription {
+            mut color_description,
+            ..
+        } = kinewright_core::assume_rec709_operation(
+            probed.media_pool[0].id,
+            &probed.media_pool[0].color_description,
+        )
+        else {
+            unreachable!()
+        };
+        color_description.provenance = kinewright_core::ColorProvenance::UserOverride;
+        let (owned_asset, _) = attachment
+            .owner
+            .import_owned_media_with_color(fixture.path(), Some(color_description))
+            .unwrap();
+        attachment.apply(Action::Save).unwrap();
+        let asset = owned_asset.id;
+        app.projects[0].ja1 = Some(attachment);
+        in1_poll_production_until(&mut app, |app| {
+            app.projects[0].document.asset(asset).is_some()
+        });
+        let saved = core.export_history().unwrap();
+        let mut observation = IncidentObservation::from_media_error(
+            &error,
+            IncidentSubject::Project,
+            app.projects[0].revision,
+        );
+        observation.subject = IncidentSubject::Asset(asset);
+        StudioOwnedColour {
+            _fixture: fixture,
+            _temp: temp,
+            app,
+            _engine: engine,
+            path,
+            saved,
+            observation,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn studio_owned_colour_finish(mut fixture: StudioOwnedColour, incident: IncidentId) {
+        use crate::ja1_attachment::Action;
+        let app = &mut fixture.app;
+        assert_eq!(
+            in1_incident(app, incident).state,
+            IncidentState::Open,
+            "the refused colour fix leaves its incident open"
+        );
+        assert_eq!(app.status, STUDIO_SOURCE_COLOUR_REFUSAL);
+        let attachment = app.projects[0].ja1.as_mut().unwrap();
+        let saved = attachment.apply(Action::Save);
+        assert!(
+            saved.is_ok(),
+            "the owned document stays saveable: {saved:?} {}",
+            attachment.message
+        );
+        let restored = kinewright_core::Core::spawn(Document::default()).unwrap();
+        kinewright_project::bundle::LoadedBundle::read(&fixture.path)
+            .unwrap()
+            .restore_manual(&restored)
+            .unwrap();
+        assert_eq!(restored.export_history().unwrap(), fixture.saved);
+        assert!(app.projects[0].ja1.as_mut().unwrap().close());
+        app.projects[0].ja1 = None;
+        in2_cleanup(app);
+        drop(fixture);
+    }
+
+    /// Wonder r2 C2 / Opus r2 C2, router half: a Studio-owned asset's
+    /// automatic colour fix never reaches Core unstaged.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn c0_studio_owned_auto_colour_fix_is_not_sent_unstaged() {
+        let mut fixture = studio_owned_colour();
+        let app = &mut fixture.app;
+        app.pending_observations.push(fixture.observation.clone());
+        app.route_incidents();
+        let incident = {
+            let handle = Arc::clone(&app.projects[0].incidents);
+            let log = handle
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let incident = log.all().next().expect("the router opened the incident");
+            assert_eq!(incident.class, PolicyClass::AutoApply);
+            incident.id
+        };
+        assert_eq!(
+            app.projects[0].core.export_history().unwrap(),
+            fixture.saved,
+            "c0-colour-auto: the automatic fix must not reach Core unstaged"
+        );
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "c0-colour-auto: no router send is outstanding"
+        );
+        studio_owned_colour_finish(fixture, incident);
+    }
+
+    /// Wonder r2 C2 / Opus r2 C2, card half: pressing the incident card's
+    /// colour recovery in a Studio project sends nothing unstaged.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn c0_studio_owned_card_colour_fix_is_not_sent_unstaged() {
+        let mut fixture = studio_owned_colour();
+        let app = &mut fixture.app;
+        let (incident, operation) = {
+            let handle = Arc::clone(&app.projects[0].incidents);
+            let mut log = handle
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Observed::Opened(id) = log.observe(fixture.observation.clone()) else {
+                panic!("a fresh log opens the owned asset's incident");
+            };
+            let incident = log.get(id).expect("open");
+            let RecoveryKind::Operation(operation) = &incident.recoveries[0].kind else {
+                panic!("the colour recovery is an operation");
+            };
+            (id, operation.clone())
+        };
+        app.send_incident_recovery(0, incident, operation, IncidentOutcome::Applied);
+        assert_eq!(
+            app.projects[0].core.export_history().unwrap(),
+            fixture.saved,
+            "c0-colour-card: the card's fix must not reach Core unstaged"
+        );
+        assert!(
+            app.pending_router_applies.is_empty(),
+            "c0-colour-card: no card send is outstanding"
+        );
+        studio_owned_colour_finish(fixture, incident);
     }
 }
 

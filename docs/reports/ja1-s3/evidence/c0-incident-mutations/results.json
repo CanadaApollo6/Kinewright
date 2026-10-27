@@ -1,0 +1,57 @@
+{
+  "source": "crates/kinewright-app/src/app.rs",
+  "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819",
+  "restored": true,
+  "tests": [
+    "app::in1_tests::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+    "app::in1_tests::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+    "app::in1_tests::in1_the_undo_sticks_and_the_reopen_is_suppressed",
+    "app::in1_tests::in1b_a_refused_card_press_is_reported_where_an_auto_apply_is_not"
+  ],
+  "rows": [
+    {
+      "phase": "baseline",
+      "exit": 0,
+      "accepted": true,
+      "not_green": [],
+      "log": "baseline.log.gz",
+      "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819"
+    },
+    {
+      "phase": "auto-apply-guard",
+      "exit": 101,
+      "accepted": true,
+      "red_witness": "app::in1_tests::c0_studio_owned_auto_colour_fix_is_not_sent_unstaged",
+      "red_at": "crates/kinewright-app/src/app.rs:11262",
+      "unexpected": [],
+      "log": "auto-apply-guard.log.gz",
+      "source_sha256": "ff3bcd5869c12b3bb3da27b7aa6801701ee57a8b07ff02c769660530214a1da9"
+    },
+    {
+      "phase": "auto-apply-guard-restored",
+      "exit": 0,
+      "accepted": true,
+      "not_green": [],
+      "log": "auto-apply-guard-restored.log.gz",
+      "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819"
+    },
+    {
+      "phase": "card-press-guard",
+      "exit": 101,
+      "accepted": true,
+      "red_witness": "app::in1_tests::c0_studio_owned_card_colour_fix_is_not_sent_unstaged",
+      "red_at": "crates/kinewright-app/src/app.rs:11296",
+      "unexpected": [],
+      "log": "card-press-guard.log.gz",
+      "source_sha256": "feee9e15c6f86523a019445811436f5914c9be9f121f76f2a41d48815887dd3b"
+    },
+    {
+      "phase": "card-press-guard-restored",
+      "exit": 0,
+      "accepted": true,
+      "not_green": [],
+      "log": "card-press-guard-restored.log.gz",
+      "source_sha256": "cd96878bbca759da2850db8c8af86aaa023eecee37d8a379fd598b7ce5004819"
+    }
+  ]
+}

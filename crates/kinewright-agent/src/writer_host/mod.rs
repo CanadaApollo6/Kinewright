@@ -2,6 +2,7 @@
 #![allow(clippy::missing_errors_doc, clippy::too_many_lines)]
 mod auth;
 mod manual;
+mod owned_media;
 mod protocol;
 mod recovery;
 mod switch;
@@ -986,6 +987,7 @@ impl BorrowedSourceReader for RemoteSource {
     reason = "retention, choice, stream recovery and switch confirmation are independent existing lifecycle gates"
 )]
 pub struct HostCommandOwner {
+    prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
     pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
     switch_frozen: bool,
@@ -1120,6 +1122,7 @@ impl HostCommandOwner {
             owner.freeze_manual_barrier()?;
         }
         let mut host = Self {
+            prepared_owned_media: None,
             pending_switch: None,
             confirmed_switch: None,
             switch_frozen,
@@ -1416,6 +1419,25 @@ impl HostCommandOwner {
                 let inputs = self.owner()?.manual_input_context()?;
                 reply.manual_lease = Some(self.acquire_manual(client)?);
                 reply.manual_inputs = Some(inputs);
+            }
+            HostCommand::PrepareOwnedMedia {
+                client,
+                path,
+                asset_id,
+                snapshot,
+            } => {
+                self.prepare_owned_media(&client, &path, asset_id, &snapshot, roots, reply)?;
+            }
+            HostCommand::PrepareMediaInterpretation {
+                client,
+                operation,
+                snapshot,
+            } => {
+                self.prepare_media_interpretation(&client, &operation, &snapshot, reply)?;
+            }
+            HostCommand::RefreshUnsavedInputs { binding, snapshot } => {
+                self.refresh_unsaved_inputs(binding, snapshot)?;
+                reply.unsaved_inputs_refreshed = true;
             }
             HostCommand::CommitHistory { client, messages } => {
                 self.commit_history(&client, &messages, reply)?;
