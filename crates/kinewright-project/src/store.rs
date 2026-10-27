@@ -1672,6 +1672,13 @@ impl<R: Read> Read for CountingReader<'_, R> {
         Ok(count)
     }
 }
+impl StorePin {
+    /// Pins may be shared only within the same IO owner's ledger.
+    #[must_use]
+    pub fn shares_owner_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
 impl Drop for StorePin {
     fn drop(&mut self) {
         if let Ok(mut ledger) = self.inner.ledger.lock() {
@@ -2272,6 +2279,15 @@ impl BundleRecord for StoreManifest {
 }
 
 impl ProjectStore {
+    /// Uses typed admission for projected-manifest oracle fixtures.
+    #[cfg(feature = "test-util")]
+    pub fn admit_manifest_probe(
+        &mut self,
+        manifest: &StoreManifest,
+    ) -> Result<SealedObject, BundleError> {
+        self.admit_record(manifest)
+    }
+
     pub fn admit_document(
         &mut self,
         document: &kinewright_core::Document,

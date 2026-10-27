@@ -1994,3 +1994,425 @@ fn s3_attachment_role_binding() {
         "C1_ATTACH_ROLE_BINDING",
     );
 }
+
+struct LostDetachedHandoff {
+    host: WriterHost,
+    _temp: kinewright_media::test_support::TempDirectory,
+    client: String,
+    command: HostCommand,
+    original: HostReply,
+}
+
+fn lost_detached_handoff(over_http: bool, switching: bool) -> LostDetachedHandoff {
+    let (temp, host, _refs) = fixture();
+    let client = "a".repeat(64);
+    let editor = host.client().with_manual_editor(client.clone());
+    accepted(foreground_request(
+        &host,
+        &editor,
+        HostCommand::AcquireManual {
+            client: client.clone(),
+        },
+        Some(1),
+        over_http,
+    ));
+    let command = if switching {
+        let target = {
+            let owner = host.owner.upgrade().unwrap();
+            let owner = owner.lock().unwrap();
+            let kinewright_project::bundle_recovery::RecoverySelection::Checkpoint { root, branch } =
+                owner
+                    .owner()
+                    .unwrap()
+                    .list_recovery_points()
+                    .unwrap()
+                    .remove(0)
+            else {
+                panic!("checkpoint")
+            };
+            kinewright_project::bundle_switch::SwitchTarget::Checkpoint { root, branch }
+        };
+        let envelope = accepted(foreground_request(
+            &host,
+            &editor,
+            HostCommand::PrepareSwitch { target },
+            None,
+            over_http,
+        ))
+        .switch_envelope
+        .unwrap();
+        HostCommand::Switch {
+            envelope: Box::new(envelope),
+        }
+    } else {
+        let snapshot =
+            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        HostCommand::SaveAs {
+            destination: temp.path("handoff.kinewright"),
+            snapshot,
+        }
+    };
+    let original = discard_foreground_reply(&host, &editor, command.clone(), 2, over_http);
+    assert!(
+        host.owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .manual
+            .is_none()
+    );
+    accepted(foreground_request(
+        &host,
+        &editor,
+        HostCommand::Detach,
+        None,
+        over_http,
+    ));
+    LostDetachedHandoff {
+        _temp: temp,
+        host,
+        client,
+        command,
+        original,
+    }
+}
+
+#[test]
+fn s3_followup_detached_handoff_requires_explicit_discard() {
+    for over_http in [false, true] {
+        for switching in [false, true] {
+            let fixture = lost_detached_handoff(over_http, switching);
+            let host = &fixture.host;
+            let other_client = "b".repeat(64);
+            let other = host
+                .attach(
+                    "replacement".into(),
+                    AttachmentRole::Editor,
+                    host.roots.clone(),
+                )
+                .unwrap()
+                .with_manual_editor(other_client.clone());
+            let installed = accepted(foreground_request(
+                host,
+                &other,
+                HostCommand::CurrentAttachment,
+                None,
+                over_http,
+            ))
+            .switch_attachment
+            .unwrap()
+            .identity()
+            .unwrap();
+            let before = foreground_state(host);
+            let root = state(host)["root"].clone();
+            for operation in [None, Some(3)] {
+                let snapshot =
+                    HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
+                        .unwrap();
+                for command in [
+                    HostCommand::AcquireManual {
+                        client: other_client.clone(),
+                    },
+                    HostCommand::ConfirmSwitch {
+                        client: other_client.clone(),
+                        installed: Box::new(installed.clone()),
+                    },
+                    HostCommand::Save { snapshot },
+                ] {
+                    let denied = foreground_request(host, &other, command, operation, over_http);
+                    assert_eq!(
+                        denied.error.as_ref().map(|error| error.code.as_str()),
+                        Some("handoff_pending"),
+                        "C1_SEQUENTIAL_HANDOFF_REFUSED: switch={switching}, operation={operation:?}"
+                    );
+                    assert_eq!(
+                        foreground_state(host),
+                        before,
+                        "C1_SEQUENTIAL_HANDOFF_BYTES"
+                    );
+                    assert_eq!(state(host)["root"], root);
+                    assert!(
+                        host.owner
+                            .upgrade()
+                            .unwrap()
+                            .lock()
+                            .unwrap()
+                            .manual
+                            .is_none()
+                    );
+                }
+            }
+            assert_eq!(
+                host.discard_detached_handoff("wrong-client")
+                    .expect_err("C1_HANDOFF_DISCARD_EXPECTED_CLIENT")
+                    .refusal()
+                    .code,
+                "handoff_changed"
+            );
+            assert_eq!(foreground_state(host), before);
+            accepted(foreground_request(
+                host,
+                &other,
+                HostCommand::Detach,
+                None,
+                over_http,
+            ));
+            let resumed = host
+                .attach(
+                    "original-client".into(),
+                    AttachmentRole::Editor,
+                    host.roots.clone(),
+                )
+                .unwrap()
+                .with_manual_editor(fixture.client.clone());
+            let repeated = accepted(foreground_request(
+                host,
+                &resumed,
+                fixture.command.clone(),
+                Some(2),
+                over_http,
+            ));
+            assert_original_foreground(
+                repeated,
+                &fixture.original,
+                "C1_SEQUENTIAL_ORIGINAL_HANDOFF",
+            );
+            assert_eq!(
+                state(host)["root"],
+                root,
+                "C1_SEQUENTIAL_NO_SECOND_PUBLICATION"
+            );
+            accepted(foreground_request(
+                host,
+                &resumed,
+                HostCommand::Detach,
+                None,
+                over_http,
+            ));
+            let replacement = host
+                .attach(
+                    "explicit-discard".into(),
+                    AttachmentRole::Editor,
+                    host.roots.clone(),
+                )
+                .unwrap()
+                .with_manual_editor(other_client.clone());
+            host.discard_detached_handoff(&fixture.client)
+                .expect("C1_TRUSTED_HANDOFF_DISCARD");
+            {
+                let owner = host.owner.upgrade().unwrap();
+                let owner = owner.lock().unwrap();
+                assert!(owner.foreground_reply.is_none() && owner.foreground_owner.is_none());
+            }
+            assert_eq!(state(host)["root"], root);
+            let grant = if switching {
+                HostCommand::ConfirmSwitch {
+                    client: other_client,
+                    installed: Box::new(installed),
+                }
+            } else {
+                HostCommand::AcquireManual {
+                    client: other_client,
+                }
+            };
+            assert!(
+                accepted(foreground_request(
+                    host,
+                    &replacement,
+                    grant,
+                    Some(3),
+                    over_http
+                ))
+                .manual_lease
+                .is_some()
+            );
+            let snapshot =
+                HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core())
+                    .unwrap();
+            assert!(
+                accepted(foreground_request(
+                    host,
+                    &replacement,
+                    HostCommand::Save { snapshot },
+                    Some(4),
+                    over_http
+                ))
+                .saved
+                .is_some()
+            );
+        }
+    }
+}
+
+fn metadata_feedback_reference(
+    host: &WriterHost,
+    viewer: &HostClient,
+    revision: FeedbackRevision,
+) -> ObjectRef {
+    let reply = accepted(direct(
+        host,
+        viewer,
+        metadata(host, MetadataChange::SaveFeedback(revision)),
+    ));
+    let ReceiptResult::Metadata {
+        result: MetadataResult::Feedback(reference),
+    } = reply.metadata.unwrap().result
+    else {
+        panic!("feedback")
+    };
+    reference
+}
+
+#[test]
+fn s3_followup_repeated_reads_dedupe_reference_pins_at_capacity() {
+    let (temp, host, refs) = fixture();
+    let viewer = host
+        .attach("reader".into(), AttachmentRole::Viewer, host.roots.clone())
+        .unwrap();
+    let producer = host
+        .attach(
+            "snapshot-publisher".into(),
+            AttachmentRole::Producer,
+            host.roots.clone(),
+        )
+        .unwrap();
+    let published = accepted(direct(&host, &producer, publish_command(&host)));
+    let command_id = published.metadata.as_ref().unwrap().id.clone();
+    let ReceiptResult::Metadata {
+        result: MetadataResult::Snapshot(key),
+    } = published.metadata.unwrap().result
+    else {
+        panic!("snapshot")
+    };
+    let revision = feedback_revision(key.clone(), &refs);
+    let reference = metadata_feedback_reference(&host, &viewer, revision.clone());
+    let batch = FeedbackBatchId::fresh().unwrap();
+    let mut submit = metadata(
+        &host,
+        MetadataChange::SubmitBatch {
+            batch: FeedbackBatch {
+                batch_id: batch.clone(),
+                revision_refs: vec![reference.clone()],
+            },
+            request: ReviseRequest {
+                command_id,
+                batch_id: batch.clone(),
+                expected_candidate_head: key.head.clone(),
+            },
+        },
+    );
+    if let HostCommand::Metadata {
+        envelope,
+        update:
+            MetadataUpdate {
+                change: MetadataChange::SubmitBatch { request, .. },
+                ..
+            },
+    } = &mut submit
+    {
+        request.command_id = envelope.id.clone();
+    }
+    accepted(direct(&host, &viewer, submit));
+    let commands = [
+        HostCommand::ReadSnapshot { key: key.clone() },
+        HostCommand::ReadFeedback {
+            reference: reference.clone(),
+        },
+        HostCommand::ReadSubmittedBatch { batch },
+    ];
+    let pin_count = || {
+        let owner = host.owner.upgrade().unwrap();
+        let owner = owner.lock().unwrap();
+        let index = owner
+            .resolve_attachment(Some(&viewer.bootstrap.auth.bearer()))
+            .unwrap();
+        owner.attachments[index].read_pins.len()
+    };
+    for (index, command) in commands.iter().enumerate() {
+        for route in 0..70 {
+            let read = accepted(match route % 3 {
+                0 => direct(&host, &viewer, command.clone()),
+                1 => viewer.request(command.clone()).unwrap(),
+                _ => mcp(&viewer, command.clone()).unwrap(),
+            });
+            match index {
+                0 => assert_eq!(read.snapshot.unwrap().key, key),
+                1 => assert_eq!(read.feedback.unwrap(), revision),
+                _ => assert_eq!(read.submitted_revisions, vec![revision.clone()]),
+            }
+            assert_eq!(pin_count(), index + 1, "C1_REPEATED_READ_PIN_DEDUPE");
+        }
+    }
+    let editor = host.client().with_manual_editor("p".repeat(64));
+    accepted(foreground_request(
+        &host,
+        &editor,
+        HostCommand::AcquireManual {
+            client: editor.editor.clone().unwrap(),
+        },
+        Some(1),
+        false,
+    ));
+    let snapshot =
+        HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+    accepted(foreground_request(
+        &host,
+        &editor,
+        HostCommand::SaveAs {
+            destination: temp.path("reader-copy.kinewright"),
+            snapshot,
+        },
+        Some(2),
+        false,
+    ));
+    for (index, command) in commands.iter().enumerate() {
+        accepted(direct(&host, &viewer, command.clone()));
+        assert_eq!(pin_count(), 4 + index, "C1_READ_PIN_OWNER_IDENTITY");
+        accepted(direct(&host, &viewer, command.clone()));
+        assert_eq!(pin_count(), 4 + index);
+    }
+    for _ in 6..64 {
+        let reference =
+            metadata_feedback_reference(&host, &viewer, feedback_revision(key.clone(), &refs));
+        accepted(direct(
+            &host,
+            &viewer,
+            HostCommand::ReadFeedback { reference },
+        ));
+    }
+    assert_eq!(pin_count(), 64);
+    for command in &commands {
+        accepted(direct(&host, &viewer, command.clone()));
+    }
+    assert_eq!(pin_count(), 64, "C1_PIN_CAPACITY_REPEAT_CONTROL");
+    let extra = metadata_feedback_reference(&host, &viewer, feedback_revision(key, &refs));
+    let root = state(&host)["root"].clone();
+    let denied = direct(
+        &host,
+        &viewer,
+        HostCommand::ReadFeedback {
+            reference: extra.clone(),
+        },
+    );
+    assert_eq!(
+        denied.error.unwrap().code,
+        "attachment_capacity",
+        "C1_DISTINCT_PIN_CAPACITY"
+    );
+    assert_eq!(pin_count(), 64);
+    assert_eq!(state(&host)["root"], root);
+    accepted(mcp(&viewer, HostCommand::Detach).unwrap());
+    let replacement = host
+        .attach(
+            "fresh-reader".into(),
+            AttachmentRole::Viewer,
+            host.roots.clone(),
+        )
+        .unwrap();
+    accepted(direct(
+        &host,
+        &replacement,
+        HostCommand::ReadFeedback { reference: extra },
+    ));
+}

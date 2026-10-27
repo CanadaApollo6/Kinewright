@@ -420,6 +420,17 @@ impl WriterHost {
             .issue_attachment(subject, role, roots.clone())?;
         HostClient::connect(self.endpoint.clone(), auth, roots)
     }
+    /// Trusted local issuer action; never an HTTP or MCP command.
+    pub fn discard_detached_handoff(&self, expected_client: &str) -> Result<(), HostError> {
+        let owner = self
+            .owner
+            .upgrade()
+            .ok_or_else(|| HostRefusal::new("attachment_refused", "host stopped"))?;
+        let mut owner = owner
+            .lock()
+            .map_err(|_| HostRefusal::new("retention_lost", RETENTION_LOST))?;
+        owner.discard_detached_handoff(expected_client)
+    }
     #[must_use]
     pub fn client(&self) -> HostClient {
         HostClient {
@@ -1041,7 +1052,7 @@ pub struct HostCommandOwner {
     #[cfg(test)]
     dispatches: u64,
     foreground_owner: Option<manual::ForegroundOwner>,
-    pending_read_pin: Option<kinewright_project::store::StorePin>,
+    pending_read_pin: Option<auth::ReadPin>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
     pending_switch: Option<kinewright_project::receipts::CommandEnvelope>,
@@ -1515,18 +1526,27 @@ impl HostCommandOwner {
             HostCommand::ReadSnapshot { key } => {
                 let pinned = self.owner()?.read_snapshot(&key)?;
                 reply.snapshot = Some(pinned.descriptor);
-                self.pending_read_pin = Some(pinned.pin);
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: pinned.roots,
+                    pin: pinned.pin,
+                });
             }
             HostCommand::ReadFeedback { reference } => {
                 let pinned = self.owner()?.read_feedback(&reference)?;
                 reply.feedback = Some(pinned.revision);
-                self.pending_read_pin = Some(pinned.pin);
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: pinned.roots,
+                    pin: pinned.pin,
+                });
             }
             HostCommand::ReadSubmittedBatch { batch } => {
                 let pinned = self.owner()?.read_submitted_batch(&batch)?;
                 reply.submitted_batch = Some(pinned.batch);
                 reply.submitted_revisions = pinned.revisions;
-                self.pending_read_pin = Some(pinned.pin);
+                self.pending_read_pin = Some(auth::ReadPin {
+                    roots: pinned.roots,
+                    pin: pinned.pin,
+                });
             }
             HostCommand::PrepareSwitch { target } => self.prepare_switch(target, reply)?,
             HostCommand::Switch { envelope } => self.publish_switch(&envelope, reply)?,

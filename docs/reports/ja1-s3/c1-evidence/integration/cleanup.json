@@ -1,0 +1,15 @@
+{
+  "worktree": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5",
+  "target": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target",
+  "predecessor_worktree": "/home/riels/.t3/worktrees/Kinewright/t3-1c0887c5/target/ja-s1-predecessor/source",
+  "predecessor_commit": "076a96c922b2f05984df4bb839ad7cf0900e6183",
+  "predecessor_tracked_files_clean": true,
+  "target_executables_before_cleanup": [],
+  "shared_cargo_lock_preserved": true,
+  "other_processes_projects_and_tmp_files_touched": false,
+  "action": "git worktree remove of owned pinned predecessor; recoverable gio trash of owned target",
+  "predecessor_worktree_absent": true,
+  "target_absent": true,
+  "shared_cargo_lock_exists": true,
+  "exit": 0
+}

@@ -1,0 +1,36 @@
+{
+  "name": "followup-handoff-discard-client",
+  "witness": "writer_host::ja_s3_host::s3_followup_detached_handoff_requires_explicit_discard",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-agent/src/writer_host/auth.rs",
+      "        if retained != expected_client {\n            return Err(\n                HostRefusal::new(\"handoff_changed\", \"detached handoff client changed\").into(),\n            );\n        }\n",
+      ""
+    ]
+  ],
+  "expected_red": {
+    "text": "C1_HANDOFF_DISCARD_EXPECTED_CLIENT",
+    "location": null
+  },
+  "baseline_manifest_sha256": "5ce10d1663f085764691caa1b11808c249908b2f8e43c4070fc3b96a6130cbca",
+  "witness_sha256": "a593eb01c910f17b407db3a3c919028c763980023f9656b3203f6fca6095afe4",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "ee679e0d329952061956b5f3f59f8e97652c49af2d112073973247d0ac3cb39f"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-agent/src/writer_host/auth.rs": "a89601951465082cdde656736502e5bed95de09ae1b1959195f9c38f08d53433"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-agent --lib writer_host::ja_s3_host::s3_followup_detached_handoff_requires_explicit_discard -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "493419881a219dda027ad269f970a1f62945de4d0462ed968e8b2f6de55f80cd",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 761 filtered out; finished in 0.63s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "24a9d46457d7f5eb45de40726e35ebe2461ee2a18dedf7c92d8b64aef901dce6",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 761 filtered out; finished in 4.00s"
+  ],
+  "restored": true
+}

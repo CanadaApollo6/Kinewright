@@ -66,6 +66,16 @@ pub(super) const ATTACHMENT_CAPACITY: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(super) struct AttachmentId(u64);
 
+pub(super) struct ReadPin {
+    pub roots: Vec<kinewright_project::bundle_records::ObjectRef>,
+    pub pin: kinewright_project::store::StorePin,
+}
+impl ReadPin {
+    fn same_reference(&self, other: &Self) -> bool {
+        self.pin.shares_owner_with(&other.pin) && self.roots == other.roots
+    }
+}
+
 pub(super) struct Attachment {
     pub id: AttachmentId,
     pub auth: HostAuth,
@@ -79,7 +89,7 @@ pub(super) struct Attachment {
     pub role: super::AttachmentRole,
     pub roots: SessionRoots,
     pub bootstrap: bool,
-    pub read_pins: Vec<kinewright_project::store::StorePin>,
+    pub read_pins: Vec<ReadPin>,
 }
 
 impl Attachment {
@@ -188,6 +198,34 @@ impl super::HostCommandOwner {
         Ok(())
     }
 
+    fn detached_handoff_client(&self) -> Option<&str> {
+        if self.manual.is_some() {
+            return None;
+        }
+        let owner = self.foreground_owner.as_ref()?;
+        let (_, _, _, reply) = self.foreground_reply.as_ref()?;
+        (owner.attachment.is_none() && (reply.saved.is_some() || reply.switch_result.is_some()))
+            .then_some(owner.client.as_str())
+    }
+
+    /// Trusted local issuance port. No HTTP or MCP request exposes this action.
+    pub fn discard_detached_handoff(&mut self, expected_client: &str) -> Result<(), HostError> {
+        let retained = self.detached_handoff_client().ok_or_else(|| {
+            HostRefusal::new(
+                "handoff_changed",
+                "no detached handoff without a live lease",
+            )
+        })?;
+        if retained != expected_client {
+            return Err(
+                HostRefusal::new("handoff_changed", "detached handoff client changed").into(),
+            );
+        }
+        self.foreground_reply = None;
+        self.foreground_owner = None;
+        Ok(())
+    }
+
     pub(super) fn resolve_attachment(&self, bearer: Option<&str>) -> Result<usize, HostError> {
         self.attachments
             .iter()
@@ -250,6 +288,25 @@ impl super::HostCommandOwner {
                 )
                 .into());
             }
+            if !grant.permits(&request.command) {
+                return Err(HostRefusal::new(
+                    "role_refused",
+                    "command is outside this attachment role",
+                )
+                .into());
+            }
+            if let Some(retained) = self.detached_handoff_client()
+                && (request.operation.is_some()
+                    || !super::manual::connector_command(&request.command))
+                && super::manual::command_client(&request.command).or(request.editor.as_deref())
+                    != Some(retained)
+            {
+                return Err(HostRefusal::new(
+                    "handoff_pending",
+                    "trusted issuer must discard the detached handoff before changing client",
+                )
+                .into());
+            }
             if request.operation.is_some() {
                 let client = self.operation_client(&request.command, request.editor.as_deref())?;
                 if let Some(owner) = &self.foreground_owner {
@@ -269,26 +326,6 @@ impl super::HostCommandOwner {
                     }
                 }
             }
-            if !grant.permits(&request.command) {
-                return Err(HostRefusal::new(
-                    "role_refused",
-                    "command is outside this attachment role",
-                )
-                .into());
-            }
-            if matches!(
-                request.command,
-                super::HostCommand::ReadSnapshot { .. }
-                    | super::HostCommand::ReadFeedback { .. }
-                    | super::HostCommand::ReadSubmittedBatch { .. }
-            ) && grant.read_pins.len() >= 64
-            {
-                return Err(HostRefusal::new(
-                    "attachment_capacity",
-                    "64 pinned reads per attachment maximum",
-                )
-                .into());
-            }
             let roots = request.roots.canonicalize()?;
             let mut command_roots = grant.roots.clone();
             if grant.bootstrap
@@ -304,6 +341,44 @@ impl super::HostCommandOwner {
                 command_roots.read.push(parent.canonicalize()?);
             }
             Self::check_narrowed_roots(&command_roots, &roots)?;
+            if grant.read_pins.len() >= 64 {
+                let read_roots = match &request.command {
+                    super::HostCommand::ReadSnapshot { key } => {
+                        let pinned = self.owner()?.read_snapshot(key)?;
+                        Some(ReadPin {
+                            roots: pinned.roots,
+                            pin: pinned.pin,
+                        })
+                    }
+                    super::HostCommand::ReadFeedback { reference } => {
+                        let pinned = self.owner()?.read_feedback(reference)?;
+                        Some(ReadPin {
+                            roots: pinned.roots,
+                            pin: pinned.pin,
+                        })
+                    }
+                    super::HostCommand::ReadSubmittedBatch { batch } => {
+                        let pinned = self.owner()?.read_submitted_batch(batch)?;
+                        Some(ReadPin {
+                            roots: pinned.roots,
+                            pin: pinned.pin,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(read_roots) = read_roots
+                    && !grant
+                        .read_pins
+                        .iter()
+                        .any(|pin| pin.same_reference(&read_roots))
+                {
+                    return Err(HostRefusal::new(
+                        "attachment_capacity",
+                        "64 distinct pinned reads per attachment maximum",
+                    )
+                    .into());
+                }
+            }
             if request.operation.is_none()
                 && self.manual.is_some()
                 && matches!(
@@ -344,7 +419,12 @@ impl super::HostCommandOwner {
         } else {
             self.execute_operation(request.command, roots, request.editor.as_deref(), operation)
         };
-        if let Some(pin) = self.pending_read_pin.take() {
+        if let Some(pin) = self.pending_read_pin.take()
+            && !self.attachments[index]
+                .read_pins
+                .iter()
+                .any(|held| held.same_reference(&pin))
+        {
             self.attachments[index].read_pins.push(pin);
         }
         if reply.error.is_none() {

@@ -777,6 +777,7 @@ fn s3_indexes_survive_all_root_producers() {
     }
     drop(manifest);
     assert_projection_oracle(&mut owner, &twice, &acknowledged);
+    assert_projection_manifest_oracle(&mut owner, &twice, &acknowledged);
     drop(owner);
     let mut session = Ja1EditingSession::open(&twice).unwrap();
     let point = session
@@ -905,6 +906,22 @@ fn s3_late_asr_preserves_audio_only_feedback_and_note_duration() {
         "S3_LATE_ASR_MISMATCH_REFUSED"
     );
     let before = std::fs::read(&path).unwrap();
+    let mut changed_revision = revision.clone();
+    changed_revision.comment_id = CommentId::fresh().unwrap();
+    changed_revision.voice_ref = Some(voice.clone());
+    changed_revision.voice_ref.as_mut().unwrap().duration_micros += 1;
+    let changed = update(&bundle, MetadataChange::SaveFeedback(changed_revision));
+    assert!(
+        bundle
+            .metadata_command(&e, MetadataScope::Feedback, &changed)
+            .is_err(),
+        "C1_FEEDBACK_VOICE_DURATION_MATCHES_NOTE"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        bundle.feedback_index().unwrap().notes[&voice.note_id].duration_micros,
+        voice.duration_micros
+    );
     for change in ["duration", "replace_asr", "remove_asr"] {
         let mut changed = voice.clone();
         match change {
@@ -1155,4 +1172,75 @@ fn s3_orchestration_admission() {
         b.run_index().unwrap().runs.contains_key(&run.run_id),
         "S3_ORCHESTRATION_REOPEN_INDEX"
     );
+}
+
+fn assert_projection_manifest_oracle(bundle: &mut ProjectBundle, path: &Path, source: &ObjectRef) {
+    use kinewright_project::{bundle_recovery::verify_projection_payloads, store::StoreManifest};
+    let bytes = std::fs::read(
+        path.with_extension("kinewright-assets")
+            .join("studio/objects")
+            .join(&source.sha256),
+    )
+    .unwrap();
+    let original: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let original_root: kinewright_project::bundle::StudioRoot =
+        serde_json::from_value(original["studio"].clone()).unwrap();
+    let manifest = (*bundle
+        .store()
+        .read_record::<StoreManifest>(&original_root.store_manifest_ref)
+        .unwrap())
+    .clone();
+    for reference in [
+        &original_root.version_index_ref,
+        &original_root.feedback_index_ref,
+        &original_root.run_index_ref,
+    ] {
+        let reference = reference.as_ref().unwrap();
+        let mut changed_manifest = manifest.clone();
+        assert!(changed_manifest.objects.contains(reference));
+        changed_manifest
+            .objects
+            .retain(|object| object != reference);
+        let manifest_hold = bundle
+            .store_mut()
+            .unwrap()
+            .admit_manifest_probe(&changed_manifest)
+            .unwrap();
+        let manifest_ref = manifest_hold.reference.clone();
+        let mut root = original_root.clone();
+        root.store_manifest_ref = manifest_ref;
+        let dependencies = [
+            Some(root.branch_index_ref.clone()),
+            Some(root.input_manifest_ref.clone()),
+            Some(root.store_manifest_ref.clone()),
+            root.version_index_ref.clone(),
+            root.feedback_index_ref.clone(),
+            root.run_index_ref.clone(),
+            root.claim_index_ref.clone(),
+            root.receipt_index_ref.clone(),
+            root.issuer_state_ref.clone(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        let mut file = original.clone();
+        file["studio"] = serde_json::to_value(&root).unwrap();
+        let changed = serde_json::to_vec(&file).unwrap();
+        let checkpoint_ref = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(&changed),
+            byte_length: changed.len() as u64,
+            record_kind: RecordKind::RootCheckpoint,
+        };
+        let checkpoint = bundle
+            .store_mut()
+            .unwrap()
+            .admit_blob(&mut &*changed, &checkpoint_ref, &dependencies)
+            .unwrap();
+        assert!(
+            matches!(verify_projection_payloads(bundle, source, &checkpoint.reference), Err(BundleError::Corrupt(message)) if message == "L1 projected manifest omits root reference"),
+            "C1_PROJECTED_MANIFEST_ORACLE: {:?}",
+            reference.record_kind
+        );
+        drop((checkpoint, manifest_hold));
+    }
 }

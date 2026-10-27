@@ -1,0 +1,55 @@
+crates/kinewright-project/src/lib.rs-23-pub use read_only_inputs::{ReadOnlyInputBinding, ReadOnlyInputFiles, ReadOnlyInputs};
+crates/kinewright-project/src/lib.rs-24-// S4 C5
+crates/kinewright-project/src/lib.rs:25:pub mod orchestration_accounting;
+crates/kinewright-project/src/lib.rs-26-pub mod receipts;
+crates/kinewright-project/src/lib.rs-27-pub mod source_boundary;
+--
+crates/kinewright-app/src/ja1_chat.rs-176-    }
+crates/kinewright-app/src/ja1_chat.rs-177-
+crates/kinewright-app/src/ja1_chat.rs:178:    /// Explicit Stop only. Dropping/detaching this client never sends cancellation.
+crates/kinewright-app/src/ja1_chat.rs-179-    pub(crate) fn interrupt(&self) {
+crates/kinewright-app/src/ja1_chat.rs-180-        self.cancelled.store(true, Ordering::Release);
+--
+crates/kinewright-agent/src/writer_host/mod.rs-1499-                        return Err(HostRefusal::new(
+crates/kinewright-agent/src/writer_host/mod.rs-1500-                            "unsupported_command",
+crates/kinewright-agent/src/writer_host/mod.rs:1501:                            "orchestration dispatch belongs to H3",
+crates/kinewright-agent/src/writer_host/mod.rs-1502-                        )
+crates/kinewright-agent/src/writer_host/mod.rs-1503-                        .into());
+--
+crates/kinewright-agent/src/server.rs-1242-    /// H3 supplies an endpoint narrowed from the current resolved Producer.
+crates/kinewright-agent/src/server.rs-1243-    #[allow(dead_code, reason = "H3 owns the production scoped-server constructor")]
+crates/kinewright-agent/src/server.rs:1244:    fn with_task_endpoint(mut self, endpoint: crate::orchestration::tasks::TaskEndpoint) -> Self {
+crates/kinewright-agent/src/server.rs-1245-        self.task_endpoint = Some(endpoint);
+crates/kinewright-agent/src/server.rs-1246-        self
+--
+crates/kinewright-agent/src/orchestration/server_tests.rs-92-    let media = Arc::new(NoopMedia::default());
+crates/kinewright-agent/src/orchestration/server_tests.rs-93-    KinewrightMcp::new(core, media.clone(), media, ConfirmationBroker::default())
+crates/kinewright-agent/src/orchestration/server_tests.rs:94:        .with_task_endpoint(endpoint)
+crates/kinewright-agent/src/orchestration/server_tests.rs-95-}
+crates/kinewright-agent/src/orchestration/server_tests.rs-96-
+--
+crates/kinewright-agent/src/orchestration/server_tests.rs-235-        ConfirmationBroker::default(),
+crates/kinewright-agent/src/orchestration/server_tests.rs-236-    )
+crates/kinewright-agent/src/orchestration/server_tests.rs:237:    .with_task_endpoint(endpoint.clone());
+crates/kinewright-agent/src/orchestration/server_tests.rs-238-    let import = s4_call(
+crates/kinewright-agent/src/orchestration/server_tests.rs-239-        &guarded,
+--
+crates/kinewright-agent/src/orchestration/requests.rs-103-    match &envelope.command {
+crates/kinewright-agent/src/orchestration/requests.rs-104-        OrchestrationCommand::Request(RuntimeRequest::Approval(_) | RuntimeRequest::Secret(_)) => {
+crates/kinewright-agent/src/orchestration/requests.rs:105:            return Err(Refusal::H3AttentionUnavailable);
+crates/kinewright-agent/src/orchestration/requests.rs-106-        }
+crates/kinewright-agent/src/orchestration/requests.rs-107-        OrchestrationCommand::Request(RuntimeRequest::Question(question)) => {
+--
+crates/kinewright-agent/src/orchestration/mod.rs-15-use kinewright_project::{bundle_records, editing_session, receipts};
+crates/kinewright-agent/src/orchestration/mod.rs-16-
+crates/kinewright-agent/src/orchestration/mod.rs:17:#[path = "../../../kinewright-project/src/orchestration_commit.rs"]
+crates/kinewright-agent/src/orchestration/mod.rs-18-pub mod orchestration_commit;
+crates/kinewright-agent/src/orchestration/mod.rs:19:#[path = "../../../kinewright-project/src/orchestration_records.rs"]
+crates/kinewright-agent/src/orchestration/mod.rs-20-pub mod orchestration_records;
+crates/kinewright-agent/src/orchestration/mod.rs-21-
+--
+crates/kinewright-agent/src/orchestration/mod.rs-61-    reason = "receiving H1 owner port; production publication is not integrated yet"
+crates/kinewright-agent/src/orchestration/mod.rs-62-)]
+crates/kinewright-agent/src/orchestration/mod.rs:63:pub(crate) fn acknowledge_attempt_reservation(
+crates/kinewright-agent/src/orchestration/mod.rs-64-    update: &orchestration_commit::ValidatedRunUpdate,
+crates/kinewright-agent/src/orchestration/mod.rs-65-    returned: &orchestration_commit::OrchestrationReceipt,

@@ -13,6 +13,21 @@ pub(super) struct ForegroundOwner {
     pub attachment: Option<super::auth::AttachmentId>,
     pub client: String,
 }
+pub(super) fn command_client(command: &HostCommand) -> Option<&str> {
+    match command {
+        HostCommand::AcquireManual { client }
+        | HostCommand::CommitHistory { client, .. }
+        | HostCommand::PrepareOwnedMedia { client, .. }
+        | HostCommand::PrepareMediaInterpretation { client, .. }
+        | HostCommand::BeginRecovery { client, .. }
+        | HostCommand::ConfirmSwitch { client, .. } => Some(client.as_str()),
+        HostCommand::PublishBarrier { barrier } | HostCommand::ConfirmBarrier { barrier, .. } => {
+            Some(barrier.client.as_str())
+        }
+        _ => None,
+    }
+}
+
 pub(super) fn connector_command(command: &HostCommand) -> bool {
     matches!(
         command,
@@ -58,17 +73,7 @@ impl HostCommandOwner {
             )
             .into());
         }
-        let command_client = match command {
-            HostCommand::AcquireManual { client }
-            | HostCommand::CommitHistory { client, .. }
-            | HostCommand::PrepareOwnedMedia { client, .. }
-            | HostCommand::PrepareMediaInterpretation { client, .. }
-            | HostCommand::BeginRecovery { client, .. }
-            | HostCommand::ConfirmSwitch { client, .. } => Some(client.as_str()),
-            HostCommand::PublishBarrier { barrier }
-            | HostCommand::ConfirmBarrier { barrier, .. } => Some(barrier.client.as_str()),
-            _ => None,
-        };
+        let command_client = command_client(command);
         if command_client.is_some_and(|expected| expected != client) {
             return Err(HostRefusal::new(
                 "manual_client",

@@ -341,11 +341,13 @@ impl ValidatedMetadataUpdate {
 pub struct PinnedSnapshot {
     pub descriptor: SnapshotDescriptor,
     pub pin: StorePin,
+    pub roots: Vec<ObjectRef>,
     _charges: Vec<StorageReservation>,
 }
 pub struct PinnedFeedback {
     pub revision: FeedbackRevision,
     pub pin: StorePin,
+    pub roots: Vec<ObjectRef>,
     charges: Vec<StorageReservation>,
 }
 pub struct PinnedSubmittedBatch {
@@ -354,6 +356,7 @@ pub struct PinnedSubmittedBatch {
     pub request: ReviseRequest,
     pub consumed_by: Option<RunId>,
     pub pin: StorePin,
+    pub roots: Vec<ObjectRef>,
     _charges: Vec<StorageReservation>,
 }
 
@@ -427,10 +430,12 @@ impl ProjectBundle {
                 BundleError::Identity("snapshot is not indexed with this identity".into())
             })?;
         self.validate_snapshot(&descriptor)?;
-        let pin = self.store.pin(&descriptor.references())?;
+        let roots = descriptor.references();
+        let pin = self.store.pin(&roots)?;
         Ok(PinnedSnapshot {
             descriptor,
             pin,
+            roots,
             _charges: charges,
         })
     }
@@ -468,6 +473,7 @@ impl ProjectBundle {
         Ok(PinnedFeedback {
             revision,
             pin,
+            roots: vec![reference.clone()],
             charges,
         })
     }
@@ -501,6 +507,7 @@ impl ProjectBundle {
             request: b.request.clone(),
             consumed_by: b.consumed_by.clone(),
             pin,
+            roots: vec![b.batch_ref.clone()],
             _charges: charges,
         })
     }

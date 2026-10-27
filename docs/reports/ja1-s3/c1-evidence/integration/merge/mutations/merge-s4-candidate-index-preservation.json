@@ -1,0 +1,36 @@
+{
+  "name": "merge-s4-candidate-index-preservation",
+  "witness": "linux::s3_indexes_survive_all_root_producers",
+  "accepted": true,
+  "changes": [
+    [
+      "crates/kinewright-project/src/bundle_commit.rs",
+      "            let branch = target.clone();\n            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))",
+      "            let branch = target.clone();\n            if target != &bundle.manual_branch_id {\n                let root = bundle.root.as_mut().unwrap();\n                root.version_index_ref = None;\n                root.feedback_index_ref = None;\n                root.run_index_ref = None;\n                root.claim_index_ref = None;\n            }\n            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))"
+    ]
+  ],
+  "expected_red": {
+    "text": "S3_S4_CANDIDATE_INDEX_PRESERVATION",
+    "location": null
+  },
+  "baseline_manifest_sha256": "f544ffa237eaf4e442e26945b22bd30ad2044b77c6eb25f3e4029f382dbf1c55",
+  "witness_sha256": "272ecc67f98406d351472771ff22b0501bc156e6e7998b4215150648de41dcd2",
+  "source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "ca50648676733e7029e86caa8d584790bb145ce8e67c1219d1039b15f85e1d1c"
+  },
+  "mutated_source_sha256": {
+    "crates/kinewright-project/src/bundle_commit.rs": "46de0648d8434c46ff5bfa9b4269bf5e75238cbe01352f617d4da26131ebb720"
+  },
+  "red_exit": 101,
+  "command": "set -e\nsource scripts/setup-ffmpeg.sh\nc1_runtime=\"$PWD/target/c1-runtime\"\nexport LOCALAPPDATA=\"$PWD/target/c1-localappdata\" TMPDIR=\"$c1_runtime/tmp\"\nexport XDG_STATE_HOME=\"$c1_runtime/state\" XDG_DATA_HOME=\"$c1_runtime/share\"\nexport XDG_CACHE_HOME=\"$c1_runtime/cache\" XDG_CONFIG_HOME=\"$c1_runtime/config\"\nmkdir -p \"$LOCALAPPDATA/Kinewright/recovery\" \"$TMPDIR\" \"$XDG_STATE_HOME\" \"$XDG_DATA_HOME\" \"$XDG_CACHE_HOME\" \"$XDG_CONFIG_HOME\"\ntest \"$(awk '/MemAvailable/ {print $2}' /proc/meminfo)\" -ge 6291456\nflock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 RUST_TEST_THREADS=4 timeout --kill-after=5s 600s nice -n 10 cargo test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 --nocapture",
+  "red_log_sha256": "4ad3c101e9baf76e703e1303bef2d921fe1d25880bcd6382cf13cba7b1a1c273",
+  "red_summary": [
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 4.32s"
+  ],
+  "green_exit": 0,
+  "green_log_sha256": "fdce65c40051798df78b1c1c357c4d84c9bc5b3c79103fd84f7117f6edde7fd0",
+  "green_summary": [
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 8.99s"
+  ],
+  "restored": true
+}

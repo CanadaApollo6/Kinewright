@@ -37,6 +37,8 @@ case "${2:-all}" in
     fmt) record fmt cargo_locked fmt -- --check ;;
     project) record project cargo_locked test -p kinewright-project --features test-util --lib --tests --no-fail-fast ;;
     agent) record agent cargo_locked test -p kinewright-agent --lib --tests --no-fail-fast ;;
+    voice-focused) record voice-focused cargo_locked test -p kinewright-project --features test-util --test ja_s3_store linux::s3_late_asr_preserves_audio_only_feedback_and_note_duration -- --exact --test-threads=1 ;;
+    follow-focused) record follow-focused cargo_locked test -p kinewright-agent --lib writer_host::ja_s3_host::s3_followup_ -- --test-threads=1 ;;
     focused) record focused cargo_locked test -p kinewright-project --features test-util --test ja_s3_store linux::s3_indexes_survive_all_root_producers -- --exact --test-threads=1 ;;
     host) record host cargo_locked test -p kinewright-agent --lib writer_host:: -- --test-threads=1 ;;
     app) record app cargo_locked test -p kinewright-app --bin kinewright-app ja1_attachment::tests:: -- --test-threads=1 ;;
@@ -49,6 +51,10 @@ case "${2:-all}" in
     windows) record windows cargo_locked check -p kinewright-project -p kinewright-agent -p kinewright-app --target x86_64-pc-windows-msvc ;;
     all)
         for c1fix_gate in build clippy fmt focused project agent app scans lint windows; do
+            if [[ "$1" == followups && "$c1fix_gate" == project ]]; then
+                bash "$0" "$1" follow-focused
+                bash "$0" "$1" voice-focused
+            fi
             bash "$0" "$1" "$c1fix_gate"
         done
         ;;

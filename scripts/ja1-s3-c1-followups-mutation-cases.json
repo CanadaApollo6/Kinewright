@@ -1,0 +1,87 @@
+[
+  {
+    "package": "kinewright-agent",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "name": "followup-detached-handoff-client",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "            if let Some(retained) = self.detached_handoff_client()\n                && (request.operation.is_some()\n                    || !super::manual::connector_command(&request.command))\n                && super::manual::command_client(&request.command).or(request.editor.as_deref())\n                    != Some(retained)\n            {\n                return Err(HostRefusal::new(\n                    \"handoff_pending\",\n                    \"trusted issuer must discard the detached handoff before changing client\",\n                )\n                .into());\n            }\n",
+        ""
+      ]
+    ],
+    "witness": "writer_host::ja_s3_host::s3_followup_detached_handoff_requires_explicit_discard",
+    "red_text": "C1_SEQUENTIAL_HANDOFF_REFUSED"
+  },
+  {
+    "package": "kinewright-agent",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "name": "followup-handoff-discard-client",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "        if retained != expected_client {\n            return Err(\n                HostRefusal::new(\"handoff_changed\", \"detached handoff client changed\").into(),\n            );\n        }\n",
+        ""
+      ]
+    ],
+    "witness": "writer_host::ja_s3_host::s3_followup_detached_handoff_requires_explicit_discard",
+    "red_text": "C1_HANDOFF_DISCARD_EXPECTED_CLIENT"
+  },
+  {
+    "package": "kinewright-agent",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "name": "followup-read-pin-owner",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/auth.rs",
+        "self.pin.shares_owner_with(&other.pin) && self.roots == other.roots",
+        "self.roots == other.roots"
+      ]
+    ],
+    "witness": "writer_host::ja_s3_host::s3_followup_repeated_reads_dedupe_reference_pins_at_capacity",
+    "red_text": "C1_READ_PIN_OWNER_IDENTITY"
+  },
+  {
+    "name": "followup-projected-manifest-refs",
+    "package": "kinewright-project",
+    "features": "test-util",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs",
+    "red_text": "C1_PROJECTED_MANIFEST_ORACLE",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_recovery/restore.rs",
+        "    if right\n        .references()\n        .iter()\n        .filter(|reference| *reference != &right.store_manifest_ref)\n        .any(|reference| !rm.objects.contains(reference))\n    {\n        return Err(BundleError::Corrupt(\n            \"L1 projected manifest omits root reference\".into(),\n        ));\n    }\n",
+        ""
+      ]
+    ]
+  },
+  {
+    "name": "merge-s4-candidate-index-preservation",
+    "package": "kinewright-project",
+    "features": "test-util",
+    "kind": "--test",
+    "target": "ja_s3_store",
+    "witness": "linux::s3_indexes_survive_all_root_producers",
+    "witness_source": "crates/kinewright-project/tests/support/ja_s3_store_linux.rs",
+    "red_text": "S3_S4_CANDIDATE_INDEX_PRESERVATION",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "            let branch = target.clone();\n            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))",
+        "            let branch = target.clone();\n            if target != &bundle.manual_branch_id {\n                let root = bundle.root.as_mut().unwrap();\n                root.version_index_ref = None;\n                root.feedback_index_ref = None;\n                root.run_index_ref = None;\n                root.claim_index_ref = None;\n            }\n            Self::publish_branch_selected(bundle, &after, inputs, &branch, None, Some(&after))"
+      ]
+    ]
+  }
+]

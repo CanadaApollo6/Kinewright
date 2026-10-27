@@ -1,0 +1,180 @@
+[
+  {
+    "gate": "build",
+    "exit": 0,
+    "summary": [],
+    "passed": 0,
+    "ignored": 0,
+    "log_sha256": "a5e552f37728aa9af45fbad62972cbd1f253b68983fc04261e6e198d17f96a9e"
+  },
+  {
+    "gate": "clippy",
+    "exit": 0,
+    "summary": [],
+    "passed": 0,
+    "ignored": 0,
+    "log_sha256": "591b3e9bcc97ee6d2a51f74ef1cc0c1acc46616e67bc8582b4f3926291d9e0bc"
+  },
+  {
+    "gate": "fmt",
+    "exit": 0,
+    "summary": [],
+    "passed": 0,
+    "ignored": 0,
+    "log_sha256": "55ba2659b933906b821fc4491f96ab150f509b3a423bff49d9808a510048ad18"
+  },
+  {
+    "gate": "focused",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 9.37s"
+    ],
+    "passed": 1,
+    "ignored": 0,
+    "log_sha256": "22af0d9588764a95b72ab1afef7b85a47568fba0de4647e14d26d96e0e7ef69a"
+  },
+  {
+    "gate": "follow-focused",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 760 filtered out; finished in 25.94s"
+    ],
+    "passed": 2,
+    "ignored": 0,
+    "log_sha256": "af184dc3579f5248febae9c84152b93611d2fb73528c3d3e29cb39ea08a0866c"
+  },
+  {
+    "gate": "voice-focused",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 1.83s"
+    ],
+    "passed": 1,
+    "ignored": 0,
+    "log_sha256": "3ad7bc018712e4aa8917a26ae8e1f6a8882f11bd8adaea8fd325b82553a112bf"
+  },
+  {
+    "gate": "project",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 158 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 101.30s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.56s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 54.84s",
+      "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 105.62s",
+      "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.86s",
+      "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 183.68s",
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 61.13s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.34s",
+      "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.76s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.47s",
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.80s",
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.14s",
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.75s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.42s",
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.32s",
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+    ],
+    "passed": 411,
+    "ignored": 2,
+    "log_sha256": "fae383fb43f6fe11420e25d102c92ecf615134d3b326af078e1f429eb48cc16e"
+  },
+  {
+    "gate": "agent",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 760 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 74.97s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 42 passed; 0 failed; 5 ignored; 0 measured; 0 filtered out; finished in 0.74s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 10 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 6.11s",
+      "test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 6.03s",
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.10s",
+      "test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 17.16s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.83s",
+      "test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s",
+      "test result: ok. 5 passed; 0 failed; 27 ignored; 0 measured; 0 filtered out; finished in 0.06s",
+      "test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s",
+      "test result: ok. 40 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 1.27s",
+      "test result: ok. 11 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.07s",
+      "test result: ok. 76 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 20.62s",
+      "test result: ok. 0 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "passed": 1021,
+    "ignored": 63,
+    "log_sha256": "7046b0ffd7846eaba38d391b4067d890510b6cf212fdd58420a83c731aa1b220"
+  },
+  {
+    "gate": "app",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 81 passed; 0 failed; 1 ignored; 0 measured; 814 filtered out; finished in 337.95s"
+    ],
+    "passed": 81,
+    "ignored": 1,
+    "log_sha256": "26e7fbb6686ab9b0316c2bcec56bfe9ba32ff98ab4febdfd70ef119a012fad2a"
+  },
+  {
+    "gate": "doc",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ],
+    "passed": 1,
+    "ignored": 0,
+    "log_sha256": "33b50e7760cc2fd9146a5ba06ede0005703264c17d0a94d769f1baa8d5e8c963"
+  },
+  {
+    "gate": "agent-architecture",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 761 filtered out; finished in 0.02s"
+    ],
+    "passed": 1,
+    "ignored": 0,
+    "log_sha256": "c9d2660355f0266a17facfd7f018f69e44cfeb0efa7a617daf1bc305133a50fc"
+  },
+  {
+    "gate": "app-architecture",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 0.02s"
+    ],
+    "passed": 1,
+    "ignored": 0,
+    "log_sha256": "7d7b916fb735c863f7ce974cdd6620320d7cbe24a3f87980bff20aa973bc6dfa"
+  },
+  {
+    "gate": "source-guard",
+    "exit": 0,
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1225 filtered out; finished in 0.86s"
+    ],
+    "passed": 1,
+    "ignored": 0,
+    "log_sha256": "3b98bf748993f3cd5288a494c24f3e7950e6a86d68828488f774df177eaab3c6"
+  },
+  {
+    "gate": "slow-lint",
+    "exit": 0,
+    "summary": [
+      "slow-test manifest and markers agree: 117 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 60 allowlist entries well-formed; 27 equipped-session skip sites counted"
+    ],
+    "passed": 0,
+    "ignored": 0,
+    "log_sha256": "4cb2b2d83573be9e0a2c9a55b1078cb7722c75ec6a767ded49989fb838957e4c"
+  },
+  {
+    "gate": "windows",
+    "exit": 101,
+    "summary": [],
+    "passed": 0,
+    "ignored": 0,
+    "log_sha256": "92dce5c94f0554fb6ea23e3908aefa52dbe0659e3797e4a7ffe288bdc3dceb90"
+  }
+]

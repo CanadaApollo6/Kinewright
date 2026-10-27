@@ -362,6 +362,16 @@ pub fn verify_projection_payloads(
     let rm = bundle
         .store
         .read_record::<StoreManifest>(&right.store_manifest_ref)?;
+    if right
+        .references()
+        .iter()
+        .filter(|reference| *reference != &right.store_manifest_ref)
+        .any(|reference| !rm.objects.contains(reference))
+    {
+        return Err(BundleError::Corrupt(
+            "L1 projected manifest omits root reference".into(),
+        ));
+    }
     let independent = |manifest: &StoreManifest| {
         manifest
             .durable_pins

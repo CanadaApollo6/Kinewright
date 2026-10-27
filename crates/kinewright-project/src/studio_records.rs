@@ -131,6 +131,7 @@ pub struct VoiceRef {
 impl VoiceRef {
     pub(crate) fn matches_note(&self, saved: &Self) -> bool {
         self.audio_ref == saved.audio_ref
+            && self.duration_micros == saved.duration_micros
             && self.playhead_log_ref == saved.playhead_log_ref
             && self
                 .original_asr_ref
