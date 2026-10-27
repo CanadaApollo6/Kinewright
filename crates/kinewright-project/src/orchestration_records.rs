@@ -21,6 +21,7 @@ pub const CONTROL_BYTES: usize = 64 * 1024 * 1024;
 pub const TASK_LIMIT: usize = 128;
 pub const ITEM_LIMIT: usize = 256;
 pub const ATTEMPT_LIMIT: usize = 3;
+pub const BACKGROUND_LIMIT: u32 = 256;
 
 macro_rules! identity {
     ($($name:ident),+ $(,)?) => {$(
@@ -173,6 +174,20 @@ pub enum OrchestrationCommand {
     CancelTask(TaskId),
     MergeTask(MergeTask),
     ControlRun(RunIntent),
+    BeginTurn(TaskTurn),
+    EndTurn(TaskTurn),
+    BackgroundWork(TaskTurn, u32),
+    Request(RuntimeRequest),
+    AdmitQuestionWake(QuestionId),
+    ExecuteQuestionWake(QuestionId),
+    ExpireSession(SessionId),
+    OfferDeliveries(TaskId, AttemptId),
+    WaitTimeout(TaskId),
+    RecordContext {
+        task: TaskId,
+        feedback: Vec<ObjectRef>,
+        decisions: Vec<ObjectRef>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -356,6 +371,7 @@ pub enum TaskState {
     Cancelling,
     CleanupBlocked(CleanupIdentity),
     Terminal(ObjectRef),
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -401,6 +417,63 @@ pub struct QuestionRecord {
     pub id: QuestionId,
     pub task: TaskId,
     pub prompt: ObjectRef,
+    pub origin: TaskTurn,
+    pub status: QuestionStatus,
+    pub wake: QuestionWake,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuestionStatus {
+    Pending,
+    Answered(ObjectRef),
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuestionWake {
+    Pending,
+    Admitted,
+    Executed,
+    Disposed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnPurpose {
+    Work,
+    QuestionAttention,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskTurn {
+    pub task: TaskId,
+    pub attempt: AttemptId,
+    pub session: SessionId,
+    pub ordinal: u64,
+    pub owner_epoch: u64,
+    pub expected_head: super::bundle_records::HeadId,
+    pub purpose: TurnPurpose,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum DependencyReservation {
+    #[default]
+    Free,
+    Reserved,
+    Backed(AttemptId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskProgress {
+    pub capacity: DependencyReservation,
+    pub turn: Option<TaskTurn>,
+    pub turn_ended: bool,
+    pub expired: bool,
+    pub background: u32,
+    pub feedback: Vec<ObjectRef>,
+    pub decisions: Vec<ObjectRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -480,6 +553,8 @@ pub struct TaskRecord {
     pub parent: Option<TaskId>,
     pub brief: TaskBrief,
     pub state: TaskState,
+    #[serde(default)]
+    pub progress: TaskProgress,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -501,6 +576,7 @@ pub struct DeliveryRecord {
     pub task: TaskId,
     pub result: ObjectRef,
     pub generation: u64,
+    pub wake: EffectId,
     pub message: StableMessageId,
     pub state: DeliveryState,
 }
@@ -580,6 +656,8 @@ pub enum Refusal {
     RetiredUnresolved,
     UnresolvedOrigin,
     PublicationUnknown,
+    DependencyCapacity,
+    H3AttentionUnavailable,
 }
 
 pub fn encoded<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>, Refusal> {

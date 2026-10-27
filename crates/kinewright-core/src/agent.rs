@@ -111,4 +111,147 @@ pub trait AgentSession: Send {
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError>;
     fn events(&self) -> Receiver<AgentEvent>;
     fn interrupt(&mut self);
+    /// Nonblocking. Existing sessions have no certified live request channel.
+    /// # Errors
+    /// Reports connector protocol failure without inventing a callback.
+    fn poll_runtime_request(&mut self) -> Result<Option<RuntimeRequest>, AgentError> {
+        Ok(None)
+    }
+    fn runtime_request_binding(&self) -> Option<RuntimeRequestBinding> {
+        None
+    }
+    /// # Errors
+    /// Unsupported unless the connector implements a verified live callback.
+    fn respond_runtime_request(
+        &mut self,
+        _request: &RuntimeRequest,
+        _response: RuntimeResponse,
+    ) -> Result<(), AgentError> {
+        Err(AgentError::Unavailable(
+            "live_runtime_controls_unsupported".into(),
+        ))
+    }
+}
+
+/// Nonsecret live identity. These DTOs carry no callback or approval authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRequestBinding {
+    pub task: String,
+    pub attempt: String,
+    pub session: String,
+    pub turn: u64,
+    pub owner_epoch: u64,
+}
+impl RuntimeRequestBinding {
+    fn valid(&self) -> bool {
+        [&self.task, &self.attempt, &self.session]
+            .into_iter()
+            .all(|value| {
+                value.len() == 32
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            })
+            && self.turn > 0
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeRequestKind {
+    Question,
+    Approval,
+    Secret,
+}
+
+/// Constructed after a connector's bounded read. Secret requests contain a reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeRequest {
+    id: String,
+    binding: RuntimeRequestBinding,
+    kind: RuntimeRequestKind,
+    text: String,
+}
+impl RuntimeRequest {
+    /// # Errors
+    /// Refuses malformed identities or a payload above 16 KiB.
+    pub fn new(
+        id: String,
+        binding: RuntimeRequestBinding,
+        kind: RuntimeRequestKind,
+        text: String,
+    ) -> Result<Self, AgentError> {
+        if id.is_empty() || id.len() > 128 || !binding.valid() || text.len() > 16 * 1024 {
+            return Err(AgentError::Protocol("runtime_request_bounds".into()));
+        }
+        Ok(Self {
+            id,
+            binding,
+            kind,
+            text,
+        })
+    }
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    #[must_use]
+    pub fn binding(&self) -> &RuntimeRequestBinding {
+        &self.binding
+    }
+    #[must_use]
+    pub const fn kind(&self) -> RuntimeRequestKind {
+        self.kind
+    }
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeResponse {
+    Pending,
+    QuestionAnswer(String),
+    Unsupported,
+    H3AttentionUnavailable,
+    Expired,
+}
+impl RuntimeResponse {
+    /// # Errors
+    /// A question answer cannot stand in for approval or contain an unbounded payload.
+    pub fn validate(&self, request: &RuntimeRequest) -> Result<(), AgentError> {
+        if *self == Self::Pending {
+            return Err(AgentError::Protocol(
+                "pending_is_not_a_final_response".into(),
+            ));
+        }
+        if let Self::QuestionAnswer(text) = self
+            && (request.kind != RuntimeRequestKind::Question || text.len() > 16 * 1024)
+        {
+            return Err(AgentError::Protocol(
+                "runtime_response_kind_or_bounds".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeResponseControl {
+    request: RuntimeRequest,
+    response: RuntimeResponse,
+}
+impl RuntimeResponseControl {
+    /// # Errors
+    /// Refuses a response with the wrong type or size before queue admission.
+    pub fn new(request: RuntimeRequest, response: RuntimeResponse) -> Result<Self, AgentError> {
+        response.validate(&request)?;
+        Ok(Self { request, response })
+    }
+    #[must_use]
+    pub const fn request(&self) -> &RuntimeRequest {
+        &self.request
+    }
+    #[must_use]
+    pub const fn response(&self) -> &RuntimeResponse {
+        &self.response
+    }
 }

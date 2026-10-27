@@ -474,7 +474,40 @@ fn s4_task_assignment_and_frozen_result_delivery_share_a_cut() {
     .unwrap();
     let mut state = assigned.projection().clone();
     let child = state.tasks[1].id.clone();
-    state.tasks[1].state = TaskState::Running(id(91));
+    let attempt: AttemptId = id(91);
+    state.attempts.push(AttemptReservation {
+        identity: ExecutionIdentity {
+            version: 1,
+            project: assignment.project.clone(),
+            run: state.run.clone(),
+            task: child.clone(),
+            attempt: attempt.clone(),
+            nonce: id(190),
+            owner_instance: id(191),
+        },
+        owner_epoch: 2,
+        state: AttemptState::Reserved,
+        recovery_ref: reference(192, RecordKind::OwnedData),
+    });
+    orchestration::tasks::refresh_cleanup(&mut state);
+    state.tasks[1].state = TaskState::Running(attempt.clone());
+    state.tasks[1].progress = TaskProgress {
+        capacity: DependencyReservation::Backed(attempt.clone()),
+        turn: Some(TaskTurn {
+            task: child.clone(),
+            attempt,
+            session: id(91),
+            ordinal: 1,
+            owner_epoch: 2,
+            expected_head: state.tasks[1].brief.scope.base.head.clone(),
+            purpose: TurnPurpose::Work,
+        }),
+        turn_ended: true,
+        expired: false,
+        background: 0,
+        feedback: vec![],
+        decisions: vec![],
+    };
     let mut freezing = assignment.clone();
     freezing.id.sequence += 1;
     freezing.expected_generation += 1;

@@ -20,10 +20,12 @@ pub mod orchestration_commit;
 pub mod orchestration_records;
 
 pub mod adapters;
+pub mod context;
 pub mod machine;
 pub mod mailbox;
 pub mod outbox;
 pub mod policy;
+pub mod requests;
 pub mod tasks;
 
 /// The complete upstream MIT notice is retained in the shipping agent library.

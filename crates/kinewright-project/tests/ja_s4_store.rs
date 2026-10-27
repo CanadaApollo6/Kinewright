@@ -99,6 +99,7 @@ fn projection(envelope: &OrchestrationEnvelope) -> RunProjection {
             parent: None,
             brief: start.director.clone(),
             state: TaskState::Queued,
+            progress: TaskProgress::default(),
         }],
         effects: vec![EffectRecord {
             id: envelope.identity("effect.prepare").unwrap(),
@@ -228,6 +229,7 @@ fn s4_run_graph_pending_dependencies_contract() {
         task: task.clone(),
         result: reference(33, RecordKind::RunIndex),
         generation: 1,
+        wake: id(46),
         message: id(34),
         state: DeliveryState::Pending,
     });
@@ -235,7 +237,18 @@ fn s4_run_graph_pending_dependencies_contract() {
         .requests
         .push(RuntimeRequest::Question(QuestionRecord {
             id: id(35),
-            task,
+            task: task.clone(),
+            origin: TaskTurn {
+                task,
+                attempt: id(41),
+                session: id(42),
+                ordinal: 1,
+                owner_epoch: 1,
+                expected_head: id(43),
+                purpose: TurnPurpose::Work,
+            },
+            status: QuestionStatus::Pending,
+            wake: QuestionWake::Pending,
             prompt: reference(36, RecordKind::OwnedData),
         }));
     projection.results.push(reference(37, RecordKind::RunIndex));

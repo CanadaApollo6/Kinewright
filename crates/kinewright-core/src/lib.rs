@@ -59,7 +59,8 @@ pub use actor::{
 pub use actor::{HistoryEntryObservation, HistoryObservation};
 pub use agent::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
-    HarnessInfo, SessionConfig,
+    HarnessInfo, RuntimeRequest, RuntimeRequestBinding, RuntimeRequestKind, RuntimeResponse,
+    RuntimeResponseControl, SessionConfig,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use au6_scenarios::{

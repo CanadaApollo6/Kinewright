@@ -8,4 +8,4 @@ if (( available_kib < 6 * 1024 * 1024 )); then
 fi
 source scripts/setup-ffmpeg.sh
 export RUST_TEST_THREADS=4
-flock /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo "$@"
+flock -o /tmp/kinewright-cargo-heavy.lock env CARGO_BUILD_JOBS=4 nice -n 10 cargo "$@"

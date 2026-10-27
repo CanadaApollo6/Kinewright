@@ -318,13 +318,23 @@ pub fn decide_task(
                 .find(|task| task.id == assignment.parent)
                 .ok_or(Refusal::ScopeConflict)?;
             if assignment.brief.role == Role::Director
-                || parent.brief.role != Role::Director
+                || parent.brief.role == Role::Reviewer
                 || matches!(
                     parent.state,
-                    TaskState::Terminal(_) | TaskState::Cancelling | TaskState::CleanupBlocked(_)
+                    TaskState::Freezing
+                        | TaskState::Terminal(_)
+                        | TaskState::Cancelled
+                        | TaskState::Cancelling
+                        | TaskState::CleanupBlocked(_)
                 )
                 || state.outcome != RunOutcome::Pending
             {
+                return Err(Refusal::InvalidState);
+            }
+            if dependency_slots(state) >= super::orchestration_records::ATTEMPT_LIMIT {
+                return Err(Refusal::DependencyCapacity);
+            }
+            if state.phase == super::orchestration_records::RunPhase::Paused {
                 return Err(Refusal::InvalidState);
             }
             if state.tasks.len() >= TASK_LIMIT {
@@ -334,11 +344,11 @@ pub fn decide_task(
                 && state.tasks.iter().any(|task| {
                     task.parent.is_some()
                         && task.brief.role != Role::Reviewer
-                        && !matches!(task.state, TaskState::Terminal(_))
+                        && !matches!(task.state, TaskState::Terminal(_) | TaskState::Cancelled)
                         && task.brief.scope.base.branch == assignment.brief.scope.base.branch
                 })
             {
-                return Err(Refusal::InvalidState);
+                return Err(Refusal::DependencyCapacity);
             }
             Ok(Some(TaskTransition::Assign(assignment.clone())))
         }
@@ -348,7 +358,12 @@ pub fn decide_task(
                 .iter()
                 .find(|task| &task.id == id)
                 .ok_or(Refusal::ScopeConflict)?;
-            if !matches!(task.state, TaskState::Preparing | TaskState::Running(_)) {
+            if !ready(state, id)
+                || !matches!(
+                    task.state,
+                    TaskState::Preparing | TaskState::Running(_) | TaskState::WaitingForChildren(_)
+                )
+            {
                 return Err(Refusal::InvalidState);
             }
             Ok(Some(TaskTransition::Freeze(id.clone())))
@@ -372,6 +387,10 @@ pub fn apply_task_transition(
                 parent: Some(assignment.parent),
                 brief: assignment.brief,
                 state: TaskState::Queued,
+                progress: super::orchestration_records::TaskProgress {
+                    capacity: super::orchestration_records::DependencyReservation::Reserved,
+                    ..super::orchestration_records::TaskProgress::default()
+                },
             };
             let order = state
                 .effects
@@ -416,4 +435,295 @@ fn validate_owner_authority(
         return Err(BundleError::Unsupported("task project/epoch/expiry".into()));
     }
     Ok(())
+}
+
+#[must_use]
+pub fn ready(state: &super::orchestration_records::RunProjection, id: &TaskId) -> bool {
+    use super::orchestration_records::{
+        DeliveryState, QuestionStatus, RuntimeRequest, TaskState, TurnPurpose,
+    };
+    let Some(task) = state.tasks.iter().find(|task| &task.id == id) else {
+        return false;
+    };
+    task.progress.turn_ended
+        && !task.progress.expired
+        && task.progress.turn.as_ref().is_some_and(|turn| turn.purpose == TurnPurpose::Work)
+        && task.progress.background == 0
+        && !matches!(task.state, TaskState::Terminal(_) | TaskState::Cancelled | TaskState::Cancelling | TaskState::CleanupBlocked(_))
+        && state.tasks.iter().filter(|child| child.parent.as_ref() == Some(id)).all(|child| {
+            matches!(child.state, TaskState::Terminal(_) | TaskState::Cancelled)
+                && state.deliveries.iter().filter(|delivery| delivery.task == child.id)
+                    .all(|delivery| matches!(delivery.state, DeliveryState::Observed(_) | DeliveryState::Disposed))
+        })
+        && !state.requests.iter().any(|request| matches!(request, RuntimeRequest::Question(q) if &q.task == id && q.status == QuestionStatus::Pending))
+}
+
+pub fn refresh_cleanup(state: &mut super::orchestration_records::RunProjection) {
+    use super::orchestration_records::{AttemptState, CleanupIdentity, RunCleanup};
+    let identities = state
+        .attempts
+        .iter()
+        .filter(|attempt| !matches!(attempt.state, AttemptState::Retired(_)))
+        .map(|attempt| CleanupIdentity {
+            attempt: attempt.identity.attempt.clone(),
+            nonce: attempt.identity.nonce.clone(),
+            owner_instance: attempt.identity.owner_instance.clone(),
+            recovery_ref: attempt.recovery_ref.clone(),
+        })
+        .collect::<Vec<_>>();
+    state.cleanup = if identities.is_empty() {
+        RunCleanup::Settled
+    } else if let RunCleanup::Blocked(_, reason) = &state.cleanup {
+        RunCleanup::Blocked(identities, reason.clone())
+    } else {
+        RunCleanup::Pending(identities)
+    };
+}
+
+#[must_use]
+pub fn dependency_slots(state: &super::orchestration_records::RunProjection) -> usize {
+    use super::orchestration_records::{AttemptState, DependencyReservation};
+    state
+        .attempts
+        .iter()
+        .filter(|attempt| !matches!(attempt.state, AttemptState::Retired(_)))
+        .count()
+        + state
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.progress.capacity == DependencyReservation::Reserved
+                    && !state.attempts.iter().any(|attempt| {
+                        attempt.identity.task == task.id
+                            && !matches!(attempt.state, AttemptState::Retired(_))
+                    })
+            })
+            .count()
+}
+
+pub fn cancel(
+    state: &mut super::orchestration_records::RunProjection,
+    id: &TaskId,
+) -> Result<(), super::orchestration_records::Refusal> {
+    use super::orchestration_records::{
+        AttemptState, DeliveryState, EffectState, QuestionStatus, QuestionWake, Refusal,
+        RuntimeRequest, TaskState,
+    };
+    if !state.tasks.iter().any(|task| &task.id == id) {
+        return Err(Refusal::ScopeConflict);
+    }
+    let mut ids = std::collections::BTreeSet::from([id.clone()]);
+    for _ in 0..state.tasks.len() {
+        for task in &state.tasks {
+            if task
+                .parent
+                .as_ref()
+                .is_some_and(|parent| ids.contains(parent))
+            {
+                ids.insert(task.id.clone());
+            }
+        }
+    }
+    for task in &mut state.tasks {
+        if ids.contains(&task.id)
+            && !matches!(task.state, TaskState::Terminal(_) | TaskState::Cancelled)
+        {
+            task.state = if state.attempts.iter().any(|attempt| {
+                attempt.identity.task == task.id
+                    && !matches!(attempt.state, AttemptState::Retired(_))
+            }) {
+                TaskState::Cancelling
+            } else {
+                task.progress.capacity = super::orchestration_records::DependencyReservation::Free;
+                TaskState::Cancelled
+            };
+        }
+    }
+    for attempt in &mut state.attempts {
+        if ids.contains(&attempt.identity.task)
+            && !matches!(
+                attempt.state,
+                AttemptState::Retired(_) | AttemptState::CleanupBlocked(_)
+            )
+        {
+            attempt.state = AttemptState::Stopping;
+        }
+    }
+    for effect in &mut state.effects {
+        if ids.contains(&effect.task) && effect.state == EffectState::Pending {
+            effect.state = EffectState::Disposed;
+        }
+    }
+    for delivery in &mut state.deliveries {
+        let recipient_cancelled = state
+            .tasks
+            .iter()
+            .find(|task| task.id == delivery.task)
+            .and_then(|task| task.parent.as_ref())
+            .is_some_and(|parent| ids.contains(parent));
+        if (ids.contains(&delivery.task) || recipient_cancelled)
+            && !matches!(delivery.state, DeliveryState::Observed(_))
+        {
+            delivery.state = DeliveryState::Disposed;
+        }
+    }
+    super::mailbox::settle_generations(state);
+    for request in &mut state.requests {
+        if let RuntimeRequest::Question(q) = request
+            && ids.contains(&q.task)
+            && q.status == QuestionStatus::Pending
+        {
+            q.status = QuestionStatus::Cancelled;
+            q.wake = QuestionWake::Disposed;
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one task lifecycle match keeps guards beside mutations"
+)]
+pub fn apply_lifecycle(
+    state: &mut super::orchestration_records::RunProjection,
+    envelope: &super::orchestration_records::OrchestrationEnvelope,
+) -> Result<bool, super::orchestration_records::Refusal> {
+    use super::orchestration_records::{
+        AttemptState, BACKGROUND_LIMIT, ITEM_LIMIT, OrchestrationCommand, QuestionStatus, Refusal,
+        RunOutcome, RunPhase, RuntimeRequest, TaskState, validate_reference,
+    };
+    match &envelope.command {
+        OrchestrationCommand::BeginTurn(turn) => {
+            let task = state
+                .tasks
+                .iter()
+                .find(|task| task.id == turn.task)
+                .ok_or(Refusal::ScopeConflict)?;
+            if state.phase == RunPhase::Paused
+                || state.outcome != RunOutcome::Pending
+                || matches!(
+                    task.state,
+                    TaskState::Terminal(_)
+                        | TaskState::Cancelled
+                        | TaskState::Cancelling
+                        | TaskState::Freezing
+                        | TaskState::CleanupBlocked(_)
+                )
+                || turn.expected_head != task.brief.scope.base.head
+                || task.progress.background != 0
+                || turn.ordinal == 0
+                || task.progress.turn.as_ref().is_some_and(|previous| {
+                    (!task.progress.turn_ended && !task.progress.expired) || turn.ordinal <= previous.ordinal || (task.progress.expired && turn.session == previous.session)
+                })
+                || task.progress.turn.as_ref().is_some_and(|previous| previous.attempt != turn.attempt && state.attempts.iter().any(|reservation| reservation.identity.attempt == previous.attempt && !matches!(reservation.state, AttemptState::Retired(_))))
+                || state.requests.iter().any(|request| matches!(request, RuntimeRequest::Question(q) if q.task == turn.task && q.status == QuestionStatus::Pending))
+                || turn.owner_epoch != envelope.authority.owner_epoch
+            {
+                return Err(Refusal::InvalidState);
+            }
+            if let Some(reservation) = state
+                .attempts
+                .iter()
+                .find(|attempt| attempt.identity.attempt == turn.attempt)
+            {
+                if reservation.identity.task != turn.task
+                    || reservation.owner_epoch != turn.owner_epoch
+                    || matches!(
+                        reservation.state,
+                        AttemptState::Retired(_)
+                            | AttemptState::Stopping
+                            | AttemptState::CleanupBlocked(_)
+                    )
+                {
+                    return Err(Refusal::ScopeConflict);
+                }
+            } else {
+                return Err(Refusal::ScopeConflict);
+            }
+            let task = state
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == turn.task)
+                .ok_or(Refusal::ScopeConflict)?;
+            task.progress.capacity =
+                super::orchestration_records::DependencyReservation::Backed(turn.attempt.clone());
+            task.progress.turn = Some(turn.clone());
+            task.progress.turn_ended = false;
+            task.progress.expired = false;
+            task.state = TaskState::Running(turn.attempt.clone());
+            state.phase = RunPhase::Running;
+        }
+        OrchestrationCommand::EndTurn(turn) | OrchestrationCommand::BackgroundWork(turn, _) => {
+            if envelope.authority.attempt.as_ref() != Some(&turn.attempt)
+                || envelope.authority.owner_epoch != turn.owner_epoch
+            {
+                return Err(Refusal::ScopeConflict);
+            }
+            if matches!(envelope.command, OrchestrationCommand::BackgroundWork(_, _)) {
+                super::requests::live_identity(state, turn)?;
+            } else {
+                super::requests::live_turn(state, turn)?;
+            }
+            let task = state
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == turn.task)
+                .ok_or(Refusal::ScopeConflict)?;
+            if let OrchestrationCommand::BackgroundWork(_, count) = envelope.command {
+                if count > BACKGROUND_LIMIT {
+                    return Err(Refusal::Capacity);
+                }
+                task.progress.background = count;
+            } else {
+                task.progress.turn_ended = true;
+                let children = state
+                    .tasks
+                    .iter()
+                    .filter(|task| {
+                        task.parent.as_ref() == Some(&turn.task)
+                            && !matches!(task.state, TaskState::Terminal(_) | TaskState::Cancelled)
+                    })
+                    .map(|task| task.id.clone())
+                    .collect::<Vec<_>>();
+                let task = state
+                    .tasks
+                    .iter_mut()
+                    .find(|task| task.id == turn.task)
+                    .ok_or(Refusal::ScopeConflict)?;
+                if !children.is_empty() {
+                    task.state = TaskState::WaitingForChildren(children);
+                }
+            }
+        }
+        OrchestrationCommand::CancelTask(id) => cancel(state, id)?,
+        OrchestrationCommand::RecordContext {
+            task,
+            feedback,
+            decisions,
+        } => {
+            let record = state
+                .tasks
+                .iter_mut()
+                .find(|record| &record.id == task)
+                .ok_or(Refusal::ScopeConflict)?;
+            if record.progress.feedback.len() + feedback.len() > ITEM_LIMIT
+                || record.progress.decisions.len() + decisions.len() > ITEM_LIMIT
+            {
+                return Err(Refusal::Capacity);
+            }
+            for reference in feedback.iter().chain(decisions) {
+                validate_reference(reference)?;
+            }
+            record.progress.feedback.extend(feedback.clone());
+            record.progress.decisions.extend(decisions.clone());
+        }
+        OrchestrationCommand::WaitTimeout(id) => {
+            if !state.tasks.iter().any(|task| &task.id == id) {
+                return Err(Refusal::ScopeConflict);
+            }
+            // Timeout records a receipt; dependency and delivery identities remain intact.
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }

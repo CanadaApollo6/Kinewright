@@ -296,18 +296,27 @@ fn brief_refs(brief: &TaskBrief, refs: &mut Vec<ObjectRef>) -> Result<(), Refusa
 }
 
 fn request_refs(request: &RuntimeRequest, refs: &mut Vec<ObjectRef>) {
-    refs.push(match request {
-        RuntimeRequest::Question(question) => question.prompt.clone(),
+    let reference = match request {
+        RuntimeRequest::Question(question) => {
+            if let super::orchestration_records::QuestionStatus::Answered(answer) = &question.status
+            {
+                refs.push(answer.clone());
+            }
+            question.prompt.clone()
+        }
         RuntimeRequest::Approval(attention) | RuntimeRequest::Secret(attention) => {
             attention.request_ref.clone()
         }
-    });
+    };
+    refs.push(reference);
 }
 
 fn projection_refs(state: &RunProjection, refs: &mut Vec<ObjectRef>) -> Result<(), Refusal> {
     validate_projection(state)?;
     for task in &state.tasks {
         brief_refs(&task.brief, refs)?;
+        refs.extend(task.progress.feedback.clone());
+        refs.extend(task.progress.decisions.clone());
         match &task.state {
             TaskState::Terminal(result) => refs.push(result.clone()),
             TaskState::CleanupBlocked(cleanup) => refs.push(cleanup.recovery_ref.clone()),
@@ -440,6 +449,10 @@ fn same_cleanup_set(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one complete projection invariant check"
+)]
 pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
     if state.tasks.len() > TASK_LIMIT
         || state.attempts.len() > ATTEMPT_LIMIT
@@ -454,6 +467,25 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
         .any(|n| n > ITEM_LIMIT)
     {
         return Err(Refusal::Capacity);
+    }
+    let native_slots = state
+        .attempts
+        .iter()
+        .filter(|attempt| !matches!(attempt.state, AttemptState::Retired(_)))
+        .count();
+    let reserved_slots = state
+        .tasks
+        .iter()
+        .filter(|task| {
+            task.progress.capacity == super::orchestration_records::DependencyReservation::Reserved
+                && !state.attempts.iter().any(|attempt| {
+                    attempt.identity.task == task.id
+                        && !matches!(attempt.state, AttemptState::Retired(_))
+                })
+        })
+        .count();
+    if native_slots + reserved_slots > ATTEMPT_LIMIT {
+        return Err(Refusal::DependencyCapacity);
     }
     encoded(state, CONTROL_BYTES)?;
     validate_attempt_ids(state)?;
@@ -476,6 +508,55 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
     {
         return Err(Refusal::InvalidState);
     }
+    for task in &state.tasks {
+        if let super::orchestration_records::DependencyReservation::Backed(id) =
+            &task.progress.capacity
+            && !state
+                .attempts
+                .iter()
+                .any(|attempt| attempt.identity.task == task.id && &attempt.identity.attempt == id)
+        {
+            return Err(Refusal::ScopeConflict);
+        }
+        if task.progress.expired && task.progress.turn_ended {
+            return Err(Refusal::InvalidState);
+        }
+        if task.progress.turn.as_ref().is_some_and(|turn| {
+            turn.task != task.id
+                || turn.ordinal == 0
+                || turn.expected_head != task.brief.scope.base.head
+        }) || task.progress.background > super::orchestration_records::BACKGROUND_LIMIT
+            || task.progress.feedback.len() > ITEM_LIMIT
+            || task.progress.decisions.len() > ITEM_LIMIT
+        {
+            return Err(Refusal::InvalidState);
+        }
+        let mut ancestors = BTreeSet::new();
+        let mut parent = task.parent.as_ref();
+        while let Some(id) = parent {
+            if id == &task.id || !ancestors.insert(id) {
+                return Err(Refusal::InvalidState);
+            }
+            parent = state
+                .tasks
+                .iter()
+                .find(|task| &task.id == id)
+                .and_then(|task| task.parent.as_ref());
+        }
+    }
+    let question_ids = state
+        .requests
+        .iter()
+        .filter_map(|request| {
+            if let RuntimeRequest::Question(q) = request {
+                Some(&q.id)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if question_ids.iter().collect::<BTreeSet<_>>().len() != question_ids.len()
+        || state.requests.iter().any(|request| matches!(request, RuntimeRequest::Question(q) if q.task != q.origin.task || !tasks.contains(&q.task))) { return Err(Refusal::InvalidState); }
     for attempt in &state.attempts {
         attempt.identity.validate()?;
         if attempt.identity.run != state.run || !tasks.contains(&attempt.identity.task) {
@@ -531,7 +612,7 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
                     DeliveryState::Observed(_) | DeliveryState::Disposed
                 )
             })
-            || !state.requests.is_empty())
+            || state.requests.iter().any(|request| !matches!(request, RuntimeRequest::Question(q) if q.status != super::orchestration_records::QuestionStatus::Pending)))
     {
         return Err(Refusal::InvalidState);
     }

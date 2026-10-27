@@ -13,6 +13,11 @@
 //! the budgets, the counters and the cancellation flag are all arguments,
 //! because the two callers disagree about almost every one of them.
 
+//! Studio control adaptation of <https://github.com/pingdotgg/t3code> at
+//! 5d91ab1117ad51ef1288a94717d85c70e7af09fe, apps/server/src/orchestration-v2/
+//! Orchestrator.ts and NotificationMailbox.ts. Notice: LICENSES/t3code-MIT.txt.
+//! Kinewright retains its sole Rust pump and investigator rejection policy.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -123,6 +128,8 @@ pub enum ConfirmationPolicy {
     /// The investigator's rule: reject the request and end the session with
     /// [`SessionStop::PolicyViolation`].
     RejectAndStop,
+    /// Studio never routes consent through the investigator confirmation broker.
+    Studio,
 }
 
 /// What the session spent.
@@ -306,11 +313,84 @@ pub enum SessionFlow {
     Stop(String),
 }
 
-/// Everything the pump deliberately does not own.
-///
-/// The eval harness's four remaining budgets — `max_operations`,
-/// `max_tool_calls`, `max_cost_usd` and its cost bookkeeping — live in its own
-/// observer, and the investigator's live in its (IN2 §3.5 rule 30).
+/// Nonblocking Studio input, including an idle source that remains open.
+pub enum PromptPoll {
+    Ready(String),
+    Pending,
+    Closed,
+}
+
+/// The caller owns additional budgets and durable Studio control admission.
+#[derive(Clone)]
+pub struct StudioPromptSender(crossbeam_channel::Sender<String>);
+pub struct StudioPromptQueue(Receiver<String>);
+#[must_use]
+pub fn studio_prompt_queue() -> (StudioPromptSender, StudioPromptQueue) {
+    let (sender, receiver) = crossbeam_channel::bounded(64);
+    (StudioPromptSender(sender), StudioPromptQueue(receiver))
+}
+impl StudioPromptSender {
+    /// # Errors
+    /// Refuses full, disconnected, or oversized input without blocking the pump.
+    pub fn try_send(&self, text: String) -> Result<(), kinewright_core::AgentError> {
+        if text.len() > crate::orchestration::orchestration_records::COMMAND_BYTES {
+            return Err(kinewright_core::AgentError::Protocol(
+                "studio_prompt_too_large".into(),
+            ));
+        }
+        self.0.try_send(text).map_err(|error| {
+            kinewright_core::AgentError::Unavailable(
+                match error {
+                    crossbeam_channel::TrySendError::Full(_) => "studio_control_capacity",
+                    crossbeam_channel::TrySendError::Disconnected(_) => "studio_control_closed",
+                }
+                .into(),
+            )
+        })
+    }
+}
+impl SessionObserver for StudioPromptQueue {
+    fn on_event(&mut self, _: &AgentEvent) -> SessionFlow {
+        SessionFlow::Continue
+    }
+    fn on_tick(&mut self, _: &SessionCounters) -> SessionFlow {
+        SessionFlow::Continue
+    }
+    fn poll_prompt(&mut self) -> PromptPoll {
+        match self.0.try_recv() {
+            Ok(text) => PromptPoll::Ready(text),
+            Err(crossbeam_channel::TryRecvError::Empty) => PromptPoll::Pending,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => PromptPoll::Closed,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct StudioResponseSender(crossbeam_channel::Sender<kinewright_core::RuntimeResponseControl>);
+pub struct StudioResponseQueue(Receiver<kinewright_core::RuntimeResponseControl>);
+#[must_use]
+pub fn studio_response_queue() -> (StudioResponseSender, StudioResponseQueue) {
+    let (sender, receiver) = crossbeam_channel::bounded(64);
+    (StudioResponseSender(sender), StudioResponseQueue(receiver))
+}
+impl StudioResponseSender {
+    /// # Errors
+    /// Refuses a full or disconnected response source without blocking the owner.
+    pub fn try_send(
+        &self,
+        response: kinewright_core::RuntimeResponseControl,
+    ) -> Result<(), kinewright_core::AgentError> {
+        self.0.try_send(response).map_err(|_| {
+            kinewright_core::AgentError::Unavailable("studio_response_capacity_or_closed".into())
+        })
+    }
+}
+impl StudioResponseQueue {
+    pub fn poll_response(&mut self) -> Option<kinewright_core::RuntimeResponseControl> {
+        self.0.try_recv().ok()
+    }
+}
+
 pub trait SessionObserver {
     /// Every event, after the pump's own accounting has seen it.
     fn on_event(&mut self, event: &AgentEvent) -> SessionFlow;
@@ -320,6 +400,32 @@ pub trait SessionObserver {
     /// *"confirmation N disappeared before approval"* is the one caller
     /// (IN2 §3.5 rule 29).
     fn on_confirmation_error(&mut self, _message: String) {}
+    /// The Studio owner records cancellation and expires the live session before native stop.
+    /// # Errors
+    /// Unknown publication retains the live session and its cleanup reservation for reconciliation.
+    fn prepare_studio_stop(
+        &mut self,
+        _stop: &SessionStop,
+        _binding: Option<&kinewright_core::RuntimeRequestBinding>,
+    ) -> Result<(), String> {
+        Err("studio_stop_owner_unsupported".into())
+    }
+    /// Nonblocking control source, polled after the initial prompt iterator ends.
+    fn poll_prompt(&mut self) -> PromptPoll {
+        PromptPoll::Closed
+    }
+    /// Nonblocking responses whose owner command has already been acknowledged.
+    fn poll_runtime_response(&mut self) -> Option<kinewright_core::RuntimeResponseControl> {
+        None
+    }
+
+    /// The owner records a question answer before returning it to the live adapter.
+    fn on_runtime_request(
+        &mut self,
+        _request: &kinewright_core::RuntimeRequest,
+    ) -> kinewright_core::RuntimeResponse {
+        kinewright_core::RuntimeResponse::Unsupported
+    }
 }
 
 /// An observer that watches nothing and stops for nothing.
@@ -366,7 +472,7 @@ fn answer_confirmations(
                     ));
                 }
             }
-            ConfirmationPolicy::RejectAndStop => {
+            ConfirmationPolicy::RejectAndStop | ConfirmationPolicy::Studio => {
                 broker.reject(request.id, INVESTIGATOR_CONFIRMATION_REFUSAL);
                 violated = true;
             }
@@ -394,7 +500,11 @@ fn answer_confirmations(
 // policy, the limits, the cancellation flag and the observer. A struct would
 // hide exactly the thing a reader of this signature needs to see, in the same
 // shape `McpServer::start_configured` already carries.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one active and idle event loop owns session budgets and broker consumption"
+)]
 pub fn pump_session(
     session: &mut dyn AgentSession,
     events: &Receiver<AgentEvent>,
@@ -410,59 +520,138 @@ pub fn pump_session(
     let mut spent = SessionCounters::default();
     let mut stop = SessionStop::Completed;
     counters.publish(&spent);
+    let mut active = false;
+    let mut responses = crate::orchestration::requests::LiveResponses::default();
     'prompts: loop {
         if cancel.load(Ordering::Relaxed) {
             stop = SessionStop::Cancelled(StopReason::Observer(CANCELLED_BY_OWNER.to_owned()));
             break;
         }
-        let Some(prompt) = prompts.next() else {
-            break;
-        };
-        // IN2 §5.1 rule 3: the pump is the assertion's subject, independently
-        // of whichever driver also refuses the send.
-        //
-        // **Erratum D-R68.** This arm is only reachable when the prompt source
-        // yields more than `max_turns` items, which is the eval harness's
-        // shape and not the investigator's: the investigator passes
-        // `std::iter::once(opening_message)` (§3.5 rule 29a), so for it the
-        // effective turn bound is `SessionConfig.max_turns` at the driver
-        // (§5.1 rule 1) and `spent.turns` is the **reported** number the card
-        // reads, published per driver turn boundary.
-        if spent.turns >= limits.max_turns {
-            stop = SessionStop::Budget(BudgetKind::Turns);
-            break;
-        }
-        // Between turns as well as between events: a turn that finished just
-        // under the bound must not be allowed to start another one. The
-        // pre-IN2 `collect_session` checked only inside a turn, so this is
-        // strictly tighter and cannot let a session run longer than it did.
         spent.elapsed = started.elapsed();
+        counters.publish(&spent);
         if spent.elapsed > limits.max_wall_time {
             stop = SessionStop::Budget(BudgetKind::WallTime);
             break;
         }
-        if let Err(error) = session.send_user_message(prompt) {
-            stop = SessionStop::Cancelled(StopReason::Harness(error.to_string()));
+        if let SessionFlow::Stop(reason) = observer.on_tick(&spent) {
+            stop = SessionStop::Cancelled(StopReason::Observer(reason));
             break;
         }
-        spent.turns = spent.turns.saturating_add(1);
-        spent.elapsed = started.elapsed();
-        counters.publish(&spent);
-        let mut turn_done = false;
-        while !turn_done {
+        if policy == ConfirmationPolicy::Studio {
+            for _ in 0..64 {
+                let request = match session.poll_runtime_request() {
+                    Ok(Some(request)) => request,
+                    Ok(None) => break,
+                    Err(error) => {
+                        stop = SessionStop::Cancelled(StopReason::Harness(error.to_string()));
+                        break 'prompts;
+                    }
+                };
+                if let Err(error) = responses.register(&request) {
+                    stop = SessionStop::Cancelled(StopReason::Harness(error.to_string()));
+                    break 'prompts;
+                }
+                let response =
+                    if session.runtime_request_binding().as_ref() != Some(request.binding()) {
+                        kinewright_core::RuntimeResponse::Expired
+                    } else if request.kind() != kinewright_core::RuntimeRequestKind::Question {
+                        kinewright_core::RuntimeResponse::H3AttentionUnavailable
+                    } else {
+                        observer.on_runtime_request(&request)
+                    };
+                if response == kinewright_core::RuntimeResponse::Pending {
+                    continue;
+                }
+                if let Err(error) = response.validate(&request) {
+                    stop = SessionStop::Cancelled(StopReason::Harness(error.to_string()));
+                    break 'prompts;
+                }
+                if responses.take(&request, session.runtime_request_binding().as_ref())
+                    && let Err(error) = session.respond_runtime_request(&request, response)
+                {
+                    observer.on_confirmation_error(error.to_string());
+                }
+            }
+        }
+        if policy == ConfirmationPolicy::Studio {
+            for _ in 0..64 {
+                let Some(control) = observer.poll_runtime_response() else {
+                    break;
+                };
+                let request = control.request();
+                if !responses.contains(request) {
+                    observer.on_confirmation_error("runtime_response_not_pending".into());
+                    continue;
+                }
+                if let Err(error) = control.response().validate(request) {
+                    observer.on_confirmation_error(error.to_string());
+                    continue;
+                }
+                if responses.take(request, session.runtime_request_binding().as_ref())
+                    && let Err(error) =
+                        session.respond_runtime_request(request, control.response().clone())
+                {
+                    observer.on_confirmation_error(error.to_string());
+                }
+            }
+            responses.expire_stale(session.runtime_request_binding().as_ref());
+        }
+        if !active {
+            let prompt = match prompts
+                .next()
+                .map_or_else(|| observer.poll_prompt(), PromptPoll::Ready)
+            {
+                PromptPoll::Ready(prompt) => Some(prompt),
+                PromptPoll::Pending => {
+                    // The same wait below keeps cancellation, broker and deadline ticks live.
+                    None
+                }
+                PromptPoll::Closed => break,
+            };
+            if let Some(prompt) = prompt {
+                if prompt.len() > crate::orchestration::orchestration_records::COMMAND_BYTES {
+                    stop = SessionStop::Cancelled(StopReason::Harness(
+                        "studio_prompt_too_large".into(),
+                    ));
+                    break;
+                }
+                // IN2 §5.1 rule 3: the pump is the assertion's subject, independently
+                // of whichever driver also refuses the send.
+                //
+                // **Erratum D-R68.** This arm is only reachable when the prompt source
+                // yields more than `max_turns` items, which is the eval harness's
+                // shape and not the investigator's: the investigator passes
+                // `std::iter::once(opening_message)` (§3.5 rule 29a), so for it the
+                // effective turn bound is `SessionConfig.max_turns` at the driver
+                // (§5.1 rule 1) and `spent.turns` is the **reported** number the card
+                // reads, published per driver turn boundary.
+                if spent.turns >= limits.max_turns {
+                    stop = SessionStop::Budget(BudgetKind::Turns);
+                    break;
+                }
+                // Between turns as well as between events: a turn that finished just
+                // under the bound must not be allowed to start another one. The
+                // pre-IN2 `collect_session` checked only inside a turn, so this is
+                // strictly tighter and cannot let a session run longer than it did.
+                spent.elapsed = started.elapsed();
+                if spent.elapsed > limits.max_wall_time {
+                    stop = SessionStop::Budget(BudgetKind::WallTime);
+                    break;
+                }
+                if let Err(error) = session.send_user_message(prompt) {
+                    stop = SessionStop::Cancelled(StopReason::Harness(error.to_string()));
+                    break;
+                }
+                spent.turns = spent.turns.saturating_add(1);
+                spent.elapsed = started.elapsed();
+                counters.publish(&spent);
+                active = true;
+            }
+        }
+        {
             if answer_confirmations(confirmations, policy, observer) {
                 stop = SessionStop::PolicyViolation;
-                break 'prompts;
-            }
-            if cancel.load(Ordering::Relaxed) {
-                stop = SessionStop::Cancelled(StopReason::Observer(CANCELLED_BY_OWNER.to_owned()));
-                break 'prompts;
-            }
-            spent.elapsed = started.elapsed();
-            counters.publish(&spent);
-            if spent.elapsed > limits.max_wall_time {
-                stop = SessionStop::Budget(BudgetKind::WallTime);
-                break 'prompts;
+                break;
             }
             // IN2 §5.2 rule 6: a post-turn stop. `AgentEvent::Cost` arrives
             // once per turn completion, so the earliest this can fire is after
@@ -472,10 +661,6 @@ pub fn pump_session(
                 && spent.input_tokens.saturating_add(spent.output_tokens) > maximum
             {
                 stop = SessionStop::Budget(BudgetKind::Tokens);
-                break 'prompts;
-            }
-            if let SessionFlow::Stop(reason) = observer.on_tick(&spent) {
-                stop = SessionStop::Cancelled(StopReason::Observer(reason));
                 break 'prompts;
             }
             match events.recv_timeout(TICK) {
@@ -493,7 +678,7 @@ pub fn pump_session(
                             spent.output_tokens =
                                 spent.output_tokens.saturating_add(*output_tokens);
                         }
-                        AgentEvent::Done => turn_done = true,
+                        AgentEvent::Done => active = false,
                         _ => {}
                     }
                     counters.publish(&spent);
@@ -512,9 +697,14 @@ pub fn pump_session(
     }
     spent.elapsed = started.elapsed();
     counters.publish(&spent);
-    // One `interrupt`, on the pump's own thread, on every path out — including
-    // the cancellation flag's, which is the whole reason the flag exists rather
-    // than a second owner of the `&mut` (IN2 §3.5 rule 27).
+    // Studio must acknowledge stop intent before releasing its native session.
+    // An unknown publication keeps the session with the owner for reconciliation.
+    if policy == ConfirmationPolicy::Studio
+        && let Err(error) =
+            observer.prepare_studio_stop(&stop, session.runtime_request_binding().as_ref())
+    {
+        return (SessionStop::Cancelled(StopReason::Observer(error)), spent);
+    }
     session.interrupt();
     (stop, spent)
 }

@@ -16,6 +16,15 @@ use super::{
 
 #[must_use]
 pub fn next_effect<'a>(state: &'a RunProjection, lane: &BranchId) -> Option<&'a EffectRecord> {
+    if state.outcome != super::orchestration_records::RunOutcome::Pending
+        || matches!(
+            state.phase,
+            super::orchestration_records::RunPhase::Paused
+                | super::orchestration_records::RunPhase::Interrupted
+        )
+    {
+        return None;
+    }
     let first = state
         .effects
         .iter()

@@ -86,6 +86,17 @@ impl Kernel {
         Ok(())
     }
 
+    /// H1 calls after loading the acknowledged cut, never a tentative snapshot.
+    #[allow(dead_code, reason = "H1 supplies trusted recovery admission")]
+    pub(crate) fn from_acknowledged(state: RunProjection) -> Result<Self, Refusal> {
+        validate_projection(&state)?;
+        Ok(Self {
+            acknowledged: Some(state),
+            pending: None,
+            uncertain: false,
+        })
+    }
+
     pub fn publication_unknown(&mut self) -> Result<(), Refusal> {
         if self.pending.is_none() {
             return Err(Refusal::InvalidState);
@@ -118,6 +129,7 @@ pub enum Transition {
     Start,
     Control(RunAction),
     Task(super::tasks::TaskTransition),
+    Lifecycle,
     Refused(RecordedRefusal),
 }
 
@@ -141,6 +153,22 @@ pub fn decide(
             }
             Ok(Transition::Control(intent.action.clone()))
         }
+        (
+            Some(_),
+            OrchestrationCommand::RecordContext { .. }
+            | OrchestrationCommand::BeginTurn(_)
+            | OrchestrationCommand::EndTurn(_)
+            | OrchestrationCommand::BackgroundWork(_, _)
+            | OrchestrationCommand::Request(_)
+            | OrchestrationCommand::AdmitQuestionWake(_)
+            | OrchestrationCommand::ExecuteQuestionWake(_)
+            | OrchestrationCommand::AnswerQuestion(_)
+            | OrchestrationCommand::ExpireSession(_)
+            | OrchestrationCommand::OfferDeliveries(_, _)
+            | OrchestrationCommand::ObserveDelivery(_)
+            | OrchestrationCommand::WaitTimeout(_)
+            | OrchestrationCommand::CancelTask(_),
+        ) => Ok(Transition::Lifecycle),
         (Some(state), command) => Ok(super::tasks::decide_task(state, command)?.map_or(
             Transition::Refused(RecordedRefusal::Unsupported),
             Transition::Task,
@@ -165,13 +193,16 @@ pub fn eligible(state: &RunProjection, action: &RunAction) -> bool {
                 && state.cleanup == RunCleanup::Settled
                 && state.wait == RunWait::None
         }
-        // Live/bounded Director message admission arrives with C4, not a label.
-        RunAction::SendMessage { .. } => false,
+        RunAction::SendMessage { .. } => {
+            super::requests::director(state).is_ok()
+                && state.effects.len() < super::orchestration_records::ITEM_LIMIT
+        }
     }
 }
 
 /// Prepare one complete cut. Replay and fresh endpoint authorization belong to
 /// H1/H3 in the owner, before this function, including on unknown-outcome retry.
+#[allow(clippy::too_many_lines, reason = "single envelope-to-cut transition")]
 pub fn prepare(
     state: Option<&RunProjection>,
     project: &super::bundle_records::ProjectId,
@@ -199,6 +230,10 @@ pub fn prepare(
             parent: None,
             brief: start.director.clone(),
             state: TaskState::Queued,
+            progress: super::orchestration_records::TaskProgress {
+                capacity: super::orchestration_records::DependencyReservation::Reserved,
+                ..super::orchestration_records::TaskProgress::default()
+            },
         };
         RunProjection {
             run: envelope.identity("run")?,
@@ -240,6 +275,15 @@ pub fn prepare(
                         code: "stopped_by_person".into(),
                         detail_ref: None,
                     });
+                    let roots = next
+                        .tasks
+                        .iter()
+                        .filter(|task| task.parent.is_none())
+                        .map(|task| task.id.clone())
+                        .collect::<Vec<_>>();
+                    for id in roots {
+                        super::tasks::cancel(&mut next, &id)?;
+                    }
                     for effect in &mut next.effects {
                         if effect.state == EffectState::Pending {
                             effect.state = EffectState::Disposed;
@@ -248,7 +292,37 @@ pub fn prepare(
                     // Actual attempt retirement is never inferred from Stop.
                 }
                 RunAction::Continue => next.phase = RunPhase::Queued,
-                RunAction::SendMessage { .. } => return Err(Refusal::Unsupported),
+                RunAction::SendMessage { text_ref } => {
+                    let task = super::requests::director(&next)?;
+                    let order = next
+                        .effects
+                        .iter()
+                        .filter(|effect| effect.lane == task.brief.scope.base.branch)
+                        .map(|effect| effect.order)
+                        .max()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or(Refusal::Capacity)?;
+                    next.effects.push(EffectRecord {
+                        id: envelope.identity("effect.control-message")?,
+                        task: task.id.clone(),
+                        lane: task.brief.scope.base.branch.clone(),
+                        order,
+                        safety: EffectSafety::ReplaySafe,
+                        state: EffectState::Pending,
+                        payload: text_ref,
+                    });
+                }
+            }
+            next.control_revision = revision;
+            CommandDecision::Applied
+        }
+        Transition::Lifecycle => {
+            if !super::tasks::apply_lifecycle(&mut next, envelope)?
+                && !super::requests::apply(&mut next, envelope)?
+                && !super::mailbox::apply(&mut next, envelope)?
+            {
+                return Err(Refusal::Unsupported);
             }
             next.control_revision = revision;
             CommandDecision::Applied
