@@ -817,7 +817,7 @@ fn s3_foreground_replay_is_attachment_subject_bound() {
     let (_temp, host, _refs) = fixture();
     let first = host
         .attach(
-            "first-editor".into(),
+            "shared-editor".into(),
             AttachmentRole::Editor,
             host.roots.clone(),
         )
@@ -825,7 +825,7 @@ fn s3_foreground_replay_is_attachment_subject_bound() {
         .with_manual_editor("e".repeat(64));
     let second = host
         .attach(
-            "second-editor".into(),
+            "shared-editor".into(),
             AttachmentRole::Editor,
             host.roots.clone(),
         )
@@ -848,7 +848,7 @@ fn foreground_state(host: &WriterHost) -> Vec<u8> {
     let owner = host.owner.upgrade().unwrap();
     let owner = owner.lock().unwrap();
     serde_json::to_vec(&(
-        &owner.foreground_subject,
+        &owner.foreground_owner,
         &owner.foreground_reply,
         &owner.foreground_history,
     ))
@@ -915,7 +915,7 @@ fn non_editor_cannot_poison_foreground(over_http: bool) {
         let owner = owner.lock().unwrap();
         assert!(owner.manual.is_none(), "C1_FOREGROUND_BEFORE_ANY_LEASE");
         assert!(
-            owner.foreground_subject.is_none() && owner.foreground_reply.is_none(),
+            owner.foreground_owner.is_none() && owner.foreground_reply.is_none(),
             "C1_FOREGROUND_BEFORE_FIRST_OPERATION"
         );
     }
@@ -1062,7 +1062,13 @@ fn s3_foreground_replay_detach_clears_stale_non_editor_slot() {
                 stale.editor.as_deref(),
                 Some(1),
             ));
-            owner.foreground_subject = Some(subject.into());
+            let index = owner
+                .resolve_attachment(Some(&stale.bootstrap.auth.bearer()))
+                .unwrap();
+            owner.foreground_owner = Some(super::manual::ForegroundOwner {
+                attachment: Some(owner.attachments[index].id),
+                client: stale.editor.clone().unwrap(),
+            });
         }
         assert_ne!(
             foreground_state(&host),
@@ -1083,6 +1089,550 @@ fn s3_foreground_replay_detach_clears_stale_non_editor_slot() {
         );
         let editor = host.client().with_manual_editor("e".repeat(64));
         acquire_and_save_foreground(&host, &editor, over_http);
+    }
+}
+
+fn discard_foreground_reply(
+    host: &WriterHost,
+    client: &HostClient,
+    command: HostCommand,
+    operation: u64,
+    over_http: bool,
+) -> HostReply {
+    let mut request = request(client, command);
+    request.operation = Some(operation);
+    if over_http {
+        let response = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap()
+            .post(format!("http://{}/host", client.endpoint().address))
+            .header("authorization", client.bootstrap.auth.bearer())
+            .header("x-kinewright-project", &client.endpoint().project)
+            .header("x-kinewright-protocol", HOST_PROTOCOL.to_string())
+            .header(
+                "x-kinewright-roots",
+                client.bootstrap.roots.wire_header().unwrap(),
+            )
+            .header("content-type", "application/json")
+            .body(serde_json::to_vec(&request).unwrap())
+            .send()
+            .unwrap();
+        assert!(response.status().is_success());
+        drop(response);
+    } else {
+        drop(
+            host.owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .execute_attached(&client.bootstrap.auth, request),
+        );
+    }
+    let owner = host.owner.upgrade().unwrap();
+    let owner = owner.lock().unwrap();
+    accepted(
+        owner
+            .foreground_reply
+            .as_ref()
+            .expect("C2_LOST_REPLY_RETAINED")
+            .3
+            .clone(),
+    )
+}
+
+fn assert_original_foreground(mut repeated: HostReply, original: &HostReply, marker: &str) {
+    repeated.status = original.status.clone();
+    assert_eq!(
+        serde_json::to_value(repeated).unwrap(),
+        serde_json::to_value(original).unwrap(),
+        "{marker}"
+    );
+}
+
+#[test]
+fn s3_fix2_same_subject_detach_preserves_lost_grant() {
+    for over_http in [false, true] {
+        let (_temp, host, _refs) = fixture();
+        let editor = host
+            .attach(
+                "shared-subject".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("a".repeat(64));
+        let command = HostCommand::AcquireManual {
+            client: editor.editor.clone().unwrap(),
+        };
+        let original = discard_foreground_reply(&host, &editor, command.clone(), 1, over_http);
+        assert!(original.manual_lease.is_some());
+        for role in [AttachmentRole::Viewer, AttachmentRole::Producer] {
+            for route in 0..3 {
+                let other = host
+                    .attach("shared-subject".into(), role, host.roots.clone())
+                    .unwrap();
+                let before = foreground_state(&host);
+                accepted(match route {
+                    0 => direct(&host, &other, HostCommand::Detach),
+                    1 => other.request(HostCommand::Detach).unwrap(),
+                    _ => mcp(&other, HostCommand::Detach).unwrap(),
+                });
+                assert_eq!(
+                    foreground_state(&host),
+                    before,
+                    "C2_SAME_SUBJECT_DETACH_UNCHANGED: {role:?}, route {route}"
+                );
+                let repeated = accepted(foreground_request(
+                    &host,
+                    &editor,
+                    command.clone(),
+                    Some(1),
+                    over_http,
+                ));
+                assert_eq!(
+                    repeated.manual_lease, original.manual_lease,
+                    "C2_ORIGINAL_GRANT_REPLAY"
+                );
+                assert_original_foreground(repeated, &original, "C2_ORIGINAL_GRANT_PAYLOAD");
+            }
+        }
+        let second = host
+            .attach(
+                "shared-subject".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor(editor.editor.clone().unwrap());
+        let before = foreground_state(&host);
+        let denied = foreground_request(&host, &second, command.clone(), Some(1), over_http);
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code.as_str()),
+            Some("operation_changed"),
+            "C2_SAME_CLIENT_OTHER_INSTANCE_REFUSED"
+        );
+        assert_eq!(foreground_state(&host), before);
+        let snapshot =
+            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        assert!(
+            accepted(foreground_request(
+                &host,
+                &editor,
+                HostCommand::Save { snapshot },
+                Some(2),
+                over_http
+            ))
+            .saved
+            .is_some()
+        );
+    }
+}
+
+#[test]
+fn s3_fix2_unnumbered_lease_guards_empty_slot() {
+    for over_http in [false, true] {
+        let (temp, host, _refs) = fixture();
+        let editor = host.client().with_manual_editor("a".repeat(64));
+        let other = host
+            .attach(
+                "other-editor".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("b".repeat(64));
+        let original = accepted(foreground_request(
+            &host,
+            &editor,
+            HostCommand::AcquireManual {
+                client: editor.editor.clone().unwrap(),
+            },
+            None,
+            over_http,
+        ));
+        assert!(
+            host.owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .foreground_reply
+                .is_none()
+        );
+        let before = foreground_state(&host);
+        let forged = editor.with_manual_editor(other.editor.clone().unwrap());
+        let denied = foreground_request(&host, &forged, HostCommand::Status, Some(1), over_http);
+        assert_eq!(
+            denied.error.as_ref().map(|e| e.code.as_str()),
+            Some("manual_busy"),
+            "C2_LEASE_CLIENT_GUARD"
+        );
+        assert_eq!(
+            foreground_state(&host),
+            before,
+            "C2_LEASE_REFUSAL_SLOT_BYTES"
+        );
+        let snapshot =
+            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        for command in [
+            HostCommand::Status,
+            HostCommand::Save {
+                snapshot: snapshot.clone(),
+            },
+        ] {
+            let denied = foreground_request(&host, &other, command, Some(1), over_http);
+            assert_eq!(
+                denied.error.as_ref().map(|e| e.code.as_str()),
+                Some("manual_busy"),
+                "C2_NONOWNER_LEASE_REFUSED"
+            );
+            assert_eq!(
+                foreground_state(&host),
+                before,
+                "C2_NONOWNER_SLOT_UNCHANGED"
+            );
+        }
+        let path = temp.path("chosen.wav");
+        std::fs::write(
+            &path,
+            kinewright_media::test_support::wav_f32(
+                &vec![0.25; 4800].into_boxed_slice(),
+                48_000,
+                1,
+            ),
+        )
+        .unwrap();
+        let same_client = other.with_manual_editor(editor.editor.clone().unwrap());
+        let denied = foreground_request(
+            &host,
+            &same_client,
+            HostCommand::PrepareOwnedMedia {
+                client: editor.editor.clone().unwrap(),
+                path,
+                asset_id: kinewright_core::AssetId(1),
+                snapshot: snapshot.clone(),
+            },
+            None,
+            over_http,
+        );
+        assert_eq!(
+            denied.error.as_ref().map(|error| error.code.as_str()),
+            Some("operation_changed"),
+            "C2_LEASE_RENEWAL_INSTANCE"
+        );
+        assert_eq!(foreground_state(&host), before, "C2_RENEWAL_SLOT_UNCHANGED");
+        assert!(
+            accepted(foreground_request(
+                &host,
+                &editor,
+                HostCommand::Save { snapshot },
+                Some(1),
+                over_http
+            ))
+            .saved
+            .is_some()
+        );
+        assert_eq!(
+            host.owner.upgrade().unwrap().lock().unwrap().manual,
+            original.manual_lease
+        );
+    }
+}
+
+#[test]
+fn s3_fix2_detach_reattach_replays_lost_save() {
+    for over_http in [false, true] {
+        let (_temp, host, _refs) = fixture();
+        let editor = host
+            .attach(
+                "shared-subject".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("a".repeat(64));
+        let lease = accepted(foreground_request(
+            &host,
+            &editor,
+            HostCommand::AcquireManual {
+                client: editor.editor.clone().unwrap(),
+            },
+            Some(1),
+            over_http,
+        ))
+        .manual_lease
+        .unwrap();
+        let snapshot =
+            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        let command = HostCommand::Save { snapshot };
+        let original = discard_foreground_reply(&host, &editor, command.clone(), 2, over_http);
+        assert!(original.saved.is_some());
+        let root = host
+            .owner
+            .upgrade()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .owner()
+            .unwrap()
+            .root_sha256()
+            .unwrap();
+        accepted(if over_http {
+            mcp(&editor, HostCommand::Detach).unwrap()
+        } else {
+            direct(&host, &editor, HostCommand::Detach)
+        });
+        {
+            let owner = host.owner.upgrade().unwrap();
+            let owner = owner.lock().unwrap();
+            assert!(
+                owner
+                    .foreground_owner
+                    .as_ref()
+                    .unwrap()
+                    .attachment
+                    .is_none()
+            );
+            assert_eq!(owner.manual.as_ref(), Some(&lease));
+            assert_eq!(
+                serde_json::to_value(
+                    &owner
+                        .foreground_reply
+                        .as_ref()
+                        .expect("C2_DETACH_RETAINS_SAVE")
+                        .3
+                )
+                .unwrap(),
+                serde_json::to_value(&original).unwrap(),
+                "C2_DETACH_RETAINS_SAVE"
+            );
+        }
+        let other = host
+            .attach(
+                "shared-subject".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("b".repeat(64));
+        let before = foreground_state(&host);
+        for command in [
+            HostCommand::Status,
+            HostCommand::AcquireManual {
+                client: other.editor.clone().unwrap(),
+            },
+        ] {
+            let denied = foreground_request(&host, &other, command, Some(3), over_http);
+            assert_eq!(
+                denied.error.as_ref().map(|e| e.code.as_str()),
+                Some("manual_busy"),
+                "C2_DETACHED_LEASE_PROTECTED"
+            );
+            assert_eq!(foreground_state(&host), before);
+        }
+        let resumed = host
+            .attach(
+                "shared-subject".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor(editor.editor.clone().unwrap());
+        accepted(foreground_request(
+            &host,
+            &resumed,
+            HostCommand::Status,
+            None,
+            over_http,
+        ));
+        {
+            let owner = host.owner.upgrade().unwrap();
+            let owner = owner.lock().unwrap();
+            let index = owner
+                .resolve_attachment(Some(&resumed.bootstrap.auth.bearer()))
+                .unwrap();
+            assert_eq!(
+                owner.foreground_owner.as_ref().unwrap().attachment,
+                Some(owner.attachments[index].id),
+                "C2_UNNUMBERED_REATTACH_BINDS"
+            );
+        }
+        let repeated = accepted(foreground_request(
+            &host,
+            &resumed,
+            command,
+            Some(2),
+            over_http,
+        ));
+        assert_original_foreground(repeated, &original, "C2_REATTACH_ORIGINAL_SAVE");
+        assert_eq!(
+            host.owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .owner()
+                .unwrap()
+                .root_sha256()
+                .unwrap(),
+            root,
+            "C2_REATTACH_DOES_NOT_SAVE_TWICE"
+        );
+        let before = foreground_state(&host);
+        let same_client = other.with_manual_editor(resumed.editor.clone().unwrap());
+        let denied =
+            foreground_request(&host, &same_client, HostCommand::Status, Some(3), over_http);
+        assert_eq!(
+            denied.error.as_ref().map(|e| e.code.as_str()),
+            Some("operation_changed"),
+            "C2_REATTACHED_INSTANCE_EXCLUSIVE"
+        );
+        assert_eq!(foreground_state(&host), before);
+        assert_eq!(
+            host.owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .manual
+                .as_ref(),
+            Some(&lease)
+        );
+    }
+}
+
+#[test]
+fn s3_fix2_no_lease_acquisition_preempts_non_authority_slot() {
+    for over_http in [false, true] {
+        let (_temp, host, _refs) = fixture();
+        let first = host.client().with_manual_editor("a".repeat(64));
+        accepted(foreground_request(
+            &host,
+            &first,
+            HostCommand::Status,
+            Some(99),
+            over_http,
+        ));
+        assert!(
+            host.owner
+                .upgrade()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .manual
+                .is_none()
+        );
+        let second = host
+            .attach(
+                "second-editor".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("b".repeat(64));
+        let grant = foreground_request(
+            &host,
+            &second,
+            HostCommand::AcquireManual {
+                client: second.editor.clone().unwrap(),
+            },
+            Some(1),
+            over_http,
+        );
+        assert!(
+            grant.error.is_none()
+                && grant
+                    .manual_lease
+                    .as_ref()
+                    .is_some_and(|lease| Some(&lease.client) == second.editor.as_ref()),
+            "C2_NO_LEASE_ACQUIRE_PREEMPTS: {:?}",
+            grant.error
+        );
+        let snapshot =
+            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        assert!(
+            accepted(foreground_request(
+                &host,
+                &second,
+                HostCommand::Save { snapshot },
+                Some(2),
+                over_http
+            ))
+            .saved
+            .is_some()
+        );
+    }
+}
+
+#[test]
+fn s3_fix2_no_lease_reads_and_refusals_cannot_replace_slot() {
+    for over_http in [false, true] {
+        let (_temp, host, _refs) = fixture();
+        let first = host.client().with_manual_editor("a".repeat(64));
+        let original = accepted(foreground_request(
+            &host,
+            &first,
+            HostCommand::Status,
+            Some(1),
+            over_http,
+        ));
+        let other = host
+            .attach(
+                "other-editor".into(),
+                AttachmentRole::Editor,
+                host.roots.clone(),
+            )
+            .unwrap()
+            .with_manual_editor("b".repeat(64));
+        let before = foreground_state(&host);
+        let denied = foreground_request(&host, &other, HostCommand::Status, Some(1), over_http);
+        assert_eq!(
+            denied.error.as_ref().map(|e| e.code.as_str()),
+            Some("operation_changed"),
+            "C2_NO_LEASE_READ_CANNOT_PREEMPT"
+        );
+        assert_eq!(foreground_state(&host), before);
+        let denied = foreground_request(
+            &host,
+            &other,
+            HostCommand::AcquireManual {
+                client: first.editor.clone().unwrap(),
+            },
+            Some(2),
+            over_http,
+        );
+        assert_eq!(
+            denied.error.as_ref().map(|e| e.code.as_str()),
+            Some("manual_client"),
+            "C2_OPERATION_COMMAND_CLIENT_BOUND"
+        );
+        assert_eq!(foreground_state(&host), before);
+        let mut snapshot =
+            HostSnapshot::capture(host.owner.upgrade().unwrap().lock().unwrap().core()).unwrap();
+        snapshot.history_sha256 = "0".repeat(64);
+        let denied = foreground_request(
+            &host,
+            &first,
+            HostCommand::Save { snapshot },
+            Some(2),
+            over_http,
+        );
+        assert_eq!(
+            denied.error.as_ref().map(|e| e.code.as_str()),
+            Some("history_changed")
+        );
+        assert_eq!(foreground_state(&host), before, "C2_REFUSAL_NOT_CACHED");
+        let repeated = accepted(foreground_request(
+            &host,
+            &first,
+            HostCommand::Status,
+            Some(1),
+            over_http,
+        ));
+        assert_original_foreground(repeated, &original, "C2_NO_LEASE_ORIGINAL_REPLY");
     }
 }
 

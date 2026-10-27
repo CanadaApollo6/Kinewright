@@ -210,8 +210,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/auth.rs",
-        "                if self.foreground_subject.as_deref() == Some(removed.subject.as_str()) {\n                    self.foreground_reply = None;\n                    self.foreground_subject = None;\n                }\n",
-        "                let _ = removed;\n"
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                let _ = removed;"
       ]
     ],
     "package": "kinewright-agent",
@@ -227,8 +227,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/auth.rs",
-        "                if self.foreground_subject.as_deref() == Some(removed.subject.as_str()) {\n                    self.foreground_reply = None;\n                    self.foreground_subject = None;\n                }\n",
-        "                let _ = removed;\n"
+        "                if let Some(owner) = &mut self.foreground_owner\n                    && owner.attachment == Some(removed.id)\n                {\n                    if self.manual.is_some() {\n                        owner.attachment = None;\n                    } else {\n                        self.foreground_reply = None;\n                        self.foreground_owner = None;\n                    }\n                }",
+        "                let _ = removed;"
       ]
     ],
     "package": "kinewright-agent",

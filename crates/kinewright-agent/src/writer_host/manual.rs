@@ -7,6 +7,12 @@ use kinewright_project::{
     manual_history::{AcceptedManualCommand, ManualLease},
     receipts::ReceiptLookup,
 };
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(super) struct ForegroundOwner {
+    pub attachment: Option<super::auth::AttachmentId>,
+    pub client: String,
+}
 pub(super) fn connector_command(command: &HostCommand) -> bool {
     matches!(
         command,
@@ -31,6 +37,48 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
     )
 }
 impl HostCommandOwner {
+    pub(super) fn operation_client<'a>(
+        &self,
+        command: &HostCommand,
+        editor: Option<&'a str>,
+    ) -> Result<&'a str, HostError> {
+        let client = editor
+            .filter(|client| (32..=128).contains(&client.len()))
+            .ok_or_else(|| {
+                HostRefusal::new("manual_client", "private GUI operation identity required")
+            })?;
+        if self
+            .manual
+            .as_ref()
+            .is_some_and(|lease| lease.client != client)
+        {
+            return Err(HostRefusal::new(
+                "manual_busy",
+                "foreground operation belongs to the active manual lease client",
+            )
+            .into());
+        }
+        let command_client = match command {
+            HostCommand::AcquireManual { client }
+            | HostCommand::CommitHistory { client, .. }
+            | HostCommand::PrepareOwnedMedia { client, .. }
+            | HostCommand::PrepareMediaInterpretation { client, .. }
+            | HostCommand::BeginRecovery { client, .. }
+            | HostCommand::ConfirmSwitch { client, .. } => Some(client.as_str()),
+            HostCommand::PublishBarrier { barrier }
+            | HostCommand::ConfirmBarrier { barrier, .. } => Some(barrier.client.as_str()),
+            _ => None,
+        };
+        if command_client.is_some_and(|expected| expected != client) {
+            return Err(HostRefusal::new(
+                "manual_client",
+                "command and foreground operation must use the same client",
+            )
+            .into());
+        }
+        Ok(client)
+    }
+
     pub(super) fn execute_operation(
         &mut self,
         command: HostCommand,
@@ -42,13 +90,13 @@ impl HostCommandOwner {
             return self.execute_client(command, roots, editor);
         };
         let checked = (|| -> Result<_, HostError> {
-            let client = editor
-                .filter(|client| (32..=128).contains(&client.len()))
-                .ok_or_else(|| {
-                    HostRefusal::new("manual_client", "private GUI operation identity required")
-                })?;
+            let client = self.operation_client(&command, editor)?;
             let digest = kinewright_media::sha256_bytes(&serde_json::to_vec(&(&command, &roots))?);
-            if let Some((previous_client, previous, payload, reply)) = &self.foreground_reply {
+            let acquiring =
+                self.manual.is_none() && matches!(command, HostCommand::AcquireManual { .. });
+            if !acquiring
+                && let Some((previous_client, previous, payload, reply)) = &self.foreground_reply
+            {
                 if previous_client != client
                     || operation < *previous
                     || (operation == *previous && *payload != digest)
@@ -82,9 +130,9 @@ impl HostCommandOwner {
             return reply;
         }
         let reply = self.execute_client(command, roots, editor);
-        // A single serialized GUI request is outstanding. Heartbeats and manual
-        // publications cannot evict its result, including across an authority change.
-        self.foreground_reply = Some((client, operation, digest, reply.clone()));
+        if reply.error.is_none() {
+            self.foreground_reply = Some((client, operation, digest, reply.clone()));
+        }
         reply
     }
 

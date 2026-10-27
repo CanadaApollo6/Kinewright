@@ -1,0 +1,104 @@
+[
+  {
+    "gate": "build",
+    "exit": 0,
+    "command": "cargo_locked build --workspace",
+    "log_sha256": "9a64fd3a567b181ba1ad41f10a46dfa96ef9fc656ec7b4ea270423684258385c",
+    "summary": [],
+    "status": "passed"
+  },
+  {
+    "gate": "clippy",
+    "exit": 0,
+    "command": "cargo_locked clippy --workspace --all-targets -- -D warnings",
+    "log_sha256": "a7f09dafb315e3f8c6ecd20c1026c1f7eb7215a3f2a459043761f82d4003db01",
+    "summary": [],
+    "status": "passed"
+  },
+  {
+    "gate": "fmt",
+    "exit": 0,
+    "command": "cargo_locked fmt -- --check",
+    "log_sha256": "57928f24b8b74f20cc02999fbe7c489d639cf5062a0906b90fae7e2676af5d73",
+    "summary": [],
+    "status": "passed"
+  },
+  {
+    "gate": "focused",
+    "exit": 0,
+    "command": "cargo_locked test -p kinewright-agent --lib writer_host::ja_s3_host::s3_fix2_ -- --test-threads=1",
+    "log_sha256": "35fa26224d86dfad0644c0a60611b7ce023821082252ebc880f3ce7823221608",
+    "summary": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 717 filtered out; finished in 5.17s"
+    ],
+    "status": "passed"
+  },
+  {
+    "gate": "host",
+    "exit": 0,
+    "command": "cargo_locked test -p kinewright-agent --lib writer_host:: -- --test-threads=1",
+    "log_sha256": "87e89736426fc35508694fbd54f17c51fc6cbd60c9fe621283c400f5c123c617",
+    "summary": [
+      "test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 654 filtered out; finished in 126.22s"
+    ],
+    "status": "passed"
+  },
+  {
+    "gate": "app",
+    "exit": 0,
+    "command": "cargo_locked test -p kinewright-app --bin kinewright-app ja1_attachment::tests:: -- --test-threads=1",
+    "log_sha256": "6bf48d9021e7b0d3157e919b57a795042d1a38a357536cff380a7a0291d3dd3f",
+    "summary": [
+      "test result: ok. 81 passed; 0 failed; 1 ignored; 0 measured; 814 filtered out; finished in 321.28s"
+    ],
+    "status": "passed"
+  },
+  {
+    "gate": "agent-architecture",
+    "exit": 0,
+    "command": "cargo_locked test -p kinewright-agent --lib in2_the_agent_crate_has_one_agent_event_loop -- --test-threads=1",
+    "log_sha256": "6c4445159509abc9866ad6f9746697d035a46b97a0a7f9aabfeda7b329380c4a",
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.02s"
+    ],
+    "status": "passed"
+  },
+  {
+    "gate": "app-architecture",
+    "exit": 0,
+    "command": "cargo_locked test -p kinewright-app --bin kinewright-app in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call -- --test-threads=1",
+    "log_sha256": "084cefa00a5c67846baa03ddff72c8b36789612eb28db8d7c50f95a01468fbad",
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 0.02s"
+    ],
+    "status": "passed"
+  },
+  {
+    "gate": "source-guard",
+    "exit": 0,
+    "command": "cargo_locked test -p kinewright-media --lib au6_fixtures::au6_declared_test_names_exist_in_their_source_files -- --exact --test-threads=1",
+    "log_sha256": "63228e25e254baa1ab73846bc0e7904c819fac071e53d34dda8e3d071954be0d",
+    "summary": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1225 filtered out; finished in 0.88s"
+    ],
+    "status": "passed"
+  },
+  {
+    "gate": "slow-lint",
+    "exit": 0,
+    "command": "nice -n 19 python3 -I scripts/slow_tests.py lint",
+    "log_sha256": "9dfc06e54182995b0fa6e028c51cb41a2cf2226c9c49ea135056a8639ed7cea3",
+    "summary": [
+      "slow-test manifest and markers agree: 89 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 56 allowlist entries well-formed"
+    ],
+    "status": "passed"
+  },
+  {
+    "gate": "windows",
+    "exit": 101,
+    "command": "cargo_locked check -p kinewright-agent -p kinewright-app --target x86_64-pc-windows-msvc",
+    "log_sha256": "408eab4628279a410ab14083c1f3f18f1a1b424a9808524392e04cce59ce7b62",
+    "summary": [],
+    "status": "blocked in native dependencies before touched code"
+  }
+]

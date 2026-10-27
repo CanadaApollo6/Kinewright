@@ -1,0 +1,213 @@
+{
+  "total": 12,
+  "new": 7,
+  "rerun": 5,
+  "all_source_and_selector_hashes_match": true,
+  "baseline_manifest_sha256": "dc03d061d077d5a89eb53f0b5812eb660c275f52fc1791d8275d3c9fa4b54e86",
+  "rows": [
+    {
+      "name": "fix1-foreground-editor-guard-http",
+      "new": false,
+      "witness": "writer_host::ja_s3_host::s3_foreground_replay_rejects_non_editor_http_before_lease",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C1_FOREGROUND_ROLE_REFUSED: forged-viewer, editor length 32",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.31s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.74s"
+      ],
+      "record_sha256": "b7c7799083e201416fa9a64d7a9e83c03fad0f404c61710f12b97ff25d15cd06"
+    },
+    {
+      "name": "fix1-foreground-editor-guard-direct",
+      "new": false,
+      "witness": "writer_host::ja_s3_host::s3_foreground_replay_rejects_non_editor_direct_before_lease",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C1_FOREGROUND_ROLE_REFUSED: forged-viewer, editor length 32",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.29s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.36s"
+      ],
+      "record_sha256": "f3cf9ed28f04d29ec2313d72418f4ea66720098cc4a0e1598bb77a4dbb17d9c5"
+    },
+    {
+      "name": "fix1-foreground-detach-only_owned_slot",
+      "new": false,
+      "witness": "writer_host::ja_s3_host::s3_foreground_replay_detach_clears_only_owned_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C1_FOREGROUND_DETACH_CLEARS_OWNED_SLOT",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.23s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.08s"
+      ],
+      "record_sha256": "3078117eb2c573b4720818e0e8ec4d74af7c1ccf15f21a40fb9fe6e4053847c8"
+    },
+    {
+      "name": "fix1-foreground-detach-stale_non_editor_slot",
+      "new": false,
+      "witness": "writer_host::ja_s3_host::s3_foreground_replay_detach_clears_stale_non_editor_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C1_FOREGROUND_DETACH_CLEARS_STALE_NON_EDITOR_SLOT: stale-viewer",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.23s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.95s"
+      ],
+      "record_sha256": "a553b984dd8cc52e19b736199a6d7f9ed56ade5a7dfa6522d574e8722947b10c"
+    },
+    {
+      "name": "fix2-lease-client-guard",
+      "new": true,
+      "witness": "writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C2_LEASE_CLIENT_GUARD",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.35s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.04s"
+      ],
+      "record_sha256": "75d452c1f14eb67d6a7b3e8539b4c10fcf936760d72d5f2bfea48776c5537cc8"
+    },
+    {
+      "name": "fix2-detach-subject-alias",
+      "new": true,
+      "witness": "writer_host::ja_s3_host::s3_fix2_same_subject_detach_preserves_lost_grant",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C2_SAME_SUBJECT_DETACH_UNCHANGED: Viewer, route 0",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.35s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.29s"
+      ],
+      "record_sha256": "00b345b47a7952fced66a4ad894ffcfded55293cd53f8141c90872c743dfc9df"
+    },
+    {
+      "name": "fix2-refusals-not-cached",
+      "new": true,
+      "witness": "writer_host::ja_s3_host::s3_fix2_no_lease_reads_and_refusals_cannot_replace_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C2_REFUSAL_NOT_CACHED",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.24s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.59s"
+      ],
+      "record_sha256": "35ad8c2f5716cd5abfcadd9a1dc4ad87bdfcb5b534e910b9185c99b05c3745b3"
+    },
+    {
+      "name": "fix2-retain-lease-replay-on-detach",
+      "new": true,
+      "witness": "writer_host::ja_s3_host::s3_fix2_detach_reattach_replays_lost_save",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "C2_DETACH_RETAINS_SAVE",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.42s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.03s"
+      ],
+      "record_sha256": "9a1f04b6196ac83ba6422a79be20209d881cd617c4abf75fcbf80e0604cd6f36"
+    },
+    {
+      "name": "fix2-no-lease-acquire-preemption",
+      "new": true,
+      "witness": "writer_host::ja_s3_host::s3_fix2_no_lease_acquisition_preempts_non_authority_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "C2_NO_LEASE_ACQUIRE_PREEMPTS: Some(HostRefusal { code: \"operation_changed\", message: \"foreground reply belongs to another attachment instance\", native_code: None })",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.24s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.92s"
+      ],
+      "record_sha256": "c4c252e097334d0b8b9c2ed715a4d9c340ebd0cc3b43e7c0456cb6c97379bad5"
+    },
+    {
+      "name": "fix2-unnumbered-renewal-instance",
+      "new": true,
+      "witness": "writer_host::ja_s3_host::s3_fix2_unnumbered_lease_guards_empty_slot",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C2_LEASE_RENEWAL_INSTANCE",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.48s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.07s"
+      ],
+      "record_sha256": "327c3e6e381e374c435cf91178a7a30726250f5724ce0835c4eec5792bf9641b"
+    },
+    {
+      "name": "c1-foreground-subject-before-replay",
+      "new": false,
+      "witness": "writer_host::ja_s3_host::s3_foreground_replay_is_attachment_subject_bound",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "C1_FOREGROUND_SUBJECT_REPLAY",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.40s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.43s"
+      ],
+      "record_sha256": "e39c21dea0d8c55ccdcd69e8bd35a8e103a73412f114756a437062d053d40c15"
+    },
+    {
+      "name": "fix2-unnumbered-reattach-binds",
+      "new": true,
+      "witness": "writer_host::ja_s3_host::s3_fix2_detach_reattach_replays_lost_save",
+      "red_exit": 101,
+      "green_exit": 0,
+      "accepted": true,
+      "restored": true,
+      "red_assertion": "assertion `left == right` failed: C2_UNNUMBERED_REATTACH_BINDS",
+      "red_summary": [
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 721 filtered out; finished in 0.44s"
+      ],
+      "green_summary": [
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 721 filtered out; finished in 1.08s"
+      ],
+      "record_sha256": "046ef150632d2c38c00dc6006daf6bd30fe4a70af1c2aee16651bf8569e1ef08"
+    }
+  ]
+}

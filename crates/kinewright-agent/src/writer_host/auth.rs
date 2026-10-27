@@ -63,10 +63,18 @@ impl<'de> Deserialize<'de> for HostAuth {
 
 pub(super) const ATTACHMENT_CAPACITY: usize = 64;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(super) struct AttachmentId(u64);
+
 pub(super) struct Attachment {
+    pub id: AttachmentId,
     pub auth: HostAuth,
     pub incarnation: String,
     pub project: String,
+    #[allow(
+        dead_code,
+        reason = "subject provenance is retained, never used as foreground authority"
+    )]
     pub subject: String,
     pub role: super::AttachmentRole,
     pub roots: SessionRoots,
@@ -153,7 +161,13 @@ impl super::HostCommandOwner {
         }
         let roots = roots.canonicalize()?;
         Self::check_narrowed_roots(&self.config.roots, &roots)?;
+        let next = self.next_attachment_id.checked_add(1).ok_or_else(|| {
+            HostRefusal::new("attachment_capacity", "attachment identifiers exhausted")
+        })?;
+        let id = AttachmentId(self.next_attachment_id);
+        self.next_attachment_id = next;
         self.attachments.push(Attachment {
+            id,
             auth,
             incarnation: self.instance.clone(),
             project: self.config.project.clone(),
@@ -228,6 +242,24 @@ impl super::HostCommandOwner {
                 )
                 .into());
             }
+            if request.operation.is_some() {
+                let client = self.operation_client(&request.command, request.editor.as_deref())?;
+                if let Some(owner) = &self.foreground_owner {
+                    let permitted = if self.manual.is_some() {
+                        owner.attachment.is_none() || owner.attachment == Some(grant.id)
+                    } else {
+                        (owner.attachment == Some(grant.id) && owner.client == client)
+                            || matches!(request.command, super::HostCommand::AcquireManual { .. })
+                    };
+                    if !permitted {
+                        return Err(HostRefusal::new(
+                            "operation_changed",
+                            "foreground reply belongs to another attachment instance",
+                        )
+                        .into());
+                    }
+                }
+            }
             if !grant.permits(&request.command) {
                 return Err(HostRefusal::new(
                     "role_refused",
@@ -263,19 +295,29 @@ impl super::HostCommandOwner {
                 command_roots.read.push(parent.canonicalize()?);
             }
             Self::check_narrowed_roots(&command_roots, &roots)?;
-            if request.operation.is_some()
-                && self.foreground_reply.is_some()
-                && self.foreground_subject.as_deref() != Some(grant.subject.as_str())
+            if request.operation.is_none()
+                && self.manual.is_some()
+                && matches!(
+                    request.command,
+                    super::HostCommand::ConfirmSwitch { .. }
+                        | super::HostCommand::PrepareOwnedMedia { .. }
+                        | super::HostCommand::PrepareMediaInterpretation { .. }
+                        | super::HostCommand::ConfirmBarrier { .. }
+                )
+                && self
+                    .foreground_owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.attachment.is_some_and(|id| id != grant.id))
             {
                 return Err(HostRefusal::new(
                     "operation_changed",
-                    "foreground reply belongs to another attachment subject",
+                    "manual lease renewal belongs to another attachment instance",
                 )
                 .into());
             }
-            Ok((index, grant.subject.clone(), roots))
+            Ok((index, grant.id, roots))
         })();
-        let (index, subject, roots) = match checked {
+        let (index, attachment, roots) = match checked {
             Ok(value) => value,
             Err(error) => {
                 return super::HostReply {
@@ -296,18 +338,50 @@ impl super::HostCommandOwner {
         if let Some(pin) = self.pending_read_pin.take() {
             self.attachments[index].read_pins.push(pin);
         }
-        if operation.is_some() && self.foreground_reply.is_some() {
-            self.foreground_subject = Some(subject);
-        }
         if reply.error.is_none() {
+            if let Some(lease) = &reply.manual_lease {
+                if operation.is_none() {
+                    self.foreground_reply = None;
+                }
+                self.foreground_owner = Some(super::manual::ForegroundOwner {
+                    attachment: Some(attachment),
+                    client: lease.client.clone(),
+                });
+            } else if operation.is_some()
+                && let Some((client, _, _, _)) = &self.foreground_reply
+            {
+                self.foreground_owner = Some(super::manual::ForegroundOwner {
+                    attachment: Some(attachment),
+                    client: client.clone(),
+                });
+            } else if !detach
+                && self.attachments[index].role == super::AttachmentRole::Editor
+                && let Some(lease) = &self.manual
+                && request.editor.as_deref() == Some(lease.client.as_str())
+                && self
+                    .foreground_owner
+                    .as_ref()
+                    .is_none_or(|owner| owner.attachment.is_none())
+            {
+                self.foreground_owner = Some(super::manual::ForegroundOwner {
+                    attachment: Some(attachment),
+                    client: lease.client.clone(),
+                });
+            }
             if admit {
                 self.attachments[index].roots = reply.status.admitted_roots.clone();
             }
             if detach {
                 let removed = self.attachments.remove(index);
-                if self.foreground_subject.as_deref() == Some(removed.subject.as_str()) {
-                    self.foreground_reply = None;
-                    self.foreground_subject = None;
+                if let Some(owner) = &mut self.foreground_owner
+                    && owner.attachment == Some(removed.id)
+                {
+                    if self.manual.is_some() {
+                        owner.attachment = None;
+                    } else {
+                        self.foreground_reply = None;
+                        self.foreground_owner = None;
+                    }
                 }
             }
         }

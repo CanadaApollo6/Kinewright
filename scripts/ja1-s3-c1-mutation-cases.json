@@ -402,8 +402,8 @@
     "changes": [
       [
         "crates/kinewright-agent/src/writer_host/auth.rs",
-        "&& self.foreground_subject.as_deref() != Some(grant.subject.as_str())",
-        "&& false && self.foreground_subject.as_deref() != Some(grant.subject.as_str())"
+        "                    if !permitted {",
+        "                    if false && !permitted {"
       ]
     ],
     "package": "kinewright-agent",

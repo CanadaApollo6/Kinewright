@@ -1037,9 +1037,10 @@ impl BorrowedSourceReader for RemoteSource {
 )]
 pub struct HostCommandOwner {
     attachments: Vec<auth::Attachment>,
+    next_attachment_id: u64,
     #[cfg(test)]
     dispatches: u64,
-    foreground_subject: Option<String>,
+    foreground_owner: Option<manual::ForegroundOwner>,
     pending_read_pin: Option<kinewright_project::store::StorePin>,
     prepared_owned_media: Option<kinewright_project::owned_inputs::PreparedOwnedMedia>,
     confirmed_switch: Option<switch::SwitchConfirmation>,
@@ -1177,9 +1178,10 @@ impl HostCommandOwner {
         }
         let mut host = Self {
             attachments: Vec::new(),
+            next_attachment_id: 1,
             #[cfg(test)]
             dispatches: 0,
-            foreground_subject: None,
+            foreground_owner: None,
             pending_read_pin: None,
             prepared_owned_media: None,
             pending_switch: None,
