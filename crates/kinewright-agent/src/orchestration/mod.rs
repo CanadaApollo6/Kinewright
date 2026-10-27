@@ -1,4 +1,5 @@
-//! Studio's isolated C1 kernel. No provider execution or project publication.
+//! Studio kernel, scoped task lifecycle, and guardian receiving ports.
+//! H1/H3 and native C2 integration are required before production execution.
 //!
 //! Rust adaptation of <https://github.com/pingdotgg/t3code> at
 //! 5d91ab1117ad51ef1288a94717d85c70e7af09fe, apps/server/src/orchestration-v2/
@@ -18,8 +19,12 @@ pub mod orchestration_commit;
 #[path = "../../../kinewright-project/src/orchestration_records.rs"]
 pub mod orchestration_records;
 
+pub mod adapters;
 pub mod machine;
+pub mod mailbox;
 pub mod outbox;
+pub mod policy;
+pub mod tasks;
 
 /// The complete upstream MIT notice is retained in the shipping agent library.
 pub const T3CODE_MIT_NOTICE: &str = include_str!("../../../../LICENSES/t3code-MIT.txt");

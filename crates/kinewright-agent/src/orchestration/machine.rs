@@ -46,9 +46,7 @@ impl Kernel {
         envelope: &OrchestrationEnvelope,
         previous_segment: Option<super::bundle_records::ObjectRef>,
     ) -> Result<&ValidatedRunUpdate, Refusal> {
-        if self.uncertain || self.pending.is_some() {
-            return Err(Refusal::PublicationUnknown);
-        }
+        self.require_available()?;
         let next = prepare(
             self.acknowledged.as_ref(),
             project,
@@ -58,6 +56,34 @@ impl Kernel {
         )?;
         self.pending = Some(next);
         self.pending.as_ref().ok_or(Refusal::InvalidState)
+    }
+
+    /// H1 has staged the typed result whose reference is included in this same cut.
+    pub fn propose_result(
+        &mut self,
+        project: &super::bundle_records::ProjectId,
+        generation: u64,
+        envelope: &OrchestrationEnvelope,
+        previous_segment: Option<super::bundle_records::ObjectRef>,
+        result: super::bundle_records::ObjectRef,
+    ) -> Result<&ValidatedRunUpdate, Refusal> {
+        self.require_available()?;
+        let state = self.acknowledged.as_ref().ok_or(Refusal::InvalidState)?;
+        self.pending = Some(super::mailbox::prepare_result_update(
+            state,
+            project,
+            generation,
+            envelope,
+            previous_segment,
+            result,
+        )?);
+        self.pending.as_ref().ok_or(Refusal::InvalidState)
+    }
+    fn require_available(&self) -> Result<(), Refusal> {
+        if self.uncertain || self.pending.is_some() {
+            return Err(Refusal::PublicationUnknown);
+        }
+        Ok(())
     }
 
     pub fn publication_unknown(&mut self) -> Result<(), Refusal> {
@@ -91,6 +117,7 @@ impl Kernel {
 pub enum Transition {
     Start,
     Control(RunAction),
+    Task(super::tasks::TaskTransition),
     Refused(RecordedRefusal),
 }
 
@@ -114,7 +141,10 @@ pub fn decide(
             }
             Ok(Transition::Control(intent.action.clone()))
         }
-        // C3/C4 add task, merge and live-request authority. C1 cannot execute them.
+        (Some(state), command) => Ok(super::tasks::decide_task(state, command)?.map_or(
+            Transition::Refused(RecordedRefusal::Unsupported),
+            Transition::Task,
+        )),
         _ => Ok(Transition::Refused(RecordedRefusal::Unsupported)),
     }
 }
@@ -220,6 +250,11 @@ pub fn prepare(
                 RunAction::Continue => next.phase = RunPhase::Queued,
                 RunAction::SendMessage { .. } => return Err(Refusal::Unsupported),
             }
+            next.control_revision = revision;
+            CommandDecision::Applied
+        }
+        Transition::Task(task) => {
+            super::tasks::apply_task_transition(&mut next, envelope, task)?;
             next.control_revision = revision;
             CommandDecision::Applied
         }

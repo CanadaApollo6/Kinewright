@@ -1,7 +1,8 @@
 //! Isolated kernel and guardian-admission contracts, not durable H1 acceptance.
 //! Rust adaptation of <https://github.com/pingdotgg/t3code> at
 //! 5d91ab1117ad51ef1288a94717d85c70e7af09fe, apps/server/src/orchestration-v2/
-//! {Orchestrator,EffectOutbox,EffectWorker}.ts. Notice: LICENSES/t3code-MIT.txt.
+//! {Orchestrator,EffectOutbox,EffectWorker,NotificationMailbox}.ts.
+//! Notice: LICENSES/t3code-MIT.txt.
 //! Kinewright adds original-envelope checks and opaque attempt reservation proof.
 #![allow(
     dead_code,
@@ -165,6 +166,16 @@ fn s4_unknown_publication_freezes_original_envelope_contract() {
         kernel.propose(&envelope.project, 20, &envelope, None),
         Err(Refusal::PublicationUnknown)
     ));
+    assert!(matches!(
+        kernel.propose_result(
+            &envelope.project,
+            20,
+            &envelope,
+            None,
+            reference(99, RecordKind::RunIndex)
+        ),
+        Err(Refusal::PublicationUnknown)
+    ));
     let mut wrong = receipt.clone();
     wrong.cut_digest = "f".repeat(64);
     assert_eq!(kernel.acknowledge(&wrong), Err(Refusal::ScopeConflict));
@@ -296,6 +307,7 @@ fn s4_durable_before_commit_attempt_contract() {
         orchestration::acknowledge_attempt_reservation(&denied, denied.receipt(), &identity)
             .is_err()
     );
+    check_guardian_injection(admitted);
     let encoded = serde_json::to_vec(&identity).unwrap();
     assert!(encoded.len() < 1024);
     assert_eq!(
@@ -378,4 +390,177 @@ fn s4_stop_retains_cleanup_and_never_continues_failed_work_contract() {
         ),
         Err(Refusal::InvalidState)
     ));
+}
+
+fn check_guardian_injection(attempt: orchestration::AdmittedAttempt) {
+    use kinewright_core::{AgentDriver, SessionConfig};
+    use orchestration::adapters::*;
+    struct Launcher(
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        ExecutionIdentity,
+    );
+    impl GuardianLauncher for Launcher {
+        fn launch(
+            &self,
+            attempt: orchestration::AdmittedAttempt,
+            profile: CertifiedConnectorProfile,
+        ) -> Result<ContainedSession, LaunchError> {
+            assert_eq!(attempt.identity(), &self.1);
+            assert_eq!(profile.selection().connector, "scripted");
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(LaunchError("fixture containment refused".into()))
+        }
+    }
+    let cfg = SessionConfig {
+        model: Some("fixture".into()),
+        ..SessionConfig::default()
+    };
+    let profile = CertifiedConnectorProfile::fixture(
+        ProviderSelectionRecord {
+            connector: "scripted".into(),
+            model: "fixture".into(),
+            options: vec![],
+        },
+        cfg.clone(),
+    );
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let identity = attempt.identity().clone();
+    let scripted = kinewright_agent::ScriptedDriver::new(vec![]);
+    let driver = ContainedDriver::new(
+        Launcher(calls.clone(), identity),
+        attempt,
+        profile,
+        scripted.detect().unwrap(),
+    );
+    let mut wrong = cfg.clone();
+    wrong.model = Some("other".into());
+    assert!(driver.start_session(wrong).is_err());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(driver.start_session(cfg.clone()).is_err());
+    assert!(driver.start_session(cfg).is_err());
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "no retry or uncontained fallback after consuming a reservation"
+    );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one complete proposed assignment/freeze/result/delivery cut oracle"
+)]
+fn s4_task_assignment_and_frozen_result_delivery_share_a_cut() {
+    let initial = envelope();
+    let initial_cut = start(&initial);
+    let mut assignment = initial.clone();
+    assignment.id.sequence += 1;
+    assignment.expected_generation += 1;
+    let mut brief = initial_cut.projection().tasks[0].brief.clone();
+    brief.role = Role::Editor;
+    assignment.command = OrchestrationCommand::AssignTask(Box::new(AssignTask {
+        run: initial_cut.projection().run.clone(),
+        parent: initial_cut.projection().tasks[0].id.clone(),
+        brief,
+    }));
+    assignment.digest = assignment.computed_digest().unwrap();
+    let assigned = machine::prepare(
+        Some(initial_cut.projection()),
+        &assignment.project,
+        assignment.expected_generation,
+        &assignment,
+        Some(reference(90, RecordKind::RunIndex)),
+    )
+    .unwrap();
+    let mut state = assigned.projection().clone();
+    let child = state.tasks[1].id.clone();
+    state.tasks[1].state = TaskState::Running(id(91));
+    let mut freezing = assignment.clone();
+    freezing.id.sequence += 1;
+    freezing.expected_generation += 1;
+    freezing.command = OrchestrationCommand::FreezeTask(child.clone());
+    freezing.digest = freezing.computed_digest().unwrap();
+    let frozen = machine::prepare(
+        Some(&state),
+        &freezing.project,
+        freezing.expected_generation,
+        &freezing,
+        Some(reference(92, RecordKind::RunIndex)),
+    )
+    .unwrap();
+    let task_result = TaskResult {
+        outcome: AttemptOutcome::Completed,
+        base: Some(state.tasks[1].brief.scope.base.clone()),
+        head: Some(state.tasks[1].brief.scope.base.clone()),
+        delta_ref: Some(reference(93, RecordKind::SpecialistBase)),
+        artifacts: vec![],
+        evidence: vec![],
+        usage_ref: reference(94, RecordKind::RunIndex),
+        explanation: reference(95, RecordKind::OwnedData),
+    };
+    let bytes = encoded(
+        &OrchestrationRecord {
+            version: 1,
+            payload: OrchestrationPayload::Result(Box::new(task_result.clone())),
+        },
+        CONTROL_BYTES,
+    )
+    .unwrap();
+    let result = ObjectRef {
+        sha256: kinewright_media::sha256_bytes(&bytes),
+        byte_length: bytes.len() as u64,
+        record_kind: RecordKind::RunIndex,
+    };
+    let mut publish = freezing.clone();
+    publish.id.sequence += 1;
+    publish.expected_generation += 1;
+    publish.command = OrchestrationCommand::PublishResult(Box::new(PublishResult {
+        task: child.clone(),
+        result: task_result,
+    }));
+    publish.digest = publish.computed_digest().unwrap();
+    let mut wrong_result = result.clone();
+    wrong_result.sha256 = "f".repeat(64);
+    assert!(
+        orchestration::mailbox::result_and_delivery(frozen.projection(), &publish, wrong_result)
+            .is_err()
+    );
+    let proposed = orchestration::mailbox::prepare_result_update(
+        frozen.projection(),
+        &publish.project,
+        publish.expected_generation,
+        &publish,
+        Some(reference(96, RecordKind::RunIndex)),
+        result.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        proposed.projection().sequence,
+        frozen.projection().sequence + 1
+    );
+    assert!(proposed.dependencies().contains(&result));
+    let next =
+        orchestration::mailbox::result_and_delivery(frozen.projection(), &publish, result.clone())
+            .unwrap();
+    assert_eq!(frozen.projection().results.len(), 0);
+    assert_eq!(next.tasks[1].state, TaskState::Terminal(result.clone()));
+    assert_eq!(next.results, vec![result.clone()]);
+    assert_eq!(next.deliveries[0].result, result);
+    assert_eq!(next.deliveries[0].state, DeliveryState::Pending);
+    assert_eq!(next.effects.last().unwrap().payload, next.results[0]);
+    assert_eq!(next.effects.last().unwrap().task, next.tasks[0].id);
+    assert_eq!(next.effects.last().unwrap().state, EffectState::Pending);
+    assert_eq!(
+        orchestration::mailbox::result_and_delivery(
+            frozen.projection(),
+            &publish,
+            next.results[0].clone()
+        )
+        .unwrap(),
+        next
+    );
+    assert!(
+        orchestration::mailbox::result_and_delivery(&next, &publish, next.results[0].clone())
+            .is_err()
+    );
 }

@@ -1177,6 +1177,7 @@ struct KinewrightMcp {
     /// unchanged.
     served_tool_allowlist: Option<&'static [&'static str]>,
     host_scoped: bool,
+    task_endpoint: Option<crate::orchestration::tasks::TaskEndpoint>,
 }
 
 impl KinewrightMcp {
@@ -1230,7 +1231,15 @@ impl KinewrightMcp {
             investigator: None,
             served_tool_allowlist: None,
             host_scoped: false,
+            task_endpoint: None,
         }
+    }
+
+    /// H3 supplies an endpoint narrowed from the current resolved Producer.
+    #[allow(dead_code, reason = "H3 owns the production scoped-server constructor")]
+    fn with_task_endpoint(mut self, endpoint: crate::orchestration::tasks::TaskEndpoint) -> Self {
+        self.task_endpoint = Some(endpoint);
+        self
     }
 
     /// The same handler, refusing every capability in `denylist` through
@@ -1313,6 +1322,17 @@ impl KinewrightMcp {
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
+        let _task_admission = if let Some(endpoint) = &self.task_endpoint {
+            if !endpoint.matches_core(&self.core) {
+                return Ok(error_text("task_scope: endpoint/Core identity mismatch"));
+            }
+            match endpoint.admit() {
+                Ok(guard) => Some(guard),
+                Err(error) => return Ok(error_text(error)),
+            }
+        } else {
+            None
+        };
         if self.host_scoped && !host_scoped_tool_admitted(&request) {
             return Ok(error_text(
                 "root_refused: this file/media operation requires an identity-pinned input/output capability; forwarded path strings alone do not authorize filesystem IO",
@@ -1329,6 +1349,11 @@ impl KinewrightMcp {
 
     #[allow(clippy::too_many_lines)]
     fn call_blocking(&self, request: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+        if let Some(endpoint) = &self.task_endpoint
+            && let Err(error) = endpoint.admit_capability(request.name.as_ref())
+        {
+            return Ok(error_text(error));
+        }
         let arguments = request.arguments.unwrap_or_default();
         match request.name.as_ref() {
             "search_capabilities" => {
@@ -2376,6 +2401,15 @@ impl KinewrightMcp {
             _ => None,
         };
         let before = self.snapshot().ok();
+        if let Some(endpoint) = &self.task_endpoint {
+            let Some((_, document)) = &before else {
+                return error_text("task_scope: missing snapshot");
+            };
+            if let Err(error) = endpoint.validate_batch(document, std::slice::from_ref(&operation))
+            {
+                return error_text(error);
+            }
+        }
         match self.core.request(Command::DoIfRevision {
             expected: expected_revision,
             operation,
@@ -2428,6 +2462,11 @@ impl KinewrightMcp {
         if expected_revision != actual_revision {
             return Ok(revision_conflict_text(expected_revision, actual_revision));
         }
+        if let Some(endpoint) = &self.task_endpoint
+            && let Err(error) = endpoint.validate_batch(&before, operations)
+        {
+            return Ok(error_text(error));
+        }
         if let Err(error) = self.ensure_verified_patched_sources(&before, operations) {
             return Ok(error_text(error));
         }
@@ -2461,6 +2500,11 @@ impl KinewrightMcp {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        if let Some(endpoint) = &self.task_endpoint
+            && let Err(error) = endpoint.check_live()
+        {
+            return Ok(error_text(error));
+        }
         let event = self
             .core
             .request(Command::DoBatchIfRevision {
@@ -8821,6 +8865,9 @@ impl KinewrightMcp {
         document: &Document,
         operations: Vec<Operation>,
     ) -> Result<PreparedEditPlan, String> {
+        if let Some(endpoint) = &self.task_endpoint {
+            endpoint.validate_batch(document, &operations)?;
+        }
         self.ensure_verified_patched_sources(document, &operations)?;
         self.prepared_plans
             .lock()
@@ -9984,6 +10031,11 @@ impl KinewrightMcp {
                 ));
             }
         };
+        if let Some(endpoint) = &self.task_endpoint
+            && let Err(error) = endpoint.validate_batch(&document, &plan.operations)
+        {
+            return Ok(error_text(error));
+        }
         let operations = serde_json::to_value(&plan.operations)
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         match crate::motion::motion_response(&plan, operations) {
@@ -36027,4 +36079,5 @@ mod tests {
         let override_runtime = build_server_runtime(Some(1));
         assert_eq!(override_runtime.metrics().num_workers(), 1);
     }
+    include!("orchestration/server_tests.rs");
 }

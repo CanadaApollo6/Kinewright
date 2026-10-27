@@ -105,3 +105,5 @@ ja_baseline native_app_bridge_rejects_abnormal_exit_after_completed_report crate
 ja_s1 s2_additive_app_fixture_observes_real_controls crates/kinewright-agent/tests/ja_s1.rs linux on-demand  # Requires JA_HARNESS_APP_TEST_BINARY; C6 gate explicitly includes it
 
 ja_s2_host c11_switch_gui_participant crates/kinewright-agent/tests/ja_s2_host.rs linux on-demand  # C11 private process helper; its matrix explicitly launches it
+
+kinewright_agent server::tests::s4_editor_result_to_candidate crates/kinewright-agent/src/orchestration/server_tests.rs linux inherited-gap  # H3 resolved attachment dispatch and C2 contained connector integration are not merged
