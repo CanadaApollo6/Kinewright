@@ -309,6 +309,11 @@ class PartialParse(unittest.TestCase):
             ),
             "test a::b ... ok",
         )
+        # Linux run 40486022371: h264's lowercase reference-list warning glued to `ok`.
+        self.assertEqual(
+            st.strip_ffmpeg_log("test a::b ... [h264 @ 0x7f75681b1440] okmmco: unref short failure"),
+            "test a::b ... ok",
+        )
         # Windows run 39009547685: both prefixes before `test`, the message glued to `ok`.
         self.assertEqual(
             st.strip_ffmpeg_log(

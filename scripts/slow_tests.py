@@ -83,8 +83,9 @@ FFMPEG_PROBE_ADVICE = re.compile(
     r"Consider increasing the value for the 'analyzeduration' \(\d+\) and 'probesize' \(\d+\) options"
 )
 OUTCOME = re.compile(r"^(?:ok|FAILED|ignored)")
-# FFmpeg's lowercase "deprecated pixel format used" warning can also glue on (Windows run 39003986680).
-GLUED_MESSAGE = re.compile(r"[A-Z]|deprecated pixel format used")
+# FFmpeg's lowercase "deprecated pixel format used" warning can also glue on (Windows run 39003986680),
+# as can h264's lowercase "mmco: unref short failure" (Linux run 40486022371).
+GLUED_MESSAGE = re.compile(r"[A-Z]|deprecated pixel format used|mmco: ")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 
