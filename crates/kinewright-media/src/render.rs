@@ -760,6 +760,10 @@ impl FrameRenderer {
         self.compositor.upload_available()
     }
 
+    pub(crate) fn po0_clear_thumbnail_cache(&mut self) {
+        self.video_sources.clear();
+        self.source_order.clear();
+    }
     pub(crate) fn clear(&mut self) -> CacheStats {
         let stats = self.cache_stats();
         self.compositor.clear_residency();
@@ -999,6 +1003,9 @@ impl FrameRenderer {
         let result = self
             .decoded_layers(document, at, resolution, scale, video)
             .and_then(|decoded| {
+                if let Some(layer) = decoded.first() {
+                    crate::po0_light::observe(document, at, &layer.frame);
+                }
                 self.compositor
                     .render_display(
                         resolution,

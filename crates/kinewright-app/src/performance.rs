@@ -28,6 +28,8 @@ struct Report {
     ui_median_ms: Option<f64>,
     ui_p95_ms: Option<f64>,
     ui_max_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    motion: Option<serde_json::Value>,
 }
 
 impl PerformanceProbe {
@@ -37,7 +39,14 @@ impl PerformanceProbe {
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(10)
-            .clamp(3, 300);
+            .clamp(
+                3,
+                if crate::motion_probe::enabled() {
+                    590
+                } else {
+                    300
+                },
+            );
         Some(Self {
             started,
             output: output.into(),
@@ -51,7 +60,13 @@ impl PerformanceProbe {
 
     /// Measures elapsed time spent building the UI, excluding GPU presentation.
     /// The first two seconds are warmup. The deadline requests a clean exit.
-    pub(crate) fn frame(&mut self, ctx: &egui::Context, began: Instant, preview: bool) -> bool {
+    pub(crate) fn frame(
+        &mut self,
+        ctx: &egui::Context,
+        began: Instant,
+        preview: bool,
+        motion: Option<(&crate::motion_probe::Probe, kinewright_core::PlaybackStats)>,
+    ) -> bool {
         if self.finished {
             return true;
         }
@@ -65,7 +80,7 @@ impl PerformanceProbe {
         if elapsed >= Duration::from_secs(2) && self.samples.len() < 100_000 {
             self.samples.push(began.elapsed().as_secs_f64() * 1_000.0);
         }
-        if elapsed < self.duration {
+        if elapsed < self.duration && motion.is_none_or(|(probe, _)| !probe.finished()) {
             // Only schedule the deadline: do not turn an idle measurement into
             // a continuously repainting workload.
             ctx.request_repaint_after(self.duration.saturating_sub(elapsed));
@@ -73,7 +88,7 @@ impl PerformanceProbe {
         }
         self.samples.sort_by(f64::total_cmp);
         let report = Report {
-            schema_version: 1,
+            schema_version: if motion.is_some() { 2 } else { 1 },
             first_ui_ms: self.first_ui_ms,
             first_preview_ms: self.first_preview_ms,
             elapsed_seconds: elapsed.as_secs_f64(),
@@ -81,6 +96,7 @@ impl PerformanceProbe {
             ui_median_ms: percentile(&self.samples, 50),
             ui_p95_ms: percentile(&self.samples, 95),
             ui_max_ms: self.samples.last().copied(),
+            motion: motion.map(|(probe, stats)| probe.report(stats)),
         };
         match serde_json::to_vec_pretty(&report)
             .map_err(|error| error.to_string())

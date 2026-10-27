@@ -42,6 +42,7 @@ mod muse;
 /// Studio command kernel. Persistence remains disabled until the S3 H1 handoff.
 pub mod orchestration;
 mod pacing;
+pub mod po0_probe;
 mod protocol;
 mod render;
 mod runtime;

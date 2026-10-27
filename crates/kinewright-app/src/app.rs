@@ -308,9 +308,9 @@ fn router_apply_accepted(
 pub(crate) type UiReply = Box<dyn FnOnce(&mut KinewrightApp, &egui::Context) + Send>;
 
 pub(crate) struct NativeDisplay {
-    session: kinewright_media::DisplaySession,
-    renderer: eframe::egui_wgpu::RenderState,
-    picture: Option<(egui::TextureId, egui::Vec2)>,
+    pub(crate) session: kinewright_media::DisplaySession,
+    pub(crate) renderer: eframe::egui_wgpu::RenderState,
+    pub(crate) picture: Option<(egui::TextureId, egui::Vec2)>,
 }
 impl NativeDisplay {
     fn clear(&mut self) {
@@ -543,6 +543,7 @@ pub(crate) struct KinewrightApp {
     /// Whether the held card reported itself during the previous frame.
     pub(crate) look_ab_hold_seen: bool,
     performance: Option<crate::performance::PerformanceProbe>,
+    pub(crate) motion_probe: Option<crate::motion_probe::Probe>,
 }
 
 impl KinewrightApp {
@@ -606,6 +607,7 @@ impl KinewrightApp {
                 String::new(),
             ),
         };
+        let document = crate::motion_probe::document(&media, document);
         let frames = media.frames();
         let media_events = media.events();
         let visual_cache = crate::visual_cache::VisualCache::new(media.visual_asset_results());
@@ -801,6 +803,7 @@ impl KinewrightApp {
             look_ab_hold: None,
             look_ab_hold_seen: false,
             performance: None,
+            motion_probe: None,
         };
         app.publish_focused_lut_library();
         app.playback
@@ -3322,6 +3325,9 @@ impl KinewrightApp {
                 }
                 MediaEvent::StampedError(stamp, _) if !stamp.is_current(self.playback.stamp()) => {}
                 MediaEvent::Error(error) | MediaEvent::StampedError(_, error) => {
+                    if let Some(probe) = &mut self.motion_probe {
+                        probe.worker_failure(error.to_string());
+                    }
                     self.playing = false;
                     self.pending_resume = None;
                     let revision = self.focused().revision;
@@ -3389,6 +3395,9 @@ impl KinewrightApp {
             return;
         };
         (self.playback).ack_presented(ack.stamp, ack.at, ack.painted, ack.expired);
+        if let Some(probe) = &mut self.motion_probe {
+            probe.acknowledge(epoch, ack);
+        }
         if let Some((since, target)) = self.pending_resume
             && ack.at == target
             && ack.stamp.seq >= since.seq
@@ -3426,7 +3435,7 @@ impl KinewrightApp {
     /// PF1 R-2: the last step of `ui`, after every transport call in the
     /// pass, binds the newest valid candidate and writes the display cell.
     #[allow(clippy::cast_precision_loss)]
-    fn finalize_preview(&mut self, ctx: &egui::Context) {
+    pub(crate) fn finalize_preview(&mut self, ctx: &egui::Context) {
         // Review A F2: the CPU image is prepared before the final stamp and
         // clock check; the cell and the texture then bind together. The
         // check and the binding cannot be one step against the free-running
@@ -3672,6 +3681,17 @@ impl eframe::App for KinewrightApp {
         if let Some(display) = &mut self.native_display {
             display.terminal();
         }
+        if self.motion_probe.is_some() {
+            if let Err(error) = self.lut_publisher.po0_drain() {
+                eprintln!("PO0 shutdown: {error}");
+            }
+            if let Some(display) = &self.native_display {
+                let _ = display.renderer.device.poll(eframe::wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(Duration::from_secs(2)),
+                });
+            }
+        }
     }
     /// PF1 R-5 (R17): a paint mark from an earlier root epoch is acked once
     /// per bound image.
@@ -3683,11 +3703,38 @@ impl eframe::App for KinewrightApp {
         self.acknowledge_paint(epoch);
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let measured_frame = self.performance.as_ref().map(|_| std::time::Instant::now());
         self.update_window_title(ui.ctx());
         self.handle_close_request(ui.ctx());
         self.poll_background(ui.ctx());
+        if let Some(mut probe) = self.motion_probe.take() {
+            probe.ui(self, ui);
+            self.finalize_preview(ui.ctx());
+            probe.observe(
+                self,
+                ui.ctx(),
+                frame.info().cpu_usage,
+                measured_frame.unwrap_or_else(std::time::Instant::now),
+            );
+            self.screenshot.update(ui.ctx());
+            self.motion_probe = Some(probe);
+            let picture_present = self.program_picture().is_some();
+            if let (Some(performance), Some(began)) = (&mut self.performance, measured_frame)
+                && performance.frame(
+                    ui.ctx(),
+                    began,
+                    picture_present,
+                    self.motion_probe
+                        .as_ref()
+                        .map(|probe| (probe, self.playback.stats())),
+                )
+            {
+                self.allow_close = true;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            return;
+        }
         self.keyboard_shortcuts(ui.ctx());
         self.import_dropped_files(ui.ctx());
         let outcome = self.projects.first_mut().map(|project| {
@@ -3739,7 +3786,7 @@ impl eframe::App for KinewrightApp {
         self.finalize_preview(ui.ctx());
         let picture_present = self.program_picture().is_some();
         if let (Some(probe), Some(began)) = (&mut self.performance, measured_frame)
-            && probe.frame(ui.ctx(), began, picture_present)
+            && probe.frame(ui.ctx(), began, picture_present, None)
         {
             self.allow_close = true;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -4401,9 +4448,32 @@ fn native_wgpu_configuration() -> eframe::WgpuConfiguration {
     let mut configuration = eframe::WgpuConfiguration::default();
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut configuration.wgpu_setup {
         setup.instance_descriptor.backends = eframe::wgpu::Backends::PRIMARY;
+        if crate::motion_probe::enabled() {
+            setup.native_adapter_selector = Some(Arc::new(|adapters, surface| {
+                let name = std::env::var("WGPU_ADAPTER_NAME")
+                    .unwrap_or_default()
+                    .to_lowercase();
+                let selected = adapters
+                    .iter()
+                    .find(|adapter| {
+                        adapter.get_info().name.to_lowercase().contains(&name)
+                            && surface.is_none_or(|surface| adapter.is_surface_supported(surface))
+                    })
+                    .cloned()
+                    .ok_or_else(|| format!("PO0 requested adapter unavailable: {name}"))?;
+                crate::motion_probe::surface_caps(&selected, surface);
+                Ok(selected)
+            }));
+        }
         setup.device_descriptor = Arc::new(|adapter| eframe::wgpu::DeviceDescriptor {
             label: Some("Kinewright shared native device"),
-            required_features: adapter.features() & eframe::wgpu::Features::TIMESTAMP_QUERY,
+            required_features: adapter.features()
+                & (eframe::wgpu::Features::TIMESTAMP_QUERY
+                    | if crate::motion_probe::enabled() {
+                        eframe::wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
+                    } else {
+                        eframe::wgpu::Features::empty()
+                    }),
             required_limits: compositor_required_limits(eframe::wgpu::Limits::default()),
             ..Default::default()
         });
@@ -4416,6 +4486,13 @@ pub(crate) fn run() -> eframe::Result {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
         .with_min_inner_size([size::WINDOW_MIN_WIDTH, size::WINDOW_MIN_HEIGHT]);
+    if crate::motion_probe::enabled() {
+        viewport = viewport
+            .with_fullscreen(true)
+            .with_position([0.0, 0.0])
+            .with_inner_size([2560.0, 1440.0])
+            .with_transparent(std::env::var_os("KINEWRIGHT_PROBE_ALPHA").is_some());
+    }
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -4444,7 +4521,11 @@ pub(crate) fn run() -> eframe::Result {
             );
             let repaint_context = creation_context.egui_ctx.clone();
             media.set_event_wakeup(move || repaint_context.request_repaint());
-            let startup = std::env::args().nth(1).map(PathBuf::from);
+            let startup = if crate::motion_probe::enabled() {
+                None
+            } else {
+                std::env::args().nth(1).map(PathBuf::from)
+            };
             let repaint_context = creation_context.egui_ctx.clone();
             let display = media.enable_display(kinewright_media::DisplayConfig {
                 premultiply: premultiply_table(),
@@ -4457,6 +4538,11 @@ pub(crate) fn run() -> eframe::Result {
                 picture: None,
             });
             app.performance = crate::performance::PerformanceProbe::from_environment(started);
+            app.motion_probe = crate::motion_probe::Probe::from_environment(render_state);
+            if app.motion_probe.is_some() {
+                app.allow_close = true;
+                app.playback.request_frame(TimeCode::ZERO);
+            }
             Ok(Box::new(app))
         }),
     )
@@ -4955,6 +5041,31 @@ fn write_noise_profile(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn po0_unset_keeps_normal_startup_without_motion_or_light() {
+        assert!(
+            !crate::motion_probe::enabled(),
+            "run app tests with the probe flag unset"
+        );
+        let media = std::sync::Arc::new(kinewright_media::FfmpegMediaEngine::new().expect("media"));
+        let mut app = super::KinewrightApp::new(std::sync::Arc::clone(&media), None);
+        assert!(app.motion_probe.is_none());
+        assert_eq!(*app.focused().document, super::default_project_document());
+        let ctx = eframe::egui::Context::default();
+        crate::theme::install(&ctx);
+        egui_extras::install_image_loaders(&ctx);
+        let _ = ctx.run_ui(eframe::egui::RawInput::default(), |ui| app.panel_layout(ui));
+        assert_eq!(crate::motion::requests(&ctx), 0);
+        assert!(
+            ctx.tex_manager()
+                .read()
+                .allocated()
+                .all(|(_, meta)| !meta.name.starts_with("PO0"))
+        );
+        super::in1_tests::in1_shutdown(&mut app);
+        super::in2b_tests::in2b_quiesce_engine(&media);
+    }
+
     #[test]
     fn native_renderer_excludes_the_unsupported_gl_backend() {
         let configuration = super::native_wgpu_configuration();
@@ -6397,6 +6508,7 @@ pub(crate) mod in1_tests {
             look_ab_hold: None,
             look_ab_hold_seen: false,
             performance: None,
+            motion_probe: None,
         };
         (app, engine)
     }
@@ -11549,6 +11661,7 @@ mod in2b_tests {
             look_ab_hold: None,
             look_ab_hold_seen: false,
             performance: None,
+            motion_probe: None,
         };
         (app, engine)
     }

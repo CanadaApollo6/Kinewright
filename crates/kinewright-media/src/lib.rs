@@ -20,6 +20,7 @@ mod frame;
 mod loudness;
 mod lut;
 mod lut_store;
+pub mod po0_light;
 mod preview;
 mod render;
 mod room_tone_store;

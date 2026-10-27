@@ -115,6 +115,13 @@ pub struct DisplaySession {
     last_rebind: Option<u64>,
 }
 impl DisplaySession {
+    /// The current borrowed image. Copy work must be submitted before rebinding.
+    #[must_use]
+    pub fn bound_image(&self) -> Option<(&wgpu::TextureView, TimeCode, FrameStamp)> {
+        self.bound
+            .as_ref()
+            .map(|frame| (&frame.view, frame.at, frame.stamp))
+    }
     #[must_use]
     pub fn timings(&self) -> Vec<DisplayTiming> {
         self.shared.lock().timing.drain(..).collect()

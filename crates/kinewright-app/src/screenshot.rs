@@ -46,7 +46,13 @@ impl ScreenshotCapture {
             let output = output.clone();
             self.output = None;
             match save_screenshot(&output, &image) {
-                Ok(()) => process::exit(0),
+                Ok(()) => {
+                    if crate::motion_probe::enabled() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    } else {
+                        process::exit(0);
+                    }
+                }
                 Err(error) => {
                     eprintln!("screenshot failed: {error}");
                     process::exit(1);

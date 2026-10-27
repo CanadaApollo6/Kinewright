@@ -327,6 +327,12 @@ enum Control {
     SetEventWakeup(Wakeup),
     /// PF1 R-1: the transport controls carry the stamp they were issued with.
     SetDocument(Arc<Document>, Issued),
+    Po0Version(Arc<Document>, Issued),
+    Po0Drain(Sender<()>),
+    Po0ClearThumbnails {
+        reply: Sender<Result<(), MediaError>>,
+        cancel: Arc<AtomicBool>,
+    },
     /// CC4 2.4: the engine's content-addressed lattice table gained entries,
     /// so the playback worker rebinds its document-local library. The library
     /// itself never crosses this channel: it is rebuilt from the worker's own
@@ -365,9 +371,10 @@ impl Control {
     /// A transport control's issuance, applied in index order (R-1).
     const fn issued(&self) -> Option<Issued> {
         match self {
-            Self::SetDocument(_, issued) | Self::Play(_, issued) | Self::Pause(issued) => {
-                Some(*issued)
-            }
+            Self::SetDocument(_, issued)
+            | Self::Po0Version(_, issued)
+            | Self::Play(_, issued)
+            | Self::Pause(issued) => Some(*issued),
             _ => None,
         }
     }
@@ -415,6 +422,76 @@ pub struct FfmpegMediaEngine {
 }
 
 impl FfmpegMediaEngine {
+    /// Switches only the probe's video while leaving the audio clock running.
+    ///
+    /// # Errors
+    /// Refuses use outside the probe or changes to the audio programme.
+    pub fn po0_switch_version(&self, doc: Arc<Document>) -> Result<(), MediaError> {
+        if std::env::var("KINEWRIGHT_MOTION_PROBE").as_deref() != Ok("1") {
+            return Err(MediaError::Backend("PO0 probe is disabled".into()));
+        }
+        let original = self
+            .export_document
+            .read()
+            .map_err(|error| MediaError::Backend(error.to_string()))?;
+        let audio = |document: &Document| {
+            document
+                .tracks
+                .iter()
+                .filter(|track| track.kind == kinewright_core::TrackKind::Audio)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if original.fps != doc.fps
+            || original.duration != doc.duration
+            || original.resolution != doc.resolution
+            || audio(&original) != audio(&doc)
+            || original.audio_mix != doc.audio_mix
+            || original.media_pool != doc.media_pool
+        {
+            return Err(MediaError::Backend(format!(
+                "PO0 version mismatch: fps {:?}/{:?}, duration {:?}/{:?}, raster {:?}/{:?}, audio {}, mix {}, assets {}",
+                original.fps,
+                doc.fps,
+                original.duration,
+                doc.duration,
+                original.resolution,
+                doc.resolution,
+                audio(&original) == audio(&doc),
+                original.audio_mix == doc.audio_mix,
+                original.media_pool == doc.media_pool
+            )));
+        }
+        drop(original);
+        let issued = self.coalesced().control();
+        self.send_issued(Control::Po0Version(doc, issued));
+        Ok(())
+    }
+    /// Clears only synchronous thumbnail decoders, leaving playback reader rings intact.
+    ///
+    /// # Errors
+    /// Refuses use outside the probe and returns the worker error.
+    pub fn po0_clear_thumbnails(&self) -> Result<(), MediaError> {
+        if std::env::var("KINEWRIGHT_MOTION_PROBE").as_deref() != Ok("1") {
+            return Err(MediaError::Backend("PO0 probe is disabled".into()));
+        }
+        self.agent_request(|reply, cancel| Control::Po0ClearThumbnails { reply, cancel })
+    }
+    /// Drains this probe's preview worker before eframe drops the shared GPU.
+    ///
+    /// # Errors
+    /// Returns a disconnected worker or a bounded shutdown timeout.
+    pub fn po0_drain(&self) -> Result<(), MediaError> {
+        if std::env::var("KINEWRIGHT_MOTION_PROBE").as_deref() != Ok("1") {
+            return Ok(());
+        }
+        let (tx, rx) = bounded(1);
+        self.control_tx
+            .send(Control::Po0Drain(tx))
+            .map_err(|error| MediaError::Backend(error.to_string()))?;
+        rx.recv_timeout(Duration::from_secs(10))
+            .map_err(|error| MediaError::Backend(error.to_string()))
+    }
     #[cfg(test)]
     pub(crate) fn s4_lane(&self) -> Arc<Lane> {
         Arc::clone(&self.lane)
@@ -2358,6 +2435,28 @@ impl Worker {
                 self.lane.set_wakeup(Arc::clone(&wakeup));
                 self.event_wakeup = Some(wakeup);
             }
+            Control::Po0Version(doc, issued) => {
+                self.take_requests_before(issued);
+                self.apply_control(issued);
+                self.document = doc;
+                self.generation += 1;
+                self.rebind_lut_library();
+                let at = self.clock.position();
+                if self.playing {
+                    self.post(JobKind::Playback { from: at }, issued.stamp);
+                } else {
+                    self.post_paused(at, issued.stamp);
+                }
+            }
+            Control::Po0ClearThumbnails { reply, cancel } => self.push_agent(AgentJob {
+                work: AgentWork::Po0ClearThumbnails { reply },
+                cancel,
+            }),
+            Control::Po0Drain(reply) => {
+                self.pause();
+                self.shut_down();
+                let _ = reply.try_send(());
+            }
             Control::SetDocument(doc, issued) => {
                 self.take_requests_before(issued);
                 self.apply_control(issued);
@@ -3014,6 +3113,11 @@ impl Worker {
 /// preview's transport renders use it; every other proxy keeps
 /// `PREVIEW_MAX_WIDTH`.
 pub(crate) fn monitor_max_width((width, height): (u32, u32)) -> u32 {
+    if (width, height) == (1920, 1080)
+        && std::env::var("KINEWRIGHT_MOTION_PROBE").as_deref() == Ok("1")
+    {
+        return 1920;
+    }
     let capped = u64::from(PREVIEW_MAX_WIDTH) * u64::from(width) / u64::from(height.max(1));
     u32::try_from(capped).map_or(PREVIEW_MAX_WIDTH, |capped| capped.min(PREVIEW_MAX_WIDTH))
 }

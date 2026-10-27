@@ -215,6 +215,9 @@ pub(crate) struct TransportJob {
 }
 
 pub(crate) enum AgentWork {
+    Po0ClearThumbnails {
+        reply: Sender<Result<(), MediaError>>,
+    },
     Thumbnail {
         document: Arc<Document>,
         lut: Arc<LutLibrary>,
@@ -243,6 +246,7 @@ impl AgentJob {
     /// Send `error` as this job's one reply.
     pub(crate) fn reply_error(self, error: MediaError) {
         match self.work {
+            AgentWork::Po0ClearThumbnails { reply } => drop(reply.send(Err(error))),
             AgentWork::Thumbnail { reply, .. } => drop(reply.send(Err(error))),
             AgentWork::CacheStats { reply, .. } => drop(reply.send(Err(error))),
             #[cfg(any(test, feature = "test-util"))]
@@ -2436,6 +2440,10 @@ impl Preview {
             hook();
         }
         match work {
+            AgentWork::Po0ClearThumbnails { reply } => {
+                self.renderer.po0_clear_thumbnail_cache();
+                self.reply(&cancel, &reply, Ok(()));
+            }
             AgentWork::Thumbnail {
                 document,
                 lut,

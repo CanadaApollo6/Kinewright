@@ -9,6 +9,7 @@ mod curve_editor_widget;
 mod edit_diff;
 mod error_ui;
 mod export_ui;
+mod grain;
 mod icons;
 mod incident_ui;
 mod inspector_ui;
@@ -18,13 +19,17 @@ mod ja1_chat;
 #[cfg(test)]
 mod ja_harness;
 mod keys;
+mod light;
 mod look_browser_ui;
 mod matte_overlay_ui;
 mod media_bin;
 mod media_workflow;
 mod mixer_pane_ui;
 mod mixer_ui;
+mod motion;
+mod motion_probe;
 mod performance;
+mod performance_gpu;
 mod presenter;
 mod preview_ui;
 mod project;
@@ -42,5 +47,8 @@ mod transport;
 mod visual_cache;
 
 fn main() -> eframe::Result {
+    if motion_probe::spring_report() {
+        return Ok(());
+    }
     app::run()
 }
