@@ -608,6 +608,12 @@ crate (moved logic), plan import/export. No Core change.
 
 ## 11. Branches, sub-agents, comparison sheet
 
+> **Revised direction (2026-10-27).** Riel has decided that Kinewright gets its own
+> orchestrator, ported to Rust from T3 Code's orchestration v2 (MIT). That replaces the
+> "harness concern" ruling and the rejected alternative below. See
+> `docs/PRODUCT-BRIEF-2026-10.md`, "How it works". The branch and comparison-sheet parts
+> still stand. The orchestrator's own design document will amend this section.
+
 **Recommendation (deciding the lead's open placement):**
 
 - **Branches stay M31 and gain a CLI surface in AW1.** `TimelineBranch`

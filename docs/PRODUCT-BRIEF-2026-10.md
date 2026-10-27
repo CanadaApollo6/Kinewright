@@ -79,8 +79,25 @@ fixes, so Riel never has to file a report.
     subscription Kinewright can drive (built-in connectors or ACP). The roles are
     editor, motion designer, audio engineer, colourist, and an independent reviewer
     that checks renders before Riel sees them.
+  - Two stage roles join them (2026-10-27, after Riverside's agents):
+    - a **producer**, before recording: the outline, shot list and recording setup;
+    - a **clipper and packager**, after the edit: the vertical reels and the publish
+      kit. It never uploads or schedules.
   - Specialists work on project branches; the lead merges their work.
   - The model for each role is configurable.
+  - **Each role is narrow.** It gets its own tools, instructions and model, and hands
+    back a defined result. Narrow roles are cheaper, easier to check, and can use
+    cheaper models where the job is simple.
+  - **One plan.** The lead owns the plan and the script. Specialists work from those,
+    never from each other's chat summaries, so handoffs do not lose context.
+  - **Clear ownership.** Each specialist owns one part of the edit (for example audio
+    or captions), so two specialists never edit the same thing. Branches and the
+    reviewer catch what slips through.
+  - **The orchestrator is a port of T3 Code's orchestration v2** (Riel, 2026-10-27:
+    it has been a step change in Riel's own productivity). T3 Code is MIT-licensed,
+    so the port keeps its attribution. It is rewritten in Rust; Kinewright never
+    bundles Node. This revises AW0 §11, which left orchestration to the external
+    agent app. Which parts to port is decided by a study first.
 - **Run style:**
   - The agent asks only what it cannot work out, shows a short plan (always for
     longer videos), then delivers a complete cut.
@@ -128,6 +145,10 @@ The epitome references are:
 - Good Work's videos.
 
 Other references: Theo Browne, Mo Bitar.
+
+Riverside's agents (riverside.com/agents) are the closest competitor for this job. They
+are built for conversations and talking-head videos, with a producer, an editor, a
+clipper and a marketer. The person directs and approves everything before it goes out.
 
 Standard elements:
 
