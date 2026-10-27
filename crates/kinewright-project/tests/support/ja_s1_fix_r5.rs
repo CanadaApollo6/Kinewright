@@ -136,7 +136,7 @@ fn pre_b5_object_uncertainty_releases_and_same_session_retries() {
         session.first_save_with_limits(&path, &core, &input, limits())
     })
     .unwrap();
-    assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
+    assert!(matches!(copy.status(), CopyStatus::CleanupPending { .. }));
     assert!(!path.exists());
     assert!(
         core.pending_history_save().unwrap().is_none(),
@@ -169,7 +169,7 @@ fn object_uncertainty_owner_drop_reopen_saves_without_losing_edits() {
         session.first_save_with_limits(&path, &core, &input, limits())
     })
     .unwrap();
-    assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
+    assert!(matches!(copy.status(), CopyStatus::CleanupPending { .. }));
     assert!(core.pending_history_save().unwrap().is_none());
     assert_eq!(core.export_history().unwrap(), before);
     assert!(io_observer::fail_path("directory_child_sync", &objects, || copy.reconcile()).is_err());
@@ -433,7 +433,11 @@ fn selected_floor_never_precedes_the_durable_floor() {
     owner.save(&core, &input).unwrap();
     let durable = core.export_history().unwrap();
     assert!(durable.floor_offset > 0);
-    core.restore_history(original).unwrap();
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(original)
+        .unwrap();
     // A larger cap would otherwise select the untrimmed cut below the durable floor.
     owner
         .restrict_limits_probe(StorageLimits::default())
@@ -529,7 +533,11 @@ fn ordinary_save_object_uncertainty_releases_then_new_owner_saves() {
         io_observer::fail_path("object_directory_sync", objects, || owner.reconcile()).is_err()
     );
     every_entry(&core, &before);
-    core.restore_history(before.clone()).unwrap();
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(before.clone())
+        .unwrap();
     drop(owner);
     let mut owner = reopen(&path);
     owner.save(&core, &input).unwrap();

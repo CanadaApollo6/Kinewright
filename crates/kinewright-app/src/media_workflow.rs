@@ -976,6 +976,12 @@ impl KinewrightApp {
     }
 
     fn start_relink_probe(&mut self, asset_id: AssetId, path: PathBuf) {
+        if self.focused().studio_host_managed() {
+            self.status =
+                "Relinking is unavailable in Studio until the replacement source can be admitted."
+                    .into();
+            return;
+        }
         let session_id = self.focused().id;
         let expected_revision = self.focused().revision;
         let media = Arc::clone(&self.analysis);
@@ -1225,9 +1231,14 @@ impl KinewrightApp {
                     );
                     return;
                 };
+                if self.projects[project_index].ja1_read_only() {
+                    self.status =
+                        "Source edit is paused while the Studio save or recovery is resolved."
+                            .into();
+                    return;
+                }
                 if self.projects[project_index]
-                    .core
-                    .send(Command::DoIfRevision {
+                    .send_manual_command(Command::DoIfRevision {
                         expected: intent.expected_revision,
                         operation: intent.operation,
                         // `IN1b` §4 rule 3: a foreign send, which does not
@@ -1448,6 +1459,14 @@ impl KinewrightApp {
         candidate: RelinkCandidate,
         allow_unverified_source: bool,
     ) {
+        if self.projects[project_index].studio_host_managed() {
+            self.status = "Relinking is unavailable in Studio until the replacement source can be admitted. Your current source is unchanged.".into();
+            return;
+        }
+        if self.projects[project_index].ja1_read_only() {
+            self.status = "Relinking is paused while the save or recovery is resolved.".into();
+            return;
+        }
         let project_name = self.projects[project_index].name.clone();
         if let Err(conflict) =
             validate_relink_revision(expected_revision, self.projects[project_index].revision)
@@ -1462,8 +1481,7 @@ impl KinewrightApp {
             allow_unverified_source,
         };
         if self.projects[project_index]
-            .core
-            .send(Command::DoIfRevision {
+            .send_manual_command(Command::DoIfRevision {
                 expected: expected_revision,
                 operation,
                 // `IN1b` §4 rule 3: this send does not correlate yet.
@@ -2071,6 +2089,11 @@ impl KinewrightApp {
 
     /// Parse, hash, and store one `.cube` on a named worker thread (CC4 §7).
     pub(crate) fn start_lut_import(&mut self, path: PathBuf, intent: LutImportIntent) {
+        if self.focused().studio_host_managed() {
+            self.status =
+                "Importing a look is unavailable in Studio until its bytes can be admitted.".into();
+            return;
+        }
         let Some(store) = self.focused().lut_store.clone() else {
             // Appendix B row 94: the store root is the project's.
             let reason = self
@@ -2176,6 +2199,14 @@ impl KinewrightApp {
         let Some(project_index) = session_index_by_id(response.session_id, &self.projects) else {
             return;
         };
+        if self.projects[project_index].studio_host_managed() {
+            self.status = "Importing a look is unavailable in Studio until its bytes can be admitted. Your current looks are unchanged.".into();
+            return;
+        }
+        if self.projects[project_index].ja1_read_only() {
+            self.status = "Look import is paused while the save or recovery is resolved.".into();
+            return;
+        }
         let import = match response.result {
             Ok(import) => import,
             // Appendix B row 99, amended by erratum `IN1b`-C-R52: the import
@@ -2229,8 +2260,7 @@ impl KinewrightApp {
             return;
         }
         if self.projects[project_index]
-            .core
-            .send(Command::DoBatch(batch.operations))
+            .send_manual_command(Command::DoBatch(batch.operations))
             .is_err()
         {
             // Appendix B row 102.
@@ -2921,6 +2951,221 @@ mod tests {
         assert!(proxy.persistence.contains("Unsupported"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one real host exercises deferred Source, relink, LUT, media placement and A/B restoration"
+    )]
+    fn s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects() {
+        use kinewright_project::{
+            bundle_records::{ObjectRef, RecordKind},
+            editing_session::Ja1EditingSession,
+            owned_inputs::{OwnedInputEntry, OwnedInputManifest},
+            storage_budget::StorageLimits,
+        };
+        let root = kinewright_media::test_support::workspace_target_dir();
+        let temp = TempDirectory::new_in(&root, "s2h-producers");
+        let media = asset(fingerprint(&"a".repeat(64), 4));
+        let mut av = media.clone();
+        av.id = AssetId(8);
+        av.kind = MediaKind::AudioVideo;
+        let mut still = media.clone();
+        still.id = AssetId(9);
+        still.kind = MediaKind::Image;
+        let solid = serde_json::from_value(serde_json::json!({
+            "id":10000,"asset":0,"source_range":{"start":0,"end":90},
+            "content":{"solid":{"r":20,"g":40,"b":60}},"timeline_start":0,
+            "effects":[{"id":1,"name":"color_wheels","enabled":true,"enabled_curve":null,"parameters":{"bypass":1},"keyframes":{}}],"transition_in":null
+        })).unwrap();
+        let document = Document {
+            duration: TimeCode(90),
+            media_pool: vec![media.clone(), av, still],
+            tracks: vec![
+                kinewright_core::Track {
+                    id: TrackId(1),
+                    kind: kinewright_core::TrackKind::Video,
+                    sync_lock: true,
+                    clips: vec![solid],
+                },
+                kinewright_core::Track {
+                    id: TrackId(2),
+                    kind: kinewright_core::TrackKind::Audio,
+                    sync_lock: true,
+                    clips: vec![],
+                },
+            ],
+            ..Document::default()
+        };
+        let (mut app, engine) = crate::app::in1_tests::in1_harness(document);
+        app.projects[0].recovery.stop_for_studio();
+        let core = app.projects[0].core.clone();
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        let bytes = b"test owned media; this is an admission witness, not decoder certification";
+        let object = ObjectRef {
+            sha256: kinewright_media::sha256_bytes(bytes),
+            byte_length: bytes.len() as u64,
+            record_kind: RecordKind::OwnedMedia,
+        };
+        let blob = owner
+            .source_mut()
+            .unwrap()
+            .store_mut()
+            .admit_blob(&mut &bytes[..], &object, &[])
+            .unwrap();
+        let source = owner.source_mut().unwrap();
+        let inputs = source
+            .admit_inputs(&OwnedInputManifest {
+                project_id: None,
+                session_id: Some(source.session_id().clone()),
+                owner_epoch: source.store().owner_epoch(),
+                entries: (7..=9)
+                    .map(|id| OwnedInputEntry {
+                        entry_id: format!("media:{id}"),
+                        object: object.clone(),
+                        dependencies: vec![],
+                        selected_stream: None,
+                        time_base: None,
+                        origin: None,
+                        profile: None,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        owner.set_unsaved_inputs(inputs.reference.clone()).unwrap();
+        let path = temp.path("a.kinewright");
+        owner.first_save(&path, StorageLimits::default()).unwrap();
+        drop(inputs);
+        drop(blob);
+        let mut attachment = crate::ja1_attachment::Ja1Attachment::new(owner).unwrap();
+        attachment
+            .launch_host(
+                "s2h-producers".into(),
+                kinewright_agent::writer_host::SessionRoots {
+                    read: vec![temp.root().into()],
+                    write: vec![temp.root().into()],
+                },
+            )
+            .unwrap();
+        app.projects[0].ja1 = Some(attachment);
+        app.projects[0].cue_source_asset(media.id);
+        app.projects[0].source_in = TimeCode(4);
+        app.projects[0].source_out = TimeCode(12);
+        let project = &app.projects[0];
+        let pending = PendingSourceEdit {
+            session_id: project.id,
+            request_id: 41,
+            asset_id: media.id,
+            path: media.path.clone(),
+            fingerprint: media.source_fingerprint.clone(),
+            expected_revision: project.revision,
+            selected_asset: project.selected_asset,
+            source_position: project.source_position,
+            timeline_in: project.position,
+            source_in: project.source_in,
+            source_out: project.source_out,
+            video_target: project.source_video_target,
+            audio_target: project.source_audio_target,
+            mode: ThreePointMode::Insert,
+        };
+        let response = edit_response(&pending, MediaAvailabilityKind::OnlineVerified);
+        app.pending_source_edit = Some(pending);
+        app.complete_pending_source_edit_revalidation(&response);
+        let after = core.export_history().unwrap();
+        assert_eq!(
+            after.batches.len(),
+            1,
+            "verified Source patch must pass the real manual permit"
+        );
+        assert_eq!(
+            app.projects[0]
+                .ja1
+                .as_ref()
+                .unwrap()
+                .manual_pending_for_test()
+                .unwrap()
+                .len(),
+            1
+        );
+        app.dispatch_relink(
+            0,
+            media.id,
+            app.projects[0].revision,
+            candidate(media.source_fingerprint.clone()),
+            false,
+        );
+        assert!(app.status.contains("Relinking is unavailable"));
+        assert_eq!(core.export_history().unwrap(), after);
+        app.start_relink_probe(media.id, temp.path("replacement.mov"));
+        assert_eq!(app.relink_probe_pending, 0);
+        let store = LutStore::for_project(&path).unwrap();
+        let cube = temp.path("look.cube");
+        std::fs::write(&cube, "TITLE \"Review look\"\nLUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n").unwrap();
+        let imported = store.import_lut_asset(&cube).unwrap();
+        app.projects[0].lut_store = Some(store.clone());
+        app.handle_lut_import_response(LutImportResponse {
+            session_id: app.projects[0].id,
+            path: temp.path("look.cube"),
+            intent: LutImportIntent::Apply {
+                clip: None,
+                stage: ColorStage::Look,
+            },
+            store,
+            result: Ok(imported),
+        });
+        assert!(app.status.contains("Importing a look is unavailable"));
+        assert!(app.lut_import_reservation.is_none());
+        assert_eq!(core.export_history().unwrap(), after);
+        app.start_lut_import(
+            temp.path("look.cube"),
+            LutImportIntent::Apply {
+                clip: None,
+                stage: ColorStage::Look,
+            },
+        );
+        assert_eq!(app.lut_worker_pending, 0);
+        let producer_events = core.subscribe().unwrap();
+        for (offset, id) in [7, 8, 9].into_iter().enumerate() {
+            crate::app::in1_tests::in1_drain_core(&mut app, 0);
+            app.add_asset_to_timeline_for(0, AssetId(id));
+            assert_eq!(
+                core.export_history().unwrap().batches.len(),
+                offset + 2,
+                "media placement must use its manual permit: {} {:?}",
+                app.status,
+                producer_events.try_iter().collect::<Vec<_>>()
+            );
+        }
+        app.look_ab_hold = Some(crate::inspector_ui::MirroredAbHold {
+            session: app.projects[0].id,
+            record: crate::inspector_ui::AbHoldRecord {
+                clip: ClipId(10000),
+                effect: EffectId(1),
+                restore: 0,
+            },
+        });
+        app.recover_stranded_ab_hold(&egui::Context::default());
+        assert_eq!(
+            core.export_history().unwrap().batches.len(),
+            5,
+            "stranded A/B restoration must use its manual permit"
+        );
+        assert_eq!(
+            core.export_history()
+                .unwrap()
+                .document
+                .clip(ClipId(10000))
+                .unwrap()
+                .effects[0]
+                .parameters["bypass"],
+            kinewright_core::ParamValue::Integer(0)
+        );
+        app.projects[0].ja1.as_mut().unwrap().close();
+        crate::app::in1_tests::in2_cleanup(&mut app);
+        drop(app);
+        drop(engine);
+    }
     fn sample_import() -> LutAssetImport {
         LutAssetImport {
             sha256: "a".repeat(64),

@@ -402,6 +402,20 @@ pub fn os_start_identity(pid: u32) -> Option<String> {
     }
 }
 
+/// Literal production phase; diagnostics and cleanup never infer root rollback.
+#[cfg(target_os = "linux")]
+pub(super) const fn publication_phase(
+    phase: kinewright_project::bundle::PublicationState,
+) -> &'static str {
+    use kinewright_project::bundle::PublicationState;
+    match phase {
+        PublicationState::NeverAttempted => "never_attempted",
+        PublicationState::DefinitelyRefused => "definitely_refused",
+        PublicationState::Unknown => "unknown",
+        PublicationState::Committed => "committed",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

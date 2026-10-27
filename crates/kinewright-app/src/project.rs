@@ -115,6 +115,9 @@ pub(crate) struct ProjectSession {
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) source_admission: kinewright_project::bundle::BundleWriteAdmission,
+    pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
+    pub(crate) ja1_job: Option<std::thread::JoinHandle<crate::ja1_attachment::Ja1Attachment>>,
+    pub(crate) retired_agent_threads: BTreeSet<u64>,
     /// The project-relative LUT store, derived from `project_path` at runtime
     /// and never serialized (CC4 §2.2). `None` for a project that has never
     /// been saved.
@@ -357,21 +360,32 @@ impl ProjectSession {
         let agent_harness = AgentHarnessChoice::ALL[0];
         let writable =
             source_admission.require_supported().is_ok() && !source_admission.is_studio();
+        // Open already resolved the source once. Claim and journal that identity,
+        // even if the original caller alias was repointed before session creation.
+        let io_project_path = source_admission.source().or(project_path.as_deref());
         let recovery = if !writable {
             Recovery::read_only()
         } else if id == 1 {
-            Recovery::start(&core, project_path.as_deref())
+            Recovery::start(&core, io_project_path)
         } else {
-            Recovery::start_attached(&core, project_path.as_deref())
+            Recovery::start_attached(&core, io_project_path)
         };
         let document = Arc::new(document);
-        let (lut_store, lut_store_error) = match derive_lut_store(project_path.as_deref()) {
-            Ok(store) => (store, None),
-            Err(reason) => (None, Some(reason)),
-        };
+        let writer_identity = recovery
+            .writer()
+            .map(|writer| writer.resolved_identity().to_path_buf());
+        let (lut_store, lut_store_error) =
+            match derive_lut_store(writer_identity.as_deref().or(project_path.as_deref())) {
+                Ok(store) => (store, None),
+                Err(reason) => (None, Some(reason)),
+            };
         let (library, statuses) = LutLibrary::build(&document.lut_assets, lut_store.as_ref());
-        let agent_project_path: ProjectPathHandle =
-            std::sync::Arc::new(std::sync::RwLock::new(project_path.clone()));
+        let agent_project_path: ProjectPathHandle = std::sync::Arc::new(std::sync::RwLock::new(
+            writer_identity
+                .as_deref()
+                .or(io_project_path)
+                .map(Path::to_path_buf),
+        ));
         // The wall origin is injected at session creation (`IN2B` §3 rule 14,
         // N1/B4, N-8): wall stamps derive at sidecar write as origin +
         // `opened_at`, and no other construction site passes one.
@@ -381,7 +395,7 @@ impl ProjectSession {
         // The open-time history load runs here, before any note and before
         // the log handle is shared with the first agent thread below (N4.1):
         // restore requires an empty log and no id may collide with it.
-        let loaded = SidecarSession::load(
+        let loaded = SidecarSession::load_owned(
             if writable {
                 sidecar_mode
             } else {
@@ -392,6 +406,7 @@ impl ProjectSession {
             TimelineRevision::default(),
             sidecar_writer,
             refuse_rename,
+            recovery.writer(),
         );
         // Restored ids snapshot before the session exists (`IN2B` §3 rules 9,
         // 11, 12, 17): the log holds only restored entries, so every entry
@@ -407,6 +422,9 @@ impl ProjectSession {
             revision: TimelineRevision::default(),
             project_path,
             source_admission,
+            ja1: None,
+            ja1_job: None,
+            retired_agent_threads: BTreeSet::new(),
             lut_store,
             lut_store_error,
             agent_project_path: std::sync::Arc::clone(&agent_project_path),
@@ -477,6 +495,12 @@ impl ProjectSession {
     /// Whether the project differs from the last save: the live document
     /// differs structurally, or the investigator mutes changed since the save.
     pub(crate) fn is_dirty(&self) -> bool {
+        if self.ja1_job.is_some() {
+            return true;
+        }
+        if let Some(ja1) = &self.ja1 {
+            return ja1.is_dirty();
+        }
         self.document_dirty()
             || self
                 .investigator
@@ -570,7 +594,20 @@ impl ProjectSession {
     /// for the branch servers a later thread creates from the same handle.
     pub(crate) fn publish_project_path_to_agents(&self) {
         if let Ok(mut slot) = self.agent_project_path.write() {
-            slot.clone_from(&self.project_path);
+            // Agent asset IO uses the admitted namespace, independently of the UI spelling.
+            *slot = self.project_path.as_ref().map(|display| {
+                self.ja1
+                    .as_ref()
+                    .and_then(crate::ja1_attachment::Ja1Attachment::named_io_root)
+                    .or_else(|| {
+                        self.sidecar
+                            .authority
+                            .as_ref()
+                            .map(|writer| writer.resolved_identity().to_path_buf())
+                    })
+                    .or_else(|| self.source_admission.source().map(Path::to_path_buf))
+                    .unwrap_or_else(|| display.clone())
+            });
         }
     }
 
@@ -662,8 +699,66 @@ impl ProjectSession {
     pub(crate) fn display_name(&self) -> String {
         project_display_name(self.project_path.as_deref(), &self.name, self.is_dirty())
     }
+    pub(crate) fn send_manual_command(
+        &self,
+        command: kinewright_core::Command,
+    ) -> Result<(), kinewright_core::CoreDisconnected> {
+        if let Some(attachment) = &self.ja1 {
+            attachment.send_manual(command)
+        } else {
+            self.core.send(command)
+        }
+    }
+    pub(crate) fn ja1_read_only(&self) -> bool {
+        self.ja1_job.is_some()
+            || self
+                .ja1
+                .as_ref()
+                .is_some_and(crate::ja1_attachment::Ja1Attachment::read_only)
+    }
+    pub(crate) fn studio_host_managed(&self) -> bool {
+        self.ja1
+            .as_ref()
+            .is_some_and(crate::ja1_attachment::Ja1Attachment::host_managed)
+    }
 
-    pub(crate) fn stop_threads(&mut self, reason: &str) {
+    pub(crate) fn studio_host_client(&self) -> Option<kinewright_agent::writer_host::HostClient> {
+        self.ja1.as_ref()?.host_client()
+    }
+
+    pub(crate) fn ja1_close_warning(&self) -> String {
+        self.ja1
+            .as_ref()
+            .map(crate::ja1_attachment::Ja1Attachment::close_text)
+            .unwrap_or_default()
+    }
+    pub(crate) fn install_ja1_view(&mut self) {
+        let Some(ja1) = &mut self.ja1 else {
+            return;
+        };
+        if let Some(view) = ja1.view.take() {
+            if self.core.actor_identity() != view.core.actor_identity() {
+                self.retired_agent_threads
+                    .extend(self.threads.iter().map(|t| t.id));
+            }
+            self.core = view.core;
+            self.core_events = view.events;
+            self.document = view.document;
+            self.revision = view.revision;
+        }
+        self.project_path = ja1.project_path();
+        if !ja1.is_dirty() {
+            self.saved_document = Some(Arc::clone(&self.document));
+        }
+        self.reconcile_source_state();
+        self.publish_project_path_to_agents();
+    }
+
+    pub(crate) fn stop_threads(&mut self, reason: &str) -> bool {
+        let source_closed = self
+            .ja1
+            .as_mut()
+            .is_none_or(crate::ja1_attachment::Ja1Attachment::close);
         // Cloned before the investigator borrow: `incidents` now resolves
         // through the sidecar deref, which borrows the whole session.
         let incidents = std::sync::Arc::clone(&self.incidents);
@@ -687,6 +782,7 @@ impl ProjectSession {
             ));
         }
         for thread in &mut self.threads {
+            thread.host_chat = None;
             if let Some(session) = &mut thread.session {
                 session.interrupt();
             }
@@ -697,7 +793,13 @@ impl ProjectSession {
                 confirmations.reject_all(reason);
             }
             thread.pending_confirmations.clear();
+            if let Some(server) = thread.mcp_server.take() {
+                server.shutdown();
+            }
         }
+        self.recovery.close();
+        self.sidecar.authority = None;
+        source_closed
     }
 }
 
@@ -887,9 +989,9 @@ mod tests {
     #[cfg(unix)]
     use kinewright_project::write_file_atomic;
     use kinewright_project::{
-        ProjectFile, build_sidecar_bytes, can_overwrite_save, canonical_session_key,
-        derive_lut_store, digest_bytes, load_sidecar, serialize_project_document,
-        sidecar_matches_project, sidecar_path_for_project, write_project_document,
+        ProjectFile, build_sidecar_bytes, can_overwrite_save, derive_lut_store, digest_bytes,
+        load_sidecar, same_project_file, serialize_project_document, sidecar_matches_project,
+        sidecar_path_for_project, write_project_document,
     };
 
     /// A media backend that does nothing, so the real `AgentThread` seam can
@@ -1839,11 +1941,7 @@ mod tests {
     }
 
     fn shutdown_test_session(session: &mut ProjectSession) {
-        for thread in &mut session.threads {
-            if let Some(server) = thread.mcp_server.take() {
-                server.shutdown();
-            }
-        }
+        session.stop_threads("project closed");
     }
 
     #[test]
@@ -2201,8 +2299,8 @@ mod tests {
         assert!(!corrupt_sidecar.exists(), "the refused file moves away");
         assert_eq!(fs::read(&bak).expect("bak reads"), b"{ truncated");
         // A second refusal lands `.bak.1`, leaving `.bak` byte-identical.
-        fs::write(&corrupt_sidecar, b"truncated again").expect("the second torn sidecar writes");
         shutdown_test_session(&mut session);
+        fs::write(&corrupt_sidecar, b"truncated again").expect("the second torn sidecar writes");
         let mut session = sidecar_session(23, &corrupt_project);
         let mut bak1_name = corrupt_sidecar.as_os_str().to_owned();
         bak1_name.push(".bak.1");
@@ -2564,33 +2662,28 @@ mod tests {
         shutdown_test_session(&mut session);
     }
 
-    /// `canonical_session_key` collapses non-canonical spellings of one file
-    /// (N2/S-13): `.`/`..` segments resolve, so the one-session guard sees
-    /// through them. A missing file keys by its raw path — still matching
-    /// itself.
+    /// Native object identity, including first-save slots with no root file yet.
     #[test]
-    fn canonical_session_key_collapses_spellings_of_one_file() {
-        let temporary = TempDirectory::new("in2b-canonical-key");
+    fn session_identity_collapses_spellings_of_one_file() {
+        let temporary = TempDirectory::new("in2b-file-identity");
         let file = temporary.path("edit.kinewright");
-        fs::write(&file, b"{}").expect("the file writes");
-        fs::create_dir(temporary.path("sub")).expect("the segment exists");
-        let alias = temporary
-            .root()
-            .join("sub")
-            .join("..")
-            .join("edit.kinewright");
-        assert_ne!(alias, file, "the spellings really differ");
-        assert_eq!(
-            canonical_session_key(&alias),
-            canonical_session_key(&file),
-            "one file, one key"
-        );
+        fs::write(&file, b"{}").unwrap();
+        fs::create_dir(temporary.path("sub")).unwrap();
+        let alias = temporary.path("sub/../edit.kinewright");
+        assert_ne!(alias, file);
+        assert!(same_project_file(&alias, &file));
+        let hard_link = temporary.path("hard-link.kinewright");
+        fs::hard_link(&file, &hard_link).unwrap();
+        assert!(same_project_file(&hard_link, &file));
         let missing = temporary.path("gone.kinewright");
-        assert_eq!(
-            canonical_session_key(&missing),
-            missing,
-            "a missing file keys by its raw path"
-        );
+        assert!(same_project_file(
+            &missing,
+            &temporary.path("sub/../gone.kinewright")
+        ));
+        assert!(!same_project_file(
+            &missing,
+            &temporary.path("other.kinewright")
+        ));
     }
 
     /// `can_overwrite_save` gates on the read version (`IN2B` §4 rule 3):

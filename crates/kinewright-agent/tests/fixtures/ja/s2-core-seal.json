@@ -1,0 +1,64 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s2-core-seal",
+  "gate_ids": [
+    "JA1.G5-L"
+  ],
+  "lane": "portable",
+  "requirements": [],
+  "inputs": {},
+  "initial": {
+    "revision": 0,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "s2_core_seal_probe",
+      "args": {}
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "control_edit_accepted",
+        "observation": 1,
+        "pointer": "/control_edit_accepted",
+        "oracle": "true",
+        "evidence_class": "control",
+        "positive_control": null
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "sealed_refuses_mutation",
+        "observation": 1,
+        "pointer": "/sealed_refuses_mutation",
+        "oracle": "true",
+        "evidence_class": "baseline_property",
+        "positive_control": "control_edit_accepted"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "independent-scalar-oracle"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 8388608,
+    "action_timeout_ms": 60000,
+    "setup_timeout_ms": 30000
+  }
+}

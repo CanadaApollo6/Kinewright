@@ -96,6 +96,8 @@ fn request(
 ) -> CommandEnvelope {
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
+        switch: None,
+        manual: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {
@@ -696,7 +698,7 @@ fn version_and_control_caps(temp: &TempDirectory) {
         limits.control_bytes = before.len() as u64 - delta;
         bundle.restrict_limits_probe(limits).unwrap();
         let result = bundle.save(&core, &inputs);
-        assert_eq!(result.is_ok(), delta == 0);
+        assert_eq!(result.is_ok(), delta == 0, "{result:?}");
         if delta == 1 {
             assert_eq!(fs::read(&path).unwrap(), before);
         }

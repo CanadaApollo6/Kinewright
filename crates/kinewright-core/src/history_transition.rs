@@ -9,10 +9,12 @@ pub struct HistorySaveTag {
     pub parent_device: u64,
     pub parent_inode: u64,
     pub root_sha256: String,
+    pub previous_root_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingHistorySave {
+    pub actor: crate::ActorIdentity,
     pub id: u64,
     pub tag: Option<HistorySaveTag>,
     pub ready: bool,
@@ -33,23 +35,14 @@ pub struct PendingHistorySave {
 ///     core.begin_history_floor(transition).unwrap();
 /// }
 /// ```
-pub struct HistorySaveOwner<P> {
-    core: Core,
-    proof: std::marker::PhantomData<fn(P)>,
-}
-impl<P> HistorySaveOwner<P> {
-    pub(crate) const fn new(core: Core) -> Self {
-        Self {
-            core,
-            proof: std::marker::PhantomData,
-        }
-    }
+pub type HistorySaveOwner<P> = crate::CoreAttachment<P>;
+impl<P: 'static> crate::CoreAttachment<P> {
     pub fn begin_history_floor(
         &self,
         _proof: &P,
         transition: HistoryTransition,
     ) -> Result<HistoryFloorBarrier<P>, HistoryError> {
-        let id = self.core.begin_history_floor(transition)?;
+        let id = self.core.begin_history_floor::<P>(transition)?;
         Ok(HistoryFloorBarrier::new(self.core.clone(), id))
     }
     pub fn settle_history_save(
@@ -58,42 +51,56 @@ impl<P> HistorySaveOwner<P> {
         pending: &PendingHistorySave,
         commit: bool,
     ) -> Result<(), HistoryError> {
-        self.core.settle_history_save(pending, commit)
+        self.core.settle_history_save::<P>(pending, commit)
     }
 }
 
 /// Revocable save barrier; only the bound owner's proof authorizes commit or retention.
-pub struct HistoryFloorBarrier<P> {
+pub struct HistoryFloorBarrier<P: 'static> {
     core: Core,
     id: u64,
     retain: bool,
+    tag: Option<HistorySaveTag>,
     settled: bool,
     proof: std::marker::PhantomData<fn(P)>,
 }
-impl<P> HistoryFloorBarrier<P> {
+impl<P: 'static> HistoryFloorBarrier<P> {
     pub(crate) const fn new(core: Core, id: u64) -> Self {
         Self {
             core,
             id,
             retain: false,
+            tag: None,
             settled: false,
             proof: std::marker::PhantomData,
         }
     }
     pub fn retain_until_reconcile(&mut self, _proof: &P) -> Result<(), HistoryError> {
-        self.core.tag_history_floor(self.id, None, true)?;
+        self.core.tag_history_floor::<P>(self.id, None, true)?;
         self.retain = true;
         Ok(())
     }
-    pub fn tag_publication(&self, _proof: &P, tag: HistorySaveTag) -> Result<(), HistoryError> {
-        self.core.tag_history_floor(self.id, Some(tag), false)
+    pub fn tag_publication(&mut self, _proof: &P, tag: HistorySaveTag) -> Result<(), HistoryError> {
+        self.core
+            .tag_history_floor::<P>(self.id, Some(tag.clone()), false)?;
+        self.tag = Some(tag);
+        Ok(())
+    }
+    #[must_use]
+    pub fn ticket(&self) -> PendingHistorySave {
+        PendingHistorySave {
+            actor: self.core.actor_identity(),
+            id: self.id,
+            tag: self.tag.clone(),
+            ready: self.retain,
+        }
     }
     pub fn commit(&mut self, _proof: &P) -> Result<(), HistoryError> {
         if self.settled {
             return Err(HistoryError::BarrierInvariant);
         }
         // The actor releases losslessly on an internal commit failure.
-        self.core.settle_history_floor(self.id, true)?;
+        self.core.settle_history_floor::<P>(self.id, true)?;
         self.settled = true;
         Ok(())
     }
@@ -101,12 +108,12 @@ impl<P> HistoryFloorBarrier<P> {
         if self.settled {
             return Err(HistoryError::BarrierInvariant);
         }
-        self.core.settle_history_floor(self.id, false)?;
+        self.core.settle_history_floor::<P>(self.id, false)?;
         self.settled = true;
         Ok(())
     }
 }
-impl<P> Drop for HistoryFloorBarrier<P> {
+impl<P: 'static> Drop for HistoryFloorBarrier<P> {
     fn drop(&mut self) {
         if !self.settled && !self.retain {
             let _ = self.release();
@@ -159,12 +166,15 @@ impl HistoryTransition {
         before: HistorySnapshot,
         reconciled: &HistorySnapshot,
     ) -> Result<Self, HistoryError> {
+        struct RecoveryReplayProof;
         if before != *reconciled {
             return Err(HistoryError::Corrupt);
         }
         let candidate =
             Core::spawn((*before.baseline).clone()).map_err(|_| HistoryError::Corrupt)?;
-        candidate.restore_history(before.clone())?;
+        candidate
+            .history_save_owner(&RecoveryReplayProof)?
+            .restore_history(&RecoveryReplayProof, before.clone())?;
         if before
             .cursor
             .undo

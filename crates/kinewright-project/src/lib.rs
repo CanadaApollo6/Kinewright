@@ -8,15 +8,22 @@ pub mod bundle_commit;
 pub mod bundle_copy;
 pub mod bundle_records;
 pub mod bundle_recovery;
+pub mod bundle_rescue;
+pub mod bundle_switch;
+pub mod editing_session;
 mod history_save;
+pub mod rescue_record;
+pub use history_save::{AttemptBinding, ProjectAttachment};
 pub mod owned_inputs;
 pub mod receipts;
+pub mod source_boundary;
 pub mod storage_budget;
 pub mod store;
 
 pub mod headless;
 #[cfg(any(test, feature = "test-util"))]
 pub mod io_observer;
+pub mod legacy_io;
 pub mod lockfile;
 pub mod namespace;
 pub mod project;
@@ -33,8 +40,8 @@ pub use lockfile::{
 };
 pub use project::{
     ProjectFile, ProjectIdentityError, ProjectSaveError, ProjectSaveReport, can_overwrite_save,
-    canonical_project_identity, canonical_session_key, derive_lut_store, load_document,
-    min_required_format_version, project_newer_format_observation, serialize_project_document,
+    canonical_project_identity, derive_lut_store, load_document, min_required_format_version,
+    project_newer_format_observation, same_project_file, serialize_project_document,
     write_file_atomic, write_project_bytes, write_project_document,
 };
 pub use recovery::{
@@ -60,7 +67,8 @@ pub(crate) fn test_hook(point: &str) {
         return;
     }
     let dir = std::path::PathBuf::from(std::env::var_os("REV2_SIGNALS").unwrap());
-    std::fs::write(dir.join("paused"), point).unwrap();
+    std::fs::write(dir.join("paused.partial"), point).unwrap();
+    std::fs::rename(dir.join("paused.partial"), dir.join("paused")).unwrap();
     if std::env::var("REV2_EXIT").is_ok() {
         std::process::exit(77);
     }
@@ -73,3 +81,5 @@ pub(crate) fn test_hook(point: &str) {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
+
+pub mod manual_history;

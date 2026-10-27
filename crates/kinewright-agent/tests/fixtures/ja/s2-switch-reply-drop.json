@@ -1,0 +1,144 @@
+{
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "fixture_id": "s2-switch-reply-drop",
+  "gate_ids": [
+    "JA1.G5-A"
+  ],
+  "lane": "app-paint",
+  "requirements": [],
+  "inputs": {
+    "control": {
+      "relative_file": "s2-switch-reply-drop-control.json",
+      "sha256": "29c7867e3f50ed71b0e936a7e654055a8b1ce63762002265383d227afcbb3281",
+      "byte_length": 49,
+      "kind": "input"
+    }
+  },
+  "initial": {
+    "revision": 0,
+    "participants": []
+  },
+  "actions": [
+    {
+      "id": 1,
+      "participant": "main",
+      "action": "app_fixture",
+      "args": {
+        "input": "control"
+      }
+    },
+    {
+      "id": 2,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "query-ran",
+        "observation": 1,
+        "pointer": "/query",
+        "oracle": "true",
+        "evidence_class": "control",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 3,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "exact",
+        "observation": 1,
+        "pointer": "/switch/exact",
+        "oracle": "true",
+        "evidence_class": "revised_property",
+        "positive_control": "query-ran",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 4,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "frozen",
+        "observation": 1,
+        "pointer": "/switch/frozen",
+        "oracle": "true",
+        "evidence_class": "revised_property",
+        "positive_control": "query-ran",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 5,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "first-undo",
+        "observation": 1,
+        "pointer": "/switch/first_undo",
+        "oracle": "true",
+        "evidence_class": "revised_property",
+        "positive_control": "query-ran",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 6,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "stale",
+        "observation": 1,
+        "pointer": "/switch/stale",
+        "oracle": "true",
+        "evidence_class": "revised_property",
+        "positive_control": "query-ran",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 7,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "saved",
+        "observation": 1,
+        "pointer": "/switch/saved",
+        "oracle": "true",
+        "evidence_class": "revised_property",
+        "positive_control": "query-ran",
+        "comparison": "equal"
+      }
+    },
+    {
+      "id": 8,
+      "participant": "main",
+      "action": "assert_observed",
+      "args": {
+        "id": "generation",
+        "observation": 1,
+        "pointer": "/switch/generation",
+        "oracle": "true",
+        "evidence_class": "revised_property",
+        "positive_control": "query-ran",
+        "comparison": "equal"
+      }
+    }
+  ],
+  "barriers": [],
+  "oracles": {
+    "true": {
+      "relative_file": "oracle-true.json",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+      "byte_length": 5,
+      "kind": "input"
+    }
+  },
+  "limits": {
+    "input_bytes": 1048576,
+    "output_bytes": 16777216,
+    "action_timeout_ms": 60000,
+    "setup_timeout_ms": 30000
+  }
+}

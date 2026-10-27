@@ -308,12 +308,22 @@ fn open_acp_session(
     spec: &AcpSessionSpec,
 ) -> Result<(String, Vec<Value>), AgentError> {
     acp_initialize(client, spec)?;
+    let headers = if let Some(bootstrap) = crate::writer_host::mcp_credentials(endpoint) {
+        let headers = crate::writer_host::mcp_headers(&bootstrap)
+            .map_err(|_| AgentError::Protocol("invalid private MCP attachment".into()))?;
+        headers.iter().map(|(name,value)| json!({"name":name.as_str(),"value":value.to_str().unwrap_or_default()})).collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
+    if !headers.is_empty() && !spec.inline_mcp {
+        return Err(AgentError::Unavailable("this connector cannot carry an authenticated root-scoped Kinewright attachment; use an inline-HTTP ACP connector or Codex".into()));
+    }
     let mcp_servers = if spec.inline_mcp {
         json!([{
             "type": "http",
             "name": "kinewright",
             "url": endpoint,
-            "headers": [],
+            "headers": headers,
         }])
     } else {
         json!([])

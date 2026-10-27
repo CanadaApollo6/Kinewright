@@ -20,7 +20,6 @@ default = ["eval-harness"]
 # MO2 R7: the harness saves its project fixtures through the shared project
 # writer, so they stamp the same minimum-required format version.
 eval-harness = [
-    "dep:rustix",
     "kinewright-core/test-util",
     "kinewright-media/test-util",
     "kinewright-project/test-util",
@@ -29,6 +28,10 @@ eval-harness = [
 # `cfg_attr(not(feature = "slow-tests"), ignore = ...)` run only with this
 # feature, which CI's slow tier and a full local run enable.
 slow-tests = []
+
+[[bin]]
+name = "kinewright"
+path = "src/bin/kinewright.rs"
 
 [[bin]]
 name = "kinewright-eval"
@@ -44,6 +47,7 @@ required-features = ["eval-harness"]
 axum.workspace = true
 base64.workspace = true
 crossbeam-channel.workspace = true
+getrandom.workspace = true
 image.workspace = true
 kinewright-core = { path = "../kinewright-core" }
 kinewright-media = { path = "../kinewright-media" }
@@ -58,13 +62,14 @@ tokio.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # Already pinned transitively; safe waitid(WNOWAIT), group signals and fixed-role reaping.
-rustix = { version = "=1.1.4", features = ["process"], optional = true }
+rustix = { version = "=1.1.4", features = ["process", "fs"] }
 
 [dev-dependencies]
 # `tests/mcp_server.rs` drives the AU6 scenarios and generates their sources,
 # so the gates are on when testing this crate even with default features off.
 kinewright-core = { path = "../kinewright-core", features = ["test-util"] }
 kinewright-media = { path = "../kinewright-media", features = ["test-util"] }
+kinewright-project = { path = "../kinewright-project", features = ["test-util"] }
 
 [lints]
 workspace = true

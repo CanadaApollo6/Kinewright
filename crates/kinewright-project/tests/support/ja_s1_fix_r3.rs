@@ -291,7 +291,11 @@ fn short_reused_lut_ids_floor_save_and_reopen_both_contents() {
     }
     // The baseline needs A and the suffix/current head needs B at the same local ID.
     let transition = HistoryTransition::floor(core.export_history().unwrap(), 2).unwrap();
-    core.install_history_transition(transition).unwrap();
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .install_history_transition(transition)
+        .unwrap();
     let b = owner
         .admit_inputs(&manifest(&owner, vec![entries[1].clone()]))
         .unwrap();

@@ -985,6 +985,331 @@
           "kind": "independent-scalar-oracle"
         }
       }
+    },
+    {
+      "fixture_id": "s2-save-phase-cleanup",
+      "relative_file": "s2-save-phase-cleanup.json",
+      "sha256": "15dc3aa5e732ec1835cc49605f27fe3a704ed0adef8c671656dab33896d16c60",
+      "byte_length": 2095,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-core-seal",
+      "relative_file": "s2-core-seal.json",
+      "sha256": "64cbb0fdc2d3f37558d1043a30e053a14f3618a71adf75f4860cf6b27ef9857f",
+      "byte_length": 1454,
+      "expected_baseline_process_exit": 1,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-rescue-source",
+      "relative_file": "s2-rescue-source.json",
+      "sha256": "b51010406dcb95128a331e4e8672a17c71bb934c0fd2203249812552f464e8b1",
+      "byte_length": 1446,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-rescue-slots",
+      "relative_file": "s2-rescue-slots.json",
+      "sha256": "1397d863879401e7bb5ba3c68ad2ff540e27ac709a474efba4d40ef5e2622352",
+      "byte_length": 1468,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-rescue-recovery",
+      "relative_file": "s2-rescue-recovery.json",
+      "sha256": "d095b7ab295eb5c25f27e5dfd3a332a6957d580cea79885c6d772018ad3e2463",
+      "byte_length": 1454,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-rescue-publication",
+      "relative_file": "s2-rescue-publication.json",
+      "sha256": "9b453f9d6087a4c9658394481cd7d68dfa1b420e8c6cb3350149265a36fb4070",
+      "byte_length": 1474,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-app-rescue",
+      "relative_file": "s2-app-rescue.json",
+      "sha256": "07748dd151d316a1a09f7a691422f70d6449d3d409165786d428643f08297d04",
+      "byte_length": 1689,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-app-rescue-control.json",
+          "sha256": "56c030181aae972cd01373582d26ad42bbae400b4c87da3d9d63603b7befe17f",
+          "byte_length": 36,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-writer-identity",
+      "relative_file": "s2-writer-identity.json",
+      "sha256": "d143fde6344af42222073d05206d5f80e35128e320c39b605d772ad96b28866d",
+      "byte_length": 1437,
+      "expected_baseline_process_exit": 1,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-gui-journal",
+      "relative_file": "s2-gui-journal.json",
+      "sha256": "33b38e557389603e11c6378a0739bcf4b4e4a6d69d73c981aa337105ae31e4dc",
+      "byte_length": 1667,
+      "expected_baseline_process_exit": 1,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-gui-journal-control.json",
+          "sha256": "d93ceec3462e1502399a88aaeb0edeedbede16e9522789fb4224bd7263d8644e",
+          "byte_length": 57,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-host-auth",
+      "relative_file": "s2-host-auth.json",
+      "sha256": "8a0798248eb08927a237176ef4a48a2533bdf04a4f4a40019d8dd238f502357f",
+      "byte_length": 1417,
+      "expected_baseline_process_exit": 0,
+      "inputs": {},
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "independent-scalar-oracle"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-manual-stream",
+      "relative_file": "s2-manual-stream.json",
+      "sha256": "7c2353785bd171bfd7eb554f221a4a2cee54adaf6d10dd7a46e5aadb9fc5004e",
+      "byte_length": 5472,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "initial": {
+          "relative_file": "synthetic-blue-project.kinewright",
+          "sha256": "1b9d3ab03d60a74646958b127043407c803781e5b08c9b8a8bc638c9f91e03c5",
+          "byte_length": 1491,
+          "kind": "synthetic-control"
+        },
+        "gesture": {
+          "relative_file": "s2-manual-stream-control.json",
+          "sha256": "8195b02ec08a0b99beec578e57b1b92ccb785465ed3b5723ba9f663544a81955",
+          "byte_length": 420,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        },
+        "one": {
+          "relative_file": "oracle-one.json",
+          "sha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+          "byte_length": 2,
+          "kind": "input"
+        },
+        "red": {
+          "relative_file": "oracle-red-rgba.json",
+          "sha256": "d2fc591344738b05e6eabe35b9069bd599788dd0d250c47faf76ab8282f8eb34",
+          "byte_length": 27,
+          "kind": "independent-landmark"
+        },
+        "key": {
+          "relative_file": "oracle-gesture-key.json",
+          "sha256": "17049e474ae190b9bb9708ab6c43eba3e1f1e421d1aefb49236cc733010ce9b4",
+          "byte_length": 7,
+          "kind": "independent-identity"
+        },
+        "letterbox": {
+          "relative_file": "oracle-letterbox.json",
+          "sha256": "e636e77340bc6192b8ebb43af038cf2288677282b7aeb3d22201ab860487f0ac",
+          "byte_length": 40,
+          "kind": "independent-landmark"
+        },
+        "green": {
+          "relative_file": "s2-manual-green-rgba.json",
+          "sha256": "6d3224294e717c73fe5820f6802b0bc0d86306bef6194463fa1968ecd4fdc14c",
+          "byte_length": 27,
+          "kind": "independent-landmark"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-manual-recovery",
+      "relative_file": "s2-manual-recovery.json",
+      "sha256": "5f4c5f22fd4e92a8fa45e4dba4c20ed2e5d61c853edc7046fb64e97741806f0f",
+      "byte_length": 3062,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-manual-recovery-control.json",
+          "sha256": "18e9de3bb2c910c7b3fc3ce955a9acf44749867e36f27dd974a08982c1e89078",
+          "byte_length": 64,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-manual-floor",
+      "relative_file": "s2-manual-floor.json",
+      "sha256": "0fdbf6cbe0dcc2421617af3fb3c7f17cd5a21b3f6ac80c07162404bfd01acea7",
+      "byte_length": 3056,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-manual-floor-control.json",
+          "sha256": "06e9b46f3054c0f22b712821d8a650934cd61127af732b562a0358ec69deb393",
+          "byte_length": 61,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-switch-reply-drop",
+      "relative_file": "s2-switch-reply-drop.json",
+      "sha256": "0dd9f3ef8168102b3a9093b79c7c8a10eb70c6a4f51ef839290d77cac96637da",
+      "byte_length": 3388,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-switch-reply-drop-control.json",
+          "sha256": "29c7867e3f50ed71b0e936a7e654055a8b1ce63762002265383d227afcbb3281",
+          "byte_length": 49,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
+    },
+    {
+      "fixture_id": "s2-switch-return",
+      "relative_file": "s2-switch-return.json",
+      "sha256": "c03e837dad414812ffb4fe472d2bfa11f4e8a90b6c608c1562ace942d2ad5044",
+      "byte_length": 3380,
+      "expected_baseline_process_exit": 0,
+      "inputs": {
+        "control": {
+          "relative_file": "s2-switch-return-control.json",
+          "sha256": "01317a5c259326fe9d22d24b625d5e355db792b1e0e59c6c0e1ddacf4111c3e5",
+          "byte_length": 50,
+          "kind": "input"
+        }
+      },
+      "oracles": {
+        "true": {
+          "relative_file": "oracle-true.json",
+          "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74",
+          "byte_length": 5,
+          "kind": "input"
+        }
+      }
     }
   ]
 }

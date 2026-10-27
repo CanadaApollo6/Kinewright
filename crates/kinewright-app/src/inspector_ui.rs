@@ -905,8 +905,7 @@ impl KinewrightApp {
             look_ab_coalesce_key(record.clip, record.effect)
         );
         if self.projects[index]
-            .core
-            .send(kinewright_core::Command::DoBatchCoalesced {
+            .send_manual_command(kinewright_core::Command::DoBatchCoalesced {
                 operations: vec![ab_hold_restore_operation(record)],
                 coalesce_key,
             })

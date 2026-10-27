@@ -27,7 +27,9 @@ mod harness;
 /// Job A predecessor-compatible, observational evaluation harness.
 #[cfg(feature = "eval-harness")]
 pub mod ja_harness;
+mod local_editing;
 mod models;
+pub use local_editing::LocalEditingSession;
 mod motion;
 mod muse;
 mod pacing;
@@ -43,6 +45,8 @@ mod server;
 mod session;
 mod silence;
 mod solo;
+/// Authenticated project writer and UI-free session owner.
+pub mod writer_host;
 
 pub use acp_drivers::{
     DEVIN_SANDBOX_NOTICE, DevinDriver, KIMI_SANDBOX_NOTICE, KIRO_SANDBOX_NOTICE, KimiDriver,

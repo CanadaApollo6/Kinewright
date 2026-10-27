@@ -1,4 +1,14 @@
-use std::{sync::Arc, thread};
+use crate::{AcceptedCut, ActorIdentity, AttachmentState, CoreMutationRefusal};
+mod manual_history;
+use manual_history::{ManualIngress, manual_message_bytes};
+use std::{
+    any::TypeId,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    thread,
+};
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
 use schemars::JsonSchema;
@@ -32,6 +42,15 @@ use crate::{
 )]
 #[serde(transparent)]
 pub struct TimelineRevision(pub u64);
+
+/// Constant-size identity of one actor's complete accepted history state.
+/// Empty Undo/Redo still append accepted batches without changing the timeline revision.
+/// Restores and committed floors advance the revision, so truncation cannot reuse this identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryChangeId {
+    revision: TimelineRevision,
+    batch_count: usize,
+}
 
 impl std::fmt::Display for TimelineRevision {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -109,6 +128,10 @@ pub enum QueryResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Event {
+    MutationRefused {
+        reason: CoreMutationRefusal,
+        token: Option<CommandToken>,
+    },
     UndoBlockedBySave {
         floor_offset: u64,
     },
@@ -155,20 +178,61 @@ pub enum Event {
 pub struct CoreDisconnected;
 
 enum CoreMessage {
+    BindManual(
+        TypeId,
+        Box<dyn crate::ManualHistoryEncoder>,
+        Option<(AcceptedCut, Arc<std::sync::atomic::AtomicBool>)>,
+        Sender<Result<u64, HistoryError>>,
+    ),
+    ManualCommand(u64, Command, Option<Sender<Event>>),
+    ManualPending(
+        u64,
+        Sender<Result<Vec<crate::AcceptedHistory>, HistoryError>>,
+    ),
+    ManualAck(
+        TypeId,
+        u64,
+        Vec<crate::AcceptedHistory>,
+        Sender<Result<(), HistoryError>>,
+    ),
+    BindOwner(TypeId, Sender<Result<(), HistoryError>>),
+    AttachmentState(Sender<AttachmentState>),
+    CaptureCut(TypeId, bool, Sender<Result<AcceptedCut, HistoryError>>),
+    FinishAttachment(TypeId, AcceptedCut, bool, Sender<Result<(), HistoryError>>),
     Command(Command),
     Request(Command, Sender<Event>),
     Subscribe(Sender<Event>),
-    ExportHistory(Sender<Result<HistorySnapshot, HistoryError>>),
-    BeginFloor(crate::HistoryTransition, Sender<Result<u64, HistoryError>>),
+    HistoryChangeId(Sender<HistoryChangeId>),
+    ExportHistory(Sender<Result<(HistoryChangeId, HistorySnapshot), HistoryError>>),
+    BeginFloor(
+        TypeId,
+        crate::HistoryTransition,
+        Sender<Result<u64, HistoryError>>,
+    ),
     PendingFloor(Sender<Option<crate::PendingHistorySave>>),
     TagFloor(
+        TypeId,
         u64,
         Option<crate::HistorySaveTag>,
         bool,
         Sender<Result<(), HistoryError>>,
     ),
-    SettleFloor(u64, bool, Sender<Result<(), HistoryError>>),
+    SettleFloor(
+        TypeId,
+        u64,
+        Option<crate::PendingHistorySave>,
+        bool,
+        Sender<Result<(), HistoryError>>,
+    ),
+    InstallFrozen(
+        TypeId,
+        AcceptedCut,
+        HistorySnapshot,
+        Vec<crate::AcceptedHistory>,
+        Sender<Result<AcceptedCut, HistoryError>>,
+    ),
     RestoreHistory(
+        Option<TypeId>,
         Box<HistorySnapshot>,
         Option<Box<HistorySnapshot>>,
         Sender<Result<(), HistoryError>>,
@@ -202,7 +266,7 @@ pub struct HistoryEntryObservation {
 #[derive(Clone)]
 pub struct Core {
     sender: Sender<CoreMessage>,
-    history_owner: Arc<std::sync::Mutex<Option<std::any::TypeId>>>,
+    identity: ActorIdentity,
 }
 
 impl Core {
@@ -214,28 +278,113 @@ impl Core {
         &self,
         _proof: &P,
     ) -> Result<crate::HistorySaveOwner<P>, HistoryError> {
-        let mut owner = self
-            .history_owner
-            .lock()
-            .map_err(|_| HistoryError::BarrierInvariant)?;
-        let requested = std::any::TypeId::of::<P>();
-        if owner.is_some_and(|existing| existing != requested) {
-            return Err(HistoryError::BarrierInvariant);
-        }
-        *owner = Some(requested);
-        Ok(crate::HistorySaveOwner::new(self.clone()))
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::BindOwner(TypeId::of::<P>(), reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(crate::CoreAttachment::new(self.clone()))
+    }
+
+    #[must_use]
+    pub const fn actor_identity(&self) -> ActorIdentity {
+        self.identity
+    }
+
+    /// Inspect attachment state without granting mutation authority.
+    /// # Errors
+    /// Returns an actor-disconnection error.
+    pub fn attachment_state(&self) -> Result<AttachmentState, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::AttachmentState(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)
+    }
+    pub(crate) fn attachment_cut<P: 'static>(
+        &self,
+        freeze: bool,
+    ) -> Result<AcceptedCut, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::CaptureCut(TypeId::of::<P>(), freeze, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+    pub(crate) fn finish_attachment<P: 'static>(
+        &self,
+        cut: AcceptedCut,
+        seal: bool,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::FinishAttachment(
+                TypeId::of::<P>(),
+                cut,
+                seal,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+    pub(crate) fn install_frozen<P: 'static>(
+        &self,
+        cut: AcceptedCut,
+        after: HistorySnapshot,
+        pending: Vec<crate::AcceptedHistory>,
+    ) -> Result<AcceptedCut, HistoryError> {
+        let (reply, result) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(CoreMessage::InstallFrozen(
+                TypeId::of::<P>(),
+                cut,
+                after,
+                pending,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        result.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+    pub(crate) fn restore_authorized<P: 'static>(
+        &self,
+        history: HistorySnapshot,
+        before: Option<HistorySnapshot>,
+    ) -> Result<(), HistoryError> {
+        self.restore_with_owner(Some(TypeId::of::<P>()), history, before)
+    }
+    fn restore_with_owner(
+        &self,
+        owner: Option<TypeId>,
+        history: HistorySnapshot,
+        before: Option<HistorySnapshot>,
+    ) -> Result<(), HistoryError> {
+        history.encoded_bytes()?;
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::RestoreHistory(
+                owner,
+                Box::new(history),
+                before.map(Box::new),
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
 
     /// Retain a validated prefix while preventing Undo from crossing its pending floor.
     /// # Errors
     /// Refuses a changed cut, an existing barrier or a disconnected actor before mutation.
-    pub(crate) fn begin_history_floor(
+    pub(crate) fn begin_history_floor<P: 'static>(
         &self,
         transition: crate::HistoryTransition,
     ) -> Result<u64, HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
-            .send(CoreMessage::BeginFloor(transition, reply))
+            .send(CoreMessage::BeginFloor(
+                TypeId::of::<P>(),
+                transition,
+                reply,
+            ))
             .map_err(|_| HistoryError::Disconnected)?;
         let id = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
         Ok(id)
@@ -255,15 +404,25 @@ impl Core {
     /// Settle a ticket after the persistence owner reconciles its tagged root.
     /// # Errors
     /// Refuses an unknown ticket or a disconnected actor.
-    pub(crate) fn settle_history_save(
+    pub(crate) fn settle_history_save<P: 'static>(
         &self,
         pending: &crate::PendingHistorySave,
         commit: bool,
     ) -> Result<(), HistoryError> {
-        self.settle_history_floor(pending.id, commit)
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::SettleFloor(
+                TypeId::of::<P>(),
+                pending.id,
+                Some(pending.clone()),
+                commit,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
 
-    pub(crate) fn tag_history_floor(
+    pub(crate) fn tag_history_floor<P: 'static>(
         &self,
         id: u64,
         tag: Option<crate::HistorySaveTag>,
@@ -271,19 +430,31 @@ impl Core {
     ) -> Result<(), HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
-            .send(CoreMessage::TagFloor(id, tag, ready, reply))
+            .send(CoreMessage::TagFloor(
+                TypeId::of::<P>(),
+                id,
+                tag,
+                ready,
+                reply,
+            ))
             .map_err(|_| HistoryError::Disconnected)?;
         receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
 
-    pub(crate) fn settle_history_floor(
+    pub(crate) fn settle_history_floor<P: 'static>(
         &self,
         offset: u64,
         commit: bool,
     ) -> Result<(), HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
-            .send(CoreMessage::SettleFloor(offset, commit, reply))
+            .send(CoreMessage::SettleFloor(
+                TypeId::of::<P>(),
+                offset,
+                None,
+                commit,
+                reply,
+            ))
             .map_err(|_| HistoryError::Disconnected)?;
         receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
@@ -292,6 +463,26 @@ impl Core {
     /// # Errors
     /// Returns an actor-disconnection error. The persistence owner bounds the retained cut.
     pub fn export_history(&self) -> Result<HistorySnapshot, HistoryError> {
+        self.export_history_identified().map(|(_, history)| history)
+    }
+
+    /// Cheap authoritative history-change identity, including gestures, Undo/Redo and floors.
+    /// # Errors
+    /// Returns an actor-disconnection error.
+    pub fn history_change_id(&self) -> Result<HistoryChangeId, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::HistoryChangeId(reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)
+    }
+
+    /// Capture history and its change identity in one actor turn.
+    /// # Errors
+    /// Returns an actor-disconnection error.
+    pub fn export_history_identified(
+        &self,
+    ) -> Result<(HistoryChangeId, HistorySnapshot), HistoryError> {
         let (reply, receiver) = unbounded();
         self.sender
             .send(CoreMessage::ExportHistory(reply))
@@ -304,51 +495,28 @@ impl Core {
     /// # Errors
     /// Refuses corrupt, excessive or disconnected histories without changing this Core.
     pub fn restore_history(&self, history: HistorySnapshot) -> Result<(), HistoryError> {
-        history.encoded_bytes()?;
-        let (reply, receiver) = unbounded();
-        self.sender
-            .send(CoreMessage::RestoreHistory(Box::new(history), None, reply))
-            .map_err(|_| HistoryError::Disconnected)?;
-        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+        self.restore_with_owner(None, history, None)
     }
 
-    /// Install an acknowledged checkpoint only at the exact frozen producer cut.
+    /// Install a checkpoint on an unbound setup actor. Bound actors require their attachment.
     /// # Errors
-    /// Refuses a newer suffix, corrupt candidate or disconnected actor without replacing it.
+    /// Refuses a bound/sealed actor, changed cut or corrupt history.
     pub fn install_checkpoint(
         &self,
         before: HistorySnapshot,
         after: HistorySnapshot,
     ) -> Result<(), HistoryError> {
-        after.encoded_bytes()?;
-        let (reply, receiver) = unbounded();
-        self.sender
-            .send(CoreMessage::RestoreHistory(
-                Box::new(after),
-                Some(Box::new(before)),
-                reply,
-            ))
-            .map_err(|_| HistoryError::Disconnected)?;
-        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+        self.restore_with_owner(None, after, Some(before))
     }
 
-    /// Install one validated floor or recovery-close only at its exact current cut.
+    /// Install a transition on an unbound setup actor. Bound actors require their attachment.
     /// # Errors
-    /// Refuses a changed cut, corrupt candidate or disconnected actor atomically.
+    /// Refuses a bound/sealed actor, changed cut or corrupt history.
     pub fn install_history_transition(
         &self,
         transition: crate::HistoryTransition,
     ) -> Result<(), HistoryError> {
-        transition.after.encoded_bytes()?;
-        let (reply, receiver) = unbounded();
-        self.sender
-            .send(CoreMessage::RestoreHistory(
-                Box::new(transition.after),
-                Some(Box::new(transition.before)),
-                reply,
-            ))
-            .map_err(|_| HistoryError::Disconnected)?;
-        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+        self.restore_with_owner(None, transition.after, Some(transition.before))
     }
 
     /// Observe private history on the actor thread without changing it.
@@ -396,16 +564,113 @@ impl Core {
         initial_document: Document,
         revision: TimelineRevision,
     ) -> Result<Self, OpError> {
+        static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
         initial_document.validate()?;
+        #[allow(deprecated, reason = "Rust 1.92 MSRV predates AtomicU64::try_update")]
+        let identity = ActorIdentity(
+            NEXT_ACTOR
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+                .expect("actor identities exhausted"),
+        );
         let (sender, receiver) = unbounded();
         thread::Builder::new()
             .name("kinewright-core".to_owned())
-            .spawn(move || run_actor(&receiver, CoreState::new(initial_document, revision)))
+            .spawn(move || {
+                run_actor(
+                    &receiver,
+                    CoreState::new(initial_document, revision),
+                    identity,
+                );
+            })
             .expect("failed to spawn Core actor");
-        Ok(Self {
-            sender,
-            history_owner: Arc::new(std::sync::Mutex::new(None)),
+        Ok(Self { sender, identity })
+    }
+
+    pub(crate) fn bind_manual<P: 'static>(
+        &self,
+        encoder: Box<dyn crate::ManualHistoryEncoder>,
+    ) -> Result<crate::ManualPermit, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::BindManual(
+                TypeId::of::<P>(),
+                encoder,
+                None,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        let generation = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(crate::ManualPermit {
+            core: self.clone(),
+            generation,
         })
+    }
+    pub(crate) fn resume_manual<P: 'static>(
+        &self,
+        cut: AcceptedCut,
+        encoder: Box<dyn crate::ManualHistoryEncoder>,
+        live: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<crate::ManualPermit, HistoryError> {
+        let (reply, receiver) = crossbeam_channel::bounded(1);
+        self.sender
+            .send(CoreMessage::BindManual(
+                TypeId::of::<P>(),
+                encoder,
+                Some((cut, live)),
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        let generation = receiver.recv().map_err(|_| HistoryError::Disconnected)??;
+        Ok(crate::ManualPermit {
+            core: self.clone(),
+            generation,
+        })
+    }
+    pub(crate) fn send_manual(
+        &self,
+        generation: u64,
+        command: Command,
+    ) -> Result<(), CoreDisconnected> {
+        self.sender
+            .send(CoreMessage::ManualCommand(generation, command, None))
+            .map_err(|_| CoreDisconnected)
+    }
+    pub(crate) fn request_manual(
+        &self,
+        generation: u64,
+        command: Command,
+    ) -> Result<Event, CoreDisconnected> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ManualCommand(generation, command, Some(reply)))
+            .map_err(|_| CoreDisconnected)?;
+        receiver.recv().map_err(|_| CoreDisconnected)
+    }
+    pub(crate) fn manual_pending(
+        &self,
+        generation: u64,
+    ) -> Result<Vec<crate::AcceptedHistory>, HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ManualPending(generation, reply))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
+    }
+    pub(crate) fn manual_ack<P: 'static>(
+        &self,
+        generation: u64,
+        prefix: Vec<crate::AcceptedHistory>,
+    ) -> Result<(), HistoryError> {
+        let (reply, receiver) = unbounded();
+        self.sender
+            .send(CoreMessage::ManualAck(
+                TypeId::of::<P>(),
+                generation,
+                prefix,
+                reply,
+            ))
+            .map_err(|_| HistoryError::Disconnected)?;
+        receiver.recv().map_err(|_| HistoryError::Disconnected)?
     }
 
     /// Queue a command for the core actor.
@@ -452,7 +717,7 @@ impl Core {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 struct HistoryEntry {
     document: Arc<Document>,
     operations: Vec<Operation>,
@@ -478,6 +743,8 @@ struct PendingFloor {
 
 #[derive(Clone)]
 struct CoreState {
+    // Changes to the baseline or installed history invalidate manual JSON caches.
+    history_epoch: u64,
     next_floor_id: u64,
     pending_floor: Option<PendingFloor>,
     floor_offset: u64,
@@ -492,9 +759,16 @@ struct CoreState {
 }
 
 impl CoreState {
+    fn history_change_id(&self) -> HistoryChangeId {
+        HistoryChangeId {
+            revision: self.revision,
+            batch_count: self.batches.len(),
+        }
+    }
     fn new(document: Document, revision: TimelineRevision) -> Self {
         let document = Arc::new(document);
         Self {
+            history_epoch: 0,
             next_floor_id: 0,
             pending_floor: None,
             floor_offset: 0,
@@ -665,7 +939,11 @@ impl CoreState {
         Ok(candidate)
     }
 
-    fn begin_floor(&mut self, transition: &crate::HistoryTransition) -> Result<u64, HistoryError> {
+    fn begin_floor(
+        &mut self,
+        actor: ActorIdentity,
+        transition: &crate::HistoryTransition,
+    ) -> Result<u64, HistoryError> {
         if let Some(pending) = &self.pending_floor {
             // An in-flight save is ordinary contention. A settleable ticket must have been
             // reconciled by the persistence owner first, so reaching it here is internal.
@@ -688,6 +966,7 @@ impl CoreState {
         self.next_floor_id = id;
         self.pending_floor = Some(PendingFloor {
             save: crate::PendingHistorySave {
+                actor,
                 id,
                 tag: None,
                 ready: false,
@@ -746,6 +1025,10 @@ impl CoreState {
                         .ok_or(HistoryError::Capacity)?,
                 );
                 candidate.next_floor_id = self.next_floor_id;
+                candidate.history_epoch = self
+                    .history_epoch
+                    .checked_add(1)
+                    .ok_or(HistoryError::Capacity)?;
                 #[cfg(any(test, feature = "test-util"))]
                 if std::env::var_os("JA_S1_COMMIT_TIMING").is_some() {
                     eprintln!(
@@ -891,37 +1174,187 @@ fn floor_from_prefix(
     clippy::too_many_lines,
     reason = "one actor dispatch owns history and save tickets"
 )]
-fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
+fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState, identity: ActorIdentity) {
+    let mut owner: Option<TypeId> = None;
+    let mut attachment = AttachmentState::Live;
     let mut subscribers: Vec<Sender<Event>> = Vec::new();
+    let mut manual: Option<ManualIngress> = None;
+    let mut manual_generation = 0_u64;
     while let Ok(message) = receiver.recv() {
         match message {
-            CoreMessage::PendingFloor(reply) => {
-                let _ = reply.send(state.pending_floor.as_ref().map(|p| p.save.clone()));
-            }
-            CoreMessage::TagFloor(id, tag, ready, reply) => {
-                let result = match state.pending_floor.as_mut() {
-                    Some(pending) if pending.save.id == id => {
-                        if let Some(tag) = tag {
-                            pending.save.tag = Some(tag);
-                        }
-                        if ready && pending.save.tag.is_none() {
-                            Err(HistoryError::BarrierInvariant)
+            CoreMessage::BindManual(requested, encoder, recovery, reply) => {
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        let valid_state = if let Some((cut, live)) = &recovery {
+                            attachment == AttachmentState::Frozen
+                                && live.load(Ordering::Acquire)
+                                && cut.actor == identity
+                                && cut.revision == state.revision
+                                && cut.history == state.history()
                         } else {
-                            pending.save.ready = ready;
-                            Ok(())
+                            attachment == AttachmentState::Live
+                        };
+                        if !valid_state
+                            || manual.as_ref().is_some_and(|m| !m.pending.is_empty())
+                            || state.pending_floor.is_some()
+                        {
+                            return Err(HistoryError::BarrierInvariant);
                         }
-                    }
-                    _ => Err(HistoryError::BarrierInvariant),
+                        let generation = manual_generation
+                            .checked_add(1)
+                            .ok_or(HistoryError::Capacity)?;
+                        let ingress = ManualIngress::new(&state, generation, encoder)?;
+                        manual_generation = generation;
+                        manual = Some(ingress);
+                        attachment = AttachmentState::Live;
+                        Ok(generation)
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::ManualPending(generation, reply) => {
+                let result = manual
+                    .as_ref()
+                    .filter(|m| generation == m.generation)
+                    .map(|m| m.pending.iter().cloned().collect())
+                    .ok_or(HistoryError::BarrierInvariant);
+                let _ = reply.send(result);
+            }
+            CoreMessage::ManualAck(requested, generation, prefix, reply) => {
+                let result = manual
+                    .as_mut()
+                    .filter(|m| generation == m.generation && owner == Some(requested))
+                    .ok_or(HistoryError::BarrierInvariant)
+                    .and_then(|m| {
+                        if prefix.len() > m.pending.len()
+                            || !prefix.iter().zip(&m.pending).all(|(a, b)| a == b)
+                        {
+                            return Err(HistoryError::BarrierInvariant);
+                        }
+                        for _ in &prefix {
+                            let item = m
+                                .pending
+                                .pop_front()
+                                .ok_or(HistoryError::BarrierInvariant)?;
+                            m.bytes -= manual_message_bytes(&item)?;
+                        }
+                        Ok(())
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::ManualCommand(generation, command, reply) => {
+                let event = match manual.as_mut().filter(|m| generation == m.generation) {
+                    Some(m) => m.execute(&mut state, attachment, command),
+                    None => manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired),
+                };
+                broadcast(&mut subscribers, &event);
+                if let Some(reply) = reply {
+                    let _ = reply.send(event);
+                }
+            }
+            CoreMessage::BindOwner(requested, reply) => {
+                let result = if owner.is_none_or(|existing| existing == requested) {
+                    owner = Some(requested);
+                    Ok(())
+                } else {
+                    Err(HistoryError::BarrierInvariant)
                 };
                 let _ = reply.send(result);
             }
-            CoreMessage::BeginFloor(transition, reply) => {
-                let result = state.begin_floor(&transition);
+            CoreMessage::AttachmentState(reply) => {
+                let _ = reply.send(attachment);
+            }
+            CoreMessage::CaptureCut(requested, freeze, reply) => {
+                let result = authorize_attachment(attachment, owner, Some(requested)).map(|()| {
+                    if freeze {
+                        attachment = AttachmentState::Frozen;
+                    }
+                    AcceptedCut {
+                        actor: identity,
+                        revision: state.revision,
+                        history: state.history(),
+                    }
+                });
                 let _ = reply.send(result);
             }
-            CoreMessage::SettleFloor(offset, commit, reply) => {
-                let result = state.settle_floor(offset, commit);
-                if result.is_ok() && commit {
+            CoreMessage::FinishAttachment(requested, cut, seal, reply) => {
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        if cut.actor != identity
+                            || cut.revision != state.revision
+                            || cut.history != state.history()
+                        {
+                            return Err(HistoryError::CaptureChanged);
+                        }
+                        if attachment != AttachmentState::Frozen {
+                            return Err(HistoryError::BarrierInvariant);
+                        }
+                        attachment = if seal {
+                            AttachmentState::Sealed
+                        } else {
+                            AttachmentState::Live
+                        };
+                        Ok(())
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::PendingFloor(reply) => {
+                let _ = reply.send(state.pending_floor.as_ref().map(|p| p.save.clone()));
+            }
+            CoreMessage::TagFloor(requested, id, tag, ready, reply) => {
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        match state.pending_floor.as_mut() {
+                            Some(pending) if pending.save.id == id => {
+                                if pending.save.ready && !ready
+                                    || tag.as_ref().is_some_and(|tag| {
+                                        pending.save.tag.as_ref().is_some_and(|old| old != tag)
+                                    })
+                                {
+                                    return Err(HistoryError::BarrierInvariant);
+                                }
+                                if let Some(tag) = tag {
+                                    pending.save.tag = Some(tag);
+                                }
+                                if ready && pending.save.tag.is_none() {
+                                    Err(HistoryError::BarrierInvariant)
+                                } else {
+                                    pending.save.ready = ready;
+                                    Ok(())
+                                }
+                            }
+                            _ => Err(HistoryError::BarrierInvariant),
+                        }
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::BeginFloor(requested, transition, reply) => {
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        if manual.is_some() {
+                            return Err(HistoryError::MutationRefused(
+                                CoreMutationRefusal::ManualPermitRequired,
+                            ));
+                        }
+                        state.begin_floor(identity, &transition)
+                    });
+                let _ = reply.send(result);
+            }
+            CoreMessage::SettleFloor(requested, offset, expected, commit, reply) => {
+                let present = state
+                    .pending_floor
+                    .as_ref()
+                    .is_some_and(|p| p.save.id == offset);
+                let result =
+                    authorize_attachment(attachment, owner, Some(requested)).and_then(|()| {
+                        if let Some(expected) = expected
+                            && (expected.actor != identity
+                                || state.pending_floor.as_ref().map(|p| &p.save) != Some(&expected))
+                        {
+                            return Err(HistoryError::BarrierInvariant);
+                        }
+                        state.settle_floor(offset, commit)
+                    });
+                if result.is_ok() && commit && present {
                     broadcast(
                         &mut subscribers,
                         &Event::DocumentChanged {
@@ -935,13 +1368,94 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                 }
                 let _ = reply.send(result);
             }
+            CoreMessage::HistoryChangeId(reply) => {
+                let _ = reply.send(state.history_change_id());
+            }
             CoreMessage::ExportHistory(reply) => {
                 // Publication chooses and records any floor before the owner installs it.
-                let _ = reply.send(Ok(state.history()));
+                let _ = reply.send(Ok((state.history_change_id(), state.history())));
             }
-            CoreMessage::RestoreHistory(history, expected, reply) => {
-                let admitted = if state.pending_floor.is_some() {
+            CoreMessage::InstallFrozen(requested, cut, after, pending, reply) => {
+                let result = (|| {
+                    authorize_attachment(attachment, owner, Some(requested))?;
+                    if attachment != AttachmentState::Frozen
+                        || cut.actor != identity
+                        || cut.revision != state.revision
+                        || cut.history != state.history()
+                        || state.pending_floor.is_some()
+                        || manual
+                            .as_ref()
+                            .map_or(!pending.is_empty(), |m| m.pending.iter().ne(pending.iter()))
+                    {
+                        return Err(HistoryError::CaptureChanged);
+                    }
+                    let discard = after
+                        .floor_offset
+                        .checked_sub(cut.history.floor_offset)
+                        .and_then(|n| usize::try_from(n).ok())
+                        .ok_or(HistoryError::Corrupt)?;
+                    let floored = if discard == 0 {
+                        cut.history.clone()
+                    } else {
+                        crate::HistoryTransition::floor(cut.history.clone(), discard)?
+                            .after()
+                            .clone()
+                    };
+                    if floored != after {
+                        let close =
+                            crate::HistoryTransition::recovery_close(floored.clone(), &floored)?;
+                        if close.after() != &after {
+                            return Err(HistoryError::Corrupt);
+                        }
+                    }
+                    let mut candidate = CoreState::restore(&after)?;
+                    candidate.history_epoch = state
+                        .history_epoch
+                        .checked_add(1)
+                        .ok_or(HistoryError::Capacity)?;
+                    candidate.next_floor_id = state.next_floor_id;
+                    candidate.revision = TimelineRevision(
+                        state
+                            .revision
+                            .0
+                            .checked_add(1)
+                            .ok_or(HistoryError::Capacity)?,
+                    );
+                    state = candidate;
+                    manual = None;
+                    broadcast(
+                        &mut subscribers,
+                        &Event::DocumentChanged {
+                            doc: Arc::clone(&state.document),
+                            revision: state.revision,
+                            last_op: None,
+                            journal_command: None,
+                            token: None,
+                        },
+                    );
+                    Ok(AcceptedCut {
+                        actor: identity,
+                        revision: state.revision,
+                        history: state.history(),
+                    })
+                })();
+                let _ = reply.send(result);
+            }
+            CoreMessage::RestoreHistory(requested, history, expected, reply) => {
+                let admitted = if attachment == AttachmentState::Sealed {
+                    Err(HistoryError::MutationRefused(CoreMutationRefusal::Sealed))
+                } else if attachment == AttachmentState::Frozen {
+                    Err(HistoryError::MutationRefused(CoreMutationRefusal::Frozen))
+                } else if manual.is_some() {
+                    Err(HistoryError::MutationRefused(
+                        CoreMutationRefusal::ManualPermitRequired,
+                    ))
+                } else if state.pending_floor.is_some() {
                     Err(HistoryError::SaveInProgress)
+                } else if owner.is_some() && owner != requested {
+                    Err(HistoryError::MutationRefused(
+                        CoreMutationRefusal::OwnerRequired,
+                    ))
                 } else if expected
                     .as_deref()
                     .is_some_and(|before| state.history() != *before)
@@ -951,6 +1465,10 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                     CoreState::restore(&history)
                 };
                 let result = admitted.and_then(|mut candidate| {
+                    candidate.history_epoch = state
+                        .history_epoch
+                        .checked_add(1)
+                        .ok_or(HistoryError::Capacity)?;
                     candidate.next_floor_id = state.next_floor_id;
                     candidate.revision = TimelineRevision(
                         state
@@ -1004,11 +1522,19 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
                 }
             }
             CoreMessage::Command(command) => {
-                let event = execute_actor_command(&mut state, command);
+                let event = if manual.is_some() && !matches!(command, Command::Query(_)) {
+                    manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired)
+                } else {
+                    execute_actor_command(&mut state, attachment, command)
+                };
                 broadcast(&mut subscribers, &event);
             }
             CoreMessage::Request(command, reply) => {
-                let event = execute_actor_command(&mut state, command);
+                let event = if manual.is_some() && !matches!(command, Command::Query(_)) {
+                    manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired)
+                } else {
+                    execute_actor_command(&mut state, attachment, command)
+                };
                 broadcast(&mut subscribers, &event);
                 let _ = reply.send(event);
             }
@@ -1016,7 +1542,53 @@ fn run_actor(receiver: &Receiver<CoreMessage>, mut state: CoreState) {
     }
 }
 
-fn execute_actor_command(state: &mut CoreState, command: Command) -> Event {
+fn manual_refusal(command: &Command, reason: CoreMutationRefusal) -> Event {
+    Event::MutationRefused {
+        reason,
+        token: if let Command::DoIfRevision { token, .. } = command {
+            *token
+        } else {
+            None
+        },
+    }
+}
+
+fn authorize_attachment(
+    attachment: AttachmentState,
+    owner: Option<TypeId>,
+    requested: Option<TypeId>,
+) -> Result<(), HistoryError> {
+    if attachment == AttachmentState::Sealed {
+        return Err(HistoryError::MutationRefused(CoreMutationRefusal::Sealed));
+    }
+    if owner.is_none() || owner != requested {
+        return Err(HistoryError::MutationRefused(
+            CoreMutationRefusal::OwnerRequired,
+        ));
+    }
+    Ok(())
+}
+
+fn execute_actor_command(
+    state: &mut CoreState,
+    attachment: AttachmentState,
+    command: Command,
+) -> Event {
+    if !matches!(command, Command::Query(_)) && attachment != AttachmentState::Live {
+        let token = if let Command::DoIfRevision { token, .. } = &command {
+            *token
+        } else {
+            None
+        };
+        return Event::MutationRefused {
+            reason: if attachment == AttachmentState::Sealed {
+                CoreMutationRefusal::Sealed
+            } else {
+                CoreMutationRefusal::Frozen
+            },
+            token,
+        };
+    }
     if matches!(command, Command::Undo)
         && state
             .pending_floor
@@ -1186,6 +1758,26 @@ mod tests {
     };
     use proptest::prelude::*;
     use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+
+    #[test]
+    fn w09_floor_commit_checks_suffix_equality_losslessly() {
+        let mut state = CoreState::new(Document::default(), TimelineRevision(0));
+        let command = Command::Do(Operation::AddAsset { asset: asset(1) });
+        assert!(matches!(
+            execute_command(&mut state, command),
+            Event::DocumentChanged { .. }
+        ));
+        let before = state.history();
+        let floor = crate::HistoryTransition::floor(before.clone(), 1).unwrap();
+        let id = state.begin_floor(ActorIdentity(1), &floor).unwrap();
+        Arc::make_mut(&mut state.pending_floor.as_mut().unwrap().baseline).resolution = (1280, 720);
+        assert_eq!(
+            state.settle_floor(id, true),
+            Err(HistoryError::CommitInvariant)
+        );
+        assert_eq!(state.history(), before);
+        assert!(state.pending_floor.is_none());
+    }
 
     fn asset(id: u64) -> MediaAsset {
         MediaAsset {

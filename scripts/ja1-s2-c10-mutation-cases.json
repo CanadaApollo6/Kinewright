@@ -1,0 +1,418 @@
+[
+  {
+    "name": "unfrozen-discrete",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::Do(_)) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "unfrozen-batch-import",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::DoBatch(_)) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "unfrozen-live-coalesced",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::DoBatchCoalesced { .. }) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "unfrozen-keyboard-undo",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::Undo) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "unfrozen-keyboard-redo",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::Redo) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "unfrozen-router-incident",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::DoIfRevision { .. }) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "unfrozen-queued-revision-batch",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::DoBatchIfRevision { .. }) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "frozen-install-owner-omitted",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "CoreMessage::InstallFrozen(requested, cut, after, pending, reply) => {\n                let result = (|| {\n                    authorize_attachment(attachment, owner, Some(requested))?;",
+        "CoreMessage::InstallFrozen(requested, cut, after, pending, reply) => {\n                let result = (|| {\n                    let _ = requested;"
+      ]
+    ],
+    "package": "kinewright-core",
+    "witness": "attachment::tests::g05l_frozen_install_keeps_exact_cut_pending_and_fresh_permit",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "production": false
+  },
+  {
+    "name": "frozen-install-cut-revision-omitted",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "|| cut.actor != identity\n                        || cut.revision != state.revision",
+        "|| cut.actor != identity"
+      ]
+    ],
+    "package": "kinewright-core",
+    "witness": "attachment::tests::g05l_frozen_install_keeps_exact_cut_pending_and_fresh_permit",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "production": false
+  },
+  {
+    "name": "frozen-install-pending-prefix-omitted",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        ".map_or(!pending.is_empty(), |m| m.pending.iter().ne(pending.iter()))",
+        ".map_or(false, |_m| false)"
+      ]
+    ],
+    "package": "kinewright-core",
+    "witness": "attachment::tests::g05l_frozen_install_keeps_exact_cut_pending_and_fresh_permit",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "production": false
+  },
+  {
+    "name": "old-permit-generation-reused",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "state = candidate;\n                    manual = None;",
+        "state = candidate;\n                    manual_generation = 0;\n                    manual = None;"
+      ]
+    ],
+    "package": "kinewright-core",
+    "witness": "attachment::tests::g05l_frozen_install_keeps_exact_cut_pending_and_fresh_permit",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "production": false
+  },
+  {
+    "name": "closed-context-resumed",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "&& live.load(Ordering::Acquire)",
+        "&& { let _ = live; true }"
+      ]
+    ],
+    "package": "kinewright-core",
+    "witness": "attachment::tests::g05l_frozen_install_keeps_exact_cut_pending_and_fresh_permit",
+    "features": "",
+    "kind": "--lib",
+    "target": "",
+    "production": false
+  },
+  {
+    "name": "shadow-floor-install-omitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "        self.owner_mut()?\n            .install_manual_barrier(&cut, barrier.after.history.clone(), vec![])?;",
+        "        if barrier.envelope.action != \"floor\" {\n        self.owner_mut()?\n            .install_manual_barrier(&cut, barrier.after.history.clone(), vec![])?;\n        }"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_fast_restart_shared_floor_and_close_reply_loss",
+    "features": "kinewright-project/test-util",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "shadow-recovery_close-install-omitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "        self.owner_mut()?\n            .install_manual_barrier(&cut, barrier.after.history.clone(), vec![])?;",
+        "        if barrier.envelope.action != \"recovery_close\" {\n        self.owner_mut()?\n            .install_manual_barrier(&cut, barrier.after.history.clone(), vec![])?;\n        }"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_fast_restart_absent_vs_committed_lost_reply_suffix",
+    "features": "kinewright-project/test-util",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "gui-floor-install-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/manual.rs",
+        "    pub fn install(\n        &mut self,\n        history: kinewright_core::HistorySnapshot,\n    ) -> Result<(), BundleError> {",
+        "    pub fn install(\n        &mut self,\n        history: kinewright_core::HistorySnapshot,\n    ) -> Result<(), BundleError> {\n        if history.floor_offset > self.cut.history().floor_offset { return Ok(()); }"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "gui-close-install-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/manual.rs",
+        "    pub fn install(\n        &mut self,\n        history: kinewright_core::HistorySnapshot,\n    ) -> Result<(), BundleError> {",
+        "    pub fn install(\n        &mut self,\n        history: kinewright_core::HistorySnapshot,\n    ) -> Result<(), BundleError> {\n        if history.floor_offset == self.cut.history().floor_offset { return Ok(()); }"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja1_attachment::tests::g05l_every_producer_stays_frozen_until_equivalence",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "committed-command-reapplied",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/manual.rs",
+        "                ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_) => {\n                    if !absent.is_empty() {\n                        return Err(BundleError::HistoryChanged);\n                    }\n                }",
+        "                ReceiptLookup::Committed(_) | ReceiptLookup::Retired(_) => {\n                    if !absent.is_empty() {\n                        return Err(BundleError::HistoryChanged);\n                    }\n                    self.core.request(kinewright_core::Command::from(original.command.clone().ok_or(BundleError::HistoryChanged)?)).map_err(|_| BundleError::HistoryChanged)?;\n                }"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_fast_restart_absent_vs_committed_lost_reply_suffix",
+    "features": "kinewright-project/test-util",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "original-to-new-link-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "recovery_origin: envelope\n                    .manual\n                    .as_ref()\n                    .and_then(|m| m.recovery_origin.clone()),",
+        "recovery_origin: None,"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_fast_restart_absent_vs_committed_lost_reply_suffix",
+    "features": "kinewright-project/test-util",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "lease-before-close-publication",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "        let checkpoint = self.owner()?.manual_barrier_result(&barrier.envelope)?;\n        if self.owner()?.manual_switch_generation()?",
+        "        let (_, checkpoint) = self.owner()?.manual_checkpoint()?;\n        if self.owner()?.manual_switch_generation()?"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_host_death_recovers_absent_and_committed_drag_suffix",
+    "features": "kinewright-project/test-util,slow-tests",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "gesture-closed-before-suffix-reconciliation",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/manual.rs",
+        "        let mut previous = None;\n        let mut absent = Vec::new();\n        for accepted in pending {",
+        "        let before = self.core.export_history().map_err(crate::bundle::history_error)?;\n        let early = kinewright_core::HistoryTransition::recovery_close(before.clone(), &before).map_err(crate::bundle::history_error)?;\n        self.attachment.install_history_transition(early).map_err(crate::bundle::history_error)?;\n        let mut previous = None;\n        let mut absent = Vec::new();\n        for accepted in pending {"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_fast_restart_absent_vs_committed_lost_reply_suffix",
+    "features": "kinewright-project/test-util",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "full-floor-matrix-requires-shared-install",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/recovery.rs",
+        "        self.owner_mut()?\n            .install_manual_barrier(&cut, barrier.after.history.clone(), vec![])?;",
+        "        if barrier.envelope.action != \"floor\" {\n        self.owner_mut()?\n            .install_manual_barrier(&cut, barrier.after.history.clone(), vec![])?;\n        }"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_shared_floor_and_recovery_close_reply_drop",
+    "features": "kinewright-project/test-util,slow-tests",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "additive-fixtures-require-frozen-producers",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {",
+        "        let attachment = if matches!(command, Command::Do(_)) { AttachmentState::Live } else { attachment };\n        if matches!(command, Command::Query(_)) || attachment != AttachmentState::Live {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "witness": "ja_harness::c10_tests::additive_manual_recovery_and_floor_fixtures",
+    "features": "",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "production": false
+  },
+  {
+    "name": "replacement-parent-treated-as-continuous",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/manual.rs",
+        "metadata.binding.parent_identity != Some(parent)",
+        "{ let _ = parent; false }"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_parent_replacement_does_not_prove_absence",
+    "features": "kinewright-project/test-util",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": true
+  },
+  {
+    "name": "pressure-floor-selection-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/manual.rs",
+        "let selected = crate::bundle_commit::bound_history(&after, &limits)?;",
+        "let selected = after.clone();"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_absent_suffix_pressure_publishes_one_shared_floor",
+    "features": "eval-harness",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": false
+  },
+  {
+    "name": "recovery-batch-ids-replaced",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "                manual.batch_id.clone()\n            } else if !manual_batch.is_empty() {",
+        "                if manual_batch.is_empty() { manual.batch_id.clone() } else { BatchId::fresh()? }\n            } else if !manual_batch.is_empty() {"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_absent_suffix_pressure_publishes_one_shared_floor",
+    "features": "eval-harness",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": false
+  },
+  {
+    "name": "intermediate-recovery-receipts-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "for envelope in manual_batch\n            .iter()\n            .chain(",
+        "for envelope in manual_batch\n            .iter().skip(manual_batch.len().saturating_sub(1))\n            .chain("
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_absent_suffix_pressure_publishes_one_shared_floor",
+    "features": "eval-harness",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": false
+  }
+]

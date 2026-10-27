@@ -109,6 +109,14 @@ pub struct Action {
 )]
 pub enum Call {
     AdapterStatus(Empty),
+    S2SavePhaseProbe(Empty),
+    S2WriterIdentityProbe(Empty),
+    S2HostAuthProbe(Empty),
+    S2CoreSealProbe(Empty),
+    S2RescueSourceProbe(Empty),
+    S2RescueSlotsProbe(Empty),
+    S2RescueRecoveryProbe(Empty),
+    S2RescuePublicationProbe(Empty),
     OwnedInputProbe(InputArgs),
     BundleCopyProbe(InputArgs),
     BundleBudgetProbe(InputArgs),
@@ -313,6 +321,8 @@ pub enum Comparison {
 pub enum EvidenceClass {
     Control,
     BaselineProperty,
+    /// A new surface with no predecessor endpoint; baseline retains a pending witness.
+    RevisedProperty,
 }
 
 /// Already captured immutable fixture bytes and verified input/oracle bytes.

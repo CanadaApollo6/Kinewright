@@ -41,7 +41,7 @@ pub const SCRIPTED_HARNESS_ID: &str = "scripted";
 
 /// One tool call the script makes, by name, through the session's own MCP
 /// client.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ScriptedCall {
     /// The served tool name, exactly as the harness would send it.
     pub tool: String,
@@ -56,7 +56,7 @@ pub struct ScriptedCall {
 /// `Option` fields straight through: a two-field cost would leave four of the
 /// six telemetry mirrors `None` for every scripted turn and make IN2 §9
 /// clause 7 unsatisfiable by any test this contract specifies (IN2 §8 rule 4).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScriptedCost {
     /// Provider input tokens.
     pub input_tokens: u64,
@@ -73,7 +73,7 @@ pub struct ScriptedCost {
 }
 
 /// One turn of a script: the calls it makes, what it says, and what it cost.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ScriptedTurn {
     /// Tool calls made in order, each through the session's own MCP client.
     pub calls: Vec<ScriptedCall>,
@@ -204,7 +204,12 @@ impl ScriptedMcpClient {
             .build()
             .map_err(|error| error.to_string())?;
         let service = runtime.block_on(async {
-            ().serve(StreamableHttpClientTransport::from_uri(mcp_url.to_owned()))
+            let transport = if let Some(bootstrap) = crate::writer_host::mcp_credentials(mcp_url) {
+                let headers = crate::writer_host::mcp_headers(&bootstrap).map_err(|_| "invalid authenticated MCP attachment".to_owned())?;
+                let config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(mcp_url.to_owned()).custom_headers(headers.into_iter().filter_map(|(name,value)| name.map(|name| (name,value))).collect());
+                StreamableHttpClientTransport::with_client(reqwest::Client::new(), config)
+            } else { StreamableHttpClientTransport::from_uri(mcp_url.to_owned()) };
+            ().serve(transport)
                 .await
                 .map_err(|error| error.to_string())
         })?;

@@ -393,6 +393,7 @@ pub enum FlushOutcome {
 
 /// One sidecar write on its way to the writer thread.
 struct WriterJob {
+    authority: Option<Arc<crate::LockfileHandle>>,
     path: PathBuf,
     seq: u64,
     bytes: Vec<u8>,
@@ -476,8 +477,19 @@ impl SidecarWriter {
     /// Best-effort: a send failure means the writer is gone, which only
     /// shutdown does — and shutdown drains before it stops.
     pub fn submit(&self, path: PathBuf, bytes: Vec<u8>) {
+        self.submit_owned(path, bytes, None);
+    }
+
+    /// Queue a snapshot under the named session's existing writer capability.
+    pub fn submit_owned(
+        &self,
+        path: PathBuf,
+        bytes: Vec<u8>,
+        authority: Option<&crate::LockfileHandle>,
+    ) {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let _ = self.tx.send(WriterMessage::Job(WriterJob {
+            authority: authority.map(|writer| Arc::new(writer.clone())),
             path,
             seq,
             bytes,
@@ -492,11 +504,21 @@ impl SidecarWriter {
     /// # Errors
     /// Returns the job's IO error, or a gone-writer error after shutdown.
     pub fn submit_and_join(&self, path: PathBuf, bytes: Vec<u8>) -> io::Result<()> {
+        self.submit_and_join_owned(path, bytes, None)
+    }
+
+    pub(crate) fn submit_and_join_owned(
+        &self,
+        path: PathBuf,
+        bytes: Vec<u8>,
+        authority: Option<&crate::LockfileHandle>,
+    ) -> io::Result<()> {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst);
         let (ack_tx, ack_rx) = crossbeam_channel::bounded(1);
         let sent = self
             .tx
             .send(WriterMessage::Job(WriterJob {
+                authority: authority.map(|writer| Arc::new(writer.clone())),
                 path,
                 seq,
                 bytes,
@@ -619,7 +641,24 @@ fn write_batch(
             ack_ok(job);
             continue;
         }
-        let result = write_one_job(&path, job.seq, &job.bytes, rename_hook);
+        let result = (|| {
+            let acquired;
+            let authority: &crate::LockfileHandle = if let Some(authority) = &job.authority {
+                authority.as_ref()
+            } else {
+                acquired = crate::lockfile::acquire_gui_project_lock(
+                    &path.with_extension("kinewright"),
+                    &crate::default_recovery_directory(),
+                )
+                .map_err(io::Error::other)?
+                .handle;
+                &acquired
+            };
+            authority.verify().map_err(io::Error::other)?;
+            let owned_path = sidecar_path_for_project(Some(&authority.io_path()))
+                .ok_or_else(|| io::Error::other("sidecar filename"))?;
+            write_one_job(&owned_path, job.seq, &job.bytes, rename_hook)
+        })();
         if result.is_ok() {
             last_written.insert(path.clone(), job.seq);
         } else if job.ack.is_none()
@@ -628,6 +667,7 @@ fn write_batch(
         {
             slot.push((path.clone(), error.to_string()));
         }
+        drop(job.authority);
         if let Some(ack) = job.ack {
             let _ = ack.send(result);
         }
@@ -636,6 +676,7 @@ fn write_batch(
 
 /// Ack a superseded or stale job: the freshest bytes won, which is success.
 fn ack_ok(job: WriterJob) {
+    drop(job.authority);
     if let Some(ack) = job.ack {
         let _ = ack.send(Ok(()));
     }
@@ -1014,5 +1055,50 @@ mod tests {
             sidecar_write_failed_observation("r", TimelineRevision::default()).code,
             IncidentCode::Label(LabelIncident::SidecarWriteFailed)
         );
+    }
+}
+
+#[cfg(test)]
+mod writer_authority_tests {
+    use super::*;
+    #[test]
+    fn g04_queued_job_retains_writer_after_session_drop() {
+        let root = kinewright_media::test_support::workspace_target_dir();
+        std::fs::create_dir_all(&root).unwrap();
+        let temp = kinewright_media::test_support::TempDirectory::new_in(&root, "c7-queued-owner");
+        let project = temp.path("project.kinewright");
+        std::fs::write(
+            &project,
+            crate::serialize_project_document(&kinewright_core::Document::default()).unwrap(),
+        )
+        .unwrap();
+        let owner = crate::lockfile::acquire_gui_project_lock(&project, temp.root()).unwrap();
+        let writer = SidecarWriter::new();
+        let (arrived, waiting) = crossbeam_channel::bounded(1);
+        let (release, released) = crossbeam_channel::bounded(1);
+        writer.set_rename_hook(Arc::new(move || {
+            arrived.send(()).unwrap();
+            released.recv().unwrap();
+        }));
+        let bytes = b"queued exact sidecar bytes";
+        let sidecar = sidecar_path_for_project(Some(&project)).unwrap();
+        writer.submit_owned(sidecar.clone(), bytes.to_vec(), Some(&owner.handle));
+        drop(owner);
+        waiting
+            .recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        let competitor = crate::lockfile::acquire_gui_project_lock(&project, temp.root());
+        release.send(()).unwrap();
+        drop(writer);
+        assert!(
+            matches!(competitor, Err(crate::LockfileError::Contention { .. })),
+            "the queued job owns the actual lock after its originating session drops"
+        );
+        assert_eq!(std::fs::read(&sidecar).unwrap(), bytes);
+        crate::lockfile::acquire_gui_project_lock(&project, temp.root())
+            .unwrap()
+            .handle
+            .release()
+            .unwrap();
     }
 }

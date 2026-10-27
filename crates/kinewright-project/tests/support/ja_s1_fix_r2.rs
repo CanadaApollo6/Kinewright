@@ -262,7 +262,10 @@ fn floor_retains_lut_context_across_multi_edit_save_reuse_and_retirement() {
     let empty = owner.empty_inputs().unwrap();
     owner.save(&core, &empty.reference).unwrap();
     let before = core.export_history().unwrap();
-    core.install_history_transition(HistoryTransition::floor(before, 2).unwrap())
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .install_history_transition(HistoryTransition::floor(before, 2).unwrap())
         .unwrap();
     owner.save(&core, &empty.reference).unwrap();
     drop(a);
@@ -445,7 +448,10 @@ fn over_quota_reopen_keeps_inventory_only_owned_graph_until_retirement() {
     );
     owner.save(&core, &inputs).unwrap();
     let history = core.export_history().unwrap();
-    core.install_history_transition(HistoryTransition::floor(history, 2).unwrap())
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .install_history_transition(HistoryTransition::floor(history, 2).unwrap())
         .unwrap();
     owner.save(&core, &inputs).unwrap();
     owner.save(&core, &inputs).unwrap();
@@ -474,6 +480,8 @@ fn over_quota_reopen_keeps_inventory_only_owned_graph_until_retirement() {
     drop(owner);
     let limits = StorageLimits {
         metadata_bytes: 8 << 20,
+        // Fresh open now uses this effective profile, including bounded decode scratch.
+        decoded_record_bytes: 4 << 20,
         ..StorageLimits::default()
     };
     let (writer, trace) = io_observer::observe(|| {
@@ -532,7 +540,11 @@ fn no_edit_comment_repairs_the_original_core_cut_after_floor_reconciliation() {
     let durable = core.export_history().unwrap();
     assert!(durable.floor_offset > original.floor_offset);
     // An interrupted installation may leave the caller at its original accepted cut.
-    core.restore_history(original).unwrap();
+    owner
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(original)
+        .unwrap();
     let Event::QueryResult(QueryResult::Snapshot { revision, .. }) =
         core.request(Command::Query(Query::Snapshot)).unwrap()
     else {
@@ -548,6 +560,8 @@ fn no_edit_comment_repairs_the_original_core_cut_after_floor_reconciliation() {
     let text_ref = reference(text);
     let strokes_ref = reference(strokes);
     let request = CommandEnvelope {
+        switch: None,
+        manual: None,
         version: 1,
         action: "comment".into(),
         id: CommandId {

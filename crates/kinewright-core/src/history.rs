@@ -60,6 +60,8 @@ pub struct HistorySnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HistoryError {
+    #[error(transparent)]
+    MutationRefused(crate::CoreMutationRefusal),
     #[error("history changed during save selection; retry the save")]
     CaptureChanged,
     #[error("another save of this history is still in progress; retry after it finishes")]

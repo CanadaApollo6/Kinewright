@@ -1,6 +1,9 @@
 //! Shared SHA-256 compression, optimized independently in development builds.
 use std::fmt::Write as _;
 
+#[cfg(target_arch = "x86_64")]
+mod x86;
+
 const INITIAL_STATE: [u32; 8] = [
     0x6a09_e667,
     0xbb67_ae85,
@@ -84,6 +87,10 @@ pub struct Sha256 {
     buffer: [u8; 64],
     buffer_len: usize,
     message_len: u64,
+    #[cfg(test)]
+    force_software: bool,
+    #[cfg(test)]
+    hardware_blocks: usize,
 }
 
 impl Sha256 {
@@ -94,6 +101,10 @@ impl Sha256 {
             buffer: [0; 64],
             buffer_len: 0,
             message_len: 0,
+            #[cfg(test)]
+            force_software: false,
+            #[cfg(test)]
+            hardware_blocks: 0,
         }
     }
 
@@ -109,18 +120,15 @@ impl Sha256 {
             input = &input[wanted..];
             if self.buffer_len == 64 {
                 let block = self.buffer;
-                self.compress(&block);
+                self.compress_blocks(&[block]);
                 self.buffer_len = 0;
             }
             if input.is_empty() {
                 return;
             }
         }
-        while input.len() >= 64 {
-            let (block, rest) = input.split_at(64);
-            self.compress(block);
-            input = rest;
-        }
+        let (blocks, input) = input.as_chunks::<64>();
+        self.compress_blocks(blocks);
         self.buffer[..input.len()].copy_from_slice(input);
         self.buffer_len = input.len();
     }
@@ -133,13 +141,13 @@ impl Sha256 {
         if self.buffer_len > 56 {
             self.buffer[self.buffer_len..].fill(0);
             let block = self.buffer;
-            self.compress(&block);
+            self.compress_blocks(&[block]);
             self.buffer_len = 0;
         }
         self.buffer[self.buffer_len..56].fill(0);
         self.buffer[56..].copy_from_slice(&bit_len.to_be_bytes());
         let block = self.buffer;
-        self.compress(&block);
+        self.compress_blocks(&[block]);
 
         let mut digest = [0_u8; 32];
         for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(self.state) {
@@ -148,9 +156,41 @@ impl Sha256 {
         digest
     }
 
+    fn compress_blocks(&mut self, blocks: &[[u8; 64]]) {
+        if blocks.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        if self.force_software {
+            for block in blocks {
+                self.compress_software(block);
+            }
+            return;
+        }
+        #[cfg(target_arch = "x86_64")]
+        if x86::try_compress(&mut self.state, blocks) {
+            #[cfg(test)]
+            {
+                self.hardware_blocks += blocks.len();
+            }
+            return;
+        }
+        for block in blocks {
+            self.compress_software(block);
+        }
+    }
+
+    #[cfg(test)]
+    fn new_software() -> Self {
+        Self {
+            force_software: true,
+            ..Self::new()
+        }
+    }
+
     // SHA-256 notation conventionally names its eight working words a through h.
     #[allow(clippy::many_single_char_names)]
-    fn compress(&mut self, block: &[u8]) {
+    fn compress_software(&mut self, block: &[u8; 64]) {
         let mut schedule = [0_u32; 64];
         for (word, bytes) in schedule[..16]
             .iter_mut()
@@ -239,3 +279,6 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     }
     encoded
 }
+
+#[cfg(test)]
+mod tests;

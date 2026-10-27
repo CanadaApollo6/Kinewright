@@ -371,6 +371,8 @@ fn realistic_history_saves_every_edit_and_advances_durable_floor() {
             panic!("snapshot");
         };
         let envelope = kinewright_project::receipts::CommandEnvelope {
+            switch: None,
+            manual: None,
             version: 1,
             action: "edit".into(),
             id: kinewright_project::receipts::CommandId {
@@ -451,13 +453,21 @@ fn baseline_change_is_not_a_continuation_of_a_zero_batch_checkpoint() {
     doc.resolution = (1280, 720);
     history.baseline = std::sync::Arc::new(doc);
     history.document = history.baseline.clone();
-    core.restore_history(history.clone()).unwrap();
+    bundle
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(history.clone())
+        .unwrap();
     assert!(
         bundle.save(&core, &inputs).is_err(),
         "different baseline accepted as a continuation"
     );
     history.floor_offset = 1;
-    core.restore_history(history).unwrap();
+    bundle
+        .attach_core(&core)
+        .unwrap()
+        .restore_history(history)
+        .unwrap();
     assert!(
         bundle.save(&core, &inputs).is_err(),
         "unproved floor offset bypassed baseline continuity"

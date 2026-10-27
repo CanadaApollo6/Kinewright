@@ -1,4 +1,6 @@
 # Slow-tier manifest: tests skipped in the fast tier on the listed OS.
+ja_s2_rescue_e2e rescue_reopen_recopy_retention_stress crates/kinewright-agent/tests/ja_s2_rescue_e2e.rs any # C6 bounded local rescue/recopy stress
+kinewright_app ja1_attachment::tests::rescue_complete_app_lifecycle_stress crates/kinewright-app/src/ja1_attachment_tests.rs any # C6 bounded App lifecycle stress
 #
 # One test per line:  <test binary> <libtest test path> <source file> <os> # linux/windows seconds
 #
@@ -146,3 +148,8 @@ kinewright_media pf1_s2c_witness::tests::a_continuation_that_ignores_the_domain_
 kinewright_media pf1_s2c_witness::tests::the_continuation_adapter_holds_no_control_capability crates/kinewright-media/src/pf1_s2c_witness.rs windows
 kinewright_media pf1_s2c_witness::tests::continuation_reproduces_seek_on_every_fixture crates/kinewright-media/src/pf1_s2c_witness.rs windows
 kinewright_media pf1_s2c_witness::tests::continuation_holds_the_scripted_cases crates/kinewright-media/src/pf1_s2c_witness.rs windows
+
+ja_s2_host g05l_host_death_recovers_absent_and_committed_drag_suffix crates/kinewright-agent/tests/ja_s2_host.rs any # C10 real process recovery matrix
+ja_s2_host g05l_shared_floor_and_recovery_close_reply_drop crates/kinewright-agent/tests/ja_s2_host.rs any # C10 shared floor and close reply loss
+
+ja_s2_host g05a_switch_reply_drop_and_participant_death crates/kinewright-agent/tests/ja_s2_host.rs any # C11 two-participant switch process cuts

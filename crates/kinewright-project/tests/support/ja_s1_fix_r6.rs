@@ -119,7 +119,7 @@ fn root_staging_and_cleanup_failure_releases_first_save_to_another_destination()
         })
     });
     let mut copy = copy.unwrap();
-    assert!(matches!(copy.status(), CopyStatus::DurabilityUnknown));
+    assert!(matches!(copy.status(), CopyStatus::CleanupPending { .. }));
     assert!(!trace.overflowed);
     assert_eq!(
         trace

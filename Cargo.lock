@@ -2315,6 +2315,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "crossbeam-channel",
+ "getrandom 0.3.4",
  "image",
  "kinewright-core",
  "kinewright-media",
@@ -2356,6 +2357,7 @@ dependencies = [
  "crossbeam-channel",
  "half",
  "kinewright-core",
+ "kinewright-hash",
  "proptest",
  "schemars",
  "serde",
@@ -2404,6 +2406,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
+ "winapi-util",
 ]
 
 [[package]]

@@ -1,6 +1,12 @@
 //! Pure project state, edit operations, history, and subsystem contracts.
 
 mod actor;
+mod attachment;
+pub use attachment::{
+    AcceptedCut, AcceptedHistory, ActorIdentity, AttachmentState, CoreAttachment,
+    CoreMutationRefusal, MANUAL_BYTES, MANUAL_COMMANDS, ManualHistoryCandidate,
+    ManualHistoryEncoder, ManualPermit,
+};
 mod agent;
 /// AU6 §2's scenario authority: the five audio workflows' documents,
 /// operations, budgets and pins.
@@ -46,7 +52,8 @@ pub use history_transition::{
 };
 
 pub use actor::{
-    Command, CommandToken, Core, CoreDisconnected, Event, Query, QueryResult, TimelineRevision,
+    Command, CommandToken, Core, CoreDisconnected, Event, HistoryChangeId, Query, QueryResult,
+    TimelineRevision,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use actor::{HistoryEntryObservation, HistoryObservation};

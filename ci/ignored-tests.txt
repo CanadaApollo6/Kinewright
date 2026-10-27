@@ -79,7 +79,7 @@ kinewright_media pf1_harness::pf1_rss_child crates/kinewright-media/src/pf1_g15.
 kinewright_media pf1_harness::pf1_seek_baseline crates/kinewright-media/src/pf1_harness.rs any on-demand  # PF1 P-seek lane: manual release seek-latency measurement; run with --release --ignored
 
 # kinewright_project
-kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # INHERITED GAP: known journal-lock defect (S5 obligation: journal writers must hold the lock); unskip once fixed
+kinewright_project lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed crates/kinewright-project/src/aw1_race_tests.rs any inherited-gap  # Historical direct filesystem injection bypasses authority; C7 real GUI writer witness covers production exclusion
 kinewright_project project::tests::mo2_old_reader_corpus crates/kinewright-project/src/project.rs any on-demand  # manual pre-land check: scripts/mo2-old-reader-check.sh
 
 # new_harness_e2e
@@ -102,3 +102,6 @@ kinewright_media pf1_harness::s4_d13_active crates/kinewright-media/src/pf1_d13.
 ja_baseline native_app_bridge_retains_exercised_control_and_property_failures crates/kinewright-agent/tests/ja_baseline.rs any on-demand  # Requires the separately built App libtest executable; S0 gate explicitly includes it
 ja_baseline native_app_bridge_keeps_inner_setup_failure_as_not_run_exit_two crates/kinewright-agent/tests/ja_baseline.rs any on-demand  # Requires the separately built App libtest executable; S0 gate explicitly includes it
 ja_baseline native_app_bridge_rejects_abnormal_exit_after_completed_report crates/kinewright-agent/tests/ja_baseline.rs any on-demand  # Requires the separately built App libtest executable; S0 gate explicitly includes it
+ja_s1 s2_additive_app_fixture_observes_real_controls crates/kinewright-agent/tests/ja_s1.rs linux on-demand  # Requires JA_HARNESS_APP_TEST_BINARY; C6 gate explicitly includes it
+
+ja_s2_host c11_switch_gui_participant crates/kinewright-agent/tests/ja_s2_host.rs linux on-demand  # C11 private process helper; its matrix explicitly launches it

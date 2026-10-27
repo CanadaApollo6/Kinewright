@@ -1,0 +1,614 @@
+[
+  {
+    "name": "accepted-command-count-overflow",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "self.pending.len() >= crate::MANUAL_COMMANDS",
+        "self.pending.len() > crate::MANUAL_COMMANDS"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_permit_and_bounded_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "exact-byte-boundary-refused",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "bytes > crate::MANUAL_BYTES.saturating_sub(self.bytes)",
+        "bytes >= crate::MANUAL_BYTES.saturating_sub(self.bytes)"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_exact_byte_boundary_and_one_beyond",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "accepted-byte-overflow",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "bytes > crate::MANUAL_BYTES.saturating_sub(self.bytes)",
+        "false"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_exact_byte_boundary_and_one_beyond",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "pending-byte-charge-omitted",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "self.bytes += bytes;",
+        "self.bytes += 0;"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_exact_byte_boundary_and_one_beyond",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "nonprefix-ack-releases-capacity",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "!prefix.iter().zip(&m.pending).all(|(a, b)| a == b)",
+        "false"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_permit_and_bounded_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "stale-permit-generation-admitted",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "CoreMessage::ManualCommand(generation, command, reply) => {\n                let event = match manual.as_mut().filter(|m| generation == m.generation) {",
+        "CoreMessage::ManualCommand(_generation, command, reply) => {\n                let event = match manual.as_mut() {"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_w05_manual_install_and_alternate_paths_are_fenced",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "raw-send-bypasses-permit",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "CoreMessage::Command(command) => {\n                let event = if manual.is_some() && !matches!(command, Command::Query(_)) {",
+        "CoreMessage::Command(command) => {\n                let event = if false {"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_w05_manual_install_and_alternate_paths_are_fenced",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "raw-request-bypasses-permit",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "CoreMessage::Request(command, reply) => {\n                let event = if manual.is_some() && !matches!(command, Command::Query(_)) {",
+        "CoreMessage::Request(command, reply) => {\n                let event = if false {"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_permit_and_bounded_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "manual-owner-install-bypass",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "} else if manual.is_some() {\n                    Err(HistoryError::MutationRefused(\n                        CoreMutationRefusal::ManualPermitRequired,",
+        "} else if false {\n                    Err(HistoryError::MutationRefused(\n                        CoreMutationRefusal::ManualPermitRequired,"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_w05_manual_install_and_alternate_paths_are_fenced",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "manual-owner-floor-bypass",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "if manual.is_some() {\n                            return Err(HistoryError::MutationRefused(",
+        "if false {\n                            return Err(HistoryError::MutationRefused("
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_w05_manual_install_and_alternate_paths_are_fenced",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "frozen-permit-admitted",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "Some(m) => m.execute(&mut state, attachment, command),",
+        "Some(m) => m.execute(&mut state, if attachment == AttachmentState::Frozen { AttachmentState::Live } else { attachment }, command),"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_permit_and_bounded_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "sealed-permit-admitted",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "Some(m) => m.execute(&mut state, attachment, command),",
+        "Some(m) => m.execute(&mut state, if attachment == AttachmentState::Sealed { AttachmentState::Live } else { attachment }, command),"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_permit_and_bounded_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "second-editor-admitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "if self.manual.is_some() {",
+        "if false {"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "wrong-client-history-admitted",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        ".filter(|lease| lease.client == client)",
+        ".filter(|_| true)"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "viewer-controls-manual",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "editor != Some(lease.client.as_str())",
+        "false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "dropped-intermediate-message",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "for message in messages {",
+        "for message in messages.iter().step_by(2) {"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_ack_prefix_is_the_independently_reopened_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "ack-without-b5",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "let (result, report) = self.owner_mut()?.commit_manual_history(&lease, message)?;",
+        "reply.manual_ack.push(message.clone());\n            continue;\n            let (result, report) = self.owner_mut()?.commit_manual_history(&lease, message)?;"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_ack_prefix_is_the_independently_reopened_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "manual-predecessor-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "|| checkpoint.batch_ids.last() != manual.predecessor.as_ref()",
+        "|| false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "accepted-history-hash-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "|| crate::manual_history::history_sha256(&after)? != manual.after_sha256",
+        "|| false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "accepted-batch-identity-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "|| after.batches.last() != Some(&manual.batch)",
+        "|| false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "accepted-cursor-hash-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        ") != manual.cursor_sha256",
+        ") != manual.cursor_sha256 && false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "actor-batch-id-replaced",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "manual.batch_id.clone()",
+        "BatchId::fresh()?"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_ack_prefix_is_the_independently_reopened_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "snapshot-replaces-history-stream",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "if self.manual.is_some()\n            && self",
+        "if false\n            && self"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app-producer-sends-without-permit",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "gate.send(command)",
+        "self.owner.core().send(command)"
+      ]
+    ],
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "witness": "ja1_attachment::tests::g05l_w05_all_manual_producers_respect_the_actor_cut",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "app-pending-labelled-saved",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "if let Some(host) = &self.host {\n            let Some(saved) = &host.status.saved_digest else {",
+        "if let Some(host) = &self.host {\n            if host.pending_count() > 0 { return false; }\n            let Some(saved) = &host.status.saved_digest else {"
+      ]
+    ],
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "witness": "ja1_attachment::tests::g05l_live_coalesced_preview_precedes_disk_ack",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "capacity-check-after-live-mutation",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "let after = candidate.history();",
+        "*state = candidate.clone();\n        let after = candidate.history();"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_exact_byte_boundary_and_one_beyond",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "foreign-owner-releases-ack-capacity",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "generation == m.generation && owner == Some(requested)",
+        "generation == m.generation"
+      ]
+    ],
+    "package": "kinewright-core",
+    "kind": "--lib",
+    "target": "ja_s2_host",
+    "features": "",
+    "production": false,
+    "witness": "attachment::tests::g05l_permit_and_bounded_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "unadmitted-input-accepted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/manual_history.rs",
+        "crate::bundle_commit::validate_document_inputs(&after.document, &self.input_manifest)",
+        "Ok::<(), BundleError>(())"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_input_context_is_admitted_before_local_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "input-context-hash-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/manual_history.rs",
+        "kinewright_media::sha256_bytes(&bytes) != self.inputs.sha256\n            || bytes.len() as u64 != self.inputs.byte_length",
+        "false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_input_context_is_admitted_before_local_acceptance",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "accepted-command-digest-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/manual_history.rs",
+        "digest.as_str() != Some(accepted.digest.as_str())",
+        "false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "accepted-command-id-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/manual_history.rs",
+        "accepted.sequence != envelope.id.sequence",
+        "false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "accepted-outer-batch-id-ignored",
+    "changes": [
+      [
+        "crates/kinewright-project/src/manual_history.rs",
+        "accepted.batch_id != identity.batch_id.as_str()",
+        "false"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "role-refusal-leaks-unadmitted-metadata",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/manual.rs",
+        "status: super::HostStatus::default(),",
+        "status: self.status(),"
+      ]
+    ],
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "witness": "g05l_two_clients_one_editor_ordered_history",
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "local-preview-event-withheld",
+    "changes": [
+      [
+        "crates/kinewright-core/src/actor.rs",
+        "            CoreMessage::ManualCommand(generation, command, reply) => {\n                let event = match manual.as_mut().filter(|m| generation == m.generation) {\n                    Some(m) => m.execute(&mut state, attachment, command),\n                    None => manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired),\n                };\n                broadcast(&mut subscribers, &event);\n                if let Some(reply) = reply {\n                    let _ = reply.send(event);\n                }\n            }\n",
+        "            CoreMessage::ManualCommand(generation, command, reply) => {\n                let event = match manual.as_mut().filter(|m| generation == m.generation) {\n                    Some(m) => m.execute(&mut state, attachment, command),\n                    None => manual_refusal(&command, CoreMutationRefusal::ManualPermitRequired),\n                };\n                // Mutant: local presentation receives no accepted event before disk acknowledgement.\n                if let Some(reply) = reply {\n                    let _ = reply.send(event);\n                }\n            }\n"
+      ]
+    ],
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "witness": "ja1_attachment::tests::g05l_live_coalesced_preview_precedes_disk_ack",
+    "environment": {},
+    "red_text": null
+  }
+]

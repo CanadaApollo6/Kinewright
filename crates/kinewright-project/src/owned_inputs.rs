@@ -181,8 +181,16 @@ impl ProjectStore {
         self.read_record(reference)
     }
     pub fn lease_input(&self, reference: &OwnedInputRef) -> Result<OwnedInputLease, BundleError> {
+        self.lease_input_for_owner(reference, &self.input_owner())
+    }
+    /// Only a verified checkpoint preparation can admit a historical payload owner.
+    pub(crate) fn lease_input_for_owner(
+        &self,
+        reference: &OwnedInputRef,
+        owner: &(Option<ProjectId>, Option<SessionId>),
+    ) -> Result<OwnedInputLease, BundleError> {
         let manifest = self.read_record::<OwnedInputManifest>(&reference.manifest_ref)?;
-        if (manifest.project_id.clone(), manifest.session_id.clone()) != self.input_owner()
+        if &(manifest.project_id.clone(), manifest.session_id.clone()) != owner
             || !manifest.entries.contains(&reference.entry)
         {
             return Err(BundleError::Identity(

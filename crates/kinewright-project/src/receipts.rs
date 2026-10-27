@@ -52,15 +52,27 @@ pub enum HistoryRequest {
     },
     RecoveryClose {
         preceding_checkpoint_generation: u64,
-        reconciled_cut: CommandId,
+        reconciled_cut: Option<CommandId>,
         suffix_digest: String,
     },
+}
+
+/// An absent manual command reauthorized only inside the shared recovery barrier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OriginalCommand {
+    pub id: CommandId,
+    pub digest: CommandDigest,
 }
 
 /// Transport tokens are deliberately absent. A retry preserves every original field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch: Option<Box<crate::bundle_switch::SwitchRequest>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manual: Option<crate::manual_history::ManualHistoryIdentity>,
     pub version: u32,
     pub action: String,
     pub id: CommandId,
@@ -88,9 +100,49 @@ impl CommandEnvelope {
                 "command envelope version/identity".into(),
             ));
         }
+        if self.action != "manual" && self.manual.is_some() {
+            return Err(BundleError::Unsupported(
+                "manual identity on ordinary command".into(),
+            ));
+        }
+        if self.action != "switch" && self.switch.is_some() {
+            return Err(BundleError::Unsupported(
+                "switch payload on ordinary command".into(),
+            ));
+        }
         match self.action.as_str() {
+            "switch"
+                if self.switch.is_some()
+                    && self.lease.is_some()
+                    && self.transition.is_none()
+                    && self.command.is_none()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.is_empty() =>
+            {
+                if let crate::bundle_switch::SwitchTarget::Snapshot { version, .. } = &self
+                    .switch
+                    .as_ref()
+                    .ok_or(BundleError::HistoryChanged)?
+                    .target
+                    && (version.len() != 32
+                        || !version
+                            .bytes()
+                            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()))
+                {
+                    return Err(BundleError::Unsupported("snapshot version identity".into()));
+                }
+            }
             "edit"
                 if self.transition.is_none()
+                    && self.command.is_some()
+                    && self.comment_text.is_none()
+                    && self.comment_strokes.is_none()
+                    && self.evidence.is_empty() => {}
+            "manual"
+                if self.manual.is_some()
+                    && self.lease.is_some()
+                    && self.transition.is_none()
                     && self.command.is_some()
                     && self.comment_text.is_none()
                     && self.comment_strokes.is_none()
@@ -135,6 +187,9 @@ impl CommandEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReceiptResult {
+    Switch {
+        result: Box<crate::bundle_switch::SwitchResult>,
+    },
     Edit {
         checkpoint_ref: ObjectRef,
         batch_id: Option<BatchId>,
@@ -150,6 +205,9 @@ pub enum ReceiptResult {
 impl ReceiptResult {
     fn dependencies(&self) -> Vec<ObjectRef> {
         match self {
+            Self::Switch { result } => {
+                vec![result.old.checkpoint.clone(), result.new.checkpoint.clone()]
+            }
             Self::Edit { checkpoint_ref, .. } => vec![checkpoint_ref.clone()],
             Self::Comment {
                 record_ref,
@@ -168,6 +226,8 @@ impl ReceiptResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_origin: Option<OriginalCommand>,
     pub id: CommandId,
     pub digest: CommandDigest,
     pub project_id: ProjectId,
@@ -185,6 +245,7 @@ pub enum ReceiptLookup {
     Committed(CommandReceipt),
     Retired(CommandReceipt),
     RetiredUnresolved,
+    UnresolvedOrigin,
     IdPayloadConflict,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,10 +264,25 @@ pub struct ReceiptLedger {
 }
 impl ReceiptLedger {
     #[must_use]
+    pub fn has_switch(&self) -> bool {
+        self.detailed
+            .iter()
+            .chain(&self.retired)
+            .any(|r| matches!(r.result, ReceiptResult::Switch { .. }))
+    }
+    #[must_use]
     pub fn lookup(&self, id: &CommandId, digest: &CommandDigest) -> ReceiptLookup {
         for (records, retired) in [(&self.detailed, false), (&self.retired, true)] {
-            if let Some(receipt) = records.iter().find(|r| r.id == *id) {
-                return if receipt.digest != *digest {
+            if let Some(receipt) = records
+                .iter()
+                .find(|r| r.id == *id || r.recovery_origin.as_ref().is_some_and(|o| o.id == *id))
+            {
+                let expected = receipt
+                    .recovery_origin
+                    .as_ref()
+                    .filter(|o| o.id == *id)
+                    .map_or(&receipt.digest, |o| &o.digest);
+                return if expected != digest {
                     ReceiptLookup::IdPayloadConflict
                 } else if retired {
                     ReceiptLookup::Retired(receipt.clone())
@@ -235,10 +311,48 @@ impl ReceiptLedger {
             {
                 return Err(BundleError::Corrupt("receipt identity/digest".into()));
             }
+            if let Some(original) = &receipt.recovery_origin {
+                original.id.issuer.validate()?;
+                if original.id.sequence == 0
+                    || !hex(&original.digest.0, 64)
+                    || !ids.insert(&original.id)
+                {
+                    return Err(BundleError::Corrupt(
+                        "recovery origin identity/digest".into(),
+                    ));
+                }
+            }
             for reference in receipt.result.dependencies() {
                 reference.validate()?;
             }
             match &receipt.result {
+                ReceiptResult::Switch { result } => {
+                    if result
+                        .target_version
+                        .as_ref()
+                        .is_some_and(|version| !hex(version, 32))
+                        || result.old.branch == result.new.branch
+                        || result.root_generation != receipt.generation
+                        || result.switch_generation == 0
+                        || result.switch_generation >= result.root_generation
+                        || result.old.branch != receipt.target_branch
+                        || result.new.head != receipt.head_id
+                        || [&result.old.checkpoint, &result.new.checkpoint]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::BranchCheckpoint)
+                        || [&result.old.history, &result.new.history]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::History)
+                        || [&result.old.inputs, &result.new.inputs]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::InputManifest)
+                        || [&result.old.lineage, &result.new.lineage]
+                            .iter()
+                            .any(|r| r.record_kind != RecordKind::Lineage)
+                    {
+                        return Err(BundleError::Corrupt("switch result identity/kind".into()));
+                    }
+                }
                 ReceiptResult::Edit { checkpoint_ref, .. }
                     if checkpoint_ref.record_kind != RecordKind::BranchCheckpoint =>
                 {
@@ -316,6 +430,15 @@ impl ProjectBundle {
         inputs: &ObjectRef,
         first_sequence: u64,
     ) -> Result<IssuerId, BundleError> {
+        self.issue_issuer_at_cut(core, inputs, first_sequence, None)
+    }
+    pub(crate) fn issue_issuer_at_cut(
+        &mut self,
+        core: &Core,
+        inputs: &ObjectRef,
+        first_sequence: u64,
+        cut: Option<&kinewright_core::AcceptedCut>,
+    ) -> Result<IssuerId, BundleError> {
         if self.unsettled || self.pending_command.is_some() {
             return Err(BundleError::Unsettled);
         }
@@ -341,7 +464,11 @@ impl ProjectBundle {
                 retired: false,
             },
         );
-        let result = self.save(core, inputs);
+        let result = if let Some(cut) = cut {
+            self.save_frozen(core, inputs, cut)
+        } else {
+            self.save(core, inputs)
+        };
         if let Err(error) = result {
             if !self.unsettled {
                 self.issuers.remove(&id);
@@ -349,6 +476,13 @@ impl ProjectBundle {
             return Err(error);
         }
         Ok(id)
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn clear_current_receipt_details_probe(&mut self) {
+        self.receipts = ReceiptLedger::default();
+        for issuer in self.issuers.values_mut() {
+            issuer.retired = true;
+        }
     }
     pub fn receipt_lookup(&self, envelope: &CommandEnvelope) -> Result<ReceiptLookup, BundleError> {
         self.store.with_namespace(|n| n.verify_read_authority())?;
@@ -362,11 +496,19 @@ impl ProjectBundle {
                 ReceiptLookup::IdPayloadConflict
             });
         }
+        let records = self.rescue_records()?;
+        for record in &records {
+            if let Some(result) = record.lookup(&envelope.id, &digest) {
+                return Ok(result);
+            }
+        }
         let current = self.receipts.lookup(&envelope.id, &digest);
         if current != ReceiptLookup::Absent {
             return Ok(current);
         }
-        for reference in &self.recovery.predecessors {
+        let mut recovery = self.recovery.predecessors.clone();
+        recovery.extend(records.iter().filter_map(|r| r.acknowledged_root.clone()));
+        for reference in &recovery {
             let _encoded = self.store.reserve(0, reference.byte_length, 0, false)?;
             let mut file = self.store.open_verified(reference)?;
             let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
@@ -505,9 +647,21 @@ impl ProjectBundle {
         }
         Ok(())
     }
+    /// Receipt/pending settlement never installs a destination checkpoint on the live actor.
     pub fn reconcile_command(&mut self, core: &Core) -> Result<(), BundleError> {
-        crate::bundle::reconcile_core_save(core)?;
-        self.reconcile()?;
+        self.reconcile_destination(Some(core))?;
+        self.pending_command = None;
+        self.pending_result = None;
+        Ok(())
+    }
+    /// Explicit ordinary attachment operation, separate from destination reconciliation.
+    pub fn install_reconciled_command(
+        &mut self,
+        core: &Core,
+        before: HistorySnapshot,
+    ) -> Result<(), BundleError> {
+        let attachment = self.attach_core(core)?;
+        self.reconcile_command(core)?;
         let checkpoint = self
             .branches
             .get(&self.manual_branch_id)
@@ -515,11 +669,9 @@ impl ProjectBundle {
         let history = self
             .store
             .read_record::<HistorySnapshot>(&checkpoint.history_ref)?;
-        core.restore_history((*history).clone())
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        self.pending_command = None;
-        self.pending_result = None;
-        Ok(())
+        attachment
+            .install_checkpoint(before, (*history).clone())
+            .map_err(crate::bundle::history_error)
     }
 }
 

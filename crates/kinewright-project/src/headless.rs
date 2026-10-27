@@ -31,8 +31,8 @@ pub struct HeadlessSaveReport {
 /// fail-closed for an unloaded session. `lock` is the held project lock,
 /// verified before any write (G9) — including a save to a fresh path (a
 /// save-as/first-save transfer): a journal for an identity is created or
-/// renamed only while holding that identity's lock (G10). `None` while no
-/// lock is held (transitional until S4 threads the acquire through).
+/// renamed only while holding that identity's lock (G10). With `None`, this
+/// call claims and retains the real writer before any mutation.
 /// # Errors
 /// `SessionNotLoaded`, `Serialize`, `Write`, or `LockLost`.
 #[allow(clippy::too_many_arguments)]
@@ -47,7 +47,7 @@ pub fn save_headless(
     recovery_dir: &Path,
     lock: Option<&LockfileHandle>,
 ) -> Result<HeadlessSaveReport, ProjectSaveError> {
-    if lock.is_some_and(|lock| lock.verify().is_err()) {
+    if lock.is_some_and(|writer| writer.verify().is_err()) {
         return Err(ProjectSaveError::LockLost {
             path: path.to_path_buf(),
         });
@@ -56,6 +56,52 @@ pub fn save_headless(
     if sidecar.established.is_empty() {
         return Err(ProjectSaveError::SessionNotLoaded);
     }
+    let existing = sidecar
+        .authority
+        .as_ref()
+        .filter(|writer| writer.names_project(path));
+    let writer = match lock.or(existing) {
+        Some(writer) => writer.clone(),
+        None => {
+            crate::lockfile::acquire_gui_project_lock(path, recovery_dir)
+                .map_err(|e| ProjectSaveError::Write(e.to_string()))?
+                .handle
+        }
+    };
+    if writer.verify().is_err() || !writer.names_project(path) {
+        return Err(ProjectSaveError::LockLost {
+            path: path.to_path_buf(),
+        });
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    crate::test_hook("legacy_save_verified");
+    let old_authority = sidecar.authority.replace(writer.clone());
+    let result = save_legacy_owned(
+        document,
+        previous_store,
+        sidecar,
+        previous_digest,
+        revision,
+        &writer,
+    );
+    if result.is_err() {
+        sidecar.authority = old_authority;
+    }
+    result.map(|mut report| {
+        report.project.path = path.to_path_buf();
+        report
+    })
+}
+
+fn save_legacy_owned(
+    document: &Document,
+    previous_store: Option<&LutStore>,
+    sidecar: &mut SidecarSession,
+    previous_digest: &str,
+    revision: TimelineRevision,
+    writer: &LockfileHandle,
+) -> Result<HeadlessSaveReport, ProjectSaveError> {
+    let path = writer.project_path();
     let json = serialize_project_document(document)?;
     let new_digest = digest_bytes(json.as_bytes());
     // N6/H12+J2 (as in `write_project`): snapshot for rollback.
@@ -82,11 +128,9 @@ pub fn save_headless(
     // failure fails the save — never an unpaired success.
     let sidecar_outcome = match sidecar_outcome {
         Ok(FlushOutcome::Occupied) => {
-            let Some(stem) = sidecar_path_for_project(Some(path)) else {
-                return Err(ProjectSaveError::Write(
-                    "an occupied flush derived no stem".to_owned(),
-                ));
-            };
+            let stem = sidecar_path_for_project(Some(&writer.io_path())).ok_or_else(|| {
+                ProjectSaveError::Write("an occupied flush derived no stem".into())
+            })?;
             let moved = refuse_sidecar(&stem)
                 .map_err(|error| ProjectSaveError::Write(error.to_string()))?;
             rollback_snapshot.note_moved_aside(moved);
@@ -114,21 +158,21 @@ pub fn save_headless(
         }
         outcome => outcome,
     };
-    let project = match crate::project::write_project_bytes(&json, document, path, previous_store) {
-        Ok(report) => report,
-        Err(error) => {
-            rollback_sidecar_write(rollback_snapshot, sidecar);
-            return Err(error);
-        }
-    };
+    let project =
+        match crate::project::write_project_bytes_owned(&json, document, writer, previous_store) {
+            Ok(report) => report,
+            Err(error) => {
+                rollback_sidecar_write(rollback_snapshot, sidecar);
+                return Err(error);
+            }
+        };
     // Landed bytes establish the stem (as in `adopt_saved_path`), even past
     // a benign skipped flush — later saves pair.
     if let Some(stem) = sidecar_path_for_project(Some(path)) {
         sidecar.established.insert(stem);
     }
     new_digest.clone_into(&mut sidecar.saved_digest);
-    // F5: headless retires nothing (param kept for call-shape stability).
-    let _ = recovery_dir;
+    // Headless never retires an unreplayed journal.
     Ok(HeadlessSaveReport {
         project,
         sidecar: sidecar_outcome,
@@ -145,13 +189,8 @@ pub fn save_headless_bundle(
     core: &kinewright_core::Core,
     inputs: Option<&crate::bundle_records::ObjectRef>,
 ) -> Result<crate::bundle::BundleSaveReport, crate::bundle::BundleError> {
-    let mut bundle = crate::bundle::ProjectBundle::activate(path, admission)?;
-    if let Some(reference) = inputs {
-        bundle.save(core, reference)
-    } else {
-        let manifest = bundle.empty_inputs()?;
-        bundle.save(core, &manifest.reference)
-    }
+    crate::editing_session::Ja1EditingSession::activate(path, admission, core, inputs)?
+        .save_active()
 }
 
 #[cfg(test)]

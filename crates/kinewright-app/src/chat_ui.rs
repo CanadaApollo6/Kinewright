@@ -459,6 +459,7 @@ pub(crate) struct AgentThread {
     pub(crate) name: String,
     pub(crate) harness: AgentHarnessChoice,
     pub(crate) session: Option<Box<dyn AgentSession>>,
+    pub(crate) host_chat: Option<crate::ja1_chat::HostChat>,
     pub(crate) events: Option<crossbeam_channel::Receiver<AgentEvent>>,
     pub(crate) running: bool,
     pub(crate) input: String,
@@ -528,7 +529,7 @@ impl AgentThread {
     pub(crate) fn new(
         name: impl Into<String>,
         harness: AgentHarnessChoice,
-        mut chat: Vec<ChatEntry>,
+        chat: Vec<ChatEntry>,
         base_revision: TimelineRevision,
         base_document: &Arc<Document>,
         playback: &Arc<dyn Playback>,
@@ -537,24 +538,57 @@ impl AgentThread {
         project_path: &ProjectPathHandle,
         incidents: &IncidentLogHandle,
     ) -> Result<Self, String> {
+        Self::new_with_execution(
+            name,
+            harness,
+            chat,
+            base_revision,
+            base_document,
+            playback,
+            analysis,
+            exporter,
+            project_path,
+            incidents,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_execution(
+        name: impl Into<String>,
+        harness: AgentHarnessChoice,
+        mut chat: Vec<ChatEntry>,
+        base_revision: TimelineRevision,
+        base_document: &Arc<Document>,
+        playback: &Arc<dyn Playback>,
+        analysis: &Arc<dyn Analysis>,
+        exporter: &Arc<dyn Export>,
+        project_path: &ProjectPathHandle,
+        incidents: &IncidentLogHandle,
+        local_execution: bool,
+    ) -> Result<Self, String> {
         let name = name.into();
         let branch = TimelineBranch::new(name.clone(), base_revision, Arc::clone(base_document))
             .map_err(|error| error.to_string())?;
-        let mcp_server = match McpServer::start_isolated_with_exporter_project_path_and_incidents(
-            branch.core(),
-            Arc::clone(playback),
-            Arc::clone(analysis),
-            Arc::clone(exporter),
-            Arc::clone(project_path),
-            Arc::clone(incidents),
-        ) {
-            Ok(server) => Some(server),
-            Err(error) => {
-                chat.push(ChatEntry::Text(format!(
-                    "Could not start this thread's Kinewright agent server: {error}"
-                )));
-                None
+        let mcp_server = if local_execution {
+            match McpServer::start_isolated_with_exporter_project_path_and_incidents(
+                branch.core(),
+                Arc::clone(playback),
+                Arc::clone(analysis),
+                Arc::clone(exporter),
+                Arc::clone(project_path),
+                Arc::clone(incidents),
+            ) {
+                Ok(server) => Some(server),
+                Err(error) => {
+                    chat.push(ChatEntry::Text(format!(
+                        "Could not start this thread's Kinewright agent server: {error}"
+                    )));
+                    None
+                }
             }
+        } else {
+            None
         };
         let confirmations = mcp_server.as_ref().map(McpServer::confirmations);
         Ok(Self {
@@ -562,6 +596,7 @@ impl AgentThread {
             name,
             harness,
             session: None,
+            host_chat: None,
             events: None,
             running: false,
             input: String::new(),
@@ -588,6 +623,7 @@ impl AgentThread {
         exporter: Arc<dyn Export>,
         project_path: &ProjectPathHandle,
         incidents: &IncidentLogHandle,
+        local_execution: bool,
     ) -> Result<(), String> {
         if let Some(confirmations) = &self.confirmations {
             confirmations.reject_all("the agent branch was replaced");
@@ -596,6 +632,14 @@ impl AgentThread {
         self.selected_operations.clear();
         let branch = TimelineBranch::new(self.name.clone(), base_revision, base_document)
             .map_err(|error| error.to_string())?;
+        if !local_execution {
+            if let Some(server) = self.mcp_server.take() {
+                server.shutdown();
+            }
+            self.confirmations = None;
+            self.branch = branch;
+            return Ok(());
+        }
         let server = McpServer::start_isolated_with_exporter_project_path_and_incidents(
             branch.core(),
             playback,
@@ -737,6 +781,22 @@ impl KinewrightApp {
         if message.is_empty() || self.projects[project_index].threads[thread_index].running {
             return;
         }
+        if self.projects[project_index].ja1_read_only() {
+            self.status = self.projects[project_index]
+                .ja1
+                .as_ref()
+                .filter(|attachment| attachment.manual_save_required())
+                .map_or(
+                    "Editing and agent producers are paused for this Studio context.",
+                    crate::ja1_attachment::Ja1Attachment::manual_refusal_reason,
+                )
+                .into();
+            return;
+        }
+        if self.projects[project_index].studio_host_client().is_some() {
+            self.start_host_agent_turn(project_index, thread_index, message);
+            return;
+        }
         let refresh_branch = self.projects[project_index].threads[thread_index]
             .branch
             .compare()
@@ -856,6 +916,67 @@ impl KinewrightApp {
         }
     }
 
+    fn start_host_agent_turn(
+        &mut self,
+        project_index: usize,
+        thread_index: usize,
+        message: String,
+    ) {
+        // C8 foreground snapshots are Save operations. C9 supplies unsaved manual streaming.
+        if self.projects[project_index].is_dirty() {
+            self.status = "Save your current edit before starting this host agent session.".into();
+            return;
+        }
+        let harness = self.projects[project_index].threads[thread_index].harness;
+        let (model, effort, service_tier) = self.harness_choices(harness);
+        let config = kinewright_agent::writer_host::HostSessionConfig {
+            model,
+            effort,
+            service_tier,
+            max_turns: None,
+        };
+        let client = self.projects[project_index]
+            .studio_host_client()
+            .expect("attached host");
+        let revision = self.projects[project_index].revision;
+        let document = Arc::clone(&self.projects[project_index].document);
+        let thread = &mut self.projects[project_index].threads[thread_index];
+        if let Some(chat) = &mut thread.host_chat {
+            if let Err(error) = chat.send(message.clone()) {
+                self.status = error;
+                return;
+            }
+        } else {
+            match TimelineBranch::new(thread.name.clone(), revision, document) {
+                Ok(branch) => thread.branch = branch,
+                Err(error) => {
+                    self.status = error.to_string();
+                    return;
+                }
+            }
+            thread.host_chat = Some(crate::ja1_chat::HostChat::start(
+                client,
+                harness.key().to_owned(),
+                config,
+                message.clone(),
+            ));
+            thread.usage.reset_usage();
+        }
+        let first = !thread
+            .chat
+            .iter()
+            .any(|entry| matches!(entry, ChatEntry::User(_)));
+        if first {
+            thread.name = thread_title(&message);
+        }
+        thread.chat.push(ChatEntry::User(message.clone()));
+        thread.provenance.record(ProvenanceKind::Prompt, message);
+        thread.input.clear();
+        thread.running = true;
+        thread.last_activity = Instant::now();
+        self.status = format!("{} is editing in the Studio host", harness.label());
+    }
+
     /// Run one registry command: prompt commands expand into an agent turn;
     /// local commands act instantly and log themselves to the stream.
     fn run_slash_command(&mut self, command: &'static crate::slash::SlashCommand) {
@@ -891,6 +1012,10 @@ impl KinewrightApp {
         let Some(thread) = self.projects[project_index].threads.get_mut(thread_index) else {
             return;
         };
+        if let Some(chat) = &thread.host_chat {
+            chat.interrupt();
+        }
+        thread.host_chat = None;
         let had_session = thread.session.is_some();
         if let Some(session) = &mut thread.session {
             session.interrupt();
@@ -913,6 +1038,7 @@ impl KinewrightApp {
     ) -> bool {
         let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
         let incidents = Arc::clone(&self.projects[project_index].incidents);
+        let local_execution = !self.projects[project_index].studio_host_managed();
         let result = self.projects[project_index].threads[thread_index].replace_branch(
             revision,
             document,
@@ -921,12 +1047,17 @@ impl KinewrightApp {
             Arc::clone(&self.exporter),
             &project_path,
             &incidents,
+            local_execution,
         );
         if let Err(error) = result {
             // Appendix B row 38.
             self.note_label(LabelIncident::AgentBranch, IncidentSubject::Agent, error);
             false
         } else {
+            let id = self.projects[project_index].threads[thread_index].id;
+            self.projects[project_index]
+                .retired_agent_threads
+                .remove(&id);
             true
         }
     }
@@ -967,6 +1098,22 @@ impl KinewrightApp {
     }
 
     fn merge_agent_branch(&mut self, project_index: usize, thread_index: usize) {
+        if self.projects[project_index].ja1_read_only()
+            || self.projects[project_index]
+                .retired_agent_threads
+                .contains(&self.projects[project_index].threads[thread_index].id)
+        {
+            self.status = self.projects[project_index]
+                .ja1
+                .as_ref()
+                .filter(|attachment| attachment.manual_save_required())
+                .map_or(
+                    "This agent branch belongs to the previous working edit or editing is read-only. Keep its work and return to that working branch before applying it.",
+                    crate::ja1_attachment::Ja1Attachment::manual_refusal_reason,
+                )
+                .into();
+            return;
+        }
         self.stop_agent(thread_index);
         let branch = self.projects[project_index].threads[thread_index]
             .branch
@@ -1285,7 +1432,75 @@ impl KinewrightApp {
                 }
             }
         }
-        let events = self
+        let mut host_events = Vec::new();
+        for (project_index, project) in self.projects.iter_mut().enumerate() {
+            for (thread_index, thread) in project.threads.iter_mut().enumerate() {
+                let Some(chat) = &mut thread.host_chat else {
+                    continue;
+                };
+                match chat.poll() {
+                    Ok(Some(status)) => {
+                        thread.running = status.running;
+                        if let Some(history) = status.history {
+                            // Display-only shadow. Real commands and sessions remain in the host.
+                            let same_base = thread.branch.compare().is_ok_and(|comparison| {
+                                history.baseline == comparison.base_document
+                            });
+                            if !same_base || thread.branch.core().restore_history(history).is_err()
+                            {
+                                project.retired_agent_threads.insert(thread.id);
+                                thread.chat.push(ChatEntry::Text("The host preview could not be installed. Its session continues in the host.".into()));
+                            }
+                        }
+                        for event in status.events {
+                            let event = match event.kind.as_str() {
+                                "done" => AgentEvent::Done,
+                                "error" => AgentEvent::Error(event.text),
+                                "tool_call" => {
+                                    let (name, arguments) = event
+                                        .text
+                                        .split_once(": ")
+                                        .unwrap_or(("host tool", &event.text));
+                                    AgentEvent::ToolCall {
+                                        name: name.to_owned(),
+                                        arguments: arguments.to_owned(),
+                                    }
+                                }
+                                "tool_result" => {
+                                    let (name, result) = event
+                                        .text
+                                        .split_once(": ")
+                                        .unwrap_or(("host tool", &event.text));
+                                    AgentEvent::ToolResult {
+                                        name: name.to_owned(),
+                                        result: result.to_owned(),
+                                    }
+                                }
+                                _ => AgentEvent::Text(event.text),
+                            };
+                            host_events.push((project_index, thread_index, event));
+                        }
+                        if status.overflowed {
+                            thread.chat.push(ChatEntry::Text(
+                                "Some earlier host events exceeded the bounded display buffer."
+                                    .into(),
+                            ));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        thread.running = false;
+                        thread.chat.push(ChatEntry::Text(error.message));
+                        if error.retention_lost
+                            && let Some(attachment) = &mut project.ja1
+                        {
+                            attachment.operation_panicked();
+                        }
+                    }
+                }
+            }
+        }
+        let mut events = self
             .projects
             .iter()
             .enumerate()
@@ -1304,6 +1519,7 @@ impl KinewrightApp {
                     })
             })
             .collect::<Vec<_>>();
+        events.extend(host_events);
         for (project_index, thread_index, event) in events {
             let thread = &mut self.projects[project_index].threads[thread_index];
             thread.usage.record(&event);
@@ -1403,7 +1619,8 @@ impl KinewrightApp {
         let base_document = Arc::clone(&self.projects[project_index].document);
         let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
         let incidents = Arc::clone(&self.projects[project_index].incidents);
-        let thread = AgentThread::new(
+        let local_execution = !self.projects[project_index].studio_host_managed();
+        let thread = AgentThread::new_with_execution(
             format!("Thread {next_number}"),
             harness,
             Vec::new(),
@@ -1414,6 +1631,7 @@ impl KinewrightApp {
             &self.exporter,
             &project_path,
             &incidents,
+            local_execution,
         );
         let Ok(thread) = thread else {
             // Appendix B row 48.
@@ -1440,7 +1658,15 @@ impl KinewrightApp {
             thread_index,
             self.projects[project_index].threads.len(),
         );
-        self.stop_agent(thread_index);
+        if self.projects[project_index].threads[thread_index]
+            .host_chat
+            .is_some()
+        {
+            self.projects[project_index].threads[thread_index].host_chat = None;
+            self.projects[project_index].threads[thread_index].running = false;
+        } else {
+            self.stop_agent(thread_index);
+        }
         self.projects[project_index].threads.remove(thread_index);
         self.projects[project_index].active_thread = next_active;
     }

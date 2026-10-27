@@ -363,7 +363,86 @@ apart from the separately charged B overlap/cleanup. If the final closure, recor
 available recovery roots or simultaneous copies cannot fit, return a typed capacity/missing-
 object refusal. A conditional preview is never a guaranteed-success claim.
 
+
+### Binding S2 revision 7 qualification: local recovery and L1
+
+[JA-1 §5.4](JA1-STUDIO-ORCHESTRATION.md#54-local-recovery-selection-and-rescue-contracts-s2-revision-7)
+is the binding local selection, session-pin, frozen-rescue, retirement, registered-session
+and availability contract. It supersedes earlier P/exact pre-floor copy and editable
+paused-state rulings. Ordinary Save on L precedes one frozen selection of R at g+1;
+normal select_history and its disclosed floor apply. There is no retained-manual role,
+read-only working branch, exact-retention bypass or editable durable-no-activation state.
+
+Final L1 supersedes this document's earlier exact-root retention wording only for inherited
+rescue linkage. Convert only that linkage to provenance and rebuild its required containers,
+manifests and root. Keep the source root SHA as provenance and label "rebound recovery
+point". Recovered Document, baseline, batches/history/cursor/Undo/Redo/gesture, input payloads
+and identities remain exact. Independent evidence and receipts remain required even when
+they still retain an older object. New B activation authority belongs to the wrapper/runtime.
+Full checkpoint-edge validation still applies. A graph-valid, fully rehashed non-linkage
+Document, batch or input change must fail the exact preservation oracle.
+
+Pin the verified selected root/checkpoint's complete closure with ordinary StorePin at
+prepare, before ordinary Save. Resolve by SHA, never automatic-list position. Keep the same
+pin/target through rotation, collection, unknown outcomes and quota retirement/retry.
+Existing-target retry requires current index membership and expected head; never resurrect
+an ID. Exclude that target from offers and direct retirement. Also exclude live attached
+sessions, unsaved edits and specialist base/target dependencies until save/close, fencing
+and eligibility recheck. Ja1EditingSession registers every durable session create/reopen
+with DurableBranchSessionGuard before edits; no usable unregistered route may bypass it.
+
+During either unresolved local-recovery publication, rescue uses the existing frozen O cut.
+Cancel/failure/refusal/unknown B leaves O frozen. Immediate verified rescue seals O,
+irrevocably abandons R and activates fresh B; late A is destination-only. This qualifies
+only A1's ordinary resume rule. It never changes newer B edits or Saved/dirty/association.
+
+Before preview, rescue handoff, Close and every destination change, disclose whether the
+chosen point is still durably listed. If held only in-session, abandoning lets it go;
+warn in advance if preliminary Save will rotate it out. Refuse Save As/open-another-project
+while prepared. Require explicit disclosed abandonment first, only with no unresolved root
+publication. Rescue may proceed with its disclosed irreversible handoff. If B lacks the
+point, say so; during selection unknown say A keeps it only if selection completed. A crash
+can lose a session-only selected point: this is an accepted limit, not durable retention.
+Unavailable storage also needs the warning that Rescue copy preserves work if A never
+returns and Close may discard its only accessible in-session copy. Never label Close safe.
+
+Format 3 and the two-predecessor validator/rotation remain. Raw nonzero switch generation
+requires manual-switch@1; actual rescue role/schema requires rescue-copy@1. Cross-check
+actual requirements and declarations as a supported subset before mutation. Generic
+OwnedEvidence is insufficient. Generation-zero ordinary v3 remains a positive control.
+Shared L/R occurrence tuples, batch IDs and split ancestry survive first and later ordinary
+saves and floors. Only genuinely new events get the accepting branch's origin.
+
+C5 selects and copies the content closure separately from automatic recovery inventories.
+Every retained recovery role is added explicitly, with R_ack outside the unchanged pair
+of automatic predecessors. Only unavailable recovery roles may be omitted. Full-history
+omission is tried before the ordinary oldest-first floor. Trim and omission require
+separate consent bound to the capture, selected history, omitted roots and target limits.
+The rebuilt source manifests never restore an omitted recovery edge. Independent roots
+and all inputs needed by current content, Redo and the retained floor remain mandatory.
+
+The mutation boundary is the first destination lock claim or missing-parent creation.
+Read-only preview, inspection and cancelled consent consume no source or destination slot.
+Every unknown destination retains its own copy owner. After immediate B activation, a
+later unknown save on that same retained copy is reconciled as its new attempt, rather
+than returning the original copy's earlier committed status. On whole-context Close,
+actors are fenced before source reuse ends. Actual readers defer source cleanup; this
+teardown does not prove any unknown destination absent or change its captured outcome.
+
+Registered specialists keep their original namespace owner when the manual actor moves
+to B. A late proof can settle only that original specialist's own ticket while it remains
+live. It cannot change B, activate a capture copy or call the sealed manual A. The full
+proposal is retained with its branch checkpoint in the same publication, independently
+of the bounded Undo floor. Context Close names any such session with unresolved or
+unsaved work before ending its retention.
+
 ## 5. Session retention and editing after success
+
+C8's process split is binding in JA-1's "C8 process ownership and retention" and
+S0 §4.3. GUI-origin temporary bytes, holds, pins, and their one source ledger stay
+in the GUI. Host source access is borrowed and has no cleanup or release authority.
+Unproved replacement retention refuses every save and rescue, including fresh paths,
+while preserving the GUI's actual source objects and histories until explicit Close.
 
 **Originating session and owner.** The originating session is one app editing context from
 New or Open (including a project opened from A) until its explicit Close or app exit. A
@@ -575,6 +654,13 @@ accepted live Core cut and previously verified committed receipts. Exclude the t
 command checkpoint/result from B's selected roots even if staging changed owner caches;
 retain all those tentative bytes at A. Preserve accepted live edits without guessing
 whether A committed the pending command.
+Select independent evidence from the acknowledged manifest, never the mutable staged
+evidence vector. This excludes a pending-only comment result and its text/strokes even
+when A's tentative root actually landed. Independently committed references still select
+their full closure; pending envelope/result holds stay at A. After a failed ordinary or
+first-save Retry, the App still runs the phase-aware probe and retains any eligible offer,
+while preserving the reconciliation error and pending-command semantics. Rescue handoff
+must not leave a Live B actor retained if A's exact seal fails.
 A post-B5 internal/tail failure must still be classified by its publication phase; a mixed
 or unverified live/receipt state refuses capture rather than fabricating an acknowledged
 history. JA-1 `:334-338,348-364` requires reconciliation, never speculative reapplication.
@@ -893,3 +979,61 @@ here with required S2 implementation and mutation witnesses.
 No open lead question remains. Cargo, runtime red/restored-green witnesses, physical-device
 removal, storage-crash persistence, native Windows execution and CI are **NOT RUN**. This is
 a design revision only; S2 must implement and gate it before any rescue availability claim.
+
+### S2-R C6 App realization
+
+The local App displays the §7 outcome/loss distinctions and the binding revision-7
+availability disclosure at preview, rescue handoff, Close and destination changes.
+Its same originating lifecycle owner survives finite background operations, wrapper
+replacement and focus changes. A late capture's explicit destination release applies
+only to a proven, never-active capture; active and source owners cannot use it. View
+subscriptions/resources are prepared before actor sealing. C6's source-bound report
+records the in-session selection pin's accepted crash window and all unrun native,
+hosted and physical-storage lanes without revising older acceptance.
+
+### C9 manual producer qualification
+
+A manual permit does not weaken A1's Frozen/Sealed or exact-cut rules. Raw Core
+clones, retained permits and owner install/floor paths cannot bypass a frozen or
+sealed actor. Accepted manual messages remain retained while publication is
+pending; only an exact durable acknowledgement releases their ingress capacity.
+Source ownership, rescue slots, exact own-ticket settlement and capture-only late
+outcomes remain with their existing owners. C9 adds no recovery authorization,
+shared floor handshake, switch receipt or fresh-actor rescue-tail repair.
+
+### C10 recovery authority remains separate from rescue settlement
+
+A frozen manual recovery endpoint accepts only the captured actor/cut and complete
+pending chain. It may install that cut's validated floor or recovery-close result
+while preserving the freeze. Neither an A1 own-ticket proof nor a matching document
+confers this permission. Original-to-new command links and close/floor outcomes are
+ordinary receipt/history records in the same root, with existing admission limits.
+A replacement callback borrows the same actual GUI source admission and cannot
+retire its bytes, pins or charges. Failure to re-establish retained ownership keeps
+all save/rescue routes refused; only explicit originating Close retires the source.
+C10 does not change the deferred sealed-A/fresh-B rescue resume case.
+
+### C11 host-wrapped selection and rescue
+
+A host switch retains the local prepared selection, its verified target and its
+actual complete-closure session pin. Its original envelope and atomic Switch
+receipt add reconciliation identity, not another selection engine. A failed,
+refused, cancelled or unknown rescue during an unknown preliminary Save or
+selection leaves the original actor frozen. Successful rescue handoff abandons
+that selection irrevocably in both the local owner and host routing state; late
+A reconciliation remains destination-only and cannot attach its historical
+selection or change B. Preview, handoff, Close and destination changes retain
+the existing session-only target disclosures and crash limit. Receipt reads
+never replace the required current-pointer/payload confirmation or grant a lease.
+N2's fresh-actor resume failure after sealing A and the final composed restart
+witness remain C12 work.
+
+### C12 post-seal resume failure
+
+If B cannot resume after A seals, retain B Frozen and return its committed
+capture outcome with `activated=false`. Do not resume sealed A. Disclose that
+A is sealed and name the committed B path; offer Open B read-only. The existing
+explicit completed-capture owner release remains necessary for a separate
+editable open. A capture result never updates the active source's Saved identity
+or grants a lease. This closes the deferred N2 failure tail without adding an
+editable pause or changing late-copy, source-retention or rescue-slot rules.

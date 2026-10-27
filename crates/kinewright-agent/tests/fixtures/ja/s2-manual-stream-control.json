@@ -1,0 +1,30 @@
+{
+  "at": 0,
+  "batches": [
+    [
+      {
+        "SetSolidColor": {
+          "clip": 1,
+          "color": {
+            "r": 0,
+            "g": 255,
+            "b": 0
+          }
+        }
+      }
+    ],
+    [
+      {
+        "SetSolidColor": {
+          "clip": 1,
+          "color": {
+            "r": 255,
+            "g": 0,
+            "b": 0
+          }
+        }
+      }
+    ]
+  ],
+  "manual_stream": true
+}

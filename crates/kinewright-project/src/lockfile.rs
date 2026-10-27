@@ -11,7 +11,10 @@ use std::{
     fs::{self, File},
     io,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -250,7 +253,7 @@ impl std::fmt::Display for LockfileError {
 impl std::error::Error for LockfileError {}
 
 /// A held lock: open object plus published discovery. Never unlinked (F3).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LockfileHandle {
     /// The lockfile path.
     pub path: PathBuf,
@@ -258,16 +261,46 @@ pub struct LockfileHandle {
     pub discovery: PathBuf,
     /// This handle's claim.
     pub claim: LockfileClaim,
-    file: File,
+    #[cfg_attr(
+        all(not(unix), not(test)),
+        expect(
+            dead_code,
+            reason = "held for its unlocking drop; only Unix re-reads the object in verify"
+        )
+    )]
+    file: Arc<LockedFile>,
+    parent: crate::legacy_io::PinnedDirectory,
     /// The spelling claimed through and the identity it resolved to (J3).
     spelling: PathBuf,
     identity: PathBuf,
 }
 
 impl LockfileHandle {
-    #[cfg(target_os = "linux")]
-    pub(crate) fn resolved_identity(&self) -> &Path {
+    /// The caller's spelling, for state, reports and notices only.
+    #[must_use]
+    pub fn project_path(&self) -> &Path {
+        &self.spelling
+    }
+
+    /// Compare against the current pinned destination, including after atomic Save.
+    #[must_use]
+    pub fn names_project(&self, path: &Path) -> bool {
+        crate::same_project_file(path, &self.identity)
+    }
+
+    #[must_use]
+    pub fn resolved_identity(&self) -> &Path {
         &self.identity
+    }
+
+    /// The project filename beneath the held parent. Call verify before starting IO.
+    /// # Panics
+    /// Only if an internal claim was constructed without a project filename.
+    #[must_use]
+    pub fn io_path(&self) -> PathBuf {
+        self.parent
+            .io_path()
+            .join(self.identity.file_name().expect("claimed filename"))
     }
 
     /// Confirm the handle still owns what it claimed, before every headless
@@ -283,19 +316,12 @@ impl LockfileHandle {
     /// # Errors
     /// Returns `LockLost` when the spelling or the object moved.
     pub fn verify(&self) -> Result<(), LockfileError> {
-        let same = crate::project::canonical_project_identity(&self.spelling)
-            .is_ok_and(|now| now == self.identity);
+        let same = self.names_project(&self.spelling);
         #[cfg(unix)]
         let same = same && {
-            use std::os::unix::fs::MetadataExt as _;
-            match (self.file.metadata(), fs::metadata(&self.path)) {
-                (Ok(opened), Ok(current)) => {
-                    opened.dev() == current.dev() && opened.ino() == current.ino()
-                }
-                _ => false,
-            }
+            crate::namespace::file_matches_path(&self.file, &self.path).unwrap_or(false)
         };
-        if same {
+        if same && self.parent.verify().is_ok() {
             Ok(())
         } else {
             Err(LockfileError::LockLost {
@@ -318,14 +344,19 @@ impl LockfileHandle {
     /// # Errors
     /// Returns the removal IO error, if any.
     pub fn release(self) -> io::Result<()> {
-        let read = read_owner(&self.discovery, &self.claim.hostname);
+        let name = self
+            .discovery
+            .file_name()
+            .ok_or_else(|| io::Error::other("missing discovery filename"))?;
+        let discovery_io = self.parent.io_path().join(name);
+        let read = read_owner(&discovery_io, &self.claim.hostname);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("release_after_read");
         let removed = match read {
             DiscoveryRead::Owner(owner)
                 if owner.claim_id == self.claim.claim_id && self.verify().is_ok() =>
             {
-                fs::remove_file(&self.discovery)
+                fs::remove_file(&discovery_io)
             }
             // N4: absent — nothing of ours; a successor may publish now.
             DiscoveryRead::Absent => Ok(()),
@@ -348,14 +379,22 @@ impl LockfileHandle {
     }
 }
 
-impl Drop for LockfileHandle {
+#[derive(Debug)]
+struct LockedFile(File);
+impl std::ops::Deref for LockedFile {
+    type Target = File;
+    fn deref(&self) -> &File {
+        &self.0
+    }
+}
+impl Drop for LockedFile {
     /// Explicit unlock before close: a bare close releases the flock only
     /// at the last close of the open description, so a forked child that
     /// inherited the fd (a spawned claimant, an ffmpeg helper) would hold
     /// the release hostage until its exec. `LOCK_UN` releases regardless
     /// of duplicates — the release is deterministic.
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = self.0.unlock();
     }
 }
 
@@ -699,13 +738,14 @@ fn is_discovery_temp(entry: &std::ffi::OsStr, name: &std::ffi::OsStr) -> bool {
 /// symlink — closing the swap window between open and flock.
 #[cfg(unix)]
 fn fd_matches_path(file: &File, lock_path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    let (Ok(opened), Ok(current)) = (file.metadata(), fs::symlink_metadata(lock_path)) else {
+    let (Ok(opened), Ok(current)) = (
+        crate::namespace::FileIdentity::of_file(file),
+        fs::symlink_metadata(lock_path),
+    ) else {
         return false;
     };
     !current.file_type().is_symlink()
-        && opened.dev() == current.dev()
-        && opened.ino() == current.ino()
+        && opened == crate::namespace::FileIdentity::of_metadata(&current)
 }
 
 /// The claim, lock and discovery paths of one resolved identity (J2): no
@@ -787,18 +827,69 @@ pub fn acquire_project_lock_with_policy(
     attempts: u32,
     retry_delay: Duration,
 ) -> Result<AcquiredLock, LockfileError> {
+    acquire_with_recovery_policy(
+        project_path,
+        mode,
+        endpoint,
+        recovery_dir,
+        attempts,
+        retry_delay,
+        true,
+    )
+}
+
+/// Claim a legacy GUI writer. Existing journals remain pending for explicit GUI decisions.
+/// # Errors
+/// Returns the ordinary identity, contention or IO refusal.
+pub fn acquire_gui_project_lock(
+    project_path: &Path,
+    recovery_dir: &Path,
+) -> Result<AcquiredLock, LockfileError> {
+    acquire_with_recovery_policy(
+        project_path,
+        LockMode::Gui,
+        "",
+        recovery_dir,
+        1,
+        Duration::ZERO,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn acquire_with_recovery_policy(
+    project_path: &Path,
+    mode: LockMode,
+    endpoint: &str,
+    recovery_dir: &Path,
+    attempts: u32,
+    retry_delay: Duration,
+    check_recovery: bool,
+) -> Result<AcquiredLock, LockfileError> {
     // J2: the identity resolves exactly once; claim, lock, discovery and
     // the pending-journal scan all derive from it, so a link re-pointed
     // mid-acquire can never split the lock from the scan.
     let identity = crate::project::canonical_project_identity(project_path)
         .map_err(|error| LockfileError::Identity(error.to_string()))?;
     let (lock_path, discovery_path, mut claim) = build_claim(&identity, mode, endpoint, None)?;
+    let parent = crate::legacy_io::PinnedDirectory::open(
+        identity
+            .parent()
+            .ok_or_else(|| LockfileError::Identity("missing project parent".into()))?,
+    )
+    .map_err(|e| LockfileError::Io(e.to_string()))?;
+    let lock_io = parent
+        .io_path()
+        .join(lock_path.file_name().expect("lock filename"));
+    let discovery_io = parent
+        .io_path()
+        .join(discovery_path.file_name().expect("discovery filename"));
     let attempts = attempts.max(1);
     for attempt in 1..=attempts {
         let last = attempt == attempts;
         // G1: never open through a symlink — a dangling lock link must
         // create nothing, and a planted link must not divert the lock.
-        if fs::symlink_metadata(&lock_path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        if fs::symlink_metadata(&lock_io).is_ok_and(|meta| meta.file_type().is_symlink()) {
             return Err(LockfileError::Io(format!(
                 "refusing to lock through a symlink: {}",
                 lock_path.display()
@@ -820,7 +911,7 @@ pub fn acquire_project_lock_with_policy(
         // share-compatible), which is what makes `verify` sound there.
         #[cfg(windows)]
         std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 3);
-        let file = match options.open(&lock_path) {
+        let file = match options.open(&lock_io) {
             Ok(file) => file,
             // A missing parent never resolves by retrying.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -843,7 +934,7 @@ pub fn acquire_project_lock_with_policy(
         // G1 (Unix): the fd must still name the lock path — a swap between
         // open and flock retries onto the current object.
         #[cfg(unix)]
-        if !fd_matches_path(&file, &lock_path) {
+        if !fd_matches_path(&file, &lock_io) {
             drop(file);
             if last {
                 return Err(LockfileError::Io(format!(
@@ -858,7 +949,7 @@ pub fn acquire_project_lock_with_policy(
             // Held: contention, never a steal. Only a parsed claim names
             // its owner; anything unreadable contends ownerless.
             drop(file);
-            let owner = match read_owner(&discovery_path, &claim.hostname) {
+            let owner = match read_owner(&discovery_io, &claim.hostname) {
                 DiscoveryRead::Owner(owner) => Some(owner),
                 _ => None,
             };
@@ -874,32 +965,45 @@ pub fn acquire_project_lock_with_policy(
         // Holding the flock: every exit below goes through the guard.
         let guard = FlockGuard::held(file);
         // Holding the flock: sweep our own stale publish temps first.
-        sweep_discovery_temps(&discovery_path);
+        sweep_discovery_temps(&discovery_io);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_scan"); // RACE-REVIEW
         // Holding the flock: pending recovery (or lookup failure) refuses first.
-        match pending_journal_for_identity(recovery_dir, project_path, &identity) {
-            Ok(Some(journal)) => {
-                return Err(LockfileError::PendingRecovery { journal });
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(LockfileError::RecoveryLookup {
-                    reason: error.to_string(),
-                });
+        if check_recovery {
+            match pending_journal_for_identity(recovery_dir, project_path, &identity) {
+                Ok(Some(journal)) => {
+                    return Err(LockfileError::PendingRecovery { journal });
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(LockfileError::RecoveryLookup {
+                        reason: error.to_string(),
+                    });
+                }
             }
         }
-        let (previous, unreadable) = decide_free_claim(&discovery_path, &claim.hostname)?;
+        let (previous, unreadable) =
+            decide_free_claim(&discovery_io, &claim.hostname).map_err(|error| match error {
+                LockfileError::ForeignHost { host, endpoint, .. } => LockfileError::ForeignHost {
+                    host,
+                    endpoint,
+                    discovery: discovery_path.clone(),
+                },
+                other => other,
+            })?;
         claim.reclaimed_from.clone_from(&previous);
         #[cfg(any(test, feature = "test-util"))]
         crate::test_hook("after_flock_before_publish");
         // G9: the object may have been deleted under this pending owner
         // between open and publish — never publish for a stale inode.
         #[cfg(unix)]
-        if !fd_matches_path(guard.file(), &lock_path) {
+        if !fd_matches_path(guard.file(), &lock_io) {
             return Err(LockfileError::LockLost { path: lock_path });
         }
-        if let Err(error) = write_discovery(&discovery_path, &claim) {
+        if parent.verify().is_err() {
+            return Err(LockfileError::LockLost { path: lock_path });
+        }
+        if let Err(error) = write_discovery(&discovery_io, &claim) {
             return Err(LockfileError::Io(error.to_string()));
         }
         #[cfg(any(test, feature = "test-util"))]
@@ -909,7 +1013,8 @@ pub fn acquire_project_lock_with_policy(
                 path: lock_path,
                 discovery: discovery_path,
                 claim,
-                file: guard.release(),
+                file: Arc::new(LockedFile(guard.release())),
+                parent,
                 spelling: project_path.to_path_buf(),
                 identity,
             },

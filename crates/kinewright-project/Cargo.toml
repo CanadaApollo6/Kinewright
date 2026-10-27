@@ -31,6 +31,10 @@ libc.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix.workspace = true
 
+# Already in Cargo.lock; safe access to volume serial + file index on stable Rust.
+[target.'cfg(windows)'.dependencies]
+winapi-util = "=0.1.11"
+
 [dev-dependencies]
 dhat = "=0.3.3"
 # The sidecar round-trip tests persist through `TempDirectory`.

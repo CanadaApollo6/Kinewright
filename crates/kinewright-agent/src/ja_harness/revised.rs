@@ -36,6 +36,70 @@ impl Adapter {
     ) -> Result<Value, String> {
         let call = &action.call;
         match call {
+            Call::S2HostAuthProbe(_) => {
+                super::s2_host_observer::observe(&self.baseline.root, self.mode == Mode::Revised)
+            }
+            Call::S2RescuePublicationProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::rescue_publication(
+                        &self.baseline.root,
+                        self.mode == Mode::Revised,
+                    )
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C5 durable rescue publication observer requires Linux; NOT RUN".into())
+                }
+            }
+            Call::S2RescueRecoveryProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::rescue_recovery(
+                        &self.baseline.root,
+                        self.mode == Mode::Revised,
+                    )
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C4 durable selection observer requires Linux; NOT RUN".into())
+                }
+            }
+            Call::S2RescueSourceProbe(_) | Call::S2RescueSlotsProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::rescue_owners(
+                        &self.baseline.root,
+                        self.mode == Mode::Revised,
+                        matches!(call, Call::S2RescueSlotsProbe(_)),
+                    )
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C3 durable source/slot observer requires Linux; NOT RUN".into())
+                }
+            }
+            Call::S2WriterIdentityProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::writer_identity(&self.baseline.root)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C7 alias observer requires Linux; NOT RUN".into())
+                }
+            }
+            Call::S2CoreSealProbe(_) => super::s2_observer::core_seal(self.mode == Mode::Revised),
+            Call::S2SavePhaseProbe(_) => {
+                #[cfg(target_os = "linux")]
+                {
+                    super::s2_observer::save_phase_cleanup(&self.baseline.root)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Err("C1 durable phase observer requires Linux; NOT RUN".into())
+                }
+            }
             Call::CoreSend(args)
                 if self.mode == Mode::Revised
                     && matches!(

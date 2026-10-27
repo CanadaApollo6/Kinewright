@@ -178,6 +178,62 @@ inputs mark a cut damaged; relink creates successor evidence. This is a required
 
 ## 5. Writer authority, manual GUI and Save As
 
+C7 binds the legacy GUI and headless writer to one resolved project identity before
+mutation. Its shared lock capability retains the native parent and remains alive in
+journal recorders and queued sidecar jobs. Project, incident sidecar, LUT copy and
+journal IO use admitted directory handles; caller aliases are never resolved again
+after verification. Legacy permission/sharing fallback semantics remain confined to
+legacy IO. Studio still uses its existing strict bundle publisher.
+
+Every named GUI journal create, append, flush, checkpoint and retirement needs the
+same real project authority. Startup restore/discard also takes that authority and
+uses the journal file profile. Pending decisions retain their scanned native directory
+and exact byte digest; changed bytes require a new decision. The active writer executes
+post-restore retirement using that retained identity. Unreplayed data survives a headless save. The final recovery
+probe includes allocator suffixes, and release checks the original claim plus lock
+file identity before removing discovery. Missing discovery never permits takeover
+of a held lock. C7 supplies local participants only; host activation and transport
+remain C8. Native Windows Studio durability remains unsupported.
+
+### C8 process ownership and retention
+
+The originating GUI owns its temporary root, `SessionStore`, source `ProjectStore`,
+`SourceCopyHold`s, complete-closure `StorePin`s, reader leases, and source reservations.
+That physical source store has one `StorageUsage` owner in the GUI. These actual
+objects remain there through focus changes, attachment changes, and host replacement.
+Host source descriptors authorize bounded verified reads through the authenticated
+attachment. They carry no cleanup, unpin, reservation-release, or Close authority.
+Dropping a host source handle, disconnecting, orderly host exit, and panic unwinding
+cannot delete or uncharge the GUI source. An accounting snapshot cannot retire it.
+
+The host owns each named destination's `ProjectBundle`, namespace, lock, ancestor
+claim, store, pins, and accounting. Each named physical store has one owner and ledger.
+A named-source hold stays with that host store. Changing writer authority fences and
+drains the previous writer, preserves the actual source holds, and validates the exact
+checkpoint after the destination lock handover. No source ledger moves across IPC.
+The GUI retains its manual and sealed actors. The host owns its agent sessions and
+the one validation shadow. GUI detach closes only the attachment.
+The private GUI bootstrap carries its exact frozen history snapshot. Before serving
+sessions, the host validates that snapshot and its admitted source overlap, then seeds
+the shadow from it, including unsaved history and Redo. This initialization publishes
+nothing and cannot mark edits Saved; only the publisher's actual result does that.
+
+When a replacement cannot re-establish exact retained ownership, every save and rescue
+request refuses, including first Save and Save As to fresh destinations. A session ID,
+remote handle, PID, or reacquired writer lock is insufficient evidence. The surviving
+GUI freezes producers and preserves all histories, temporary bytes, pins, and charges.
+Queries and history export remain available. The person sees: "The host could not
+re-establish this session's retained data. Your edits remain here. Saving and rescue
+are paused, including saving elsewhere. Close this editing context explicitly to end it."
+
+Explicit context Close fences requests and drains readers. Only the owning process
+retires its actual holds through the existing collector and namespace cleanup. Repeated
+Close, a lost reply, or reader retirement releases each pin and reservation at most once.
+Failed cleanup stays charged and retryable with that owner. Host Drop never means GUI
+Close. A headless-only context has its originating source owner in the host and has no
+surviving GUI after host death. C8 and C12 reports separate kill, orderly-exit, and caught
+panic-unwind evidence from native Windows and physical-storage acceptance.
+
 ### 5.1 A fenced local manual Core
 
 The host holds the project OS lock and pinned store/root handles. Acquire it on Studio activation before authorizing any writer. A legacy GUI checkpoints
@@ -285,6 +341,240 @@ hints, never portable identities. Verify a relink instead of substituting slash/
 complete graph and selects a verified prior root without rewriting the damaged original. No recovery question when evidence determines the answer. Network
 filesystems and concurrent machines are outside v1's supported writer profile.
 
+### 5.4 Local recovery selection and rescue contracts (S2 revision 7)
+
+This section supersedes the earlier P, exact pre-floor copy and editable paused-state
+rulings. It is binding for the project API, local lifecycle, App and later host. C4
+implements record, restore and already-saved selection operations. C5 composes the
+ordinary Save, rescue lifecycle and retirement. C6 connects the App. Host receipts and
+leases follow in C11. None of these contracts depends on C7+ to make local recovery work.
+
+The Saved baseline is the exact history identity returned by the successful publisher,
+including its ordinary floor result. First Save, ordinary Save, Save As and selection
+must never recapture a live actor after IO to establish that baseline. An accepted
+post-cut suffix remains dirty and Close warns until its own publication succeeds.
+Unchanged Studio dirty polls compare an authoritative actor/history-change identity;
+they must not export, serialize or hash retained history on every UI poll. Undo, Redo,
+gestures, restores and floor commits invalidate the history cache.
+Accepted empty Undo/Redo commands count as history changes even when the document revision
+is unchanged.
+
+Backend admission refuses reopening the manual branch as a durable session. Existing
+working-branch selection refuses registered session/base dependencies both at prepare
+and immediately before publication. A refused retirement preserves the complete original
+branch/evidence vectors and releases any new pending pins before a later Save. Stage all
+replacement rescue records before changing the evidence vector; a successful explicit
+R_ack retirement changes only that edge and its required retirement reason.
+
+Let O be the current actor, L its ordinary working branch and g the committed switch
+generation. Prepare a checkpoint target as exactly one fresh working branch R. An
+existing-branch target retains its BranchId and expected head. Freeze all producers
+inside O, settle submitted sends and drain accepted events to one cut. Keep editing
+read-only until the outcome permits resumption. Queries and history export remain
+available. Keyboard, queued actions, Undo, Redo, live controls, alternate handles, agents
+and the validation shadow cannot accept post-cut edits.
+
+Before any preliminary Save, verify the chosen root/checkpoint ObjectRef, SHA, length,
+kind, payload identities and complete content closure. Take an ordinary in-session
+StorePin over that closure, with bounded verification and metadata admission. If it
+cannot fit, refuse before either publication, preserving O, association, history and
+Saved/dirty exactly. The pin is no byte copy and cannot recover unavailable bytes.
+Resolve by that verified identity, never by automatic-list position or continued list
+membership. Keep the same target, pin and original R ID through rotation, collection,
+unknown outcomes, quota refusal and the offered retire-then-retry route. Duplicate
+replies cannot create another R or increment g again.
+
+If O is dirty, ordinary Save publishes O onto L first. Use the ordinary executor,
+select_history, exact-ticket transition and normal history-limit disclosure. Only
+that Save's legal oldest-first floor may remove Undo. Preserve current content,
+complete Redo, the open gesture baseline/key, surviving batch/input identities and
+independent roots. The bound owner may settle this exact frozen O/L/cut Save's own
+ticket. That permission is not a direct-handle or general frozen-state bypass. A clean
+O skips Save only after exact durable association/checkpoint validation. No extra
+pre-recovery work point or durable initial-R pin is created.
+
+After definite Save success, compare the accepted cut and its expected post-Save
+history/floor identity. The validated floor may advance runtime revision without new
+accepted input. Prepare all fallible target Core, inputs and resource attachment work
+before publication or seal. A suffix, source-head/root/authority conflict or missing or
+changed existing target refuses before selection, keeping every suffix edit intact
+and ordinary saving usable. An existing target must still be indexed at its expected
+head immediately before publication and on retry. Its pin cannot resurrect a removed
+BranchId.
+
+One B0-B5 selection transaction retains saved L as an ordinary branch, installs the
+verified complete target history, batches, lineage and inputs, selects R, increments g
+once with checked overflow and writes the matching flattened Document/input context.
+Do not use document-only fork for checkpoint recovery. Refresh the writer's manual
+pointer, generation, branch index, inputs and inventory on definite success and on
+both committed and absent reconciliation. Seal O at its exact cut and activate the
+prepared target before unfreezing it. Publication or protocol invariants stay frozen;
+there is no editable durable-no-activation mode. A post-publication activation diagnostic
+retains the committed phase and freeze for exact reconciliation; it is not a definite
+selection refusal. Selection alone never fabricates a
+Save acknowledgment. Return R to existing L uses the same freeze, ordinary Save if
+dirty and one selection, without creating a replacement L.
+
+Ordinary Save failure or definite refusal ends the selection attempt without a
+selection publication. Release only its uncommitted exact ticket and resume O intact.
+Save unknown keeps O frozen. Proved absence releases that ticket losslessly and resumes
+unchanged. Only proved commit plus exact-ticket settlement permits selection. Selection
+failure/refusal resumes O on the definitely saved L result, retaining the normal floor
+disclosure. Selection unknown stays frozen. Proven absence refreshes L/g before resume;
+proven commit refreshes R/g+1, seals O and activates the original preparation before
+resume. Reconciliation grants no write authority. A genuine later selection gets a new
+operation; retries use the original preparation and target.
+
+All selection candidates inherit §6.1's fresh-open validation under the same limits as
+an independent reader. Cache residency gives no authority. No next-save shadow allowance,
+successor headroom, exact-retention selector bypass or additional ledger is introduced.
+Every later ordinary Save can floor or refuse under its own current limits.
+
+Shared history keeps the identical (branch_origin, creation_batch_id, result_ordinal),
+batch IDs and complete split ancestry across L and R. Compare baseline, current, Undo
+and Redo. Moving an occurrence into a floor baseline does not create it again. Seed the
+actual current R checkpoint with the selected identities before R's first Save. L's
+preliminary Save is its authoritative baseline for later saves. Match retained batches
+by accepted identity and floor correspondence, never the position of an unrelated
+redo-truncated batch. Mint once for genuinely new events, with their accepting branch's
+origin. Ordinary branch and specialist saves follow the same rule.
+
+Format 3 remains unchanged. Derive manual-switch@1 directly from raw nonzero
+manual_switch_generation, and rescue-copy@1 from recognized rescue attachments and
+records. Cross-check actual requirements against declarations and the reader's supported
+subset before caller mutation. Generic OwnedEvidence support is insufficient. Reject
+missing, mismatched, unknown role/schema/API declarations or invalid checkpoint edges.
+Unchanged generation-zero v3 roots remain supported without either new requirement.
+Keep all-nonmanual candidate_branch_ids, the two-predecessor validator/count/rotation,
+and full RootCheckpoint content-edge validation.
+
+RescueCopyV1 is a recognized OwnedEvidence role/schema in durable_pins. Its optional
+acknowledged_root is a dedicated RootCheckpoint content edge outside RecoveryInventory,
+with complete verified B-owned closure. Default selection preserves it and both selected
+automatic predecessors. Record unsaved-source absence or exact separately consented
+unavailable-root omissions. Available recovery roots are never omittable for quota.
+Evaluate full-history omission alone first, and offer no unnecessary trim. Only otherwise
+search legal oldest-first prefixes. Trim and omission have separate exact consents;
+recompute blockers and the complete retained union after each choice. No archival source
+manifest or ordinary copy may reintroduce an omitted root. Independent evidence/receipts,
+current content, retained Redo, legal gesture baseline and required inputs stay exact.
+
+Final L1 permits only inherited rescue-linkage edges to become provenance, with the
+necessary linkage-container, manifest and root rebuilds. Preserve the source root SHA
+and original identities as provenance and label the result "rebound recovery point".
+Document, baseline, history, batches, cursor, Undo, Redo, gesture, inputs and their content
+identities stay exact. Independent evidence and receipts remain reachable, even when an
+independent path still pins an older object. New activation identity and authority belong
+to B's wrapper/runtime, not rewritten payloads. An original input manifest may retain an
+origin ProjectId only when B declares that origin. Prepare its verified leases from B's
+owned namespace at B's current owner epoch. No A authority is restored. Validate the rebuilt graph normally.
+The preservation oracle must reject a graph-valid, fully rehashed change to each
+non-linkage Document, batch or input payload. Do not weaken checkpoint validation.
+
+Provenance keeps at most 16 exact attempts and 64 KiB encoded data, including the one
+recovery edge and exact current omissions. Up to four retained current-session attempts
+remain exact. Flatten inherited provenance, keeping newest detail that fits. Older detail
+becomes a fixed count, saturating-overflow flag, digest and unresolved warning. Summary
+never proves settlement or reactivates an ID. Compaction cannot drop independent roots,
+current omissions or the dedicated R_ack edge. Original pending command ID/digest lookup
+returns UnresolvedOrigin, or conflict for a changed digest, never Absent or permission to
+execute. Search exact receipts retained through R_ack beyond automatic predecessors.
+Tentative command-effect exclusion and complete rescue publication are C5 obligations.
+
+At either unknown publication, eligible A1 rescue captures the already-frozen O cut.
+During selection unknown that cut is exactly saved L, with nothing newer. During Save
+unknown its own exact ticket and unknown outcome remain. Rescue cancel, failure,
+refusal or unknown B keeps O frozen and retains A's attempt, target pin, owners and
+charges. Unknown B is a never-active capture copy. Immediate verified B handoff seals
+O and irrevocably abandons A's selection. Late A proof settles/shows destination status
+only, never activates abandoned R or changes B's actor, edits, history, association or
+Saved/dirty. Outside this composition, A1's ordinary resume rule continues to apply.
+
+A quota refusal resumes O before offering eligible non-active working-branch retirement.
+Keep the chosen target's pin across retirement and retry, taking a fresh cut and ordinary
+Save if O changed. Exclude the active branch, R_ack, the prepared existing-branch target,
+all live attached Core/agent/specialist sessions and specialist base/target dependencies.
+Direct removal of the prepared target refuses as well. A live session's unsaved suffix
+must stay usable and persistable. Name blocking sessions/bases, offer Save this session
+or Close this session, fence safely and recheck eligibility at publication. Saving alone
+does not permit orphaning a still-writable session or required base. Durable agent and
+specialist creation/reopen goes only through Ja1EditingSession and its registered
+DurableBranchSessionGuard before accepting edits. Keep registration through save/close
+and fencing, with no usable unregistered constructor or raw mutable-bundle escape.
+C5 owns this registration witness; C6 has no production App durable-session credit.
+
+The owner retains the registered Core, base, pin and charged registration after the caller
+drops its guard or branch object. Dropping a guard never discards accepted edits. The agent
+close route first persists the complete proposal, then freezes the exact saved history and
+seals every Core handle before unregistering. A direct owner close refuses an unsaved suffix
+and names the required persist step. A racing edit between persist and freeze also refuses.
+Creation and reopen allocate a private actor inside the owner. Registration precedes
+the first returned Core handle. These checks use the same
+owner that lists and removes branches.
+
+A guard keeps the epoch of its actual namespace owner across Save As and rescue. A live
+specialist created at A continues to use A's retained writer after manual editing moves
+to B. Its guard cannot write B or block removal of an independent B branch copy. A late
+A proof may settle that specialist's exact original ticket while its actor remains live;
+it never changes B or calls a sealed manual actor or a never-active capture actor.
+Close names each registered session with accepted unsaved work or an unresolved save.
+
+Registered persist freezes that specialist's accepted cut, computes the full proposal
+with Core's existing floor and replay rules, and stages its SpecialistBaseRecord before
+publishing the branch checkpoint. Both belong to one existing root transaction. The
+owner keeps a charged capture of the last proposed cut so an unknown Save followed by
+its exact floor settlement and a newer suffix preserves the complete original proposal.
+The owner uses its canonical registration even when the caller holds an older guard
+clone. This capture is session metadata for the specialist, not another recovery point.
+
+Explicit retirement confirms exact branch/content/history loss and expected root, then
+publishes removal of only that current index entry under the same fresh-open guard.
+Use the existing collector after acknowledgment and reader safety. Independent evidence,
+specialist bases, readers, selected-target and A1 source holds remain. Report current
+history-residency relief separately from physically reclaimable bytes. Unknown retirement
+follows ordinary reconciliation. Repeat cleanup never deletes or uncharges twice.
+Forget the older recovery point from A is a separate explicit successor-record operation
+removing only its dedicated R_ack edge. Branch removal cannot perform it silently.
+
+Release the selection pin only after durable activation retains the content, final refusal
+without retry, explicit abandonment/target change with no unresolved root publication,
+or safe whole-context Close. Disclose whether the point remains durably listed first.
+When only session-pinned, say: "This recovery point is no longer in the project's automatic
+list. It is kept only for this selection in this session. Abandoning the selection lets it
+go." Preview warns if preliminary Save will rotate it out. While prepared, refuse Save As,
+opening another project and other ordinary destination changes with that explanation.
+Only explicit abandonment when no root publication is unresolved permits the new action.
+A1 rescue remains allowed with disclosed irrevocable abandonment at handoff. If B omits
+the selected point, say so. During unknown selection add that A keeps it only if selection
+completed. The pin is session-only: a crash can lose this chosen point. This is an accepted
+limit, not a crash-survival guarantee or a new durable recovery slot.
+
+For unavailable A, say work was saved at its current location only when proved. If storage
+never returns, Save rescue copy is the way to keep the work. Close can discard the only
+accessible in-session copy and must never be labelled safe. Keep reconcile/rescue choices
+and the freeze after failed rescue. Close also discloses session-only target loss and,
+while selection is unresolved, that A keeps it only if selection completed. Closing a
+status view is not context Close, recovery or proof of absence.
+
+C5's frozen Save permission belongs to the bound editing owner and exact accepted cut.
+It calls the ordinary selector and exact-ticket publisher. `recovery_save_disclosure`
+reports that selector's exact oldest-Undo loss before the action. Public Save and alternate
+handles still refuse Frozen actors. Selection activation moves its already prepared
+attachment, input context and history digest after sealing O.
+
+A rescue preview walks the selected content closure without recursively importing an
+archived root's automatic inventory. It then adds each retained recovery role explicitly.
+This preserves R_ack and both automatic predecessors while allowing separately consented
+unavailable-only omissions. The copier uses that same closure. An archival manifest cannot
+reintroduce an omitted role. Independent evidence, receipts, Redo and required inputs
+remain mandatory. Source adoption and the destination reservation occur at the actual
+first namespace mutation, including a lock claim or missing-parent creation.
+
+Whole-context Close fences active, registered and retained actors before ending source
+reuse. Each copy owner keeps its own namespace, source reads, pins and charges until its
+readers finish. Ending source reuse permits temporary-source cleanup. It does not resolve
+any destination's unknown publication or permit a late copy to activate.
+
 ## 6. Durability, receipts and host-death recovery
 
 ### 6.1 Ordered persistence barriers
@@ -317,6 +607,26 @@ evidence and newly created directories:
 
 6. **B5 commit point:** strictly replace the root inside its pinned filesystem namespace; sync the root directory/namespace barrier. Only after success
    acknowledge durable edits/comments, Saved or Delivered. Notify from a later durable event.
+
+**Fresh-open publication invariant (JA-1 S2 C1).** Every root publication must admit its exact
+candidate graph as an independent fresh reader under the same effective `StorageLimits`, before B5.
+The shared reader/publisher traversal in `bundle_recovery.rs` enumerates all current BranchIndex
+histories and charges each exact verified history hash once, including histories absent from the
+writer cache. It also applies control, metadata, decoded scratch/replay peaks, archived/recovery
+traversal, raw support, graph depth/object count, owned-byte and complete-closure checks. Encoded
+length is not decoded cost. This corrects S1's ordinary multi-branch Save/Save As under-accounting;
+cache residency is a performance choice. The operation-local empty-reader calculation is not added
+to the writer's physical ledger; actual execution still reserves its own overlap. Save, branch save,
+fork, first save/copy and evidence/receipt/floor publications share the root boundary. Refusal
+preserves the authoritative root, live edits and exact floor-ticket semantics. Reconciliation checks
+the observed graph under those same limits. No later-save headroom or persistent fit certificate is
+created; every later candidate is admitted afresh. An in-session accounting memo may reuse costs
+recorded from already decoded and verified objects, keyed by exact ObjectRef (SHA-256, kind,
+length) and the entire effective limit profile. Misses take the same exact reader decode/preflight
+path; encoded length never estimates an unseen history. Discard affected facts at explicit
+re-verification and discard the memo when namespace continuity is not proved. The memo contains
+no decoded histories, persistent accounting or reservation, and its presence never determines
+which candidate branches count.
 
 Linux's proposed local-filesystem adapter uses `fsync` files, no-replace object publication and `renameat` for the root, plus directory `fsync` at B2/B3/B5.
 Storage and filesystem must honor flushes. Windows's named replacement primitive is **`MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`**, same
@@ -1000,3 +1310,198 @@ deferrals.
 | 3 — Shipped Songbird v1 dataset/scope/completeness | Replace every superseded four-field assumption with format/version 1, provenance and typed dataset selectors. Preserve per-answer/section completeness and query scope; chartData rows/reflines plus chartSpec exclusively drive the plot. Bind labels and geometry, actual output comparison and the full validation key; update JA-3 handoff. | §9, §14.2 and corrected §15 handoff summary; G17: differing SQL/plot rows, reference line, duplicate section titles, mixed completeness, null chartData, truncated subtotal, scoped positive controls and correctly-hashed/wrong-output mutations. |
 | 4 — Scope reductions | Incremental admission verifies new/unverified bytes while open/recovery validates the full graph; retain two automatic predecessors plus bounded staging/legacy backup; one execution owner refuses another run without a daemon; one manual attachment validation shadow. | §§1, 5.1, 6.1, 8.2, 12; G15/G20: verified bytes/latency, repeated floor/root retirement and crash, independent pins, second-run refusal through cleanup and no parked-branch shadows. |
 | Lead decision 3 — Platform durability | Fix the release/refusal policy in one statement in §6.1; remove repeated policy uncertainty elsewhere, preserve all barriers and keep native evidence unclaimed. | §6.1; G1/G1-W unsupported-profile zero-mutation witness; §14.2 asks only for implementation/evidence. |
+
+### S2-R local App integration (C6)
+
+The App's `ProjectSession` carries one local `Ja1Attachment` and moves that same
+`Ja1EditingSession` into each finite background operation and back. Closing a status
+window or focusing another project does not end its originating editing context.
+Modal save/selection/rescue choices disable App producers; the existing actor enforces
+the frozen/sealed cut for retained and alternate handles. Subscribe and prepare the
+new view before selection publication or rescue's first mutation/seal. Activating a
+new actor fences application of old in-memory agent branches; their work remains
+available for inspection or an explicit new base.
+
+Studio activation is explicit. Unsupported inspection stays read-only and cannot be
+converted into a writable local session by generic Save As. Local headless and agent
+open/save/resume use the same admission and lifecycle; no process host or manual stream
+is implied. Explicit loss, omission, retirement, abandonment and completed-capture
+release choices retain the rules above. Source-bound C6 evidence and its exact gate
+are recorded in `docs/reports/ja1-s2/c6.md` and `c6-gate.sh`; native Windows/hosted slow
+and physical storage lanes require their separately recorded results.
+
+### C9 accepted manual history
+
+A named Studio attachment starts its manual stream from an exact acknowledged
+checkpoint. An unsaved or dirty bootstrap remains read-only until an explicit
+foreground Save establishes that identity. The attachment, read-only modal and
+manual-refusal notices say "Save once to keep editing here; until then this
+timeline is read-only." The modal offers Save (named project) or Save As (new
+project). Status/retry replies retain this requirement; the first successful Save
+grants the manual gate and clears the read-only presentation. The App's `ManualProducerGate` is the
+only manual mutation capability; discrete actions, frame-coalesced controls,
+keyboard Undo/Redo, revision-gated recovery tools, deferred actions and
+import/relink installation all use it. Specialist/session MCP endpoints have no
+manual permit, and the host MCP surface cannot acquire one or install foreground
+snapshots. Other attachments can read and operate their isolated sessions.
+
+The owning actor checks its attachment and permit generation and reserves the
+64-command/256-KiB pending ingress plus bounded history/control overlap before
+acceptance. A refusal leaves history unchanged and is visible. Each accepted
+message retains its original CommandId/digest, BatchId/predecessor, JournalCommand,
+coalescing key, resulting history/cursor identities, identity effects and bound
+lineage/input context. Closing or sealing ingress preserves its drainable queue.
+Only the bound owner can release an exact acknowledged contiguous prefix.
+The input manifest is transferred once at lease acquisition, checked against its
+ObjectRef bytes/hash and retained as bounded actor control metadata. New media,
+LUT or font references absent from this admitted context refuse before acceptance.
+The person sees an input-admission refusal; it cannot become an unsaveable pending
+command. This reuses the existing owned-input rules and grants no decoder certificate.
+
+One host shadow validates the original contiguous messages through Core and the
+distinct admitted-history BundleCommit route. The S1 command route still requires
+`lease=None`. Publication preserves each intermediate batch, actor-assigned BatchId,
+receipt and input context. A foreground snapshot cannot replace this stream. Local
+preview and paint do not wait for publication. Pending manual work is not Saved;
+a durable acknowledgement uses the publisher's result, and Close warns about any
+remaining local suffix. Unknown publication or lost retention fences the actor.
+C9 does not authorize recovery replay, a shared floor, recovery-close or switching;
+those remain later stages. A required floor or unsupported input context refuses
+and retains the accepted pending history for explicit resolution.
+
+### C10 shared manual recovery and ordered floors
+
+C10 implements §5.1's shared barrier around C9's accepted envelopes. On transport
+failure or transfer, the GUI freezes the actor before joining submitted stream IO.
+The original pending envelopes remain in the GUI until the shared result is
+confirmed. The successor acquires the ordinary named writer, authenticates a fresh
+callback to the same actual GUI source admission, and reads the acknowledged root.
+It creates no source owner, source ledger or cleanup right. Retained destinations
+or a prepared selection whose ownership cannot be re-established still refuse.
+
+Each original ID/digest is resolved before fresh admission. Only proven absence
+permits recovery-only reauthorization. Its new receipt contains the original
+ID/digest in that same publication. The bounded absent suffix reserves its control
+and history overlap before replay, then publishes every original-to-new receipt
+and preserved batch ID in one ordinary root transaction. The S1 selector may
+choose a legal floor for this full accepted cut; neither actor resumes until both
+install that exact selected result and then the recovery-close result. This uses
+the existing limits, without special recovery headroom. Committed commands are never reapplied;
+unknown, payload conflict and retired-unresolved outcomes remain frozen. Recovery
+compares the complete accepted history, including the original open gesture,
+with the shadow. With no surviving GUI, the barrier uses the acknowledged prefix.
+
+A runtime RecoveryBarrier binds the switch generation, original transition envelope,
+checkpoint reference, and exact before/after histories. The reference identifies
+the predecessor for a new transition, or the committed batch result for an
+automatically selected floor. Ordered floors
+use S1's validated HistoryTransition and existing transactional publisher. After
+both actors install and confirm the same floor, the host prepares recovery-close.
+Close likewise requires its durable receipt before confirmation can grant a fresh
+lease. A lost publication reply retries the same envelope and recorded result.
+Later metadata-only publications may change runtime head wrappers; every payload
+reference, command cut, lineage and floor identity must still match that result.
+
+The GUI endpoint installs only an owner-authorized exact frozen cut's legal floor
+or recovery-close result. Installation keeps input frozen and invalidates old
+permits. Resume and binding the fresh permit are one actor turn, conditional on
+the originating context still being open. Rescue's exact own-ticket settlement
+remains separate and gives no recovery-install permission. C9's explicit Save
+requirement for an unsaved or dirty bootstrap remains unchanged. Adoption, return,
+C11 switch receipts and the sealed-A rescue-tail repair remain later work.
+An acknowledged prefix with no accepted command has no cut CommandId. Its
+recovery-close record uses an absent cut, checked against the predecessor's absent
+cut, rather than inventing a command. Existing nonempty cut encodings stay exact.
+Manual leases also bind the admitted native parent identity and logical namespace
+name. The name identifies the slot within that native parent; native identity,
+rather than name or path equality, proves continuity. An identical copied
+root at a replacement parent is insufficient proof of an original command's
+absence. Recovery refuses before reauthorization when that identity differs or
+was never recorded; this comparison uses native IDs rather than path spelling.
+
+### C11 original-envelope adoption and return
+
+The host prepares a verified target through the existing local Save/select owner,
+retaining its complete-closure session pin across preliminary Save, refusal and
+retirement/retry. The GUI freezes and drains its original manual chain before
+requesting selection. Preparation stages the target GUI actor, subscriptions and
+resource context before publication. The ordinary Save executor preserves L; one
+selection root creates R or selects an existing BranchId, advances the switch
+generation once, and includes the original-envelope Switch receipt. Its result
+names both saved checkpoints, heads, histories, inputs and lineage, optional
+snapshot VersionId, and resulting root/switch generations. Adoption adds no
+whole-document Undo entry. Return saves R if dirty and selects the existing L.
+
+An optional switch envelope field is omitted when absent. Edit/comment encodings
+and original fixture bytes remain unchanged. Roots reaching Switch receipts
+declare `host-switch@1` in addition to `manual-switch@1`; independent Open and
+the exact-candidate publication guard verify each receipt against its checkpoint
+objects. Later saves, maintenance, copies and reopen preserve switch generation.
+
+A receipt lookup returns its original result without granting a lease, selecting
+again or allocating another branch. The accompanying attachment always names the
+current committed pointer, including after a later switch supersedes that receipt.
+The GUI restores committed history, lineage and inputs on a frozen actor. Only
+confirmation against the exact current pointer and payload permits fresh manual
+authority. A restarted host requires that confirmation before acquisition for a
+switched root. A definite refusal restores/revalidates the saved old branch under
+fresh authority; an unknown publication keeps both actors frozen. Old permits
+and delayed old-lease envelopes remain fenced after returning to the same branch.
+
+Registered agent/specialist creation and reopen execute only through the host's
+Ja1EditingSession and retain its registration guard. Retirement consults live
+registrations and specialist-base dependencies; save/close precedes eligibility
+refresh. A successful A1 rescue irrevocably abandons the host-wrapped selection;
+late reconciliation of A never activates it. Failed or unknown rescue preserves
+its existing freeze and target-availability, Close and destination disclosures.
+The selected-point session pin still has the accepted crash window: it does not
+make a rotated-out point durable. Native Windows Studio success remains S6-owned.
+
+### C12 rescue activation failure and final-owner evidence
+
+If A seals but the prepared B actor cannot resume, return the committed capture
+with `activated=false`. A remains sealed; B remains Frozen under its retained
+destination owner. Never attempt to resume sealed A. The person sees that A is
+sealed, the committed B path, and Open B read-only. Editing B separately still
+requires the existing explicit release of its completed destination owner.
+Neither a committed capture nor its receipt marks the active source Saved or
+grants manual authority. The host and local App preserve this disclosure.
+
+Unreadable acknowledged evidence stays required while rescue classifies its
+closure. Failure to read it must reach the bounded missing-owned-bytes diagnostic,
+including exact object identity, retaining uses, cause and completeness. A host
+error must not reduce that page to an item count. Refusal replies may reuse the
+current history's verified cache entry only when its full ObjectRef matches the
+current checkpoint, with ordinary byte/namespace verification and a normal read
+fallback. The selection pin and existing limits remain in force.
+
+C12's report and repeat ledger bind composed rescue/switch/restart, exact source
+ownership, original receipts and final Linux gates to one committed source head.
+Private process fault scheduling exercises the actual serialized host owner;
+shipping HTTP/authentication and App routes retain their separate witnesses.
+Process death and modeled IO faults do not certify physical power loss. The
+in-session selected-target pin still has its accepted crash window; native
+Windows durability, native providers and G20 retain their separate gates.
+
+A non-activated rescue leaves the active association's display path and Saved identity at A.
+Only an activated outcome transfers the caller's destination spelling to B; a later proof of
+a completed capture does not change the active association.
+
+### S2-H review corrections
+
+Enable Studio refuses a named legacy project before stopping its ordinary local writer.
+Its edits stay Live and its existing legacy Save route remains available, including media
+that Studio cannot yet admit. Lower-level handover also refuses any unconverted root before
+releasing its local migration owner. A bootstrap failure before discovery reaps its child, reacquires the original writer,
+verifies the expected root under pinned authority, and resumes the exact retained GUI cut.
+Failure after host acquisition retains the existing L2 ownership rule.
+
+A missing reply freezes input while preserving original accepted envelopes and the switch
+request. An alive host reconciles that evidence through the shared recovery barrier; confirmed
+host loss still enters L2. Installing a committed switch retains B's frozen cut and prepared
+view until confirmation. Retry confirms the same identity without reinstalling or resuming A;
+a duplicate confirmation returns only that client's same current grant. Failed input acquisition
+revokes the partial grant and refreezes the shadow.
+
+The host bearer carries editor authority while no manual lease is held; S4 binds an editor
+credential at attach.

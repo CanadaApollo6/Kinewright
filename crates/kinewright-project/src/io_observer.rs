@@ -200,6 +200,24 @@ pub fn observe<T>(run: impl FnOnce() -> T) -> (T, IoTrace) {
 }
 
 thread_local! { static FAILURE: RefCell<Option<&'static str>> = const {RefCell::new(None)}; }
+thread_local! { static NATIVE_FAILURE: RefCell<Option<(&'static str, i32)>> = const {RefCell::new(None)}; }
+/// Inject one native cause at a real adapter boundary inside a private fixture root.
+/// # Panics
+/// Refuses nested native fault scopes.
+pub fn fail_native_once<T>(operation: &'static str, errno: i32, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NATIVE_FAILURE.with_borrow_mut(|f| *f = None);
+        }
+    }
+    NATIVE_FAILURE.with_borrow_mut(|f| {
+        assert!(f.is_none());
+        *f = Some((operation, errno));
+    });
+    let _reset = Reset;
+    run()
+}
 thread_local! { static PATH_FAILURE: RefCell<Option<(&'static str, PathBuf)>> = const {RefCell::new(None)}; }
 /// Keep one file undeletable for the entire scope, including every retry.
 /// # Panics
@@ -221,6 +239,24 @@ pub fn fail_path<T>(operation: &'static str, path: &std::path::Path, run: impl F
 /// Inject one operation error in a fixture-owned temporary namespace.
 /// # Panics
 /// Refuses nested fault scopes. Unwinding clears the scope.
+pub fn fail_nth<T>(operation: &'static str, occurrence: usize, run: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            NTH_FAILURE.with_borrow_mut(|f| *f = None);
+        }
+    }
+    NTH_FAILURE.with_borrow_mut(|f| {
+        assert!(f.is_none() && occurrence > 0);
+        *f = Some((operation, occurrence));
+    });
+    let _reset = Reset;
+    run()
+}
+thread_local! { static NTH_FAILURE: RefCell<Option<(&'static str, usize)>> = const {RefCell::new(None)}; }
+/// Inject one failure. Unwinding clears the scope.
+/// # Panics
+/// Refuses nested failure scopes.
 pub fn fail_once<T>(operation: &'static str, run: impl FnOnce() -> T) -> T {
     struct Reset;
     impl Drop for Reset {
@@ -239,6 +275,33 @@ pub(crate) fn check_failure(
     operation: &'static str,
     path: &std::path::Path,
 ) -> std::io::Result<()> {
+    let nth = NTH_FAILURE.with_borrow_mut(|f| {
+        if let Some((op, count)) = f.as_mut()
+            && *op == operation
+        {
+            *count -= 1;
+            if *count == 0 {
+                *f = None;
+                return true;
+            }
+        }
+        false
+    });
+    if nth {
+        note("injected_failure", path);
+        return Err(std::io::Error::other(format!("injected nth {operation}")));
+    }
+    let native = NATIVE_FAILURE.with_borrow_mut(|failure| {
+        if failure.as_ref().is_some_and(|(op, _)| *op == operation) {
+            failure.take().map(|(_, errno)| errno)
+        } else {
+            None
+        }
+    });
+    if let Some(errno) = native {
+        note("injected_native_failure", path);
+        return Err(std::io::Error::from_raw_os_error(errno));
+    }
     let fail = FAILURE.with_borrow_mut(|failure| {
         if *failure == Some(operation) {
             *failure = None;
@@ -258,4 +321,25 @@ pub(crate) fn check_failure(
     } else {
         Ok(())
     }
+}
+
+thread_local! { static PUBLICATION_USAGE: RefCell<crate::storage_budget::StorageUsage> = RefCell::new(crate::storage_budget::StorageUsage::default()); }
+pub(crate) fn note_publication_usage(usage: &crate::storage_budget::StorageUsage) {
+    PUBLICATION_USAGE.with_borrow_mut(|value| *value = usage.clone());
+}
+#[must_use]
+pub fn publication_usage() -> crate::storage_budget::StorageUsage {
+    PUBLICATION_USAGE.with_borrow(Clone::clone)
+}
+
+thread_local! { static PUBLICATION_FIT: RefCell<SyncProfile> = const { RefCell::new(SyncProfile { calls: 0, nanoseconds: 0 }) }; }
+pub(crate) fn note_publication_fit(duration: std::time::Duration) {
+    PUBLICATION_FIT.with_borrow_mut(|profile| {
+        profile.calls += 1;
+        profile.nanoseconds += duration.as_nanos();
+    });
+}
+#[must_use]
+pub fn publication_fit_profile() -> SyncProfile {
+    PUBLICATION_FIT.with_borrow(Clone::clone)
 }

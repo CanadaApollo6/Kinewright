@@ -1,0 +1,548 @@
+[
+  {
+    "name": "legacy-enable-replaces-local-writer",
+    "changes": [
+      [
+        "crates/kinewright-app/src/app.rs",
+        "if was_legacy && self.focused().project_path.is_some() {",
+        "if false {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_legacy_unsaved_activation_keeps_local_save_and_exact_reopen",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "legacy-handover-releases-before-studio-save",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "if bundle.root.is_none() {",
+        "if false {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_direct_legacy_handoff_keeps_exact_history_until_local_studio_save",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "failed-bootstrap-never-reacquires-local-writer",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "                if let Err(cause) =\n                    owner.restore_failed_host_launch(launch_path.as_deref(), launch_root.as_deref())\n                {",
+        "                if let Err(cause) = Ok::<(), BundleError>(()) {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_unlaunchable_host_restores_local_writer_and_both_saves",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "unknown-reply-latches-retention-loss",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "        if host.confirmed_lost() || self.owner.host_retention_lost() {",
+        "        if true {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "confirmed-death-is-treated-as-unknown",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "        if host.confirmed_lost() || self.owner.host_retention_lost() {",
+        "        if self.owner.host_retention_lost() {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "installed-switch-state-is-discarded",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "            self.installed_switch = Some((\n                committed.clone(),\n                prepared.ok_or(BundleError::HistoryChanged)?,\n            ));",
+        "            let _lost_installation = Some((\n                committed.clone(),\n                prepared.ok_or(BundleError::HistoryChanged)?,\n            ));"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_confirm_reply_loss_retries_installed_b_without_reinstallation",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "duplicate-confirm-refuses-original-grant",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            && continuation\n            && let Some((lease, inputs))",
+        "            && false\n            && let Some((lease, inputs))"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_confirm_reply_loss_retries_installed_b_without_reinstallation",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": true
+  },
+  {
+    "name": "failed-confirm-keeps-undelivered-lease",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            Err(error) => {\n                self.manual = None;\n                self.switch_frozen = true;\n                self.owner()?.freeze_manual_barrier()?;",
+        "            Err(error) => {\n                self.switch_frozen = true;\n                self.owner()?.freeze_manual_barrier()?;"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_confirm_inputs_failure_revokes_partial_grant_and_refreezes",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "source-dispatch-bypasses-permit",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_workflow.rs",
+        "                if self.projects[project_index]\n                    .send_manual_command(Command::DoIfRevision {",
+        "                if self.projects[project_index]\n                    .core.send(Command::DoIfRevision {"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "relink-dispatch-bypasses-input-refusal",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_workflow.rs",
+        "    fn dispatch_relink(\n        &mut self,\n        project_index: usize,\n        asset_id: AssetId,\n        expected_revision: TimelineRevision,\n        candidate: RelinkCandidate,\n        allow_unverified_source: bool,\n    ) {\n        if self.projects[project_index].studio_host_managed() {\n            self.status = \"Relinking is unavailable in Studio until the replacement source can be admitted. Your current source is unchanged.\".into();\n            return;\n        }\n        if self.projects[project_index].ja1_read_only() {\n            self.status = \"Relinking is paused while the save or recovery is resolved.\".into();\n            return;\n        }\n        let project_name = self.projects[project_index].name.clone();\n        if let Err(conflict) =\n            validate_relink_revision(expected_revision, self.projects[project_index].revision)\n        {\n            // Appendix B row 89.\n            self.note_observation(conflict.incident_observation(IncidentSubject::Asset(asset_id)));\n            return;\n        }\n        let operation = Operation::RelinkAsset {\n            asset: asset_id,\n            candidate,\n            allow_unverified_source,\n        };\n        if self.projects[project_index]\n            .send_manual_command(Command::DoIfRevision {\n                expected: expected_revision,\n                operation,\n                // `IN1b` \u00a74 rule 3: this send does not correlate yet.\n                token: None,\n            })\n            .is_err()\n        {\n            // Appendix B row 90.\n            self.note_actor_stopped(\n                IncidentSubject::Asset(asset_id),\n                format!(\"Core actor stopped while relinking in {project_name}\"),\n            );\n        } else {\n            self.status = format!(\"Relinking asset {asset_id}\u2026\");\n        }\n    }",
+        "    fn dispatch_relink(\n        &mut self,\n        project_index: usize,\n        asset_id: AssetId,\n        expected_revision: TimelineRevision,\n        candidate: RelinkCandidate,\n        allow_unverified_source: bool,\n    ) {\n        if false {\n            self.status = \"Relinking is unavailable in Studio until the replacement source can be admitted. Your current source is unchanged.\".into();\n            return;\n        }\n        if self.projects[project_index].ja1_read_only() {\n            self.status = \"Relinking is paused while the save or recovery is resolved.\".into();\n            return;\n        }\n        let project_name = self.projects[project_index].name.clone();\n        if let Err(conflict) =\n            validate_relink_revision(expected_revision, self.projects[project_index].revision)\n        {\n            // Appendix B row 89.\n            self.note_observation(conflict.incident_observation(IncidentSubject::Asset(asset_id)));\n            return;\n        }\n        let operation = Operation::RelinkAsset {\n            asset: asset_id,\n            candidate,\n            allow_unverified_source,\n        };\n        if self.projects[project_index]\n            .send_manual_command(Command::DoIfRevision {\n                expected: expected_revision,\n                operation,\n                // `IN1b` \u00a74 rule 3: this send does not correlate yet.\n                token: None,\n            })\n            .is_err()\n        {\n            // Appendix B row 90.\n            self.note_actor_stopped(\n                IncidentSubject::Asset(asset_id),\n                format!(\"Core actor stopped while relinking in {project_name}\"),\n            );\n        } else {\n            self.status = format!(\"Relinking asset {asset_id}\u2026\");\n        }\n    }"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "lut-dispatch-bypasses-input-refusal",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_workflow.rs",
+        "    fn handle_lut_import_response(&mut self, response: LutImportResponse) {\n        self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);\n        let Some(project_index) = session_index_by_id(response.session_id, &self.projects) else {\n            return;\n        };\n        if self.projects[project_index].studio_host_managed() {\n            self.status = \"Importing a look is unavailable in Studio until its bytes can be admitted. Your current looks are unchanged.\".into();\n            return;\n        }\n        if self.projects[project_index].ja1_read_only() {\n            self.status = \"Look import is paused while the save or recovery is resolved.\".into();\n            return;\n        }\n        let import = match response.result {\n            Ok(import) => import,\n            // Appendix B row 99, amended by erratum `IN1b`-C-R52: the import\n            // that would have minted a `LutAssetId` is the thing that failed,\n            // so there is no look to state this against and the store root is\n            // the project's. `MediaError` evidence, and `look_unclassified`\n            // until cut item 2 lands the per-variant `LutStoreErrorCode` codes\n            // (`IN1b` \u00a712).\n            Err(error) => {\n                let observation = self.lut_media_observation(\n                    IncidentSubject::Project,\n                    lut_failure_message(&response.path, &error),\n                    &error,\n                );\n                self.note_observation(observation);\n                return;\n            }\n        };\n        let title = import.title.clone();\n        let batch = match lut_import_operations(\n            &self.projects[project_index].document,\n            import,\n            &response.intent,\n        ) {\n            Ok(batch) => batch,\n            // Appendix B row 100, amended by erratum `IN1b`-C-R52: the plan\n            // that mints the id is the thing that was refused.\n            Err(error) => {\n                self.note_label(LabelIncident::Look, IncidentSubject::Project, error);\n                return;\n            }\n        };\n        let store_unavailable = self.projects[project_index].lut_store_unavailable_reason();\n        let realignment = import_realignment_failure(\n            &title,\n            &response.store,\n            self.projects[project_index].lut_store.as_ref(),\n            store_unavailable.as_deref(),\n            &batch.asset,\n        );\n        // From here the batch names the look it registers, so every refusal\n        // below is that look's (Appendix B rows 101-103).\n        let lut_asset = batch.asset.id;\n        if let Some(message) = realignment {\n            // Appendix B row 101.\n            self.note_label(\n                LabelIncident::Look,\n                IncidentSubject::LutAsset(lut_asset),\n                message,\n            );\n            return;\n        }\n        if self.projects[project_index]\n            .send_manual_command(Command::DoBatch(batch.operations))\n            .is_err()\n        {\n            // Appendix B row 102.\n            self.note_actor_stopped(\n                IncidentSubject::LutAsset(lut_asset),\n                \"Core actor stopped while registering the look\",\n            );\n            return;\n        }\n        self.lut_import_reservation = Some(LutImportReservation {\n            session_id: response.session_id,\n            asset: batch.asset.id,\n        });\n        if let Some(lost) = batch.target_lost {\n            // Appendix B row 103: `look_incomplete`, because the look **was**\n            // registered and only its application is missing \u2014 a degraded\n            // result, not a blocked one.\n            self.note_label(\n                LabelIncident::LookIncomplete,\n                IncidentSubject::LutAsset(lut_asset),\n                format!(\n                    \"Imported {title}, but {lost}, so it was registered without being applied. \\\n                     Apply it from the look browser.\"\n                ),\n            );\n        }\n        self.status = format!(\"Imported look {title}\");\n    }",
+        "    fn handle_lut_import_response(&mut self, response: LutImportResponse) {\n        self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);\n        let Some(project_index) = session_index_by_id(response.session_id, &self.projects) else {\n            return;\n        };\n        if false {\n            self.status = \"Importing a look is unavailable in Studio until its bytes can be admitted. Your current looks are unchanged.\".into();\n            return;\n        }\n        if self.projects[project_index].ja1_read_only() {\n            self.status = \"Look import is paused while the save or recovery is resolved.\".into();\n            return;\n        }\n        let import = match response.result {\n            Ok(import) => import,\n            // Appendix B row 99, amended by erratum `IN1b`-C-R52: the import\n            // that would have minted a `LutAssetId` is the thing that failed,\n            // so there is no look to state this against and the store root is\n            // the project's. `MediaError` evidence, and `look_unclassified`\n            // until cut item 2 lands the per-variant `LutStoreErrorCode` codes\n            // (`IN1b` \u00a712).\n            Err(error) => {\n                let observation = self.lut_media_observation(\n                    IncidentSubject::Project,\n                    lut_failure_message(&response.path, &error),\n                    &error,\n                );\n                self.note_observation(observation);\n                return;\n            }\n        };\n        let title = import.title.clone();\n        let batch = match lut_import_operations(\n            &self.projects[project_index].document,\n            import,\n            &response.intent,\n        ) {\n            Ok(batch) => batch,\n            // Appendix B row 100, amended by erratum `IN1b`-C-R52: the plan\n            // that mints the id is the thing that was refused.\n            Err(error) => {\n                self.note_label(LabelIncident::Look, IncidentSubject::Project, error);\n                return;\n            }\n        };\n        let store_unavailable = self.projects[project_index].lut_store_unavailable_reason();\n        let realignment = import_realignment_failure(\n            &title,\n            &response.store,\n            self.projects[project_index].lut_store.as_ref(),\n            store_unavailable.as_deref(),\n            &batch.asset,\n        );\n        // From here the batch names the look it registers, so every refusal\n        // below is that look's (Appendix B rows 101-103).\n        let lut_asset = batch.asset.id;\n        if let Some(message) = realignment {\n            // Appendix B row 101.\n            self.note_label(\n                LabelIncident::Look,\n                IncidentSubject::LutAsset(lut_asset),\n                message,\n            );\n            return;\n        }\n        if self.projects[project_index]\n            .send_manual_command(Command::DoBatch(batch.operations))\n            .is_err()\n        {\n            // Appendix B row 102.\n            self.note_actor_stopped(\n                IncidentSubject::LutAsset(lut_asset),\n                \"Core actor stopped while registering the look\",\n            );\n            return;\n        }\n        self.lut_import_reservation = Some(LutImportReservation {\n            session_id: response.session_id,\n            asset: batch.asset.id,\n        });\n        if let Some(lost) = batch.target_lost {\n            // Appendix B row 103: `look_incomplete`, because the look **was**\n            // registered and only its application is missing \u2014 a degraded\n            // result, not a blocked one.\n            self.note_label(\n                LabelIncident::LookIncomplete,\n                IncidentSubject::LutAsset(lut_asset),\n                format!(\n                    \"Imported {title}, but {lost}, so it was registered without being applied. \\\n                     Apply it from the look browser.\"\n                ),\n            );\n        }\n        self.status = format!(\"Imported look {title}\");\n    }"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "relink-starts-probe-before-admission",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_workflow.rs",
+        "    fn start_relink_probe(&mut self, asset_id: AssetId, path: PathBuf) {\n        if self.focused().studio_host_managed() {\n            self.status =\n                \"Relinking is unavailable in Studio until the replacement source can be admitted.\"\n                    .into();\n            return;\n        }\n        let session_id = self.focused().id;\n        let expected_revision = self.focused().revision;\n        let media = Arc::clone(&self.analysis);\n        let result_tx = self.relink_probe_tx.clone();\n        self.relink_probe_pending = self.relink_probe_pending.saturating_add(1);\n        self.status = format!(\"Checking replacement {}\u2026\", path.display());\n        thread::Builder::new()\n            .name(\"kinewright-relink-probe\".to_owned())\n            .spawn(move || {\n                let result = media.probe(&path);\n                let _ = result_tx.send(RelinkProbeResponse {\n                    session_id,\n                    asset_id,\n                    expected_revision,\n                    path,\n                    result,\n                });\n            })\n            .expect(\"failed to spawn media relink probe worker\");\n    }",
+        "    fn start_relink_probe(&mut self, asset_id: AssetId, path: PathBuf) {\n        if false {\n            self.status =\n                \"Relinking is unavailable in Studio until the replacement source can be admitted.\"\n                    .into();\n            return;\n        }\n        let session_id = self.focused().id;\n        let expected_revision = self.focused().revision;\n        let media = Arc::clone(&self.analysis);\n        let result_tx = self.relink_probe_tx.clone();\n        self.relink_probe_pending = self.relink_probe_pending.saturating_add(1);\n        self.status = format!(\"Checking replacement {}\u2026\", path.display());\n        thread::Builder::new()\n            .name(\"kinewright-relink-probe\".to_owned())\n            .spawn(move || {\n                let result = media.probe(&path);\n                let _ = result_tx.send(RelinkProbeResponse {\n                    session_id,\n                    asset_id,\n                    expected_revision,\n                    path,\n                    result,\n                });\n            })\n            .expect(\"failed to spawn media relink probe worker\");\n    }"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "lut-starts-worker-before-admission",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_workflow.rs",
+        "    pub(crate) fn start_lut_import(&mut self, path: PathBuf, intent: LutImportIntent) {\n        if self.focused().studio_host_managed() {\n            self.status =\n                \"Importing a look is unavailable in Studio until its bytes can be admitted.\".into();\n            return;\n        }\n        let Some(store) = self.focused().lut_store.clone() else {\n            // Appendix B row 94: the store root is the project's.\n            let reason = self\n                .focused()\n                .lut_store_unavailable_reason()\n                .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned());\n            self.note_label(LabelIncident::Look, IncidentSubject::Project, reason);\n            return;\n        };\n        let session_id = self.focused().id;\n        let result_tx = self.lut_import_tx.clone();\n        self.lut_worker_pending = self.lut_worker_pending.saturating_add(1);\n        self.status = format!(\"Importing look {}\u2026\", path.display());\n        let spawn = thread::Builder::new()\n            .name(\"kinewright-lut-import\".to_owned())\n            .spawn(move || {\n                let result = store.import_lut_asset(&path);\n                let _ = result_tx.send(LutImportResponse {\n                    session_id,\n                    path,\n                    intent,\n                    store,\n                    result,\n                });\n            });\n        if let Err(error) = spawn {\n            self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);\n            // Appendix B row 95.\n            self.note_label(\n                LabelIncident::Look,\n                IncidentSubject::Project,\n                format!(\"Could not start the look import: {error}\"),\n            );\n        }\n    }",
+        "    pub(crate) fn start_lut_import(&mut self, path: PathBuf, intent: LutImportIntent) {\n        if false {\n            self.status =\n                \"Importing a look is unavailable in Studio until its bytes can be admitted.\".into();\n            return;\n        }\n        let Some(store) = self.focused().lut_store.clone() else {\n            // Appendix B row 94: the store root is the project's.\n            let reason = self\n                .focused()\n                .lut_store_unavailable_reason()\n                .unwrap_or_else(|| PROJECT_NOT_SAVED_MESSAGE.to_owned());\n            self.note_label(LabelIncident::Look, IncidentSubject::Project, reason);\n            return;\n        };\n        let session_id = self.focused().id;\n        let result_tx = self.lut_import_tx.clone();\n        self.lut_worker_pending = self.lut_worker_pending.saturating_add(1);\n        self.status = format!(\"Importing look {}\u2026\", path.display());\n        let spawn = thread::Builder::new()\n            .name(\"kinewright-lut-import\".to_owned())\n            .spawn(move || {\n                let result = store.import_lut_asset(&path);\n                let _ = result_tx.send(LutImportResponse {\n                    session_id,\n                    path,\n                    intent,\n                    store,\n                    result,\n                });\n            });\n        if let Err(error) = spawn {\n            self.lut_worker_pending = self.lut_worker_pending.saturating_sub(1);\n            // Appendix B row 95.\n            self.note_label(\n                LabelIncident::Look,\n                IncidentSubject::Project,\n                format!(\"Could not start the look import: {error}\"),\n            );\n        }\n    }"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "still-placement-bypasses-permit",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_bin.rs",
+        "                    if self.projects[project_index]\n                        .send_manual_command(kinewright_core::Command::DoBatch(operations))",
+        "                    if self.projects[project_index]\n                        .core.send(kinewright_core::Command::DoBatch(operations))"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "av-placement-bypasses-permit",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_bin.rs",
+        "                if self.projects[project_index]\n                    .send_manual_command(kinewright_core::Command::DoBatch(operations))",
+        "                if self.projects[project_index]\n                    .core.send(kinewright_core::Command::DoBatch(operations))"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "video-placement-bypasses-permit",
+    "changes": [
+      [
+        "crates/kinewright-app/src/media_bin.rs",
+        "        if self.projects[project_index]\n            .send_manual_command(kinewright_core::Command::Do(operation))",
+        "        if self.projects[project_index]\n            .core.send(kinewright_core::Command::Do(operation))"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "stranded-ab-restore-bypasses-permit",
+    "changes": [
+      [
+        "crates/kinewright-app/src/inspector_ui.rs",
+        "        if self.projects[index]\n            .send_manual_command(kinewright_core::Command::DoBatchCoalesced {",
+        "        if self.projects[index]\n            .core.send(kinewright_core::Command::DoBatchCoalesced {"
+      ]
+    ],
+    "witness": "media_workflow::tests::s2h_real_media_dispatch_uses_manual_gate_or_refuses_before_side_effects",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "save-disclosure-cache-is-never-used",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "            && cached_limits == limits",
+        "            && cached_limits == limits && false"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "registered-digest-cache-is-never-used",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "            && *cached_revision == revision\n",
+        "            && *cached_revision == revision && false\n"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "registered-digest-never-invalidates",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session.rs",
+        "            && *cached_revision == revision\n",
+        "            && true\n"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "save-disclosure-never-invalidates",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "            && *cached_revision == revision\n",
+        "            && true\n"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_status_disclosures_cache_and_invalidate_actual_histories",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "known-refusal-becomes-unknown-reply",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "if !known_refusal {",
+        "if true {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c9_fix1_unsaved_studio_activation_requires_first_save_before_manual_edit",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "duplicate-confirm-binds-unrelated-root-metadata",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            confirmation.installed == *installed\n                && confirmation.current.project == current.project\n                && confirmation.current.switch_generation == current.switch_generation\n                && confirmation.current.current == current.current",
+        "            confirmation.installed == *installed && confirmation.current == current"
+      ]
+    ],
+    "witness": "writer_host::s2h_tests::s2h_confirm_inputs_failure_revokes_partial_grant_and_refreezes",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "s2h-prelaunch-failure-implicitly-closes-source",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "            Err(error) => {\n                if self.owner.host_retention_lost() {",
+        "            Err(error) => {\n                let _ = self.owner.close_originating_source();\n                if self.owner.host_retention_lost() {"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_failed_host_launch_keeps_source_and_restores_local_editing",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "recovery-reply-loss-drops-owned-host",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host_recovery.rs",
+        "                child: host.child.take(),\n                completion: Some(completion),",
+        "                child: if completion.is_err() { None } else { host.child.take() },\n                completion: Some(completion),"
+      ]
+    ],
+    "witness": "ja1_attachment::tests::s2h_manual_and_save_reply_loss_reconcile_originals_and_kill_is_l2",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false
+  },
+  {
+    "name": "confirmation-trusts-supplied-pointer",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/switch.rs",
+        "            || (current != *installed && !continuation)",
+        "            || false"
+      ]
+    ],
+    "witness": "g05a_fast_b5_switch_reply_loss_before_and_after_restore",
+    "package": "kinewright-agent",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-fork-without-registration",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "    pub fn fork_durable_branch(\n        &mut self,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n        {\n            return Err(BundleError::Unsettled);\n        }\n        let charge = self.registration_capacity(name)?;\n        let live = self\n            .core\n            .export_history()\n            .map_err(crate::bundle::history_error)?;\n        if self.dirty()? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let core = Core::spawn((*live.document).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;\n        let target = bundle.manual_branch_id().clone();\n        if live != *bundle.branch_history(&target)? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let checkpoint = bundle.checkpoint(&target)?.clone();\n        let base = SpecialistBaseRecord {\n            target_branch: target.clone(),\n            base_head: checkpoint.head_id,\n            base_document_hash: checkpoint.document_hash,\n            original_baseline_ref: checkpoint.document_ref,\n            frozen_checkpoint_ref: bundle.checkpoint_reference(&target)?,\n            full_applied_delta: vec![],\n        };\n        let pin = bundle\n            .store\n            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;\n        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        if !candidate_cut.history().batches.is_empty() {\n            attachment\n                .resume(&candidate_cut)\n                .map_err(crate::bundle::history_error)?;\n            return Err(BundleError::HistoryChanged);\n        }\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let branch = match bundle.fork_branch(&target) {\n            Ok(branch) => branch,\n            Err(error) => {\n                attachment\n                    .seal(&candidate_cut)\n                    .map_err(crate::bundle::history_error)?;\n                return Err(error);\n            }\n        };\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base,\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        self.durable_sessions.push(RegisteredSession {\n            digest_cache: std::cell::RefCell::new(None),\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }",
+        "    pub fn fork_durable_branch(\n        &mut self,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n        {\n            return Err(BundleError::Unsettled);\n        }\n        let charge = self.registration_capacity(name)?;\n        let live = self\n            .core\n            .export_history()\n            .map_err(crate::bundle::history_error)?;\n        if self.dirty()? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let core = Core::spawn((*live.document).clone())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let bundle = self.active_bundle_mut()?;\n        let target = bundle.manual_branch_id().clone();\n        if live != *bundle.branch_history(&target)? {\n            return Err(BundleError::HistoryChanged);\n        }\n        let checkpoint = bundle.checkpoint(&target)?.clone();\n        let base = SpecialistBaseRecord {\n            target_branch: target.clone(),\n            base_head: checkpoint.head_id,\n            base_document_hash: checkpoint.document_hash,\n            original_baseline_ref: checkpoint.document_ref,\n            frozen_checkpoint_ref: bundle.checkpoint_reference(&target)?,\n            full_applied_delta: vec![],\n        };\n        let pin = bundle\n            .store\n            .pin(std::slice::from_ref(&base.frozen_checkpoint_ref))?;\n        let encoded = serde_json::to_vec(&base).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let base = Arc::new(bundle.store.reserve_retained_capture(&encoded)?.hold(base));\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        if !candidate_cut.history().batches.is_empty() {\n            attachment\n                .resume(&candidate_cut)\n                .map_err(crate::bundle::history_error)?;\n            return Err(BundleError::HistoryChanged);\n        }\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let branch = match bundle.fork_branch(&target) {\n            Ok(branch) => branch,\n            Err(error) => {\n                attachment\n                    .seal(&candidate_cut)\n                    .map_err(crate::bundle::history_error)?;\n                return Err(error);\n            }\n        };\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base,\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        drop(RegisteredSession {\n            digest_cache: std::cell::RefCell::new(None),\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "host-reopen-without-registration",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/durable.rs",
+        "    pub fn reopen_durable_branch(\n        &mut self,\n        branch: BranchId,\n        base_ref: &ObjectRef,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n            || self.active_bundle()?.unsettled\n        {\n            return Err(BundleError::Unsettled);\n        }\n        if self.active_bundle()?.manual_branch_id() == &branch\n            || self\n                .durable_sessions\n                .iter()\n                .any(|r| r.guard.branch == branch)\n        {\n            return Err(BundleError::Contention(\n                \"durable branch already has a live session\".into(),\n            ));\n        }\n        let charge = self.registration_capacity(name)?;\n        let bundle = self.active_bundle()?;\n        let base = bundle.store.read_record::<SpecialistBaseRecord>(base_ref)?;\n        let checkpoint = bundle\n            .store\n            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;\n        if checkpoint.branch_id != base.target_branch\n            || checkpoint.head_id != base.base_head\n            || checkpoint.document_hash != base.base_document_hash\n            || checkpoint.document_ref != base.original_baseline_ref\n            || !bundle.branches.contains_key(&base.target_branch)\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let history = bundle.branch_history(&branch)?;\n        let core =\n            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        bundle\n            .attach_core(&core)?\n            .restore_history((*history).clone())\n            .map_err(crate::bundle::history_error)?;\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        let pin = bundle\n            .store\n            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base: Arc::new(base),\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        self.durable_sessions.push(RegisteredSession {\n            digest_cache: std::cell::RefCell::new(None),\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }",
+        "    pub fn reopen_durable_branch(\n        &mut self,\n        branch: BranchId,\n        base_ref: &ObjectRef,\n        name: &str,\n    ) -> Result<DurableBranchSessionGuard, BundleError> {\n        if self\n            .core\n            .attachment_state()\n            .map_err(crate::bundle::history_error)?\n            != kinewright_core::AttachmentState::Live\n            || self.active_bundle()?.unsettled\n        {\n            return Err(BundleError::Unsettled);\n        }\n        if self.active_bundle()?.manual_branch_id() == &branch\n            || self\n                .durable_sessions\n                .iter()\n                .any(|r| r.guard.branch == branch)\n        {\n            return Err(BundleError::Contention(\n                \"durable branch already has a live session\".into(),\n            ));\n        }\n        let charge = self.registration_capacity(name)?;\n        let bundle = self.active_bundle()?;\n        let base = bundle.store.read_record::<SpecialistBaseRecord>(base_ref)?;\n        let checkpoint = bundle\n            .store\n            .read_record::<crate::bundle_records::BranchCheckpoint>(&base.frozen_checkpoint_ref)?;\n        if checkpoint.branch_id != base.target_branch\n            || checkpoint.head_id != base.base_head\n            || checkpoint.document_hash != base.base_document_hash\n            || checkpoint.document_ref != base.original_baseline_ref\n            || !bundle.branches.contains_key(&base.target_branch)\n        {\n            return Err(BundleError::HistoryChanged);\n        }\n        let history = bundle.branch_history(&branch)?;\n        let core =\n            Core::spawn(Document::default()).map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        bundle\n            .attach_core(&core)?\n            .restore_history((*history).clone())\n            .map_err(crate::bundle::history_error)?;\n        let attachment = bundle.attach_core(&core)?;\n        let candidate_cut = attachment.freeze().map_err(crate::bundle::history_error)?;\n        let pin = bundle\n            .store\n            .pin(&[base_ref.clone(), bundle.checkpoint_reference(&branch)?])?;\n        let encoded = serde_json::to_vec(candidate_cut.history())\n            .map_err(|e| BundleError::Corrupt(e.to_string()))?;\n        let floor_source = Arc::new(\n            bundle\n                .store\n                .reserve_retained_capture(&encoded)?\n                .hold(candidate_cut.history().clone()),\n        );\n        let guard = DurableBranchSessionGuard {\n            branch,\n            floor_source,\n            base: Arc::new(base),\n            core: core.clone(),\n            epoch: bundle.store.owner_epoch(),\n        };\n        drop(RegisteredSession {\n            digest_cache: std::cell::RefCell::new(None),\n            guard: guard.clone(),\n            name: name.into(),\n            pin,\n            _charge: charge,\n        });\n        attachment\n            .resume(&candidate_cut)\n            .map_err(crate::bundle::history_error)?;\n        Ok(guard)\n    }"
+      ]
+    ],
+    "witness": "writer_host::switch::tests::w13_registered_host_create_reopen_refuses_retirement_and_preserves_unsaved_edits",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "kinewright-project/test-util",
+    "production": true,
+    "build_host": false
+  },
+  {
+    "name": "repeat-c5-registered-close-warning-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/editing_session/recovery.rs",
+        "        for registered in &self.durable_sessions {",
+        "        for registered in self.durable_sessions.iter().take(0) {"
+      ]
+    ],
+    "witness": "durable_branch::tests::w13_registered_session_keeps_original_namespace_after_rescue",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "target": "",
+    "features": "eval-harness",
+    "production": false,
+    "build_host": false,
+    "environment": {},
+    "red_text": null
+  },
+  {
+    "name": "s2h-app-host-disconnect-implicitly-closes-source",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "    pub fn operation_panicked(&mut self) {\n",
+        "    pub fn operation_panicked(&mut self) {\n        let _ = self.owner.close_originating_source();\n"
+      ]
+    ],
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "build_host": false,
+    "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history"
+  },
+  {
+    "name": "app-bootstrap-replaces-frozen-gui-history-with-empty-core",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_host.rs",
+        "initial_snapshot: HostSnapshot::from_history(transfer.history).map_err(",
+        "initial_snapshot: HostSnapshot::capture(&kinewright_core::Core::spawn(kinewright_core::Document::default()).map_err(|error| BundleError::Corrupt(error.to_string()))?).map_err("
+      ]
+    ],
+    "witness": "ja1_attachment::tests::c8_app_host_first_save_then_orderly_exit_preserves_gui_source_and_history",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "features": "",
+    "production": false,
+    "environment": {},
+    "red_text": "the exact GUI snapshot must reach the shipping host bootstrap"
+  },
+  {
+    "name": "intermediate-recovery-receipts-omitted",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_commit.rs",
+        "for envelope in manual_batch\n            .iter()\n            .chain(",
+        "for envelope in manual_batch\n            .iter().skip(manual_batch.len().saturating_sub(1))\n            .chain("
+      ]
+    ],
+    "package": "kinewright-agent",
+    "witness": "g05l_absent_suffix_pressure_publishes_one_shared_floor",
+    "features": "eval-harness",
+    "kind": "--test",
+    "target": "ja_s2_host",
+    "production": false
+  }
+]

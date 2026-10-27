@@ -74,6 +74,8 @@ fn command(
 ) -> CommandEnvelope {
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
+        switch: None,
+        manual: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {
@@ -124,7 +126,7 @@ fn reopened_exact_base_merges_once_with_fresh_runtime_revision() {
     let legacy =
         TimelineBranch::new("counter-only", revision(&core), original.document.clone()).unwrap();
     apply(&legacy.core(), Command::Do(lock(true)));
-    let mut branch = DurableTimelineBranch::fork(&mut bundle, &core, "durable").unwrap();
+    let mut branch = DurableTimelineBranch::fork_probe(&mut bundle, &core, "durable").unwrap();
     apply(&branch.core(), Command::Do(lock(true)));
     apply(&branch.core(), Command::Do(lock(false)));
     apply(&branch.core(), Command::Undo);
@@ -154,7 +156,8 @@ fn reopened_exact_base_merges_once_with_fresh_runtime_revision() {
         "literal old numeric-base control"
     );
     assert_eq!(core.export_history().unwrap(), original);
-    let branch = DurableTimelineBranch::reopen(&bundle, branch_id, &base_ref, "durable").unwrap();
+    let branch =
+        DurableTimelineBranch::reopen_probe(&bundle, branch_id, &base_ref, "durable").unwrap();
     assert_eq!(branch.base().full_applied_delta, frozen_delta);
     let envelope = prepare_merge(&branch, &mut bundle, &core, &inputs);
     assert_eq!(envelope.expected_revision, revision(&core));
@@ -189,7 +192,7 @@ fn equal_bytes_new_head_and_equal_counter_other_head_conflict() {
     );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
-    let mut branch = DurableTimelineBranch::fork(&mut bundle, &core, "durable").unwrap();
+    let mut branch = DurableTimelineBranch::fork_probe(&mut bundle, &core, "durable").unwrap();
     apply(&branch.core(), Command::Do(lock(true)));
     branch.persist(&mut bundle).unwrap();
     let envelope = prepare_merge(&branch, &mut bundle, &core, &inputs);
@@ -331,7 +334,7 @@ fn merge_lost_reply_preserves_one_undo_entry() {
     );
     let path = temp.path("edit.kinewright");
     let (core, mut bundle, inputs) = setup(&path);
-    let mut branch = DurableTimelineBranch::fork(&mut bundle, &core, "durable").unwrap();
+    let mut branch = DurableTimelineBranch::fork_probe(&mut bundle, &core, "durable").unwrap();
     apply(
         &branch.core(),
         Command::DoBatch(vec![lock(true), lock(false)]),
@@ -346,7 +349,7 @@ fn merge_lost_reply_preserves_one_undo_entry() {
     drop(core);
     let (core, mut bundle, inputs) = reopen(&path);
     let before = core.export_history().unwrap();
-    let branch = DurableTimelineBranch::reopen(&bundle, id, &base_ref, "durable").unwrap();
+    let branch = DurableTimelineBranch::reopen_probe(&bundle, id, &base_ref, "durable").unwrap();
     let (result, trace) = io_observer::observe(|| branch.merge(&mut bundle, &core, &envelope));
     assert_eq!(committed(result.unwrap()), original);
     assert!(trace.events.is_empty());
@@ -421,7 +424,7 @@ fn exercise_floor_and_close(path: &Path) {
     close.command = None;
     close.transition = Some(HistoryRequest::RecoveryClose {
         preceding_checkpoint_generation: previous.checkpoint_generation,
-        reconciled_cut: previous.command_cut.clone().unwrap(),
+        reconciled_cut: previous.command_cut.clone(),
         suffix_digest: previous.history_ref.sha256.clone(),
     });
     let closed = committed(bundle.command(&close, &core, &inputs, &[]).unwrap());
@@ -523,7 +526,7 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
         })
         .unwrap();
     let mut specialist =
-        DurableTimelineBranch::fork(&mut owner, &live, "floor specialist").unwrap();
+        DurableTimelineBranch::fork_probe(&mut owner, &live, "floor specialist").unwrap();
     for i in 0..40 {
         apply(&specialist.core(), Command::Do(lock(i % 2 == 0)));
     }
@@ -545,8 +548,9 @@ fn floored_specialist_reopens_original_full_delta_and_merges_once() {
     drop(owner);
     drop(live);
     let (live, mut owner, inputs) = reopen(&path);
-    let mut specialist = DurableTimelineBranch::reopen(&owner, branch, &reference, "reopened")
-        .expect("floor made the persisted specialist unreopenable");
+    let mut specialist =
+        DurableTimelineBranch::reopen_probe(&owner, branch, &reference, "reopened")
+            .expect("floor made the persisted specialist unreopenable");
     assert_eq!(specialist.core().export_history().unwrap(), history);
     apply(&specialist.core(), Command::Do(lock(true)));
     apply(&specialist.core(), Command::Undo);

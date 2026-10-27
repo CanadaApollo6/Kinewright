@@ -41,6 +41,8 @@ fn revision(core: &Core) -> TimelineRevision {
 fn envelope(bundle: &mut ProjectBundle, core: &Core, inputs: &ObjectRef) -> CommandEnvelope {
     let issuer = bundle.issue_issuer(core, inputs, 1).unwrap();
     CommandEnvelope {
+        switch: None,
+        manual: None,
         version: 1,
         action: "edit".into(),
         id: CommandId {
@@ -395,7 +397,9 @@ fn ambiguous_commit_keeps_pending_until_receipt_reconciliation() {
         bundle.command(&request, &core, &inputs, &[]).unwrap(),
         ReceiptLookup::Pending
     );
-    bundle.reconcile_command(&core).unwrap();
+    bundle
+        .install_reconciled_command(&core, before.clone())
+        .unwrap();
     let result = committed(bundle.command(&request, &core, &inputs, &[]).unwrap());
     assert!(matches!(result.result, ReceiptResult::Edit { .. }));
     assert_eq!(core.export_history().unwrap().cursor.undo.len(), 2);
@@ -469,7 +473,7 @@ fn invalid_comment_does_not_enter_pending_or_pause_the_next_command() {
 }
 
 #[test]
-fn unchanged_comment_skips_history_decode_and_coalesces_directory_syncs() {
+fn unchanged_comment_validates_fresh_open_and_coalesces_directory_syncs() {
     let temp = TempDirectory::new_in(
         std::path::Path::new(env!("CARGO_TARGET_TMPDIR")),
         "r1-comment-work",
@@ -495,7 +499,21 @@ fn unchanged_comment_skips_history_decode_and_coalesces_directory_syncs() {
     assert_eq!(
         io_observer::history_decode_count(),
         decoded_before,
-        "unchanged history was decoded again"
+        "unchanged-history comment save decoded history"
+    );
+    assert!(
+        trace
+            .events
+            .iter()
+            .any(|e| e.operation == "publication_reopen_fit"),
+        "publication omitted fresh-open validation"
+    );
+    assert!(
+        trace
+            .events
+            .iter()
+            .any(|e| e.operation == "publication_memo_hit"),
+        "publication did not use verified accounting identities"
     );
     let start = trace
         .events
@@ -507,6 +525,11 @@ fn unchanged_comment_skips_history_decode_and_coalesces_directory_syncs() {
         .iter()
         .position(|e| e.operation == "bundle_B5")
         .unwrap();
+    assert!(
+        trace.events[start..end]
+            .iter()
+            .any(|e| e.operation == "publication_reopen_fit")
+    );
     assert_eq!(
         trace.events[start..end]
             .iter()
@@ -521,4 +544,34 @@ fn unchanged_comment_skips_history_decode_and_coalesces_directory_syncs() {
             .any(|e| e.operation == "object_unlink"),
         "GC still runs during acknowledged publication"
     );
+    drop(bundle);
+    let path = temp.path("edit.kinewright");
+    let loaded = LoadedBundle::read(&path).unwrap();
+    let reopened_core = Core::spawn(Document::default()).unwrap();
+    loaded.restore_manual(&reopened_core).unwrap();
+    let mut reopened = loaded.into_writer().unwrap();
+    for reconciled in [false, true] {
+        if reconciled {
+            reopened.reconcile().unwrap();
+        }
+        let before = io_observer::history_decode_count();
+        let request = comment(
+            envelope(&mut reopened, &reopened_core, &inputs),
+            b"after open",
+            b"[]",
+        );
+        execute_comment(
+            &mut reopened,
+            &reopened_core,
+            &inputs,
+            &request,
+            b"after open",
+            b"[]",
+        );
+        assert_eq!(
+            io_observer::history_decode_count(),
+            before,
+            "open/reconcile failed to seed verified accounting identities"
+        );
+    }
 }

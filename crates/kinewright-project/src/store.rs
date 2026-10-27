@@ -28,6 +28,8 @@ pub struct StoreManifest {
     pub recovery: RecoveryInventory,
     pub required_fields: BTreeSet<String>,
     pub required_apis: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evidence_roles: BTreeMap<String, String>,
     pub required_kinds: BTreeSet<RecordKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mirrors: Vec<(ObjectRef, PortablePath)>,
@@ -83,6 +85,7 @@ struct Ledger {
 
 struct StoreInner {
     namespace: Mutex<ProjectNamespace>,
+    verified_memo: Mutex<crate::bundle_recovery::VerifiedIdentityMemo>,
     ledger: Mutex<Ledger>,
     usage: Arc<Mutex<StorageUsage>>,
     limits: StorageLimits,
@@ -91,6 +94,8 @@ struct StoreInner {
     project_id: Option<ProjectId>,
     session_id: Option<SessionId>,
     owner_epoch: u64,
+    session_closed: std::sync::atomic::AtomicBool,
+    session_closing: std::sync::atomic::AtomicBool,
 }
 
 pub struct ProjectStore {
@@ -105,6 +110,391 @@ pub struct SealedObject {
     pin: StorePin,
 }
 
+/// Unforgeable access to a verified, pinned closure under its original store owner.
+/// No caller locator or external hint is accepted by reads.
+pub struct RetainedReadAdmission {
+    hold: Arc<SourceCopyHold>,
+    objects: StorageReservation<Vec<ObjectRef>>,
+}
+pub(crate) struct RetainedReadLease {
+    file: File,
+    _hold: Arc<SourceCopyHold>,
+    _charge: StorageReservation,
+}
+impl Read for RetainedReadLease {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+impl Seek for RetainedReadLease {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+impl RetainedReadAdmission {
+    pub(crate) fn reserve_snapshot_growth(
+        &self,
+        overlap: &StorageReservation,
+        encoded_bytes: u64,
+    ) -> Result<StorageReservation, BundleError> {
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        if store
+            .inner
+            .session_closing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(BundleError::Identity(
+                "originating source is closing".into(),
+            ));
+        }
+        let free = store.with_namespace(|n| n.available_bytes())?;
+        overlap.reserve_copy_growth(encoded_bytes, store.limits(), free)
+    }
+    pub(crate) fn reserve_snapshot_scratch(
+        &self,
+        encoded_bytes: u64,
+    ) -> Result<StorageReservation, BundleError> {
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        store.reserve_copy_read(0, encoded_bytes, 0, false, true)
+    }
+    pub(crate) fn inspect_destination(
+        &self,
+        path: &Path,
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        ProjectStore::inspect_borrowed_destination(path, &[&store])
+    }
+    #[must_use]
+    pub fn objects(&self) -> &[ObjectRef] {
+        &self.objects
+    }
+    pub fn open(&self, reference: &ObjectRef) -> Result<impl Read + Seek + use<>, BundleError> {
+        self.open_lease(reference)
+    }
+    pub(crate) fn open_lease(
+        &self,
+        reference: &ObjectRef,
+    ) -> Result<RetainedReadLease, BundleError> {
+        if !self.objects.contains(reference) {
+            return Err(BundleError::Identity(
+                "object outside retained admission".into(),
+            ));
+        }
+        let store = ProjectStore {
+            inner: Arc::clone(&self.hold.pin.inner),
+        };
+        let path = ProjectStore::object_path(reference)?;
+        crate::namespace::note("rescue_permission_read", path.as_path());
+        let charge = store.reserve_copy_read(0, 256, 0, false, true)?;
+        let file = store.open_copy_source(reference, true)?;
+        Ok(RetainedReadLease {
+            file,
+            _hold: Arc::clone(&self.hold),
+            _charge: charge,
+        })
+    }
+}
+impl ProjectStore {
+    /// Explicit originating Close. Keep this owner for retry on failure or while
+    /// readers still hold the real pin; no host descriptor can call this method.
+    pub(crate) fn close_temporary_source(&mut self) -> Result<bool, BundleError> {
+        use std::sync::atomic::Ordering;
+        if self.inner.session_closed.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+        if self.inner.session_id.is_none() {
+            return Err(BundleError::Identity(
+                "only the originating temporary owner can close its source".into(),
+            ));
+        }
+        self.inner.session_closing.store(true, Ordering::SeqCst);
+        if Arc::strong_count(&self.inner) != 1 {
+            return Ok(false);
+        }
+        let needs_collection = {
+            let mut ledger = self
+                .inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+            if ledger.copy_holds != 0 || ledger.pins.values().any(|n| *n != 0) {
+                return Ok(false);
+            }
+            if !ledger.pending.is_empty() || !ledger.pending_controls.is_empty() {
+                return Err(BundleError::Unsettled);
+            }
+            ledger.can_collect = true;
+            ledger.committed.clear();
+            !ledger.objects.is_empty()
+                || !ledger.unclassified.is_empty()
+                || !ledger.temporaries.is_empty()
+        };
+        let result = (|| {
+            if needs_collection {
+                collect(&self.inner)?;
+            }
+            self.with_namespace(ProjectNamespace::cleanup_session)?;
+            self.inner.session_closed.store(true, Ordering::SeqCst);
+            Ok(true)
+        })();
+        self.inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?
+            .unsettled = result.is_err();
+        result
+    }
+
+    /// Only the bundle's own durable pin may remain at a named writer handover.
+    /// Check and release under the actual pinned namespace, before a new host acquires it.
+    pub(crate) fn release_named_writer_for_host(
+        &mut self,
+        expected_root: &[u8],
+        own_pins: usize,
+    ) -> Result<(), BundleError> {
+        if self.inner.session_id.is_some() || Arc::strong_count(&self.inner) != 1 + own_pins {
+            return Err(BundleError::Identity(
+                "named writer still has source holds or readers".into(),
+            ));
+        }
+        let mut ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        if ledger.copy_holds != 0
+            || !ledger.pending.is_empty()
+            || !ledger.pending_controls.is_empty()
+        {
+            return Err(BundleError::Unsettled);
+        }
+        let mut namespace = self
+            .inner
+            .namespace
+            .lock()
+            .map_err(|_| BundleError::Capacity("namespace poisoned"))?;
+        namespace.verify()?;
+        if namespace.read_root()?.as_deref() != Some(expected_root) {
+            return Err(BundleError::Identity(
+                "named handover checkpoint changed".into(),
+            ));
+        }
+        // The released owner must do no collection after giving up the lock.
+        ledger.can_collect = false;
+        namespace.release()?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn retention_probe(&self) -> Result<(u64, BTreeMap<String, u64>), BundleError> {
+        let ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        Ok((ledger.copy_holds, ledger.pins.clone()))
+    }
+    pub(crate) fn reserve_retained_capture(
+        &self,
+        bytes: &[u8],
+    ) -> Result<StorageReservation, BundleError> {
+        let decoded = preflight_record(bytes, self.limits())?;
+        self.reserve_copy_read(0, decoded, decoded, false, true)
+    }
+    pub(crate) fn reserve_capture_scratch(&self) -> Result<StorageReservation, BundleError> {
+        self.reserve_copy_read(0, self.limits().decoded_record_bytes, 0, false, true)
+    }
+    pub fn inspect_rescue_destination(
+        path: &Path,
+        stores: &[&Self],
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        Self::inspect_copy_destination(path, stores, false)
+    }
+    pub fn inspect_borrowed_destination(
+        path: &Path,
+        stores: &[&Self],
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        Self::inspect_copy_destination(path, stores, true)
+    }
+    fn inspect_copy_destination(
+        path: &Path,
+        stores: &[&Self],
+        borrowed: bool,
+    ) -> Result<crate::namespace::DestinationInspection, BundleError> {
+        let mut stores = stores.to_vec();
+        stores.sort_by_key(|store| Arc::as_ptr(&store.inner));
+        stores.dedup_by(|a, b| Arc::ptr_eq(&a.inner, &b.inner));
+        let guards = stores
+            .iter()
+            .map(|s| {
+                s.inner
+                    .namespace
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("namespace poisoned"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let namespaces = guards.iter().map(|g| &**g).collect::<Vec<_>>();
+        if borrowed {
+            crate::namespace::DestinationInspection::inspect_borrowed(path, &namespaces)
+        } else {
+            crate::namespace::DestinationInspection::inspect(path, &namespaces)
+        }
+    }
+    pub fn revalidate_rescue_destination(
+        inspection: &crate::namespace::DestinationInspection,
+        stores: &[&Self],
+    ) -> Result<(), BundleError> {
+        let mut stores = stores.to_vec();
+        stores.sort_by_key(|store| Arc::as_ptr(&store.inner));
+        stores.dedup_by(|a, b| Arc::ptr_eq(&a.inner, &b.inner));
+        let guards = stores
+            .iter()
+            .map(|s| {
+                s.inner
+                    .namespace
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("namespace poisoned"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        inspection.revalidate(&guards.iter().map(|g| &**g).collect::<Vec<_>>())
+    }
+    /// Diagnose each retaining role independently, then page a bounded frozen result.
+    pub fn diagnose_retained_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        offset: usize,
+        page: usize,
+    ) -> Result<crate::bundle_rescue::RescueMissingOwnedBytes, BundleError> {
+        self.diagnose_retained_selection(roots, offset, page, true)
+    }
+    pub(crate) fn diagnose_retained_content_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        offset: usize,
+        page: usize,
+    ) -> Result<crate::bundle_rescue::RescueMissingOwnedBytes, BundleError> {
+        self.diagnose_retained_selection(roots, offset, page, false)
+    }
+    fn diagnose_retained_selection(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        offset: usize,
+        page: usize,
+        inventory: bool,
+    ) -> Result<crate::bundle_rescue::RescueMissingOwnedBytes, BundleError> {
+        use crate::bundle_rescue::RescueMissingOwnedBytes;
+        if roots.len() as u64 > self.limits().objects || page == 0 || page > 32 {
+            return Err(BundleError::Capacity("rescue diagnostic page"));
+        }
+        let mut uses = BTreeMap::<ObjectRef, BTreeSet<_>>::new();
+        let mut working = Vec::new();
+        let mut complete = true;
+        let mut missing = BTreeMap::new();
+        for (root, role) in roots {
+            match self.closure_with_inventory(std::slice::from_ref(root), inventory) {
+                Ok(objects) => {
+                    let additions = objects
+                        .iter()
+                        .filter(|object| {
+                            !uses.get(*object).is_some_and(|roles| roles.contains(role))
+                        })
+                        .count();
+                    working.push(self.reserve_copy_read(
+                        0,
+                        additions as u64 * 1024,
+                        0,
+                        false,
+                        true,
+                    )?);
+                    for object in objects {
+                        uses.entry(object).or_default().insert(role.clone());
+                    }
+                }
+                Err(error) => {
+                    working.push(self.reserve_copy_read(0, 1024, 0, false, true)?);
+                    complete = false;
+                    uses.entry(root.clone()).or_default().insert(role.clone());
+                    missing.insert(root.clone(), error.to_string());
+                }
+            }
+        }
+        for object in uses.keys() {
+            if missing.contains_key(object) {
+                continue;
+            }
+            if let Err(error) = self.open_copy_source(object, true) {
+                if !object.record_kind.is_owned_bytes() {
+                    complete = false;
+                }
+                missing.insert(object.clone(), format!("retained object read: {error}"));
+            }
+        }
+        let total = missing.len();
+        let entries = missing
+            .into_iter()
+            .skip(offset)
+            .take(page)
+            .map(|(object, cause)| {
+                let roles = uses
+                    .remove(&object)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                (object, roles, cause)
+            })
+            .collect::<Vec<_>>();
+        let end = offset.saturating_add(entries.len());
+        Ok(RescueMissingOwnedBytes {
+            omitted: total.saturating_sub(entries.len()),
+            next: (end < total).then_some(end),
+            entries,
+            dependencies_complete: complete,
+        })
+    }
+    pub fn admit_retained_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+    ) -> Result<RetainedReadAdmission, BundleError> {
+        self.admit_retained_selection(roots, true)
+    }
+    pub(crate) fn admit_retained_content_reads(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+    ) -> Result<RetainedReadAdmission, BundleError> {
+        self.admit_retained_selection(roots, false)
+    }
+    fn admit_retained_selection(
+        &self,
+        roots: &[(ObjectRef, crate::bundle_rescue::MissingOwnedUse)],
+        inventory: bool,
+    ) -> Result<RetainedReadAdmission, BundleError> {
+        let diagnostic = self.diagnose_retained_selection(roots, 0, 32, inventory)?;
+        if !diagnostic.entries.is_empty() || !diagnostic.dependencies_complete {
+            return Err(BundleError::RescueMissingOwnedBytes(Box::new(diagnostic)));
+        }
+        let roots = roots.iter().map(|(r, _)| r.clone()).collect::<Vec<_>>();
+        let objects = self.closure_with_inventory(&roots, inventory)?;
+        let bytes = objects.iter().try_fold(0_u64, |n, r| {
+            n.checked_add(r.byte_length)
+                .ok_or(BundleError::Capacity("retained source bytes"))
+        })?;
+        let objects = self
+            .reserve_copy_read(0, objects.len() as u64 * 256, 0, false, true)?
+            .hold(objects);
+        let hold = self.begin_copy_source(&roots, bytes, true)?;
+        Ok(RetainedReadAdmission {
+            hold: Arc::new(hold),
+            objects,
+        })
+    }
+}
+
 impl SealedObject {
     #[must_use]
     pub fn into_pin(self) -> StorePin {
@@ -112,6 +502,17 @@ impl SealedObject {
     }
 }
 impl ProjectStore {
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn reset_decode_peaks_probe(&self) -> Result<(), BundleError> {
+        let mut usage = self
+            .inner
+            .usage
+            .lock()
+            .map_err(|_| BundleError::Capacity("usage poisoned"))?;
+        usage.peak_decoded_bytes = usage.decoded_bytes;
+        usage.peak_live_history_bytes = usage.live_history_bytes;
+        Ok(())
+    }
     pub fn collection_status(&self) -> Result<CollectionStatus, BundleError> {
         Ok(self
             .inner
@@ -151,6 +552,7 @@ impl ProjectStore {
         Ok(Self {
             inner: Arc::new(StoreInner {
                 namespace: Mutex::new(namespace),
+                verified_memo: Mutex::new(crate::bundle_recovery::VerifiedIdentityMemo::default()),
                 ledger: Mutex::new(Ledger {
                     collection: CollectionStatus::default(),
                     objects: BTreeMap::new(),
@@ -181,6 +583,8 @@ impl ProjectStore {
                 project_id,
                 session_id,
                 owner_epoch,
+                session_closed: std::sync::atomic::AtomicBool::new(false),
+                session_closing: std::sync::atomic::AtomicBool::new(false),
             }),
         })
     }
@@ -224,7 +628,65 @@ impl ProjectStore {
             .namespace
             .lock()
             .map_err(|_| BundleError::Identity("namespace poisoned".into()))?;
-        run(&mut namespace)
+        let result = run(&mut namespace);
+        if namespace.is_uncertain()
+            || matches!(
+                &result,
+                Err(BundleError::Identity(_)
+                    | BundleError::Unsettled
+                    | BundleError::DurabilityUnknown
+                    | BundleError::Corrupt(_))
+            )
+        {
+            self.clear_verified_memo()?;
+        }
+        result
+    }
+    pub(crate) fn clear_verified_memo(&self) -> Result<(), BundleError> {
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .clear();
+        Ok(())
+    }
+    pub(crate) fn replace_verified_memo(
+        &self,
+        memo: crate::bundle_recovery::VerifiedIdentityMemo,
+    ) -> Result<(), BundleError> {
+        *self
+            .inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))? = memo;
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn clear_verified_memo_probe(&self) -> Result<(), BundleError> {
+        self.clear_verified_memo()
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn evict_verified_cost_probe(&self, reference: &ObjectRef) -> Result<(), BundleError> {
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .forget(reference);
+        Ok(())
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn misbind_verified_cost_probe(
+        &self,
+        reference: &ObjectRef,
+        wrong: ObjectRef,
+    ) -> Result<(), BundleError> {
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .misbind_probe(reference, wrong);
+        Ok(())
     }
     pub(crate) fn reserve(
         &self,
@@ -233,6 +695,13 @@ impl ProjectStore {
         history: u64,
         copy: bool,
     ) -> Result<StorageReservation, BundleError> {
+        if self
+            .inner
+            .session_closing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(BundleError::Identity("originating source is closed".into()));
+        }
         let free = self.with_namespace(|n| n.available_bytes())?;
         StorageReservation::reserve(
             &self.inner.usage,
@@ -568,7 +1037,7 @@ impl ProjectStore {
     pub fn closure(&self, roots: &[ObjectRef]) -> Result<Vec<ObjectRef>, BundleError> {
         self.closure_with_inventory(roots, true)
     }
-    fn closure_with_inventory(
+    pub(crate) fn closure_with_inventory(
         &self,
         roots: &[ObjectRef],
         include_inventory: bool,
@@ -628,9 +1097,21 @@ impl ProjectStore {
         self.open_verified(reference).map(drop)
     }
     pub(crate) fn open_verified(&self, reference: &ObjectRef) -> Result<File, BundleError> {
+        self.open_copy_source(reference, false)
+    }
+    fn open_copy_source(
+        &self,
+        reference: &ObjectRef,
+        cleanup_only: bool,
+    ) -> Result<File, BundleError> {
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .forget(reference);
         // Opening archived bytes does not promote their automatic inventory into live roots.
         self.closure_with_inventory(std::slice::from_ref(reference), false)?;
-        let _working = self.reserve(0, 1 << 20, 0, false)?;
+        let _working = self.reserve_copy_read(0, 1 << 20, 0, false, cleanup_only)?;
         let path = Self::object_path(reference)?;
         let mut file = self
             .with_namespace(|namespace| namespace.open_owned(&path))?
@@ -718,6 +1199,7 @@ impl ProjectStore {
             recovery: RecoveryInventory::default(),
             required_fields: BTreeSet::new(),
             required_apis: BTreeMap::new(),
+            evidence_roles: BTreeMap::new(),
             required_kinds: ledger
                 .objects
                 .values()
@@ -1002,6 +1484,11 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         ledger.objects.remove(&hash);
         ledger.pins.remove(&hash);
         ledger.verified.remove(&hash);
+        inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .forget(&reference);
 
         ledger.metadata_sizes.remove(&hash);
         ledger.inventory_dependencies.remove(&hash);
@@ -1129,6 +1616,12 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
 }
 impl Drop for StoreInner {
     fn drop(&mut self) {
+        if self
+            .session_closed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         let temporary = self.session_id.is_some();
         let mut collectable = false;
         if let Ok(ledger) = self.ledger.get_mut() {
@@ -1445,11 +1938,23 @@ impl ProjectStore {
                 .insert(reference.sha256, inventory_dependencies);
         }
         sealed.pin = self.pin(std::slice::from_ref(&sealed.reference))?;
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .remember(&sealed.reference, record, decoded, None, self.limits());
         Ok(sealed)
     }
     pub fn read_record<T: BundleRecord>(
         &self,
         reference: &ObjectRef,
+    ) -> Result<StorageReservation<T>, BundleError> {
+        self.read_copy_record(reference, false)
+    }
+    pub(crate) fn read_copy_record<T: BundleRecord>(
+        &self,
+        reference: &ObjectRef,
+        cleanup_only: bool,
     ) -> Result<StorageReservation<T>, BundleError> {
         #[cfg(any(test, feature = "test-util"))]
         if T::KIND == RecordKind::History {
@@ -1466,19 +1971,25 @@ impl ProjectStore {
         if reference.byte_length > limit {
             return Err(BundleError::Capacity("encoded record"));
         }
-        let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
-        let mut file = self.open_verified(reference)?;
+        let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, cleanup_only)?;
+        let mut file = self.open_copy_source(reference, cleanup_only)?;
         let bytes = crate::bundle_recovery::bounded_bytes(&mut file, reference.byte_length)?;
         if bytes.len() as u64 != reference.byte_length {
             return Err(BundleError::Corrupt("record changed while decoding".into()));
         }
-        let preflight = self.reserve(0, self.limits().decoded_record_bytes, 0, false)?;
+        let preflight = self.reserve_copy_read(
+            0,
+            self.limits().decoded_record_bytes,
+            0,
+            false,
+            cleanup_only,
+        )?;
         let decoded = preflight_record(&bytes, self.limits())?;
         drop(preflight);
         if T::KIND == RecordKind::History && decoded > self.limits().branch_history_bytes {
             return Err(BundleError::Capacity("live branch history"));
         }
-        let decoded_reservation = self.reserve(
+        let decoded_reservation = self.reserve_copy_read(
             0,
             decoded,
             if T::KIND == RecordKind::History {
@@ -1487,10 +1998,16 @@ impl ProjectStore {
                 0
             },
             false,
+            cleanup_only,
         )?;
         let value: T =
             serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
         value.validate(self.limits())?;
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .remember(reference, &value, decoded, None, self.limits());
         Ok(decoded_reservation.hold(value))
     }
 }
@@ -1689,6 +2206,7 @@ impl ProjectStore {
             &mut retained,
             &mut verified,
             &usage,
+            &limits,
         )?;
         let manifest = &retained;
         if manifest.project_id.as_ref() != Some(&project_id) || manifest.session_id.is_some() {
@@ -1739,20 +2257,8 @@ impl ProjectStore {
                     .cloned()
                     .ok_or_else(|| BundleError::Corrupt("missing dependency row".into()))?
             };
-            let charge = 256_u64
-                .checked_add(
-                    (dependencies.len() as u64)
-                        .checked_mul(160)
-                        .ok_or(BundleError::Capacity("edge overflow"))?,
-                )
-                .and_then(|n| {
-                    n.checked_add(if reference.record_kind.is_owned_bytes() {
-                        0
-                    } else {
-                        reference.byte_length
-                    })
-                })
-                .ok_or(BundleError::Capacity("metadata overflow"))?;
+            let charge =
+                crate::storage_budget::object_metadata_charge(&reference, dependencies.len())?;
             physical = physical
                 .checked_add(reference.byte_length)
                 .ok_or(BundleError::Capacity("physical overflow"))?;
@@ -1802,6 +2308,73 @@ impl ProjectStore {
         store.account_residuals(true)?;
         Ok(store)
     }
+    pub(crate) fn has_host_switch_receipts(
+        &self,
+        objects: &[ObjectRef],
+    ) -> Result<bool, BundleError> {
+        for reference in objects
+            .iter()
+            .filter(|r| r.record_kind == RecordKind::ReceiptIndex)
+        {
+            if self
+                .read_record::<crate::receipts::ReceiptLedger>(reference)?
+                .has_switch()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub(crate) fn has_archived_manual_switch(
+        &self,
+        objects: &[ObjectRef],
+    ) -> Result<bool, BundleError> {
+        #[derive(Deserialize)]
+        struct RootCapabilities {
+            studio: Option<StudioCapabilities>,
+        }
+        #[derive(Deserialize)]
+        struct StudioCapabilities {
+            manual_switch_generation: u64,
+        }
+        for reference in objects
+            .iter()
+            .filter(|r| r.record_kind == RecordKind::RootCheckpoint)
+        {
+            let _encoded = self.reserve(0, reference.byte_length, 0, false)?;
+            let bytes = crate::bundle_recovery::bounded_bytes(
+                self.open_verified(reference)?,
+                reference.byte_length,
+            )?;
+            // Derive the raw requirement without allocating another Document. The shared
+            // publication reader still fully admits every archived root before B5.
+            let capabilities: RootCapabilities =
+                serde_json::from_slice(&bytes).map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if capabilities
+                .studio
+                .as_ref()
+                .is_some_and(|r| r.manual_switch_generation != 0)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    pub(crate) fn evidence_roles(
+        &self,
+        objects: &[ObjectRef],
+    ) -> Result<BTreeMap<String, String>, BundleError> {
+        let mut roles = BTreeMap::new();
+        for reference in objects.iter().filter(|r| {
+            r.record_kind == RecordKind::OwnedEvidence
+                && r.byte_length <= crate::rescue_record::PROVENANCE_BYTES as u64
+        }) {
+            if let Some(record) = crate::rescue_record::parse(&self.read_evidence(reference)?)? {
+                roles.insert(reference.sha256.clone(), record.role);
+            }
+        }
+        Ok(roles)
+    }
     pub(crate) fn selected_manifest(
         &self,
         roots: &[ObjectRef],
@@ -1814,6 +2387,7 @@ impl ProjectStore {
         all.extend_from_slice(pins);
         all.extend(recovery.references());
         let objects = self.closure(&all)?;
+        let evidence_roles = self.evidence_roles(&objects)?;
         let ledger = self
             .inner
             .ledger
@@ -1846,6 +2420,7 @@ impl ProjectStore {
                 .chain(std::iter::once(RecordKind::StoreManifest))
                 .collect(),
             required_apis: inventory.required_apis.clone(),
+            evidence_roles,
             mirrors: ledger
                 .mirrors
                 .iter()
@@ -1944,7 +2519,22 @@ impl ProjectStore {
         bytes: &[u8],
     ) -> Result<(), crate::namespace::RootReplaceFailure> {
         let mut boundary = crate::namespace::RootReplaceBoundary::NeverAttempted;
-        self.publish_control(bytes, true, &mut boundary)
+        let result = self.with_namespace(|n| {
+            crate::namespace::note("publication_reopen_fit", &n.identity().resolved_root);
+            n.verify()?;
+            crate::bundle_recovery::validate_publication_reopen_fit(
+                n,
+                bytes,
+                self.limits(),
+                &mut *self
+                    .inner
+                    .verified_memo
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("memo poisoned"))?,
+            )
+        });
+        result
+            .and_then(|()| self.publish_control(bytes, true, &mut boundary))
             .map_err(|error| crate::namespace::RootReplaceFailure { boundary, error })
     }
     fn publish_control(
@@ -2021,6 +2611,43 @@ impl ProjectStore {
         *prior = length;
         Ok(())
     }
+    fn memoize_support_decode(
+        &self,
+        reference: &ObjectRef,
+        decoded: u64,
+        fields: BTreeSet<String>,
+    ) -> Result<(), BundleError> {
+        let ledger = self
+            .inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        let (identity, dependencies) = ledger
+            .objects
+            .get(&reference.sha256)
+            .ok_or_else(|| BundleError::Corrupt("support identity absent from store".into()))?;
+        if identity != reference {
+            return Err(BundleError::Corrupt("support identity changed".into()));
+        }
+        let inventory = ledger
+            .inventory_dependencies
+            .get(&reference.sha256)
+            .cloned()
+            .unwrap_or_default();
+        self.inner
+            .verified_memo
+            .lock()
+            .map_err(|_| BundleError::Capacity("memo poisoned"))?
+            .remember_raw(
+                reference,
+                decoded,
+                fields,
+                dependencies.clone(),
+                inventory,
+                self.limits(),
+            );
+        Ok(())
+    }
     pub(crate) fn support_fields(
         &self,
         roots: &[ObjectRef],
@@ -2044,9 +2671,24 @@ impl ProjectStore {
                     .lock()
                     .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
                 if let Some(cached) = ledger.support_fields.get(&reference.sha256) {
+                    self.inner
+                        .verified_memo
+                        .lock()
+                        .map_err(|_| BundleError::Capacity("memo poisoned"))?
+                        .remember_fields(&reference, cached, self.limits());
                     fields.extend(cached.iter().cloned());
                     continue;
                 }
+            }
+            if let Some(cached) = self
+                .inner
+                .verified_memo
+                .lock()
+                .map_err(|_| BundleError::Capacity("memo poisoned"))?
+                .cached_fields(&reference, self.limits())
+            {
+                fields.extend(cached);
+                continue;
             }
             let mut object_fields = BTreeSet::new();
             if reference.byte_length > self.limits().control_bytes {
@@ -2072,11 +2714,17 @@ impl ProjectStore {
                 admission.require_supported()?;
                 object_fields.extend(admission.data.inventory.required_fields.iter().cloned());
             } else {
-                let _raw = crate::bundle_recovery::decode::<serde_json::Value>(
+                let raw = crate::bundle_recovery::decode::<serde_json::Value>(
                     &bytes,
                     &self.inner.usage,
                     reference.record_kind,
                     &mut object_fields,
+                    self.limits(),
+                )?;
+                self.memoize_support_decode(
+                    &reference,
+                    raw.decoded_charge(),
+                    object_fields.clone(),
                 )?;
             }
             let cache_charge = object_fields.iter().try_fold(128_u64, |total, field| {
@@ -2216,14 +2864,21 @@ impl ProjectStore {
         &self,
         reference: &ObjectRef,
     ) -> Result<StorageReservation<Vec<u8>>, BundleError> {
+        self.read_copy_evidence(reference, false)
+    }
+    pub(crate) fn read_copy_evidence(
+        &self,
+        reference: &ObjectRef,
+        retained: bool,
+    ) -> Result<StorageReservation<Vec<u8>>, BundleError> {
         if reference.record_kind != RecordKind::OwnedEvidence
             || reference.byte_length > self.limits().control_bytes
         {
             return Err(BundleError::Capacity("evidence snapshot"));
         }
         let _pin = self.pin(std::slice::from_ref(reference))?;
-        let charge = self.reserve(0, reference.byte_length, 0, false)?;
-        let file = self.open_verified(reference)?;
+        let charge = self.reserve_copy_read(0, reference.byte_length, 0, false, retained)?;
+        let file = self.open_copy_source(reference, retained)?;
         let bytes = crate::bundle_recovery::bounded_bytes(file, reference.byte_length)?;
         if bytes.len() as u64 != reference.byte_length {
             return Err(BundleError::Corrupt(
@@ -2231,6 +2886,19 @@ impl ProjectStore {
             ));
         }
         Ok(charge.hold(bytes))
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn pending_control_bytes_probe(&self) -> Result<u64, BundleError> {
+        self.inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+            .pending_controls
+            .iter()
+            .try_fold(0_u64, |sum, charge| {
+                sum.checked_add(charge.reserved_bytes_probe())
+                    .ok_or(BundleError::Capacity("control charge overflow"))
+            })
     }
     pub(crate) fn has_unsettled_objects(&self) -> Result<bool, BundleError> {
         Ok(!self
@@ -2251,13 +2919,178 @@ pub(crate) struct SourceCopyHold {
     previous_collection: bool,
 }
 impl ProjectStore {
+    /// Retain the real source objects under this ledger; only the descriptor may cross processes.
+    pub(crate) fn retain_borrowed_source(
+        &self,
+        roots: &[ObjectRef],
+        extra_overlap_bytes: u64,
+    ) -> Result<crate::source_boundary::RetainedBorrowedSource, BundleError> {
+        use crate::source_boundary::{
+            BorrowedSnapshotOverlap, BorrowedSourceDescriptor, BorrowedSourceObject,
+            RetainedBorrowedSource,
+        };
+        if roots.len() as u64 > self.limits().objects {
+            return Err(BundleError::Capacity("borrowed source roots"));
+        }
+        let _working = self.reserve_copy_read(0, self.usage()?.metadata_bytes, 0, false, true)?;
+        let roots_with_roles = roots
+            .iter()
+            .cloned()
+            .map(|r| (r, crate::bundle_rescue::MissingOwnedUse::Manifest))
+            .collect::<Vec<_>>();
+        let admission = self.admit_retained_reads(&roots_with_roles)?;
+        let manifest = self.manifest()?;
+        let mut remaining = admission
+            .objects()
+            .iter()
+            .cloned()
+            .map(|r| (r.sha256.clone(), r))
+            .collect::<BTreeMap<_, _>>();
+        let mut ordered = Vec::new();
+        let mut copied = BTreeSet::new();
+        while !remaining.is_empty() {
+            let ready = remaining
+                .iter()
+                .filter(|(hash, _)| {
+                    manifest.dependencies[*hash]
+                        .iter()
+                        .all(|r| copied.contains(&r.sha256))
+                })
+                .map(|(hash, _)| hash.clone())
+                .collect::<Vec<_>>();
+            if ready.is_empty() {
+                return Err(BundleError::Corrupt(
+                    "borrowed source graph is not closed".into(),
+                ));
+            }
+            for hash in ready {
+                let reference = remaining
+                    .remove(&hash)
+                    .ok_or_else(|| BundleError::Corrupt("borrowed object disappeared".into()))?;
+                ordered.push(BorrowedSourceObject {
+                    reference,
+                    dependencies: manifest.dependencies[&hash].clone(),
+                    inventory_dependencies: manifest
+                        .inventory_dependencies
+                        .get(&hash)
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+                copied.insert(hash);
+            }
+        }
+        let (project_id, session_id) = self.input_owner();
+        let descriptor = BorrowedSourceDescriptor {
+            admission: SessionId::fresh()?,
+            project_id,
+            session_id,
+            owner_epoch: self.owner_epoch(),
+            extra_overlap_bytes,
+            roots: roots.to_vec(),
+            objects: ordered,
+        };
+        descriptor.validate(self.limits())?;
+        let metadata = self.reserve_copy_read(0, descriptor.metadata_bytes()?, 0, false, true)?;
+        let overlap = self.reserve_copy_read(extra_overlap_bytes, 0, 0, true, true)?;
+        Ok(RetainedBorrowedSource {
+            descriptor,
+            reads: admission,
+            _metadata: metadata,
+            overlap: Mutex::new(BorrowedSnapshotOverlap {
+                reservation: overlap,
+                snapshot: None,
+            }),
+            accepting_reads: std::sync::atomic::AtomicBool::new(true),
+            reader: Mutex::new(None),
+        })
+    }
+
+    /// A host destination uses its own normal ledger and verifies every streamed object.
+    /// This method never opens a source namespace or holds a source reservation.
+    pub fn copy_graph_from_borrowed(
+        &mut self,
+        source: &crate::source_boundary::BorrowedSourceDescriptor,
+        reader: &mut dyn crate::source_boundary::BorrowedSourceReader,
+    ) -> Result<(), BundleError> {
+        source.validate(self.limits())?;
+        let path = self.resolved_root()?;
+        let inspection = Self::inspect_borrowed_destination(&path, &[])?;
+        if reader.inspect_destination(source, inspection.path())? != inspection.identity()? {
+            return Err(BundleError::Identity(
+                "borrowed destination identity differs".into(),
+            ));
+        }
+        let _working = self.reserve(0, source.metadata_bytes()?, 0, false)?;
+        for object in &source.objects {
+            let mut stream = crate::source_boundary::BorrowedObjectReader::new(
+                source,
+                &object.reference,
+                reader,
+            );
+            let sealed =
+                self.admit_recovered(&mut stream, &object.reference, &object.dependencies)?;
+            if !object.inventory_dependencies.is_empty() {
+                self.inner
+                    .ledger
+                    .lock()
+                    .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                    .inventory_dependencies
+                    .insert(
+                        object.reference.sha256.clone(),
+                        object.inventory_dependencies.clone(),
+                    );
+            }
+            drop(sealed);
+        }
+        Ok(())
+    }
+
+    fn reserve_copy_read(
+        &self,
+        bytes: u64,
+        decoded: u64,
+        history: u64,
+        copy: bool,
+        cleanup_only: bool,
+    ) -> Result<StorageReservation, BundleError> {
+        if self
+            .inner
+            .session_closing
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(BundleError::Identity(
+                "originating source is closing".into(),
+            ));
+        }
+        let free = self.with_namespace(|n| n.available_bytes())?;
+        StorageReservation::reserve_for_retained_read(
+            &self.inner.usage,
+            self.limits(),
+            bytes,
+            decoded,
+            history,
+            copy,
+            free,
+            cleanup_only,
+        )
+    }
     pub(crate) fn begin_copy(
         &self,
         roots: &[ObjectRef],
         bytes: u64,
     ) -> Result<SourceCopyHold, BundleError> {
-        self.with_namespace(|n| n.verify())?;
-        let overlap = self.reserve_copy(bytes)?;
+        self.begin_copy_source(roots, bytes, false)
+    }
+    pub(crate) fn begin_copy_source(
+        &self,
+        roots: &[ObjectRef],
+        bytes: u64,
+        cleanup_only: bool,
+    ) -> Result<SourceCopyHold, BundleError> {
+        if !cleanup_only {
+            self.with_namespace(|n| n.verify())?;
+        }
+        let overlap = self.reserve_copy_read(bytes, 0, 0, true, cleanup_only)?;
         let pin = self.pin(roots)?;
         let mut ledger = self
             .inner
@@ -2292,8 +3125,64 @@ impl ProjectStore {
         source: &ProjectStore,
         roots: &[ObjectRef],
     ) -> Result<(), BundleError> {
-        let _working = source.reserve(0, source.usage()?.metadata_bytes, 0, false)?;
-        let selected = source.closure(roots)?;
+        self.copy_graph_from_source(source, roots, false)
+    }
+    pub(crate) fn copy_graph_from_source(
+        &mut self,
+        source: &ProjectStore,
+        roots: &[ObjectRef],
+        cleanup_only: bool,
+    ) -> Result<(), BundleError> {
+        self.copy_selected_graph(source, roots, cleanup_only, true)
+    }
+    /// Check the destination profile while the retained source is still read-only.
+    pub(crate) fn admit_rescue_record_profile(
+        &self,
+        reference: &ObjectRef,
+        limits: &StorageLimits,
+    ) -> Result<(), BundleError> {
+        let cap = match reference.record_kind {
+            RecordKind::History => limits.branch_history_bytes,
+            RecordKind::RootCheckpoint | RecordKind::OwnedEvidence => limits.control_bytes,
+            _ if reference.record_kind.is_owned_bytes() => return Ok(()),
+            _ => limits.decoded_record_bytes,
+        };
+        if reference.byte_length > cap {
+            return Err(BundleError::Capacity("rescue encoded record"));
+        }
+        if reference.record_kind == RecordKind::OwnedEvidence {
+            return Ok(());
+        }
+        let _encoded = self.reserve_copy_read(0, reference.byte_length, 0, false, true)?;
+        let bytes = crate::bundle_recovery::bounded_bytes(
+            self.open_copy_source(reference, true)?,
+            reference.byte_length,
+        )?;
+        let _decoded =
+            self.reserve_copy_read(0, self.limits().decoded_record_bytes, 0, false, true)?;
+        let charge = preflight_record(&bytes, limits)?;
+        if reference.record_kind == RecordKind::History && charge > limits.branch_history_bytes {
+            return Err(BundleError::Capacity("rescue decoded branch history"));
+        }
+        Ok(())
+    }
+    pub(crate) fn copy_rescue_graph(
+        &mut self,
+        source: &ProjectStore,
+        roots: &[ObjectRef],
+    ) -> Result<(), BundleError> {
+        self.copy_selected_graph(source, roots, true, false)
+    }
+    fn copy_selected_graph(
+        &mut self,
+        source: &ProjectStore,
+        roots: &[ObjectRef],
+        cleanup_only: bool,
+        inventory: bool,
+    ) -> Result<(), BundleError> {
+        let _working =
+            source.reserve_copy_read(0, source.usage()?.metadata_bytes, 0, false, cleanup_only)?;
+        let selected = source.closure_with_inventory(roots, inventory)?;
         let manifest = source.manifest()?;
         let mut remaining: BTreeMap<_, _> = selected
             .into_iter()
@@ -2320,7 +3209,7 @@ impl ProjectStore {
                     .remove(&hash)
                     .ok_or_else(|| BundleError::Corrupt("copy selection disappeared".into()))?;
                 let dependencies = &manifest.dependencies[&hash];
-                let mut file = source.open_verified(&reference)?;
+                let mut file = source.open_copy_source(&reference, cleanup_only)?;
                 #[cfg(any(test, feature = "test-util"))]
                 crate::io_observer::check_failure(
                     "copy_object",
@@ -2343,6 +3232,11 @@ impl ProjectStore {
     }
 }
 impl SourceCopyHold {
+    /// Context teardown ends source reuse, without proving any destination outcome.
+    pub(crate) fn close_originating_context(&mut self) {
+        self.uncertain = false;
+    }
+
     pub(crate) const fn requires_reconciliation(&self) -> bool {
         self.uncertain
     }

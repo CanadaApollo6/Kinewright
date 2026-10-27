@@ -33,6 +33,8 @@ pub type IncidentLogHandle = Arc<RwLock<IncidentLog>>;
 /// The UI-free half of a project session: everything the sidecar load and
 /// flush need, with the investigator context passed per call.
 pub struct SidecarSession {
+    /// Shared real writer; queued jobs retain its lock and pinned directory.
+    pub authority: Option<crate::LockfileHandle>,
     pub saved_digest: String,
     pub sidecar_writer: Arc<SidecarWriter>,
     pub carried_sidecar_records: Vec<String>,
@@ -84,6 +86,32 @@ impl LoadedSessionSidecar {
     }
 }
 
+fn refuse_loaded_sidecar(
+    project: &Path,
+    authority: Option<&crate::LockfileHandle>,
+    rename: Option<&RefuseRename>,
+) -> std::io::Result<PathBuf> {
+    let acquired;
+    let writer = if let Some(writer) = authority {
+        writer
+    } else {
+        acquired = crate::lockfile::acquire_gui_project_lock(
+            project,
+            &crate::default_recovery_directory(),
+        )
+        .map_err(std::io::Error::other)?
+        .handle;
+        &acquired
+    };
+    writer.verify().map_err(std::io::Error::other)?;
+    let path = sidecar_path_for_project(Some(&writer.io_path()))
+        .ok_or_else(|| std::io::Error::other("sidecar filename"))?;
+    match rename {
+        Some(rename) => refuse_sidecar_with(&path, rename),
+        None => refuse_sidecar(&path),
+    }
+}
+
 /// Load a session's history at creation: parse, gate, restore or refuse.
 ///
 /// Every arm opens the project — incidents are recoverable state, the
@@ -102,6 +130,7 @@ fn load_session_sidecar(
     incidents: &IncidentLogHandle,
     opening: TimelineRevision,
     rename: Option<&RefuseRename>,
+    authority: Option<&crate::LockfileHandle>,
 ) -> LoadedSessionSidecar {
     let (gate_digest, seed) = match mode {
         SidecarMode::Load { project_digest } => {
@@ -132,10 +161,7 @@ fn load_session_sidecar(
     // file stays at the stem and must never be overwritten — and the note
     // carries the IO error. Returns whether the rename failed.
     let refused = |reason: String| -> bool {
-        let renamed = match rename {
-            Some(injected) => refuse_sidecar_with(&sidecar_path, injected),
-            None => refuse_sidecar(&sidecar_path),
-        };
+        let renamed = refuse_loaded_sidecar(project_path, authority, rename);
         let (reason, failed) = match renamed {
             Ok(_) => (reason, false),
             Err(error) => (
@@ -226,13 +252,41 @@ impl SidecarSession {
         writer: Option<Arc<SidecarWriter>>,
         rename: Option<&RefuseRename>,
     ) -> LoadedSidecarSession {
+        Self::load_owned(mode, project_path, incidents, opening, writer, rename, None)
+    }
+
+    /// Load while sharing the actual GUI writer, including any refusal rename.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_owned(
+        mode: &SidecarMode,
+        project_path: Option<&Path>,
+        incidents: IncidentLogHandle,
+        opening: TimelineRevision,
+        writer: Option<Arc<SidecarWriter>>,
+        rename: Option<&RefuseRename>,
+        authority: Option<crate::LockfileHandle>,
+    ) -> LoadedSidecarSession {
+        let identity = authority
+            .as_ref()
+            .map(|writer| writer.resolved_identity().to_path_buf());
+        let project_path = identity.as_deref().or(project_path);
         let stem = (!matches!(mode, SidecarMode::None))
             .then(|| project_path.and_then(|path| sidecar_path_for_project(Some(path))))
             .flatten();
         let established = BTreeSet::from_iter(stem);
-        let loaded = load_session_sidecar(mode, project_path, &incidents, opening, rename);
+        let io_project = authority.as_ref().map(crate::LockfileHandle::io_path);
+        let loaded = load_session_sidecar(
+            mode,
+            io_project.as_deref().or(project_path),
+            &incidents,
+            opening,
+            rename,
+            authority.as_ref(),
+        );
         LoadedSidecarSession {
             session: Self {
+                authority,
                 saved_digest: loaded.saved_digest,
                 sidecar_writer: writer.unwrap_or_else(SidecarWriter::new),
                 carried_sidecar_records: loaded.carried,
@@ -309,26 +363,42 @@ impl SidecarSession {
         if self.sidecar_suspended {
             return Ok(FlushOutcome::Skipped);
         }
+        let identity = self
+            .authority
+            .as_ref()
+            .map(|writer| writer.resolved_identity().to_path_buf());
+        let project_path = identity.as_deref().or(project_path);
         let Some(sidecar_path) = sidecar_path_for_project(project_path) else {
             return Ok(FlushOutcome::Skipped);
         };
         let (bytes, report) = self
             .sidecar_bytes_for_save(project_digest, previous_digest, prepare)
             .map_err(std::io::Error::other)?;
+        let io_project = self.authority.as_ref().map(crate::LockfileHandle::io_path);
+        let io_sidecar = io_project
+            .as_deref()
+            .and_then(|path| sidecar_path_for_project(Some(path)));
+        let occupied_path = io_sidecar.as_deref().unwrap_or(&sidecar_path);
         // GUARD-B (R6/F1/G3): an unestablished stem keeps its history
         // against an empty flush — reported distinctly, so the save path
         // preserves-and-replaces instead of skipping into an unpaired save.
         // Fresh, established, and non-empty flushes are untouched.
-        if !self.established.contains(&sidecar_path)
+        if !self
+            .established
+            .iter()
+            .any(|established| crate::same_project_file(established, &sidecar_path))
             && report.written_open == 0
             && report.written_resolved == 0
             && self.carried_sidecar_records.is_empty()
-            && sidecar_path.exists()
+            && occupied_path.exists()
         {
             return Ok(FlushOutcome::Occupied);
         }
-        self.sidecar_writer
-            .submit_and_join(sidecar_path.clone(), bytes)?;
+        self.sidecar_writer.submit_and_join_owned(
+            sidecar_path.clone(),
+            bytes,
+            self.authority.as_ref(),
+        )?;
         let generation = self
             .incidents
             .read()
@@ -393,6 +463,11 @@ impl SidecarSession {
         if self.sidecar_suspended {
             return;
         }
+        let identity = self
+            .authority
+            .as_ref()
+            .map(|writer| writer.resolved_identity().to_path_buf());
+        let project_path = identity.as_deref().or(project_path);
         let Some(sidecar_path) = sidecar_path_for_project(project_path) else {
             return;
         };
@@ -406,7 +481,8 @@ impl SidecarSession {
         }
         let digest = self.saved_digest.clone();
         if let Ok((bytes, _)) = self.sidecar_bytes_for_save(&digest, &digest, prepare) {
-            self.sidecar_writer.submit(sidecar_path, bytes);
+            self.sidecar_writer
+                .submit_owned(sidecar_path, bytes, self.authority.as_ref());
             self.last_written_gen = generation;
         }
     }
@@ -425,6 +501,7 @@ enum RollbackBytes {
 /// membership, both generation baselines, and G3's `.bak` move. Snapshotted
 /// before the flush; the save path records the `.bak` move after it.
 pub struct SidecarRollback {
+    authority: Option<crate::LockfileHandle>,
     sidecar: Option<PathBuf>,
     bytes: RollbackBytes,
     established: BTreeSet<PathBuf>,
@@ -447,6 +524,10 @@ pub fn snapshot_sidecar_rollback(
     sidecar: Option<&Path>,
     session: &SidecarSession,
 ) -> SidecarRollback {
+    let owned_path = sidecar
+        .and(session.authority.as_ref())
+        .and_then(|writer| sidecar_path_for_project(Some(&writer.io_path())));
+    let sidecar = owned_path.as_deref().or(sidecar);
     let bytes = match sidecar {
         None => RollbackBytes::Skip,
         Some(sidecar) => match fs::read(sidecar) {
@@ -456,6 +537,7 @@ pub fn snapshot_sidecar_rollback(
         },
     };
     SidecarRollback {
+        authority: session.authority.clone(),
         sidecar: sidecar.map(Path::to_path_buf),
         bytes,
         established: session.established.clone(),
@@ -479,7 +561,11 @@ pub fn rollback_sidecar_write(snapshot: SidecarRollback, session: &mut SidecarSe
     if !moved_back {
         match (snapshot.sidecar, snapshot.bytes) {
             (Some(sidecar), RollbackBytes::Restore(bytes)) => {
-                let _ = write_file_atomic(&sidecar, &bytes);
+                let _ = if snapshot.authority.is_some() {
+                    crate::project::write_file_at(&sidecar, &sidecar, &bytes, None)
+                } else {
+                    write_file_atomic(&sidecar, &bytes)
+                };
             }
             (Some(sidecar), RollbackBytes::Remove) => {
                 let _ = fs::remove_file(sidecar);

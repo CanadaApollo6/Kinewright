@@ -88,6 +88,10 @@ impl KinewrightApp {
         let Some(project) = self.projects.get(project_index) else {
             return;
         };
+        if project.ja1_read_only() {
+            self.status = "Adding media is paused while the save or recovery is resolved.".into();
+            return;
+        }
         let Some(asset) = project.document.asset(asset_id).cloned() else {
             self.note_label(
                 LabelIncident::Operations,
@@ -102,8 +106,7 @@ impl KinewrightApp {
             match still_placement_operations(&self.projects[project_index].document, &asset) {
                 Ok(operations) => {
                     if self.projects[project_index]
-                        .core
-                        .send(kinewright_core::Command::DoBatch(operations))
+                        .send_manual_command(kinewright_core::Command::DoBatch(operations))
                         .is_err()
                     {
                         self.note_actor_stopped(
@@ -150,8 +153,7 @@ impl KinewrightApp {
             source: TimeCode::ZERO..asset.duration,
         };
         if self.projects[project_index]
-            .core
-            .send(kinewright_core::Command::Do(operation))
+            .send_manual_command(kinewright_core::Command::Do(operation))
             .is_err()
         {
             self.note_actor_stopped(
@@ -171,8 +173,7 @@ impl KinewrightApp {
         match audio_video_placement_operations(&self.projects[project_index].document, asset) {
             Ok(operations) => {
                 if self.projects[project_index]
-                    .core
-                    .send(kinewright_core::Command::DoBatch(operations))
+                    .send_manual_command(kinewright_core::Command::DoBatch(operations))
                     .is_err()
                 {
                     self.note_actor_stopped(

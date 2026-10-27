@@ -313,6 +313,16 @@ Freeze these conceptual boundary types now, without adding production Rust types
 | `DerivedResult` | Project/session identity, epoch/job/source/recipe/intent identity, measured bytes, sealed output refs and coverage. A candidate result is not an edit bind. |
 | `SuccessorEvidence` | Old and new identities, reason (relink, damage repair, retranscription or deliberate regeneration), dependency invalidations and expected head/bound-resource identity. |
 
+C7's legacy callers retain one resolved project lock and native IO parents through
+project, sidecar, asset-copy and GUI journal operations. Recorder and queued-writer
+lifetimes retain that actual authority. A changed alias or lost lock cannot authorize
+another namespace. Startup journal decisions use writer authority, unreplayed journals
+survive headless Save, and final probes include suffixed names. Pending startup decisions
+retain the scanned native parent and exact bytes; changed journals cannot be retired by
+an earlier decision. Post-restore retirement executes at the active writer. These are local G4
+obligations; they do not establish C8 host or Windows Studio durability acceptance.
+The original legacy truncate-fallback contradiction remains historical S0 evidence.
+
 The JA-1 host is the **single writer** of the authoritative manifest/index/root; before
 first save, the same project-store primitives have one session owner as frozen in §4.3.
 It reserves and copies/clones to exclusive owned storage while hashing, checks requested
@@ -373,6 +383,20 @@ selected closure while preserving prior-destination protection.
 
 ### 4.3 Unsaved session and first-save ownership handoff
 
+Every root publication, including ordinary Save, branch save/fork, first save, Save As and
+evidence/receipt/floor changes, must pass the exact candidate fresh-open invariant in JA-1 §6.1
+under the same effective `StorageLimits` before root replacement. Shared production reader/publisher
+accounting includes all current branch histories (only exact verified hashes deduplicate), temporary
+decode/replay and archived/recovery peaks, raw support and complete owned closure. A sparse writer
+cache cannot authorize publication. This closes the existing S1 multi-branch exposure without a
+second persistent ledger or future-save allowance; actual execution reservations remain separate.
+A refusal preserves the old root and live history/ticket semantics. Reconciliation validates the
+observed root under the same limits before acknowledgement. An in-session verified-identity
+accounting memo may supply unchanged costs under JA-1 §6.1, keyed by the exact ObjectRef and
+complete effective limit profile. Misses decode/preflight exactly; namespace discontinuity and
+explicit re-verification invalidate affected facts. Memo membership never selects current branches,
+and the memo adds no persistent ledger, decoded history residency or reservation.
+
 **Owner/stage:** the project/JA-1 owner implements this lifecycle in JA-1 S1's common store
 and bundle-publication primitives; AW2 P1a consumes them for code/font admission. It does
 not wait for a scheduler or create an AW2 store lifecycle. AW2 R12 already requires a
@@ -387,6 +411,23 @@ For A1, S2 adds the JA-1 `Ja1EditingSession` lifecycle owner to the existing app
 context, shared by agent/headless entry points. The originating session runs from New/Open
 through explicit Close or exit; rescue handoffs and ordinary focus/project switches do not
 end it or reset its slots. Closing a destination status view is not session teardown.
+
+C8 splits that lifecycle by physical ownership as specified in JA-1's "C8 process
+ownership and retention" contract. The GUI keeps its actual temporary root and
+`SessionStore`, source holds, complete-closure pins, reader leases, reservations, and
+the source store's single `StorageUsage` owner. The host owns named destination stores
+and receives bounded authenticated source-read descriptors. A borrowed host descriptor
+cannot own a source namespace, delete bytes, unpin objects, release charges, or send an
+implicit Close on Drop, disconnect, orderly exit, or unwind. Named-source holds stay
+with their host-owned named store. Distinct destination copies retain distinct charges.
+
+Unproved retention after replacement refuses all saves and rescue, including fresh-path
+first Save and Save As. IDs and a reacquired lock do not establish retention. The GUI
+keeps its edits, query and history export, actual source bytes, and charges, and says
+that retained data was not re-established. Only explicit context Close ends retention.
+Close first fences requests and drains readers. The actual owner then retires each
+hold and charge once through the existing cleanup path. Outstanding readers delay
+retirement. Failed cleanup remains charged and retryable under that same owner.
 
 An unnamed edit has one session owner with an exclusive temporary root, pinned handles and
 session/epoch-scoped authority. It uses the same reserve/write/seal/pin/retire primitives,
@@ -520,6 +561,77 @@ control, not as permission for bundle IO to inherit it
 `first_save_failure_undo_live_reader` witness belongs to AW2 G11 and JA-1 G3 (§8.3).
 S0 freezes these contracts and witness slots only; it implements none of this lifecycle.
 A1 never exempts a dependency still reachable from the final selected roots; rescue remains S2 work.
+
+
+### Binding S2 revision 7 qualification: local recovery and L1
+
+[JA-1 §5.4](JA1-STUDIO-ORCHESTRATION.md#54-local-recovery-selection-and-rescue-contracts-s2-revision-7)
+is the binding local selection, session-pin, frozen-rescue, retirement, registered-session
+and availability contract. It supersedes earlier P/exact pre-floor copy and editable
+paused-state rulings. Ordinary Save on L precedes one frozen selection of R at g+1;
+normal select_history and its disclosed floor apply. There is no retained-manual role,
+read-only working branch, exact-retention bypass or editable durable-no-activation state.
+
+Every Saved baseline comes from the exact committed history returned by the publisher,
+including the ordinary floor result, for first Save, Save and Save As. A post-cut accepted
+suffix remains dirty and Close discloses its loss risk. Unchanged Studio dirty polls use
+the authoritative history-change identity; only a changed history needs a fresh digest.
+Refused retirement restores the original complete records and pending-pin ownership before
+any later Save. Reopening the manual branch as a durable writer, or selecting a registered
+session/base branch for manual writing, refuses in the backend as well as the App.
+
+Final L1 supersedes this document's earlier exact-root retention wording only for inherited
+rescue linkage. Convert only that linkage to provenance and rebuild its required containers,
+manifests and root. Keep the source root SHA as provenance and label "rebound recovery
+point". Recovered Document, baseline, batches/history/cursor/Undo/Redo/gesture, input payloads
+and identities remain exact. Independent evidence and receipts remain required even when
+they still retain an older object. New B activation authority belongs to the wrapper/runtime.
+Full checkpoint-edge validation still applies. A graph-valid, fully rehashed non-linkage
+Document, batch or input change must fail the exact preservation oracle.
+
+Pin the verified selected root/checkpoint's complete closure with ordinary StorePin at
+prepare, before ordinary Save. Resolve by SHA, never automatic-list position. Keep the same
+pin/target through rotation, collection, unknown outcomes and quota retirement/retry.
+Existing-target retry requires current index membership and expected head; never resurrect
+an ID. Exclude that target from offers and direct retirement. Also exclude live attached
+sessions, unsaved edits and specialist base/target dependencies until save/close, fencing
+and eligibility recheck. Ja1EditingSession registers every durable session create/reopen
+with DurableBranchSessionGuard before edits; no usable unregistered route may bypass it.
+
+During either unresolved local-recovery publication, rescue uses the existing frozen O cut.
+Cancel/failure/refusal/unknown B leaves O frozen. Immediate verified rescue seals O,
+irrevocably abandons R and activates fresh B; late A is destination-only. This qualifies
+only A1's ordinary resume rule. It never changes newer B edits or Saved/dirty/association.
+
+Before preview, rescue handoff, Close and every destination change, disclose whether the
+chosen point is still durably listed. If held only in-session, abandoning lets it go;
+warn in advance if preliminary Save will rotate it out. Refuse Save As/open-another-project
+while prepared. Require explicit disclosed abandonment first, only with no unresolved root
+publication. Rescue may proceed with its disclosed irreversible handoff. If B lacks the
+point, say so; during selection unknown say A keeps it only if selection completed. A crash
+can lose a session-only selected point: this is an accepted limit, not durable retention.
+Unavailable storage also needs the warning that Rescue copy preserves work if A never
+returns and Close may discard its only accessible in-session copy. Never label Close safe.
+
+Format 3 and the two-predecessor validator/rotation remain. Raw nonzero switch generation
+requires manual-switch@1; actual rescue role/schema requires rescue-copy@1. Cross-check
+actual requirements and declarations as a supported subset before mutation. Generic
+OwnedEvidence is insufficient. Generation-zero ordinary v3 remains a positive control.
+Shared L/R occurrence tuples, batch IDs and split ancestry survive first and later ordinary
+saves and floors. Only genuinely new events get the accepting branch's origin.
+
+C5 implements these local outcomes in `Ja1EditingSession`. Its frozen ordinary Save is
+bound to the existing accepted cut; other Save handles still refuse. Durable-session
+registrations retain the Core, specialist base and pins even after caller guard drop.
+Closing through the agent persists first, then freezes and seals before unregistering.
+A direct owner close refuses an unpersisted suffix. Retirement rechecks the same registry.
+Guards retain their original namespace epoch through rescue. Their persist and exact-ticket
+reconciliation use that retained owner. B's copied branch is independent of an A guard.
+The full specialist proposal and its branch checkpoint publish in one root. Charged
+captures preserve the proposal through a later proven floor and accepted suffix. Close
+also discloses unresolved or unsaved registered sessions in retained destinations.
+The additive `s2-rescue-publication.json` observes real first-save uncertainty, a fresh B
+actor, sealed A and independent B reopen. The absent baseline rescue API remains pending.
 
 ## 5. JA-3 typed editorial handoffs
 
@@ -1239,3 +1351,67 @@ actual adapter/connector certification and implementation evidence remain pendin
 | 1 — Major: durable take-validation evidence and implicit inventories | §§3.2, 3.5, 5.2–5.4, 8.3 item 1, 13.1 Q3 | Added one typed take-evidence record with exact page/map/JA-1 retention edges, S2/S3 producers and successor invalidation; both editorial inventories persist within the existing consumer family. JA-4 G7/G10 now require cache-delete/reopen preservation of the critical-word observation or explicit unresolved/refused output. |
 | 2 — Major: unsaved store, first save and LUT scope | §§4.1–4.3, 8.1 G3, 8.3 item 2, 12 item 2, 13.1 Q1–Q2 | JA-1 S1 owns the bounded session-to-named handoff consumed by AW2 P1a; authority/copy/verification precede root, failures preserve usable unsaved state/prior destination, and reader pins outlive handoff. Named AW2 G11/JA-1 G3 witness; whole new-bundle graph includes LUTs while unrelated legacy behavior stays unchanged. |
 | 3 — Minor: AW2 runtime-red terminology | §7.4, §12 item 5, §11 S0-1, §13.1 Q4 | Preserve capability-gap evidence separately with no JA-1 behavioral-red/invariant credit. Adopt all five conflict resolutions and the critic's Q1–Q4 answers; correct S0-1 to reference the complete ledger. All three findings accepted; nothing rejected. |
+
+### S2-R C6 caller boundary
+
+The local App, headless and agent entry points validate actual rescue-role and nonzero
+switch requirements before editable-session admission and any sidecar/journal/store
+mutation. A supported Linux control must really save and independently reopen; missing,
+mismatched and masked requirements observe zero mutation. Windows retains its native
+durability refusal. A completed, never-active rescue capture may release its destination
+writer only after explicit choice and verified commit. This does not release any rescue
+source, change active editing, or refund a consumed slot. Original S0 fixtures and
+historical acceptance are unchanged; new App evidence is additive.
+
+### C9 manual-stream observation boundary
+
+`s2-manual-stream.json` is additive. Its unchanged App/Core/paint controls run in
+both modes. Baseline host absence is pending, never a behavioral red. Revised
+observations retain the original accepted envelopes and compare the independently
+reopened history and BatchIds after actual host publication. The observation delays
+transport polling while the local App/media/presenter paint callback runs; it does
+not claim physical display or disk-stall latency. A separate publisher-barrier
+witness covers local acceptance before B5, and two authenticated clients exercise
+one-editor authority. The original `app-coalesced-paint` fixture and all old oracle
+bytes remain unchanged. This is C9 ingress evidence, not G5-L recovery, G20 or native
+Windows durable-success acceptance.
+
+### C10 manual recovery observation boundary
+
+The additive `s2-manual-recovery.json` and `s2-manual-floor.json` fixtures retain a
+real Core query control in baseline mode. The original S0 host-recovery seam stays
+pending. Revised mode drives the actual App attachment, all manual command forms,
+a killed/restarted shipping host, the original accepted envelopes, shared durable
+floor/close records, and fresh permit acquisition. Exact history, frozen producers,
+Saved identity and actual source ownership are observed. The unchanged S1 restore
+proof remains a prerequisite rather than G5-L acceptance. The fast restart tests
+execute without slow features; the two complete recovery matrices use the existing
+agent slow tier. Native Windows runs protocol, process and actor-state controls;
+Studio durable success remains unsupported until its separate certification.
+
+### C11 switch observation boundary
+
+Additive `s2-switch-reply-drop` and `s2-switch-return` fixtures observe the real
+App/host Save/select path, original-envelope retry, exactly one adopted branch,
+restored current pointer/resources, first edit/Undo and exact retained return
+history. Source mode records a real query control and pending switch absence;
+it is not a fabricated behavioral red. `branches-current` remains the original
+divergence control. Switch receipt lookup never grants authority. The current
+checkpoint/payload must be confirmed after frozen GUI restore before a fresh
+lease, including after a host restart or a superseding selection. Independent
+Open and the prepublication fresh-open guard admit the exact receipt-bearing
+root and its `host-switch@1` requirement. Process-cut, dropped-reply, native
+Windows and physical-storage evidence remain separate lanes.
+
+### C12 final-owner and capture acknowledgement boundary
+
+A committed rescue copy whose activation fails after A seals is a retained,
+Frozen capture. Its outcome says `activated=false`, names B's committed path,
+and discloses that A is sealed. Open B read-only uses ordinary project inspection;
+editable opening requires explicit completed-capture owner release. Never resume
+sealed A or acknowledge that capture as a save of the active source.
+
+The C12 repeat ledger distinguishes final host commands, real process restarts,
+shared lower-layer byte/graph controls and unavailable native/physical lanes.
+Frozen S0/S1 fixture and index bytes remain unchanged. Existing controls and
+additive pending-to-revised cases do not become new baseline-red flips.

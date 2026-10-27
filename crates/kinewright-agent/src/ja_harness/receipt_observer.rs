@@ -74,6 +74,8 @@ impl Adapter {
                 .issue_issuer(&core, &inputs, u64::from(original))
                 .map_err(|e| e.to_string())?;
             let request = CommandEnvelope {
+                switch: None,
+                manual: None,
                 version: 1,
                 action: "edit".into(),
                 id: CommandId {
@@ -147,6 +149,8 @@ impl Adapter {
                 .issue_issuer(&core, &inputs, u64::from(original_action.id))
                 .map_err(|e| e.to_string())?;
             let request = CommandEnvelope {
+                switch: None,
+                manual: None,
                 version: 1,
                 action: "comment".into(),
                 id: CommandId {

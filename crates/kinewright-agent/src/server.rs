@@ -516,6 +516,69 @@ pub struct McpServer {
 }
 
 impl McpServer {
+    /// Authenticated isolated endpoint for one host-owned session. File/media operations
+    /// without pinned capabilities are refused before dispatch, including asset dependencies.
+    pub(crate) fn start_host_isolated(
+        core: Core,
+        playback: Arc<dyn Playback>,
+        analysis: Arc<dyn Analysis>,
+        project: &str,
+        roots: crate::writer_host::SessionRoots,
+    ) -> Result<Self, crate::writer_host::HostError> {
+        use crate::writer_host::{HOST_PROTOCOL, HostAuth, HostBootstrap, HostEndpoint};
+        let listener = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0))?;
+        let address = listener.local_addr()?;
+        listener.set_nonblocking(true)?;
+        let endpoint = format!("http://{address}/mcp");
+        let auth = HostBootstrap {
+            endpoint: HostEndpoint {
+                address,
+                project: project.into(),
+                protocol: HOST_PROTOCOL,
+            },
+            auth: HostAuth::generate()?,
+            roots,
+        };
+        let confirmations = ConfirmationBroker::default();
+        let project_path = Arc::new(RwLock::new(None));
+        let incidents = Arc::new(RwLock::new(IncidentLog::default()));
+        let mut handler = KinewrightMcp::configured(
+            core,
+            playback,
+            analysis,
+            None,
+            confirmations.clone(),
+            false,
+            Arc::clone(&project_path),
+            Arc::clone(&incidents),
+        );
+        handler.host_scoped = true;
+        let tool_surface_metrics =
+            ToolSurfaceMetrics::measure(&KinewrightMcp::served_tools().map_err(|_| {
+                crate::writer_host::HostError::Protocol("MCP tool schema unavailable".into())
+            })?);
+        #[cfg(feature = "eval-harness")]
+        let ja_request_counts = Arc::clone(&handler.ja_request_counts);
+        let (shutdown, shutdown_rx) = oneshot::channel();
+        let server_thread = thread::Builder::new()
+            .name("kinewright-host-mcp".into())
+            .spawn({
+                let auth = auth.clone();
+                move || run_server(listener, handler, shutdown_rx, None, Some(auth))
+            })?;
+        crate::writer_host::register_mcp(&endpoint, auth);
+        Ok(Self {
+            #[cfg(feature = "eval-harness")]
+            ja_request_counts,
+            endpoint,
+            confirmations,
+            project_path,
+            incidents,
+            tool_surface_metrics,
+            shutdown: Some(shutdown),
+            thread: Some(server_thread),
+        })
+    }
     /// Start the loopback MCP server for the live core and media engine.
     ///
     /// # Errors
@@ -869,7 +932,7 @@ impl McpServer {
         let ja_request_counts = Arc::clone(&handler.ja_request_counts);
         let server_thread = thread::Builder::new()
             .name("kinewright-mcp".to_owned())
-            .spawn(move || run_server(listener, handler, shutdown_rx, worker_threads))
+            .spawn(move || run_server(listener, handler, shutdown_rx, worker_threads, None))
             .map_err(McpServerError::Thread)?;
         Ok(Self {
             #[cfg(feature = "eval-harness")]
@@ -973,6 +1036,7 @@ impl McpServer {
 
 impl Drop for McpServer {
     fn drop(&mut self) {
+        crate::writer_host::unregister_mcp(&self.endpoint);
         self.signal_shutdown();
     }
 }
@@ -982,6 +1046,7 @@ fn run_server(
     handler: KinewrightMcp,
     shutdown: oneshot::Receiver<()>,
     worker_threads: Option<usize>,
+    host_auth: Option<crate::writer_host::HostBootstrap>,
 ) {
     // IN2 §3.3 rule 13 bounded only the investigator's runtime; every other
     // server took `new_multi_thread`'s default of one worker per CPU. The
@@ -1000,6 +1065,14 @@ fn run_server(
                 StreamableHttpServerConfig::default(),
             );
         let router = axum::Router::new().nest_service("/mcp", service);
+        let router = if let Some(auth) = host_auth {
+            router.layer(axum::middleware::from_fn_with_state(
+                auth,
+                crate::writer_host::guard_mcp,
+            ))
+        } else {
+            router
+        };
         // Erratum D-R67: `with_graceful_shutdown` begins draining when its
         // future resolves and then waits for every live connection to close on
         // its own — measured at 300 s against a streamable-HTTP MCP client
@@ -1026,6 +1099,52 @@ fn run_server(
             } => {}
         }
     });
+}
+
+fn host_scoped_tool_admitted(request: &CallToolRequestParams) -> bool {
+    fn paths_or_owned_inputs(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+                let key = key.to_ascii_lowercase();
+                key.contains("path")
+                    || key.contains("asset")
+                    || key.contains("lut")
+                    || key.contains("export")
+                    || key.contains("relink")
+                    || paths_or_owned_inputs(value)
+            }),
+            serde_json::Value::Array(values) => values.iter().any(paths_or_owned_inputs),
+            serde_json::Value::String(s) => {
+                let s = s.to_ascii_lowercase();
+                s.contains("import")
+                    || s.contains("relink")
+                    || s.contains("lut")
+                    || s.contains("asset")
+                    || s.contains("export")
+            }
+            _ => false,
+        }
+    }
+    match request.name.as_ref() {
+        "get_timeline_state"
+        | "search_capabilities"
+        | "get_capability"
+        | "discard_edit_plan"
+        | "commit_edit_plan" => true,
+        "invoke_capability" => {
+            request
+                .arguments
+                .as_ref()
+                .and_then(|a| a.get("name"))
+                .and_then(serde_json::Value::as_str)
+                == Some("get_timeline_state")
+        }
+        "prepare_edit_plan" => !request
+            .arguments
+            .as_ref()
+            .is_some_and(|a| paths_or_owned_inputs(&serde_json::Value::Object(a.clone()))),
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -1057,6 +1176,7 @@ struct KinewrightMcp {
     /// `None`, which is what leaves every other server byte-for-byte
     /// unchanged.
     served_tool_allowlist: Option<&'static [&'static str]>,
+    host_scoped: bool,
 }
 
 impl KinewrightMcp {
@@ -1109,6 +1229,7 @@ impl KinewrightMcp {
             capability_denylist: &[],
             investigator: None,
             served_tool_allowlist: None,
+            host_scoped: false,
         }
     }
 
@@ -1192,6 +1313,11 @@ impl KinewrightMcp {
         &self,
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
+        if self.host_scoped && !host_scoped_tool_admitted(&request) {
+            return Ok(error_text(
+                "root_refused: this file/media operation requires an identity-pinned input/output capability; forwarded path strings alone do not authorize filesystem IO",
+            ));
+        }
         if !crate::runtime::COMPACT_TOOL_NAMES.contains(&request.name.as_ref()) {
             return Ok(error_text(format!(
                 "{} is an internal capability, not an MCP tool; use search_capabilities, get_capability, and invoke_capability or prepare_edit_plan",
