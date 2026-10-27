@@ -786,16 +786,23 @@ mod tests {
                 .unwrap();
         initial.save_active().unwrap();
         drop(initial);
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        // Capture the child's output: an inherited "running 1 test" line would corrupt the
+        // parent's libtest stream, which CI's slow-test accounting parses.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "owned_media::tests::s3_fix1_reused_crash_residue_keeps_bytes_and_one_charge",
                 "--test-threads=1",
             ])
             .env(CHILD_ROOT, &path)
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success());
+        assert!(
+            output.status.success(),
+            "crash child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         let mut owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
         let before = owner.store().usage().unwrap();
         assert_eq!(before.unclassified_bytes, bytes.len() as u64);
