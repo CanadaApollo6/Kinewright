@@ -1,0 +1,146 @@
+[
+  {
+    "name": "reservation_scope",
+    "source": "crates/kinewright-project/src/orchestration_commit.rs",
+    "source_sha256": "1f0a93a3a4e98050b3b538ad4815b7afb367adb5896789f1118215b48cf78ac3",
+    "witness": "s4_receipt_scope_collision_forced_reservation_loser_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "returned_cut",
+    "source": "crates/kinewright-project/src/orchestration_commit.rs",
+    "source_sha256": "1f0a93a3a4e98050b3b538ad4815b7afb367adb5896789f1118215b48cf78ac3",
+    "witness": "s4_one_root_cut_and_replay_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "pending_effect_edge",
+    "source": "crates/kinewright-project/src/orchestration_commit.rs",
+    "source_sha256": "1f0a93a3a4e98050b3b538ad4815b7afb367adb5896789f1118215b48cf78ac3",
+    "witness": "s4_run_graph_pending_dependencies_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "schema_support",
+    "source": "crates/kinewright-project/src/orchestration_commit.rs",
+    "source_sha256": "1f0a93a3a4e98050b3b538ad4815b7afb367adb5896789f1118215b48cf78ac3",
+    "witness": "s4_support_and_original_envelope_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.01s"
+    ]
+  },
+  {
+    "name": "original_digest",
+    "source": "crates/kinewright-project/src/orchestration_records.rs",
+    "source_sha256": "19c7eae0dc59030e52d4826c6375aaa5ce6dff3eb06a29e751d374f0891395f7",
+    "witness": "s4_support_and_original_envelope_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.01s"
+    ]
+  },
+  {
+    "name": "unknown_freeze",
+    "source": "crates/kinewright-agent/src/orchestration/machine.rs",
+    "source_sha256": "3d91e93ce4000c63dcb93416df308d41cd4a050ae796fad529dea197ccae2cdc",
+    "witness": "s4_unknown_publication_freezes_original_envelope_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "no_reclaim",
+    "source": "crates/kinewright-agent/src/orchestration/outbox.rs",
+    "source_sha256": "4e76edbd8cfb02f6b9832a4ad416017ad24e636080f1b4fd074ad85c21212e75",
+    "witness": "s4_outbox_order_unknown_and_reconcile_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "reservation_identity",
+    "source": "crates/kinewright-agent/src/orchestration/mod.rs",
+    "source_sha256": "eaed3de801df43d1525e5d814929ea7a4cedea984089bd8f8000de58d9e95f36",
+    "witness": "s4_durable_before_commit_attempt_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "refused_attempt",
+    "source": "crates/kinewright-agent/src/orchestration/mod.rs",
+    "source_sha256": "eaed3de801df43d1525e5d814929ea7a4cedea984089bd8f8000de58d9e95f36",
+    "witness": "s4_durable_before_commit_attempt_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "predecessor_edge",
+    "source": "crates/kinewright-project/src/orchestration_commit.rs",
+    "source_sha256": "1f0a93a3a4e98050b3b538ad4815b7afb367adb5896789f1118215b48cf78ac3",
+    "witness": "s4_event_predecessor_retention_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "attempt_unique",
+    "source": "crates/kinewright-project/src/orchestration_commit.rs",
+    "source_sha256": "1f0a93a3a4e98050b3b538ad4815b7afb367adb5896789f1118215b48cf78ac3",
+    "witness": "s4_attempt_identity_unique_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "name": "cleanup_facts",
+    "source": "crates/kinewright-project/src/orchestration_commit.rs",
+    "source_sha256": "1f0a93a3a4e98050b3b538ad4815b7afb367adb5896789f1118215b48cf78ac3",
+    "witness": "s4_cleanup_matches_attempt_facts_contract",
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s"
+    ]
+  }
+]

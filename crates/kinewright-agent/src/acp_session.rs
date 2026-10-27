@@ -1070,6 +1070,7 @@ mod tests {
     /// `a_restore_reads_current_values_and_puts_the_model_back_first`.
     #[cfg(unix)]
     const RECORDING_ACP_AGENT: &str = concat!(
+        r#"printf '%s\n' "$$" > "$KW_PID.partial"; mv "$KW_PID.partial" "$KW_PID"; "#,
         "while IFS= read -r line; do ",
         r#"id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'); "#,
         "case \"$line\" in ",
@@ -1077,8 +1078,8 @@ mod tests {
         r#"*'"session/new"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"sessionId":"s1","configOptions":%s}}\n' "$id" "$KW_OPENING" ;; "#,
         r#"*'"session/set_config_option"'*) printf '%s\n' "$line" | sed -n 's/.*"configId":"\([^"]*\)".*"value":\([^},]*\).*/\1=\2/p' >> "$KW_LOG"; "#,
         r#"printf '{"jsonrpc":"2.0","id":%s,"result":{"configOptions":%s}}\n' "$id" "$KW_LADDER" ;; "#,
-        r#"*'"session/prompt"'*) if [ -n "$KW_HANGUP" ]; then exec 1>&- 2>&-; sleep 600; "#,
-        r#"elif [ -n "$KW_MUTE" ]; then sleep 600; "#,
+        r#"*'"session/prompt"'*) if [ -n "$KW_HANGUP" ]; then exec 1>&- 2>&-; exec sleep 600; "#,
+        r#"elif [ -n "$KW_MUTE" ]; then exec sleep 600; "#,
         r#"elif [ -z "$KW_DEAF" ]; then "#,
         r#"printf '{"jsonrpc":"2.0","id":%s,"result":{"stopReason":"end_turn"}}\n' "$id"; fi ;; "#,
         "esac; done",
@@ -1144,7 +1145,7 @@ mod tests {
         after_prompt: AfterPrompt,
         requested: SessionConfig,
         lease: &'static AtomicBool,
-    ) -> GenericAcpSession {
+    ) -> (GenericAcpSession, FixtureChild) {
         let opening = json!([
             {"id": "mode", "currentValue": "build", "options": [{"value": "build"}]},
             {"id": "model", "currentValue": "old-model",
@@ -1163,6 +1164,7 @@ mod tests {
         command
             .arg("-c")
             .arg(RECORDING_ACP_AGENT)
+            .env("KW_PID", log_file.with_extension("pid"))
             .env("KW_LOG", log_file)
             .env("KW_OPENING", opening.to_string())
             .env("KW_LADDER", ladder.to_string());
@@ -1178,7 +1180,7 @@ mod tests {
                 command.env("KW_HANGUP", "1");
             }
         }
-        GenericAcpSession::start(
+        let session = GenericAcpSession::start(
             command,
             "http://127.0.0.1:43123/mcp",
             requested,
@@ -1193,7 +1195,42 @@ mod tests {
                 verify_initialized: None,
             },
         )
-        .expect("the fake agent opens a session")
+        .expect("the fake agent opens a session");
+        let mut child = FixtureChild {
+            client: session.client.clone().unwrap(),
+            pid: None,
+        };
+        child.pid = Some(
+            fs::read_to_string(log_file.with_extension("pid"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap(),
+        );
+        (session, child)
+    }
+
+    #[cfg(unix)]
+    struct FixtureChild {
+        client: AcpClient,
+        pid: Option<i32>,
+    }
+    #[cfg(unix)]
+    impl Drop for FixtureChild {
+        fn drop(&mut self) {
+            self.client.kill();
+            if !thread::panicking()
+                && let Some(pid) = self.pid
+            {
+                assert_eq!(
+                    rustix::process::test_kill_process(
+                        rustix::process::Pid::from_raw(pid).unwrap()
+                    ),
+                    Err(rustix::io::Errno::SRCH),
+                    "ACP fixture child survived kill and reap"
+                );
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -1231,7 +1268,7 @@ mod tests {
     fn a_leasing_turn_restores_every_setting_it_overwrote() {
         let scratch = create_scratch_directory("acp-lease-test").unwrap();
         let log_file = scratch.join("set-config.log");
-        let mut session = recording_session(
+        let (mut session, _child) = recording_session(
             &log_file,
             AfterPrompt::Answer,
             leased_turn_request(),
@@ -1284,7 +1321,7 @@ mod tests {
     fn an_interrupted_leasing_turn_restores_without_blocking_the_caller() {
         let scratch = create_scratch_directory("acp-lease-stop").unwrap();
         let log_file = scratch.join("set-config.log");
-        let mut session = recording_session(
+        let (mut session, _child) = recording_session(
             &log_file,
             AfterPrompt::Deaf,
             leased_turn_request(),
@@ -1337,13 +1374,13 @@ mod tests {
     fn a_second_leasing_turn_is_refused_while_the_first_holds_the_lease() {
         let scratch = create_scratch_directory("acp-lease-contention").unwrap();
         let log_file = scratch.join("set-config.log");
-        let mut first = recording_session(
+        let (mut first, _first_child) = recording_session(
             &log_file,
             AfterPrompt::Deaf,
             leased_turn_request(),
             &CONTENTION_TEST_LEASE,
         );
-        let mut second = recording_session(
+        let (mut second, _second_child) = recording_session(
             &scratch.join("second.log"),
             AfterPrompt::Deaf,
             leased_turn_request(),
@@ -1387,7 +1424,7 @@ mod tests {
     fn a_stop_against_a_mute_harness_returns_at_once_and_bounds_the_restore() {
         let scratch = create_scratch_directory("acp-lease-mute").unwrap();
         let log_file = scratch.join("set-config.log");
-        let mut session = recording_session(
+        let (mut session, _child) = recording_session(
             &log_file,
             AfterPrompt::Mute,
             leased_turn_request(),
@@ -1465,7 +1502,7 @@ mod tests {
     fn a_turn_that_dies_mid_flight_is_done_only_once_the_lease_is_back() {
         let scratch = create_scratch_directory("acp-lease-hangup").unwrap();
         let log_file = scratch.join("set-config.log");
-        let mut session = recording_session(
+        let (mut session, _child) = recording_session(
             &log_file,
             AfterPrompt::HangUp,
             leased_turn_request(),
@@ -1489,6 +1526,34 @@ mod tests {
             "`Done` was announced while the configuration was still leased"
         );
         drop(session);
+        fs::remove_dir_all(scratch).unwrap();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn t1_acp_lease_fixture_reaps_on_panic() {
+        static PANIC_LEASE: AtomicBool = AtomicBool::new(false);
+        let scratch = create_scratch_directory("acp-lease-panic").unwrap();
+        let pid = std::sync::atomic::AtomicI32::new(0);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (mut session, child) = recording_session(
+                &scratch.join("panic.log"),
+                AfterPrompt::Mute,
+                leased_turn_request(),
+                &PANIC_LEASE,
+            );
+            pid.store(child.pid.unwrap(), Ordering::Release);
+            session
+                .send_user_message("wait for cleanup".into())
+                .unwrap();
+            recorded_writes(&scratch.join("panic.log"), 3);
+            panic!("exercise fixture failure cleanup");
+        }));
+        assert!(result.is_err());
+        let pid = rustix::process::Pid::from_raw(pid.load(Ordering::Acquire)).unwrap();
+        assert_eq!(
+            rustix::process::test_kill_process(pid),
+            Err(rustix::io::Errno::SRCH)
+        );
         fs::remove_dir_all(scratch).unwrap();
     }
 }

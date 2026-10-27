@@ -1,0 +1,278 @@
+{
+  "base": "061573e0809c3362bed2198fe8f818e3e1c29a7d",
+  "branch": "t3/ja1-s4-c1",
+  "source_scope": "All changed Rust production and witness files used by the full-crate gate, captured before the mutation campaign. No Rust source changed between the gate and this snapshot.",
+  "sources": {
+    "crates/kinewright-agent/src/orchestration/machine.rs": "0784ded981e9a04be811882ba862e95a9d4365dafaf4666d809086e05f8fe63c",
+    "crates/kinewright-agent/src/orchestration/policy.rs": "a173cdc7e29bce534b7a3db25213a492a29a62493eabcfac9a045b0aa7ababa3",
+    "crates/kinewright-agent/src/orchestration/server_tests.rs": "e097d40d11cd41e9488b7f253f672dd36756557c304cd07e4090e520aaf5e995",
+    "crates/kinewright-agent/src/orchestration/tasks.rs": "16f40acc4925f73e9e517ba356e098d742f4de9211ec5cd925a4830b915b1722",
+    "crates/kinewright-agent/src/server.rs": "00bf1b6d438381156eac45db6bb92e929d56d7235ac02c5b81bdbb320747075f",
+    "crates/kinewright-agent/tests/ja_s4_lifecycle.rs": "f631b4006ed379b3e438b12ab7a79cbfef9fd85c05eb6218587c05a53cba6baf",
+    "crates/kinewright-project/src/bundle_commit.rs": "002887f2151c44c5514e21ce299401c6cccbaa3d2446f880c12a89cf55756c3d",
+    "crates/kinewright-project/src/editing_session.rs": "f2e751d809da3f40add44e8b8d37707f9b418e1caa487b2bd6a82eb485287a91",
+    "crates/kinewright-project/src/editing_session/durable.rs": "d0f941ffbcf6b5c867ac8eca6f823d78206f46c4d4ae95a625c4eddda3013c65",
+    "crates/kinewright-project/src/orchestration_commit.rs": "e701bf5b5124bd47e9cf6d9c7ef813f673dae8e3aa3dcc4d3d866fa14e1bbaf8",
+    "crates/kinewright-project/src/orchestration_records.rs": "5044e537f9745e08b6a0b7551222cf6814e18e10af71cf3b3e3b9846622d2f97",
+    "crates/kinewright-project/tests/ja_s4_candidate.rs": "2c236a8eb4a6fc49b1e1366111f4d03e1dfc6499995a05c6b27fb060877d0120"
+  },
+  "predecessor_recipe_sha256": "4925144d5da70f57a2b714894cf01598586af832372a06e4a75c8245f07726ff",
+  "test_binaries": {
+    "target/debug/deps/agent_e2e-4177832a3f8ae59c": "9caf381597354d193fdeb824ab2f1fde7bc100b38663a1813ad8c7229888de3a",
+    "target/debug/deps/ja_baseline-2d6c4419d59fea45": "d846d0647be04de9fb4b137a025ad74934f2ba60e5b0dce9a4b78ce74351f809",
+    "target/debug/deps/ja_s1-a0d5b1c67c16e5c9": "4f04c7993d68ce528b3102e8b222f9bb8c211171621456af78dee4ef71947b17",
+    "target/debug/deps/ja_s1_branches-5484a45e2aa4fe39": "a571bdc733a7149ff5c0bcc6a97e628635e84b14f2bd52810e859b426d1f777a",
+    "target/debug/deps/ja_s1_copy-40fbdf9c417bf7a3": "5e8b16f593a837886a4bd79dad489c6581a9468b2f4ef1fe71663aef6dd528c1",
+    "target/debug/deps/ja_s1_receipts-b37d800c98f0849e": "d93219e8136b863833cbf76e73a965e6cb9a270ecd0c64fa100eec73bf353f2f",
+    "target/debug/deps/ja_s1_storage-14b62bbfc1ab23d7": "0e1d3bf09844bbacf448a1dc5fb95f79427bfdb076205ebe1be4bf91929c60a5",
+    "target/debug/deps/ja_s2_host-658a4d2a55af8317": "38f8bcc2f157f2c315dd19bd0b329fa7b65c7fba36f0fe49f233a9e37fb0a068",
+    "target/debug/deps/ja_s2_rescue-7cdf04b72437a222": "5a0e7dfe7db22167858f211a71d954d886ec23b9fe78218c5b5dac6b22c7398a",
+    "target/debug/deps/ja_s2_rescue_admission-c362997d242a03b0": "363a6e3f9b1a278a52d1a7aabb5f9afc69c736aa0c244329a13e15fe8b38d272",
+    "target/debug/deps/ja_s2_rescue_e2e-3a88aebd73310aae": "cb338eeb48fcf36c61fc81df7610c56b13717e181b542d9d7f3347da3c4889ae",
+    "target/debug/deps/ja_s2_rescue_record-fca95b7872e35161": "f004bd16726040a0ac82cc2d21b02cd71b8a6a646acdf698c0105d19a4adb20a",
+    "target/debug/deps/ja_s2_save-2c348aee46c34cc2": "f01728d67099774b6c0797e2344bafed57c40d3cdbbafc9c5d384cb906dc75a7",
+    "target/debug/deps/ja_s2_save_cost-b1daf7995a7a035c": "a3a48d89f31903f8542212a26d1e1e875a3116229d16b0f2b0bf2f0d7bf481c5",
+    "target/debug/deps/ja_s2_source_boundary-313e91c98ae9faa0": "4a39a4b0f65a1ef317b04518fc02b71f1f43373ec394343d8cbe910ba4848b78",
+    "target/debug/deps/ja_s2_switch-f50df29780bb1ac7": "98962e291f7013b93db8ceb36dfdc4ba3453c794a9d348e87bc0c500bdfe0879",
+    "target/debug/deps/ja_s2_writer-2d82d395f21a192a": "c752084899d0adbbce039199f6e54af0099bc140d7fe1c9a513a70ed8d5aceac",
+    "target/debug/deps/ja_s4_candidate-bc17fada01cd4f5b": "3e2c9ed7bd18af5c336b2dadb79ad4ff425290143860009b4eae4c70e0fa0096",
+    "target/debug/deps/ja_s4_kernel-3a944fecf2df5094": "72db0ba3b50db6b06133d4d2b304b8da84ae162000746e87fe6792a80676d33e",
+    "target/debug/deps/ja_s4_lifecycle-0f1698cf590a28a5": "0e9d6f136ac05664f9cd058ae10950283d083ad3234eebeb5b6bb1f517e90b3f",
+    "target/debug/deps/ja_s4_store-5dd90344aa1fbe1d": "1287f6bcc3585314777b14dddc9ff0ad645cd29dbf87601f1417c67c67c18440",
+    "target/debug/deps/kinewright-6983a94d55e0bded": "f4f53fbcd5218a1011388fc7928ae2edd295205ff99ea93d3783fe81aaad8e45",
+    "target/debug/deps/kinewright_agent-dadfabeb770f6ff9": "9b753ec36a67288236cb5abdfb8786af647dad7af3ec181c3c290fc35fefb6ff",
+    "target/debug/deps/kinewright_app-9de5bb984385afd2": "9de52b169941bb697a7b10988cc12a75acf6bdde48f912d0e5122641f749a4c1",
+    "target/debug/deps/kinewright_eval-9edda5b31e81ffd7": "447d21239dd60c58c3a3e66352064ada86126951a21e7708deac6257d39eee28",
+    "target/debug/deps/kinewright_ja_baseline-f615c9b4987426b7": "17871c581a217af4a33d06bfaee3c944a4bb53f4dd9a7a491743164e7f4b38a4",
+    "target/debug/deps/kinewright_project-c0e879eae489c99a": "40c7dab8c58744432e0a47a2fb3324667c8d555f416a8286ca68d70c2897ae52",
+    "target/debug/deps/mcp_server-0767f6edc71f6faa": "1550525140013080149a543fe99c2515ccc632031e7a7cc63eefabedc4e3ae99",
+    "target/debug/deps/new_harness_e2e-984d521accf2329a": "aa71ca7b939758ef553fbbe7cbb4c68d026eae2a72f59f48414165ab2adfafc9",
+    "target/debug/deps/silence_agent_e2e-a8cf59f1989328fd": "a10a5357b15d65dc4f62418ecc9fa1f4984976221330c70da4fdb8a56492df12",
+    "target/debug/deps/transcript_agent_e2e-4b6bc049cce22a9c": "ca11e98f04ee422704be84eec6af19a0ea797e3bc2937ca27674f46799e825b7"
+  },
+  "compiler": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "harnesses_and_reports": {
+    "docs/reports/ja1-s4/fu1-audit.py": "a336328e7ced0470dc5eb9c957cbfa5481b0d9cdf1bae049e9a47101724730c5",
+    "docs/reports/ja1-s4/fu1-gate.sh": "8cff8152fca5594e7105e38f430781121a7b8ab999e6eb915107dbb31e25b18b",
+    "docs/reports/ja1-s4/fu1-ignored.json": "c618653e2475300594759658d88d19642199b8044b3eb043e50293628c32c719",
+    "docs/reports/ja1-s4/fu1-mutations.json": "d2a70ef25c71aed9986b494e9dbbdc8c83d13c63d0b5f210822a3ba5e1b5875c",
+    "docs/reports/ja1-s4/fu1-mutations.py": "889a759ddffe8e11c38229baa1d18bdd7ad45b37dd343fa9ccf6338b4ce1cc3b",
+    "docs/reports/ja1-s4/fu1-predecessor-identity.json": "4bc66fda3233d63ddee3793d85e64f7c25b3313a5369afaa0042c25071725ae4",
+    "docs/reports/ja1-s4/fu1-predecessor.sh": "620f7ed6119119452c69e147d94b7d6dcce71a8f4e26ebfbe7cbb0d5459e1265",
+    "docs/reports/ja1-s4/fu1-test-summaries.json": "7a0ae0d02601aa7bf8b0887dfaaeae9ca185992abe756a21c4f1954f04f6e106",
+    "docs/reports/ja1-s4/fu1.md": "76e664c3a52f87b3f67fb9fe6823eb2e60bf119602e68fea11d421efa1455bdb"
+  },
+  "corrected_historical_reports": {
+    "docs/reports/ja1-s4/c1.md": "d20ef1eac40b76275c12d8c7428d8286159601a998652b0963efc3a1c1dab0ab",
+    "docs/reports/ja1-s4/c1-handoff.md": "de2c31e1ef2b72165a272a270b6730bf8b3753a782c3383166d9717aa3299be5",
+    "docs/reports/ja1-s4/c1-identities.json": "828414df97edf62f197cf2cf7dbb8ea777ca307a61a37b3ad4b5bbb17f5b0c2e",
+    "docs/reports/ja1-s4/c4-pre-h3.md": "8a12d3ee6475d31fc4c53b4d79553acc475bfa3be7d6cbc54443f9552c56b114"
+  },
+  "archives": {
+    "docs/reports/ja1-s4/fu1-A1-receipt-before-authority-green.log.gz": {
+      "sha256": "494d8393808580d460fad65909500120544968cfbd9796669f031c4ea5fe9923",
+      "raw_sha256": "2d0224cf656de20caabe53ca009c2497d23101fba20c832c600511efdfa77944"
+    },
+    "docs/reports/ja1-s4/fu1-A1-receipt-before-authority-red.log.gz": {
+      "sha256": "43043a6b178ef97a4989817958033f106219c96c1a783aa5c7a10e02a63c5960",
+      "raw_sha256": "432852dabc101c4cd9eb4862d7686b0a7f7788c1902b5f9e215e3be5b9c659f3"
+    },
+    "docs/reports/ja1-s4/fu1-A2-C1-parent-green.log.gz": {
+      "sha256": "e4ea98804307079dd40b352002710a8725dd664198c873e648dd1f3a64cf3da1",
+      "raw_sha256": "6131e960724be381e17e89c995fce9d4214132ca9ae21fcb26f631cbfd66fa52"
+    },
+    "docs/reports/ja1-s4/fu1-A2-C1-parent-red.log.gz": {
+      "sha256": "c5e00e34f4b24f4b4398736da67e857661b701a8b802ca527239b981560d84ed",
+      "raw_sha256": "2cf025046eaad0bf2e7513fc384327cbcf168c204df22071e1792b7871724725"
+    },
+    "docs/reports/ja1-s4/fu1-C4-R2-1-background-settlement-green.log.gz": {
+      "sha256": "e4ad78e65cc271cf02c960f11556f4c251dc375d21bbe271def296b11d7ff154",
+      "raw_sha256": "05d2b0294f773200520ce328c7daf5f9c556122de670006dacd1d6bcc18e39bb"
+    },
+    "docs/reports/ja1-s4/fu1-C4-R2-1-background-settlement-red.log.gz": {
+      "sha256": "b0ec7a655afd075e0a6eac1b34efe73c7258ffd75b7421cb9fc165cc348722da",
+      "raw_sha256": "2a1e4041b9d1b75f618cbbbc640b68a5d454e23ac84bb6f0fe6ea4bd439aa760"
+    },
+    "docs/reports/ja1-s4/fu1-C4-R2-2-cancelled-ready-green.log.gz": {
+      "sha256": "2b6f8d14bdac820212116cfdaa25695dc16c5da815b4763c07ab4d5d9bada771",
+      "raw_sha256": "0dcbf58753785bd50c42e84b463cebacc4e47fab8627c16da6a5a36b8dd5a46d"
+    },
+    "docs/reports/ja1-s4/fu1-C4-R2-2-cancelled-ready-red.log.gz": {
+      "sha256": "dbce866d1e714c71f36331e16fc391cc08acc2d0c2ef34e36b53bf5080b067a0",
+      "raw_sha256": "1ed02ffb52b632c35904123153fe7371a12c04ad434964f7d6adabf53862d0ba"
+    },
+    "docs/reports/ja1-s4/fu1-M1-before.log.gz": {
+      "sha256": "b2182b3b8812359334cbe2da73e776ea579310619055d059b068d13afa035be6",
+      "raw_sha256": "4b6030055eac6dfeb9947d686c158959e620b7b055c82e7be8c72c913188ce25"
+    },
+    "docs/reports/ja1-s4/fu1-M1-candidate-refusal-green.log.gz": {
+      "sha256": "927d502e6cdc9a8bc962948fd3b9fed0fcca7042d4013a4ab5decb2595f12da1",
+      "raw_sha256": "c44fb74802def79a04befc2c31c3ab20c2ab574366b6fba74d0a179629bb5d04"
+    },
+    "docs/reports/ja1-s4/fu1-M1-candidate-refusal-red.log.gz": {
+      "sha256": "e30f61a1b338a6be8fb14c64e8cd4a0b20e77b71d5e2b85151e764ffc18d55fd",
+      "raw_sha256": "96a8de90b7b03023b3a185276f37246c8f4de909eeda4cffc139003f2ed6f150"
+    },
+    "docs/reports/ja1-s4/fu1-M2-production-admission-green.log.gz": {
+      "sha256": "30be58b28b6cf946dcc81d5fbdd8cb33374589814ccab25ca2f5c7ecdee9a5a9",
+      "raw_sha256": "f02d5aff3298a934898d623cc6d143620703a90a0cd196fa24225904452aa7a3"
+    },
+    "docs/reports/ja1-s4/fu1-M2-production-admission-red.log.gz": {
+      "sha256": "b8cf5a9a2414c9e593d97ec3e8116cd0913bbbbb24431e14f2ca8bf33fa15ee5",
+      "raw_sha256": "fb6b0735496eed74b6ac8ba1e5ce07d205ed9fd49eb93df9be30b3c624f858ee"
+    },
+    "docs/reports/ja1-s4/fu1-M4-unknown-branch-green.log.gz": {
+      "sha256": "6bc43ae00829a77388b627e07db7a5fac2784eeec86962bbcd9e4bfe044272d5",
+      "raw_sha256": "281d727823d0c53213c593d09fc8114fc5f16b727b773535e4da5c275ead973a"
+    },
+    "docs/reports/ja1-s4/fu1-M4-unknown-branch-red.log.gz": {
+      "sha256": "2a68020607c8308eabec7e76fa296ff9ab6ee7d2eddb06fbbcad08405de0d4c1",
+      "raw_sha256": "7afb1d45b762fe41bba0c71139b7f2422e7e457be5d86aff4007eef86a31b2be"
+    },
+    "docs/reports/ja1-s4/fu1-M7-provenance-green.log.gz": {
+      "sha256": "59c805428645368d2a047ed3309fd5290456ee328a622e7cff9fc6a2c3193a81",
+      "raw_sha256": "6131e960724be381e17e89c995fce9d4214132ca9ae21fcb26f631cbfd66fa52"
+    },
+    "docs/reports/ja1-s4/fu1-M7-provenance-red.log.gz": {
+      "sha256": "6e03a98e1739fe84e9cf8562e83377cb7b2813e919b5aade9ea48372f9464eb2",
+      "raw_sha256": "12e15b62e2043d8e6fea61ff4e89328a019793d592a76519cd5baa512ce3dfc9"
+    },
+    "docs/reports/ja1-s4/fu1-M8-task-close-green.log.gz": {
+      "sha256": "2b84a1d9257abac04c3e666bdcfec63c8da6405764907d77d5b70d33ace43ed0",
+      "raw_sha256": "afd24ff2d59656164acef04c0e29409ad31854ff21084a08321ef81a11984f25"
+    },
+    "docs/reports/ja1-s4/fu1-M8-task-close-red.log.gz": {
+      "sha256": "21120f5f19d427c216833e3d4920896d91d581a7504b92b9e9f6ab997f1a9f43",
+      "raw_sha256": "fc771d60a714afd0a8debfa1697aeaee976cdc5caf76fbc25243cf6c7d7b03a8"
+    },
+    "docs/reports/ja1-s4/fu1-T1-request-owner-green.log.gz": {
+      "sha256": "eb660544eccb3643dc289367275a7a6d4ef424a075004fae1f1c2ff02090bad5",
+      "raw_sha256": "6131e960724be381e17e89c995fce9d4214132ca9ae21fcb26f631cbfd66fa52"
+    },
+    "docs/reports/ja1-s4/fu1-T1-request-owner-red.log.gz": {
+      "sha256": "a72e52426a41319524482343deafcb0ac9549a839d0f89b6ac7bed8b4eb59650",
+      "raw_sha256": "2a98709e49cd0b8d79a8fe804fdfff0856c28825eb9625216359f5c0c4072520"
+    },
+    "docs/reports/ja1-s4/fu1-agent.log.gz": {
+      "sha256": "82a3d5a61057a5986a9514601238f61ac3c309d127aecec5bca69e19a3bef7c8",
+      "raw_sha256": "73c1e56ceaf7e03e381edc5a09f3abc31e8f7a5d83b11d36ba39d75b7d70bae3"
+    },
+    "docs/reports/ja1-s4/fu1-app-architecture-initial.log.gz": {
+      "sha256": "93784a8422e0bcddd089425ba09555185ba656dbac7a09ceddb03385f827446b",
+      "raw_sha256": "81f43a75cb34ab835d33c89eed6aaae742d52455a2ce2d685125d70bf416569d"
+    },
+    "docs/reports/ja1-s4/fu1-app-architecture.log.gz": {
+      "sha256": "3fbe87cd61d7ad7998fe6d0b4a4e703861c613cd5fe8bfe3a6a322c588d728eb",
+      "raw_sha256": "c9b0588a00a7b2f0a76501214034b64aa414d8866dbee4f2c464a61bbb92f1c8"
+    },
+    "docs/reports/ja1-s4/fu1-audit.log.gz": {
+      "sha256": "52fb84b49fb8d902f7cddde6992ce42aae84a28b8df171c36616232b43a856d6",
+      "raw_sha256": "6131e960724be381e17e89c995fce9d4214132ca9ae21fcb26f631cbfd66fa52"
+    },
+    "docs/reports/ja1-s4/fu1-baseline-build.log.gz": {
+      "sha256": "c49d60f32fb62ef0df98d59ce347ed00e96dd37b068d416c207f1c87bc4736dc",
+      "raw_sha256": "d6e6f59d52ab00b68b97431ad4ca105862db8ce7e34d522a82a972f1abe1ff04"
+    },
+    "docs/reports/ja1-s4/fu1-build.log.gz": {
+      "sha256": "60b5f1335adae6249c40f9d7a3d1c3b599f027e4d31f025b9822944d7dbab2a7",
+      "raw_sha256": "d33dbc3175bb51c86bfa1434c0f0f82f052535c2ad8ca3a152e29e6627775198"
+    },
+    "docs/reports/ja1-s4/fu1-candidate.log.gz": {
+      "sha256": "f602f876b77c7320be307766b52cedc07e6ecbecfeda115565b81cb98394ace1",
+      "raw_sha256": "e98c552fed35b24a3c1ececd3e1ef2866ed5f36e890a2c2f8fba0e6f68e99370"
+    },
+    "docs/reports/ja1-s4/fu1-clippy-fixture.log.gz": {
+      "sha256": "1254240721eb8b37a34dd98b7eeaf16ad6a5f7a93c56de0ba7c4510f39d28adc",
+      "raw_sha256": "fa203f2c06df371d986050883a1d863928082196d231e34cc5c63ebd42331919"
+    },
+    "docs/reports/ja1-s4/fu1-clippy-initial.log.gz": {
+      "sha256": "773417d3ce639dd20f03a0ee71b2412755120e69144d96eafc5674be18cb018b",
+      "raw_sha256": "5238ff8d152e128388507aa715bdd6b889a4d9c2a3ad5638670f08171b7ffa3d"
+    },
+    "docs/reports/ja1-s4/fu1-clippy.log.gz": {
+      "sha256": "82c0ff317a4dbd25e536adc883ad8ddda7d3ee6fbf8bd891127d47f834b00b0c",
+      "raw_sha256": "1b3dbd051cee77860e0176cdad3f6cd773e9ccbb5003de3b2dabe9753eca1d2f"
+    },
+    "docs/reports/ja1-s4/fu1-diff-check.log.gz": {
+      "sha256": "b06404d94e2de71389d1792cab807ea2c0b87458d3f19778039c601ea979f88d",
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "docs/reports/ja1-s4/fu1-dispatch.log.gz": {
+      "sha256": "d820f390a3ab02852832a8e6ecbc3698fda65bf16b65c87d74ebe8bed0c054cb",
+      "raw_sha256": "c011e37551fe3dcb273e656d481afadf1f2d62ec5416c1f5b4be6a6dd5bf81d2"
+    },
+    "docs/reports/ja1-s4/fu1-fmt.log.gz": {
+      "sha256": "21893d30dda3a8df2741aa9e8af7b9e7e2a1d83c3736b50f2422db9d6b976241",
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "docs/reports/ja1-s4/fu1-gate-finalize.log.gz": {
+      "sha256": "67a2b96a1bab9d8fe0fe5c9cb71e5ece800085e204c4bea4b130e7b570e02726",
+      "raw_sha256": "60ba5e57ac00a7d366f939e49e832ea33617da4cc39344833e6e7610dd6a66f7"
+    },
+    "docs/reports/ja1-s4/fu1-gate-initial.log.gz": {
+      "sha256": "fcee6aae5918633806311ff88af5eba3cda9913126ba1b62d27a9849647489f1",
+      "raw_sha256": "f011a80927c783bb2900cdab652600e3ba76d869a57d2ee267244f62a9dcd1c9"
+    },
+    "docs/reports/ja1-s4/fu1-gate-remaining.log.gz": {
+      "sha256": "7b19340a13a25fccfaa39d8ee2c08417a0b26ac890524934751988977e756e90",
+      "raw_sha256": "3bdf6e5ee572f4fe2ce8b099baad6e3dc8d8aa5846406acf33c31068e1c7d685"
+    },
+    "docs/reports/ja1-s4/fu1-gate.log.gz": {
+      "sha256": "74a54a755b2bc4a730897ed5da66264be8ab091c69a3a72cae7db3bedae6a129",
+      "raw_sha256": "4710be31b8b856920ced33bad738f6e5245c84458177e461212203d5bb3e9918"
+    },
+    "docs/reports/ja1-s4/fu1-lifecycle-new.log.gz": {
+      "sha256": "745e6e2c55e3315f569cf0f5443d68bc069852883ef6730f5d17a6f3c2309be6",
+      "raw_sha256": "50cf29ca1d227733b22a381cd5c5621d9752b6495831b0a28d886f66ffefd7f0"
+    },
+    "docs/reports/ja1-s4/fu1-manifest.log.gz": {
+      "sha256": "5696f07e534e9710767b5482ad56ac493ffd9b0aea61142a72079a9e681fd639",
+      "raw_sha256": "604a784864f321be37452d550e0b6e6906b706b2175fa7604ea4093b665e112c"
+    },
+    "docs/reports/ja1-s4/fu1-manual-before.log.gz": {
+      "sha256": "e586f683ff8f018a1ff5bdc8cc9eae0f1702afab87f78fe956ef6efdef7df861",
+      "raw_sha256": "412b67af1ea41cb8f9983d9414742197f28fdb9b137410bc419c1c457bb9367d"
+    },
+    "docs/reports/ja1-s4/fu1-mutation-run.log.gz": {
+      "sha256": "d6e755b6338e6f887711a095b226ab43da973126b2f9a8216f5b3c383575f8d6",
+      "raw_sha256": "26658f641d73b81c0da8683958806d0d5c924735a7909b9763cd8a44a6e0e0aa"
+    },
+    "docs/reports/ja1-s4/fu1-predecessor-controls.log.gz": {
+      "sha256": "2fe8dbb256c54e388fd374e53208ac6cdf128ff5e3dea97b9f944ea631b6cd02",
+      "raw_sha256": "c53281660f618337e73675904e4437a3f22be64cc3397b5f2049e646cc853eb4"
+    },
+    "docs/reports/ja1-s4/fu1-predecessor-initial.log.gz": {
+      "sha256": "ed4c7483c482a849d8adbf815d8afe2b3a0823975503269a08a46ba3a9555c39",
+      "raw_sha256": "4fa3344ed01fbbc8d9c213dcd5b93fcd4d7297611d95dee49c697cd5a381ae25"
+    },
+    "docs/reports/ja1-s4/fu1-predecessor.log.gz": {
+      "sha256": "7704b9f90fbf74e6f5fa1377aac124da26122866412ff14b0298a2aab4a5ffe9",
+      "raw_sha256": "c79ea287ea5bb0757bbda46810d8dddce56675591f586126d23badf9716c03d4"
+    },
+    "docs/reports/ja1-s4/fu1-project-lib.log.gz": {
+      "sha256": "c08b8330148ba43b7c5ec26902895b70b666174ce4954b7d2031ea0831a5bc19",
+      "raw_sha256": "b03b12b00964732d6b6171111e1cfcaf8e5a13dd0c146ef1956aa6292b61c301"
+    },
+    "docs/reports/ja1-s4/fu1-project.log.gz": {
+      "sha256": "52b18fc45963d71ac5ccdc9df286bec87f465e829dbaae078e2e2d1c95caed8c",
+      "raw_sha256": "7b05da76fb4d991d90659f18815b63cbfd84722e4c0931152c406ca103c364f5"
+    },
+    "docs/reports/ja1-s4/fu1-ready-before.log.gz": {
+      "sha256": "82fe116add8e6a4f62f48e1cb28769f247634654621738ee28b2343d3e01b2a4",
+      "raw_sha256": "83804e998b332c96f06dcd627e0f6b78437dda3d907723420230348c6a47f685"
+    },
+    "docs/reports/ja1-s4/fu1-replay-before.log.gz": {
+      "sha256": "eb075589cdf82cb5db353a818918e1c074065c44c281725c53b040f0e3f03adc",
+      "raw_sha256": "8374c9d40ce66c974188a8b01cbb903a6105b4f14a0704ff35e95408f85e12bc"
+    },
+    "docs/reports/ja1-s4/fu1-unknown-branch.log.gz": {
+      "sha256": "108f90ce8c94089a01b354b7899524bedae0594d59b698ad60c1b43d5091de68",
+      "raw_sha256": "e550da89869ada37f4376bf3fdb9adfb959f82e405d576ecef4373282c15463f"
+    },
+    "docs/reports/ja1-s4/fu1-predecessor-evidence.tar.gz": {
+      "sha256": "8d958f8f167bae00b8a008924fdcc068527d00dd9824bb90fce769be470e065e"
+    }
+  },
+  "gate_scope": "Build and clippy exited 0. The initial full project command exited 101 only for the missing sealed predecessor; its successful integration targets plus the successful full lib rerun cover all nonignored project targets. Agent full targets, App architecture, touched formatting, manifest lint and audit passed. Seven runtime mutation pairs and three audit pairs passed.",
+  "build_cleanup": "Temporary target artifacts and the nested pinned predecessor worktree are removed after hashing. The recorded executable paths are historical artifacts; fu1-gate.sh recreates their prerequisite."
+}

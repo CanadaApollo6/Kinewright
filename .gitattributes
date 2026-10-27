@@ -18,3 +18,6 @@ docs/reports/ja1-s3/c1-evidence/fix2/** -text
 scripts/ja1-s3-c1-fix2-mutation-cases.json text eol=lf
 docs/reports/ja1-s3/c1-evidence/fix3/** -text
 scripts/ja1-s3-c1-fix3-mutation-cases.json text eol=lf
+docs/reports/ja1-s3/c1-evidence/integration/** -text
+scripts/ja1-s3-c1-merge-mutation-cases.json text eol=lf
+scripts/ja1-s3-c1-followups-mutation-cases.json text eol=lf

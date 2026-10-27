@@ -178,7 +178,19 @@ impl<P: 'static> CoreAttachment<P> {
         after: HistorySnapshot,
         pending: Vec<AcceptedHistory>,
     ) -> Result<AcceptedCut, HistoryError> {
-        self.core.install_frozen::<P>(cut.clone(), after, pending)
+        self.core
+            .install_frozen::<P>(cut.clone(), after, pending, false)
+    }
+    /// Install an owner's replay-validated checkpoint at its exact frozen cut.
+    /// Manual producers cannot use this path. Input remains fenced until resume.
+    pub fn install_frozen_checkpoint(
+        &self,
+        _proof: &P,
+        cut: &AcceptedCut,
+        after: HistorySnapshot,
+    ) -> Result<AcceptedCut, HistoryError> {
+        self.core
+            .install_frozen::<P>(cut.clone(), after, vec![], true)
     }
     pub fn install_history_transition(
         &self,
@@ -207,6 +219,40 @@ mod tests {
     }
     fn history_error(reason: CoreMutationRefusal) -> HistoryError {
         HistoryError::MutationRefused(reason)
+    }
+    #[test]
+    fn h2_frozen_checkpoint_requires_exact_cut_and_keeps_ingress_fenced() {
+        let core = Core::spawn(crate::Document::default()).unwrap();
+        let owner = core.history_save_owner(&Proof).unwrap();
+        let stale = owner.capture(&Proof).unwrap();
+        core.request(edit(1)).unwrap();
+        let cut = owner.freeze(&Proof).unwrap();
+        let shadow = Core::spawn((*cut.history().document).clone()).unwrap();
+        shadow.request(edit(2)).unwrap();
+        let after = shadow.export_history().unwrap();
+        assert!(
+            owner
+                .install_frozen_checkpoint(&Proof, &stale, after.clone())
+                .is_err()
+        );
+        assert_eq!(core.export_history().unwrap(), *cut.history());
+        let installed = owner
+            .install_frozen_checkpoint(&Proof, &cut, after.clone())
+            .unwrap();
+        assert_eq!(core.export_history().unwrap(), after);
+        assert!(matches!(
+            core.request(edit(3)).unwrap(),
+            Event::MutationRefused {
+                reason: CoreMutationRefusal::Frozen,
+                ..
+            }
+        ));
+        assert!(owner.resume(&Proof, &cut).is_err());
+        owner.resume(&Proof, &installed).unwrap();
+        assert!(matches!(
+            core.request(edit(3)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
     }
     #[test]
     fn m01_eager_binding_and_install_capability_cannot_be_bypassed() {

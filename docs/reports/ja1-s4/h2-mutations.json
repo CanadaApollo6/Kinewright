@@ -1,0 +1,44 @@
+[
+  {
+    "name": "candidate_base",
+    "source": "crates/kinewright-project/src/editing_session/durable.rs",
+    "restored_sha256": "ecb05591a1b9447a4bd0c3537d1edaefb75084a9458e987a92d8e239085694bf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "frozen_payload",
+    "source": "crates/kinewright-project/src/editing_session/durable.rs",
+    "restored_sha256": "ecb05591a1b9447a4bd0c3537d1edaefb75084a9458e987a92d8e239085694bf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "merge_replay",
+    "source": "crates/kinewright-project/src/editing_session/durable.rs",
+    "restored_sha256": "ecb05591a1b9447a4bd0c3537d1edaefb75084a9458e987a92d8e239085694bf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "candidate_install",
+    "source": "crates/kinewright-project/src/editing_session/durable.rs",
+    "restored_sha256": "ecb05591a1b9447a4bd0c3537d1edaefb75084a9458e987a92d8e239085694bf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "continuous_freeze",
+    "source": "crates/kinewright-project/src/editing_session/durable.rs",
+    "restored_sha256": "ecb05591a1b9447a4bd0c3537d1edaefb75084a9458e987a92d8e239085694bf",
+    "red": 101,
+    "green": 0
+  },
+  {
+    "name": "candidate_batch",
+    "source": "crates/kinewright-project/src/bundle_commit.rs",
+    "restored_sha256": "b58f0e075aff66d16b23c45a59718d75ace7ec48a28115811125abaaff7bc997",
+    "red": 101,
+    "green": 0
+  }
+]

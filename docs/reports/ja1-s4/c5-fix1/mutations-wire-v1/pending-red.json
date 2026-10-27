@@ -1,0 +1,110 @@
+{
+  "source_sha256": "cb8908ee0e670f0060c6c14df2165b8834fd637f412be561b88c348baf2807ee",
+  "cases": [
+    {
+      "guard": "crash-coverage",
+      "binary": "ja_s4_usage",
+      "test": "s4_reply_before_usage_publication_crash_blocks_new_attempt",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.08s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations/crash-coverage-red.log"
+      },
+      "log": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/docs/reports/ja1-s4/c5-fix1/mutations/crash-coverage-green.log"
+    },
+    {
+      "guard": "matching-turn-coverage",
+      "binary": "ja_s4_usage",
+      "test": "s4_usage_settlement_requires_acknowledged_matching_turn",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations/matching-turn-coverage-red.log"
+      },
+      "log": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/docs/reports/ja1-s4/c5-fix1/mutations/matching-turn-coverage-green.log"
+    },
+    {
+      "guard": "acknowledged-settlement",
+      "binary": "ja_s4_usage",
+      "test": "s4_usage_settlement_requires_acknowledged_matching_turn",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations/acknowledged-settlement-red.log"
+      },
+      "log": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/docs/reports/ja1-s4/c5-fix1/mutations/acknowledged-settlement-green.log"
+    },
+    {
+      "guard": "cancellable-reply-write",
+      "binary": "@lib",
+      "test": "muse::tests::s4_full_reply_pipe_cannot_block_raw_fault_cleanup",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 5.17s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations/cancellable-reply-write-red.log"
+      },
+      "log": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/docs/reports/ja1-s4/c5-fix1/mutations/cancellable-reply-write-green.log"
+    },
+    {
+      "guard": "fault-reap-before-terminal",
+      "binary": "@lib",
+      "test": "muse::tests::s4_full_reply_pipe_cannot_block_raw_fault_cleanup",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.18s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations/fault-reap-before-terminal-red.log"
+      },
+      "log": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/docs/reports/ja1-s4/c5-fix1/mutations/fault-reap-before-terminal-green.log"
+    },
+    {
+      "guard": "fault-publication-after-cleanup",
+      "binary": "@lib",
+      "test": "acp::tests::s4_raw_fault_is_retained_when_cleanup_races_publication",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations/fault-publication-after-cleanup-red.log"
+      },
+      "log": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/docs/reports/ja1-s4/c5-fix1/mutations/fault-publication-after-cleanup-green.log"
+    },
+    {
+      "guard": "prior-write-fault-publication",
+      "binary": "@lib",
+      "test": "acp::tests::s4_prior_write_fault_survives_cleanup_before_eof",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 734 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations/prior-write-fault-publication-red.log"
+      },
+      "log": "/home/riels/.t3/worktrees/Kinewright/t3-9c40e728/docs/reports/ja1-s4/c5-fix1/mutations/prior-write-fault-publication-green.log"
+    }
+  ]
+}

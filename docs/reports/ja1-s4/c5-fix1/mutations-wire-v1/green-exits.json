@@ -1,0 +1,9 @@
+{
+  "crash-coverage": 0,
+  "matching-turn-coverage": 0,
+  "acknowledged-settlement": 0,
+  "cancellable-reply-write": 0,
+  "fault-reap-before-terminal": 0,
+  "fault-publication-after-cleanup": 0,
+  "prior-write-fault-publication": 0
+}

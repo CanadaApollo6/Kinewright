@@ -1,0 +1,94 @@
+{
+  "source_sha256": "fc43bbba584ba13141e43d432a68877e0bdb46175f67a0e850fa34f5fd89ca01",
+  "pairs": [
+    {
+      "guard": "first-turn-coverage",
+      "witness": "s4_first_unreported_turn_blocks_next_send",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/first-turn-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/first-turn-coverage-green.log.gz"
+      }
+    },
+    {
+      "guard": "later-turn-coverage",
+      "witness": "s4_unreported_turn_after_settlement_blocks_next_send",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/later-turn-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/later-turn-coverage-green.log.gz"
+      }
+    },
+    {
+      "guard": "crash-coverage",
+      "witness": "s4_reply_before_usage_publication_crash_blocks_new_attempt",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.08s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/crash-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.07s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/crash-coverage-green.log.gz"
+      }
+    },
+    {
+      "guard": "matching-turn-coverage",
+      "witness": "s4_usage_settlement_requires_acknowledged_matching_turn",
+      "red": {
+        "exit": 101,
+        "summary": [
+          "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": true,
+        "green": false,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/matching-turn-coverage-red.log.gz"
+      },
+      "green": {
+        "exit": 0,
+        "summary": [
+          "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s"
+        ],
+        "runtime_red": false,
+        "green": true,
+        "log": "docs/reports/ja1-s4/c5-fix1/mutations-superseded/matching-turn-coverage-green.log.gz"
+      }
+    }
+  ],
+  "credit": "superseded; excluded from final-source mutation count"
+}

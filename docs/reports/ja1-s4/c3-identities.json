@@ -1,0 +1,257 @@
+{
+  "parent": "cdfe7c3b1c0ef54c4701de7abbc8f7f1f683b847",
+  "sources": {
+    "ci/ignored-tests.txt": "d8df30ae5bf1642d8f66ce0530b3fa46f3f79423bb21074e998695cbe4802bfa",
+    "crates/kinewright-agent/src/orchestration/adapters.rs": "e359f347b825fc3728af200474b6e87321ef91547403b5731b8f726b15a796b9",
+    "crates/kinewright-agent/src/orchestration/machine.rs": "ec57ccf19510970f7043f596e5df721562a361fc96dad56902b4ce43c2ee1ada",
+    "crates/kinewright-agent/src/orchestration/mailbox.rs": "5407344fb5250a9541595c28eef38a8277d59304e6a58e0d46caac52de9e9955",
+    "crates/kinewright-agent/src/orchestration/mod.rs": "db609f5735ce4ca579c19c371c5cef65510be2343ccf215866ae9a9928df6f05",
+    "crates/kinewright-agent/src/orchestration/outbox.rs": "4e76edbd8cfb02f6b9832a4ad416017ad24e636080f1b4fd074ad85c21212e75",
+    "crates/kinewright-agent/src/orchestration/policy.rs": "6f9335b661a3af21c5a3b364bd5a874c8073873bd9dc6db60ccdaf0012b330cf",
+    "crates/kinewright-agent/src/orchestration/server_tests.rs": "3701447052cbbadca51930dacc7796b60852ecf2ac5ed01056bfbf5380d70584",
+    "crates/kinewright-agent/src/orchestration/tasks.rs": "404b8905f39b72a3f7221ec16549c393fc8cd1bde442a8b3fc185d14bcd94f1f",
+    "crates/kinewright-agent/src/server.rs": "e5f26e8e132ee3a61d8d24bcf526d86aeb51260e592b45ab84d6c963088fef16",
+    "crates/kinewright-agent/tests/ja_s4_kernel.rs": "4ba0c0536bdc8c6ca021222294d5c70463a137af7bd826cd35ed604d33372410"
+  },
+  "binaries": {
+    "target/debug/deps/kinewright_agent-dadfabeb770f6ff9": "1cfbacf2d55e593cc713a7b524a41e3630f2416d4cefb721ed4d987ebdc49cd2",
+    "target/debug/deps/ja_s4_kernel-3a944fecf2df5094": "ae1072c2603167079850fb92bb4bf97b302082ea92422bcac1d5eb85fc51c3fb",
+    "target/debug/deps/ja_s4_candidate-bc17fada01cd4f5b": "b2c4a50470ee2c759bcf5b0dc84fda92d672fef2d0cc1f9e828018fb24a44de6",
+    "target/debug/deps/ja_s2_host-658a4d2a55af8317": "1e73dc894582de012931c81e68428c819c5eb03c2688c4e366d406fb09325572",
+    "target/debug/deps/kinewright_app-9de5bb984385afd2": "6ed001c1b2c9be910634399c8705df3c766f1ebfbc6e65049f79d0567fe3aad8"
+  },
+  "logs": {
+    "c3-witnesses.log.gz": {
+      "raw_sha256": "24da0333b8827d7e1f905e4399114038fde442c3127e110b4ec87ba10789845f",
+      "archive_sha256": "0486e80e26e576a69eb8148f273527ecd274b7e60d2e4354d5266bf4c388eef2"
+    },
+    "c3-policy.log.gz": {
+      "raw_sha256": "0f764d0cf9385020e1a2dd93f430819d778c4b3d4180a9ef8bbda028b5807465",
+      "archive_sha256": "6463d9f5a2899963357c4103fa3b75d9b55e873209e48920c94b43809d81a835"
+    },
+    "c3-kernel.log.gz": {
+      "raw_sha256": "41628bb4b0e2301a58cf6ddfdc126cf7c6a53e6f8fb1c5c12ba55e521586190e",
+      "archive_sha256": "55bafae9d8340f0b6a141cb8818d09b4611a6c54494f80f0d0b94534c78f85f8"
+    },
+    "c3-clippy.log.gz": {
+      "raw_sha256": "1e4a2b9bd3787341338136a88514f681378bef07c0df30fc07c1ced381323a6f",
+      "archive_sha256": "8eac484b192f5c9742cb2cb1be2cc5a2f949e579a85e0fab22a6138aaf291b1e"
+    },
+    "c3-manifest.log.gz": {
+      "raw_sha256": "6e5be9df04910ef7b027116d26d5a0f66563e6d4d9b4387fd5299360fc0af270",
+      "archive_sha256": "dbab5e4772908b60da540f05af4a650b694ee3f49c5d1ee74175fea15468db0b"
+    },
+    "c3-build.log.gz": {
+      "raw_sha256": "609c2fffb928ebf5fd934d37b625b49963914a75794d8153249b36cd3d147caf",
+      "archive_sha256": "9738e2d76a2e76859d44e74af8bf5a60235292c33daf17697bdd7ee2efd27ceb"
+    },
+    "c3-h2.log.gz": {
+      "raw_sha256": "743a38b42b8b40982f6fb9690e781edfc9c65a85f8cbd2e54496c8d7c6d9e8cc",
+      "archive_sha256": "0771d74e21f9b791560f8e1d9d3713c7262f61e4446b975a9b88008e4a94ecb5"
+    },
+    "c3-store.log.gz": {
+      "raw_sha256": "3d7800b34d03b03a20624035c9d3d343e3c5446252745bec0e9484ed7ace61ec",
+      "archive_sha256": "7ddb4ef2e713e542495e73fe7ff9a7d4dc92f5bca1ec8364e131f8052d1df938"
+    },
+    "c3-receipts.log.gz": {
+      "raw_sha256": "f90002977cbdb5db7e6f57b12c854f1a586c57e0348f180eaf6d4881ff97a33b",
+      "archive_sha256": "72172fd1b2d10a2e09c6016292ae50081f653e9fadf5db7c4616f1eea741f100"
+    },
+    "c3-writer.log.gz": {
+      "raw_sha256": "9a5b508739ec86a9dbdd509883abbf29fd43df7baed8f469e1dad3e67787d26c",
+      "archive_sha256": "1d206f4cf06e06d344acad06c015ae239badd437fbe8a428dcfbef690563666a"
+    },
+    "c3-branches.log.gz": {
+      "raw_sha256": "1c03e6fcff00ec4377bd7e04dc62c4d3cec8eec3abe615ea422327086d86be56",
+      "archive_sha256": "ddec7d93a185b6e7f7d91e52c42a2e2ff678796163831fc38e39c9419e3d75e9"
+    },
+    "c3-host-authority.log.gz": {
+      "raw_sha256": "b58b7996cac75f3206c20bf298c36b95cd3d04066a92914aea460f9a13830cce",
+      "archive_sha256": "e18eba927d15ee14a3f47929494d12552a078779497c8bfc1a04a2a9e519ce1b"
+    },
+    "c3-confirmation.log.gz": {
+      "raw_sha256": "61525d4d337fd6809c7005638c65b41e378c722cd4a8978c79f3199e7575ed4f",
+      "archive_sha256": "6237c35aa94f203432df777c622f7ae088e4a26bc538568cfd04b14aa3f7d5e1"
+    },
+    "c3-m31.log.gz": {
+      "raw_sha256": "5c466a3da368905ba20ae7f1dc41a7682029a0717cc4c0ed0a1ae455c1657a59",
+      "archive_sha256": "2bc4e1c55d21d8432c97cc8fcbd6df6db6f203a7c00909803d2774cc977536bb"
+    },
+    "c3-agent-architecture.log.gz": {
+      "raw_sha256": "b11c88e8768a36b4daba9c7900730c8071522635c83de9d3e00507440b92258c",
+      "archive_sha256": "434962137afbef9fcb08d37a0f8de3707fa735dc10d0816452b6d6c01b0037bc"
+    },
+    "c3-app-architecture.log.gz": {
+      "raw_sha256": "7b9c397c3c5e4ebb5548104136da18cc2c7591a0c71a9e94d00906f1b70f368c",
+      "archive_sha256": "605f1e97934b918ad71818bec11de3eda96f970c93b7531523ef31647656c2bf"
+    },
+    "c3-fmt.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_sha256": "854054276d54a00bd7774b7549ebeda9612c790de33cfe55569c67f087960c06"
+    },
+    "c3-diff-check.log.gz": {
+      "raw_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "archive_sha256": "d7ec8f3806b425fa245e23942d7e54110132a99738727efe63db5aa480ead0e5"
+    },
+    "c3-mutations.log.gz": {
+      "raw_sha256": "31259ae31e474f161775de07836f4d4da46bc7365c87e2b4ad73a6b65a785210",
+      "archive_sha256": "aab66f1c94ed9703290ce759d032415cbca5635944df9c5f915d5aad72700625"
+    },
+    "c3-mutation-refresh.log.gz": {
+      "raw_sha256": "9a2ce71ad0308150794629dc311170cdbcd510232161fa7b9578abaf7e3409d0",
+      "archive_sha256": "a061c7df3cbeec7bd7800fb4b9bd951ce239b0c034cbf996a7d3d4e6294ea8fb"
+    },
+    "c3-review-fixes.log.gz": {
+      "raw_sha256": "c901588ebad6fc1a51a23c0dc60db473145abc3eca66f618dbf6ac887d8c0048",
+      "archive_sha256": "83b99942f1ca03815bb48106dfe972e25929cb7e412881426a014576e42d65b4"
+    },
+    "c3-review-mutations.log.gz": {
+      "raw_sha256": "ea42f0010a548e10eda506c825174844154fbe08c8290e38cadc6cbf94ca4455",
+      "archive_sha256": "e55ceea39c57124100c15628376cdcd06ba9e065328bb8a3dc8854b574392eda"
+    },
+    "c3-mutation-prepare_scope-red.log.gz": {
+      "raw_sha256": "9d08f9b36dab8b08b40eccf37e724cf0ab223f1b3ee4e1f0b38bb179764f3fdd",
+      "archive_sha256": "b079fe17021dbe83552f8c116dc0cb63e8287cf5eac0f688b56ab890d7e988f9"
+    },
+    "c3-mutation-prepare_scope-green.log.gz": {
+      "raw_sha256": "38d03743a6d57f46702b8e8d601d586c02bf27d229fa1d1117b2e2e090725afb",
+      "archive_sha256": "ec53be8ef4dcc9f8504addc44108729fc2bb3832d094d69f42e2e7e5943b5ba6"
+    },
+    "c3-mutation-commit_scope-red.log.gz": {
+      "raw_sha256": "fe14f5dc1dc91b38a5e679fa7066d84b39eec64471a09a8311b0cb5a13f75b64",
+      "archive_sha256": "0e7e205f367bef96188e5952b9c6ed378f31e889c692ab8fa8174dde176b25b9"
+    },
+    "c3-mutation-commit_scope-green.log.gz": {
+      "raw_sha256": "550b2632839e91de8caba79e8e5f0879c6f11a213bc792d132a75a2bdaf37b82",
+      "archive_sha256": "dda34d77826d3ef68f5289e9cbad6a1e9967d1f083bee69b4da99ac2d0ff31dd"
+    },
+    "c3-mutation-capability_scope-red.log.gz": {
+      "raw_sha256": "766381f512a4732ab5e7a9d56a67bfb1d9da105a2188f15d28839a3ea618f439",
+      "archive_sha256": "9940e4aed7325125f49db42ef1fb8efd1e41647b14d7f372e85cbacae9c21cf2"
+    },
+    "c3-mutation-capability_scope-green.log.gz": {
+      "raw_sha256": "82e6f667af696cab1d96bba1dfdf4e7a1a533be1dfda24cbfc45bb2608aacc17",
+      "archive_sha256": "67555c5b05626d3b8aebba36e78bd62cea38441c6c66290811f4ac0d1a9d4769"
+    },
+    "c3-mutation-planner_scope-red.log.gz": {
+      "raw_sha256": "bfc7f289f79bd08baf76e72405d66b0e9df6f0affd4bdf5eed5d6b88c3c3319e",
+      "archive_sha256": "67be346ce7d60e6bcbd63c92c37dcbbdc6acf0be7f113b590e1130cff861194b"
+    },
+    "c3-mutation-planner_scope-green.log.gz": {
+      "raw_sha256": "7b6da9d1cc2fddebcd37e9785043409d03fa9d09b50f962d6cb715d8241e0284",
+      "archive_sha256": "4cb20af4c9f9db426eab64612fb0ae7f860a441ff15264db9c01b7939e613e87"
+    },
+    "c3-mutation-endpoint_identity-red.log.gz": {
+      "raw_sha256": "474012c07754af5d24736ac603755683d05408c97c5013576890a4afe3c4821a",
+      "archive_sha256": "78ac28052d61b6a07e17d008d945a76b2fadfde4e4769d4b4179260bb46363d6"
+    },
+    "c3-mutation-endpoint_identity-green.log.gz": {
+      "raw_sha256": "aaa1edaee575212bd476ec1e4349c9fd0372e4552513512d6d2cf3ef5824d460",
+      "archive_sha256": "c7c13ad30f7156f890cfeaf583c16c6c4f8577d05c7ddaef845d8bc84c2fcdd3"
+    },
+    "c3-mutation-live_authority-red.log.gz": {
+      "raw_sha256": "69f274cf4cbfcf2d116d3a806cf8450dfbeda0ba432b1265a8334ac153a520b8",
+      "archive_sha256": "69d5fb3b27b01ac4ee1c07e768966316dd6abf5f653b7c5f0c599eebc4c96ff1"
+    },
+    "c3-mutation-live_authority-green.log.gz": {
+      "raw_sha256": "f3e226de2d12f20d8c05f10549a8806a14678464e0913b916da687c0aaae15a2",
+      "archive_sha256": "6998766be4a13feebe0adf5a6ee2b73fc3414abfb2fae9a8e533ed9d63ded4cb"
+    },
+    "c3-mutation-freeze_ingress-red.log.gz": {
+      "raw_sha256": "797517af3a5a203a7ffe8ab6950018eda946ec0c89785bde2dac881cd08dc2a8",
+      "archive_sha256": "01c5e56bc055d8eff39e25237ba2cc4848d158db991b6a7da56819387524c3c4"
+    },
+    "c3-mutation-freeze_ingress-green.log.gz": {
+      "raw_sha256": "d32b66004b69baf84874bccb6caa1be9fd008dd2778ac4bf405faf624461773b",
+      "archive_sha256": "370c0f3835891ecd8f8f52d33b9f364751664e5742fb29f827adcf2f38f4ed8b"
+    },
+    "c3-mutation-merge_scope-red.log.gz": {
+      "raw_sha256": "2bb9dad3327385d50981365250dae41b43a63b83fad1bd813f4d047cd921c6a5",
+      "archive_sha256": "ef111635ab997b9bbc724941a960fe6fa50d5f06fdc66d51d985b945be850009"
+    },
+    "c3-mutation-merge_scope-green.log.gz": {
+      "raw_sha256": "6138b8ad5c4f451992defa58dbf1ee651fcf67f878eda142a357b1c1af8761cd",
+      "archive_sha256": "11c06a4ab7676b42899a8cebe460ede347eb229f5587189f0ff4f0f7d98d4847"
+    },
+    "c3-mutation-audio_role-red.log.gz": {
+      "raw_sha256": "2e623d39b33d23b7afdc609a105b9eea3e31258cc30ffb43b097db43e8ed6d3a",
+      "archive_sha256": "74549f12b0a3dc321937628f56b8ee00787e10ee7de71f505bd1be7a330b00a8"
+    },
+    "c3-mutation-audio_role-green.log.gz": {
+      "raw_sha256": "61c716d0f3a6909434f824de55c3a918bbcb6105823820000867722b685c58e4",
+      "archive_sha256": "e8e08fc144a19ae84d9ba8e456b69534c4082872a2e9dfc1363e98b5efe1a6d2"
+    },
+    "c3-mutation-owner_project-red.log.gz": {
+      "raw_sha256": "bac0f019422d9816fe74858f57b025b5ef21c28b64f1a502ec007b70811223a6",
+      "archive_sha256": "f2fdd1fd0939d6d869362528cf9e2164443c7ab6561ac170dba772ef1fda98db"
+    },
+    "c3-mutation-owner_project-green.log.gz": {
+      "raw_sha256": "ffccc27e526230d87da5ad8bc46def1c618a0ca7904c155cd9b2be8c2bf6c524",
+      "archive_sha256": "aa8e8a44e76cbbf7af0e6f22bd07db1c15aaefc832cc73dbdf4b59692222326a"
+    },
+    "c3-mutation-owner_epoch-red.log.gz": {
+      "raw_sha256": "9deb8ff592447d9ee4f7d44f6bb7d307815924f66b6bc804946f2f68ad7c0538",
+      "archive_sha256": "6dd3e6d4da6debc21ed063ecd618eddf90f697dad8675f1de200a11672ffd80f"
+    },
+    "c3-mutation-owner_epoch-green.log.gz": {
+      "raw_sha256": "539409e2c773b5744a0837527ae74100ac95b78d1caba59c3404a40d1ec56b4b",
+      "archive_sha256": "9913d38730003e2fa24319092461efdc54d8ded070600c7ea5b591f15f41a314"
+    },
+    "c3-mutation-owner_expiry-red.log.gz": {
+      "raw_sha256": "27cbdacb2eee890a84e972a0238fd6008e2a4199c17c0838460e65390569c695",
+      "archive_sha256": "3747f324aa23dc593eee606bd0817a22054af20c69ed8b07330b0e97a08f2e60"
+    },
+    "c3-mutation-owner_expiry-green.log.gz": {
+      "raw_sha256": "d69605ac91a0c87d6f71c36d7f375bf27e9ca0ca41051e23eb7c86635381c68f",
+      "archive_sha256": "425a263b5edb1a672a1ec9c7cf5f0cedbb746c04cbce2e3ff71189dad6778a76"
+    },
+    "c3-mutation-frozen_result_identity-red.log.gz": {
+      "raw_sha256": "e65dbccbc6c16a40be0c30343744ed9a24c709d723b52b6b425241850150b377",
+      "archive_sha256": "0dc4104770bdc76df8c9cc870c5193568c2cf1e8e26556852d981fe59b6be204"
+    },
+    "c3-mutation-frozen_result_identity-green.log.gz": {
+      "raw_sha256": "66d98d8e67167a545e6e430f18866386cae398d9a831e805d4b7dc7256ee7ece",
+      "archive_sha256": "d853bd3e52570a2018f5942fa18263e33c06646a0dcd5dca0f937598a2a4eb57"
+    },
+    "c3-mutation-routing_closure-red.log.gz": {
+      "raw_sha256": "f304ff91862bde9757b430086b803cd7dce1ba4b3df4dadb09fbd4833fdb85ec",
+      "archive_sha256": "a6b97df0a8c0895c794a6577984c12c164039d68e18cc1ebfd72ba04d6efa9d7"
+    },
+    "c3-mutation-routing_closure-green.log.gz": {
+      "raw_sha256": "94de266d0f9a53bca62212858facf6b4ece7f3c063d497af73258c6c375de7ed",
+      "archive_sha256": "3e955c5b61080faca8d9ab9ae2054884148a5393caf76802828c9b7535fc15f3"
+    },
+    "c3-mutation-result_publication_freeze-red.log.gz": {
+      "raw_sha256": "06b55062d21e7a2aeb6011dd56e620ece78ff6a54672d20b962d170126379e64",
+      "archive_sha256": "fdbde5fd594b7dcef0a77fbfd902b8c0624e525dffed1ef4aa8d71841a67a697"
+    },
+    "c3-mutation-result_publication_freeze-green.log.gz": {
+      "raw_sha256": "6097ceb2192bec47c6561da31b87c8f15de7b49eeba5295d132f6e2444b8fe05",
+      "archive_sha256": "b6b932b4541c5cc898e58546cc62acff2e95de74aa2b722680a69a94e3b38d1a"
+    },
+    "c3-mutation-solo_collateral-red.log.gz": {
+      "raw_sha256": "a2bd7db29815e5243b03b87ee4a145996074ff7d81bde2c5ae4a0ab3ad840fa2",
+      "archive_sha256": "7f1f87416ad71f4406e6ad2835743e9066e62683c95158441e8864bff2b3a56a"
+    },
+    "c3-mutation-solo_collateral-green.log.gz": {
+      "raw_sha256": "7afd3c66e579b1b227e51078f2b740414dc8a6726f6ecf055575294e6856aa34",
+      "archive_sha256": "f16185df5e5b34fe7fd342f883faff36257138f932c266c13da331a92382de62"
+    },
+    "c3-mutation-director_routing-red.log.gz": {
+      "raw_sha256": "38b3de252b60754bd2fad9f1a80af522b1a96a487426d562a727f6d05291cd64",
+      "archive_sha256": "058161f4457aa1f0185767f7b7ca50a98eaff24f36bb6c6138056c20ce92db20"
+    },
+    "c3-mutation-director_routing-green.log.gz": {
+      "raw_sha256": "72ec212fc3364f828f1a667dc4ecf83bb6cf478f56f8e992c2bdfe7476279e23",
+      "archive_sha256": "a08bb4233853fcb2da493a9aec747bda1aaf91b0202e08c58b6ff2d0bb44e022"
+    },
+    "c3-mutation-editor_direct_effect_authority-red.log.gz": {
+      "raw_sha256": "e9eba007be89006d521d4030a0eb4eb3ba3da00d40ae4795d061d3d7d9198326",
+      "archive_sha256": "1db51fdc800f23fa9bcf4c27a7f11c69172bc121c2779ab1a5705ce6e19bd077"
+    },
+    "c3-mutation-editor_direct_effect_authority-green.log.gz": {
+      "raw_sha256": "2a213d45294a96bc65ce40da97118973a514da0beabb0dbfeccce2c4690bd4ee",
+      "archive_sha256": "372c40a0f7ea1ac604caba56ae5bf64cc06e83f76f42f9b388d1428158d2cf08"
+    }
+  }
+}

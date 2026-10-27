@@ -133,6 +133,14 @@ impl ProjectAttachment {
         self.authority
             .install_frozen_transition(&ProjectHistoryProof, cut, after, pending)
     }
+    pub(crate) fn install_frozen_checkpoint(
+        &self,
+        cut: &kinewright_core::AcceptedCut,
+        after: kinewright_core::HistorySnapshot,
+    ) -> Result<kinewright_core::AcceptedCut, HistoryError> {
+        self.authority
+            .install_frozen_checkpoint(&ProjectHistoryProof, cut, after)
+    }
     pub fn install_history_transition(
         &self,
         transition: HistoryTransition,

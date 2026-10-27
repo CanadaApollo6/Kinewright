@@ -30,8 +30,9 @@ feature makes it an ordinary test again, so `cargo test -- --ignored` would
 run only the hardware (NVIDIA) lanes; the slow tier therefore selects its
 tests by exact name from the manifest instead. An OS-scoped test uses
 `all(windows, not(feature = "slow-tests"))` (or target_os = "linux") as its cfg_attr condition.
-On the other OS, the fast tier must observe it passing. Both slow tiers run
-the whole manifest, including OS-scoped entries.
+On the other OS, the fast tier must observe it passing. The linux-only and
+windows-only manifest scopes instead name functions compiled only on that OS.
+Both slow tiers run all manifest entries compiled for their platform.
 
 Cargo is run as `cargo`; a caller that needs `nice`, `-j` or other cargo
 arguments passes them after `--` (`slow_tests.py fast -- -j 4`), and libtest
@@ -83,8 +84,9 @@ FFMPEG_PROBE_ADVICE = re.compile(
     r"Consider increasing the value for the 'analyzeduration' \(\d+\) and 'probesize' \(\d+\) options"
 )
 OUTCOME = re.compile(r"^(?:ok|FAILED|ignored)")
-# FFmpeg's lowercase "deprecated pixel format used" warning can also glue on (Windows run 39003986680).
-GLUED_MESSAGE = re.compile(r"[A-Z]|deprecated pixel format used")
+# FFmpeg's lowercase "deprecated pixel format used" warning can also glue on (Windows run 39003986680),
+# as can h264's lowercase "mmco: unref short failure" (Linux run 40486022371).
+GLUED_MESSAGE = re.compile(r"[A-Z]|deprecated pixel format used|mmco: ")
 DOC_TESTS = re.compile(r"^\s*Doc-tests (\S+)")
 
 
@@ -127,7 +129,25 @@ def result_lines(log: str):
     """
     pending = None  # (number, "test name ... ") awaiting its outcome
     probe_advice_pending = False
+    captured = False
     for number, raw in enumerate(log.splitlines(), 1):
+        if re.fullmatch(r"---- .+ (?:stdout|stderr) ----", raw):
+            captured = True
+        if captured:
+            if raw == "successes:" or raw.startswith("test result:"):
+                captured = False
+            else:
+                continue
+        marker = re.search(r"C2_NATIVE_NOT_RUN test=s4_\w+ reason=.+$", raw)
+        if marker:
+            prefix = raw[:marker.start()]
+            if not prefix:
+                continue
+            if re.fullmatch(r"test .+? \.\.\. ", prefix):
+                if pending is not None:
+                    yield pending
+                pending = (number, prefix)
+                continue
         probe_advice = probe_advice_pending and FFMPEG_PROBE_ADVICE.fullmatch(raw)
         probe_advice_pending = bool(FFMPEG_PROBE_MESSAGE.search(raw))
         line = strip_ffmpeg_log(raw)
@@ -149,6 +169,9 @@ def result_lines(log: str):
         # ... No accelerated colorspace conversion ...` then `ok`). Text before a fragment
         # elsewhere on the line is not recognised, and the line keeps its non-outcome.
         head, sep, rest = FFMPEG_LOG_PREFIX.sub("", raw).partition(" ... ")
+        if sep and head.startswith("test ") and not rest:
+            pending = (number, head + sep)
+            continue
         if (
             sep
             and head.startswith("test ")
@@ -175,8 +198,8 @@ def read_entries(path: Path) -> list[tuple[str, str, str, str]]:
         if not binary or len(parts) != 3:
             sys.exit(f"{path}:{number}: want '<binary> <test path> <source file> <os>', got {raw!r}")
         test_path, source_file, scope = parts
-        if scope not in OSES:
-            sys.exit(f"{path}:{number}: os {scope!r} is not one of {', '.join(OSES)}")
+        if scope not in SLOW_SCOPES:
+            sys.exit(f"{path}:{number}: scope {scope!r} is not one of {', '.join(SLOW_SCOPES)}")
         entries.append((binary, test_path, source_file, scope))
     seen = set()
     for entry in entries:
@@ -192,6 +215,7 @@ def read_manifest() -> list[tuple[str, str, str, str]]:
 
 CATEGORIES = ("hardware", "on-demand", "inherited-gap")
 OSES = ("any", "linux", "windows")
+SLOW_SCOPES = (*OSES, "linux-only", "windows-only")
 
 
 def read_allowlist() -> list[dict]:
@@ -321,7 +345,7 @@ def lint_ignored(problems: list[str], slow_keys: set[tuple[str, str]]) -> None:
 
 def lint() -> int:
     entries = read_manifest()
-    listed = {(f, path.rsplit("::", 1)[-1], scope) for _, path, f, scope in entries}
+    listed = {(f, path.rsplit("::", 1)[-1], scope.removesuffix("-only")) for _, path, f, scope in entries}
     marked = marked_tests()
     problems = []
     for file, name, scope in sorted(listed - marked):
@@ -337,6 +361,12 @@ def lint() -> int:
         if not re.search(rf"\bfn\s+{re.escape(name)}\b|\b{re.escape(name)}\s*=>", text):
             problems.append(f"{file} has no {name}")
     lint_ignored(problems, {(b, p) for b, p, _, _ in entries})
+    guardian_source = "crates/kinewright-agent/tests/ja_s4_guardian.rs"
+    guardian_path = ROOT / guardian_source
+    guarded = set(re.findall(r'equipped_session\("(s4_\w+)"\)', guardian_path.read_text())) if guardian_path.is_file() else set()
+    listed_guardians = {p for b, p, f, scope in entries if b == "ja_s4_guardian" and f == guardian_source and scope.startswith("linux")}
+    for name in sorted(guarded - listed_guardians):
+        problems.append(f"equipped-session skip has no slow-tier accounting: {name}")
     if problems:
         print("slow-test manifest, ignored-test allowlist and markers disagree:")
         for problem in problems:
@@ -344,7 +374,8 @@ def lint() -> int:
         return 1
     print(
         f"slow-test manifest and markers agree: {len(entries)} tests, "
-        f"features {feature_list(entries)}; {len(read_ignored())} allowlist entries well-formed"
+        f"features {feature_list(entries)}; {len(read_ignored())} allowlist entries well-formed; "
+        f"{len(guarded)} equipped-session skip sites counted"
     )
     return 0
 
@@ -461,8 +492,8 @@ def verify_fast(log: str, os_name: str | None = None) -> int:
     except UnparsableLog as error:
         return unparsable(error)
     entries = read_manifest()
-    expected = {(b, p) for b, p, _, scope in entries if scope in ("any", os_name)}
-    must_pass = {(b, p) for b, p, _, scope in entries if scope not in ("any", os_name)}
+    expected = {(b, p) for b, p, _, scope in entries if scope in ("any", os_name, os_name + "-only")}
+    must_pass = {(b, p) for b, p, _, scope in entries if scope not in ("any", os_name) and not scope.endswith("-only")}
     outcomes = {}
     for b, p, outcome in rows:
         outcomes.setdefault((b, p), []).append(outcome)
@@ -512,7 +543,9 @@ def verify_slow(log: str) -> int:
         rows = parse(log)
     except UnparsableLog as error:
         return unparsable(error)
-    expected = {(b, p) for b, p, _, _ in read_manifest()}
+    expected = {(b, p) for b, p, _, scope in read_manifest() if not scope.endswith("-only") or scope == host_os() + "-only"}
+    skips = re.findall(r"C2_NATIVE_NOT_RUN test=(s4_\w+) reason=([^\r\n]+)", log)
+    skipped = {("ja_s4_guardian", name) for name, _ in skips}
     outcomes = {}
     for b, p, outcome in rows:
         outcomes.setdefault((b, p), []).append(outcome)
@@ -524,11 +557,14 @@ def verify_slow(log: str) -> int:
         for (b, p), seen in sorted(outcomes.items())
         if len(seen) != 1
     ]
+    problems += [f"unaccounted equipped-session skip: {b} {p}" for b, p in sorted(skipped - expected)]
+    if log.count("C2_NATIVE_NOT_RUN") != len(skips) or len(skips) != len(skipped):
+        problems.append("malformed or duplicate equipped-session skip marker")
     if problems:
         print("slow tier and manifest disagree:")
         print("\n".join("  " + p for p in problems))
         return 1
-    print(f"slow tier ran and passed exactly the {len(expected)} manifest tests")
+    print(f"slow tier accounted for exactly the {len(expected)} manifest tests: {len(expected - skipped)} passed; {len(skipped)} equipped-session NOT RUN")
     return 0
 
 
@@ -592,7 +628,7 @@ def main(argv: list[str]) -> int:
             "--features", feature_list(entries),
             "--lib", "--bins", "--tests",
             *extra,
-            "--", "--exact", *names,
+            "--", "--show-output", "--exact", *names,
         ]
         code, log = run_cargo(cargo)
         if code != 0:

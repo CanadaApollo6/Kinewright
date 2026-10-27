@@ -1,0 +1,272 @@
+[
+  {
+    "name": "M1-candidate-refusal",
+    "command": [
+      "bash",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/c1-cargo.sh",
+      "test",
+      "-p",
+      "kinewright-project",
+      "--features",
+      "test-util",
+      "--test",
+      "ja_s4_candidate",
+      "fu1_",
+      "--",
+      "--test-threads=1"
+    ],
+    "restored_sources": {
+      "crates/kinewright-project/src/editing_session/durable.rs": "d0f941ffbcf6b5c867ac8eca6f823d78206f46c4d4ae95a625c4eddda3013c65",
+      "crates/kinewright-project/src/editing_session.rs": "f2e751d809da3f40add44e8b8d37707f9b418e1caa487b2bd6a82eb485287a91"
+    },
+    "red": [
+      "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.85s"
+    ],
+    "green": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 6.38s"
+    ],
+    "logs": {
+      "fu1-M1-candidate-refusal-red.log.gz": "e30f61a1b338a6be8fb14c64e8cd4a0b20e77b71d5e2b85151e764ffc18d55fd",
+      "fu1-M1-candidate-refusal-green.log.gz": "927d502e6cdc9a8bc962948fd3b9fed0fcca7042d4013a4ab5decb2595f12da1"
+    }
+  },
+  {
+    "name": "M2-production-admission",
+    "command": [
+      "bash",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/c1-cargo.sh",
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--lib",
+      "s4_drain_and_durable_base",
+      "--",
+      "--test-threads=1"
+    ],
+    "restored_sources": {
+      "crates/kinewright-agent/src/server.rs": "00bf1b6d438381156eac45db6bb92e929d56d7235ac02c5b81bdbb320747075f"
+    },
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 724 filtered out; finished in 1.97s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 724 filtered out; finished in 4.53s"
+    ],
+    "logs": {
+      "fu1-M2-production-admission-red.log.gz": "b8cf5a9a2414c9e593d97ec3e8116cd0913bbbbb24431e14f2ca8bf33fa15ee5",
+      "fu1-M2-production-admission-green.log.gz": "30be58b28b6cf946dcc81d5fbdd8cb33374589814ccab25ca2f5c7ecdee9a5a9"
+    }
+  },
+  {
+    "name": "A1-receipt-before-authority",
+    "command": [
+      "bash",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/c1-cargo.sh",
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--lib",
+      "s4_drain_and_durable_base",
+      "--",
+      "--test-threads=1"
+    ],
+    "restored_sources": {
+      "crates/kinewright-agent/src/orchestration/tasks.rs": "16f40acc4925f73e9e517ba356e098d742f4de9211ec5cd925a4830b915b1722"
+    },
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 724 filtered out; finished in 4.12s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 724 filtered out; finished in 4.56s"
+    ],
+    "logs": {
+      "fu1-A1-receipt-before-authority-red.log.gz": "43043a6b178ef97a4989817958033f106219c96c1a783aa5c7a10e02a63c5960",
+      "fu1-A1-receipt-before-authority-green.log.gz": "494d8393808580d460fad65909500120544968cfbd9796669f031c4ea5fe9923"
+    }
+  },
+  {
+    "name": "M4-unknown-branch",
+    "command": [
+      "bash",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/c1-cargo.sh",
+      "test",
+      "-p",
+      "kinewright-project",
+      "--features",
+      "test-util",
+      "--lib",
+      "fu1_unknown_branch",
+      "--",
+      "--test-threads=1"
+    ],
+    "restored_sources": {
+      "crates/kinewright-project/src/bundle_commit.rs": "002887f2151c44c5514e21ce299401c6cccbaa3d2446f880c12a89cf55756c3d"
+    },
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 140 filtered out; finished in 0.39s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 140 filtered out; finished in 0.48s"
+    ],
+    "logs": {
+      "fu1-M4-unknown-branch-red.log.gz": "2a68020607c8308eabec7e76fa296ff9ab6ee7d2eddb06fbbcad08405de0d4c1",
+      "fu1-M4-unknown-branch-green.log.gz": "6bc43ae00829a77388b627e07db7a5fac2784eeec86962bbcd9e4bfe044272d5"
+    }
+  },
+  {
+    "name": "M8-task-close",
+    "command": [
+      "bash",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/c1-cargo.sh",
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--lib",
+      "s4_drain_and_durable_base",
+      "--",
+      "--test-threads=1"
+    ],
+    "restored_sources": {
+      "crates/kinewright-agent/src/orchestration/tasks.rs": "16f40acc4925f73e9e517ba356e098d742f4de9211ec5cd925a4830b915b1722"
+    },
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 724 filtered out; finished in 4.11s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 724 filtered out; finished in 4.51s"
+    ],
+    "logs": {
+      "fu1-M8-task-close-red.log.gz": "21120f5f19d427c216833e3d4920896d91d581a7504b92b9e9f6ab997f1a9f43",
+      "fu1-M8-task-close-green.log.gz": "2b84a1d9257abac04c3e666bdcfec63c8da6405764907d77d5b70d33ace43ed0"
+    }
+  },
+  {
+    "name": "C4-R2-1-background-settlement",
+    "command": [
+      "bash",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/c1-cargo.sh",
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--test",
+      "ja_s4_lifecycle",
+      "fu1_expired_background",
+      "--",
+      "--test-threads=1"
+    ],
+    "restored_sources": {
+      "crates/kinewright-agent/src/orchestration/tasks.rs": "16f40acc4925f73e9e517ba356e098d742f4de9211ec5cd925a4830b915b1722"
+    },
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.27s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.25s"
+    ],
+    "logs": {
+      "fu1-C4-R2-1-background-settlement-red.log.gz": "b0ec7a655afd075e0a6eac1b34efe73c7258ffd75b7421cb9fc165cc348722da",
+      "fu1-C4-R2-1-background-settlement-green.log.gz": "e4ad78e65cc271cf02c960f11556f4c251dc375d21bbe271def296b11d7ff154"
+    }
+  },
+  {
+    "name": "C4-R2-2-cancelled-ready",
+    "command": [
+      "bash",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/c1-cargo.sh",
+      "test",
+      "-p",
+      "kinewright-agent",
+      "--test",
+      "ja_s4_lifecycle",
+      "fu1_cancelled_reviewer",
+      "--",
+      "--test-threads=1"
+    ],
+    "restored_sources": {
+      "crates/kinewright-project/src/orchestration_commit.rs": "e701bf5b5124bd47e9cf6d9c7ef813f673dae8e3aa3dcc4d3d866fa14e1bbaf8"
+    },
+    "red": [
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.27s"
+    ],
+    "green": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.29s"
+    ],
+    "logs": {
+      "fu1-C4-R2-2-cancelled-ready-red.log.gz": "dbce866d1e714c71f36331e16fc391cc08acc2d0c2ef34e36b53bf5080b067a0",
+      "fu1-C4-R2-2-cancelled-ready-green.log.gz": "2b6f8d14bdac820212116cfdaa25695dc16c5da815b4763c07ab4d5d9bada771"
+    }
+  },
+  {
+    "name": "A2-C1-parent",
+    "command": [
+      "nice",
+      "-n",
+      "19",
+      "python3",
+      "-I",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/fu1-audit.py"
+    ],
+    "restored_sources": {
+      "docs/reports/ja1-s4/c1-identities.json": "828414df97edf62f197cf2cf7dbb8ea777ca307a61a37b3ad4b5bbb17f5b0c2e"
+    },
+    "red": [
+      "AssertionError"
+    ],
+    "green": [
+      "FU1 provenance, retained C1 identities, C3 headers and T1 attribution: PASS"
+    ],
+    "logs": {
+      "fu1-A2-C1-parent-red.log.gz": "c5e00e34f4b24f4b4398736da67e857661b701a8b802ca527239b981560d84ed",
+      "fu1-A2-C1-parent-green.log.gz": "e4ea98804307079dd40b352002710a8725dd664198c873e648dd1f3a64cf3da1"
+    }
+  },
+  {
+    "name": "M7-provenance",
+    "command": [
+      "nice",
+      "-n",
+      "19",
+      "python3",
+      "-I",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/fu1-audit.py"
+    ],
+    "restored_sources": {
+      "crates/kinewright-agent/src/orchestration/policy.rs": "a173cdc7e29bce534b7a3db25213a492a29a62493eabcfac9a045b0aa7ababa3",
+      "crates/kinewright-agent/src/orchestration/server_tests.rs": "e097d40d11cd41e9488b7f253f672dd36756557c304cd07e4090e520aaf5e995"
+    },
+    "red": [
+      "AssertionError"
+    ],
+    "green": [
+      "FU1 provenance, retained C1 identities, C3 headers and T1 attribution: PASS"
+    ],
+    "logs": {
+      "fu1-M7-provenance-red.log.gz": "6e03a98e1739fe84e9cf8562e83377cb7b2813e919b5aade9ea48372f9464eb2",
+      "fu1-M7-provenance-green.log.gz": "59c805428645368d2a047ed3309fd5290456ee328a622e7cff9fc6a2c3193a81"
+    }
+  },
+  {
+    "name": "T1-request-owner",
+    "command": [
+      "nice",
+      "-n",
+      "19",
+      "python3",
+      "-I",
+      "/home/riels/.t3/worktrees/Kinewright/t3-f4cb0356/docs/reports/ja1-s4/fu1-audit.py"
+    ],
+    "restored_sources": {
+      "docs/reports/ja1-s4/c4-pre-h3.md": "8a12d3ee6475d31fc4c53b4d79553acc475bfa3be7d6cbc54443f9552c56b114"
+    },
+    "red": [
+      "AssertionError"
+    ],
+    "green": [
+      "FU1 provenance, retained C1 identities, C3 headers and T1 attribution: PASS"
+    ],
+    "logs": {
+      "fu1-T1-request-owner-red.log.gz": "a72e52426a41319524482343deafcb0ac9549a839d0f89b6ac7bed8b4eb59650",
+      "fu1-T1-request-owner-green.log.gz": "eb660544eccb3643dc289367275a7a6d4ef424a075004fae1f1c2ff02090bad5"
+    }
+  }
+]

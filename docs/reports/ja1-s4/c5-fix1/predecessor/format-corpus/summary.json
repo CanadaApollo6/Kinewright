@@ -1,0 +1,666 @@
+{
+  "artifacts": [
+    {
+      "byte_length": 0,
+      "relative_file": "artifacts/source.diff",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "byte_length": 313,
+      "relative_file": "artifacts/source-manifest.json",
+      "sha256": "d1668710a6edcb94f0b0463dfdd34eea18c84b6137a50f9567ad2da67563f776"
+    },
+    {
+      "byte_length": 6764,
+      "relative_file": "artifacts/fixture.json",
+      "sha256": "f53ae88d6d9e75606b46614b6ebe522578fbddebb35fe1152a091ef39feadb02"
+    },
+    {
+      "byte_length": 139,
+      "relative_file": "artifacts/input-0.bin",
+      "sha256": "ad1fafd92abd6983710a2381156ea3be56f89b4dbd8f35e05dcf4294043c6c86"
+    },
+    {
+      "byte_length": 157,
+      "relative_file": "artifacts/input-1.bin",
+      "sha256": "12b18026d46533156e39c2c8d1375399b19001ceb0b547ce4794edb1b3e0a7c6"
+    },
+    {
+      "byte_length": 634,
+      "relative_file": "artifacts/input-2.bin",
+      "sha256": "480be4dc59cbfec90acbfd1830fb204c3875bc2b45f5f8c4848a937ef0935de9"
+    },
+    {
+      "byte_length": 6,
+      "relative_file": "artifacts/input-3.bin",
+      "sha256": "2ed27c1421e6928dbe13dbfdb5c59e1045b30341fe7ebe05700006bc5ac572c0"
+    },
+    {
+      "byte_length": 5,
+      "relative_file": "artifacts/input-4.bin",
+      "sha256": "a17fcf0a2f50e2d495e4f90ce263410edc183add6c62699a2facbccf60410f74"
+    },
+    {
+      "byte_length": 1017,
+      "relative_file": "artifacts/input-5.bin",
+      "sha256": "59611abbbf40aed579dda09a9f7d4900904dc06af7badd96cd475df200062326"
+    },
+    {
+      "byte_length": 1891,
+      "relative_file": "artifacts/input-6.bin",
+      "sha256": "1c7d54a934331bdd929d65b2ff21d9a5d3ced41796ed243ce34efb5ddec8fb55"
+    },
+    {
+      "byte_length": 1391,
+      "relative_file": "artifacts/input-7.bin",
+      "sha256": "b8edf112cd0483a3f2b15a2045d00fbaa30e77c4af025dd6437c77afcb65031c"
+    },
+    {
+      "byte_length": 1385,
+      "relative_file": "artifacts/input-8.bin",
+      "sha256": "e6496b3ef8304e6c3dfb53574e36b4ad9f65fe2482df7eb959e6ddc1ddbb5c32"
+    },
+    {
+      "byte_length": 1165,
+      "relative_file": "artifacts/input-9.bin",
+      "sha256": "9f28a9d1d91973806e1b4245860c8853ac00962c54bdb58465079efd17a768aa"
+    },
+    {
+      "byte_length": 829,
+      "relative_file": "artifacts/observation-1.json",
+      "sha256": "d9976ae735cb137f18c2c6356c4d319f3584b494184f8eab6592585fa9edcaa9"
+    },
+    {
+      "byte_length": 1288,
+      "relative_file": "artifacts/observation-2.json",
+      "sha256": "22f7069b43bd5fa80dc3cf75e2a52ed75ccb02612603308135a1e490469884cb"
+    },
+    {
+      "byte_length": 2655,
+      "relative_file": "artifacts/assertion-0.json",
+      "sha256": "61fc14f650aac4208b644175358b7804ab5569ebd25fe0e4537532eb96186499"
+    },
+    {
+      "byte_length": 2464,
+      "relative_file": "artifacts/observation-4.json",
+      "sha256": "df49a6c71622200d1e3573b2d1a0c85faf06f7a212e5e73b29ae871b8afc90bb"
+    },
+    {
+      "byte_length": 2286,
+      "relative_file": "artifacts/observation-5.json",
+      "sha256": "2dd910296b2253da86caf1d5101fae4f9dbb82949e58841bfd8fe2237a4e57ea"
+    },
+    {
+      "byte_length": 4653,
+      "relative_file": "artifacts/assertion-1.json",
+      "sha256": "e548cea8a8b1c76429cdadcf625e4fea62b4c99f76f50bf3bebfcff11a9877e7"
+    },
+    {
+      "byte_length": 829,
+      "relative_file": "artifacts/observation-7.json",
+      "sha256": "d9976ae735cb137f18c2c6356c4d319f3584b494184f8eab6592585fa9edcaa9"
+    },
+    {
+      "byte_length": 2672,
+      "relative_file": "artifacts/observation-8.json",
+      "sha256": "84397c886e7aaf8f26f25cf244a75e57d83ed0a19bd1c5cc078ffdd792f0ae26"
+    },
+    {
+      "byte_length": 3932,
+      "relative_file": "artifacts/observation-9.json",
+      "sha256": "cb88afada38ec974b30d1245e3f44e292bf9341654719beeb795a6f181b0a56f"
+    },
+    {
+      "byte_length": 1712,
+      "relative_file": "artifacts/observation-10.json",
+      "sha256": "c0e32568bb078760a5ea36dc54b1f1803a28a5fb5f87dcc308cd7c5c7508f5ff"
+    },
+    {
+      "byte_length": 3492,
+      "relative_file": "artifacts/assertion-2.json",
+      "sha256": "e586470a317f81d300c5a927a8adee2ab87d562dc50b002cc07559e95c85519c"
+    },
+    {
+      "byte_length": 2505,
+      "relative_file": "artifacts/observation-12.json",
+      "sha256": "78c1bce780d7ea5839d9f5b846986809e1965bdfedbd9ab7e01974ffa361bb40"
+    },
+    {
+      "byte_length": 3012,
+      "relative_file": "artifacts/observation-13.json",
+      "sha256": "f254fdbb26d09b2da1ea5ea6115e960d15e298907e78e669fceddf506cfa7a03"
+    },
+    {
+      "byte_length": 313,
+      "relative_file": "artifacts/assertion-3.json",
+      "sha256": "f7e0783d4fe2b627e331ee907f8ccb8de338a8ad60d4c39332d7f6457ed52a95"
+    },
+    {
+      "byte_length": 2607,
+      "relative_file": "artifacts/observation-15.json",
+      "sha256": "0dbd708dbcffb8d0cfed5fa7eacc88f5ce49fbed49a803f8ed4a8939fde8bdb1"
+    },
+    {
+      "byte_length": 305,
+      "relative_file": "artifacts/assertion-4.json",
+      "sha256": "df213261154ad9b563b14b5dc83db5521637d1e1701ff947dcbefa5f27d8e1c9"
+    },
+    {
+      "byte_length": 329,
+      "relative_file": "artifacts/assertion-5.json",
+      "sha256": "4f098067633331a71780f013e3d6126a51065b57ce8970c5dfe597542b545276"
+    },
+    {
+      "byte_length": 333,
+      "relative_file": "artifacts/assertion-6.json",
+      "sha256": "5e2532d1013b89e316be4b2c421f9a3306e94b9320d96566015a295a3d34eb25"
+    },
+    {
+      "byte_length": 168,
+      "relative_file": "artifacts/observation-19.json",
+      "sha256": "c46651129f037eeb6d6c7eb7236ea6db486e48de0c14a5fb820fcb37976113b7"
+    },
+    {
+      "byte_length": 314,
+      "relative_file": "artifacts/assertion-7.json",
+      "sha256": "500c4ea1f8e824e29060e9768aaa53ce7e5538ead635a15a2a3fcfe9accf8e2f"
+    },
+    {
+      "byte_length": 334,
+      "relative_file": "artifacts/assertion-8.json",
+      "sha256": "e9a69827a62bd24bf5d2c4368324e97f3666fc07a10284ca21e12ed1daaee777"
+    },
+    {
+      "byte_length": 594,
+      "relative_file": "supervisor-process.json",
+      "sha256": "f6fcf78dab88889908daf40168f2a550ed96eaa561d28440f50ca13bd9c4b656"
+    },
+    {
+      "byte_length": 61,
+      "relative_file": "supervisor-deadline.json",
+      "sha256": "21d39e4caaa4b00c49ec2a6cf440f770601b019510b8df8835605780326512ca"
+    },
+    {
+      "byte_length": 0,
+      "relative_file": "supervisor-stdout.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "byte_length": 0,
+      "relative_file": "supervisor-stderr.txt",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "assertions": [
+    {
+      "artifact": {
+        "byte_length": 2655,
+        "relative_file": "artifacts/assertion-0.json",
+        "sha256": "61fc14f650aac4208b644175358b7804ab5569ebd25fe0e4537532eb96186499"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v1-empty-full-bytes",
+      "observation": 2,
+      "oracle": "v1-empty",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/serialized",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 4653,
+        "relative_file": "artifacts/assertion-1.json",
+        "sha256": "e548cea8a8b1c76429cdadcf625e4fea62b4c99f76f50bf3bebfcff11a9877e7"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v1-legacy-full-bytes",
+      "observation": 5,
+      "oracle": "v1-legacy",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/serialized",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 3492,
+        "relative_file": "artifacts/assertion-2.json",
+        "sha256": "e586470a317f81d300c5a927a8adee2ab87d562dc50b002cc07559e95c85519c"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v2-full-bytes",
+      "observation": 10,
+      "oracle": "v2",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/serialized",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 313,
+        "relative_file": "artifacts/assertion-3.json",
+        "sha256": "f7e0783d4fe2b627e331ee907f8ccb8de338a8ad60d4c39332d7f6457ed52a95"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v2-reopen-bytes",
+      "observation": 13,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/writer_round_trip_equal",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 305,
+        "relative_file": "artifacts/assertion-4.json",
+        "sha256": "df213261154ad9b563b14b5dc83db5521637d1e1701ff947dcbefa5f27d8e1c9"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v3-studio-loads-advisory",
+      "observation": 15,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/loaded",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 329,
+        "relative_file": "artifacts/assertion-5.json",
+        "sha256": "4f098067633331a71780f013e3d6126a51065b57ce8970c5dfe597542b545276"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v3-studio-overwrite-refused-by-ceiling",
+      "observation": 15,
+      "oracle": "false",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/can_overwrite",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 333,
+        "relative_file": "artifacts/assertion-6.json",
+        "sha256": "5e2532d1013b89e316be4b2c421f9a3306e94b9320d96566015a295a3d34eb25"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v3-studio-original-bytes-preserved",
+      "observation": 15,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/original_bytes_unchanged",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 314,
+        "relative_file": "artifacts/assertion-7.json",
+        "sha256": "500c4ea1f8e824e29060e9768aaa53ce7e5538ead635a15a2a3fcfe9accf8e2f"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "unsupported-code-parse-refused",
+      "observation": 19,
+      "oracle": "false",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/loaded",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 334,
+        "relative_file": "artifacts/assertion-8.json",
+        "sha256": "e9a69827a62bd24bf5d2c4368324e97f3666fc07a10284ca21e12ed1daaee777"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "unsupported-code-original-preserved",
+      "observation": 19,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/original_bytes_unchanged",
+      "positive_control": null
+    }
+  ],
+  "disposition": "observed",
+  "elapsed_ns": "1652371629",
+  "exit_code": 0,
+  "fixture_id": "format-corpus",
+  "gates": [
+    {
+      "disposition": "pending_baseline_witness",
+      "fixture_slot": "baseline-slot-JA1-G3",
+      "gate": "JA1.G3",
+      "observer": "Legacy writer corpus, copy order/fault trace, two participant destination contention and exact asset inventories",
+      "owner": "project/JA-1 store and handoff owner",
+      "reason": "Studio graph migration/backup/unknown-kind publication and §8.3's `first_save_failure_undo_live_reader` remain pending JA-1 S1/AW2 P1a. Existing legacy LUT behavior is observed, not fixed in S0; new bundle writes include LUTs in copy-before-root.",
+      "stage": "S1 / AW2 P1a"
+    }
+  ],
+  "lane": "portable",
+  "missing_requirements": null,
+  "mode": "baseline",
+  "observations": [
+    {
+      "action_id": 1,
+      "artifact": {
+        "byte_length": 829,
+        "relative_file": "artifacts/observation-1.json",
+        "sha256": "d9976ae735cb137f18c2c6356c4d319f3584b494184f8eab6592585fa9edcaa9"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 2,
+      "artifact": {
+        "byte_length": 1288,
+        "relative_file": "artifacts/observation-2.json",
+        "sha256": "22f7069b43bd5fa80dc3cf75e2a52ed75ccb02612603308135a1e490469884cb"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 4,
+      "artifact": {
+        "byte_length": 2464,
+        "relative_file": "artifacts/observation-4.json",
+        "sha256": "df49a6c71622200d1e3573b2d1a0c85faf06f7a212e5e73b29ae871b8afc90bb"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 5,
+      "artifact": {
+        "byte_length": 2286,
+        "relative_file": "artifacts/observation-5.json",
+        "sha256": "2dd910296b2253da86caf1d5101fae4f9dbb82949e58841bfd8fe2237a4e57ea"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 7,
+      "artifact": {
+        "byte_length": 829,
+        "relative_file": "artifacts/observation-7.json",
+        "sha256": "d9976ae735cb137f18c2c6356c4d319f3584b494184f8eab6592585fa9edcaa9"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 8,
+      "artifact": {
+        "byte_length": 2672,
+        "relative_file": "artifacts/observation-8.json",
+        "sha256": "84397c886e7aaf8f26f25cf244a75e57d83ed0a19bd1c5cc078ffdd792f0ae26"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 9,
+      "artifact": {
+        "byte_length": 3932,
+        "relative_file": "artifacts/observation-9.json",
+        "sha256": "cb88afada38ec974b30d1245e3f44e292bf9341654719beeb795a6f181b0a56f"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 10,
+      "artifact": {
+        "byte_length": 1712,
+        "relative_file": "artifacts/observation-10.json",
+        "sha256": "c0e32568bb078760a5ea36dc54b1f1803a28a5fb5f87dcc308cd7c5c7508f5ff"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 12,
+      "artifact": {
+        "byte_length": 2505,
+        "relative_file": "artifacts/observation-12.json",
+        "sha256": "78c1bce780d7ea5839d9f5b846986809e1965bdfedbd9ab7e01974ffa361bb40"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 13,
+      "artifact": {
+        "byte_length": 3012,
+        "relative_file": "artifacts/observation-13.json",
+        "sha256": "f254fdbb26d09b2da1ea5ea6115e960d15e298907e78e669fceddf506cfa7a03"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 15,
+      "artifact": {
+        "byte_length": 2607,
+        "relative_file": "artifacts/observation-15.json",
+        "sha256": "0dbd708dbcffb8d0cfed5fa7eacc88f5ce49fbed49a803f8ed4a8939fde8bdb1"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    },
+    {
+      "action_id": 19,
+      "artifact": {
+        "byte_length": 168,
+        "relative_file": "artifacts/observation-19.json",
+        "sha256": "c46651129f037eeb6d6c7eb7236ea6db486e48de0c14a5fb820fcb37976113b7"
+      },
+      "participant": "main",
+      "reply_delivered": true
+    }
+  ],
+  "pending": [],
+  "positive_controls": [
+    {
+      "artifact": {
+        "byte_length": 2655,
+        "relative_file": "artifacts/assertion-0.json",
+        "sha256": "61fc14f650aac4208b644175358b7804ab5569ebd25fe0e4537532eb96186499"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v1-empty-full-bytes",
+      "observation": 2,
+      "oracle": "v1-empty",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/serialized",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 4653,
+        "relative_file": "artifacts/assertion-1.json",
+        "sha256": "e548cea8a8b1c76429cdadcf625e4fea62b4c99f76f50bf3bebfcff11a9877e7"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v1-legacy-full-bytes",
+      "observation": 5,
+      "oracle": "v1-legacy",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/serialized",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 3492,
+        "relative_file": "artifacts/assertion-2.json",
+        "sha256": "e586470a317f81d300c5a927a8adee2ab87d562dc50b002cc07559e95c85519c"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v2-full-bytes",
+      "observation": 10,
+      "oracle": "v2",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/serialized",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 313,
+        "relative_file": "artifacts/assertion-3.json",
+        "sha256": "f7e0783d4fe2b627e331ee907f8ccb8de338a8ad60d4c39332d7f6457ed52a95"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v2-reopen-bytes",
+      "observation": 13,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/writer_round_trip_equal",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 305,
+        "relative_file": "artifacts/assertion-4.json",
+        "sha256": "df213261154ad9b563b14b5dc83db5521637d1e1701ff947dcbefa5f27d8e1c9"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v3-studio-loads-advisory",
+      "observation": 15,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/loaded",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 329,
+        "relative_file": "artifacts/assertion-5.json",
+        "sha256": "4f098067633331a71780f013e3d6126a51065b57ce8970c5dfe597542b545276"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v3-studio-overwrite-refused-by-ceiling",
+      "observation": 15,
+      "oracle": "false",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/can_overwrite",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 333,
+        "relative_file": "artifacts/assertion-6.json",
+        "sha256": "5e2532d1013b89e316be4b2c421f9a3306e94b9320d96566015a295a3d34eb25"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "v3-studio-original-bytes-preserved",
+      "observation": 15,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/original_bytes_unchanged",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 314,
+        "relative_file": "artifacts/assertion-7.json",
+        "sha256": "500c4ea1f8e824e29060e9768aaa53ce7e5538ead635a15a2a3fcfe9accf8e2f"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "unsupported-code-parse-refused",
+      "observation": 19,
+      "oracle": "false",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/loaded",
+      "positive_control": null
+    },
+    {
+      "artifact": {
+        "byte_length": 334,
+        "relative_file": "artifacts/assertion-8.json",
+        "sha256": "e9a69827a62bd24bf5d2c4368324e97f3666fc07a10284ca21e12ed1daaee777"
+      },
+      "assertion": "actual == independently frozen expected",
+      "comparison": "equal",
+      "disposition": "pass_control",
+      "evidence_class": "control",
+      "id": "unsupported-code-original-preserved",
+      "observation": 19,
+      "oracle": "true",
+      "oracle_pointer": "",
+      "passed": true,
+      "pointer": "/original_bytes_unchanged",
+      "positive_control": null
+    }
+  ],
+  "protocol": "kinewright.ja-harness",
+  "protocol_version": 1,
+  "run_id": "2546828-1793113548030814918"
+}

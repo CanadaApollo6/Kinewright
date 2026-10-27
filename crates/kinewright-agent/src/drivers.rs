@@ -2,7 +2,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{BufRead as _, BufReader, Write as _},
+    io::BufReader,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command as ProcessCommand, Stdio},
     sync::{
@@ -12,7 +12,10 @@ use std::{
     thread,
 };
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
+use crate::protocol::limits::{
+    EventSender as Sender, Frames, event_channel, stderr_capture, write_frame,
+};
+use crossbeam_channel::Receiver;
 use kinewright_core::{
     AgentDriver, AgentError, AgentEvent, AgentSession, AuthenticationStatus, HarnessId,
     HarnessInfo, SessionConfig,
@@ -20,9 +23,7 @@ use kinewright_core::{
 use serde_json::{Value, json};
 
 use crate::{
-    child_process::{
-        create_scratch_directory, hide_console_window, process_output, spawn_stderr_capture,
-    },
+    child_process::{create_scratch_directory, hide_console_window, process_output},
     compact_tool_names,
     protocol::{ClaudeProtocol, CodexProtocol},
 };
@@ -247,7 +248,7 @@ struct ClaudeSession {
     child: Arc<Mutex<Child>>,
     stdin: Arc<Mutex<ChildStdin>>,
     events_rx: Receiver<AgentEvent>,
-    events_tx: Sender<AgentEvent>,
+    events_tx: Sender,
     done: Arc<AtomicBool>,
     assistant_turns: Arc<AtomicU32>,
 }
@@ -278,7 +279,7 @@ impl ClaudeSession {
 
         let child = Arc::new(Mutex::new(child));
         let stdin = Arc::new(Mutex::new(stdin));
-        let (events_tx, events_rx) = unbounded();
+        let (events_tx, events_rx) = event_channel();
         let done = Arc::new(AtomicBool::new(true));
         let assistant_turns = Arc::new(AtomicU32::new(0));
         spawn_claude_reader(
@@ -320,9 +321,9 @@ struct CodexSession {
     scratch_directory: PathBuf,
     model_catalog_directory: PathBuf,
     model_catalog_path: PathBuf,
-    child: Arc<Mutex<Option<Child>>>,
+    child: Arc<Mutex<Option<(u32, Child)>>>,
     events_rx: Receiver<AgentEvent>,
-    events_tx: Sender<AgentEvent>,
+    events_tx: Sender,
     done: Arc<AtomicBool>,
 }
 
@@ -342,7 +343,7 @@ impl CodexSession {
                     return Err(error);
                 }
             };
-        let (events_tx, events_rx) = unbounded();
+        let (events_tx, events_rx) = event_channel();
         Ok(Self {
             target,
             endpoint,
@@ -365,7 +366,7 @@ impl CodexSession {
 
     fn kill_current(&self) {
         if let Ok(mut child) = self.child.lock()
-            && let Some(child) = child.as_mut()
+            && let Some((_, child)) = child.as_mut()
         {
             if child.try_wait().ok().flatten().is_none() {
                 let _ = child.kill();
@@ -381,6 +382,12 @@ fn configured_tool_names(cfg: &SessionConfig) -> Vec<String> {
 
 impl AgentSession for CodexSession {
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError> {
+        if self.events_tx.failed() {
+            return Err(AgentError::Protocol("ingress: interrupted".into()));
+        }
+        if text.len() > crate::protocol::limits::FRAME_BYTES / 2 {
+            return Err(AgentError::Protocol("ingress: prompt_capacity".into()));
+        }
         if text.trim().is_empty() {
             return Err(AgentError::Protocol("user message is empty".to_owned()));
         }
@@ -391,24 +398,30 @@ impl AgentSession for CodexSession {
                 "Turn cap reached ({cap}); start a new Codex session to continue."
             )));
         }
-        {
-            let mut child = self
-                .child
-                .lock()
-                .map_err(|_| AgentError::Harness("Codex child lock was poisoned".to_owned()))?;
-            if let Some(process) = child.as_mut()
-                && process
-                    .try_wait()
-                    .map_err(|error| AgentError::Harness(error.to_string()))?
-                    .is_none()
-            {
-                return Err(AgentError::Harness(
-                    "Codex is still processing the previous turn".to_owned(),
-                ));
-            }
+        if !self.done.load(Ordering::Acquire) {
+            return Err(AgentError::Harness(
+                "Codex is still processing the previous turn".into(),
+            ));
         }
-
+        let reader_turn = self
+            .turns
+            .checked_add(1)
+            .ok_or_else(|| AgentError::Protocol("Codex turn identity exhausted".into()))?;
+        let context_bytes = self
+            .prior_requests
+            .iter()
+            .try_fold(text.len(), |bytes, prior| {
+                bytes
+                    .checked_add(prior.len())
+                    .and_then(|n| n.checked_add(32))
+            });
+        if context_bytes.is_none_or(|bytes| bytes > crate::protocol::limits::FRAME_BYTES / 2) {
+            return Err(AgentError::Protocol("ingress: prompt_capacity".into()));
+        }
         let prompt = codex_prompt(&self.prior_requests, &text);
+        if prompt.len() > crate::protocol::limits::FRAME_BYTES {
+            return Err(AgentError::Protocol("ingress: prompt_capacity".into()));
+        }
         let mut command = build_codex_command(
             &self.target,
             &self.endpoint,
@@ -420,6 +433,20 @@ impl AgentSession for CodexSession {
             &self.tool_names,
             &prompt,
         );
+        let mut slot = self
+            .child
+            .lock()
+            .map_err(|_| AgentError::Harness("Codex child lock was poisoned".into()))?;
+        if let Some((_, process)) = slot.as_mut()
+            && process
+                .try_wait()
+                .map_err(|e| AgentError::Harness(e.to_string()))?
+                .is_none()
+        {
+            return Err(AgentError::Harness(
+                "Codex is still processing the previous turn".into(),
+            ));
+        }
         let mut process = command
             .spawn()
             .map_err(|error| AgentError::Harness(format!("could not start Codex: {error}")))?;
@@ -431,24 +458,22 @@ impl AgentSession for CodexSession {
             .stderr
             .take()
             .ok_or_else(|| AgentError::Harness("Codex stderr was not available".to_owned()))?;
-        *self
-            .child
-            .lock()
-            .map_err(|_| AgentError::Harness("Codex child lock was poisoned".to_owned()))? =
-            Some(process);
+        *slot = Some((reader_turn, process));
         self.done.store(false, Ordering::Release);
+        drop(slot);
         if let Err(error) = spawn_codex_reader(
             stdout,
             stderr,
             Arc::clone(&self.child),
             self.events_tx.clone(),
             Arc::clone(&self.done),
+            reader_turn,
         ) {
             self.kill_current();
             return Err(error);
         }
         self.prior_requests.push(text);
-        self.turns += 1;
+        self.turns = reader_turn;
         Ok(())
     }
 
@@ -616,16 +641,22 @@ fn build_codex_command(
 fn spawn_codex_reader(
     stdout: impl std::io::Read + Send + 'static,
     stderr: impl std::io::Read + Send + 'static,
-    child: Arc<Mutex<Option<Child>>>,
-    events: Sender<AgentEvent>,
+    child: Arc<Mutex<Option<(u32, Child)>>>,
+    events: Sender,
     done: Arc<AtomicBool>,
-) -> Result<(), AgentError> {
-    let stderr_reader = spawn_stderr_capture(stderr, "kinewright-codex-stderr")?;
+    reader_turn: u32,
+) -> Result<thread::JoinHandle<()>, AgentError> {
+    let stderr_reader = stderr_capture(stderr, "kinewright-codex-stderr")?;
     thread::Builder::new()
         .name("kinewright-codex-events".to_owned())
         .spawn(move || {
             let mut protocol = CodexProtocol::default();
-            for line in BufReader::new(stdout).lines() {
+            for line in Frames::new(stdout) {
+                let Ok(active)=child.lock() else {break;};
+                if !matches!(active.as_ref(),Some((active_turn,_)) if *active_turn == reader_turn) {break;}
+                if events.failed() {
+                    break;
+                }
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
@@ -637,23 +668,30 @@ fn spawn_codex_reader(
                 match protocol.parse_line(&line) {
                     Ok(parsed) => {
                         for event in parsed {
-                            if event == AgentEvent::Done {
-                                send_done(&events, &done);
-                            } else {
+                            if event != AgentEvent::Done {
                                 let _ = events.send(event);
                             }
                         }
                     }
                     Err(error) => {
+                        let capacity=matches!(&error, AgentError::Protocol(reason) if reason.starts_with("ingress:"));
                         let _ = events.send(AgentEvent::Error(error.to_string()));
+                        if capacity { break; }
                     }
                 }
+                if events.failed() {
+                    break;
+                }
             }
-            let status = child
-                .lock()
-                .ok()
-                .and_then(|mut child| child.as_mut().and_then(|child| child.wait().ok()));
+            let status=child.lock().ok().and_then(|mut slot| {
+                let (active_turn,process)=slot.as_mut()?;
+                if *active_turn != reader_turn { return None; }
+                if process.try_wait().ok().flatten().is_none() {let _=process.kill();}
+                process.wait().ok()
+            });
             let stderr_text = stderr_reader.join().unwrap_or_default();
+            let Ok(active)=child.lock() else {return;};
+            if !matches!(active.as_ref(),Some((active_turn,_)) if *active_turn == reader_turn) {return;}
             if !done.load(Ordering::Acquire)
                 && let Some(status) = status
                 && !status.success()
@@ -668,7 +706,6 @@ fn spawn_codex_reader(
             }
             send_done(&events, &done);
         })
-        .map(|_| ())
         .map_err(|error| AgentError::Harness(error.to_string()))
 }
 
@@ -748,6 +785,12 @@ fn force_direct_tool_mode(catalog: &mut Value) -> Result<(), AgentError> {
 
 impl AgentSession for ClaudeSession {
     fn send_user_message(&mut self, text: String) -> Result<(), AgentError> {
+        if self.events_tx.failed() {
+            return Err(AgentError::Protocol("ingress: interrupted".into()));
+        }
+        if text.len() > crate::protocol::limits::FRAME_BYTES / 2 {
+            return Err(AgentError::Protocol("ingress: prompt_capacity".into()));
+        }
         if text.trim().is_empty() {
             return Err(AgentError::Protocol("user message is empty".to_owned()));
         }
@@ -774,12 +817,7 @@ impl AgentSession for ClaudeSession {
             .stdin
             .lock()
             .map_err(|_| AgentError::Harness("Claude stdin lock was poisoned".to_owned()))?;
-        serde_json::to_writer(&mut *stdin, &message)
-            .map_err(|error| AgentError::Protocol(error.to_string()))?;
-        stdin
-            .write_all(b"\n")
-            .and_then(|()| stdin.flush())
-            .map_err(|error| AgentError::Harness(format!("could not send to Claude: {error}")))
+        write_frame(&mut *stdin, &message)
     }
 
     fn events(&self) -> Receiver<AgentEvent> {
@@ -802,7 +840,7 @@ impl Drop for ClaudeSession {
 fn spawn_claude_reader(
     stdout: impl std::io::Read + Send + 'static,
     child: Arc<Mutex<Child>>,
-    events: Sender<AgentEvent>,
+    events: Sender,
     done: Arc<AtomicBool>,
     assistant_turns: Arc<AtomicU32>,
     max_turns: Option<u32>,
@@ -811,7 +849,10 @@ fn spawn_claude_reader(
         .name("kinewright-claude-events".to_owned())
         .spawn(move || {
             let mut protocol = ClaudeProtocol::default();
-            for line in BufReader::new(stdout).lines() {
+            for line in Frames::new(stdout) {
+                if events.failed() {
+                    break;
+                }
                 let line = match line {
                     Ok(line) => line,
                     Err(error) => {
@@ -844,9 +885,17 @@ fn spawn_claude_reader(
                         }
                     }
                     Err(error) => {
+                        let capacity=matches!(&error, AgentError::Protocol(reason) if reason.starts_with("ingress:"));
                         let _ = events.send(AgentEvent::Error(error.to_string()));
+                        if capacity { break; }
                     }
                 }
+                if events.failed() {
+                    break;
+                }
+            }
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
             }
             if !done.load(Ordering::Acquire) {
                 let status = child.lock().ok().and_then(|mut child| child.wait().ok());
@@ -871,7 +920,7 @@ fn is_claude_assistant_message(line: &str) -> bool {
         == Some("assistant")
 }
 
-fn send_done(events: &Sender<AgentEvent>, done: &AtomicBool) {
+fn send_done(events: &Sender, done: &AtomicBool) {
     if !done.swap(true, Ordering::AcqRel) {
         let _ = events.send(AgentEvent::Done);
     }
@@ -1043,6 +1092,91 @@ pub(crate) fn find_on_path(executable: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn s4_codex_old_reader_cannot_retire_a_new_turn() {
+        struct HeldEof {
+            bytes: std::io::Cursor<Vec<u8>>,
+            release: Arc<std::sync::Barrier>,
+        }
+        impl std::io::Read for HeldEof {
+            fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.bytes.read(output)?;
+                if n == 0 {
+                    self.release.wait();
+                }
+                Ok(n)
+            }
+        }
+        struct OwnedSlot(Arc<Mutex<Option<(u32, Child)>>>);
+        impl Drop for OwnedSlot {
+            fn drop(&mut self) {
+                if let Ok(mut slot) = self.0.lock()
+                    && let Some((_, child)) = slot.as_mut()
+                {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let hold = || {
+            ProcessCommand::new("sh")
+                .args(["-c", "exec sleep 30"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let child = Arc::new(Mutex::new(Some((1, hold()))));
+        let _owner = OwnedSlot(Arc::clone(&child));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let (sender, events) = event_channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let reader=spawn_codex_reader(HeldEof {bytes:std::io::Cursor::new(b"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}\n".to_vec()),release:Arc::clone(&release)},std::io::empty(),Arc::clone(&child),sender,Arc::clone(&done),1).unwrap();
+        assert!(matches!(
+            events
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            AgentEvent::Cost {
+                input_tokens: 1,
+                output_tokens: 2,
+                ..
+            }
+        ));
+        let done_before_cleanup = done.load(Ordering::Acquire);
+        {
+            let mut slot = child.lock().unwrap();
+            let (_, old) = slot.as_mut().unwrap();
+            let _ = old.kill();
+            old.wait().unwrap();
+            *slot = Some((2, hold()));
+        }
+        release.wait();
+        reader.join().unwrap();
+        assert!(
+            !done_before_cleanup,
+            "Done follows cleanup of the original turn"
+        );
+        assert!(
+            child
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .1
+                .try_wait()
+                .unwrap()
+                .is_none(),
+            "the replacement process stays alive"
+        );
+        assert!(!done.load(Ordering::Acquire));
+        assert!(
+            events.try_recv().is_err(),
+            "the old reader emits no new-turn terminal event"
+        );
+    }
 
     #[test]
     fn driver_ids_match_the_public_harness_names() {

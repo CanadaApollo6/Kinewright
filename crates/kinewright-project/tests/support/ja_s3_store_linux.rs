@@ -553,6 +553,55 @@ fn s3_indexes_survive_all_root_producers() {
         Event::DocumentChanged { .. }
     ));
     session.persist_durable_branch(&mut guard).unwrap();
+    let binding = session.candidate_binding(guard.branch_id()).unwrap();
+    let mut specialist = session
+        .fork_registered_from_candidate(&binding, "S4 candidate merge")
+        .unwrap();
+    assert!(matches!(
+        specialist
+            .core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: true,
+            }))
+            .unwrap(),
+        Event::DocumentChanged { .. }
+    ));
+    let frozen = session
+        .freeze_registered_candidate(&mut specialist)
+        .unwrap();
+    let issuer = session
+        .issue_manual_lease("S4 candidate".into(), "candidate-private".into())
+        .unwrap()
+        .issuer;
+    let command = session
+        .candidate_merge_envelope(
+            &frozen,
+            CommandId {
+                issuer,
+                sequence: 1,
+            },
+        )
+        .unwrap();
+    committed(session.commit_candidate(&frozen, &command).unwrap());
+    assert!(guard.core().export_history().unwrap().document.tracks[0].sync_lock);
+    let published = LoadedBundle::read(&path).unwrap();
+    let published = published.root().unwrap();
+    assert_eq!(
+        (
+            &published.version_index_ref,
+            &published.feedback_index_ref,
+            &published.run_index_ref,
+            &published.claim_index_ref,
+        ),
+        (
+            &old.version_index_ref,
+            &old.feedback_index_ref,
+            &old.run_index_ref,
+            &old.claim_index_ref,
+        ),
+        "S3_S4_CANDIDATE_INDEX_PRESERVATION"
+    );
     assert!(
         session
             .read_submitted_batch(&batch)
