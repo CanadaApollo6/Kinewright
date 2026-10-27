@@ -17,6 +17,8 @@ use super::{
 
 /// H1 stages this typed record with the returned projection, in the same cut.
 /// A provider's final text cannot call this port or make a task ready.
+/// A coalesced wake delivers every `DeliveryRecord` whose `wake` equals the effect
+/// ID. Its `payload` names only the first result, not the full delivery set.
 #[allow(
     clippy::too_many_lines,
     reason = "one atomic result and generation proposal"
@@ -142,6 +144,7 @@ pub fn result_and_delivery(
     if let Some(wake) = wake {
         next.effects.push(wake);
     }
+    super::tasks::refresh_wait(&mut next);
     Ok(next)
 }
 

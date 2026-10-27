@@ -1325,11 +1325,20 @@ fn s4_observed_and_cancelled_siblings_settle_one_wake() {
 }
 
 #[test]
+fn s4_async_question_response_uses_acknowledged_owner() {
+    async_question_response_cases(&[0, 1, 2, 3]);
+}
+
+#[test]
+fn fu2_repeated_pending_request_uses_acknowledged_owner() {
+    async_question_response_cases(&[4]);
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "asynchronous owner acknowledgment, expiry and cancellation share the real pump fixture"
+    reason = "asynchronous owner acknowledgment and repeated polls share the real pump fixture"
 )]
-fn s4_async_question_response_uses_acknowledged_owner() {
+fn async_question_response_cases(modes: &[u8]) {
     use kinewright_core::{
         AgentError, AgentSession, RuntimeRequest as LiveRequest, RuntimeRequestBinding,
         RuntimeRequestKind, RuntimeResponse, RuntimeResponseControl,
@@ -1337,7 +1346,8 @@ fn s4_async_question_response_uses_acknowledged_owner() {
     use std::sync::{Mutex, atomic::Ordering};
     struct Session {
         binding: Arc<Mutex<Option<RuntimeRequestBinding>>>,
-        request: Option<LiveRequest>,
+        requests: VecDeque<LiveRequest>,
+        polls: usize,
         acknowledged: Arc<AtomicBool>,
         responses: usize,
         tx: crossbeam_channel::Sender<AgentEvent>,
@@ -1354,7 +1364,9 @@ fn s4_async_question_response_uses_acknowledged_owner() {
             assert!(self.acknowledged.load(Ordering::SeqCst));
         }
         fn poll_runtime_request(&mut self) -> Result<Option<LiveRequest>, AgentError> {
-            Ok(self.request.take())
+            let request = self.requests.pop_front();
+            self.polls += usize::from(request.is_some());
+            Ok(request)
         }
         fn runtime_request_binding(&self) -> Option<RuntimeRequestBinding> {
             self.binding.lock().unwrap().clone()
@@ -1452,7 +1464,7 @@ fn s4_async_question_response_uses_acknowledged_owner() {
     fn text_id<T: serde::Serialize>(id: &T) -> String {
         serde_json::to_value(id).unwrap().as_str().unwrap().into()
     }
-    for mode in 0..4 {
+    for &mode in modes {
         let mut owner = ContractOwner::new();
         let root = owner.root();
         owner.begin(&root, 21, TurnPurpose::Work);
@@ -1479,7 +1491,12 @@ fn s4_async_question_response_uses_acknowledged_owner() {
         let (sender, queue) = kinewright_agent::studio_response_queue();
         let mut session = Session {
             binding: binding.clone(),
-            request: Some(request),
+            requests: if mode == 4 {
+                VecDeque::from([request.clone(), request])
+            } else {
+                VecDeque::from([request])
+            },
+            polls: 0,
             acknowledged: acknowledged.clone(),
             responses: 0,
             tx,
@@ -1516,9 +1533,10 @@ fn s4_async_question_response_uses_acknowledged_owner() {
             &cancel,
             &mut observer,
         );
-        if mode == 0 {
+        if mode == 0 || mode == 4 {
             assert_eq!(stop, SessionStop::Completed);
             assert_eq!(session.responses, 1);
+            assert_eq!(session.polls, if mode == 4 { 2 } else { 1 });
             assert!(
                 observer.owner.state().tasks[0]
                     .progress
@@ -1654,4 +1672,147 @@ fn fu1_expired_background_settles_only_after_native_cleanup() {
             assert!(orchestration::tasks::ready(owner.state(), &root));
         })],
     );
+}
+
+#[test]
+fn fu2_late_expiry_preserves_replacement_and_finished_phase() {
+    let mut owner = ContractOwner::new();
+    let root = owner.root();
+    let first = owner.begin(&root, 21, TurnPurpose::Work);
+    owner
+        .apply(OrchestrationCommand::ExpireSession(first.session.clone()))
+        .unwrap();
+    let mut cleaned = owner.state().clone();
+    cleaned.attempts[0].state = AttemptState::Retired(AttemptOutcome::Interrupted);
+    orchestration::tasks::refresh_cleanup(&mut cleaned);
+    owner.kernel = Kernel::from_acknowledged(cleaned).unwrap();
+    let replacement = owner.begin(&root, 22, TurnPurpose::Work);
+    let before = owner.state().clone();
+    let effect = orchestration::outbox::next_effect(&before, &before.effects[0].lane).cloned();
+    assert!(effect.is_some());
+    assert_eq!(
+        owner.apply(OrchestrationCommand::ExpireSession(first.session)),
+        Err(Refusal::InvalidState)
+    );
+    assert_eq!(owner.state(), &before);
+    assert_eq!(
+        owner.state().tasks[0].progress.turn.as_ref(),
+        Some(&replacement)
+    );
+    assert_eq!(
+        orchestration::outbox::next_effect(owner.state(), &before.effects[0].lane),
+        effect.as_ref()
+    );
+    owner
+        .apply(OrchestrationCommand::ControlRun(RunIntent {
+            command_id: owner
+                .command_envelope(OrchestrationCommand::WaitTimeout(root.clone()))
+                .id,
+            run_id: owner.state().run.clone(),
+            expected_control_revision: owner.state().control_revision.clone(),
+            action: RunAction::Stop,
+        }))
+        .unwrap();
+    let finished = owner.state().clone();
+    assert_eq!(
+        owner.apply(OrchestrationCommand::ExpireSession(replacement.session)),
+        Err(Refusal::InvalidState)
+    );
+    assert_eq!(owner.state(), &finished);
+    assert_eq!(owner.state().phase, RunPhase::Finished);
+}
+
+#[test]
+fn fu2_terminal_runs_refuse_owner_lifecycle_commands() {
+    let mut owner = ContractOwner::new();
+    let root = owner.root();
+    let turn = owner.begin(&root, 21, TurnPurpose::Work);
+    owner
+        .apply(OrchestrationCommand::ExpireSession(turn.session.clone()))
+        .unwrap();
+    let mut terminal = owner.state().clone();
+    terminal.attempts[0].state = AttemptState::Retired(AttemptOutcome::Interrupted);
+    orchestration::tasks::refresh_cleanup(&mut terminal);
+    terminal.phase = RunPhase::Finished;
+    for outcome in [
+        RunOutcome::Failed(OutcomeDetail {
+            code: "fixture_failure".into(),
+            detail_ref: None,
+        }),
+        RunOutcome::Cancelled(OutcomeDetail {
+            code: "fixture_cancel".into(),
+            detail_ref: None,
+        }),
+        RunOutcome::Ready,
+    ] {
+        terminal.outcome = outcome;
+        terminal.tasks[0].state = TaskState::Terminal(reference(920, RecordKind::RunIndex));
+        for effect in &mut terminal.effects {
+            effect.state = EffectState::Disposed;
+        }
+        validate_projection(&terminal).unwrap();
+        owner.kernel = Kernel::from_acknowledged(terminal.clone()).unwrap();
+        for command in [
+            OrchestrationCommand::SettleExpiredBackground(turn.clone()),
+            OrchestrationCommand::RecordContext {
+                task: root.clone(),
+                feedback: vec![reference(921, RecordKind::OwnedData)],
+                decisions: vec![],
+            },
+            OrchestrationCommand::WaitTimeout(root.clone()),
+            OrchestrationCommand::CancelTask(root.clone()),
+        ] {
+            assert_eq!(owner.apply(command), Err(Refusal::InvalidState));
+            assert_eq!(owner.state(), &terminal);
+        }
+    }
+}
+
+#[test]
+fn fu2_wait_tracks_questions_children_and_deliveries() {
+    let mut owner = ContractOwner::new();
+    let root = owner.root();
+    let director = owner.begin(&root, 21, TurnPurpose::Work);
+    let child = owner.assign(&root, Role::Reviewer).unwrap();
+    let turn = owner.begin(&child, 22, TurnPurpose::Work);
+    let question = owner.question(&child, 930);
+    owner
+        .apply(OrchestrationCommand::Request(RuntimeRequest::Question(
+            question.clone(),
+        )))
+        .unwrap();
+    assert_eq!(owner.state().wait, RunWait::Question(question.id.clone()));
+    owner
+        .apply(OrchestrationCommand::AnswerQuestion(AnswerQuestion {
+            question: question.id,
+            answer: reference(931, RecordKind::OwnedData),
+        }))
+        .unwrap();
+    assert_eq!(owner.state().wait, RunWait::None);
+    owner
+        .apply(OrchestrationCommand::EndTurn(director.clone()))
+        .unwrap();
+    assert_eq!(owner.state().wait, RunWait::Children(vec![child.clone()]));
+    owner.apply(OrchestrationCommand::EndTurn(turn)).unwrap();
+    owner
+        .apply(OrchestrationCommand::FreezeTask(child.clone()))
+        .unwrap();
+    let followup = owner.begin(&root, 23, TurnPurpose::Work);
+    assert_eq!(owner.state().wait, RunWait::None);
+    owner.result(&child, 940).unwrap();
+    assert_eq!(owner.state().wait, RunWait::Children(vec![child]));
+    owner
+        .apply(OrchestrationCommand::OfferDeliveries(
+            root,
+            followup.attempt,
+        ))
+        .unwrap();
+    owner
+        .apply(OrchestrationCommand::ObserveDelivery(
+            owner.state().deliveries[0].id.clone(),
+        ))
+        .unwrap();
+    assert_eq!(owner.state().wait, RunWait::None);
+    assert!(matches!(owner.state().cleanup, RunCleanup::Pending(_)));
+    validate_projection(owner.state()).unwrap();
 }

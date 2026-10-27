@@ -303,7 +303,13 @@ impl Ja1EditingSession {
             if pending.envelope != *envelope {
                 return Err(BundleError::Unsettled);
             }
-            self.reconcile_active()?;
+            if let Err(error) = self.reconcile_active() {
+                return match self.active_bundle()?.receipt_lookup(envelope)? {
+                    receipt @ (crate::receipts::ReceiptLookup::Committed(_)
+                    | crate::receipts::ReceiptLookup::Retired(_)) => Ok(receipt),
+                    _ => Err(error),
+                };
+            }
         }
         let bundle = self.active_bundle()?;
         let previous = bundle.receipt_lookup(envelope)?;
@@ -355,7 +361,10 @@ impl Ja1EditingSession {
             false,
             &target,
         );
-        if result.is_ok() || (!bundle.unsettled && bundle.pending_command.is_none()) {
+        if result.is_ok() {
+            // Settlement can retry through reconcile_active without hiding a durable receipt.
+            let _ = self.settle_pending_candidate();
+        } else if !bundle.unsettled && bundle.pending_command.is_none() {
             self.settle_pending_candidate()?;
         }
         result
@@ -370,7 +379,13 @@ impl Ja1EditingSession {
         let bundle = self.active_bundle_mut()?;
         let attachment = bundle.attach_core(&core)?;
         let cut = match bundle.receipt_lookup(&envelope)? {
-            crate::receipts::ReceiptLookup::Committed(_) => {
+            crate::receipts::ReceiptLookup::Committed(_)
+            | crate::receipts::ReceiptLookup::Retired(_) => {
+                #[cfg(any(test, feature = "test-util"))]
+                crate::io_observer::check_failure(
+                    "candidate_settlement",
+                    &bundle.store.resolved_root()?,
+                )?;
                 let after = bundle.branch_history(&envelope.target_branch)?;
                 attachment
                     .install_frozen_checkpoint(&cut, (*after).clone())
@@ -763,4 +778,124 @@ pub fn specialist_floor_delta_from_baseline(
         }
     }
     Ok(base.full_applied_delta[..split].to_vec())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod fu2_tests {
+    use super::*;
+    use crate::{
+        receipts::{CommandId, ReceiptLookup},
+        storage_budget::StorageLimits,
+    };
+    use kinewright_core::{AttachmentState, Operation, Track, TrackId, TrackKind};
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one candidate settlement and manual-history oracle across issuer retirement"
+    )]
+    fn fu2_candidate_settlement_recovers_retired_receipt_without_masking_commit() {
+        let root = kinewright_media::test_support::workspace_target_dir().join("fu2-unit");
+        let temp =
+            kinewright_media::test_support::TempDirectory::new_in(&root, "retired-candidate");
+        let core = Core::spawn(Document {
+            tracks: vec![Track {
+                id: TrackId(1),
+                kind: TrackKind::Video,
+                sync_lock: true,
+                clips: vec![],
+            }],
+            ..Document::default()
+        })
+        .unwrap();
+        let mut owner =
+            Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+        owner
+            .first_save(&temp.path("project.kinewright"), StorageLimits::default())
+            .unwrap();
+        let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+        owner.persist_durable_branch(&mut candidate).unwrap();
+        let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
+        let mut specialist = owner
+            .fork_registered_from_candidate(&binding, "Editor")
+            .unwrap();
+        specialist
+            .core()
+            .request(Command::Do(Operation::SetTrackSyncLock {
+                track: TrackId(1),
+                locked: false,
+            }))
+            .unwrap();
+        let frozen = owner.freeze_registered_candidate(&mut specialist).unwrap();
+        let issuer = owner
+            .issue_manual_lease("candidate".into(), "candidate-private".into())
+            .unwrap()
+            .issuer;
+        let envelope = owner
+            .candidate_merge_envelope(
+                &frozen,
+                CommandId {
+                    issuer: issuer.clone(),
+                    sequence: 1,
+                },
+            )
+            .unwrap();
+        core.request(Command::Do(Operation::AddSolidClip {
+            track: TrackId(1),
+            timeline_start: kinewright_core::TimeCode(0),
+            duration: kinewright_core::TimeCode(100),
+            color: kinewright_core::SolidColor::default(),
+        }))
+        .unwrap();
+        let manual = core.export_history().unwrap();
+        assert_eq!(manual.document.tracks[0].clips.len(), 1);
+        let result = crate::io_observer::fail_once("candidate_settlement", || {
+            owner.commit_candidate(&frozen, &envelope)
+        });
+        let retry = crate::io_observer::fail_once("candidate_settlement", || {
+            owner.commit_candidate(&frozen, &envelope)
+        });
+        assert_eq!(
+            candidate.core().attachment_state().unwrap(),
+            AttachmentState::Frozen
+        );
+        assert!(owner.pending_candidate.is_some());
+        assert_eq!(core.export_history().unwrap(), manual);
+        let expected = owner
+            .active_bundle()
+            .unwrap()
+            .branch_history(candidate.branch_id())
+            .unwrap();
+        assert!(expected.document.tracks[0].clips.is_empty());
+        assert_ne!(*expected, manual);
+        let bundle = owner.active_bundle_mut().unwrap();
+        let inputs = bundle
+            .checkpoint(bundle.manual_branch_id())
+            .unwrap()
+            .input_manifest_ref
+            .clone();
+        bundle
+            .acknowledge_issuer(&issuer, 1, &core, &inputs)
+            .unwrap();
+        bundle
+            .retire_issuer(&issuer, false, &core, &inputs)
+            .unwrap();
+        let ReceiptLookup::Retired(retired) = bundle.receipt_lookup(&envelope).unwrap() else {
+            panic!("retired receipt");
+        };
+        owner
+            .reconcile_active()
+            .expect("a retired committed receipt must settle");
+        assert_eq!(
+            candidate.core().attachment_state().unwrap(),
+            AttachmentState::Live
+        );
+        assert!(owner.pending_candidate.is_none());
+        assert_eq!(candidate.core().export_history().unwrap(), *expected);
+        assert_eq!(core.export_history().unwrap(), manual);
+        owner.save_active().unwrap();
+        assert_eq!(core.export_history().unwrap(), manual);
+        assert_eq!(result.unwrap(), ReceiptLookup::Committed(retired.clone()));
+        assert_eq!(retry.unwrap(), ReceiptLookup::Committed(retired));
+    }
 }

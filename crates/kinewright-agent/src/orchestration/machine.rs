@@ -154,6 +154,13 @@ pub fn decide(
             Ok(Transition::Control(intent.action.clone()))
         }
         (
+            Some(state),
+            OrchestrationCommand::RecordContext { .. }
+            | OrchestrationCommand::SettleExpiredBackground(_)
+            | OrchestrationCommand::WaitTimeout(_)
+            | OrchestrationCommand::CancelTask(_),
+        ) if state.outcome != RunOutcome::Pending => Err(Refusal::InvalidState),
+        (
             Some(_),
             OrchestrationCommand::RecordContext { .. }
             | OrchestrationCommand::BeginTurn(_)
@@ -335,6 +342,10 @@ pub fn prepare(
         }
         Transition::Refused(reason) => CommandDecision::Refused(reason),
     };
+    if decision == CommandDecision::Applied {
+        super::tasks::refresh_cleanup(&mut next);
+        super::tasks::refresh_wait(&mut next);
+    }
     next.sequence = next.sequence.checked_add(1).ok_or(Refusal::Capacity)?;
     let event = OrchestrationEvent {
         command: envelope.id.clone(),

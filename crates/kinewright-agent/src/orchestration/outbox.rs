@@ -14,6 +14,8 @@ use super::{
     },
 };
 
+/// A result wake must deliver every record with `delivery.wake == effect.id`.
+/// The effect's `payload` alone does not include all coalesced sibling results.
 #[must_use]
 pub fn next_effect<'a>(state: &'a RunProjection, lane: &BranchId) -> Option<&'a EffectRecord> {
     if state.outcome != super::orchestration_records::RunOutcome::Pending

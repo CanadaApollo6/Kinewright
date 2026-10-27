@@ -112,6 +112,8 @@ pub trait AgentSession: Send {
     fn events(&self) -> Receiver<AgentEvent>;
     fn interrupt(&mut self);
     /// Nonblocking. Existing sessions have no certified live request channel.
+    /// Connectors may consume a request or repeat it while its response is pending.
+    /// Repeated requests must retain the exact ID, binding, kind, and prompt.
     /// # Errors
     /// Reports connector protocol failure without inventing a callback.
     fn poll_runtime_request(&mut self) -> Result<Option<RuntimeRequest>, AgentError> {

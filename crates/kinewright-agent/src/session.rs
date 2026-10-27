@@ -547,6 +547,9 @@ pub fn pump_session(
                         break 'prompts;
                     }
                 };
+                if responses.contains(&request) {
+                    continue;
+                }
                 if let Err(error) = responses.register(&request) {
                     stop = SessionStop::Cancelled(StopReason::Harness(error.to_string()));
                     break 'prompts;

@@ -191,6 +191,23 @@ pub fn apply(state: &mut RunProjection, envelope: &OrchestrationEnvelope) -> Res
                 .state = TaskState::Running(question.origin.attempt.clone());
         }
         OrchestrationCommand::ExpireSession(session) => {
+            if !state.tasks.iter().any(|task| {
+                !task.progress.expired
+                    && task
+                        .progress
+                        .turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.session == *session)
+                    && !matches!(
+                        task.state,
+                        TaskState::Terminal(_)
+                            | TaskState::Cancelled
+                            | TaskState::Cancelling
+                            | TaskState::CleanupBlocked(_)
+                    )
+            }) {
+                return Err(Refusal::InvalidState);
+            }
             for request in &mut state.requests {
                 if let RuntimeRequest::Question(q) = request
                     && q.origin.session == *session
@@ -216,7 +233,9 @@ pub fn apply(state: &mut RunProjection, envelope: &OrchestrationEnvelope) -> Res
                     task.state = TaskState::Preparing;
                 }
             }
-            state.phase = RunPhase::Interrupted;
+            if state.phase != RunPhase::Finished {
+                state.phase = RunPhase::Interrupted;
+            }
         }
         _ => return Ok(false),
     }

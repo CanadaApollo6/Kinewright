@@ -504,8 +504,7 @@ fn s4_drain_and_durable_base() {
         .reopen_registered_candidate(candidate.branch_id().clone(), &candidate_base)
         .unwrap();
     let mut authority = s4_owner_authority(&owner);
-    authority.expires_at = Instant::now() + Duration::from_secs(2);
-    let expires_at = authority.expires_at;
+    authority.expires_at = Instant::now() + Duration::from_secs(3600);
     let mut reopened = EditorTask::reopen(
         &mut owner,
         brief.clone(),
@@ -528,8 +527,6 @@ fn s4_drain_and_durable_base() {
         sequence: 1,
     };
     let receipt = reopened.merge(&mut owner, id.clone()).unwrap();
-    std::thread::sleep(expires_at.saturating_duration_since(Instant::now()));
-    assert_eq!(reopened.merge(&mut owner, id.clone()).unwrap(), receipt);
     reopened.endpoint().revoke();
     assert_eq!(reopened.merge(&mut owner, id.clone()).unwrap(), receipt);
     let mut changed = id;

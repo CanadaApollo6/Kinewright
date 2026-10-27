@@ -237,6 +237,9 @@ impl EditorTask {
         self.frozen.as_ref().ok_or(BundleError::HistoryChanged)
     }
     /// Replay the original receipt before admitting and validating a fresh merge.
+    /// H3 must authenticate the current attachment and project before calling.
+    /// `Ok` alone does not confirm a committed merge. Callers must handle
+    /// `Pending`, `Retired`, `RetiredUnresolved`, and `IdPayloadConflict` explicitly.
     pub fn merge(
         &mut self,
         owner: &mut Ja1EditingSession,
@@ -468,6 +471,58 @@ pub fn ready(state: &super::orchestration_records::RunProjection, id: &TaskId) -
                     .all(|delivery| matches!(delivery.state, DeliveryState::Observed(_) | DeliveryState::Disposed))
         })
         && !state.requests.iter().any(|request| matches!(request, RuntimeRequest::Question(q) if &q.task == id && q.status == QuestionStatus::Pending))
+}
+
+pub fn refresh_wait(state: &mut super::orchestration_records::RunProjection) {
+    use super::orchestration_records::{
+        DeliveryState, QuestionStatus, RunWait, RuntimeRequest, TaskState,
+    };
+    // Only the file/provider owner can settle these external facts.
+    if matches!(state.wait, RunWait::Files(_) | RunWait::Provider(_)) {
+        return;
+    }
+    if let Some(question) = state.requests.iter().find_map(|request| match request {
+        RuntimeRequest::Question(q) if q.status == QuestionStatus::Pending => Some(q),
+        _ => None,
+    }) {
+        state.wait = RunWait::Question(question.id.clone());
+        return;
+    }
+    let mut children = std::collections::BTreeSet::new();
+    for task in &state.tasks {
+        if let TaskState::WaitingForChildren(ids) = &task.state {
+            children.extend(
+                ids.iter()
+                    .filter(|id| {
+                        state.tasks.iter().any(|child| {
+                            child.id == **id
+                                && !matches!(
+                                    child.state,
+                                    TaskState::Terminal(_) | TaskState::Cancelled
+                                )
+                        })
+                    })
+                    .cloned(),
+            );
+        }
+    }
+    children.extend(
+        state
+            .deliveries
+            .iter()
+            .filter(|delivery| {
+                !matches!(
+                    delivery.state,
+                    DeliveryState::Observed(_) | DeliveryState::Disposed
+                )
+            })
+            .map(|delivery| delivery.task.clone()),
+    );
+    state.wait = if children.is_empty() {
+        RunWait::None
+    } else {
+        RunWait::Children(children.into_iter().collect())
+    };
 }
 
 pub fn refresh_cleanup(state: &mut super::orchestration_records::RunProjection) {

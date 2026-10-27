@@ -1915,7 +1915,7 @@ pub fn history_cost_probe(
     record_cost(history, limits)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod fu1_tests {
     use super::*;
     use kinewright_core::{
