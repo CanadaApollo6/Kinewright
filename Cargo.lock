@@ -2318,6 +2318,7 @@ dependencies = [
  "getrandom 0.3.4",
  "image",
  "kinewright-core",
+ "kinewright-job-sys",
  "kinewright-media",
  "kinewright-project",
  "reqwest",
@@ -2368,6 +2369,14 @@ dependencies = [
 [[package]]
 name = "kinewright-hash"
 version = "0.1.0"
+
+[[package]]
+name = "kinewright-job-sys"
+version = "0.1.0"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "kinewright-media"
