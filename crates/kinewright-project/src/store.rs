@@ -1132,7 +1132,20 @@ impl ProjectStore {
                 pin: self.pin(std::slice::from_ref(&reference))?,
             }
         } else {
-            self.register_published(&reference, &[], reservation, None)?
+            let unclassified = self
+                .inner
+                .ledger
+                .lock()
+                .map_err(|_| BundleError::Capacity("ledger poisoned"))?
+                .unclassified
+                .get(&reference.sha256)
+                .copied();
+            if unclassified.is_some_and(|length| length != reference.byte_length) {
+                return Err(BundleError::Corrupt(
+                    "unclassified import length differs".into(),
+                ));
+            }
+            self.register_published(&reference, &[], reservation, unclassified)?
         };
         Ok((sealed, table.ok_or(BundleError::HistoryBarrierInvariant)?))
     }
@@ -1709,11 +1722,12 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
                       length: u64,
                       run: &mut dyn FnMut() -> Result<(), BundleError>|
      -> Result<bool, BundleError> {
-        let result = (|| {
-            #[cfg(any(test, feature = "test-util"))]
-            crate::io_observer::check_failure("gc_before_unlink", path)?;
-            run()
-        })();
+        #[cfg(any(test, feature = "test-util"))]
+        let result = crate::io_observer::check_failure("gc_before_unlink", path)
+            .map_err(BundleError::from)
+            .and_then(|()| run());
+        #[cfg(not(any(test, feature = "test-util")))]
+        let result = run();
         match result {
             Ok(()) => Ok(true),
             Err(error) => {
@@ -1916,6 +1930,13 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         .unclassified
         .clone();
     for (hash, length) in orphans {
+        let mut ledger = inner
+            .ledger
+            .lock()
+            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
+        if ledger.objects.contains_key(&hash) || ledger.pins.get(&hash).copied().unwrap_or(0) != 0 {
+            continue;
+        }
         let path = PortablePath::new(&Path::new("studio/objects").join(&hash))?;
         if !retire(path.as_path(), length, &mut || {
             inner
@@ -1926,10 +1947,6 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
         })? {
             continue;
         }
-        let mut ledger = inner
-            .ledger
-            .lock()
-            .map_err(|_| BundleError::Capacity("ledger poisoned"))?;
         let mut usage = inner
             .usage
             .lock()
@@ -1969,6 +1986,7 @@ fn collect_objects(inner: &StoreInner) -> Result<u64, BundleError> {
     }
     Ok(retired)
 }
+
 impl Drop for StoreInner {
     fn drop(&mut self) {
         if self
@@ -3896,5 +3914,114 @@ impl ProjectStore {
         // the exact prior inventory that rollback just restored.
         ledger.can_collect = false;
         result.map(|_| ())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod c0_fix1_tests {
+    use super::*;
+
+    #[test]
+    fn s3_fix1_reclassification_refuses_a_different_orphan_length_before_registration() {
+        let temp = kinewright_media::test_support::TempDirectory::new_in(
+            &kinewright_media::test_support::workspace_target_dir(),
+            "c0-fix1-orphan-length",
+        );
+        let mut session =
+            crate::bundle_copy::SessionStore::create(temp.root(), StorageLimits::default())
+                .unwrap();
+        let bytes = vec![17; 4096];
+        let (sealed, _) = session
+            .store_mut()
+            .admit_measured_media(&mut bytes.as_slice(), bytes.len() as u64)
+            .unwrap();
+        let reference = sealed.reference.clone();
+        {
+            let mut ledger = session.store().inner.ledger.lock().unwrap();
+            ledger.objects.remove(&reference.sha256);
+            ledger
+                .unclassified
+                .insert(reference.sha256.clone(), reference.byte_length + 1);
+        }
+        let before = session.store().usage().unwrap();
+        let result = session
+            .store_mut()
+            .admit_measured_media(&mut bytes.as_slice(), bytes.len() as u64);
+        assert!(result.is_err(), "C0_FIX1_ORPHAN_LENGTH_REFUSED");
+        let mut ledger = session.store().inner.ledger.lock().unwrap();
+        assert!(
+            !ledger.objects.contains_key(&reference.sha256),
+            "C0_FIX1_NO_INVALID_REGISTRATION"
+        );
+        assert_eq!(
+            ledger.unclassified.get(&reference.sha256),
+            Some(&(reference.byte_length + 1))
+        );
+        ledger.unclassified.remove(&reference.sha256);
+        ledger
+            .objects
+            .insert(reference.sha256.clone(), (reference, vec![]));
+        drop(ledger);
+        let after = session.store().usage().unwrap();
+        assert_eq!(before.physical_bytes, after.physical_bytes);
+        assert_eq!(after.reserved_bytes, 0);
+        drop(sealed);
+    }
+
+    #[test]
+    fn s3_fix1_orphan_cleanup_preserves_admitted_and_pinned_identities() {
+        for admitted in [true, false] {
+            let temp = kinewright_media::test_support::TempDirectory::new_in(
+                &kinewright_media::test_support::workspace_target_dir(),
+                "c0-fix1-orphan-guard",
+            );
+            let mut session =
+                crate::bundle_copy::SessionStore::create(temp.root(), StorageLimits::default())
+                    .unwrap();
+            let bytes = vec![17; 4096];
+            let (sealed, _) = session
+                .store_mut()
+                .admit_measured_media(&mut bytes.as_slice(), bytes.len() as u64)
+                .unwrap();
+            let reference = sealed.reference.clone();
+            {
+                let mut ledger = session.store().inner.ledger.lock().unwrap();
+                ledger
+                    .unclassified
+                    .insert(reference.sha256.clone(), reference.byte_length);
+                if admitted {
+                    ledger.pins.remove(&reference.sha256);
+                    ledger.committed.push(reference.clone());
+                } else {
+                    ledger.objects.remove(&reference.sha256);
+                }
+            }
+            // Model the stale dual classification left by the pre-fix reuse path.
+            let result = session.store_mut().collect_unpublished();
+            let actual = session.store().with_namespace(|namespace| {
+                namespace.read(
+                    &ProjectStore::object_path(&reference)?,
+                    reference.byte_length,
+                )
+            });
+            assert_eq!(
+                actual.unwrap().unwrap_or_default(),
+                bytes,
+                "C0_FIX1_ORPHAN_CLEANUP_GUARD"
+            );
+            result.unwrap();
+            let mut ledger = session.store().inner.ledger.lock().unwrap();
+            ledger.unclassified.remove(&reference.sha256);
+            if admitted {
+                ledger.pins.insert(reference.sha256, 1);
+                ledger.committed.clear();
+            } else {
+                ledger
+                    .objects
+                    .insert(reference.sha256.clone(), (reference, vec![]));
+            }
+            drop(ledger);
+            drop(sealed);
+        }
     }
 }

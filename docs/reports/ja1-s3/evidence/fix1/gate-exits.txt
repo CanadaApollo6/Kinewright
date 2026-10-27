@@ -1,0 +1,14 @@
+project 101
+app 101
+build 0
+clippy 0
+windows 101
+clippy 0
+windows 0
+fmt 0
+build 0
+host 0
+host-recovery 0
+media 0
+app 0
+project 0

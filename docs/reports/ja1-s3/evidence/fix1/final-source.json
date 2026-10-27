@@ -1,0 +1,25 @@
+{
+  "parent": "6516e57bcfd2e06fc0a3f3188c095d894653acc8",
+  "branch": "ja1/s3-c0fix",
+  "worktree": "/home/riels/.t3/worktrees/Kinewright/ja1-s3-c0fix",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+  "source_sha256": {
+    "crates/kinewright-agent/src/writer_host/s2h_tests.rs": "bed4df3fb601d51b1c4fec056d13db14c50d9237561033a970712ca81b26c1f6",
+    "crates/kinewright-app/src/ja1_attachment_tests.rs": "08d7342dd2ebc9b512d615d4e4cdd6c1ba1266702b53ed13f477064bd20d215c",
+    "crates/kinewright-app/src/media_workflow.rs": "32d523089394b2e8048bc241a45577b9fedf8a22058cc00272d10023912f287f",
+    "crates/kinewright-project/src/editing_session/manual.rs": "568378a0ef209215080cf2627d7ce4b25aab976c17d67e49e3adcb293030ba6e",
+    "crates/kinewright-project/src/editing_session/owned_media.rs": "2491d7157c129e780c0b867324753b042c79fe365e4f5cefa4c8706c23e0848d",
+    "crates/kinewright-project/src/namespace/mod.rs": "8a5225b180106e8065ca2aeeb42c50b73c5e39b5d33feb4c78ec062496243ab0",
+    "crates/kinewright-project/src/owned_media.rs": "34bfd6788ef8af48eaef03363a3341f451887c44faa4d3af73b0feae500a0b2c",
+    "crates/kinewright-project/src/store.rs": "be63d9047b2ee1bff92793fd660418695d6f6bb16b92062906f728c7bd7b3c95",
+    "crates/kinewright-project/tests/ja_s3_owned_inputs.rs": "61e0bfb38c4e19de7fe5303ce9d3a5456e1c5723a26dea8d4ab8d5b600ea18fe",
+    "docs/reports/ja1-s3/evidence/fix1/run-cargo.sh": "a41350b0559f22a6993907041559b3bc0a77e4f35041bcf66066db4d130a8232",
+    "docs/reports/ja1-s3/evidence/fix1/run-gates.sh": "5c5d9ef164b143e754b1f6c76db869a1410b623de987599ffde6ff52053aea8a",
+    "docs/reports/ja1-s3/evidence/fix1/mutations.py": "b3cccc3a776812a8d0e98dc792fde009062a961cc54792cb3e1aabf770b4e05c",
+    "docs/reports/ja1-s3/evidence/fix1/mutations.json": "9fec0213959bb1eb88b6db9eb5795af3c2d75f7a3c939f1624aec540f0e204e2",
+    "Cargo.lock": "9a81a4685916563fad70550958dbf5580978415c64e5b0aadbe2cbb442563a0c",
+    "scripts/slow_tests.py": "ea27f22304e3d096a87885377fb6bc55c8a9169d438bcea6dc9c627a283ff4c0",
+    "scripts/ja-s1-predecessor-controls.sh": "5028374617dbfab8005e9e1aa14a908ec81aee0cfc55526982ace2f7eb9edea5"
+  },
+  "ffmpeg_archive_sha256": "c201d31f5c8a3b169345101c63ca70f71442848a271bec4a16ca29a1876e5cb1"
+}

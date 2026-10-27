@@ -33,6 +33,80 @@ fn c9_fix1_manual_gate_controls_the_save_requirement_message() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn s3_fix1_import_lost_first_commit_recovers() {
+    s3_fix1_lost_first_commit(false);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn s3_fix1_colour_lost_first_commit_recovers() {
+    s3_fix1_lost_first_commit(true);
+}
+
+#[cfg(target_os = "linux")]
+fn s3_fix1_lost_first_commit(colour: bool) {
+    let (temp, mut app, path) = s2h_fix3_app(false);
+    let source = temp.path("accepted.wav");
+    std::fs::write(
+        &source,
+        kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
+    )
+    .unwrap();
+    if colour {
+        app.apply(Action::ImportMedia(source.clone())).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while app.is_dirty() && std::time::Instant::now() < deadline {
+            app.poll_host();
+            std::thread::yield_now();
+        }
+        assert!(!app.is_dirty());
+    }
+    let proxy = app
+        .host
+        .as_mut()
+        .unwrap()
+        .drop_http_reply("commit_history", true);
+    if colour {
+        let history = app.owner.core().export_history().unwrap();
+        let operation =
+            crate::color_ui::assume_sdr_rec709_operation(&history.document.media_pool[0]);
+        app.apply(Action::ChangeMediaInterpretation(Box::new(operation)))
+            .unwrap();
+    } else {
+        app.apply(Action::ImportMedia(source.clone())).unwrap();
+    }
+    app.send_manual(Command::Do(Operation::SetTrackSyncLock {
+        track: TrackId(1),
+        locked: false,
+    }))
+    .unwrap();
+    let expected = app.owner.core().export_history().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !app.read_only() && std::time::Instant::now() < deadline {
+        app.poll_host();
+        std::thread::park_timeout(std::time::Duration::from_millis(5));
+    }
+    assert!(proxy.dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert!(app.read_only());
+    assert_eq!(app.owner.core().export_history().unwrap(), expected);
+    std::fs::remove_file(source).unwrap();
+    app.apply(Action::Retry).unwrap();
+    s2h_fix3_wait(&mut app);
+    assert!(!app.read_only(), "C0_FIX1_ACCEPTED_SUFFIX: {}", app.message);
+    app.apply(Action::Save).unwrap();
+    assert!(!app.is_dirty(), "{}", app.message);
+    let restored = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(restored.export_history().unwrap(), expected);
+    assert!(app.close());
+    drop(proxy);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn s3_owned_colour_reply_loss_preserves_prior_interpretation_for_undo() {
     let (temp, mut app, path) = s2h_fix3_app(false);
     let source = temp.path("colour.wav");

@@ -320,6 +320,8 @@ pub(crate) fn stream_media(
             .map_err(|_| BundleError::Capacity("chunk size"))?;
         reader.read_exact(&mut buffer[..size])?;
         output.write_all(&buffer[..size])?;
+        #[cfg(any(test, feature = "test-util"))]
+        crate::io_observer::at_test_hook("import_chunk_streamed");
         full.update(&buffer[..size]);
         let mut chunk = Sha256::new();
         chunk.update(&buffer[..size]);
@@ -755,6 +757,82 @@ mod tests {
             owner_epoch: owner.store().owner_epoch(),
             entries,
         }
+    }
+
+    #[test]
+    fn s3_fix1_reused_crash_residue_keeps_bytes_and_one_charge() {
+        use crate::bundle::{BundleWriteAdmission, LoadedBundle};
+        use crate::editing_session::Ja1EditingSession;
+        use kinewright_core::{Core, Document};
+        const CHILD_ROOT: &str = "KINEWRIGHT_C0_FIX1_CRASH_ROOT";
+        let bytes = wav(5432);
+        if let Some(path) = std::env::var_os(CHILD_ROOT) {
+            let mut owner = LoadedBundle::read(Path::new(&path))
+                .unwrap()
+                .into_writer()
+                .unwrap();
+            owner
+                .store_mut()
+                .unwrap()
+                .admit_measured_media(&mut bytes.as_slice(), bytes.len() as u64)
+                .unwrap();
+            std::process::exit(0);
+        }
+        let temp = TempDirectory::new_in(&workspace_target_dir(), "c0-fix1-crash-residue");
+        let path = temp.path("crash.kinewright");
+        let core = Core::spawn(Document::default()).unwrap();
+        let mut initial =
+            Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
+                .unwrap();
+        initial.save_active().unwrap();
+        drop(initial);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "owned_media::tests::s3_fix1_reused_crash_residue_keeps_bytes_and_one_charge",
+                "--test-threads=1",
+            ])
+            .env(CHILD_ROOT, &path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut owner = LoadedBundle::read(&path).unwrap().into_writer().unwrap();
+        let before = owner.store().usage().unwrap();
+        assert_eq!(before.unclassified_bytes, bytes.len() as u64);
+        let (asset, entry, pins) = owner
+            .store_mut()
+            .unwrap()
+            .import_media(
+                &mut bytes.as_slice(),
+                bytes.len() as u64,
+                AssetId(1),
+                Path::new("external.wav"),
+                None,
+            )
+            .unwrap();
+        assert!(entry.matches_media_asset(&asset));
+        let after = owner.store().usage().unwrap();
+        assert_eq!(after.unclassified_bytes, 0, "C0_FIX1_ORPHAN_RECLASSIFIED");
+        let table = entry.chunk_table_ref().unwrap();
+        assert_eq!(
+            after.physical_bytes,
+            before.physical_bytes + table.byte_length
+        );
+        assert_eq!(after.owned_bytes, before.owned_bytes);
+        assert_eq!(after.objects, before.objects + 1);
+        assert_eq!(after.reserved_bytes, 0);
+        owner.collect_after_ack().unwrap();
+        let mut descriptor = owner.store().open_input_descriptor(&entry.object).unwrap();
+        let mut actual = Vec::new();
+        descriptor.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, bytes, "C0_FIX1_REUSED_BYTES_REOPEN");
+        for _ in 0..2 {
+            let source = owner.store().certify_media_entry(&entry).unwrap();
+            let mut decoder = source.open_audio(Arc::new(AtomicBool::new(false))).unwrap();
+            assert!(decoder.next_frame().unwrap().is_some());
+        }
+        assert_eq!(owner.store().usage().unwrap().unclassified_bytes, 0);
+        drop(pins);
     }
 
     #[test]

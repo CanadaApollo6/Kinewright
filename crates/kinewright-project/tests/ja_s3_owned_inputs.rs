@@ -28,6 +28,99 @@ fn cancel() -> Arc<AtomicBool> {
 }
 
 #[test]
+fn s3_fix1_recovery_carries_the_exact_unpublished_extension() {
+    use kinewright_core::{AssetId, Command, Core, Document, Operation};
+    use kinewright_project::bundle::BundleWriteAdmission;
+    let temp = temp("c0-fix1-live-extension");
+    let path = temp.path("live.kinewright");
+    let core = Core::spawn(Document::default()).unwrap();
+    let mut owner =
+        Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
+            .unwrap();
+    owner.save_active().unwrap();
+    let source = temp.path("prepared.wav");
+    std::fs::write(
+        &source,
+        kinewright_media::test_support::wav_f32(&vec![0.25; 4800].into_boxed_slice(), 48_000, 1),
+    )
+    .unwrap();
+    let prepared = owner.prepare_owned_media(&source, AssetId(1)).unwrap();
+    let mut lease = owner
+        .issue_manual_lease("r".repeat(64), "t".repeat(64))
+        .unwrap();
+    assert_ne!(lease.inputs, prepared.inputs_ref);
+    lease.inputs = prepared.inputs_ref.clone();
+    let gui = Core::spawn(Document::default()).unwrap();
+    gui.restore_history(core.export_history().unwrap()).unwrap();
+    let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+    let permit = replica
+        .bind_manual_producer(lease, prepared.manifest.clone())
+        .unwrap();
+    permit
+        .request(Command::Do(Operation::AddAsset {
+            asset: prepared.asset.clone(),
+        }))
+        .unwrap();
+    let expected = gui.export_history().unwrap();
+    let expected_inputs = prepared.inputs_ref.clone();
+    drop(prepared);
+    owner
+        .reconcile_manual_chain(&"r".repeat(64), &permit.pending().unwrap(), Some(&expected))
+        .expect("C0_FIX1_EXACT_EXTENSION_RECOVERED");
+    assert_eq!(owner.current_inputs_ref(), &expected_inputs);
+    let restored = Core::spawn(Document::default()).unwrap();
+    LoadedBundle::read(&path)
+        .unwrap()
+        .restore_manual(&restored)
+        .unwrap();
+    assert_eq!(restored.export_history().unwrap(), expected);
+}
+
+#[test]
+fn s3_fix1_same_length_torn_import_refuses() {
+    use kinewright_core::{Core, Document};
+    use kinewright_project::bundle::BundleWriteAdmission;
+    use std::io::Write;
+    let temp = temp("c0-fix1-torn-import");
+    let source = temp.path("changing.wav");
+    let bytes = kinewright_media::test_support::wav_f32(&vec![0.25; 600_000], 48_000, 1);
+    std::fs::write(&source, &bytes).unwrap();
+    let core = Core::spawn(Document::default()).unwrap();
+    let path = temp.path("unchanged.kinewright");
+    let mut edit =
+        Ja1EditingSession::activate(&path, BundleWriteAdmission::new_document(), &core, None)
+            .unwrap();
+    edit.save_active().unwrap();
+    let before = core.export_history().unwrap();
+    let root = std::fs::read(&path).unwrap();
+    let inputs = edit.current_inputs_ref().clone();
+    let changed_source = source.clone();
+    let result =
+        io_observer::at_barrier(
+            "import_chunk_streamed",
+            move || {
+                let mut writer = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&changed_source)
+                    .unwrap();
+                writer.seek(SeekFrom::Start(1_048_576)).unwrap();
+                writer.write_all(&[0; 64]).unwrap();
+                writer
+                    .set_times(std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(12345),
+                    ))
+                    .unwrap();
+            },
+            || edit.import_owned_media(&source),
+        );
+    assert!(result.is_err(), "C0_FIX1_TORN_IMPORT_REFUSED");
+    assert_eq!(core.export_history().unwrap(), before);
+    assert_eq!(edit.current_inputs_ref(), &inputs);
+    assert_eq!(std::fs::read(path).unwrap(), root);
+    assert_eq!(edit.store().unwrap().usage().unwrap().reserved_bytes, 0);
+}
+
+#[test]
 fn s3_owned_import_refuses_dynamic_mpegps_before_probe() {
     use kinewright_core::{Core, Document};
     use kinewright_media::{owned_io::observe_stream_info_probes, test_support::run_ffmpeg};

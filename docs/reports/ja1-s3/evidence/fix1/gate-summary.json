@@ -1,0 +1,175 @@
+{
+  "parent": "6516e57bcfd2e06fc0a3f3188c095d894653acc8",
+  "final_gate_exits": {
+    "project": 0,
+    "app": 0,
+    "build": 0,
+    "clippy": 0,
+    "windows": 0,
+    "fmt": 0,
+    "host": 0,
+    "host-recovery": 0,
+    "media": 0
+  },
+  "gates": {
+    "build": {
+      "log": "build.log.gz",
+      "sha256": "b1091f0230b6f6d67405a7e0a0fa6caa81f1d5f0e4840e7c41778d9d734a4410",
+      "summaries": [],
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "ignored_entries": [],
+      "finished_lines": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.58s"
+      ]
+    },
+    "clippy": {
+      "log": "clippy.log.gz",
+      "sha256": "3bd2319979fe08aaa93c5ae61d87a71ce85d242f1487375cfc428a4e781f2b29",
+      "summaries": [],
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "ignored_entries": [],
+      "finished_lines": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.97s"
+      ]
+    },
+    "windows": {
+      "log": "windows.log.gz",
+      "sha256": "212a92cbaa7ba5e80ffcfe9807962806a50bf0ebbc4011a04a0dcedf848c205b",
+      "summaries": [],
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "ignored_entries": [],
+      "finished_lines": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.99s"
+      ]
+    },
+    "fmt": {
+      "log": "fmt.log.gz",
+      "sha256": "379c00818533e9e1ae3438c492731f65e921897b6bc7dc4f617e8779b08be4e2",
+      "summaries": [],
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "ignored_entries": [],
+      "finished_lines": []
+    },
+    "host": {
+      "log": "host.log.gz",
+      "sha256": "982dfcf2b2661d9d8f1d2063428be03cfa63471f4a776ac86422ed3a1a43b932",
+      "summaries": [
+        "test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 662 filtered out; finished in 77.93s"
+      ],
+      "passed": 44,
+      "failed": 0,
+      "ignored": 0,
+      "ignored_entries": [],
+      "finished_lines": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.25s"
+      ]
+    },
+    "host-recovery": {
+      "log": "host-recovery.log.gz",
+      "sha256": "53e23502869eacb83e705a5b6959db3a06ab01c37cdab1e713332715f4295648",
+      "summaries": [
+        "test result: ok. 10 passed; 0 failed; 2 ignored; 0 measured; 9 filtered out; finished in 29.11s"
+      ],
+      "passed": 10,
+      "failed": 0,
+      "ignored": 2,
+      "ignored_entries": [
+        "test g05l_host_death_recovers_absent_and_committed_drag_suffix ... ignored, slow tier: cargo test --features slow-tests",
+        "test g05l_shared_floor_and_recovery_close_reply_drop ... ignored, slow tier: cargo test --features slow-tests"
+      ],
+      "finished_lines": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.26s"
+      ]
+    },
+    "media": {
+      "log": "media.log.gz",
+      "sha256": "8a46f32784a5b51b01f4006178bbd0add84e4f04b7fffc06be0bd319ce4ccde5",
+      "summaries": [
+        "test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 1199 filtered out; finished in 1.11s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s"
+      ],
+      "passed": 27,
+      "failed": 0,
+      "ignored": 0,
+      "ignored_entries": [],
+      "finished_lines": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.11s"
+      ]
+    },
+    "app": {
+      "log": "app.log.gz",
+      "sha256": "7a49f27468c2052983c1307d145222ae8ede64aeed82342748b46db3eb6afe7a",
+      "summaries": [
+        "test result: ok. 886 passed; 0 failed; 6 ignored; 0 measured; 0 filtered out; finished in 411.12s"
+      ],
+      "passed": 886,
+      "failed": 0,
+      "ignored": 6,
+      "ignored_entries": [
+        "test ja1_attachment::tests::rescue_complete_app_lifecycle_stress ... ignored, slow tier: cargo test --features slow-tests",
+        "test ja_harness::tests::run_fixture_from_env ... ignored, on-demand fixture adapter: requires JA_HARNESS_FIXTURE and JA_HARNESS_OUTPUT",
+        "test preview_ui::mo2_tests::new_mo2_combined_transform_real_program_drags ... ignored, slow tier: cargo test --features slow-tests",
+        "test project::tests::is_dirty_memoized_poll_release_perf ... ignored, manual release performance measurement",
+        "test recovery::tests::crash_child_process ... ignored, invoked as the deliberately crashing subprocess",
+        "test solo_ui::tests::new_mo2_solo_control_argument_matrix ... ignored, slow tier: cargo test --features slow-tests"
+      ],
+      "finished_lines": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.34s"
+      ]
+    },
+    "project": {
+      "log": "project.log.gz",
+      "sha256": "75066588ad1bbcfc7e4c9ea274b04286f5e9acb8f9d2c1c3cdb6fc95bb7663ef",
+      "summaries": [
+        "test result: ok. 155 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 156.10s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.39s",
+        "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 62.41s",
+        "test result: ok. 86 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 219.83s",
+        "test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 58.80s",
+        "test result: ok. 33 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 192.76s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 67.16s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 20.71s",
+        "test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.78s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.74s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.38s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.02s",
+        "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "passed": 390,
+      "failed": 0,
+      "ignored": 2,
+      "ignored_entries": [
+        "test lockfile::race_tests::defect_journal_appearing_after_the_scan_is_missed ... ignored, historical uncooperative journal injection; C7 covers the real GUI writer",
+        "test project::tests::mo2_old_reader_corpus ... ignored, manual pre-land check: scripts/mo2-old-reader-check.sh"
+      ],
+      "finished_lines": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.62s"
+      ]
+    }
+  },
+  "mutation_pairs": 12,
+  "source_hashes_verified": true,
+  "child_host_binary": {
+    "path": "target/debug/kinewright",
+    "sha256": "824f11f1c4cc5e6e4d5071a268ef99141137a15338055eacfe89fe52d5a6104f"
+  },
+  "lint": {
+    "command": "nice -n 19 python3 -I scripts/slow_tests.py lint",
+    "log": "slow-lint-final.log.gz",
+    "sha256": "538896bb835629b0c7f03f6ba231b61755114cde799e6ac77dc0d5371705a182",
+    "summary": "slow-test manifest and markers agree: 89 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 56 allowlist entries well-formed",
+    "result": "PASS"
+  }
+}

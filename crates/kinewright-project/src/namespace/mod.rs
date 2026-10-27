@@ -3,7 +3,6 @@
 use crate::{LockfileHandle, bundle::BundleError};
 use std::path::{Component, Path, PathBuf};
 mod file_identity;
-#[cfg(unix)]
 pub(crate) use file_identity::FileIdentity;
 pub(crate) use file_identity::{file_matches_path, paths_match};
 #[cfg(target_os = "linux")]
@@ -697,6 +696,7 @@ impl ProjectNamespace {
             Err(BundleError::DurabilityUnsupported.into())
         }
     }
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn publish_immutable(
         &mut self,
         name: &PortablePath,

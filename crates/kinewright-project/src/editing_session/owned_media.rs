@@ -245,9 +245,13 @@ impl Ja1EditingSession {
                 "staged media admission differs".into(),
             ));
         }
-        let mut lease = self.issue_manual_lease(client, token)?;
-        lease.inputs.clone_from(&prepared.inputs_ref);
-        Ok(lease)
+        // Issuer publication must retain this extension before the GUI can accept it.
+        let previous = std::mem::replace(&mut self.inputs, prepared.inputs_ref.clone());
+        let lease = self.issue_manual_lease(client, token);
+        if lease.is_err() {
+            self.inputs = previous;
+        }
+        lease
     }
 
     /// Local source ownership remains in this process even while an unsaved host is attached.
@@ -500,6 +504,8 @@ fn prepare(
     }
     let mut file = open_import_source(path)?;
     let metadata = file.metadata()?;
+    let identity = crate::namespace::FileIdentity::of_file(&file)?;
+    let modified = metadata.modified()?;
     if !metadata.is_file() {
         return Err(BundleError::Unsupported(
             "media source is not a regular file".into(),
@@ -507,9 +513,18 @@ fn prepare(
     }
     let (asset, entry, mut pins) =
         store.import_media(&mut file, metadata.len(), id, path, color)?;
-    if file.metadata()?.len() != metadata.len() {
+    let after = file.metadata()?;
+    let current = open_import_source(path)?;
+    let current_metadata = current.metadata()?;
+    if crate::namespace::FileIdentity::of_file(&file)? != identity
+        || crate::namespace::FileIdentity::of_file(&current)? != identity
+        || after.len() != metadata.len()
+        || current_metadata.len() != metadata.len()
+        || after.modified()? != modified
+        || current_metadata.modified()? != modified
+    {
         return Err(BundleError::Corrupt(
-            "source size changed during import".into(),
+            "source identity, size or modification time changed during import".into(),
         ));
     }
     if !manifest.entries.contains(&entry) {

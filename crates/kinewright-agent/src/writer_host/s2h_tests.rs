@@ -52,6 +52,111 @@ fn checked(host: &mut HostCommandOwner, command: HostCommand) -> HostReply {
 }
 
 #[test]
+fn s3_fix1_admitted_extension_recovers_after_host_restart() {
+    for colour in [false, true] {
+        let (temp, mut host) = fixture();
+        let path = temp.path("restart.wav");
+        std::fs::write(
+            &path,
+            kinewright_media::test_support::wav_f32(&vec![0.25; 4800], 48_000, 1),
+        )
+        .unwrap();
+        let client = "e".repeat(64);
+        checked(
+            &mut host,
+            HostCommand::AcquireManual {
+                client: client.clone(),
+            },
+        );
+        if colour {
+            host.owner_mut().unwrap().import_owned_media(&path).unwrap();
+            host.manual = None;
+            checked(
+                &mut host,
+                HostCommand::AcquireManual {
+                    client: client.clone(),
+                },
+            );
+        }
+        let before = HostSnapshot::capture(host.core()).unwrap();
+        let command = if colour {
+            HostCommand::PrepareMediaInterpretation {
+                client: client.clone(),
+                operation: kinewright_core::assume_rec709_operation(
+                    kinewright_core::AssetId(1),
+                    &before.history.document.media_pool[0].color_description,
+                ),
+                snapshot: before.clone(),
+            }
+        } else {
+            HostCommand::PrepareOwnedMedia {
+                client: client.clone(),
+                path: path.clone(),
+                asset_id: kinewright_core::AssetId(1),
+                snapshot: before.clone(),
+            }
+        };
+        let prepared = checked(&mut host, command);
+        let gui = Core::spawn(Document::default()).unwrap();
+        gui.restore_history(before.history).unwrap();
+        let replica = Ja1EditingSession::new(temp.root(), &gui, StorageLimits::default()).unwrap();
+        let permit = replica
+            .bind_manual_producer(
+                prepared.manual_lease.unwrap(),
+                prepared.manual_inputs.unwrap(),
+            )
+            .unwrap();
+        let operation = prepared
+            .owned_media_edit
+            .unwrap_or_else(|| Operation::AddAsset {
+                asset: prepared.owned_media.unwrap(),
+            });
+        assert!(matches!(
+            permit.request(CoreCommand::Do(operation)).unwrap(),
+            Event::DocumentChanged { .. }
+        ));
+        let pending = permit.pending().unwrap();
+        let frozen = HostSnapshot::capture(&gui).unwrap();
+        let mut config = host.config.clone();
+        config.path = Some(temp.path("a.kinewright"));
+        drop(host);
+        std::fs::remove_file(path).unwrap();
+        let mut host = HostCommandOwner::open(config).unwrap();
+        let recovered = run(
+            &mut host,
+            HostCommand::BeginRecovery {
+                client,
+                frozen: Some(frozen.clone()),
+                pending,
+                discard_batches: None,
+            },
+        );
+        assert!(
+            recovered.error.is_none(),
+            "C0_FIX1_RESTART_EXTENSION: {:?}",
+            recovered.error
+        );
+        let barrier = recovered.recovery.unwrap();
+        checked(
+            &mut host,
+            HostCommand::PublishBarrier {
+                barrier: Box::new(barrier),
+            },
+        );
+        let restored = Core::spawn(Document::default()).unwrap();
+        kinewright_project::bundle::LoadedBundle::read(&temp.path("a.kinewright"))
+            .unwrap()
+            .restore_manual(&restored)
+            .unwrap();
+        assert_eq!(
+            restored.export_history().unwrap(),
+            frozen.history,
+            "C0_FIX1_RESTART_SUFFIX"
+        );
+    }
+}
+
+#[test]
 fn s3_host_owned_input_admission_rebinds_only_the_exact_editor_cut() {
     let (temp, mut host) = fixture();
     let path = temp.path("owned.wav");
