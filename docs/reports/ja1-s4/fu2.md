@@ -16,7 +16,7 @@ The brief authorizes one commit and no push.
 | R3-M5 | `result_and_delivery` and `next_effect` document that a wake delivers every record whose `wake` equals the effect ID. `payload` contains only the first result. The existing `s4_observed_and_cancelled_siblings_settle_one_wake` covers shared wake identity and independent observation. The H3 executor witness remains outside this branch. |
 | R3-M6 | The Studio pump skips registration of an identical live request. `poll_runtime_request` documents consuming or repeating a pending request with the same identity and contents. `fu2_repeated_pending_request_uses_acknowledged_owner` polls the same request twice, waits for the C1 owner's answer, and checks one response and normal completion. |
 | R3-M7 | The complete local `kinewright-core` target set runs with the final source, alongside agent and project targets. Results appear below. |
-| R3-M8 | `s4_drain_and_durable_base` gives the first merge a one-hour expiry and revokes authority before replay, without a wall-clock sleep. The platform-independent `fu1_unknown_branch_refuses_after_receipt_lookup` unit test is no longer Linux-gated. Both run in the full affected-crate gate. |
+| R3-M8 | `s4_drain_and_durable_base` gives the first merge a one-hour expiry and revokes authority before replay, without a wall-clock sleep. `fu1_unknown_branch_refuses_after_receipt_lookup` was ungated here. FU3 restores its Linux gate because G1-W still refuses durable bundle activation on Windows. Both run in the full affected-crate gate. |
 
 M5's index assignments in `publish_branch_impl` and all excluded C2 and C5 files stay
 unchanged. This worker starts no independent review round.
@@ -71,7 +71,7 @@ raw summaries. The restored `durable.rs` SHA-256 is
 ## NOT RUN
 
 - 38 existing declared test ignores, comprising 1 core, 35 agent, and 2 project ignores. Reasons cover manual performance and old-reader checks, a historical uncooperative journal fixture, the known media-engine teardown SIGSEGV, missing App or GUI participants and H1 or H3 integrations, unprepared speech and media packs, live subscriptions, and the slow tier. Each exact test and reason is retained in `fu2-gates.log.gz`; none is counted as a pass. The predecessor prerequisite recipe itself did run successfully.
-- Native Windows, Windows clippy, and G1-W. This workstation runs Linux. Removing the M4 test's Linux gate enables Windows CI coverage but does not claim a local Windows run.
+- Native Windows, Windows clippy, and G1-W. This workstation runs Linux. `bundle_commit::fu1_tests::fu1_unknown_branch_refuses_after_receipt_lookup` is NOT RUN on Windows. It requires durable bundle activation and receipt publication, which G1-W does not support. FU3 restores the Linux-only gate. The receipt-before-unknown-branch ordering cannot be exercised through a supported Windows bundle owner until G1-W exists.
 - Hosted CI, the full workspace test suites, and slow-feature suites. The brief forbids pushing, and SPEED-RULES leaves full suites to CI. Required local core, agent, and project targets run here.
 - Native C2 admission, containment, and retirement through a kernel command, plus C5 accounting. Those implementations and files are outside this worker's scope. Lifecycle fixtures supply acknowledged C2 retirement facts. The cleanup refresh call is wired for their later integration.
 - H1 durable orchestration publication, independent lifecycle reopen, and crash recovery. The publisher is not merged in this branch.

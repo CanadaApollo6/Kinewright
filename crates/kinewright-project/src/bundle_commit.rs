@@ -1915,7 +1915,8 @@ pub fn history_cost_probe(
     record_cost(history, limits)
 }
 
-#[cfg(test)]
+// G1-W: durable bundle activation and receipt publication are unsupported on Windows.
+#[cfg(all(test, target_os = "linux"))]
 mod fu1_tests {
     use super::*;
     use kinewright_core::{
@@ -1924,7 +1925,7 @@ mod fu1_tests {
 
     #[test]
     fn fu1_unknown_branch_refuses_after_receipt_lookup() {
-        // A durable filesystem, not /tmp, and no `..`: Windows bundles refuse traversal.
+        // Receipt ordering needs a real durable publisher, outside tmpfs.
         let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .nth(2)
