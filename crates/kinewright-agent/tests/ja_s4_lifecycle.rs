@@ -112,6 +112,7 @@ impl ContractOwner {
         envelope.id.sequence += 1;
         envelope.expected_generation += 1;
         envelope.authority.attempt = match &command {
+            OrchestrationCommand::SettleExpiredBackground(_) => None,
             OrchestrationCommand::BeginTurn(turn)
             | OrchestrationCommand::EndTurn(turn)
             | OrchestrationCommand::BackgroundWork(turn, _) => Some(turn.attempt.clone()),
@@ -148,12 +149,9 @@ impl ContractOwner {
         self.state().tasks[0].id.clone()
     }
     fn begin(&mut self, task: &TaskId, n: u64, purpose: TurnPurpose) -> TaskTurn {
-        if !self
-            .state()
-            .attempts
-            .iter()
-            .any(|attempt| &attempt.identity.task == task)
-        {
+        if !self.state().attempts.iter().any(|attempt| {
+            &attempt.identity.task == task && !matches!(attempt.state, AttemptState::Retired(_))
+        }) {
             // C2 fixture admission is separate from a C4 dependency reservation.
             let mut state = self.state().clone();
             state.attempts.push(AttemptReservation {
@@ -183,7 +181,7 @@ impl ContractOwner {
             .state()
             .attempts
             .iter()
-            .find(|a| &a.identity.task == task)
+            .find(|a| &a.identity.task == task && !matches!(a.state, AttemptState::Retired(_)))
             .map_or_else(|| id(n), |a| a.identity.attempt.clone());
         let turn = TaskTurn {
             task: task.clone(),
@@ -1535,4 +1533,125 @@ fn s4_async_question_response_uses_acknowledged_owner() {
             ));
         }
     }
+}
+
+#[test]
+fn fu1_cancelled_reviewer_allows_completed_root_ready() {
+    let mut owner = ContractOwner::new();
+    let root = owner.root();
+    let turn = owner.begin(&root, 21, TurnPurpose::Work);
+    let reviewer = owner.assign(&root, Role::Reviewer).unwrap();
+    drive(
+        &mut owner,
+        vec![Box::new(move |owner| {
+            owner
+                .apply(OrchestrationCommand::CancelTask(reviewer.clone()))
+                .unwrap();
+            owner.apply(OrchestrationCommand::EndTurn(turn)).unwrap();
+            owner
+                .apply(OrchestrationCommand::FreezeTask(root.clone()))
+                .unwrap();
+            owner
+                .result(&root, 700)
+                .expect("a settled cancelled reviewer must not prevent Ready");
+            let mut final_cut = owner.state().clone();
+            final_cut.phase = RunPhase::Finished;
+            final_cut.outcome = RunOutcome::Ready;
+            assert_eq!(validate_projection(&final_cut), Err(Refusal::InvalidState));
+            for attempt in &mut final_cut.attempts {
+                attempt.state = AttemptState::Retired(AttemptOutcome::Completed);
+            }
+            for effect in &mut final_cut.effects {
+                effect.state = EffectState::Settled;
+            }
+            orchestration::tasks::refresh_cleanup(&mut final_cut);
+            owner.kernel = Kernel::from_acknowledged(final_cut)
+                .expect("final Ready validation must accept a settled cancelled descendant");
+            assert_eq!(owner.state().outcome, RunOutcome::Ready);
+            assert_eq!(owner.state().cleanup, RunCleanup::Settled);
+            assert_eq!(
+                owner
+                    .state()
+                    .tasks
+                    .iter()
+                    .find(|task| task.id == reviewer)
+                    .unwrap()
+                    .state,
+                TaskState::Cancelled
+            );
+            let mut invalid = owner.state().clone();
+            invalid.tasks[0].state = TaskState::Cancelled;
+            assert_eq!(validate_projection(&invalid), Err(Refusal::InvalidState));
+            let mut invalid = owner.state().clone();
+            invalid.tasks[0].state = TaskState::Preparing;
+            assert_eq!(validate_projection(&invalid), Err(Refusal::InvalidState));
+        })],
+    );
+}
+
+#[test]
+fn fu1_expired_background_settles_only_after_native_cleanup() {
+    let mut owner = ContractOwner::new();
+    let root = owner.root();
+    let turn = owner.begin(&root, 21, TurnPurpose::Work);
+    drive(
+        &mut owner,
+        vec![Box::new(move |owner| {
+            owner
+                .apply(OrchestrationCommand::BackgroundWork(turn.clone(), 2))
+                .unwrap();
+            owner
+                .apply(OrchestrationCommand::ExpireSession(turn.session.clone()))
+                .unwrap();
+            let before = owner.state().clone();
+            assert_eq!(
+                owner.apply(OrchestrationCommand::SettleExpiredBackground(turn.clone())),
+                Err(Refusal::InvalidState)
+            );
+            assert_eq!(
+                owner.apply(OrchestrationCommand::BackgroundWork(turn.clone(), 0)),
+                Err(Refusal::InvalidState)
+            );
+            let mut next = turn.clone();
+            next.ordinal += 1;
+            next.session = id(800);
+            assert_eq!(
+                owner.apply(OrchestrationCommand::BeginTurn(next.clone())),
+                Err(Refusal::InvalidState)
+            );
+            assert_eq!(owner.state(), &before);
+            // C2 owns native proof. This fixture supplies its acknowledged retirement fact.
+            let mut cleaned = owner.state().clone();
+            cleaned.attempts[0].state = AttemptState::Retired(AttemptOutcome::Interrupted);
+            orchestration::tasks::refresh_cleanup(&mut cleaned);
+            owner.kernel = Kernel::from_acknowledged(cleaned).unwrap();
+            let before = owner.state().clone();
+            let mut wrong = turn.clone();
+            wrong.ordinal += 1;
+            assert_eq!(
+                owner.apply(OrchestrationCommand::SettleExpiredBackground(wrong)),
+                Err(Refusal::InvalidState)
+            );
+            assert_eq!(owner.state(), &before);
+            owner
+                .apply(OrchestrationCommand::SettleExpiredBackground(turn.clone()))
+                .unwrap();
+            assert_eq!(owner.state().tasks[0].progress.background, 0);
+            assert_eq!(owner.state().tasks[0].progress.turn.as_ref(), Some(&turn));
+            assert!(owner.state().tasks[0].progress.expired);
+            assert_eq!(
+                owner.apply(OrchestrationCommand::BeginTurn(next)),
+                Err(Refusal::ScopeConflict)
+            );
+            let fresh = owner.begin(&root, 22, TurnPurpose::Work);
+            assert_ne!(fresh.attempt, turn.attempt);
+            assert_ne!(fresh.session, turn.session);
+            assert_eq!(
+                owner.apply(OrchestrationCommand::BackgroundWork(turn, 0)),
+                Err(Refusal::InvalidState)
+            );
+            owner.apply(OrchestrationCommand::EndTurn(fresh)).unwrap();
+            assert!(orchestration::tasks::ready(owner.state(), &root));
+        })],
+    );
 }

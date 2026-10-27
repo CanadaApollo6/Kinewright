@@ -1,6 +1,6 @@
 # C1 contracts for S3 H1 and S4 C2
 
-The base is `7fa471fcd2ee0455142f7ee41893ec4ccaf646df`. H1 has not merged. These
+The reviewed C1 parent is `4250d146eb767b64a058bcbafb5f9adbccbb5264`. H1 has not merged. These
 contracts do not enable RunIndex support, publish a Studio root, or authorize
 provider execution. S3 retains every shared store, host, App, manifest, and CI file.
 
@@ -95,3 +95,17 @@ The agent exposes that exact text in `T3CODE_MIT_NOTICE`. Translated sources and
 tests identify upstream repository, pin, paths, notice, and Kinewright changes.
 The App and packaging owner still owes the attribution-list and packaged-notice
 link. The workspace license remains GPL-3.0-only.
+
+## C1 evidence after the rebase
+
+The original measured base was `7fa471fcd2ee0455142f7ee41893ec4ccaf646df`. The final reviewed
+parent is `4250d146eb767b64a058bcbafb5f9adbccbb5264`. The original `c1-*.log.gz` archives,
+source hashes, binary hashes, mutation results and raw summaries are historical
+evidence from before the rebase. They have not been relabelled as runs at the new parent.
+
+The C1-local build, clippy, formatting, 12 mutation pairs, architecture,
+confirmation, M31, receipt, writer, branch, store and kernel checks are
+**NOT RUN at base `4250d14`**. No C1-local rerun at that exact base is recorded.
+The subsequent [H2 report](h2.md) and [C3 report](c3-pre-h3.md) retain their
+own later-head gates, including store, kernel, receipt, writer and branch suites.
+[fu1.md](fu1.md) records the current follow-up gates separately.

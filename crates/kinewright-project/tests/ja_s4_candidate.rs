@@ -276,3 +276,189 @@ fn run_case(drop_ack: bool) {
         receipt
     );
 }
+
+#[test]
+fn fu1_refused_candidate_commit_does_not_block_unknown_manual_save() {
+    for earlier_refusal in [false, true] {
+        run_manual_refusal("root_rename_io", false, earlier_refusal);
+        run_manual_refusal("root_parent_sync", true, earlier_refusal);
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "one exact manual floor ticket and candidate refusal across reconciliation"
+)]
+fn run_manual_refusal(fault: &'static str, landed: bool, earlier_refusal: bool) {
+    use kinewright_project::{bundle::BundleError, io_observer};
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("fu1-roots");
+    let temp = TempDirectory::new_in(&root, "manual-settlement");
+    let path = temp.path("project.kinewright");
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    let limits = StorageLimits {
+        branch_history_bytes: kinewright_project::bundle_commit::history_cost_probe(
+            &core.export_history().unwrap(),
+            &StorageLimits::default(),
+        )
+        .unwrap()
+            * 3,
+        ..StorageLimits::default()
+    };
+    owner.first_save(&path, limits.clone()).unwrap();
+    owner.save_active().unwrap();
+    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    owner.persist_durable_branch(&mut candidate).unwrap();
+    let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
+    let mut specialist = owner
+        .fork_registered_from_candidate(&binding, "Editor")
+        .unwrap();
+    specialist
+        .core()
+        .request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        }))
+        .unwrap();
+    let frozen = owner.freeze_registered_candidate(&mut specialist).unwrap();
+    let issuer = owner
+        .issue_manual_lease("candidate".into(), "candidate-private".into())
+        .unwrap()
+        .issuer;
+    let envelope = owner
+        .candidate_merge_envelope(
+            &frozen,
+            CommandId {
+                issuer,
+                sequence: 1,
+            },
+        )
+        .unwrap();
+    if earlier_refusal {
+        let mut refused = envelope.clone();
+        refused.id.sequence += 1;
+        assert!(matches!(
+            owner.commit_candidate(&frozen, &refused),
+            Err(BundleError::Unsupported(_))
+        ));
+    }
+    for n in 0..64 {
+        core.request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: n % 2 == 0,
+        }))
+        .unwrap();
+    }
+    let manual = core.export_history().unwrap();
+    let expected =
+        kinewright_project::bundle_commit::bound_history_probe(&manual, &limits).unwrap();
+    assert!(
+        expected.floor_offset > manual.floor_offset,
+        "the unknown save must own a floor ticket"
+    );
+    assert!(matches!(
+        io_observer::fail_once(fault, || owner.save_active()),
+        Err(BundleError::DurabilityUnknown)
+    ));
+    assert!(core.pending_history_save().unwrap().is_some());
+    assert!(matches!(
+        owner.commit_candidate(&frozen, &envelope),
+        Err(BundleError::Unsettled)
+    ));
+    owner
+        .reconcile_active()
+        .expect("the manual attempt must settle with its own Core");
+    assert!(core.pending_history_save().unwrap().is_none());
+    assert_eq!(
+        core.export_history().unwrap(),
+        if landed {
+            expected.clone()
+        } else {
+            manual.clone()
+        }
+    );
+    owner.save_active().unwrap();
+    assert_eq!(core.export_history().unwrap(), expected);
+    assert_eq!(flattened_document(&path), *manual.document);
+    assert_eq!(
+        candidate.core().attachment_state().unwrap(),
+        kinewright_core::AttachmentState::Live
+    );
+    assert!(matches!(
+        owner.commit_candidate(&frozen, &envelope).unwrap(),
+        ReceiptLookup::Committed(_)
+    ));
+}
+
+#[test]
+fn fu1_definite_candidate_refusal_releases_the_frozen_cut() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("fu1-roots");
+    let temp = TempDirectory::new_in(&root, "candidate-refusal");
+    let core = Core::spawn(Document {
+        tracks: vec![Track {
+            id: TrackId(1),
+            kind: TrackKind::Video,
+            sync_lock: true,
+            clips: vec![],
+        }],
+        ..Document::default()
+    })
+    .unwrap();
+    let mut owner = Ja1EditingSession::new(temp.root(), &core, StorageLimits::default()).unwrap();
+    owner
+        .first_save(&temp.path("project.kinewright"), StorageLimits::default())
+        .unwrap();
+    let mut candidate = owner.fork_durable_branch("candidate").unwrap();
+    owner.persist_durable_branch(&mut candidate).unwrap();
+    let binding = owner.candidate_binding(candidate.branch_id()).unwrap();
+    let mut specialist = owner
+        .fork_registered_from_candidate(&binding, "Editor")
+        .unwrap();
+    specialist
+        .core()
+        .request(Command::Do(Operation::SetTrackSyncLock {
+            track: TrackId(1),
+            locked: false,
+        }))
+        .unwrap();
+    let frozen = owner.freeze_registered_candidate(&mut specialist).unwrap();
+    let issuer = owner
+        .issue_manual_lease("candidate".into(), "candidate-private".into())
+        .unwrap()
+        .issuer;
+    let envelope = owner
+        .candidate_merge_envelope(
+            &frozen,
+            CommandId {
+                issuer,
+                sequence: 2,
+            },
+        )
+        .unwrap();
+    let root = owner.root_sha256().unwrap();
+    assert!(matches!(
+        owner.commit_candidate(&frozen, &envelope),
+        Err(kinewright_project::bundle::BundleError::Unsupported(_))
+    ));
+    assert_eq!(
+        candidate.core().attachment_state().unwrap(),
+        kinewright_core::AttachmentState::Live
+    );
+    owner.reconcile_active().unwrap();
+    assert_eq!(owner.root_sha256().unwrap(), root);
+    let mut valid = envelope;
+    valid.id.sequence = 1;
+    assert!(matches!(
+        owner.commit_candidate(&frozen, &valid).unwrap(),
+        ReceiptLookup::Committed(_)
+    ));
+}

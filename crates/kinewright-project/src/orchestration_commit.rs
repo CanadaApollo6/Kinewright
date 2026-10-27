@@ -602,7 +602,8 @@ pub fn validate_projection(state: &RunProjection) -> Result<(), Refusal> {
             || state
                 .tasks
                 .iter()
-                .any(|task| !matches!(task.state, TaskState::Terminal(_)))
+                .any(|task| !(matches!(task.state, TaskState::Terminal(_))
+                    || task.parent.is_some() && task.state == TaskState::Cancelled))
             || state.effects.iter().any(|effect| {
                 !matches!(effect.state, EffectState::Settled | EffectState::Disposed)
             })

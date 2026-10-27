@@ -1,5 +1,5 @@
 {
-  "base": "7fa471fcd2ee0455142f7ee41893ec4ccaf646df",
+  "base": "4250d146eb767b64a058bcbafb5f9adbccbb5264",
   "branch": "t3/ja1-s4-c1",
   "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
   "sources": {
@@ -124,5 +124,8 @@
     "mutation-schema_support-red.log.gz": "479ab59b56d6a64550870d01f5d49727aa0763c0e819b2f31797275e7be94b3d",
     "mutation-unknown_freeze-green.log.gz": "2eaf279c063e9a458a2db0930eca64bc8879b15c2a6393d122c1eadb40bd870f",
     "mutation-unknown_freeze-red.log.gz": "f69ab781a5f5ee1c3f48b8531f2f7433470b9f83ae5db1b57d0f07d8d9bc9943"
-  }
+  },
+  "original_measured_base": "7fa471fcd2ee0455142f7ee41893ec4ccaf646df",
+  "evidence_scope": "Historical pre-rebase C1 evidence. Original source, binary, log hashes and summaries are retained unchanged.",
+  "rerun_at_reviewed_parent": "NOT RUN at 4250d14. No C1-local gate or mutation rerun at that exact base is recorded. Later H2, C3 and fu1 reports retain their own head-specific gates."
 }

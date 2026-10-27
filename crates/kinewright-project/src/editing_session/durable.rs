@@ -42,9 +42,9 @@ impl FrozenTaskResult {
 }
 
 pub(super) struct PendingCandidateCommit {
-    core: Core,
+    pub(super) core: Core,
     cut: kinewright_core::AcceptedCut,
-    envelope: crate::receipts::CommandEnvelope,
+    pub(super) envelope: crate::receipts::CommandEnvelope,
 }
 
 #[derive(Clone)]
@@ -303,12 +303,15 @@ impl Ja1EditingSession {
             if pending.envelope != *envelope {
                 return Err(BundleError::Unsettled);
             }
-            self.settle_pending_candidate(true)?;
+            self.reconcile_active()?;
         }
         let bundle = self.active_bundle()?;
         let previous = bundle.receipt_lookup(envelope)?;
         if previous != crate::receipts::ReceiptLookup::Absent {
             return Ok(previous);
+        }
+        if bundle.unsettled || bundle.pending_command.is_some() {
+            return Err(BundleError::Unsettled);
         }
         let core = self.candidate_core(frozen.base())?;
         if self.candidate_binding(&frozen.source.branch)? != frozen.source
@@ -317,11 +320,18 @@ impl Ja1EditingSession {
             return Err(BundleError::HistoryChanged);
         }
         let target = frozen.base.branch.clone();
+        let inputs = self
+            .active_bundle()?
+            .checkpoint(&target)?
+            .input_manifest_ref
+            .clone();
         let attachment = self.active_bundle()?.attach_core(&core)?;
         let cut = attachment.freeze().map_err(crate::bundle::history_error)?;
-        let encoded = serde_json::to_vec(&(cut.history(), envelope))
-            .map_err(|e| BundleError::Corrupt(e.to_string()))?;
-        let charge = match self.store()?.reserve_retained_capture(&encoded) {
+        let charge = match (|| {
+            let encoded = serde_json::to_vec(&(cut.history(), envelope))
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            self.store()?.reserve_retained_capture(&encoded)
+        })() {
             Ok(charge) => charge,
             Err(error) => {
                 attachment
@@ -336,7 +346,6 @@ impl Ja1EditingSession {
             envelope: envelope.clone(),
         }));
         let bundle = self.active_bundle_mut()?;
-        let inputs = bundle.checkpoint(&target)?.input_manifest_ref.clone();
         let result = crate::bundle_commit::BundleCommit::command_target(
             bundle,
             envelope,
@@ -346,12 +355,12 @@ impl Ja1EditingSession {
             false,
             &target,
         );
-        if result.is_ok() {
-            self.settle_pending_candidate(false)?;
+        if result.is_ok() || (!bundle.unsettled && bundle.pending_command.is_none()) {
+            self.settle_pending_candidate()?;
         }
         result
     }
-    pub(super) fn settle_pending_candidate(&mut self, reconcile: bool) -> Result<(), BundleError> {
+    pub(super) fn settle_pending_candidate(&mut self) -> Result<(), BundleError> {
         let Some(pending) = &self.pending_candidate else {
             return Ok(());
         };
@@ -359,9 +368,6 @@ impl Ja1EditingSession {
         let cut = pending.cut.clone();
         let envelope = pending.envelope.clone();
         let bundle = self.active_bundle_mut()?;
-        if reconcile {
-            bundle.reconcile_command(&core)?;
-        }
         let attachment = bundle.attach_core(&core)?;
         let cut = match bundle.receipt_lookup(&envelope)? {
             crate::receipts::ReceiptLookup::Committed(_) => {

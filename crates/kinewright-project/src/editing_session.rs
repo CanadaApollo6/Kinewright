@@ -1254,6 +1254,11 @@ impl Ja1EditingSession {
         Ok(())
     }
     fn core_for_destination(&self, bundle: &ProjectBundle, default: Option<&Core>) -> Option<Core> {
+        let default = self
+            .pending_candidate
+            .as_ref()
+            .filter(|pending| bundle.pending_command.as_deref() == Some(&pending.envelope))
+            .map_or(default, |pending| Some(&pending.core));
         let eligible = |core: &&Core| {
             core.attachment_state()
                 .is_ok_and(|state| state != kinewright_core::AttachmentState::Sealed)
@@ -1267,18 +1272,17 @@ impl Ja1EditingSession {
         {
             return Some(core.clone());
         }
-        self.durable_sessions
-            .iter()
-            .filter(|registered| registered.guard.epoch == bundle.store.owner_epoch())
-            .map(|registered| registered.guard.core())
+        std::iter::once(&self.core)
+            .chain(
+                self.durable_sessions
+                    .iter()
+                    .filter(|registered| registered.guard.epoch == bundle.store.owner_epoch())
+                    .map(|registered| registered.guard.core()),
+            )
             .find(|core| eligible(core) && core.actor_identity() == attempt.actor())
             .cloned()
     }
     pub fn reconcile_active(&mut self) -> Result<Option<BundleSaveReport>, BundleError> {
-        if self.pending_candidate.is_some() {
-            self.settle_pending_candidate(true)?;
-            return Ok(None);
-        }
         let live = self.core_for_destination(self.active_bundle()?, Some(&self.core));
         let destination = self
             .destination
@@ -1297,7 +1301,9 @@ impl Ja1EditingSession {
             self.rescue
                 .settle(&tag, destination.bundle()?.publication_state());
         }
-        result
+        let report = result?;
+        self.settle_pending_candidate()?;
+        Ok(report)
     }
     /// Foreground probe. Only a failed unknown attempt can supply an offer.
     pub fn probe_active(&mut self) -> Result<Option<RescueProbe>, BundleError> {

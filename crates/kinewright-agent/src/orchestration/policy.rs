@@ -1,4 +1,5 @@
 //! Pure operation policy. This is scope validation, not an H3 authorization grant.
+//! Original Kinewright implementation; no upstream source was translated.
 //!
 //! Scope strings are exact, with no wildcards. Objects use `track:1`, `clip:2`,
 //! `effect:2:3` (clip then effect), `asset:4`, `bus:5`, `mix:1`, `marker:6`,

@@ -159,6 +159,7 @@ pub fn decide(
             | OrchestrationCommand::BeginTurn(_)
             | OrchestrationCommand::EndTurn(_)
             | OrchestrationCommand::BackgroundWork(_, _)
+            | OrchestrationCommand::SettleExpiredBackground(_)
             | OrchestrationCommand::Request(_)
             | OrchestrationCommand::AdmitQuestionWake(_)
             | OrchestrationCommand::ExecuteQuestionWake(_)

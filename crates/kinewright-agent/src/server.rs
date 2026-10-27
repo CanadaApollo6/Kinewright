@@ -1178,6 +1178,8 @@ struct KinewrightMcp {
     served_tool_allowlist: Option<&'static [&'static str]>,
     host_scoped: bool,
     task_endpoint: Option<crate::orchestration::tasks::TaskEndpoint>,
+    #[cfg(test)]
+    task_admission_hook: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl KinewrightMcp {
@@ -1232,6 +1234,8 @@ impl KinewrightMcp {
             served_tool_allowlist: None,
             host_scoped: false,
             task_endpoint: None,
+            #[cfg(test)]
+            task_admission_hook: None,
         }
     }
 
@@ -1333,6 +1337,10 @@ impl KinewrightMcp {
         } else {
             None
         };
+        #[cfg(test)]
+        if let Some(hook) = &self.task_admission_hook {
+            hook();
+        }
         if self.host_scoped && !host_scoped_tool_admitted(&request) {
             return Ok(error_text(
                 "root_refused: this file/media operation requires an identity-pinned input/output capability; forwarded path strings alone do not authorize filesystem IO",

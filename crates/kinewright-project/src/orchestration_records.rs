@@ -177,6 +177,8 @@ pub enum OrchestrationCommand {
     BeginTurn(TaskTurn),
     EndTurn(TaskTurn),
     BackgroundWork(TaskTurn, u32),
+    /// Owner settlement after the expired turn's native attempt is proven retired.
+    SettleExpiredBackground(TaskTurn),
     Request(RuntimeRequest),
     AdmitQuestionWake(QuestionId),
     ExecuteQuestionWake(QuestionId),

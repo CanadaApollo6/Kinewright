@@ -1,4 +1,4 @@
-// Production dispatcher witnesses for the pre-H3 task boundary.
+// Original Kinewright dispatcher witnesses; no upstream source was translated.
 fn s4_id<T: serde::de::DeserializeOwned>(number: u64) -> T {
     serde_json::from_value(json!(format!("{number:032x}"))).unwrap()
 }
@@ -430,7 +430,27 @@ fn s4_drain_and_durable_base() {
         .unwrap();
     let revision = handler.snapshot().unwrap().0;
     let endpoint = task.endpoint();
-    let admitted = endpoint.admit().unwrap();
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let mut admitted_handler = handler.clone();
+    let (inside, resume) = (entered.clone(), release.clone());
+    admitted_handler.task_admission_hook = Some(Arc::new(move || {
+        inside.wait();
+        resume.wait();
+    }));
+    let admitted_call = std::thread::spawn(move || {
+        admitted_handler
+            .call_exposed_blocking(
+                CallToolRequestParams::new("commit_edit_plan").with_arguments(
+                    json!({"plan_id":prepared["plan_id"],"expected_revision":revision})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .unwrap()
+    });
+    entered.wait();
     let freezing = std::thread::spawn(move || {
         let frozen = task.freeze(&mut owner).unwrap().clone();
         (task, owner, frozen)
@@ -440,23 +460,20 @@ fn s4_drain_and_durable_base() {
         assert!(Instant::now() < deadline, "freeze did not close ingress");
         std::thread::yield_now();
     }
-    let result = handler
-        .call_blocking(
-            CallToolRequestParams::new("commit_edit_plan").with_arguments(
-                json!({"plan_id":prepared["plan_id"],"expected_revision":revision})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
-        )
-        .unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let froze_before_release = freezing.is_finished();
+    release.wait();
+    let result = admitted_call.join().unwrap();
+    let (task, owner, frozen) = freezing.join().unwrap();
+    assert!(
+        !froze_before_release,
+        "freeze must wait for production admission"
+    );
     assert_eq!(
         result.is_error,
         Some(false),
         "admitted work drains after closure: {result:?}"
     );
-    drop(admitted);
-    let (task, owner, frozen) = freezing.join().unwrap();
     assert_eq!(
         frozen.delta().len(),
         1,
@@ -486,7 +503,9 @@ fn s4_drain_and_durable_base() {
     let candidate = owner
         .reopen_registered_candidate(candidate.branch_id().clone(), &candidate_base)
         .unwrap();
-    let authority = s4_owner_authority(&owner);
+    let mut authority = s4_owner_authority(&owner);
+    authority.expires_at = Instant::now() + Duration::from_secs(2);
+    let expires_at = authority.expires_at;
     let mut reopened = EditorTask::reopen(
         &mut owner,
         brief.clone(),
@@ -509,11 +528,25 @@ fn s4_drain_and_durable_base() {
         sequence: 1,
     };
     let receipt = reopened.merge(&mut owner, id.clone()).unwrap();
-    assert_eq!(reopened.merge(&mut owner, id).unwrap(), receipt);
+    std::thread::sleep(expires_at.saturating_duration_since(Instant::now()));
+    assert_eq!(reopened.merge(&mut owner, id.clone()).unwrap(), receipt);
+    reopened.endpoint().revoke();
+    assert_eq!(reopened.merge(&mut owner, id.clone()).unwrap(), receipt);
+    let mut changed = id;
+    changed.sequence += 1;
+    assert!(reopened.merge(&mut owner, changed).is_err());
     let history = owner.durable_branch_history(&candidate).unwrap();
     assert_eq!(history.document.tracks[0].clips.len(), 2);
     assert_eq!(history.cursor.undo.len(), 2);
     drop(history);
+    let registrations = owner.durable_sessions().len();
+    let retired_core = reopened.core().clone();
+    reopened.close(&mut owner).unwrap();
+    assert_eq!(owner.durable_sessions().len(), registrations - 1);
+    assert_eq!(
+        retired_core.attachment_state().unwrap(),
+        kinewright_core::AttachmentState::Sealed
+    );
     assert!(
         owner
             .fork_registered_from_candidate(&base, "changed durable target")

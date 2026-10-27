@@ -236,12 +236,21 @@ impl EditorTask {
         }
         self.frozen.as_ref().ok_or(BundleError::HistoryChanged)
     }
-    /// Revalidate the full frozen delta at the original durable base before merge/replay.
+    /// Replay the original receipt before admitting and validating a fresh merge.
     pub fn merge(
         &mut self,
         owner: &mut Ja1EditingSession,
         id: CommandId,
     ) -> Result<ReceiptLookup, BundleError> {
+        if let Some(envelope) = &self.merge_envelope {
+            if envelope.id != id {
+                return Err(BundleError::HistoryChanged);
+            }
+            let receipt = owner.manual_transition_receipt(envelope)?;
+            if receipt != ReceiptLookup::Absent {
+                return Ok(receipt);
+            }
+        }
         self.endpoint
             .check_live()
             .map_err(BundleError::Unsupported)?;
@@ -258,11 +267,7 @@ impl EditorTask {
         self.endpoint
             .validate_batch(&document, frozen.delta())
             .map_err(BundleError::Unsupported)?;
-        if let Some(envelope) = &self.merge_envelope {
-            if envelope.id != id {
-                return Err(BundleError::HistoryChanged);
-            }
-        } else {
+        if self.merge_envelope.is_none() {
             self.merge_envelope = Some(owner.candidate_merge_envelope(frozen, id)?);
         }
         let envelope = self
@@ -290,6 +295,13 @@ impl EditorTask {
     #[must_use]
     pub const fn original_merge_envelope(&self) -> Option<&CommandEnvelope> {
         self.merge_envelope.as_ref()
+    }
+    /// Persist terminal work, seal its Core and release the owner's registration.
+    pub fn close(&mut self, owner: &mut Ja1EditingSession) -> Result<(), BundleError> {
+        self.freeze(owner)?;
+        owner.close_durable_branch(&self.registration)?;
+        self.endpoint.revoke();
+        Ok(())
     }
 }
 
@@ -694,6 +706,28 @@ pub fn apply_lifecycle(
                     task.state = TaskState::WaitingForChildren(children);
                 }
             }
+        }
+        OrchestrationCommand::SettleExpiredBackground(turn) => {
+            let task = state
+                .tasks
+                .iter_mut()
+                .find(|task| task.id == turn.task)
+                .ok_or(Refusal::ScopeConflict)?;
+            if envelope.authority.attempt.is_some()
+                || envelope.authority.endpoint.is_some()
+                || envelope.authority.owner_epoch != turn.owner_epoch
+                || !task.progress.expired
+                || task.progress.turn.as_ref() != Some(turn)
+                || !state.attempts.iter().any(|attempt| {
+                    attempt.identity.task == turn.task
+                        && attempt.identity.attempt == turn.attempt
+                        && attempt.owner_epoch == turn.owner_epoch
+                        && matches!(attempt.state, AttemptState::Retired(_))
+                })
+            {
+                return Err(Refusal::InvalidState);
+            }
+            task.progress.background = 0;
         }
         OrchestrationCommand::CancelTask(id) => cancel(state, id)?,
         OrchestrationCommand::RecordContext {

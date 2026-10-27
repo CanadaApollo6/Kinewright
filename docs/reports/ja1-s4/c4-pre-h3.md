@@ -143,7 +143,7 @@ A continuation refuses until its outstanding background work settles under the
 original identity. Mixed observed/disposed sibling deliveries settle their exact
 shared wake, which is linked by EffectId instead of result-content coincidence.
 
-Follow-up T1 from `.review/ja/s4-followups.md` is included at Riel's explicit request.
+Follow-up T1 from `.review/ja/s4-followups.md` is included at the lead's request.
 The test-only ACP lease fixture replaces the shell with `exec sleep` rather than
 spawning an unowned sleeping descendant. Every fixture session has an RAII child
 guard that calls the existing transport's kill-and-wait path on normal return and
