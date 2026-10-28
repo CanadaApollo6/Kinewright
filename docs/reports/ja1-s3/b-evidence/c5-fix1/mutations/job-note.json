@@ -1,0 +1,23 @@
+{
+  "case": "job-note",
+  "source": "crates/kinewright-media/src/voice_note.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-media",
+    "--lib",
+    "voice_note::tests::s3_voice_job_identity",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "92e4b554bb4ddf2cce47094931d5b77530e4c8a957905e12c7f0b61f26d7e410",
+  "mutated_sha256": "0075ee1a6b7893a4b8394d32e5cc2f6e9560fe3052665154842aa78d352911a8",
+  "red_exit": 101,
+  "red_log_sha256": "2b60984dbe444cf86442e07cfe693c340037f406f63598410af9955801df53aa",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "dbec99aa0285564afa9342f0b7de9b98bac1195599b929365aeb902db77ede15",
+  "runtime_green": true
+}

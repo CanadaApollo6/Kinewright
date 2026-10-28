@@ -1,0 +1,24 @@
+{
+  "case": "asr-definite-refusal-rebase",
+  "source": "crates/kinewright-app/src/recording.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_fix1_asr_refusal_collection_retry",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "2c1134a23c075415da3bcbfc892de8ff41d709feebd827e4c1c7e8300a93e1fa",
+  "mutated_sha256": "1686093a5bfd2403e17563bec09cc2842b2536b36a98de0b6036c398597bb7d4",
+  "red_exit": 101,
+  "red_log_sha256": "c2e86c1db52ea8e221f824314c68f1032611027c5ca5992ee01f51c81d4bcc80",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "ffdbedb6c28ba168b072ed66c1744f450745fd9638e4f194ffb4ac415b238dd4",
+  "runtime_green": true
+}

@@ -149,14 +149,23 @@ pub struct PlayheadSample<A> {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CaptureStatus {
+    pub complete: bool,
+    pub capture_error: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PlayheadLog<A> {
     pub version: u32,
     pub samples: Vec<PlayheadSample<A>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_status: Option<CaptureStatus>,
 }
 impl<A> PlayheadLog<A> {
     pub fn new(displayed: A) -> Self {
         Self {
             version: 1,
+            capture_status: None,
             samples: vec![PlayheadSample {
                 audio_micros: 0,
                 displayed,
@@ -180,7 +189,13 @@ impl<A> PlayheadLog<A> {
         Ok(())
     }
     pub fn validate(&self, duration_micros: u64) -> Result<(), MediaError> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 2 && self.capture_status.is_none())
+            || self
+                .capture_status
+                .as_ref()
+                .and_then(|status| status.capture_error.as_ref())
+                .is_some_and(|error| error.len() > MAX_VOICE_TEXT_BYTES)
             || duration_micros == 0
             || duration_micros > MAX_VOICE_MICROS
             || self.samples.is_empty()
@@ -311,12 +326,25 @@ pub fn spoken_timecode(text: &str, program_duration_micros: u64) -> SpokenTimeco
                 (Some(_), _) => None,
                 (None, value) => value,
             };
-            found.push(value.and_then(|n| n.checked_mul(60)));
+            found.push(
+                if tokens.get(i + 2).is_some_and(|token| time_suffix(token)) {
+                    None
+                } else {
+                    value.and_then(|n| n.checked_mul(60))
+                },
+            );
         }
     }
     found.sort_unstable();
     found.dedup();
     if found.is_empty() {
+        if tokens.windows(3).any(|part| {
+            number(part[0]).is_some()
+                && number(part[1]).is_some()
+                && matches!(part[2], "second" | "seconds" | "minute" | "minutes")
+        }) {
+            return SpokenTimecode::Ambiguous;
+        }
         return SpokenTimecode::Absent;
     }
     if found.len() != 1 {
@@ -361,14 +389,22 @@ fn number(token: &str) -> Option<u64> {
     }
 }
 fn parse_time(tokens: &[&str]) -> Option<u64> {
-    let first = *tokens.first()?;
-    if tokens.iter().take(8).any(|t| matches!(*t, "or" | "to"))
-        || tokens
-            .windows(2)
-            .any(|pair| pair[0] == "and" && number(pair[1]).is_some())
-    {
+    let (seconds, consumed) = parse_time_prefix(tokens)?;
+    if tokens.get(consumed).is_some_and(|token| time_suffix(token)) {
         return None;
     }
+    Some(seconds)
+}
+fn time_suffix(token: &str) -> bool {
+    number(token).is_some()
+        || token.contains(':')
+        || matches!(
+            token,
+            "second" | "seconds" | "minute" | "minutes" | "and" | "or" | "to" | "in"
+        )
+}
+fn parse_time_prefix(tokens: &[&str]) -> Option<(u64, usize)> {
+    let first = *tokens.first()?;
     if let Some((minutes, seconds)) = first.split_once(':') {
         if seconds.len() != 2 {
             return None;
@@ -380,6 +416,7 @@ fn parse_time(tokens: &[&str]) -> Option<u64> {
                 .ok()?
                 .checked_mul(60)?
                 .checked_add(seconds)
+                .map(|value| (value, 1))
         });
     }
     let a = number(first)?;
@@ -390,23 +427,24 @@ fn parse_time(tokens: &[&str]) -> Option<u64> {
         && b < 10
         && matches!(*unit, "second" | "seconds" | "minute" | "minutes")
     {
-        return if unit.starts_with("minute") {
+        let value = if unit.starts_with("minute") {
             a.checked_add(b)?.checked_mul(60)
         } else {
             a.checked_add(b)
-        };
+        }?;
+        return Some((value, if tokens.get(3) == Some(&"in") { 4 } else { 3 }));
     }
     match tokens.get(1).copied() {
-        Some("second" | "seconds") => Some(a),
+        Some("second" | "seconds") => Some((a, 2)),
         Some("minute" | "minutes") => {
             let minutes = a.checked_mul(60)?;
             if let Some(seconds) = tokens.get(2).and_then(|t| number(t)) {
                 if seconds >= 60 || !matches!(tokens.get(3).copied(), Some("second" | "seconds")) {
                     return None;
                 }
-                minutes.checked_add(seconds)
+                minutes.checked_add(seconds).map(|value| (value, 4))
             } else {
-                Some(minutes)
+                Some((minutes, if tokens.get(2) == Some(&"in") { 3 } else { 2 }))
             }
         }
         Some(second) => {
@@ -417,7 +455,7 @@ fn parse_time(tokens: &[&str]) -> Option<u64> {
             {
                 return None;
             }
-            a.checked_mul(60)?.checked_add(b)
+            a.checked_mul(60)?.checked_add(b).map(|value| (value, 2))
         }
         None => None,
     }
@@ -874,9 +912,15 @@ mod tests {
             "at 1:10 or 1:20",
             "at 22 seconds and 35 seconds",
             "at twenty two",
+            "at twenty two minutes ten seconds",
+            "at one ten seconds",
+            "twenty two minutes ten seconds",
+            "one ten seconds",
+            "two minutes in ten seconds",
+            "at two minutes in ten seconds",
         ] {
             assert_eq!(
-                spoken_timecode(text, 300_000_000),
+                spoken_timecode(text, 3_600_000_000),
                 SpokenTimecode::Ambiguous,
                 "{text}"
             );

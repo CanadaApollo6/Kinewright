@@ -1,0 +1,24 @@
+{
+  "case": "asr-admission-retention",
+  "source": "crates/kinewright-app/src/recording.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_fix1_asr_admission_retry",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "2c1134a23c075415da3bcbfc892de8ff41d709feebd827e4c1c7e8300a93e1fa",
+  "mutated_sha256": "765d467550172cd9e570163fe8817a5ac0a2b9adf1e6f07d4493db7709c8433c",
+  "red_exit": 101,
+  "red_log_sha256": "97431de5caa4cf07532a93469572ac7e7a83459ca771d9b3fdc2bf2cfd6fadf5",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "652e97fa70cba4d66df185693c7819c6e582eb0b68294d77368d8347a2814e43",
+  "runtime_green": true
+}

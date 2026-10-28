@@ -1,0 +1,24 @@
+{
+  "case": "stale-transcript-choice",
+  "source": "crates/kinewright-app/src/recording.rs",
+  "command": [
+    "test",
+    "-p",
+    "kinewright-app",
+    "--bin",
+    "kinewright-app",
+    "recording::feedback_capture::tests::s3_voice_fix1_stale_transcript_choice",
+    "--",
+    "--exact",
+    "--nocapture"
+  ],
+  "original_sha256": "2c1134a23c075415da3bcbfc892de8ff41d709feebd827e4c1c7e8300a93e1fa",
+  "mutated_sha256": "8fcf9c64582d01bac938c4e3c0515fe95fd4e388ab31825a66b3971d91a58fdc",
+  "red_exit": 101,
+  "red_log_sha256": "0837cd9bbd01bab20f4888a5f1cb36ea3ff113d96efad4613a6b8c8116eb84a9",
+  "runtime_red": true,
+  "restored_exactly": true,
+  "green_exit": 0,
+  "green_log_sha256": "54370aaa83003ff73ced0de82d237e12cbc9c2767357fef0ecbd167ab218d0a2",
+  "runtime_green": true
+}

@@ -139,6 +139,69 @@ impl FeedbackBeatOwner for Beats {
 }
 
 #[test]
+fn s3_old_feedback_reverse_split_ancestry() {
+    let temp = TempDirectory::new_in(Path::new(env!("CARGO_TARGET_TMPDIR")), "s3-reverse-split");
+    let [fixture, _] = build_c0_fixture_pair(temp.root()).unwrap();
+    let mut owner = LoadedBundle::read(&fixture.path)
+        .unwrap()
+        .into_writer()
+        .unwrap();
+    let branch = owner.manual_branch_id().clone();
+    let baseline = owner.branch_history(&branch).unwrap();
+    let parent = baseline.document.tracks[0].clips[0].id;
+    let core = Core::spawn((*baseline.document).clone()).unwrap();
+    core.restore_history((*baseline).clone()).unwrap();
+    apply(
+        &core,
+        Operation::SplitClip {
+            clip: parent,
+            at: TimeCode(6),
+        },
+    );
+    owner.save_branch(&branch, &core).unwrap();
+    let split = owner.branch_history(&branch).unwrap();
+    let child = split.document.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.timeline_start == TimeCode(6))
+        .unwrap()
+        .id;
+    assert_ne!(parent, child);
+    let key = publish(&mut owner, &branch);
+    let original = feedback(&mut owner, key, child);
+    core.request(Command::Undo).unwrap();
+    owner.save_branch(&branch, &core).unwrap();
+    let restored = owner
+        .resolve_feedback(&request(&owner, &original, &branch), None)
+        .unwrap();
+    assert_eq!(
+        restored.resolution.temporal,
+        TemporalStatus::Exact,
+        "S3_REVERSE_SPLIT_IS_NOT_REMOVAL"
+    );
+    assert_eq!(
+        restored.candidates,
+        vec![MappedFrame {
+            clip: parent,
+            frame: 8
+        }]
+    );
+    core.request(Command::Redo).unwrap();
+    owner.save_branch(&branch, &core).unwrap();
+    let redone = owner
+        .resolve_feedback(&request(&owner, &original, &branch), None)
+        .unwrap();
+    assert_eq!(redone.resolution.temporal, TemporalStatus::Exact);
+    assert_eq!(
+        redone.candidates,
+        vec![MappedFrame {
+            clip: child,
+            frame: 8
+        }]
+    );
+}
+
+#[test]
 #[allow(
     clippy::too_many_lines,
     reason = "One saved origin is checked against each real Core operation and checkpoint"

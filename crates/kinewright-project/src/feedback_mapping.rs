@@ -143,12 +143,17 @@ impl ProjectBundle {
         {
             return Ok(result);
         }
+        // Undo can leave the occurrence only in redo; absent ancestry cannot prove removal.
+        let mut removal_proven = !is_future_occurrence(occurrence, &new_lineage);
         for track in &candidate.tracks {
             for clip in &track.clips {
                 let Some(current) = new_lineage.current.get(&clip.id) else {
+                    removal_proven = false;
                     continue;
                 };
-                if !descends_from(current, occurrence, &new_lineage) {
+                if !descends_from(current, occurrence, &new_lineage)
+                    && !descends_from(occurrence, current, &old_lineage)
+                {
                     continue;
                 }
                 let Some(asset) = candidate.asset(clip.asset) else {
@@ -211,6 +216,7 @@ impl ProjectBundle {
         result.candidates.sort_by_key(|c| (c.frame, c.clip));
         result.candidates.dedup();
         result.resolution.temporal = match result.candidates.as_slice() {
+            [] if !removal_proven => TemporalStatus::Unresolved,
             [] if request.beat_map_ref.is_some() && beats.is_none() => TemporalStatus::Unresolved,
             [] => TemporalStatus::Removed,
             [one] if source_mapping && one.frame == revision.anchor.frame => TemporalStatus::Exact,
@@ -276,4 +282,40 @@ fn descends_from(current: &OccurrenceId, origin: &OccurrenceId, lineage: &Lineag
         next = parent;
     }
     false
+}
+
+fn is_future_occurrence(occurrence: &OccurrenceId, lineage: &LineageRecord) -> bool {
+    lineage
+        .redo
+        .iter()
+        .flat_map(|map| map.values())
+        .any(|known| known == occurrence)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn s3_incomplete_split_ancestry_cannot_prove_removal() {
+        let branch = crate::bundle_records::BranchId::fresh().unwrap();
+        let child = OccurrenceId {
+            branch_origin: branch.clone(),
+            creation_batch_id: crate::bundle_records::BatchId::fresh().unwrap(),
+            result_ordinal: 1,
+        };
+        let mut lineage = LineageRecord {
+            branch_origin: branch,
+            baseline: std::collections::BTreeMap::default(),
+            current: std::collections::BTreeMap::default(),
+            undo: vec![],
+            redo: vec![[(ClipId(2), child.clone())].into()],
+            split_ancestry: vec![],
+        };
+        assert!(
+            is_future_occurrence(&child, &lineage),
+            "S3_UNPROVEN_ANCESTRY_IS_NOT_REMOVAL"
+        );
+        lineage.redo.clear();
+        assert!(!is_future_occurrence(&child, &lineage));
+    }
 }
