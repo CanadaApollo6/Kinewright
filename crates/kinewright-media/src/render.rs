@@ -308,6 +308,7 @@ pub(crate) struct SourceSpec {
     asset: AssetId,
     path: std::path::PathBuf,
     certified: Option<crate::owned_io::CertifiedSource>,
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     fps: Rational,
     description: ColorDescription,
     max_width: Option<u32>,
@@ -356,6 +357,10 @@ impl SourceSpec {
                 stop,
             );
         }
+        self.legacy_media
+            .as_ref()
+            .ok_or(MediaError::MediaAdmissionRequired)?
+            .check()?;
         open_managed(
             self.asset,
             path,
@@ -490,7 +495,18 @@ pub(crate) fn reader_demand(
     horizon: i64,
     sizes: &mut FrameSizes,
 ) -> Result<ReaderDemand, MediaError> {
-    reader_demand_with_inputs(document, at, resolution, scale, horizon, sizes, None)
+    reader_demand_with_inputs(
+        document,
+        at,
+        resolution,
+        scale,
+        horizon,
+        sizes,
+        None,
+        kinewright_core::MediaSourceOrigin::new_project()
+            .legacy_media()
+            .as_ref(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -502,7 +518,13 @@ pub(crate) fn reader_demand_with_inputs(
     horizon: i64,
     sizes: &mut FrameSizes,
     inputs: Option<&crate::owned_io::PlaybackInputs>,
+    legacy_media: Option<&kinewright_core::LegacyMediaGrant>,
 ) -> Result<ReaderDemand, MediaError> {
+    if inputs.is_none() {
+        legacy_media
+            .ok_or(MediaError::MediaAdmissionRequired)?
+            .check()?;
+    }
     let mut demand = ReaderDemand::default();
     let mut generated = 0usize;
     let mut ahead: Vec<(VideoSourceKey, i64)> = Vec::new();
@@ -546,6 +568,7 @@ pub(crate) fn reader_demand_with_inputs(
                     asset: asset.id,
                     path: asset.path.clone(),
                     certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,
+                    legacy_media: legacy_media.cloned(),
                     fps: asset.fps,
                     description: asset.color_description.clone(),
                     max_width,
@@ -730,11 +753,30 @@ pub(crate) struct FrameRenderer {
     /// `missing_lut_asset` instead of quietly dropping the look.
     lut_library: Arc<LutLibrary>,
     inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
+    legacy_media: Option<kinewright_core::LegacyMediaGrant>,
     /// The engine gauge current when this renderer was built, if any.
     decoders: Option<DecoderGauge>,
 }
 
 impl FrameRenderer {
+    #[cfg(test)]
+    pub(crate) fn legacy_preview_fixture(gpu: GpuContext) -> Self {
+        let mut renderer = Self::new_preview(gpu);
+        renderer.set_legacy_media(kinewright_core::MediaSourceOrigin::new_project().legacy_media());
+        renderer
+    }
+    #[cfg(test)]
+    pub(crate) fn legacy_fixture(gpu: GpuContext) -> Self {
+        let mut renderer = Self::new(gpu);
+        renderer.set_legacy_media(kinewright_core::MediaSourceOrigin::new_project().legacy_media());
+        renderer
+    }
+    pub(crate) fn set_legacy_media(&mut self, grant: Option<kinewright_core::LegacyMediaGrant>) {
+        if grant.is_some() {
+            self.set_inputs(None);
+        }
+        self.legacy_media = grant;
+    }
     pub(crate) fn new(gpu: GpuContext) -> Self {
         Self {
             decoders: DECODER_GAUGE.with(|gauge| gauge.borrow().clone()),
@@ -751,6 +793,7 @@ impl FrameRenderer {
             preview: None,
             lut_library: Arc::new(LutLibrary::default()),
             inputs: None,
+            legacy_media: None,
         }
     }
 
@@ -773,6 +816,9 @@ impl FrameRenderer {
     /// lattices still hits, which is what keeps steady-state playback from
     /// re-uploading the atlas every frame.
     pub(crate) fn set_inputs(&mut self, inputs: Option<Arc<crate::owned_io::PlaybackInputs>>) {
+        if inputs.is_some() {
+            self.legacy_media = None;
+        }
         let same = match (&self.inputs, &inputs) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             (None, None) => true,
@@ -1357,6 +1403,12 @@ impl FrameRenderer {
         fingerprint: &MediaSourceFingerprint,
         description: &ColorDescription,
     ) -> Result<WorkingFrame, MediaError> {
+        if self.inputs.is_none() {
+            self.legacy_media
+                .as_ref()
+                .ok_or(MediaError::MediaAdmissionRequired)?
+                .check()?;
+        }
         let assumption = d65_assumption(description);
         let key = VideoSourceKey::new(
             asset,
@@ -1383,6 +1435,10 @@ impl FrameRenderer {
                     None,
                 )?
             } else {
+                self.legacy_media
+                    .as_ref()
+                    .ok_or(MediaError::MediaAdmissionRequired)?
+                    .check()?;
                 open_managed(
                     asset,
                     path,
@@ -1963,7 +2019,7 @@ mod tests {
     }
 
     fn test_renderer() -> Option<FrameRenderer> {
-        Some(FrameRenderer::new(fixture_gpu_or_skip()?))
+        Some(FrameRenderer::legacy_fixture(fixture_gpu_or_skip()?))
     }
 
     impl FrameRenderer {
@@ -2493,7 +2549,8 @@ mod tests {
         let red_document = Arc::new(single_clip_document(red_asset));
         let blue_document = Arc::new(single_clip_document(blue_asset));
         let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu)
-            .expect("media engine should start for relink identity fixture");
+            .expect("media engine should start for relink identity fixture")
+            .into_legacy_fixture();
 
         let red_thumbnail = engine
             .thumbnail_for_document(Arc::clone(&red_document), TimeCode::ZERO, 16)
@@ -2733,7 +2790,7 @@ mod tests {
         let (_media, asset) = small_source("pf1-pins", "testsrc2", 1, 8);
         let document = three_demands_on_one_source(asset);
         let frame = working_bytes((64, 36));
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         renderer.set_cache_budget(64 * frame);
         let scale = RenderScale::Proxy { max_width: 1280 };
         let strategy = DecodeStrategy::Sequential;
@@ -2765,7 +2822,7 @@ mod tests {
         let (_media, asset) = small_source("pf1-overshoot", "testsrc2", 1, 8);
         let document = three_demands_on_one_source(asset);
         let frame = working_bytes((64, 36));
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         renderer.set_cache_budget(frame);
         let scale = RenderScale::Proxy { max_width: 1280 };
         for at in [0, 1, 2] {
@@ -2801,7 +2858,7 @@ mod tests {
         document.tracks.push(track);
         document.media_pool.push(b);
         let frame = working_bytes((64, 36));
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         renderer.set_cache_budget(4 * frame);
         let scale = RenderScale::Proxy { max_width: 1280 };
         let strategy = DecodeStrategy::Sequential;
@@ -2854,7 +2911,7 @@ mod tests {
         let (_media, asset) = small_source("pf1-thumb", "testsrc2", 1, 2);
         let document = single_clip_document(asset);
         let scale = RenderScale::Proxy { max_width: 1280 };
-        let mut renderer = FrameRenderer::new_preview(gpu);
+        let mut renderer = FrameRenderer::legacy_preview_fixture(gpu);
         let strategy = DecodeStrategy::Sequential;
         let live = renderer.render_live(&document, TimeCode(5), (64, 36), scale, strategy);
         live.expect("a preview frame");
@@ -2918,11 +2975,11 @@ mod tests {
             renderer.video_seek_count() - warm
         };
         assert_eq!(
-            seeks_after_warm_up(FrameRenderer::new_preview(gpu.clone())),
+            seeks_after_warm_up(FrameRenderer::legacy_preview_fixture(gpu.clone())),
             0
         );
         assert!(
-            seeks_after_warm_up(FrameRenderer::new(gpu)) > 0,
+            seeks_after_warm_up(FrameRenderer::legacy_fixture(gpu)) > 0,
             "the control"
         );
     }
@@ -3013,7 +3070,7 @@ mod k1_allocation {
         let sizes = &mut FrameSizes::default();
         let demand = reader_demand(&document, TimeCode(0), resolution, scale, 0, sizes);
         let demand = demand.expect("the demand");
-        let mut renderer = FrameRenderer::new_preview(fallback_gpu().context());
+        let mut renderer = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
         let supplied = SuppliedFrames::new();
         let video = Video::Supplied(&supplied);
         let layers = (renderer.decoded_layers(&document, TimeCode(0), resolution, scale, video))

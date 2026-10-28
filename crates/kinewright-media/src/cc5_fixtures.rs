@@ -4213,7 +4213,8 @@ fn cc5_matte_proof_matches_the_cpu_reference_coverage() {
     let matte = MatteSpec::window(WindowSpec::CENTRED);
     let document = cc5_media_document(&media, vec![gain_wheels(7, 1_500, Some(&matte))]);
     let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("the media engine should start on the fixture adapter");
+        .expect("the media engine should start on the fixture adapter")
+        .into_legacy_fixture();
     let proof = engine
         .matte_proof_for_document(
             Arc::clone(&document),
@@ -4519,7 +4520,8 @@ fn cc5_matte_scoped_scopes_measure_exactly_the_affected_set() {
     let matte = MatteSpec::window(WindowSpec::CENTRED);
     let document = cc5_media_document(&media, vec![gain_wheels(7, 1_500, Some(&matte))]);
     let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-        .expect("the media engine should start on the fixture adapter");
+        .expect("the media engine should start on the fixture adapter")
+        .into_legacy_fixture();
 
     let monitor = engine
         .monitor_proof_for_document(Arc::clone(&document), TimeCode::ZERO)

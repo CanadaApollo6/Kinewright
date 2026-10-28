@@ -1039,12 +1039,13 @@ impl KinewrightApp {
         let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
         let incidents = Arc::clone(&self.projects[project_index].incidents);
         let local_execution = !self.projects[project_index].studio_host_managed();
+        let ports = self.projects[project_index].media();
         let result = self.projects[project_index].threads[thread_index].replace_branch(
             revision,
             document,
-            Arc::clone(&self.playback),
-            Arc::clone(&self.analysis),
-            Arc::clone(&self.exporter),
+            ports.playback,
+            ports.analysis,
+            ports.exporter,
             &project_path,
             &incidents,
             local_execution,
@@ -1316,7 +1317,7 @@ impl KinewrightApp {
         }
     }
 
-    fn review_agent_branch(
+    pub(crate) fn review_agent_branch(
         &mut self,
         ctx: &egui::Context,
         project_index: usize,
@@ -1343,32 +1344,10 @@ impl KinewrightApp {
             stamp: self.playback.stamp(),
             document: Arc::clone(&document),
         };
-        let analysis = Arc::clone(&self.analysis);
-        let media = Arc::clone(&self.lut_publisher);
-        let project = &self.projects[project_index];
-        let owned = project.ja1.is_some()
-            || project.ja1_job.is_some()
-            || project.studio.manual_inputs.is_some();
-        let inputs = project
-            .studio
-            .manual_inputs
-            .as_ref()
-            .ok_or(kinewright_core::MediaError::NotImplemented)
-            .and_then(|inputs| {
-                inputs
-                    .with_document(Arc::clone(&document))
-                    .map(Arc::new)
-                    .map_err(|_| kinewright_core::MediaError::NotImplemented)
-            });
+        let analysis = self.projects[project_index].analysis();
         self.off_ui(
             ctx,
-            move || {
-                if owned {
-                    media.thumbnail_for_inputs(inputs?, at, 1_280)
-                } else {
-                    analysis.thumbnail_for_document(document, at, 1_280)
-                }
-            },
+            move || analysis.thumbnail_for_document(document, at, 1_280),
             move |app, ctx, result| {
                 if let Some(target) = app.branch_review_target(&request) {
                     app.show_branch_frame(ctx, target, at, result);
@@ -1642,15 +1621,16 @@ impl KinewrightApp {
         let project_path = Arc::clone(&self.projects[project_index].agent_project_path);
         let incidents = Arc::clone(&self.projects[project_index].incidents);
         let local_execution = !self.projects[project_index].studio_host_managed();
+        let ports = self.projects[project_index].media();
         let thread = AgentThread::new_with_execution(
             format!("Thread {next_number}"),
             harness,
             Vec::new(),
             base_revision,
             &base_document,
-            &self.playback,
-            &self.analysis,
-            &self.exporter,
+            &ports.playback,
+            &ports.analysis,
+            &ports.exporter,
             &project_path,
             &incidents,
             local_execution,
@@ -3464,6 +3444,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn s3_an_owned_branch_frame_uses_its_own_certified_inputs() {
         use crate::app::in1_tests::{in1_harness_with_engine, in1_shutdown};
         use kinewright_media::{
@@ -3518,7 +3499,9 @@ mod tests {
         retired.0 = Some(media.teardown_observer());
         let (mut app, engine) = in1_harness_with_engine((*document).clone(), media);
         app.projects[0].studio.manual_inputs = Some(inputs);
-        engine.set_document(Arc::new(Document::default()));
+        engine
+            .unadmitted_media(Arc::new(Document::default()))
+            .set_document(Arc::new(Document::default()));
         engine.test_applied_scene().unwrap();
         let context = egui::Context::default();
         let document = app.projects[0].threads[0]

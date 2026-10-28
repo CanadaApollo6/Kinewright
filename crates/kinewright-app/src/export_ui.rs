@@ -1627,7 +1627,7 @@ impl KinewrightApp {
             self.note_export_refusal(conformance.summary());
             return None;
         }
-        let media_preflight = export_media_preflight(&document, self.analysis.as_ref());
+        let media_preflight = export_media_preflight(&document, self.focused().analysis().as_ref());
         if !media_preflight.export_ready() {
             // Appendix B row 53.
             self.note_export_refusal(media_preflight.summary());
@@ -1769,8 +1769,8 @@ impl KinewrightApp {
             dialog_export_settings(&document, &self.export_dialog, fps, cancellation.clone());
         let (progress_tx, progress_rx) = crossbeam_channel::unbounded();
         let (result_tx, result_rx) = mpsc::channel();
-        let media = Arc::clone(&self.exporter);
-        let worker_analysis = Arc::clone(&self.analysis);
+        let media = self.focused().media().exporter;
+        let worker_analysis = Arc::clone(&self.focused().analysis());
         let worker_store = self.focused().lut_store.clone();
         let worker_store_error = self.focused().lut_store_error.clone();
         let worker_document = document;

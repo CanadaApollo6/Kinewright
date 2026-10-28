@@ -84,7 +84,7 @@ fn s3b_d14_superseded_real_refill_delivers_target_without_optional_redecode() {
         converted, 0,
         "necessary GOP pre-roll is separately recorded by received"
     );
-    let mut reference = FrameRenderer::new_preview(fallback_gpu().context());
+    let mut reference = FrameRenderer::legacy_preview_fixture(fallback_gpu().context());
     let expected = reference
         .render_live(
             &document,

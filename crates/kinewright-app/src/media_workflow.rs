@@ -984,7 +984,7 @@ impl KinewrightApp {
         }
         let session_id = self.focused().id;
         let expected_revision = self.focused().revision;
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.relink_probe_tx.clone();
         self.relink_probe_pending = self.relink_probe_pending.saturating_add(1);
         self.status = format!("Checking replacement {}…", path.display());
@@ -1009,7 +1009,14 @@ impl KinewrightApp {
         asset: &MediaAsset,
         request_id: u64,
     ) -> bool {
-        let media = Arc::clone(&self.analysis);
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|project| project.id == session_id)
+        else {
+            return false;
+        };
+        let media = project.analysis();
         let status_tx = self.media_status_tx.clone();
         let path = asset.path.clone();
         let fingerprint = asset.source_fingerprint.clone();
@@ -1608,7 +1615,7 @@ impl KinewrightApp {
     pub(crate) fn refresh_cache_inventory(&mut self, ctx: &egui::Context) {
         self.cache_inventory_generation += 1;
         let generation = self.cache_inventory_generation;
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         self.off_ui(
             ctx,
             move || media.cache_inventory(),
@@ -1624,7 +1631,7 @@ impl KinewrightApp {
         if self.media_cache_clear_pending.is_some() {
             return;
         }
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.cache_clear_tx.clone();
         self.media_cache_clear_pending = Some(family);
         thread::Builder::new()

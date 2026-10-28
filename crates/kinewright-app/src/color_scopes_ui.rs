@@ -847,7 +847,7 @@ impl KinewrightApp {
             }
         });
         if sample {
-            let analysis = Arc::clone(&self.analysis);
+            let analysis = Arc::clone(&self.focused().analysis());
             let document = Arc::clone(&self.focused().document);
             self.color_scopes
                 .request_sample(analysis, document, session_id, revision, frame);

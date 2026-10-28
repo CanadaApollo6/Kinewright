@@ -280,7 +280,7 @@ fn blend3(mode: BlendMode, s: [f32; 3], d: [f32; 3], alpha: f32) -> [f32; 3] {
 
 /// Gate 1: a feather-masked 60% `Screen` light leak over a grey plate.
 fn screen_light_leak_matches_twin_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let mask = effect(
         2,
         "mask",
@@ -305,7 +305,7 @@ fn screen_light_leak_matches_twin_on(context: GpuContext) {
 
 /// Gate 2: a cropped `Multiply` callout box.
 fn multiply_callout_matches_twin_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let crop = effect(
         1,
         "crop",
@@ -376,7 +376,7 @@ fn grey4(v: f32) -> [f32; 4] {
 /// Gate 3: the other modes over the plate, every §3 extended-domain vector,
 /// the CC8 peaks, and an over-1.0 `Add` surviving to `render_working`.
 fn remaining_modes_match_twin_on(gpu_context: GpuContext) {
-    let mut r = FrameRenderer::new(gpu_context.clone());
+    let mut r = FrameRenderer::legacy_fixture(gpu_context.clone());
     for mode in [
         BlendMode::Overlay,
         BlendMode::Darken,
@@ -444,7 +444,7 @@ fn r9b_opaque_accumulator_vector_on(gpu_context: GpuContext) {
 
 /// R9b: a colour fade with a mask under a non-`Normal` blend.
 fn r9b_colour_fade_masked_blend_matches_twin_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let mask = effect(
         2,
         "mask",
@@ -520,7 +520,7 @@ fn r10_non_finite_blends_refuse_typed_and_sticky_on(gpu_context: GpuContext) {
 /// offending clip and project frame; a real `Normal` pixel-layer overflow
 /// refuses too (ME11: R10 is universal), named the same way.
 fn r10_refusal_names_clip_and_frame_on_every_path_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let boost = |id| primary(id, &[("exposure_milli_stops", 5_000)]);
     let hot = |id, blend| solid(id, [255; 3], blend, vec![boost(1), boost(2)]);
     let document = document(vec![hot(1, BlendMode::Normal), hot(2, BlendMode::Multiply)]);
@@ -561,7 +561,7 @@ fn r10_refusal_names_clip_and_frame_on_every_path_on(context: GpuContext) {
 /// upper tracks are invariant; plus an empty below-stack, a disabled
 /// adjustment and a non-`Normal` adjustment blend.
 fn adjustment_look_over_section_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let plate = || solid(1, GREY, BlendMode::Normal, vec![]);
     let half = || solid(2, ORANGE, BlendMode::Normal, vec![opacity(1, 50)]);
     let look = || {
@@ -717,7 +717,7 @@ const PROBES: [(i32, i32); 6] = [(10, 7), (50, 7), (110, 7), (150, 50), (50, 75)
 /// duration; OOB `D0(x)` through a translucent title; completion equals
 /// ordinary composition; plus the R23 blend/adjustment Push compositions.
 fn push_midpoint_splits_frame_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     for name in ["push_left", "push_right", "push_up", "push_down"] {
         let mut clips = quartered();
         clips.push(with_transition(
@@ -810,7 +810,7 @@ fn push_midpoint_splits_frame_on(context: GpuContext) {
 /// `p = 0`; all 15 endpoints; transformed/translucent sources through the
 /// last transition frame and the following frame.
 fn slide_and_wipe_midpoints_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let below = gpu(&mut r, &document(quartered()), 0).unwrap();
     for kind in ["slide", "wipe"] {
         for edge in ["left", "right", "up", "down"] {
@@ -939,7 +939,7 @@ fn slide_and_wipe_midpoints_on(context: GpuContext) {
 /// is not multilinear in the weights and the envelope refuses rather than
 /// widening; the gate fixture moves the title by whole pixels instead.
 fn warp_midpoint_departure_is_refused_by_the_envelope_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let moved = [
         ("scale_percent", 60),
         ("x_percent", 20),
@@ -969,7 +969,7 @@ fn warp_midpoint_departure_is_refused_by_the_envelope_on(context: GpuContext) {
 /// an ordinary special layer 1; a Normal Push 1; a non-`Normal` Push 2;
 /// any adjustment Push 2 (errata ME2, ME10).
 fn accumulator_copy_counts_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let top = |blend, transition: Option<&str>, adjust: bool| {
         let clip = if adjust {
             adjustment(2, blend, vec![primary(1, &[("saturation_percent", -50)])])
@@ -1012,7 +1012,7 @@ fn accumulator_copy_counts_on(context: GpuContext) {
 /// Gate 7: a solid card with opacity and transform; the solid/title
 /// same-colour identity through the shared generated-content input (R3/B6).
 fn solid_title_card_renders_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     let transform = effect(2, "transform", &[("scale_percent", 50), ("x_percent", 10)]);
     let card = solid(
         2,
@@ -1076,7 +1076,7 @@ fn solid_title_card_renders_on(context: GpuContext) {
 /// R32 seam: generated pixels with varying alpha under non-`Normal` blends
 /// flow through the real `compositor_layers` + branch + twin assembly.
 fn r32_generated_alpha_under_blend_matches_twin_on(context: GpuContext) {
-    let mut r = FrameRenderer::new(context);
+    let mut r = FrameRenderer::legacy_fixture(context);
     for blend in [BlendMode::Screen, BlendMode::Multiply, BlendMode::Add] {
         let mut text = title_clip(4, TitlePosition::Center, vec![opacity(1, 80)]);
         text.blend_mode = blend;
@@ -1167,7 +1167,7 @@ fn pre_mo2(gpu: &GpuContext) -> Option<Vec<mo2_identity_corpus::Record>> {
 fn post_mo2(gpu: GpuContext) -> (Vec<mo2_identity_corpus::Record>, u64) {
     crate::initialize_ffmpeg().expect("FFmpeg should initialize");
     let media = mo2_identity_corpus::source();
-    let mut r = FrameRenderer::new(gpu);
+    let mut r = FrameRenderer::legacy_fixture(gpu);
     let records = mo2_identity_corpus::render(&mut r, media.path());
     (records, r.accumulator_copies())
 }

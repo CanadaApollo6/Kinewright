@@ -1912,6 +1912,12 @@ pub struct SourceColorRefusal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MediaError {
+    #[error(
+        "owned_media_admission_required: activate Studio to preview or analyse this project's owned media"
+    )]
+    MediaAdmissionRequired,
+    #[error("owned_media_operation_unavailable: this operation has no certified source route")]
+    OwnedMediaOperationUnavailable,
     #[error("media operation is not implemented")]
     NotImplemented,
     #[error("export was cancelled")]
@@ -2086,7 +2092,9 @@ impl MediaError {
             Self::MatteProof(error) => Some(error.code()),
             Self::MatteCoverage(error) => Some(error.code()),
             Self::Store { code, .. } => Some(code),
-            Self::NotImplemented
+            Self::MediaAdmissionRequired
+            | Self::OwnedMediaOperationUnavailable
+            | Self::NotImplemented
             | Self::Cancelled
             | Self::MixSpectrumRangeTooShort { .. }
             | Self::MixLoudnessRangeTooShort { .. }

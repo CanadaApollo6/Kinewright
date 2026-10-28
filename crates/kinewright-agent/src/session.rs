@@ -727,7 +727,7 @@ mod tests {
     /// these tests is a real call answered by the real dispatcher.
     fn live_server() -> McpServer {
         let core = Core::spawn(Document::default()).expect("the fixture core starts");
-        let media = Arc::new(FfmpegMediaEngine::new().expect("the media engine starts"));
+        let media = Arc::new(FfmpegMediaEngine::legacy_fixture().expect("the media engine starts"));
         McpServer::start(core, Arc::clone(&media) as _, media as _).expect("the MCP server starts")
     }
 

@@ -53,7 +53,7 @@ impl KinewrightApp {
         }
         self.status = format!("Probing {}…", path.display());
         let session_id = self.focused().id;
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         let result_tx = self.probe_tx.clone();
         thread::Builder::new()
             .name("kinewright-probe".to_owned())
@@ -270,7 +270,7 @@ impl KinewrightApp {
                 (asset, status)
             })
             .collect::<Vec<_>>();
-        let media = Arc::clone(&self.analysis);
+        let media = Arc::clone(&self.focused().analysis());
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {

@@ -3313,7 +3313,7 @@ fn published_render_hash(
     document: &Document,
     library: LutLibrary,
 ) -> Result<String, kinewright_core::MediaError> {
-    let mut renderer = crate::render::FrameRenderer::new(gpu.clone());
+    let mut renderer = crate::render::FrameRenderer::legacy_fixture(gpu.clone());
     renderer.set_lut_library(Arc::new(library));
     let frame = renderer.render(
         document,

@@ -171,7 +171,7 @@ fn print_phases(gpu: GpuContext, document: &Document, key: &str) {
         max_width: PREVIEW_MAX_WIDTH,
     };
     let dims = scale.output_resolution(document.resolution);
-    let mut renderer = FrameRenderer::new(gpu);
+    let mut renderer = FrameRenderer::legacy_fixture(gpu);
     renderer.set_cache_budget(1 << 30);
     let mut means = [0.0; 3];
     for frame in 0..40 {
@@ -256,7 +256,7 @@ fn r28_ledger_holds_the_ceilings_and_releases_every_charge() {
     ];
     for Workload(document, _media) in workloads {
         let context = GpuContext::new(gpu.device.clone(), gpu.queue.clone());
-        let mut renderer = FrameRenderer::new(context.clone());
+        let mut renderer = FrameRenderer::legacy_fixture(context.clone());
         let resolution = document.resolution;
         for at in [0, 1, 31] {
             let (scale, strategy) = (RenderScale::FullResolution, DecodeStrategy::Seek);

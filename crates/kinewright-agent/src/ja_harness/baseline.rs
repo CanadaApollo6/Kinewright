@@ -24,7 +24,7 @@ pub struct Baseline {
     pub root: PathBuf,
     lock: Option<kinewright_project::LockfileHandle>,
     server: Option<crate::McpServer>,
-    media: Option<Arc<kinewright_media::FfmpegMediaEngine>>,
+    media: Option<Arc<kinewright_media::SessionMedia>>,
 }
 
 impl Baseline {
@@ -44,13 +44,14 @@ impl Baseline {
         self.core.as_ref().ok_or_else(|| "core not started".into())
     }
 
-    pub fn media(&mut self) -> Result<Arc<kinewright_media::FfmpegMediaEngine>, String> {
+    pub fn media(&mut self) -> Result<Arc<kinewright_media::SessionMedia>, String> {
         if self.media.is_none() {
             self.media = Some(Arc::new(
                 kinewright_media::FfmpegMediaEngine::new_with_data_dir(
                     self.root.join("media-cache"),
                 )
-                .map_err(|e| format!("media prerequisite NOT RUN: {e}"))?,
+                .map_err(|e| format!("media prerequisite NOT RUN: {e}"))?
+                .into_legacy_fixture(),
             ));
         }
         self.media.clone().ok_or_else(|| "media missing".into())

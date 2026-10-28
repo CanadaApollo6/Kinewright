@@ -222,6 +222,11 @@ pub use incident::{
     rec709_compatible, recovery_description, should_flush, truncate_to_serialized_bytes,
 };
 pub use journal::JournalCommand;
+mod media_access;
+pub use media_access::{LegacyMediaGrant, MediaSourceOrigin};
+mod refused_media;
+pub use refused_media::RefusedMedia;
+
 pub use media::{
     AgentCancel, Analysis, AnalysisJobStatus, AnalysisKind, AnalysisPhase, AssetBeats,
     AssetSceneChanges, AssetSilences, AssetTranscript, AudioChain, AudioLoudness, BeatMarker,

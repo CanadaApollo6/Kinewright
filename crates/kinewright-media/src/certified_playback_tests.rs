@@ -69,6 +69,35 @@ fn thumbnail_engine(root: &TempDirectory) -> ThumbnailEngine {
 }
 
 #[test]
+fn s3_certified_live_audio_retains_the_program_namespace_without_recue() {
+    use kinewright_core::{LiveAudioChange, Playback};
+    let (root, path, source) = media_fixture("red");
+    let inputs = thumbnail_inputs(&path, &root.path("absent-locator"), source);
+    let engine = thumbnail_engine(&root);
+    engine.set_certified_document(Arc::clone(&inputs));
+    engine.test_applied_scene().unwrap();
+    let controls = engine.controls();
+    let stamp = controls.stamp();
+    controls.update_audio(LiveAudioChange::Both, Arc::clone(&inputs.document));
+    let applied = engine.test_applied_scene().unwrap();
+    assert_eq!(controls.stamp(), stamp, "C2_OWNED_LIVE_AUDIO_NO_RECUE");
+    assert_eq!(
+        applied["certified_sources"].as_array().unwrap().len(),
+        1,
+        "C2_OWNED_LIVE_AUDIO_KEEPS_CERTIFIED_SOURCE"
+    );
+    assert_eq!(
+        applied["certified_sources"][0]["source_sha256"],
+        serde_json::to_value(
+            inputs.sources[&kinewright_core::AssetId(1)]
+                .identity()
+                .source_sha256
+        )
+        .unwrap()
+    );
+}
+
+#[test]
 fn s3_thumbnail_document_mismatch_refuses_locator_fallback() {
     use kinewright_core::{Analysis, MediaError};
 
@@ -81,11 +110,12 @@ fn s3_thumbnail_document_mismatch_refuses_locator_fallback() {
     let engine = thumbnail_engine(&root_a);
     engine.set_certified_document(Arc::clone(&inputs_a));
     engine.test_applied_scene().unwrap();
+    let origin = engine.certified_media(Arc::clone(&inputs_b));
     engine.set_certified_document(inputs_b);
     engine.test_applied_scene().unwrap();
     fs::copy(&path_b, &locator).unwrap();
 
-    let result = engine.thumbnail_for_document(Arc::clone(&inputs_a.document), TimeCode::ZERO, 32);
+    let result = origin.thumbnail_for_document(Arc::clone(&inputs_a.document), TimeCode::ZERO, 32);
     assert!(
         matches!(result, Err(MediaError::NotImplemented)),
         "C2_THUMBNAIL_MISMATCH_REFUSAL: {:?}",
@@ -110,11 +140,12 @@ fn s3_thumbnail_document_only_edit_keeps_certified_inputs() {
     edited.duration.0 -= 1;
     edited.tracks[0].clips[0].source_range.end = edited.duration;
     let engine = thumbnail_engine(&root);
+    let origin = engine.certified_media(Arc::clone(&inputs));
     engine.set_certified_document(inputs);
     engine.test_applied_scene().unwrap();
     fs::copy(replacement, locator).unwrap();
 
-    let image = engine
+    let image = origin
         .thumbnail_for_document(Arc::new(edited), TimeCode::ZERO, 32)
         .unwrap();
     assert_red_thumbnail(&image);
@@ -140,7 +171,9 @@ fn s3_thumbnail_capability_survives_queued_scene_change() {
         thread::sleep(Duration::from_millis(1));
     }
     let queued = engine.s4_lane().waiting().0 == 1;
-    engine.set_document(Arc::new(kinewright_core::Document::default()));
+    engine
+        .unadmitted_media(Arc::new(kinewright_core::Document::default()))
+        .set_document(Arc::new(kinewright_core::Document::default()));
     engine.test_applied_scene().unwrap();
     let pinned = retained.upgrade().is_some();
     drop(hold);

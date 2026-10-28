@@ -5,9 +5,7 @@
 )]
 use super::*;
 use crate::app::in1_tests::{in1_harness, in1_shutdown};
-use kinewright_core::{
-    Analysis, Command, Core, Event, Operation, Playback, Track, TrackId, TrackKind,
-};
+use kinewright_core::{Command, Core, Event, Operation, Playback, Track, TrackId, TrackKind};
 use kinewright_media::test_support::{TempDirectory, workspace_target_dir};
 use kinewright_project::{
     bundle::{LoadedBundle, ProjectBundle},
@@ -215,8 +213,8 @@ fn s3_frozen_selection_survives_background_copy_and_reopen() {
     let expected = serde_json::to_vec(&context.document).unwrap();
     let (mut app, engine) = in1_harness(context.document.clone());
     retire.arm(&engine);
-    app.frames = engine.frames();
-    app.media_events = engine.events();
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
     attach(&mut app, fixtures.owners.remove(0));
     app.install_studio_context(Arc::clone(&context)).unwrap();
     let ctx = egui::Context::default();
@@ -269,10 +267,10 @@ fn s3_frozen_selection_survives_background_copy_and_reopen() {
         "C2_EDIT_COPY_ACTIVATED"
     );
     assert!(app.focused().ja1_job.is_some());
-    let pending = engine.stamp();
+    let pending = engine.controls().stamp();
     app.play_program_from(app.program_position());
     app.toggle_playback();
-    assert_eq!(engine.stamp(), pending, "C2_PENDING_AUDIO_OWNER");
+    assert_eq!(engine.controls().stamp(), pending, "C2_PENDING_AUDIO_OWNER");
     let deadline = Instant::now() + Duration::from_secs(30);
     while app.focused().ja1.is_none() || app.focused().studio.manual_inputs.is_none() {
         app.poll_background(&ctx);
@@ -388,8 +386,8 @@ fn s3_bound_ab_identity() {
     let b = Arc::clone(&fixtures.contexts[1]);
     let (mut app, engine) = in1_harness(a.document.clone());
     retire.arm(&engine);
-    app.frames = engine.frames();
-    app.media_events = engine.events();
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
     let ctx = egui::Context::default();
     app.install_studio_context(Arc::clone(&a)).unwrap();
     wait_frame(&mut app, &ctx, &a.snapshot.descriptor.key, TimeCode::ZERO);
@@ -414,7 +412,7 @@ fn s3_bound_ab_identity() {
     // A new owner namespace is not ready yet. Even a genuine completion from
     // the old PF1 scene must stay under the prior stale display cell.
     app.presenter.suspend();
-    engine.request_frame(TimeCode::ZERO);
+    engine.controls().request_frame(TimeCode::ZERO);
     let deadline = Instant::now() + Duration::from_secs(10);
     let completion = loop {
         if let Ok(frame) = app.frames.try_recv() {
@@ -541,8 +539,8 @@ fn s3_layout_roundtrip() {
     let selected = Arc::clone(&fixtures.contexts[0]);
     let (mut app, engine) = in1_harness(selected.document.clone());
     retire.arm(&engine);
-    app.frames = engine.frames();
-    app.media_events = engine.events();
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
     app.install_studio_context(Arc::clone(&selected)).unwrap();
     let ctx = egui::Context::default();
     crate::theme::install(&ctx);
@@ -631,14 +629,14 @@ fn s3_still_import_and_manual_placement() {
             ..Document::default()
         });
         retire.arm(&engine);
-        app.frames = engine.frames();
-        app.media_events = engine.events();
+        app.frames = engine.controls().frames();
+        app.media_events = engine.controls().events();
         let mut owner =
             Ja1EditingSession::new(root.root(), &app.focused().core, StorageLimits::default())
                 .unwrap();
         let path = root.path(&format!("{codec}.kinewright"));
         owner.first_save(&path, StorageLimits::default()).unwrap();
-        let probed = engine.probe(media.path()).unwrap();
+        let probed = app.focused().analysis().probe(media.path()).unwrap();
         let Operation::SetAssetColorDescription {
             mut color_description,
             ..
@@ -714,7 +712,7 @@ fn s3_bound_ab_gpu_identity() {
     let a = Arc::clone(&fixtures.contexts[0]);
     let b = Arc::clone(&fixtures.contexts[1]);
     let (mut app, engine, _gpu, ctx, _root) = crate::app::s3a_tests::display_app();
-    retire.arm(&engine);
+    retire.arm(&engine.engine());
     app.install_studio_context(Arc::clone(&a)).unwrap();
     wait_frame(&mut app, &ctx, &a.snapshot.descriptor.key, TimeCode::ZERO);
     assert!(app.presenter.using_gpu());
@@ -794,8 +792,8 @@ fn s3_failed_edit_copy_keeps_frozen_selection() {
     let selected = Arc::clone(&fixtures.contexts[0]);
     let (mut app, engine) = in1_harness(selected.document.clone());
     retire.arm(&engine);
-    app.frames = engine.frames();
-    app.media_events = engine.events();
+    app.frames = engine.controls().frames();
+    app.media_events = engine.controls().events();
     attach(&mut app, fixtures.owners.remove(0));
     app.install_studio_context(Arc::clone(&selected)).unwrap();
     let before = app.focused().core.actor_identity();

@@ -27,7 +27,6 @@
 //!    measurement reads `frame.data(plane)` directly.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use ffmpeg_next as ffmpeg;
 use kinewright_core::{
@@ -48,7 +47,6 @@ use crate::{
         decoder_format_name, ensure_decoder, frame_to_global_timestamp, managed_filter_graph,
         media_error, normalized_start, probe_path, stream_timestamp_to_global,
     },
-    lut_store::LutLibrary,
     render::{DecodeStrategy, FrameRenderer, RenderScale},
 };
 
@@ -773,12 +771,13 @@ fn basis_points(value: u64, count: u64) -> u32 {
 /// frame's own identity — disagrees with what the document implies.
 pub(crate) fn verify_delivery_output(
     gpu: &GpuContext,
-    library: Arc<LutLibrary>,
+    context: crate::export::LegacyRenderContext,
     document: &Document,
     path: &Path,
     settings: &ExportSettings,
     request: &DeliveryVerificationRequest,
 ) -> Result<DeliveryVerification, MediaError> {
+    context.grant.check()?;
     let depth = requested_lane(settings, request)?;
     let bits = depth.bits();
 
@@ -803,7 +802,8 @@ pub(crate) fn verify_delivery_output(
     let samples = sampled_frames(request, expected_frames)?;
 
     let mut renderer = FrameRenderer::new(gpu.clone());
-    renderer.set_lut_library(library);
+    renderer.set_legacy_media(Some(context.grant));
+    renderer.set_lut_library(context.library);
 
     let measured = measure_samples(
         gpu,
@@ -1356,6 +1356,7 @@ const fn severity_rank(severity: QaSeverity) -> u8 {
 mod tests {
     use std::io::Write as _;
     use std::process::{Command as ProcessCommand, Stdio};
+    #[cfg(test)]
     use std::sync::Arc;
 
     use kinewright_core::{
@@ -1817,7 +1818,8 @@ mod tests {
             .expect("the production export path should write an 8-bit H.264 delivery");
 
         let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start");
+            .expect("the production media engine should start")
+            .into_legacy_fixture();
         let document = Arc::new(document);
         let request = DeliveryVerificationRequest::new(
             DeliveryEncodeDepth::Eight,
@@ -1988,7 +1990,7 @@ mod tests {
         assert_eq!(error.observed(), CC6_SOURCE_FRAMES.to_string());
         assert_eq!(error.allowed_values(), (CC6_SOURCE_FRAMES + 1).to_string());
 
-        let mut renderer = FrameRenderer::new(gpu.context());
+        let mut renderer = FrameRenderer::legacy_fixture(gpu.context());
         let full = delivery_reference(
             &gpu.context(),
             &mut renderer,
@@ -2065,7 +2067,8 @@ mod tests {
         );
 
         let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start");
+            .expect("the production media engine should start")
+            .into_legacy_fixture();
         let error = engine
             .verify_delivery_output(
                 Arc::new(document),
@@ -2114,7 +2117,7 @@ mod tests {
             .expect("the export re-probes")
             .color_description;
 
-        let mut renderer = FrameRenderer::new(gpu.context());
+        let mut renderer = FrameRenderer::legacy_fixture(gpu.context());
         let context = gpu.context();
 
         let mut honest = DeliveryDecoder::open(&output, settings.fps, &probed)
@@ -2258,7 +2261,8 @@ mod tests {
         initialize_ffmpeg().expect("FFmpeg must initialize");
         let gpu = fallback_gpu();
         let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start");
+            .expect("the production media engine should start")
+            .into_legacy_fixture();
         let directory = TempDirectory::new("cc6-verify-budget-lane");
         let absent = directory.path("never-written.mp4");
 
@@ -2327,7 +2331,8 @@ mod tests {
         initialize_ffmpeg().expect("FFmpeg must initialize");
         let gpu = fallback_gpu();
         let engine = crate::engine::FfmpegMediaEngine::new_with_gpu(gpu.context())
-            .expect("the production media engine should start");
+            .expect("the production media engine should start")
+            .into_legacy_fixture();
         let directory = TempDirectory::new("cc6-verify-frame-count");
         let absent = directory.path("never-written.mp4");
         let (document, settings) = lane_settings(DeliveryEncodeDepth::Eight);

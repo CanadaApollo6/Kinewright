@@ -428,7 +428,7 @@ fn final_rte_adjustment_midpoints() {
 /// F16: the compositor frame time is measured and bounded by the call.
 #[test]
 fn final_render_timed_measures_inside_the_call() {
-    let mut r = FrameRenderer::new(context());
+    let mut r = FrameRenderer::legacy_fixture(context());
     let doc = document_sized((3, 3), vec![solid(1, GREY, BlendMode::Normal, vec![])]);
     r.set_cache_budget(1 << 30);
     let full = (RenderScale::FullResolution, DecodeStrategy::Sequential);

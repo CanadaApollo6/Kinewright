@@ -20,6 +20,7 @@ mod ja_harness;
 mod keys;
 mod look_browser_ui;
 mod matte_overlay_ui;
+mod media_access;
 mod media_bin;
 mod media_workflow;
 mod mixer_pane_ui;

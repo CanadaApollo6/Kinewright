@@ -27,6 +27,9 @@ serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+rmcp.workspace = true
+tokio.workspace = true
 kinewright-agent = { path = "../kinewright-agent", default-features = false, features = ["eval-harness"] }
 pollster.workspace = true
 proptest.workspace = true

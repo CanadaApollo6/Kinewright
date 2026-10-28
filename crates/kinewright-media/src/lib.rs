@@ -21,6 +21,7 @@ mod loudness;
 mod lut;
 mod lut_store;
 pub mod owned_io;
+mod unscoped;
 
 /// The existing SDR renderer's explicit white-point assumption for a source.
 #[must_use]
@@ -182,7 +183,7 @@ pub use derived::{
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use engine::AgentLaneHold;
-pub use engine::FfmpegMediaEngine;
+pub use engine::{FfmpegMediaEngine, SessionMedia};
 pub use export::{NORMALIZATION_MAXIMUM_GAIN_HUNDREDTHS, NORMALIZATION_MINIMUM_GAIN_HUNDREDTHS};
 pub use kinewright_core::{
     LutAvailabilityKind, LutAvailabilityStatus, MediaAvailabilityKind, MediaAvailabilityStatus,

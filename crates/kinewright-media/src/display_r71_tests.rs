@@ -79,7 +79,7 @@ fn long_document() -> kinewright_core::Document {
     document.validate().unwrap();
     document
 }
-fn harness(gpu: &GpuContext) -> (crate::FfmpegMediaEngine, crate::test_support::TempDirectory) {
+fn harness(gpu: &GpuContext) -> (crate::SessionMedia, crate::test_support::TempDirectory) {
     use crate::audio::{AudioDiagnostics, simulated::SimulatedAudio};
     let temp = crate::test_support::TempDirectory::new("s3a-race");
     let engine = crate::FfmpegMediaEngine::new_for_harness(
@@ -89,7 +89,8 @@ fn harness(gpu: &GpuContext) -> (crate::FfmpegMediaEngine, crate::test_support::
         Arc::default(),
         Arc::new(AudioDiagnostics::default()),
     )
-    .unwrap();
+    .unwrap()
+    .into_legacy_fixture();
     (engine, temp)
 }
 /// K (deterministic): playback publishes every frame of a job with the

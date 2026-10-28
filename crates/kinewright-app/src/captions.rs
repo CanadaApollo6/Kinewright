@@ -28,7 +28,7 @@ impl KinewrightApp {
                 continue;
             };
             let asset_name = asset.name.clone();
-            match self.analysis.transcript_status(asset) {
+            match self.focused().analysis().transcript_status(asset) {
                 TranscriptStatus::Ready(_) | TranscriptStatus::NoSpeech => {}
                 TranscriptStatus::Failed(error) => {
                     return Err(format!("Transcript failed for {asset_name}: {error}"));
@@ -38,7 +38,8 @@ impl KinewrightApp {
         }
 
         let words = self
-            .analysis
+            .focused()
+            .analysis()
             .timeline_transcript(&self.focused().document, None)
             .map_err(|error| error.to_string())?;
         let cues = caption_cues_from_words(words, self.focused().document.fps);

@@ -23,9 +23,9 @@ struct StudioOwnedColour {
 fn studio_owned_colour() -> StudioOwnedColour {
     use crate::ja1_attachment::{Action, Ja1Attachment};
     use kinewright_project::{editing_session::Ja1EditingSession, storage_budget::StorageLimits};
-    let probe_engine = FfmpegMediaEngine::new().expect("the test engine starts");
+    let probe_engine = FfmpegMediaEngine::legacy_fixture().expect("the test engine starts");
     let (fixture, probed) = in1_untagged(&probe_engine);
-    let error = in1_playback_error(&probe_engine, &probed);
+    let error = in1_playback_error(&probe_engine.engine(), &probed);
     let temp = TempDirectory::new_in(
         &kinewright_media::test_support::workspace_target_dir(),
         "c0-studio-colour",

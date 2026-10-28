@@ -360,7 +360,7 @@ fn typical_60s() -> Workload {
 }
 
 struct Session {
-    engine: FfmpegMediaEngine,
+    engine: crate::SessionMedia,
     frames: Receiver<PreviewFrame>,
     events: Receiver<MediaEvent>,
     gpu: GpuContext,
@@ -387,7 +387,8 @@ impl Session {
             Arc::clone(&faults),
             shared,
         )
-        .expect("the harness engine starts");
+        .expect("the harness engine starts")
+        .into_legacy_fixture();
         let (frames, events) = (engine.frames(), engine.events());
         Self {
             engine,
@@ -1569,7 +1570,8 @@ fn pf1_the_fill_runs_while_the_preview_renders() {
         faults,
         Arc::clone(&diagnostics),
     )
-    .expect("the engine starts");
+    .expect("the engine starts")
+    .into_legacy_fixture();
     engine.set_document(Arc::new(perf_fixtures::title_card((64, 64), 900)));
     engine.play(TimeCode::ZERO);
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1602,7 +1604,8 @@ fn pf1_engine_clock_follows_the_stepped_simulated_driver() {
         Arc::default(),
         Arc::clone(&diagnostics),
     )
-    .expect("the engine starts");
+    .expect("the engine starts")
+    .into_legacy_fixture();
     engine.set_document(Arc::new(perf_fixtures::title_card((64, 64), 90)));
     engine.play(TimeCode::ZERO);
     let deadline = Instant::now() + Duration::from_secs(60);
