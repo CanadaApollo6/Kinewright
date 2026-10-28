@@ -97,8 +97,11 @@ def bars(m, lane, hz):
             check("dropped animated frames percent", m.get("dropped_percent"), 5)
     if m.get("moment") == 1:
         window = at(m, "repaint_windows_ms.max")
-        status = "NOT RUN" if window is None else "PASS" if window <= 520 else "DESIGN-DOC CONFLICT"
-        rows.append({"bar": "spring repaint window ms", "value": window, "limit": 520, "status": status})
+        if m.get("spring_variant", "").startswith("deadline"):
+            check("deadline-snap repaint window ms", window, 520)
+        else:
+            status = "NOT RUN" if window is None else "PASS" if window <= 520 else "DESIGN-DOC CONFLICT"
+            rows.append({"bar": "spring repaint window ms", "value": window, "limit": 520, "status": status})
         check("motion repaints after actual settle", m.get("motion_repaints_after_settle"), 0)
     completions = m.get("transition_completions", [])
     curves = [abs(c["elapsed_ms"] - c["nominal_ms"]) for c in completions if c["token"] not in ("Spring", "Panel", "Instant")]
