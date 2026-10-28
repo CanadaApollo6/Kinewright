@@ -439,7 +439,7 @@ impl ProjectBundle {
             _charges: charges,
         })
     }
-    fn validate_snapshot(&self, d: &SnapshotDescriptor) -> Result<(), BundleError> {
+    pub(crate) fn validate_snapshot(&self, d: &SnapshotDescriptor) -> Result<(), BundleError> {
         if d.key.project != self.project_id && !self.origin_project_ids.contains(&d.key.project) {
             return Err(BundleError::Identity("snapshot project".into()));
         }
@@ -979,10 +979,29 @@ pub struct FrozenContext {
     pub certified_input_leases: Vec<crate::owned_inputs::OwnedInputLease>,
     pub resource_context: Vec<crate::owned_inputs::CertifiedResource>,
     _document_charge: StorageReservation,
+    reserve_frame: std::sync::Arc<kinewright_media::owned_io::CursorReservation>,
 }
 impl ProjectBundle {
     pub fn frozen_context(&self, key: &SnapshotKey) -> Result<FrozenContext, BundleError> {
         let snapshot = self.read_snapshot(key)?;
+        self.build_frozen_context(snapshot)
+    }
+    pub fn frozen_context_descriptor(
+        &self,
+        descriptor: &SnapshotDescriptor,
+    ) -> Result<FrozenContext, BundleError> {
+        self.validate_snapshot(descriptor)?;
+        let roots = descriptor.references();
+        let pin = self.store.pin(&roots)?;
+        let charges = vec![charge_value(&self.store, descriptor)?];
+        self.build_frozen_context(PinnedSnapshot {
+            descriptor: descriptor.clone(),
+            pin,
+            roots,
+            _charges: charges,
+        })
+    }
+    fn build_frozen_context(&self, snapshot: PinnedSnapshot) -> Result<FrozenContext, BundleError> {
         let original_document = self
             .store
             .read_record::<kinewright_core::Document>(&snapshot.descriptor.document_ref)?;
@@ -1017,6 +1036,7 @@ impl ProjectBundle {
             certified_input_leases,
             resource_context,
             _document_charge: document_charge,
+            reserve_frame: self.store.decoder_reserver(),
         })
     }
 }
@@ -1214,5 +1234,159 @@ fn charge_value<T: serde::Serialize>(
 impl crate::editing_session::Ja1EditingSession {
     pub fn frozen_context(&self, key: &SnapshotKey) -> Result<FrozenContext, BundleError> {
         self.active_bundle()?.frozen_context(key)
+    }
+}
+
+impl FrozenContext {
+    pub fn reserve_frame(
+        &self,
+        bytes: u64,
+    ) -> Result<kinewright_media::owned_io::LifetimeGuard, BundleError> {
+        (self.reserve_frame)(bytes).map_err(BundleError::Corrupt)
+    }
+    /// Build the renderer scene without consulting a media or LUT locator.
+    /// The scene itself retains this context through decoder and paint consumers.
+    pub fn playback_inputs(
+        self: &std::sync::Arc<Self>,
+    ) -> Result<std::sync::Arc<kinewright_media::owned_io::PlaybackInputs>, BundleError> {
+        use std::{
+            collections::{BTreeMap, HashMap},
+            sync::Arc,
+        };
+        let encoded = serde_json::to_vec(&self.document)
+            .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+        if kinewright_media::sha256_bytes(&encoded) != self.snapshot.descriptor.key.document_hash
+            || self.snapshot.descriptor.document_ref.sha256
+                != self.snapshot.descriptor.key.document_hash
+            || self.certified_input_leases.iter().any(|lease| {
+                lease.identity().manifest_ref != self.snapshot.descriptor.input_manifest_ref
+            })
+            || self.resource_context.iter().any(|resource| {
+                resource.identity().manifest_ref != self.snapshot.descriptor.input_manifest_ref
+            })
+        {
+            return Err(BundleError::Identity(
+                "frozen document/context binding".into(),
+            ));
+        }
+        let mut sources = BTreeMap::new();
+        for asset in &self.document.media_pool {
+            let lease = self
+                .certified_input_leases
+                .iter()
+                .find(|lease| lease.identity().entry.matches_media_asset(asset))
+                .ok_or_else(|| BundleError::Identity("frozen media interpretation".into()))?;
+            sources.insert(asset.id, lease.certified_source()?.playback_source());
+        }
+        let mut luts = HashMap::new();
+        for resource in &self.resource_context {
+            if resource.identity().entry.object.record_kind == RecordKind::OwnedLut {
+                let lut = kinewright_media::parse_cube_lut_bytes(resource.bytes())
+                    .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                luts.insert(
+                    resource.identity().entry.object.sha256.clone(),
+                    Arc::new(lut),
+                );
+            }
+        }
+        let (library, missing) =
+            kinewright_media::LutLibrary::from_document_assets(&self.document.lut_assets, &luts);
+        if !missing.is_empty() {
+            return Err(BundleError::Identity("frozen LUT resources missing".into()));
+        }
+        kinewright_media::owned_io::PlaybackInputs::admit(
+            Arc::new(self.document.clone()),
+            sources,
+            Arc::new(library),
+            Arc::clone(self) as kinewright_media::owned_io::LifetimeGuard,
+        )
+        .map(Arc::new)
+        .map_err(|error| BundleError::Corrupt(error.to_string()))
+    }
+}
+impl crate::editing_session::Ja1EditingSession {
+    pub fn frozen_context_descriptor(
+        &self,
+        descriptor: &SnapshotDescriptor,
+    ) -> Result<FrozenContext, BundleError> {
+        self.active_bundle()?.frozen_context_descriptor(descriptor)
+    }
+    pub fn studio_versions(&self) -> Result<Vec<SnapshotKey>, BundleError> {
+        Ok(self
+            .active_bundle()?
+            .version_index()?
+            .snapshots
+            .values()
+            .map(|descriptor| descriptor.key.clone())
+            .collect())
+    }
+}
+
+impl crate::store::ProjectStore {
+    /// Read-only playback admission for an accepted manual view. This lends
+    /// this owner's existing namespace and ledger; it publishes no snapshot.
+    pub fn manual_playback_inputs(
+        &self,
+        document: std::sync::Arc<kinewright_core::Document>,
+        inputs: &ObjectRef,
+    ) -> Result<std::sync::Arc<kinewright_media::owned_io::PlaybackInputs>, BundleError> {
+        use std::{
+            collections::{BTreeMap, HashMap},
+            sync::Arc,
+        };
+        let manifest = self.read_input_manifest(inputs)?;
+        crate::bundle_commit::validate_document_inputs(&document, &manifest)?;
+        let pin = self.pin(std::slice::from_ref(inputs))?;
+        let document_charge = charge_value(self, &*document)?;
+        let mut leases = Vec::new();
+        let mut resources = Vec::new();
+        let mut sources = BTreeMap::new();
+        let mut luts = HashMap::new();
+        for entry in &manifest.entries {
+            let identity = crate::owned_inputs::OwnedInputRef {
+                manifest_ref: inputs.clone(),
+                entry: entry.clone(),
+            };
+            if matches!(
+                entry.object.record_kind,
+                RecordKind::OwnedLut | RecordKind::OwnedFont
+            ) {
+                let resource = self.certify_resource_input(&identity)?;
+                if entry.object.record_kind == RecordKind::OwnedLut {
+                    let lut = kinewright_media::parse_cube_lut_bytes(resource.bytes())
+                        .map_err(|error| BundleError::Corrupt(error.to_string()))?;
+                    luts.insert(entry.object.sha256.clone(), Arc::new(lut));
+                }
+                resources.push(resource);
+            } else {
+                leases.push(self.lease_input_for_owner(
+                    &identity,
+                    &(manifest.project_id.clone(), manifest.session_id.clone()),
+                )?);
+            }
+        }
+        for asset in &document.media_pool {
+            let lease = leases
+                .iter()
+                .find(|lease| lease.identity().entry.matches_media_asset(asset))
+                .ok_or_else(|| BundleError::Identity("manual playback interpretation".into()))?;
+            sources.insert(asset.id, lease.certified_source()?.playback_source());
+        }
+        let (library, missing) =
+            kinewright_media::LutLibrary::from_document_assets(&document.lut_assets, &luts);
+        if !missing.is_empty() {
+            return Err(BundleError::Identity(
+                "manual playback LUT resources".into(),
+            ));
+        }
+        let lifetime = Arc::new((pin, document_charge, manifest, leases, resources));
+        kinewright_media::owned_io::PlaybackInputs::admit(
+            document,
+            sources,
+            Arc::new(library),
+            lifetime,
+        )
+        .map(Arc::new)
+        .map_err(|error| BundleError::Corrupt(error.to_string()))
     }
 }

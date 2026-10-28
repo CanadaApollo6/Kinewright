@@ -23,8 +23,16 @@ pub struct C0FixtureSnapshot {
 }
 pub fn build_c0_fixture_pair(parent: &Path) -> Result<[C0FixtureSnapshot; 2], BundleError> {
     Ok([
-        build(parent, "c0-red", "red", 440, 62, false)?,
-        build(parent, "c0-blue", "blue", 880, 31, true)?,
+        build(parent, "c0-red", "red", 440, 62, false, false)?,
+        build(parent, "c0-blue", "blue", 880, 31, true, false)?,
+    ])
+}
+/// C2 adds an independent second-half yellow landmark without changing the
+/// original C0 fixtures. A speed change must select a different source moment.
+pub fn build_c2_fixture_pair(parent: &Path) -> Result<[C0FixtureSnapshot; 2], BundleError> {
+    Ok([
+        build(parent, "c2-red", "red", 440, 62, false, true)?,
+        build(parent, "c2-blue", "blue", 880, 31, true, true)?,
     ])
 }
 fn apply(core: &Core, operation: Operation) -> Result<(), BundleError> {
@@ -50,14 +58,22 @@ fn build(
     frequency: u32,
     luma: u8,
     swapped: bool,
+    timed: bool,
 ) -> Result<C0FixtureSnapshot, BundleError> {
+    let visual = if timed {
+        format!(
+            "color=c={color}:s=32x24:r=24:d=0.25[a];color=c=yellow:s=32x24:r=24:d=0.25[b];[a][b]concat=n=2:v=1:a=0"
+        )
+    } else {
+        format!("color=c={color}:s=32x24:r=24:d=0.5")
+    };
     let source = kinewright_media::test_support::GeneratedMedia::ffmpeg(
         label,
         &[
             "-f",
             "lavfi",
             "-i",
-            &format!("color=c={color}:s=32x24:r=24:d=0.5"),
+            &visual,
             "-f",
             "lavfi",
             "-i",
@@ -115,7 +131,9 @@ fn build(
         byte_len: lut_ref.byte_length,
         domain_min_millionths: [0; 3],
         domain_max_millionths: [1_000_000; 3],
-        source: LutAssetSource::Builtin { name: label.into() },
+        source: LutAssetSource::Imported {
+            source_path: format!("unavailable-{label}.cube"),
+        },
     };
     let manifest = OwnedInputManifest {
         project_id: Some(bundle.project_id().clone()),

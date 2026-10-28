@@ -1316,7 +1316,8 @@ impl HostCommandOwner {
         let result = roots.canonicalize().and_then(|roots| {
             let write = !matches!(
                 command,
-                HostCommand::ReadSnapshot { .. }
+                HostCommand::ListVersions
+                    | HostCommand::ReadSnapshot { .. }
                     | HostCommand::ReadFeedback { .. }
                     | HostCommand::ReadSubmittedBatch { .. }
                     | HostCommand::Attach
@@ -1463,13 +1464,10 @@ impl HostCommandOwner {
         roots: &SessionRoots,
         reply: &mut HostReply,
     ) -> Result<(), HostError> {
-        #[cfg(test)]
-        {
-            self.dispatches += 1;
-        }
         let close_session = matches!(&command, HostCommand::CloseSession { .. });
         if self.recovering
-            && !manual::connector_command(&command)
+            && (!manual::connector_command(&command)
+                || matches!(command, HostCommand::Metadata { .. }))
             && !matches!(
                 command,
                 HostCommand::BeginRecovery { .. }
@@ -1483,6 +1481,10 @@ impl HostCommandOwner {
                 "Editing remains read-only until both Cores confirm the durable recovery result.",
             )
             .into());
+        }
+        #[cfg(test)]
+        {
+            self.dispatches += 1;
         }
         match command {
             HostCommand::Metadata { envelope, update } => {
@@ -1522,6 +1524,9 @@ impl HostCommandOwner {
                         reason: "Feedback is saved. No scheduler is attached.".into(),
                     });
                 }
+            }
+            HostCommand::ListVersions => {
+                reply.versions = self.owner()?.studio_versions()?;
             }
             HostCommand::ReadSnapshot { key } => {
                 let pinned = self.owner()?.read_snapshot(&key)?;

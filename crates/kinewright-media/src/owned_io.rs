@@ -7,7 +7,7 @@ use std::{
     fs::File,
     io::{self, SeekFrom},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -30,6 +30,121 @@ pub const CURSOR_RESERVATION_BYTES: u64 =
 
 pub type LifetimeGuard = Arc<dyn Send + Sync>;
 pub type CursorReservation = dyn Fn(u64) -> Result<LifetimeGuard, String> + Send + Sync;
+
+#[path = "certified_playback.rs"]
+mod playback;
+pub use playback::PlaybackInputs;
+
+/// The existing PF1 decoders use the same format interface for legacy media
+/// and descriptor-only Studio media. The latter retains its AVIO and ledger.
+pub(crate) enum DecodeInput {
+    Legacy(ffmpeg::format::context::Input),
+    Certified(Box<CertifiedInput>),
+}
+impl std::ops::Deref for DecodeInput {
+    type Target = ffmpeg::format::context::Input;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Legacy(input) => input,
+            Self::Certified(input) => &input.format,
+        }
+    }
+}
+impl std::ops::DerefMut for DecodeInput {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Legacy(input) => input,
+            Self::Certified(input) => &mut input.format,
+        }
+    }
+}
+impl DecodeInput {
+    #[cfg(test)]
+    pub(crate) fn cached_chunks(&self) -> Vec<u64> {
+        match self {
+            Self::Legacy(_) => vec![],
+            Self::Certified(input) => input
+                .avio
+                .cursor
+                .slots
+                .iter()
+                .filter_map(|slot| slot.index)
+                .collect(),
+        }
+    }
+    pub(crate) fn open(
+        source: &CertifiedSource,
+        cancel: Arc<AtomicBool>,
+    ) -> Result<Self, kinewright_core::MediaError> {
+        CertifiedInput::open(source, cancel)
+            .map(|input| Self::Certified(Box::new(input)))
+            .map_err(media_io_error)
+    }
+    pub(crate) fn check(&mut self) -> Result<(), kinewright_core::MediaError> {
+        if let Self::Certified(input) = self {
+            input.check().map_err(media_io_error)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn video(
+        &mut self,
+        frame: &ffmpeg::frame::Video,
+    ) -> Result<(), kinewright_core::MediaError> {
+        self.check()?;
+        if let Self::Certified(input) = self {
+            input
+                .decoder_bound
+                .expect("opened decoder")
+                .check_video(frame)
+                .map_err(media_io_error)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn audio(
+        &mut self,
+        frame: &ffmpeg::frame::Audio,
+    ) -> Result<(), kinewright_core::MediaError> {
+        self.check()?;
+        if let Self::Certified(input) = self {
+            input
+                .decoder_bound
+                .expect("opened decoder")
+                .check_audio(frame)
+                .map_err(media_io_error)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn context(
+        &mut self,
+        source: &CertifiedSource,
+        index: usize,
+        video: bool,
+    ) -> Result<ffmpeg::codec::context::Context, kinewright_core::MediaError> {
+        source
+            .check_selected(index, video)
+            .map_err(media_io_error)?;
+        let parameters = self
+            .stream(index)
+            .ok_or_else(|| media_io_error(decoder_error("selected stream missing")))?
+            .parameters();
+        let bound = bridge::decoder_bound(&parameters).map_err(media_io_error)?;
+        let charge = (source.0.reserve)(bound.bytes)
+            .map_err(|e| media_io_error(OwnedIoError::Capacity(e)))?;
+        let context = bridge::decoder_context(parameters, bound).map_err(media_io_error)?;
+        if let Self::Certified(input) = self {
+            input.decoder_bound = Some(bound);
+            input.probe_charges.push(charge);
+        }
+        Ok(context)
+    }
+}
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "map_err transfers the owned decoder error"
+)]
+fn media_io_error(error: OwnedIoError) -> kinewright_core::MediaError {
+    kinewright_core::MediaError::Backend(error.to_string())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedIoError {
@@ -77,6 +192,7 @@ pub struct CertifiedIdentity {
 
 struct Source {
     file: File,
+    failure: Mutex<Option<OwnedIoError>>,
     identity: CertifiedIdentity,
     chunks: Arc<[[u8; 32]]>,
     _lifetime: LifetimeGuard,
@@ -99,8 +215,58 @@ struct SelectedStreams {
 }
 
 impl CertifiedSource {
+    pub(crate) fn still_orientation(
+        &self,
+    ) -> Result<Option<crate::still_orientation::StillOrientation>, OwnedIoError> {
+        let mut cursor = self.cursor(Arc::new(AtomicBool::new(false)))?;
+        let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
+        let count = cursor.read(&mut header)?;
+        Ok(crate::still_orientation::still_bytes_orientation(
+            &header[..count],
+        ))
+    }
+    /// Admit a descriptor by checking its complete fingerprint and every chunk.
+    /// Project admission additionally binds these identities to its manifest.
+    /// No public unchecked constructor can manufacture a certified source.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub fn verify(
+        file: File,
+        source_sha256: [u8; 32],
+        source_length: u64,
+        table_sha256: [u8; 32],
+        chunk_sha256: Arc<[[u8; 32]]>,
+        lifetime: LifetimeGuard,
+        reserve_cursor: Arc<CursorReservation>,
+    ) -> Result<Self, OwnedIoError> {
+        let source = Self::new(
+            file,
+            source_sha256,
+            source_length,
+            table_sha256,
+            chunk_sha256,
+            lifetime,
+            reserve_cursor,
+        )?;
+        let mut cursor = source.cursor(Arc::new(AtomicBool::new(false)))?;
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0_u8; AVIO_BUFFER_BYTES];
+        loop {
+            let count = cursor.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            digest.update(&buffer[..count]);
+        }
+        if digest.finalize() != source_sha256 {
+            return Err(OwnedIoError::InvalidCertificate(
+                "complete source digest".into(),
+            ));
+        }
+        Ok(source)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
         file: File,
         source_sha256: [u8; 32],
         source_length: u64,
@@ -126,6 +292,7 @@ impl CertifiedSource {
         Ok(Self(
             Arc::new(Source {
                 file,
+                failure: Mutex::new(None),
                 identity: CertifiedIdentity {
                     source_sha256,
                     source_length,
@@ -527,12 +694,32 @@ const _: () = assert!(std::mem::size_of::<VerifiedCursor>() <= CURSOR_BOOKKEEPIN
 
 impl VerifiedCursor {
     fn fail<T>(&mut self, error: OwnedIoError) -> Result<T, OwnedIoError> {
+        if matches!(
+            error,
+            OwnedIoError::Damaged(_) | OwnedIoError::Unavailable(_)
+        ) {
+            self.source
+                .failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_or_insert_with(|| error.clone());
+        }
         Err(self.failure.get_or_insert(error).clone())
     }
 
     fn check(&mut self) -> Result<(), OwnedIoError> {
         if let Some(error) = &self.failure {
             return Err(error.clone());
+        }
+        if let Some(error) = self
+            .source
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            self.failure = Some(error.clone());
+            return Err(error);
         }
         if self.cancel.load(Ordering::Acquire) {
             return self.fail(OwnedIoError::Cancelled);
@@ -706,10 +893,11 @@ pub struct CertifiedProbe {
     pub color_description: ColorDescription,
 }
 
-struct CertifiedInput {
+pub(crate) struct CertifiedInput {
     format: ffmpeg::format::context::Input,
     avio: bridge::Avio,
     probe_charges: Vec<LifetimeGuard>,
+    decoder_bound: Option<DecoderBound>,
 }
 impl CertifiedInput {
     fn open(source: &CertifiedSource, cancel: Arc<AtomicBool>) -> Result<Self, OwnedIoError> {
@@ -719,12 +907,25 @@ impl CertifiedInput {
             format,
             avio,
             probe_charges: Vec::new(),
+            decoder_bound: None,
         };
         if input.format.nb_streams() as usize > MAX_CERTIFIED_STREAMS {
             return Err(OwnedIoError::Capacity("too many certified streams".into()));
         }
         // Every probe decoder needs a reservation and options before FFmpeg can open it.
-        if input.format.nb_streams() == 0 || bridge::dynamic_stream_table(&input.format) {
+        let still_pipe = input.format.nb_streams() == 1
+            && matches!(input.format.format().name(), "png_pipe" | "jpeg_pipe");
+        if still_pipe {
+            let mut cursor = source.cursor(input.avio.cancel())?;
+            let mut header = vec![0_u8; AVIO_BUFFER_BYTES];
+            let count = cursor.read(&mut header)?;
+            let dimensions = still_dimensions(&header[..count])
+                .ok_or_else(|| decoder_error("unsupported or incomplete still header"))?;
+            bridge::set_still_dimensions(&mut input.format, dimensions)?;
+        }
+        if input.format.nb_streams() == 0
+            || (bridge::dynamic_stream_table(&input.format) && !still_pipe)
+        {
             return Err(decoder_error(
                 "incomplete or dynamic stream table unsupported",
             ));
@@ -783,6 +984,39 @@ impl CertifiedInput {
         self.check()?;
         result.map_err(decoder_error)
     }
+}
+
+fn still_dimensions(header: &[u8]) -> Option<(u32, u32)> {
+    if header.starts_with(b"\x89PNG\r\n\x1a\n") && header.get(12..16)? == b"IHDR" {
+        return Some((
+            u32::from_be_bytes(header.get(16..20)?.try_into().ok()?),
+            u32::from_be_bytes(header.get(20..24)?.try_into().ok()?),
+        ));
+    }
+    if !header.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    let mut offset = 2;
+    while header.get(offset) == Some(&0xff) {
+        while header.get(offset) == Some(&0xff) {
+            offset += 1;
+        }
+        let marker = *header.get(offset)?;
+        offset += 1;
+        let length = usize::from(u16::from_be_bytes(
+            header.get(offset..offset + 2)?.try_into().ok()?,
+        ));
+        if length < 2 {
+            return None;
+        }
+        if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
+            let height = u16::from_be_bytes(header.get(offset + 3..offset + 5)?.try_into().ok()?);
+            let width = u16::from_be_bytes(header.get(offset + 5..offset + 7)?.try_into().ok()?);
+            return Some((u32::from(width), u32::from(height)));
+        }
+        offset = offset.checked_add(length)?;
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -1007,6 +1241,28 @@ mod bridge {
     };
 
     const SINGLE_OBJECT_DEMUXERS: &CStr = c"avi,mov,matroska,webm,wav,mp3,flac,ogg,aac,nut,mpegts,mpeg,mpegvideo,image2,png_pipe,jpeg_pipe,webp_pipe,bmp_pipe,tiff_pipe";
+
+    pub(super) fn set_still_dimensions(
+        input: &mut ffmpeg::format::context::Input,
+        (width, height): (u32, u32),
+    ) -> Result<(), OwnedIoError> {
+        if width == 0
+            || height == 0
+            || width > MAX_DECODER_DIMENSION
+            || height > MAX_DECODER_DIMENSION
+        {
+            return Err(OwnedIoError::Capacity("still dimensions".into()));
+        }
+        let mut parameters = input
+            .stream(0)
+            .ok_or_else(|| decoder_error("still stream missing"))?
+            .parameters();
+        unsafe {
+            (*parameters.as_mut_ptr()).width = i32::try_from(width).expect("bounded width");
+            (*parameters.as_mut_ptr()).height = i32::try_from(height).expect("bounded height");
+        }
+        Ok(())
+    }
 
     pub(super) fn dynamic_stream_table(input: &ffmpeg::format::context::Input) -> bool {
         unsafe { (*input.as_ptr()).ctx_flags & ffi::AVFMTCTX_NOHEADER != 0 }
@@ -1912,12 +2168,7 @@ mod tests {
         assert_damaged(first);
         assert_damaged(second);
         assert_damaged(seek);
-        let mut reopened = source.open_video(index, running()).unwrap();
-        assert_damaged(
-            reopened
-                .seek(6_000_000)
-                .and_then(|()| reopened.next_frame()),
-        );
+        assert_damaged(source.open_video(index, running()));
     }
 
     #[test]
@@ -1994,12 +2245,15 @@ mod tests {
         );
         overwrite(&mut writer, chunk * CHUNK_BYTES as u64, &[27]);
         for input in [&mut video.input, &mut audio.input] {
-            input
+            let seek = input
                 .avio
                 .cursor
-                .seek(SeekFrom::Start(chunk * CHUNK_BYTES as u64))
-                .unwrap();
-            assert!(bridge::callback_read(&mut input.avio.cursor, &mut [0; 32]) < 0);
+                .seek(SeekFrom::Start(chunk * CHUNK_BYTES as u64));
+            if seek.is_ok() {
+                assert!(bridge::callback_read(&mut input.avio.cursor, &mut [0; 32]) < 0);
+            } else {
+                assert_damaged(seek);
+            }
         }
         assert_damaged(video.next_frame());
         assert_damaged(audio.next_frame());
@@ -2064,6 +2318,7 @@ mod tests {
             format,
             avio,
             probe_charges: Vec::new(),
+            decoder_bound: None,
         };
         assert_eq!(
             header.format.nb_streams(),
@@ -2121,6 +2376,7 @@ mod tests {
             format,
             avio,
             probe_charges: Vec::new(),
+            decoder_bound: None,
         };
         assert_eq!(
             header.format.nb_streams(),
@@ -2156,6 +2412,7 @@ mod tests {
             format,
             avio,
             probe_charges: Vec::new(),
+            decoder_bound: None,
         };
         assert_eq!(header.format.nb_streams(), 1);
         assert!(
@@ -2481,5 +2738,8 @@ mod tests {
             decoder.next_frame(),
             Err(OwnedIoError::Unavailable(_))
         ));
+    }
+    mod pf1 {
+        include!("certified_playback_tests.rs");
     }
 }

@@ -177,6 +177,7 @@ pub enum HostCommand {
         envelope: kinewright_project::studio_records::MetadataEnvelope,
         update: kinewright_project::studio_records::MetadataUpdate,
     },
+    ListVersions,
     ReadSnapshot {
         key: kinewright_project::studio_records::SnapshotKey,
     },
@@ -502,6 +503,8 @@ pub struct HostReply {
     pub revise_result: Option<kinewright_project::studio_records::ReviseResult>,
     #[serde(default)]
     pub submitted_revisions: Vec<kinewright_project::studio_records::FeedbackRevision>,
+    #[serde(default)]
+    pub versions: Vec<kinewright_project::studio_records::SnapshotKey>,
     pub snapshot: Option<kinewright_project::studio_records::SnapshotDescriptor>,
     pub feedback: Option<kinewright_project::studio_records::FeedbackRevision>,
     pub submitted_batch: Option<kinewright_project::studio_records::FeedbackBatch>,

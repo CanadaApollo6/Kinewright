@@ -307,6 +307,7 @@ fn open_managed(
 pub(crate) struct SourceSpec {
     asset: AssetId,
     path: std::path::PathBuf,
+    certified: Option<crate::owned_io::CertifiedSource>,
     fps: Rational,
     description: ColorDescription,
     max_width: Option<u32>,
@@ -331,19 +332,38 @@ impl SourceSpec {
         if stopped() {
             return Err(MediaError::Cancelled);
         }
+        let opened = self.open_decoder(threads, Some(stop));
+        if stopped() {
+            return Err(MediaError::Cancelled);
+        }
+        opened
+    }
+
+    fn open_decoder(
+        &self,
+        threads: usize,
+        stop: Option<&Arc<AtomicBool>>,
+    ) -> Result<VideoDecoder, MediaError> {
         let (path, description) = (&self.path, &self.description);
-        let opened = open_managed(
+        if let Some(source) = &self.certified {
+            return VideoDecoder::open_certified(
+                path,
+                self.fps,
+                self.max_width,
+                description,
+                d65_assumption(description),
+                source,
+                stop,
+            );
+        }
+        open_managed(
             self.asset,
             path,
             self.fps,
             self.max_width,
             description,
-            (threads, Some(stop)),
-        );
-        if stopped() {
-            return Err(MediaError::Cancelled);
-        }
-        opened
+            (threads, stop),
+        )
     }
 
     /// K-1 (review B F1): the size this source's frames convert to, read
@@ -357,16 +377,7 @@ impl SourceSpec {
         if let Some(size) = sizes.get(key) {
             return Ok(*size);
         }
-        // The preview thread's open: no reader flag to interrupt it.
-        let (path, description) = (&self.path, &self.description);
-        let opened = open_managed(
-            self.asset,
-            path,
-            self.fps,
-            self.max_width,
-            description,
-            (1, None),
-        );
+        let opened = self.open_decoder(1, None);
         let opened = opened?;
         let size = (opened.frame_size(), opened.decoded_frame_bytes());
         sizes.insert(key.clone(), size);
@@ -389,6 +400,7 @@ impl SourceSpec {
         paused: bool,
         (refill, discard): (Option<Refill>, Option<(i64, i64)>),
     ) -> Result<WorkingFrame, MediaError> {
+        decoder.check_certified()?;
         if let Some(keep) = discard {
             decoder.discard_kept_outside(keep);
         }
@@ -469,6 +481,7 @@ pub(crate) fn document_source_keys(
 /// measured into `sizes`; the asset's optional resolution is never
 /// trusted, so a missing or mismatched one charges the actual bytes. A
 /// source that cannot be opened fails the job with the open's error.
+#[cfg(test)]
 pub(crate) fn reader_demand(
     document: &Document,
     at: TimeCode,
@@ -476,6 +489,19 @@ pub(crate) fn reader_demand(
     scale: RenderScale,
     horizon: i64,
     sizes: &mut FrameSizes,
+) -> Result<ReaderDemand, MediaError> {
+    reader_demand_with_inputs(document, at, resolution, scale, horizon, sizes, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reader_demand_with_inputs(
+    document: &Document,
+    at: TimeCode,
+    resolution: (u32, u32),
+    scale: RenderScale,
+    horizon: i64,
+    sizes: &mut FrameSizes,
+    inputs: Option<&crate::owned_io::PlaybackInputs>,
 ) -> Result<ReaderDemand, MediaError> {
     let mut demand = ReaderDemand::default();
     let mut generated = 0usize;
@@ -519,6 +545,7 @@ pub(crate) fn reader_demand(
                 let mut spec = SourceSpec {
                     asset: asset.id,
                     path: asset.path.clone(),
+                    certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,
                     fps: asset.fps,
                     description: asset.color_description.clone(),
                     max_width,
@@ -702,6 +729,7 @@ pub(crate) struct FrameRenderer {
     /// a document with an active LUT node then fails the render with
     /// `missing_lut_asset` instead of quietly dropping the look.
     lut_library: Arc<LutLibrary>,
+    inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
     /// The engine gauge current when this renderer was built, if any.
     decoders: Option<DecoderGauge>,
 }
@@ -722,6 +750,7 @@ impl FrameRenderer {
             cache_budget: FRAME_CACHE_BYTE_BUDGET,
             preview: None,
             lut_library: Arc::new(LutLibrary::default()),
+            inputs: None,
         }
     }
 
@@ -743,6 +772,17 @@ impl FrameRenderer {
     /// from a stale atlas. An unchanged library that hands back the same
     /// lattices still hits, which is what keeps steady-state playback from
     /// re-uploading the atlas every frame.
+    pub(crate) fn set_inputs(&mut self, inputs: Option<Arc<crate::owned_io::PlaybackInputs>>) {
+        let same = match (&self.inputs, &inputs) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.clear();
+            self.inputs = inputs;
+        }
+    }
     pub(crate) fn set_lut_library(&mut self, library: Arc<LutLibrary>) {
         self.lut_library = library;
     }
@@ -1299,7 +1339,11 @@ impl FrameRenderer {
         Ok(frame)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "One source key covers opening, decoding and caching"
+    )]
     fn decode_video_frame(
         &mut self,
         asset: AssetId,
@@ -1327,14 +1371,27 @@ impl FrameRenderer {
             self.video_sources.entry(key.clone())
         {
             let threads = crate::decode::default_threads();
-            let decoder = open_managed(
-                asset,
-                path,
-                fps,
-                key.max_width,
-                description,
-                (threads, None),
-            )?;
+            let decoder = if let Some(inputs) = &self.inputs {
+                let certified = inputs.source(asset)?;
+                VideoDecoder::open_certified(
+                    path,
+                    fps,
+                    scale.max_width(),
+                    description,
+                    d65_assumption(description),
+                    &certified,
+                    None,
+                )?
+            } else {
+                open_managed(
+                    asset,
+                    path,
+                    fps,
+                    key.max_width,
+                    description,
+                    (threads, None),
+                )?
+            };
             let mut cache = FrameCache::new(FRAME_CACHE_CAPACITY);
             let demand = self
                 .preview
@@ -1350,6 +1407,11 @@ impl FrameRenderer {
             });
         }
 
+        self.video_sources
+            .get_mut(&key)
+            .expect("opened source")
+            .decoder
+            .check_certified()?;
         let cache_miss = !self
             .video_sources
             .get(&key)

@@ -388,6 +388,9 @@ pub struct CertifiedMediaInput {
     interpretation: MediaInterpretation,
 }
 impl CertifiedMediaInput {
+    pub(crate) fn playback_source(&self) -> CertifiedSource {
+        self.source.clone()
+    }
     fn from_admitted_source(
         source: CertifiedSource,
         interpretation: MediaInterpretation,
@@ -682,7 +685,7 @@ impl ProjectStore {
         let mut roots = vec![source.clone(), table_ref.clone()];
         roots.extend(context.cloned());
         let pin = self.pin(&roots)?;
-        CertifiedSource::new(
+        CertifiedSource::verify(
             file,
             parse_digest(&source.sha256)?,
             source.byte_length,

@@ -1,0 +1,99 @@
+{
+  "base": "7f73f9c8d49873456aa0e80dd0331a6673633450",
+  "branch": "ja1/s3",
+  "source_manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+  "source_unchanged": true,
+  "accepted_pairs": 14,
+  "bindings": [
+    {
+      "name": "public-digest",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates-v1.json",
+      "manifest_sha256": "104722414cb9091a8f7b048fed5bee05bab478317f10a90e250fabe6d484cbc9",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "buffered-video",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates-v1.json",
+      "manifest_sha256": "104722414cb9091a8f7b048fed5bee05bab478317f10a90e250fabe6d484cbc9",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "buffered-audio",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates-v1.json",
+      "manifest_sha256": "104722414cb9091a8f7b048fed5bee05bab478317f10a90e250fabe6d484cbc9",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "shared-quarantine",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates-v1.json",
+      "manifest_sha256": "104722414cb9091a8f7b048fed5bee05bab478317f10a90e250fabe6d484cbc9",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "certified-route",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "stale-identity",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "failed-copy-freeze",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "copy-branch-isolation",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "recovery-metadata",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "pending-namespace",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "certified-audio-route",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "gpu-still-copy",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "bootstrap-save-not-preempted",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    },
+    {
+      "name": "pending-audio-owner",
+      "manifest": "docs/reports/ja1-s3/c2-evidence/source-before-gates.json",
+      "manifest_sha256": "b843f15b39a136356193175d4b12ccc6c469a9958a7c072665c0179df8143730",
+      "final_package_and_witness_match": true
+    }
+  ],
+  "b_owned_files_unchanged": true,
+  "artifacts": {
+    "gate-summary.json": "f0d70d2052b78286b5236603e80093c79a5ba1b0607b7afebc0551d141e65c21",
+    "landmarks.json": "4a080eb8ff5570253b7531c81060f31a9f58594e160fefa8de6fe5fabd8d32a9",
+    "captures.json": "e312a0f42e879b54fa1bcfb27db5dd5b6dbf0935a2f2b1fe656199d6708d2138"
+  }
+}

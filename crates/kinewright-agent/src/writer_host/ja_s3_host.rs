@@ -624,7 +624,7 @@ fn s3_viewer_capabilities() {
     for (command, marker) in released_commands {
         refused(&host, &viewer, command, marker);
     }
-    feedback_controls(&host, &viewer, &producer, &refs);
+    recovery_metadata_refused(&host, &producer, &publish_command(&host));
     let replay = published.metadata.as_ref().unwrap();
     assert!(matches!(replay.result, ReceiptResult::Metadata { .. }));
     accepted(
@@ -642,6 +642,7 @@ fn s3_viewer_capabilities() {
             })
             .unwrap(),
     );
+    feedback_controls(&host, &viewer, &producer, &refs);
     // C10 returns a new lease. Detach revokes the credential independently of it.
     accepted(viewer.request(HostCommand::Detach).unwrap());
     assert!(
@@ -2415,4 +2416,49 @@ fn s3_followup_repeated_reads_dedupe_reference_pins_at_capacity() {
         &replacement,
         HostCommand::ReadFeedback { reference: extra },
     ));
+}
+
+#[test]
+fn s3_metadata_write_refused_during_recovery() {
+    let (_temp, host, _refs) = fixture();
+    let producer = host
+        .attach(
+            "c2-producer".into(),
+            AttachmentRole::Producer,
+            host.roots.clone(),
+        )
+        .unwrap();
+    let command = publish_command(&host);
+    host.owner.upgrade().unwrap().lock().unwrap().recovering = true;
+    recovery_metadata_refused(&host, &producer, &command);
+    accepted(producer.request(HostCommand::ReadHistory).unwrap());
+    accepted(producer.request(HostCommand::ListVersions).unwrap());
+    host.owner.upgrade().unwrap().lock().unwrap().recovering = false;
+    accepted(producer.request(command).unwrap());
+}
+
+fn recovery_metadata_refused(host: &WriterHost, producer: &HostClient, command: &HostCommand) {
+    // Refusal updates the status disclosure. Durable state, history, leases,
+    // allocation counters and dispatch counts must remain identical.
+    let stable = || {
+        let mut value = state(host);
+        value["status"].as_object_mut().unwrap().remove("message");
+        value
+    };
+    let before = stable();
+    for route in 0..3 {
+        let reply = if route == 0 {
+            direct(host, producer, command.clone())
+        } else if route == 1 {
+            producer.request(command.clone()).unwrap()
+        } else {
+            mcp(producer, command.clone()).unwrap()
+        };
+        assert_eq!(
+            reply.error.as_ref().map(|e| e.code.as_str()),
+            Some("recovery_frozen"),
+            "C2_RECOVERY_METADATA_WRITE"
+        );
+        assert_eq!(stable(), before, "C2_RECOVERY_METADATA_NO_EFFECT");
+    }
 }

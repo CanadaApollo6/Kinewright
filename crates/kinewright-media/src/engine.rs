@@ -324,9 +324,14 @@ struct Issued {
 }
 
 enum Control {
+    #[cfg(any(test, feature = "test-util"))]
+    InspectApplied {
+        reply: Sender<Result<serde_json::Value, MediaError>>,
+    },
     SetEventWakeup(Wakeup),
     /// PF1 R-1: the transport controls carry the stamp they were issued with.
     SetDocument(Arc<Document>, Issued),
+    SetCertified(Arc<crate::owned_io::PlaybackInputs>, Issued),
     /// CC4 2.4: the engine's content-addressed lattice table gained entries,
     /// so the playback worker rebinds its document-local library. The library
     /// itself never crosses this channel: it is rebuilt from the worker's own
@@ -365,9 +370,10 @@ impl Control {
     /// A transport control's issuance, applied in index order (R-1).
     const fn issued(&self) -> Option<Issued> {
         match self {
-            Self::SetDocument(_, issued) | Self::Play(_, issued) | Self::Pause(issued) => {
-                Some(*issued)
-            }
+            Self::SetDocument(_, issued)
+            | Self::SetCertified(_, issued)
+            | Self::Play(_, issued)
+            | Self::Pause(issued) => Some(*issued),
             _ => None,
         }
     }
@@ -673,8 +679,23 @@ impl FfmpegMediaEngine {
         self.finished.clone()
     }
 
-    /// Read-only teardown signal for native eval owners. Disconnection follows
-    /// actual worker/preview destruction; it does not perform that destruction.
+    /// Observe the worker's applied scene without inferring it from issuance.
+    /// # Errors
+    /// Returns the worker's ordinary disconnected or deadline error.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn test_applied_scene(&self) -> Result<serde_json::Value, MediaError> {
+        self.agent_request(|reply, _cancel| Control::InspectApplied { reply })
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_gpu(&self) -> GpuContext {
+        self.gpu.clone()
+    }
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn test_audio_owner_counts(&self) -> [u64; 3] {
+        self.diagnostics.owner_counts()
+    }
     #[cfg(any(test, feature = "test-util"))]
     #[must_use]
     pub fn teardown_observer(&self) -> Receiver<()> {
@@ -752,6 +773,22 @@ impl FfmpegMediaEngine {
         Ok(())
     }
 
+    /// Issue one document and its certified namespace through the ordered PF1
+    /// control lane. The returned epoch identifies this scene's later frames.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn set_certified_document(
+        &self,
+        inputs: Arc<crate::owned_io::PlaybackInputs>,
+    ) -> FrameStamp {
+        let mut coalesced = self.coalesced();
+        self.clock.set_fps(inputs.document.fps);
+        let issued = coalesced.control();
+        let stamp = issued.stamp;
+        drop(coalesced);
+        self.send_issued(Control::SetCertified(inputs, issued));
+        stamp
+    }
+
     /// Publish one project's verified CC4 lattices for preview, proof, and
     /// export.
     ///
@@ -780,7 +817,10 @@ impl FfmpegMediaEngine {
     ///
     /// Built-in looks need no publication at all: they are generated in this
     /// binary and resolve straight from the pinned bake table.
-    #[allow(clippy::needless_pass_by_value)]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "Shared library publication matches the existing caller-owned handoff"
+    )]
     pub fn set_lut_library(&self, library: Arc<LutLibrary>) {
         if let Ok(mut published) = self.lut_lattices.write() {
             published.merge(&library);
@@ -2146,6 +2186,7 @@ struct Worker {
     /// Bumped by every `set_document`, so the preview clears its caches.
     generation: u64,
     document: Arc<Document>,
+    inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
     /// The engine's content-addressed lattice table, shared with the
     /// caller-thread proof and export paths (CC4 2.4).
     lut_lattices: Arc<RwLock<PublishedLattices>>,
@@ -2267,6 +2308,7 @@ impl Worker {
             preview: RefCell::new(PreviewThread::None),
             generation: 0,
             document: Arc::new(Document::default()),
+            inputs: None,
             lut_lattices,
             lut_library: Arc::new(LutLibrary::default()),
             audio: None,
@@ -2352,8 +2394,21 @@ impl Worker {
         seek
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One worker applies all ordered scene and transport controls"
+    )]
     fn apply(&mut self, control: Control) {
         match control {
+            #[cfg(any(test, feature = "test-util"))]
+            Control::InspectApplied { reply } => {
+                let observed = serde_json::to_vec(&*self.document).map(|bytes| serde_json::json!({
+                    "document_sha256": crate::sha256_bytes(&bytes),
+                    "epoch": self.handled.epoch, "seq": self.handled.seq,
+                    "certified_sources": self.inputs.as_ref().map(|inputs| inputs.sources.iter().map(|(id, source)| serde_json::json!({"asset":id.0,"source_sha256":source.identity().source_sha256,"source_length":source.identity().source_length,"table_sha256":source.identity().table_sha256})).collect::<Vec<_>>())
+                })).map_err(|error| MediaError::Backend(error.to_string()));
+                let _ = reply.send(observed);
+            }
             Control::SetEventWakeup(wakeup) => {
                 self.lane.set_wakeup(Arc::clone(&wakeup));
                 self.event_wakeup = Some(wakeup);
@@ -2361,10 +2416,28 @@ impl Worker {
             Control::SetDocument(doc, issued) => {
                 self.take_requests_before(issued);
                 self.apply_control(issued);
+                self.inputs = None;
                 self.set_document(&doc, issued.stamp);
             }
+            Control::SetCertified(inputs, issued) => {
+                self.take_requests_before(issued);
+                self.apply_control(issued);
+                self.inputs = Some(Arc::clone(&inputs));
+                self.set_document(&inputs.document, issued.stamp);
+            }
             Control::LutLatticesPublished => self.rebind_lut_library(),
-            Control::UpdateAudio(kind, doc) => self.update_audio(kind, doc),
+            Control::UpdateAudio(kind, doc) => {
+                if let Some(inputs) = &self.inputs {
+                    match inputs.with_document(Arc::clone(&doc)) {
+                        Ok(inputs) => self.inputs = Some(Arc::new(inputs)),
+                        Err(error) => {
+                            self.fail(error);
+                            return;
+                        }
+                    }
+                }
+                self.update_audio(kind, doc);
+            }
             Control::Play(from, issued) => {
                 self.take_requests_before(issued);
                 self.apply_control(issued);
@@ -2401,8 +2474,17 @@ impl Worker {
                 cancel,
             } => {
                 let document = document.unwrap_or_else(|| Arc::clone(&self.document));
-                let lut = self.bound_lut_library(&document);
+                let inputs = self
+                    .inputs
+                    .as_ref()
+                    .filter(|inputs| inputs.document == document)
+                    .cloned();
+                let lut = inputs.as_ref().map_or_else(
+                    || self.bound_lut_library(&document),
+                    |inputs| Arc::clone(&inputs.lut),
+                );
                 let work = AgentWork::Thumbnail {
+                    inputs,
                     document,
                     lut,
                     at,
@@ -2495,6 +2577,7 @@ impl Worker {
 
     fn scene(&self) -> Scene {
         Scene {
+            inputs: self.inputs.clone(),
             document: Arc::clone(&self.document),
             lut: Arc::clone(&self.lut_library),
             generation: self.generation,
@@ -2562,6 +2645,11 @@ impl Worker {
     /// holds, so an unchanged look keeps its atlas-cache identity and steady
     /// playback does not re-upload the atlas.
     fn rebind_lut_library(&mut self) {
+        if let Some(inputs) = &self.inputs {
+            self.lut_library = Arc::clone(&inputs.lut);
+            self.lane.rebind(self.generation, &self.lut_library);
+            return;
+        }
         let document = Arc::clone(&self.document);
         self.lut_library = self.bound_lut_library(&document);
         self.lane.rebind(self.generation, &self.lut_library);
@@ -2956,6 +3044,7 @@ impl Worker {
             Arc::clone(&self.monitor_gain_tenth_db),
             &self.output_device,
             &self.audio_diagnostics,
+            self.inputs.as_deref(),
         )
     }
 

@@ -36,7 +36,7 @@ use crate::{
     render::{
         DecodeStrategy, FRAME_CACHE_BYTE_BUDGET, FrameRenderer, FrameSizes, PREFETCH_FRAMES,
         ReaderDemand, RenderScale, SourceSpec, SuppliedFrames, TitleCacheKey, VideoSourceKey,
-        document_source_keys, reader_demand,
+        document_source_keys,
     },
     sched::{
         Admission, Next, PausedView, PermitBook, Planned, Poll, Posted, Readers, WaitStep,
@@ -193,6 +193,7 @@ impl CachedFrame for Pinned {
 /// its stamp, bound by the worker when it posts (R-1).
 #[derive(Clone)]
 pub(crate) struct Scene {
+    pub(crate) inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
     pub(crate) document: Arc<Document>,
     pub(crate) lut: Arc<LutLibrary>,
     /// Bumped by every `set_document`: the preview clears its caches.
@@ -216,6 +217,7 @@ pub(crate) struct TransportJob {
 
 pub(crate) enum AgentWork {
     Thumbnail {
+        inputs: Option<Arc<crate::owned_io::PlaybackInputs>>,
         document: Arc<Document>,
         lut: Arc<LutLibrary>,
         at: TimeCode,
@@ -1276,6 +1278,10 @@ pub(crate) enum Attempt {
     Pending,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "The bounded display handoff retains its non-cloneable lease inline"
+)]
 enum Image {
     Cpu(FrameTexture),
     Gpu(crate::DisplayFrame),
@@ -1604,6 +1610,7 @@ impl Preview {
         at: TimeCode,
         wait: &FrameWait,
     ) -> Result<Option<Image>, Halt> {
+        self.renderer.set_inputs(scene.inputs.clone());
         let document = &*scene.document;
         let scale = RenderScale::Proxy {
             max_width: monitor_max_width(document.resolution),
@@ -1637,9 +1644,17 @@ impl Preview {
             0
         };
         if self.generation != Some(scene.generation) {
-            self.forget_sources(document, scale, wait)?;
+            self.forget_sources(document, scale, wait, scene.inputs.is_some())?;
         }
-        let demand = reader_demand(document, at, resolution, scale, horizon, &mut self.sizes);
+        let demand = crate::render::reader_demand_with_inputs(
+            document,
+            at,
+            resolution,
+            scale,
+            horizon,
+            &mut self.sizes,
+            scene.inputs.as_deref(),
+        );
         let demand = demand.map_err(Halt::Failed)?;
         // Bound first: a new generation's cleared titles are not resident
         // when admission counts them (review B S2).
@@ -1812,8 +1827,13 @@ impl Preview {
         document: &Document,
         scale: RenderScale,
         wait: &FrameWait,
+        sealed: bool,
     ) -> Result<(), Halt> {
-        let keep = document_source_keys(document, scale);
+        let keep = if sealed {
+            std::collections::HashSet::new()
+        } else {
+            document_source_keys(document, scale)
+        };
         self.sizes.retain(|key| keep.contains(key));
         let (retired, posted) = {
             let mut state = self.lane.lock();
@@ -2437,12 +2457,14 @@ impl Preview {
         }
         match work {
             AgentWork::Thumbnail {
+                inputs,
                 document,
                 lut,
                 at,
                 max_width,
                 reply,
             } => {
+                self.renderer.set_inputs(inputs);
                 self.bind(None, &lut);
                 let scale = RenderScale::Proxy { max_width };
                 let resolution = scale.output_resolution(document.resolution);
@@ -2545,6 +2567,7 @@ pub(crate) mod tests {
     use kinewright_core::Analysis;
 
     use super::*;
+    use crate::render::reader_demand;
     use crate::{
         cc1_fixtures::fallback_gpu, compositor::live_table_frames, engine::FfmpegMediaEngine,
         perf_fixtures::title_card, test_support::TempDirectory,
@@ -2620,6 +2643,7 @@ pub(crate) mod tests {
     pub(crate) fn job(document: &Arc<Document>, kind: JobKind, stamp: FrameStamp) -> TransportJob {
         let lut = Arc::default();
         let scene = Scene {
+            inputs: None,
             document: Arc::clone(document),
             lut,
             generation: 1,
@@ -2676,6 +2700,7 @@ pub(crate) mod tests {
         preview.run_agent(
             AgentJob {
                 work: AgentWork::Thumbnail {
+                    inputs: None,
                     document,
                     lut: Arc::default(),
                     at: TimeCode::ZERO,
@@ -2735,6 +2760,7 @@ pub(crate) mod tests {
         preview.run_agent(
             AgentJob {
                 work: AgentWork::Thumbnail {
+                    inputs: None,
                     document: Arc::clone(&document),
                     lut: Arc::default(),
                     at: TimeCode(1),
@@ -3515,6 +3541,7 @@ pub(crate) mod tests {
                     let rings = preview.lane.lock().readers.ring_bytes();
                     let (reply, response) = bounded(1);
                     let work = AgentWork::Thumbnail {
+                        inputs: None,
                         document: Arc::clone(&document),
                         lut: Arc::default(),
                         at: TimeCode(35),
@@ -4935,6 +4962,7 @@ pub(crate) mod tests {
         let (reply, response) = bounded(1);
         let thumbnail = AgentJob {
             work: AgentWork::Thumbnail {
+                inputs: None,
                 document: Arc::clone(&b),
                 lut: Arc::clone(&b_lut),
                 at: TimeCode(0),
@@ -6212,6 +6240,7 @@ pub(crate) mod tests {
     /// adopted with their charge while they fit, and dropped when they do
     /// not.
     #[test]
+    #[allow(clippy::too_many_lines, reason = "one ledger lifetime witness")]
     fn thumbnail_rasters_are_charged_or_dropped() {
         use kinewright_core::{BlendMode, ClipContent, SolidColor, Track, TrackId, TrackKind};
         let n = 4u8;
@@ -6277,6 +6306,7 @@ pub(crate) mod tests {
         let thumbnail = |preview: &mut Preview| {
             let (reply, response) = bounded(1);
             let work = AgentWork::Thumbnail {
+                inputs: None,
                 document: Arc::clone(&document),
                 lut: Arc::default(),
                 at: TimeCode(5),

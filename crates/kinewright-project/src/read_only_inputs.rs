@@ -185,7 +185,7 @@ impl ReadOnlyInputs {
             chunks_charge,
             admission_charge,
         ));
-        let source = CertifiedSource::new(
+        let source = CertifiedSource::verify(
             file,
             source_digest,
             source_length,

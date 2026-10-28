@@ -62,6 +62,10 @@ impl PreparedView {
 }
 
 pub(crate) enum Action {
+    StudioVersions,
+    StudioManualPlayback(Arc<Document>),
+    StudioSelect(kinewright_project::studio_records::SnapshotKey),
+    StudioEditCopy(kinewright_project::studio_records::SnapshotKey),
     ImportMedia(PathBuf),
     ChangeMediaInterpretation(Box<kinewright_core::Operation>),
     Save,
@@ -120,10 +124,22 @@ impl ManualProducerGate {
     }
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent attachment and UI lifecycle flags"
+)]
 pub(crate) struct Ja1Attachment {
     pub(crate) imported_media: Option<kinewright_core::AssetId>,
     pub owner: Ja1EditingSession,
     pub message: String,
+    pub(crate) studio_ready: Option<Arc<kinewright_project::studio_store::FrozenContext>>,
+    pub(crate) studio_versions_ready: Option<Vec<kinewright_project::studio_records::SnapshotKey>>,
+    pub(crate) studio_edit_pending: bool,
+    pub(crate) studio_error_ready: Option<String>,
+    pub(crate) studio_manual_ready: Option<(
+        (u64, kinewright_project::bundle_records::ObjectRef),
+        Arc<kinewright_media::owned_io::PlaybackInputs>,
+    )>,
     choice: Option<Choice>,
     offer: Option<RescueProbe>,
     pub view: Option<PreparedView>,
@@ -162,6 +178,11 @@ impl Ja1Attachment {
         let view = Some(PreparedView::prepare(owner.core())?);
         let mut this = Self {
             imported_media: None,
+            studio_ready: None,
+            studio_versions_ready: None,
+            studio_edit_pending: false,
+            studio_error_ready: None,
+            studio_manual_ready: None,
             owner,
             message: "Studio editing. Saved means a verified durable save.".into(),
             choice: None,
@@ -294,8 +315,74 @@ impl Ja1Attachment {
             || self.frozen
             || self.choice.is_some()
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one attachment action dispatch and result boundary"
+    )]
     pub fn apply(&mut self, action: Action) -> Result<(), BundleError> {
         self.require_retention()?;
+        match &action {
+            Action::StudioManualPlayback(document) => {
+                let scope = self.studio_playback_scope()?;
+                let inputs = &scope.1;
+                match self
+                    .owner
+                    .store()?
+                    .manual_playback_inputs(Arc::clone(document), inputs)
+                {
+                    Ok(inputs) => {
+                        self.studio_manual_ready = Some((scope, inputs));
+                        self.panel_open = false;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        self.message = format!("Playback input unavailable: {error}");
+                        self.studio_error_ready = Some(self.message.clone());
+                        return Err(error);
+                    }
+                }
+            }
+            Action::StudioVersions => {
+                self.studio_versions_ready = Some(self.studio_versions()?);
+                return Ok(());
+            }
+            Action::StudioSelect(key) => match self.studio_context(key) {
+                Ok(context) => {
+                    self.studio_ready = Some(Arc::new(context));
+                    self.panel_open = false;
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.message = format!("Version damaged or unavailable: {error}");
+                    self.studio_error_ready = Some(self.message.clone());
+                    return Err(error);
+                }
+            },
+            Action::StudioEditCopy(key) => {
+                self.studio_edit_pending = false;
+                let before = self.owner.core().actor_identity();
+                let prior_view = self.view.take();
+                let result = self.studio_edit_copy(key);
+                self.studio_edit_pending = result.is_ok()
+                    && self.view.as_ref().is_some_and(|view| {
+                        view.core.actor_identity() != before
+                            && serde_json::to_vec(&*view.document).is_ok_and(|bytes| {
+                                kinewright_media::sha256_bytes(&bytes) == key.document_hash
+                            })
+                    });
+                if self.view.is_none() && self.owner.core().actor_identity() == before {
+                    self.view = prior_view;
+                }
+                if let Err(error) = &result {
+                    self.message = format!(
+                        "The copy was not opened. Your selected version remains unchanged. {error}"
+                    );
+                    self.studio_error_ready = Some(self.message.clone());
+                }
+                return result;
+            }
+            _ => {}
+        }
         if let Action::ImportMedia(path) = &action
             && self.host.is_some()
             && self.owner.association().is_none()
@@ -502,6 +589,71 @@ impl Ja1Attachment {
             .pending()
             .map_err(|e| e.to_string())
     }
+    pub(crate) fn studio_playback_scope(
+        &self,
+    ) -> Result<(u64, kinewright_project::bundle_records::ObjectRef), BundleError> {
+        let inputs = self.host.as_ref().map_or_else(
+            || self.owner.current_inputs_ref(),
+            host::HostAttachment::playback_inputs_ref,
+        );
+        Ok((self.owner.store()?.owner_epoch(), inputs.clone()))
+    }
+    pub(crate) fn studio_versions(
+        &self,
+    ) -> Result<Vec<kinewright_project::studio_records::SnapshotKey>, BundleError> {
+        if let Some(host) = &self.host {
+            let reply = host
+                .client
+                .request(kinewright_agent::writer_host::HostCommand::ListVersions)
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if let Some(error) = reply.error {
+                return Err(BundleError::Corrupt(error.message));
+            }
+            return Ok(reply.versions);
+        }
+        self.owner.studio_versions()
+    }
+    pub(crate) fn studio_context(
+        &self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<kinewright_project::studio_store::FrozenContext, BundleError> {
+        if let Some(host) = &self.host {
+            let reply = host
+                .client
+                .request(kinewright_agent::writer_host::HostCommand::ReadSnapshot {
+                    key: key.clone(),
+                })
+                .map_err(|e| BundleError::Corrupt(e.to_string()))?;
+            if let Some(error) = reply.error {
+                return Err(BundleError::Corrupt(error.message));
+            }
+            let descriptor = reply.snapshot.ok_or(BundleError::HistoryChanged)?;
+            if descriptor.key != *key {
+                return Err(BundleError::HistoryChanged);
+            }
+            return self.owner.frozen_context_descriptor(&descriptor);
+        }
+        self.owner.frozen_context(key)
+    }
+    pub(crate) fn studio_edit_copy(
+        &mut self,
+        key: &kinewright_project::studio_records::SnapshotKey,
+    ) -> Result<(), BundleError> {
+        let context = self.studio_context(key)?;
+        let descriptor = &context.snapshot.descriptor;
+        let checkpoint = self
+            .owner
+            .store()?
+            .read_record::<kinewright_project::bundle_records::BranchCheckpoint>(
+                &descriptor.checkpoint_ref,
+            )?;
+        self.apply(Action::PreviewRecovery(RecoverySelection::Checkpoint {
+            root: descriptor.checkpoint_ref.clone(),
+            branch: checkpoint.branch_id.clone(),
+        }))?;
+        self.apply(Action::OpenRecovery)
+    }
+
     pub fn host_client(&self) -> Option<kinewright_agent::writer_host::HostClient> {
         if self.retention_lost {
             return None;
@@ -862,6 +1014,12 @@ impl Ja1Attachment {
     #[allow(clippy::too_many_lines)]
     fn apply_inner(&mut self, action: Action) -> Result<(), BundleError> {
         match action {
+            Action::StudioVersions
+            | Action::StudioManualPlayback(_)
+            | Action::StudioSelect(_)
+            | Action::StudioEditCopy(_) => {
+                return Err(BundleError::HistoryChanged);
+            }
             Action::ChangeMediaInterpretation(operation) => {
                 let kinewright_core::Operation::SetAssetColorDescription { asset: id, .. } =
                     operation.as_ref()

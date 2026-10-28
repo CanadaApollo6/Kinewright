@@ -115,6 +115,7 @@ pub(crate) struct ProjectSession {
     pub(crate) revision: TimelineRevision,
     pub(crate) project_path: Option<PathBuf>,
     pub(crate) source_admission: kinewright_project::bundle::BundleWriteAdmission,
+    pub(crate) studio: crate::studio::Studio,
     pub(crate) ja1: Option<crate::ja1_attachment::Ja1Attachment>,
     pub(crate) ja1_job: Option<std::thread::JoinHandle<crate::ja1_attachment::Ja1Attachment>>,
     pub(crate) retired_agent_threads: BTreeSet<u64>,
@@ -422,6 +423,7 @@ impl ProjectSession {
             revision: TimelineRevision::default(),
             project_path,
             source_admission,
+            studio: crate::studio::Studio::default(),
             ja1: None,
             ja1_job: None,
             retired_agent_threads: BTreeSet::new(),
@@ -703,6 +705,9 @@ impl ProjectSession {
         &self,
         command: kinewright_core::Command,
     ) -> Result<(), kinewright_core::CoreDisconnected> {
+        if self.studio.selection.is_some() {
+            return Err(kinewright_core::CoreDisconnected);
+        }
         if let Some(attachment) = &self.ja1 {
             attachment.send_manual(command)
         } else {
@@ -710,7 +715,8 @@ impl ProjectSession {
         }
     }
     pub(crate) fn ja1_read_only(&self) -> bool {
-        self.ja1_job.is_some()
+        self.studio.selection.is_some()
+            || self.ja1_job.is_some()
             || self
                 .ja1
                 .as_ref()

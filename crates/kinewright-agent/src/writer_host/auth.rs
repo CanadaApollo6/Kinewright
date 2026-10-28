@@ -111,7 +111,9 @@ impl Attachment {
                 }
                 kinewright_project::studio_records::MetadataChange::Orchestration { .. } => false,
             },
-            HostCommand::ReadSnapshot { .. } | HostCommand::ReadSubmittedBatch { .. } => true,
+            HostCommand::ListVersions
+            | HostCommand::ReadSnapshot { .. }
+            | HostCommand::ReadSubmittedBatch { .. } => true,
             HostCommand::ReadFeedback { .. } => self.role != AttachmentRole::Producer,
             HostCommand::Attach
             | HostCommand::Status

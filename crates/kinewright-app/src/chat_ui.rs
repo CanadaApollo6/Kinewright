@@ -364,7 +364,7 @@ pub(crate) enum ChatEntry {
 }
 
 /// A deferred action from an edit card in the session stream.
-enum EditCardAction {
+pub(crate) enum EditCardAction {
     Review(TimeCode),
     Undo,
 }
@@ -2310,7 +2310,7 @@ impl KinewrightApp {
         match card_action {
             Some(EditCardAction::Review(cue)) => {
                 self.seek_to(cue);
-                self.playback.play(self.projects[project_index].position);
+                self.play_program_from(self.projects[project_index].position);
             }
             Some(EditCardAction::Undo) => self.undo(),
             None => {}
@@ -2776,7 +2776,7 @@ fn activity_summary(entries: &[ChatEntry], fps: kinewright_core::Rational) -> St
 /// One stream entry, rendered the same whether it stands alone or sits
 /// inside a collapsed activity group.
 #[allow(clippy::too_many_lines)]
-fn render_stream_entry(
+pub(crate) fn render_stream_entry(
     ui: &mut egui::Ui,
     entry: &ChatEntry,
     salt: usize,

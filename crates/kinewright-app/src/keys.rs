@@ -304,6 +304,24 @@ impl KinewrightApp {
     }
 
     fn perform_key_action(&mut self, action: KeyAction) {
+        if self.focused().studio.selection.is_some()
+            && !matches!(
+                action,
+                KeyAction::TogglePlayback
+                    | KeyAction::ShuttleBackwardFrame
+                    | KeyAction::Pause
+                    | KeyAction::PlayForward
+                    | KeyAction::StepBackward
+                    | KeyAction::StepForward
+                    | KeyAction::JumpStart
+                    | KeyAction::JumpEnd
+                    | KeyAction::Help
+            )
+        {
+            self.status =
+                "Choose Current edit or Edit a copy before using editing controls.".into();
+            return;
+        }
         match action {
             KeyAction::TogglePlayback => self.toggle_playback(),
             KeyAction::Split => self.split_at_playhead(),
@@ -319,7 +337,7 @@ impl KinewrightApp {
             KeyAction::JumpStart => self.pause_and_seek(TimeCode::ZERO),
             KeyAction::JumpEnd => {
                 self.pause_and_seek(TimeCode(
-                    self.focused().document.duration.0.saturating_sub(1).max(0),
+                    self.program_document().duration.0.saturating_sub(1).max(0),
                 ));
             }
             KeyAction::SetIn => self.trim_selected_at_playhead(true),
@@ -348,7 +366,7 @@ impl KinewrightApp {
     }
 
     fn step_frames(&mut self, delta: i64) {
-        self.pause_and_seek(TimeCode(self.focused().position.0.saturating_add(delta)));
+        self.pause_and_seek(TimeCode(self.program_position().0.saturating_add(delta)));
     }
 
     fn pause_and_seek(&mut self, position: TimeCode) {
@@ -396,7 +414,7 @@ impl KinewrightApp {
             return;
         };
         let project_end = clip.timeline_start.0.saturating_add(project_duration.0);
-        let position = self.focused().position;
+        let position = self.program_position();
         if position < clip.timeline_start || position.0 > project_end {
             self.note_label(
                 LabelIncident::Operations,

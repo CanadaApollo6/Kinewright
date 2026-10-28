@@ -10,11 +10,29 @@ use std::{
 use eframe::{egui, egui_wgpu};
 use kinewright_core::{FrameStamp, PreviewFrame, TimeCode};
 
+/// Bound resources follow the image through deferred GPU callbacks.
+pub(crate) struct PresentationContext {
+    pub(crate) snapshot: kinewright_project::studio_records::SnapshotKey,
+    pub(crate) inputs: Arc<kinewright_media::owned_io::PlaybackInputs>,
+}
+impl std::fmt::Debug for PresentationContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.snapshot.fmt(f)
+    }
+}
+impl PartialEq for PresentationContext {
+    fn eq(&self, other: &Self) -> bool {
+        self.snapshot == other.snapshot
+    }
+}
+impl Eq for PresentationContext {}
+
 /// What the preview texture shows now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DisplayCell {
     pub(crate) stamp: FrameStamp,
     pub(crate) at: TimeCode,
+    pub(crate) context: Option<Arc<PresentationContext>>,
     /// Bumped by every binding: one ack per bound image.
     pub(crate) frame_id: u64,
     /// An image of an older epoch, kept up (marked) until a current one binds.
@@ -23,7 +41,7 @@ pub(crate) struct DisplayCell {
 
 /// A paint of a bound, current image in root epoch `epoch`, at `painted`;
 /// `expired` if playback's clock had passed the image's frame by then.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaintMark {
     pub(crate) cell: DisplayCell,
     pub(crate) epoch: u64,
@@ -46,8 +64,11 @@ type Shared<T> = Arc<Mutex<Option<T>>>;
 /// eligibility inputs, read again by the marker at paint time.
 pub(crate) type Now = Box<dyn Fn() -> (FrameStamp, Option<TimeCode>) + Send + Sync>;
 
-fn read<T: Copy>(shared: &Shared<T>) -> Option<T> {
-    *shared.lock().unwrap_or_else(PoisonError::into_inner)
+fn read<T: Clone>(shared: &Shared<T>) -> Option<T> {
+    shared
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
 }
 
 fn write<T>(shared: &Shared<T>, value: Option<T>) -> Option<T> {
@@ -60,13 +81,18 @@ fn write<T>(shared: &Shared<T>, value: Option<T>) -> Option<T> {
 #[derive(Default)]
 pub(crate) struct Presenter {
     candidates: Vec<PreviewFrame>,
+    contexts: Option<(u64, Option<Arc<PresentationContext>>)>,
     cell: Shared<DisplayCell>,
     cpu_cell: Shared<DisplayCell>,
     gpu_cell: Shared<DisplayCell>,
     using_gpu: bool,
     mark: Shared<PaintMark>,
     next_frame_id: u64,
+    root_epoch: u64,
+    retiring_cpu: Option<u64>,
+    retiring_gpu: Option<u64>,
     acked: Option<u64>,
+    suspended: bool,
 }
 
 /// R-2 selection: the newest candidate of the current epoch with seq ≥ the
@@ -104,6 +130,39 @@ pub(crate) fn choose_candidate(
 }
 
 impl Presenter {
+    pub(crate) fn advance(&mut self, epoch: u64) {
+        self.root_epoch = epoch;
+        if self.retiring_cpu.is_some_and(|retired| epoch > retired) {
+            write(&self.cpu_cell, None);
+            self.retiring_cpu = None;
+        }
+        if self.retiring_gpu.is_some_and(|retired| epoch > retired) {
+            write(&self.gpu_cell, None);
+            self.retiring_gpu = None;
+        }
+    }
+    pub(crate) fn set_context(&mut self, epoch: u64, context: Option<Arc<PresentationContext>>) {
+        self.suspended = false;
+        self.contexts = Some((epoch, context));
+    }
+    /// Retain the old image and its identity while no admitted scene is ready.
+    pub(crate) fn suspend(&mut self) {
+        self.suspended = true;
+        self.candidates.clear();
+        if let Some(mut cell) = read(&self.cell) {
+            cell.stale = true;
+            write(&self.cell, Some(cell));
+        }
+    }
+    fn context(&self, epoch: u64) -> Option<Arc<PresentationContext>> {
+        self.contexts
+            .as_ref()
+            .filter(|(start, _)| *start <= epoch)
+            .and_then(|(_, value)| value.clone())
+    }
+    pub(crate) fn bound(&self) -> Option<DisplayCell> {
+        read(&self.cell)
+    }
     /// `poll_background` only collects (bounded: the channel holds two).
     pub(crate) fn collect(&mut self, frame: PreviewFrame) {
         if self.candidates.len() >= 4 {
@@ -123,12 +182,16 @@ impl Presenter {
         now: impl Fn() -> (FrameStamp, Option<TimeCode>),
         prepare: impl FnOnce(&PreviewFrame) -> P,
     ) -> Option<(PreviewFrame, P)> {
+        if self.suspended {
+            self.candidates.clear();
+            return None;
+        }
         let shown = read(&self.cell);
         let (latest, playing) = now();
         let chosen = choose_candidate(
             &mut self.candidates,
             latest,
-            shown.map(|c| c.stamp),
+            shown.as_ref().map(|c| c.stamp),
             playing,
         );
         let prepared = chosen.map(|frame| {
@@ -147,6 +210,7 @@ impl Presenter {
                     stamp,
                     at,
                     frame_id,
+                    context: self.context(stamp.epoch),
                     stale: false,
                 }
             }
@@ -157,6 +221,10 @@ impl Presenter {
             _ => return None,
         };
         if chosen.is_some() {
+            if self.using_gpu {
+                self.retiring_gpu = Some(self.root_epoch);
+            }
+            self.retiring_cpu = None;
             self.cell = Arc::clone(&self.cpu_cell);
             self.using_gpu = false;
         }
@@ -165,6 +233,9 @@ impl Presenter {
     }
 
     pub(crate) fn bind_gpu(&mut self, frame: &kinewright_media::DisplayFrame, now: &Now) -> bool {
+        if self.suspended {
+            return false;
+        }
         let (latest, playing) = now();
         let shown = read(&self.cell);
         if frame.stamp.epoch != latest.epoch
@@ -174,6 +245,10 @@ impl Presenter {
             return false;
         }
         self.next_frame_id += 1;
+        if !self.using_gpu {
+            self.retiring_cpu = Some(self.root_epoch);
+        }
+        self.retiring_gpu = None;
         self.cell = Arc::clone(&self.gpu_cell);
         self.using_gpu = true;
         write(
@@ -182,6 +257,7 @@ impl Presenter {
                 stamp: frame.stamp,
                 at: frame.at,
                 frame_id: self.next_frame_id,
+                context: self.context(frame.stamp.epoch),
                 stale: false,
             }),
         );
@@ -218,6 +294,7 @@ impl Presenter {
     pub(crate) fn marker(&self, epoch: u64, now: Now) -> PaintMarker {
         let (cell, mark) = (Arc::clone(&self.cell), Arc::clone(&self.mark));
         PaintMarker {
+            _context: read(&self.cell).and_then(|cell| cell.context),
             cell,
             mark,
             epoch,
@@ -245,6 +322,8 @@ impl Presenter {
 }
 
 pub(crate) struct PaintMarker {
+    // A later clear/rebind may change the shared cell before this paint runs.
+    _context: Option<Arc<PresentationContext>>,
     cell: Shared<DisplayCell>,
     mark: Shared<PaintMark>,
     epoch: u64,

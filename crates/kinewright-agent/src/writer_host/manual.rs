@@ -32,6 +32,7 @@ pub(super) fn connector_command(command: &HostCommand) -> bool {
     matches!(
         command,
         HostCommand::Metadata { .. }
+            | HostCommand::ListVersions
             | HostCommand::ReadSnapshot { .. }
             | HostCommand::ReadFeedback { .. }
             | HostCommand::ReadSubmittedBatch { .. }

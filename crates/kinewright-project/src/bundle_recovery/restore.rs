@@ -50,37 +50,54 @@ impl ProjectBundle {
         let reference = match selection {
             RecoverySelection::WorkingBranch(branch) => self.checkpoint_reference(branch)?,
             RecoverySelection::Checkpoint { root, branch } => {
-                if root.record_kind != RecordKind::RootCheckpoint {
-                    return Err(BundleError::Corrupt("recovery root kind".into()));
+                if root.record_kind == RecordKind::BranchCheckpoint {
+                    let versions = self.version_index()?;
+                    let descriptor = versions
+                        .snapshots
+                        .values()
+                        .find(|d| d.checkpoint_ref == *root)
+                        .ok_or_else(|| {
+                            BundleError::Identity("unindexed Studio checkpoint".into())
+                        })?;
+                    self.validate_snapshot(descriptor)?;
+                    let checkpoint = self.store.read_record::<BranchCheckpoint>(root)?;
+                    if checkpoint.branch_id != *branch {
+                        return Err(BundleError::Identity("Studio checkpoint branch".into()));
+                    }
+                    root.clone()
+                } else {
+                    if root.record_kind != RecordKind::RootCheckpoint {
+                        return Err(BundleError::Corrupt("recovery root kind".into()));
+                    }
+                    let bytes = self.store.read_checkpoint_bytes(root)?;
+                    let admission = BundleWriteAdmission::from_bytes_with_limits(
+                        None,
+                        bytes,
+                        self.store.usage_arc(),
+                        self.store.limits(),
+                    )?;
+                    admission.require_supported()?;
+                    let root = admission
+                        .data
+                        .file
+                        .as_ref()
+                        .and_then(|f| f.studio.as_ref())
+                        .ok_or(BundleError::Unsettled)?;
+                    if root.project_id != self.project_id
+                        && !self.origin_project_ids.contains(&root.project_id)
+                    {
+                        return Err(BundleError::Identity("recovery origin".into()));
+                    }
+                    let manifest = self
+                        .store
+                        .read_record::<StoreManifest>(&root.store_manifest_ref)?;
+                    super::validate_manifest_apis(&manifest, root.manual_switch_generation)?;
+                    self.store
+                        .read_record::<BTreeMap<BranchId, ObjectRef>>(&root.branch_index_ref)?
+                        .get(branch)
+                        .cloned()
+                        .ok_or_else(|| BundleError::Corrupt("recovery branch".into()))?
                 }
-                let bytes = self.store.read_checkpoint_bytes(root)?;
-                let admission = BundleWriteAdmission::from_bytes_with_limits(
-                    None,
-                    bytes,
-                    self.store.usage_arc(),
-                    self.store.limits(),
-                )?;
-                admission.require_supported()?;
-                let root = admission
-                    .data
-                    .file
-                    .as_ref()
-                    .and_then(|f| f.studio.as_ref())
-                    .ok_or(BundleError::Unsettled)?;
-                if root.project_id != self.project_id
-                    && !self.origin_project_ids.contains(&root.project_id)
-                {
-                    return Err(BundleError::Identity("recovery origin".into()));
-                }
-                let manifest = self
-                    .store
-                    .read_record::<StoreManifest>(&root.store_manifest_ref)?;
-                super::validate_manifest_apis(&manifest, root.manual_switch_generation)?;
-                self.store
-                    .read_record::<BTreeMap<BranchId, ObjectRef>>(&root.branch_index_ref)?
-                    .get(branch)
-                    .cloned()
-                    .ok_or_else(|| BundleError::Corrupt("recovery branch".into()))?
             }
         };
         let closure = self.store.closure(std::slice::from_ref(&reference))?;

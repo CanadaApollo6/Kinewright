@@ -228,7 +228,7 @@ impl Fixture {
             &fixture.table,
             RecordKind::InputChunkTable,
         );
-        let author = CertifiedSource::new(
+        let author = CertifiedSource::verify(
             File::open(fixture.root.path("media")).unwrap(),
             digest(&fixture.bytes),
             object.byte_length,
@@ -616,7 +616,12 @@ fn s3_read_only_tamper_after_certification_and_cache_hit_size_refuse() {
     writer.seek(SeekFrom::Start(44)).unwrap();
     writer.write_all(&fixture.bytes[44..45]).unwrap();
     writer.flush().unwrap();
-    let source = admission.certify_media_input().unwrap();
+    assert!(
+        admission.certify_media_input().is_err(),
+        "damaged admission stays quarantined"
+    );
+    let fresh = fixture.admit().unwrap();
+    let source = fresh.certify_media_input().unwrap();
     let mut cursor = source.cursor(cancel()).unwrap();
     assert_eq!(cursor.read(&mut [0; 4]).unwrap(), 4);
     writer.set_len(fixture.bytes.len() as u64 + 1).unwrap();

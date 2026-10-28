@@ -1,0 +1,221 @@
+[
+  {
+    "name": "public-digest",
+    "package": "kinewright-media",
+    "kind": "--lib",
+    "witness": "owned_io::tests::pf1::s3_public_source_admission_checks_the_complete_digest",
+    "witness_source": "crates/kinewright-media/src/certified_playback_tests.rs",
+    "red_text": "C2_PUBLIC_SOURCE_FULL_DIGEST",
+    "changes": [
+      [
+        "crates/kinewright-media/src/owned_io.rs",
+        "if digest.finalize() != source_sha256 {",
+        "if false && digest.finalize() != source_sha256 {"
+      ]
+    ]
+  },
+  {
+    "name": "buffered-video",
+    "package": "kinewright-media",
+    "kind": "--lib",
+    "witness": "owned_io::tests::pf1::s3_pf1_latched_video_rejects_buffered_output",
+    "witness_source": "crates/kinewright-media/src/certified_playback_tests.rs",
+    "red_text": "C2_PF1_BUFFERED_VIDEO_REJECTED",
+    "changes": [
+      [
+        "crates/kinewright-media/src/decode.rs",
+        "            self.input.video(&decoded)?;",
+        "            // mutation: accept decoded video without receipt validation"
+      ]
+    ]
+  },
+  {
+    "name": "buffered-audio",
+    "package": "kinewright-media",
+    "kind": "--lib",
+    "witness": "owned_io::tests::pf1::s3_pf1_latched_audio_rejects_buffered_output",
+    "witness_source": "crates/kinewright-media/src/certified_playback_tests.rs",
+    "red_text": "C2_PF1_BUFFERED_AUDIO_REJECTED",
+    "changes": [
+      [
+        "crates/kinewright-media/src/audio.rs",
+        "        self.input.audio(&decoded)?;",
+        "        // mutation: accept decoded audio without receipt validation"
+      ]
+    ]
+  },
+  {
+    "name": "shared-quarantine",
+    "package": "kinewright-media",
+    "kind": "--lib",
+    "witness": "owned_io::tests::pf1::s3_certified_failure_quarantines_the_shared_namespace",
+    "witness_source": "crates/kinewright-media/src/certified_playback_tests.rs",
+    "red_text": "C2_SHARED_CERTIFICATE_QUARANTINE",
+    "changes": [
+      [
+        "crates/kinewright-media/src/owned_io.rs",
+        "        if matches!(\n            error,\n            OwnedIoError::Damaged(_) | OwnedIoError::Unavailable(_)\n        ) {\n            self.source\n                .failure\n                .lock()\n                .unwrap_or_else(std::sync::PoisonError::into_inner)\n                .get_or_insert_with(|| error.clone());\n        }",
+        "        if false && matches!(\n            error,\n            OwnedIoError::Damaged(_) | OwnedIoError::Unavailable(_)\n        ) {\n            self.source\n                .failure\n                .lock()\n                .unwrap_or_else(std::sync::PoisonError::into_inner)\n                .get_or_insert_with(|| error.clone());\n        }"
+      ]
+    ]
+  },
+  {
+    "name": "certified-route",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "witness": "studio::tests::s3_bound_ab_identity",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_RED_DECODED_LANDMARK",
+    "changes": [
+      [
+        "crates/kinewright-media/src/render.rs",
+        "                    certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,",
+        "                    certified: None,"
+      ]
+    ],
+    "target": "kinewright-app"
+  },
+  {
+    "name": "stale-identity",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "witness": "studio::tests::s3_bound_ab_identity",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_STALE_IDENTITY",
+    "changes": [
+      [
+        "crates/kinewright-app/src/presenter.rs",
+        "            (None, Some(cell)) if cell.stamp.epoch < latest.epoch => DisplayCell {\n                stale: true,\n                ..cell\n            },",
+        "            (None, Some(cell)) if cell.stamp.epoch < latest.epoch => DisplayCell {\n                stale: true,\n                context: self.context(latest.epoch),\n                ..cell\n            },"
+      ]
+    ],
+    "target": "kinewright-app"
+  },
+  {
+    "name": "failed-copy-freeze",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "witness": "studio::tests::s3_failed_edit_copy_keeps_frozen_selection",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_FAILED_COPY_FROZEN",
+    "changes": [
+      [
+        "crates/kinewright-app/src/ja1_attachment.rs",
+        "                self.studio_edit_pending = result.is_ok()\n                    && self.view.as_ref().is_some_and(|view| {\n                        view.core.actor_identity() != before\n                            && serde_json::to_vec(&*view.document).is_ok_and(|bytes| {\n                                kinewright_media::sha256_bytes(&bytes) == key.document_hash\n                            })\n                    });",
+        "                self.studio_edit_pending = true;"
+      ]
+    ],
+    "target": "kinewright-app"
+  },
+  {
+    "name": "copy-branch-isolation",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "witness": "studio::tests::s3_frozen_selection_survives_background_copy_and_reopen",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_COPY_BRANCH_DISTINCT",
+    "changes": [
+      [
+        "crates/kinewright-project/src/bundle_switch.rs",
+        "        } else {\n            BranchId::fresh()?\n        };",
+        "        } else {\n            self.manual_branch_id.clone()\n        };"
+      ]
+    ],
+    "target": "kinewright-app"
+  },
+  {
+    "name": "recovery-metadata",
+    "package": "kinewright-agent",
+    "kind": "--lib",
+    "witness": "writer_host::ja_s3_host::s3_metadata_write_refused_during_recovery",
+    "witness_source": "crates/kinewright-agent/src/writer_host/ja_s3_host.rs",
+    "red_text": "C2_RECOVERY_METADATA_WRITE",
+    "changes": [
+      [
+        "crates/kinewright-agent/src/writer_host/mod.rs",
+        "            && (!manual::connector_command(&command)\n                || matches!(command, HostCommand::Metadata { .. }))",
+        "            && !manual::connector_command(&command)"
+      ]
+    ]
+  },
+  {
+    "name": "pending-namespace",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "witness": "studio::tests::s3_bound_ab_identity",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_PENDING_NAMESPACE_FENCE",
+    "changes": [
+      [
+        "crates/kinewright-app/src/presenter.rs",
+        "        if self.suspended {\n            self.candidates.clear();\n            return None;\n        }",
+        "        // mutation: accept an old completion while namespace admission is pending"
+      ]
+    ]
+  },
+  {
+    "name": "certified-audio-route",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "witness": "studio::tests::s3_bound_ab_identity",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_AUDIO_A_LANDMARK",
+    "changes": [
+      [
+        "crates/kinewright-media/src/audio.rs",
+        "                certified: inputs.map(|inputs| inputs.source(asset.id)).transpose()?,",
+        "                certified: None,"
+      ]
+    ]
+  },
+  {
+    "name": "gpu-still-copy",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "witness": "studio::tests::s3_bound_ab_gpu_identity",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_GPU_ORIGINAL_STILL_PIXELS",
+    "changes": [
+      [
+        "crates/kinewright-media/src/display.rs",
+        "        commands.copy_texture_to_texture(\n            frame.texture.as_image_copy(),\n            texture.as_image_copy(),\n            texture.size(),\n        );",
+        "        // mutation: publish the still texture without copying its pixels"
+      ]
+    ]
+  },
+  {
+    "name": "bootstrap-save-not-preempted",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "witness": "ja1_attachment::tests::c9_fix1_unsaved_studio_activation_requires_first_save_before_manual_edit",
+    "witness_source": "crates/kinewright-app/src/app.rs",
+    "red_text": "C2_BOOTSTRAP_SAVE_UI_REMAINS_AVAILABLE",
+    "changes": [
+      [
+        "crates/kinewright-app/src/studio.rs",
+        "            && self\n                .focused()\n                .ja1\n                .as_ref()\n                .is_some_and(|attachment| !attachment.read_only())",
+        "            && true"
+      ]
+    ]
+  },
+  {
+    "name": "pending-audio-owner",
+    "package": "kinewright-app",
+    "kind": "--bin",
+    "target": "kinewright-app",
+    "witness": "studio::tests::s3_frozen_selection_survives_background_copy_and_reopen",
+    "witness_source": "crates/kinewright-app/src/studio_tests.rs",
+    "red_text": "C2_PENDING_AUDIO_OWNER",
+    "changes": [
+      [
+        "crates/kinewright-app/src/transport.rs",
+        "self.focused().ja1.is_some() || self.focused().ja1_job.is_some()",
+        "self.focused().ja1.is_some()"
+      ]
+    ]
+  }
+]

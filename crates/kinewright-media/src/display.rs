@@ -94,6 +94,7 @@ pub struct DisplayFrame {
     pub stamp: FrameStamp,
     pub dimensions: (u32, u32),
     pub view: wgpu::TextureView,
+    texture: wgpu::Texture,
     pub allocation_id: usize,
     publication: u64,
     #[cfg(test)]
@@ -115,6 +116,35 @@ pub struct DisplaySession {
     last_rebind: Option<u64>,
 }
 impl DisplaySession {
+    /// Copy the actually bound paused image, before its pool allocation can be reused.
+    /// The caller reserves and retains the independent still's bytes.
+    #[must_use]
+    pub fn copy_bound(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Option<(FrameStamp, TimeCode, wgpu::Texture)> {
+        let frame = self.bound.as_ref()?;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Studio paused still"),
+            size: frame.texture.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: frame.texture.format(),
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let mut commands =
+            device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        commands.copy_texture_to_texture(
+            frame.texture.as_image_copy(),
+            texture.as_image_copy(),
+            texture.size(),
+        );
+        queue.submit([commands.finish()]);
+        Some((frame.stamp, frame.at, texture))
+    }
     #[must_use]
     pub fn timings(&self) -> Vec<DisplayTiming> {
         self.shared.lock().timing.drain(..).collect()
@@ -747,6 +777,7 @@ impl DisplayPool {
             stamp,
             dimensions: (texture.width(), texture.height()),
             view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            texture: (**texture).clone(),
             allocation_id: id,
             exchange: Arc::downgrade(&self.shared),
         };

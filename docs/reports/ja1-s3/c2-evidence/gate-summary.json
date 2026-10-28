@@ -1,0 +1,233 @@
+{
+  "base": "7f73f9c8d49873456aa0e80dd0331a6673633450",
+  "ffmpeg": "ffmpeg version n8.0-23-gd1f31a829d-20251022 Copyright (c) 2000-2025 the FFmpeg developers",
+  "libavcodec": "62.11.100",
+  "gates": [
+    {
+      "label": "play-gate-build",
+      "exit": 0,
+      "command": "build --workspace",
+      "summary": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 55.08s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/play-gate-build.log.gz",
+      "sha256": "6b0d623fc2dcce6d5940802041ce48642c23830aa8aed555e3251e0dea829da6"
+    },
+    {
+      "label": "play-gate-clippy",
+      "exit": 0,
+      "command": "clippy --workspace --all-targets -- -D warnings",
+      "summary": [
+        "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.20s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/play-gate-clippy.log.gz",
+      "sha256": "19b84524b2d90c4d046b93c0131c8a2ec2781a28446a50ee6077aa0729c0e8cb"
+    },
+    {
+      "label": "play-gate-fmt",
+      "exit": 0,
+      "command": "fmt -- --check",
+      "summary": [],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/play-gate-fmt.log.gz",
+      "sha256": "ac73670af3abed54ac6fb4695131f4099be9fbe39d6076c5d0264a6bbdae9d83"
+    },
+    {
+      "label": "play-gate-c2",
+      "exit": 0,
+      "command": "test -p kinewright-app --bin kinewright-app studio::tests::s3_ -- --test-threads=1 --nocapture",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.39s",
+        "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 896 filtered out; finished in 31.28s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/play-gate-c2.log.gz",
+      "sha256": "1e2b7aab18116ad588379d2d579d5c813d9f9d2b68d2fe14bf64956237adc57b"
+    },
+    {
+      "label": "final-media",
+      "exit": 0,
+      "command": "test -p kinewright-media --lib owned_io::tests:: -- --test-threads=1 --nocapture",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 45.32s",
+        "test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 1199 filtered out; finished in 3.18s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/final-media.log.gz",
+      "sha256": "82199043a005cc9fa5be6fba3dfaa00fd0e1ce210d53cb088b9db2df9f5ac278"
+    },
+    {
+      "label": "affected-project2",
+      "exit": 0,
+      "command": "test -p kinewright-project --features test-util --test ja_s3_owned_inputs --test ja_s3_read_only_inputs --test ja_s2_switch --test ja_s3_store -- --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.09s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.40s",
+        "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 23.04s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.16s",
+        "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.59s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/affected-project2.log.gz",
+      "sha256": "0177fa635dfe6bc2dba177c89cf04b2cd3ddc254d3f802d86506844c80c37d84"
+    },
+    {
+      "label": "affected-host3",
+      "exit": 0,
+      "command": "test -p kinewright-agent --lib writer_host::ja_s3_host:: -- --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.25s",
+        "test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 743 filtered out; finished in 86.73s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/affected-host3.log.gz",
+      "sha256": "14a4d4a75f74a3b1f0ec7bd2832e8997684495c0c828fb5b79b548511b72449d"
+    },
+    {
+      "label": "retained-core",
+      "exit": 0,
+      "command": "test -p kinewright-core --lib actor::tests::",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 36.03s",
+        "test result: ok. 23 passed; 0 failed; 1 ignored; 0 measured; 302 filtered out; finished in 0.81s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/retained-core.log.gz",
+      "sha256": "4d54813adec73c0df1e119683134b956551c2fdbe9587e79b2c31b6472d21964"
+    },
+    {
+      "label": "retained-branches",
+      "exit": 0,
+      "command": "test -p kinewright-agent --lib branch::tests::",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 44.15s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 755 filtered out; finished in 5.36s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/retained-branches.log.gz",
+      "sha256": "531eb72d31449f55a64fce154d71f8ad3b435b011a7fe4d1f642ed8c8e731aeb"
+    },
+    {
+      "label": "retained-core-history",
+      "exit": 0,
+      "command": "test -p kinewright-core --test ja_s1_history --test stills_core",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.21s",
+        "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/retained-core-history.log.gz",
+      "sha256": "6c01de73e8000a7b4f6350711d89c242ffd020b55bf327afbc3503b2d5e724b8"
+    },
+    {
+      "label": "retained-presenter",
+      "exit": 0,
+      "command": "test -p kinewright-app --bin kinewright-app presenter::tests:: -- --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s",
+        "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 895 filtered out; finished in 0.28s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/retained-presenter.log.gz",
+      "sha256": "27e76094c4b9aaf57f84656c1a2dbaaa08e4e6d5d306cedb17957449a5cfa6ca"
+    },
+    {
+      "label": "play-gate-r71",
+      "exit": 0,
+      "command": "test -p kinewright-app --bin kinewright-app app::s3a_tests::r71:: -- --test-threads=1 --nocapture",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.40s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 900 filtered out; finished in 1.70s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/play-gate-r71.log.gz",
+      "sha256": "7f713af2b0fd3c463f311519b3eaf503c519d838819da64cd4c46093f011e2ba"
+    },
+    {
+      "label": "retained-keys",
+      "exit": 0,
+      "command": "test -p kinewright-app --bin kinewright-app keys::tests:: -- --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.98s",
+        "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 900 filtered out; finished in 0.00s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/retained-keys.log.gz",
+      "sha256": "9b922e599940b5a284fac7a0ceb0f631a170594ccdd9eb8c07319dc949b8185a"
+    },
+    {
+      "label": "retained-s2-host",
+      "exit": 0,
+      "command": "test -p kinewright-agent --lib writer_host::s2h_tests:: -- --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s",
+        "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 753 filtered out; finished in 12.53s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/retained-s2-host.log.gz",
+      "sha256": "f34f9d25e227c1df45dca7b1fcbc82e103c8fcdb53eb393010f833769148b443"
+    },
+    {
+      "label": "retained-attachment-focused",
+      "exit": 0,
+      "command": "test -p kinewright-app --bin kinewright-app ja1_attachment::tests::g0 -- --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.61s",
+        "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 894 filtered out; finished in 17.61s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/retained-attachment-focused.log.gz",
+      "sha256": "abb94f1617f76bcfe3ac1f4099ccb01246549ee28af96dd8140de5a7e5c94103"
+    },
+    {
+      "label": "final-c9",
+      "exit": 0,
+      "command": "test -p kinewright-app --bin kinewright-app ja1_attachment::tests::c9_fix1_ -- --test-threads=1 --nocapture",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s",
+        "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 899 filtered out; finished in 6.44s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/final-c9.log.gz",
+      "sha256": "fd7429fd1a050f619f33a4819af6f929a95018d194dde48f783d8c4a763ba6d4"
+    },
+    {
+      "label": "final-app-architecture",
+      "exit": 0,
+      "command": "test -p kinewright-app --bin kinewright-app investigator::tests::in2_the_app_crate_has_no_agent_event_loop_and_one_pump_call -- --exact --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 901 filtered out; finished in 0.05s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/final-app-architecture.log.gz",
+      "sha256": "681d256c24e64922247305e9f529d71cc9a840b8b1a604030dda5fa0c4edfea6"
+    },
+    {
+      "label": "agent-architecture",
+      "exit": 0,
+      "command": "test -p kinewright-agent --lib session::tests::in2_the_agent_crate_has_one_agent_event_loop -- --exact",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 762 filtered out; finished in 0.04s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/agent-architecture.log.gz",
+      "sha256": "32a0389fefe166da1f90851097afa4cd81d283538558109de0927f2c6676c721"
+    },
+    {
+      "label": "au6-source-guard",
+      "exit": 0,
+      "command": "test -p kinewright-media --lib au6_fixtures::au6_declared_test_names_exist_in_their_source_files -- --exact --test-threads=1",
+      "summary": [
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s",
+        "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1230 filtered out; finished in 1.69s"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/au6-source-guard.log.gz",
+      "sha256": "51bfda61c741e3c2d23b9ee8e4f83d0e2dc9739be1d03480641bf2b45b5d43b6"
+    },
+    {
+      "label": "final-slow-lint",
+      "exit": 0,
+      "command": "python scripts/slow_tests.py lint",
+      "summary": [
+        "slow-test manifest and markers agree: 117 tests, features kinewright-agent/slow-tests,kinewright-app/slow-tests,kinewright-media/slow-tests; 60 allowlist entries well-formed; 27 equipped-session skip sites counted"
+      ],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/final-slow-lint.log.gz",
+      "sha256": "fe82e541c184439bdc8e901d3b5aae6134ce994c48604bdb703ea899d4267dc7"
+    },
+    {
+      "label": "windows-check",
+      "exit": 101,
+      "command": "check -p kinewright-media -p kinewright-project -p kinewright-agent -p kinewright-app --all-targets --target x86_64-pc-windows-msvc",
+      "summary": [],
+      "raw_log": "docs/reports/ja1-s3/c2-evidence/gates/windows-check.log.gz",
+      "sha256": "fcffd3e873284687c232e81d3a190511360d96537a6f3ccec095013573c76ffc"
+    }
+  ]
+}

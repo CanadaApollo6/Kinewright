@@ -34,6 +34,7 @@ mod screenshot;
 mod settings_ui;
 mod slash;
 mod solo_ui;
+mod studio;
 mod theme;
 mod timeline_ui;
 mod transcript_edit;

@@ -309,9 +309,9 @@ fn router_apply_accepted(
 pub(crate) type UiReply = Box<dyn FnOnce(&mut KinewrightApp, &egui::Context) + Send>;
 
 pub(crate) struct NativeDisplay {
-    session: kinewright_media::DisplaySession,
-    renderer: eframe::egui_wgpu::RenderState,
-    picture: Option<(egui::TextureId, egui::Vec2)>,
+    pub(crate) session: kinewright_media::DisplaySession,
+    pub(crate) renderer: eframe::egui_wgpu::RenderState,
+    pub(crate) picture: Option<(egui::TextureId, egui::Vec2)>,
 }
 impl NativeDisplay {
     fn clear(&mut self) {
@@ -642,6 +642,7 @@ impl KinewrightApp {
             None,
         )
         .expect("startup project session must be valid");
+        project.studio.mode = crate::studio::Mode::Studio;
         if project_path.is_some() {
             project.saved_document = Some(Arc::clone(&project.document));
         }
@@ -665,11 +666,15 @@ impl KinewrightApp {
         // and `devin auth status` is a network round trip, so an unreachable
         // endpoint held the first frame with no window to show for it.
         let (harness_update_tx, harness_update_rx) = crossbeam_channel::unbounded();
-        let harness_update_rx = std::thread::Builder::new()
-            .name("kinewright-harness-probes".to_owned())
-            .spawn(move || crate::chat_ui::probe_harnesses(&harness_update_tx))
-            .map(|_| harness_update_rx)
-            .ok();
+        let harness_update_rx = if screenshotting {
+            None
+        } else {
+            std::thread::Builder::new()
+                .name("kinewright-harness-probes".to_owned())
+                .spawn(move || crate::chat_ui::probe_harnesses(&harness_update_tx))
+                .map(|_| harness_update_rx)
+                .ok()
+        };
         let resolution = document.resolution;
         let fps = document.fps;
         let error_log_open = error_log.len() > 0;
@@ -803,10 +808,16 @@ impl KinewrightApp {
             look_ab_hold_seen: false,
             performance: None,
         };
-        app.publish_focused_lut_library();
-        app.playback
-            .set_document(Arc::clone(&app.focused().document));
-        app.playback.request_frame(TimeCode::ZERO);
+        if app.focused().source_admission.is_studio() {
+            if !screenshotting {
+                app.enable_ja1();
+            }
+        } else {
+            app.publish_focused_lut_library();
+            app.playback
+                .set_document(Arc::clone(&app.focused().document));
+            app.playback.request_frame(TimeCode::ZERO);
+        }
         // The investigator settings file is read once at startup (IN2 §2.1
         // rule 6); a malformed file opens one incident and is left alone
         // until the person changes a setting (rule 3).
@@ -825,7 +836,9 @@ impl KinewrightApp {
         }
         if let Some(observation) = load_error {
             app.note_observation(observation);
-        } else if let Some(path) = opened_path {
+        } else if let Some(path) =
+            opened_path.filter(|_| !app.focused().source_admission.is_studio())
+        {
             let missing: Vec<String> = app
                 .focused()
                 .document
@@ -862,7 +875,9 @@ impl KinewrightApp {
                 }
             }
         }
-        app.queue_media_status_checks_for_project(0);
+        if !app.focused().source_admission.is_studio() {
+            app.queue_media_status_checks_for_project(0);
+        }
         app
     }
 
@@ -894,7 +909,7 @@ impl KinewrightApp {
         clippy::too_many_lines,
         reason = "one activation boundary stages the local owner and authenticated host together"
     )]
-    fn enable_ja1(&mut self) {
+    pub(crate) fn enable_ja1(&mut self) {
         if self.focused().ja1_job.is_some() {
             return;
         }
@@ -956,8 +971,10 @@ impl KinewrightApp {
                 session.sidecar.sidecar_suspended = true;
                 session.ja1 = Some(attachment);
                 session.install_ja1_view();
-                self.playback
-                    .set_document(Arc::clone(&self.focused().document));
+                self.presenter.suspend();
+                self.playback.pause();
+                self.playing = false;
+                self.focused_mut().studio.manual_inputs = None;
                 let mut root_paths = Vec::new();
                 if let Some(home) =
                     std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
@@ -1042,6 +1059,10 @@ impl KinewrightApp {
             attachment
         }));
     }
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one attachment job completion transition"
+    )]
     fn poll_ja1(&mut self, ctx: &egui::Context) {
         let focused = self.focused_project;
         let mut changed = false;
@@ -1135,10 +1156,14 @@ impl KinewrightApp {
             );
             self.focused_mut().lut_library = Arc::new(library);
             self.focused_mut().lut_availability = statuses.into_iter().collect();
-            self.playback
-                .set_document(Arc::clone(&self.focused().document));
-            self.publish_focused_lut_library();
-            self.playback.request_frame(self.focused().position);
+            if self.focused().studio.selection.is_none() && self.focused().ja1.is_none() {
+                self.playback
+                    .set_document(Arc::clone(&self.focused().document));
+                self.presenter
+                    .set_context(self.playback.stamp().epoch, None);
+                self.publish_focused_lut_library();
+                self.playback.request_frame(self.focused().position);
+            }
         }
     }
     fn show_ja1(&mut self, ctx: &egui::Context) {
@@ -1273,6 +1298,31 @@ impl KinewrightApp {
         self.mixer_selection = None;
         self.clear_preview();
         self.focused_project = index;
+        if let Some(context) = self.focused().studio.selection.clone() {
+            let position = self.focused().studio.position;
+            if let Err(error) = self.install_studio_context(context) {
+                self.presenter.suspend();
+                self.status = error;
+            } else {
+                self.focused_mut().studio.position = position;
+                self.playback.seek(position);
+                self.playback.request_frame(position);
+            }
+            return;
+        }
+        if self.focused().ja1.is_some() || self.focused().ja1_job.is_some() {
+            if let Some(inputs) = self.focused().studio.manual_inputs.clone() {
+                let stamp = self.lut_publisher.set_certified_document(inputs);
+                self.presenter.set_context(stamp.epoch, None);
+                self.playback.seek(self.focused().position);
+                self.playback.request_frame(self.focused().position);
+            } else {
+                self.presenter.suspend();
+            }
+            return;
+        }
+        self.presenter
+            .set_context(self.playback.stamp().epoch, None);
         let document = Arc::clone(&self.focused().document);
         let position = self.focused().position;
         self.publish_focused_lut_library();
@@ -1547,6 +1597,11 @@ impl KinewrightApp {
     }
 
     pub(crate) fn save_project(&mut self, save_as: bool) -> bool {
+        if self.focused().studio.selection.is_some() {
+            self.status =
+                "Choose Current edit or Edit a copy before saving a working branch.".into();
+            return false;
+        }
         if self.focused().ja1_job.is_some() {
             self.status = "Saving or selection is still in progress; editing is read-only.".into();
             return false;
@@ -3054,7 +3109,7 @@ impl KinewrightApp {
 
     // Polling coordinates six independent channels and preserves their visible event ordering.
     #[allow(clippy::too_many_lines)]
-    fn poll_background(&mut self, ctx: &egui::Context) {
+    pub(crate) fn poll_background(&mut self, ctx: &egui::Context) {
         self.poll_ja1(ctx);
         while let Ok(reply) = self.ui_replies.1.try_recv() {
             reply(self, ctx);
@@ -3265,17 +3320,21 @@ impl KinewrightApp {
                                 .clamp(0, doc.duration.0.saturating_sub(1)),
                         );
                     }
-                    if project_index == self.focused_project {
+                    if project_index == self.focused_project
+                        && self.projects[project_index].studio.selection.is_none()
+                    {
                         if !media_changed_assets.is_empty() {
                             self.clear_preview();
                         }
                         let position = self.projects[project_index].position;
-                        if !apply_live_audio_change(
-                            self.playback.as_ref(),
-                            live_audio,
-                            &doc,
-                            position,
-                        ) {
+                        if !self.update_owned_playback(Arc::clone(&doc), live_audio, position)
+                            && !apply_live_audio_change(
+                                self.playback.as_ref(),
+                                live_audio,
+                                &doc,
+                                position,
+                            )
+                        {
                             self.playing = false;
                         }
                     }
@@ -3373,7 +3432,7 @@ impl KinewrightApp {
             match event {
                 MediaEvent::Position(position) => {
                     if !self.resume_after_scrub {
-                        self.focused_mut().position = position;
+                        self.set_program_position(position);
                     }
                 }
                 MediaEvent::PlaybackStateChanged(state) => {
@@ -3383,6 +3442,13 @@ impl KinewrightApp {
                 MediaEvent::Error(error) | MediaEvent::StampedError(_, error) => {
                     self.playing = false;
                     self.pending_resume = None;
+                    if self.focused().studio.selection.is_some()
+                        || self.focused().studio.manual_inputs.is_some()
+                    {
+                        self.presenter.suspend();
+                        self.playback.pause();
+                        self.focused_mut().studio.failure = Some(error.to_string());
+                    }
                     let revision = self.focused().revision;
                     // `IN1b` §5.1 rule 12: the constructor is total after
                     // Part B, so both arms fold into one and IN1 §5.2 rule 6's
@@ -3413,9 +3479,10 @@ impl KinewrightApp {
 
         if self.playing {
             let position = self.playback.position();
-            self.focused_mut().position = position;
+            self.set_program_position(position);
             ctx.request_repaint_after(Duration::from_millis(10));
         }
+        self.sync_studio_selection();
     }
 
     /// Review B (UI blocking): run `work` (an agent-lane request, which may
@@ -3454,7 +3521,7 @@ impl KinewrightApp {
             && ack.stamp.epoch == self.playback.stamp().epoch
         {
             self.pending_resume = None;
-            self.playback.play(target);
+            self.play_program_from(target);
         }
     }
 
@@ -3479,13 +3546,14 @@ impl KinewrightApp {
             display.clear();
         }
         self.presenter.clear();
+        self.focused_mut().studio.cpu_frame = None;
         self.pending_resume = None;
     }
 
     /// PF1 R-2: the last step of `ui`, after every transport call in the
     /// pass, binds the newest valid candidate and writes the display cell.
     #[allow(clippy::cast_precision_loss)]
-    fn finalize_preview(&mut self, ctx: &egui::Context) {
+    pub(crate) fn finalize_preview(&mut self, ctx: &egui::Context) {
         // Review A F2: the CPU image is prepared before the final stamp and
         // clock check; the cell and the texture then bind together. The
         // check and the binding cannot be one step against the free-running
@@ -3493,6 +3561,7 @@ impl KinewrightApp {
         // its paint is acked expired (`PaintMarker::record`).
         let now = self.paint_clock();
         let epoch = ctx.cumulative_frame_nr_for(egui::ViewportId::ROOT);
+        self.presenter.advance(epoch);
         debug_assert_eq!(ctx.viewport_id(), egui::ViewportId::ROOT);
         if let Some(display) = &mut self.native_display
             && let Some(frame) = display.session.reserve()
@@ -3532,7 +3601,7 @@ impl KinewrightApp {
                     display.session.bind(epoch, frame);
                     // Keep the CPU id: this pass may have laid it out before the route switch.
                     if !self.resume_after_scrub && !self.playing {
-                        self.focused_mut().position = at;
+                        self.set_program_position(at);
                     }
                 } else if let Some(prepared) = prepared {
                     renderer.free_texture(&prepared);
@@ -3547,7 +3616,9 @@ impl KinewrightApp {
                 .map(|side| usize::try_from(side).unwrap_or_default());
             egui::ColorImage::from_rgba_unmultiplied(size, texture.rgba.as_slice())
         };
-        if let Some((PreviewFrame { at, .. }, image)) = self.presenter.finalize(now, prepare) {
+        if let Some((frame, image)) = self.presenter.finalize(now, prepare) {
+            let at = frame.at;
+            self.focused_mut().studio.cpu_frame = Some(frame.texture);
             // Keep the native id and its Bound lease through a laid-out GPU paint.
             // The next GPU rebind retires it under the normal root-epoch fence.
             if let Some(texture) = &mut self.texture {
@@ -3560,7 +3631,7 @@ impl KinewrightApp {
                 ));
             }
             if !self.resume_after_scrub && !self.playing {
-                self.focused_mut().position = at;
+                self.set_program_position(at);
             }
         }
         if let Some((painter, slot, image_rect)) = self.stale_caption.take()
@@ -3739,6 +3810,7 @@ impl eframe::App for KinewrightApp {
         if let Some(display) = &mut self.native_display {
             display.session.advance(epoch);
         }
+        self.presenter.advance(epoch);
         self.acknowledge_paint(epoch);
     }
 
@@ -3776,8 +3848,16 @@ impl eframe::App for KinewrightApp {
             }
         }
 
-        self.app_top_bar(ui);
-        self.panel_layout(ui);
+        self.sync_studio_selection();
+        if self.focused().studio.mode == crate::studio::Mode::Studio
+            || self.focused().studio.selection.is_some()
+            || ui.available_width() < 1000.0
+        {
+            self.studio_layout(ui);
+        } else {
+            self.app_top_bar(ui);
+            self.panel_layout(ui);
+        }
         self.show_export_dialog(ui.ctx());
         self.show_record_dialog(ui.ctx());
         self.show_settings_dialog(ui.ctx());
@@ -3823,6 +3903,9 @@ impl KinewrightApp {
                 ui.horizontal_centered(|ui| {
                     ui.label(theme::wordmark("KINEWRIGHT", color::TEXT_SECONDARY));
                     ui.separator();
+                    if ui.selectable_label(false, "Studio").clicked() {
+                        self.focused_mut().studio.mode = crate::studio::Mode::Studio;
+                    }
                     self.file_menu(ui);
                     self.view_menu(ui);
                     self.look_menu(ui);
@@ -4474,7 +4557,22 @@ pub(crate) fn run() -> eframe::Result {
     let started = std::time::Instant::now();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([size::WINDOW_WIDTH, size::WINDOW_HEIGHT])
-        .with_min_inner_size([size::WINDOW_MIN_WIDTH, size::WINDOW_MIN_HEIGHT]);
+        .with_min_inner_size([360.0, size::WINDOW_MIN_HEIGHT]);
+    if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
+        && let Some((width, height)) =
+            std::env::var("KINEWRIGHT_SCREENSHOT_SIZE")
+                .ok()
+                .and_then(|size| {
+                    let (width, height) = size.split_once('x')?;
+                    Some((width.parse::<f32>().ok()?, height.parse::<f32>().ok()?))
+                })
+    {
+        viewport = viewport
+            .with_inner_size([width, height])
+            .with_min_inner_size([width, height])
+            .with_max_inner_size([width, height])
+            .with_resizable(false);
+    }
     if let Some(icon) = window_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -4515,6 +4613,12 @@ pub(crate) fn run() -> eframe::Result {
                 renderer: render_state.clone(),
                 picture: None,
             });
+            if std::env::var_os("KINEWRIGHT_SCREENSHOT_TO").is_some()
+                && let Some(path) = std::env::var_os("KINEWRIGHT_SCREENSHOT_STUDIO_BUNDLE")
+                && let Err(error) = app.prepare_studio_screenshot(std::path::Path::new(&path))
+            {
+                eprintln!("Studio screenshot preparation failed: {error}");
+            }
             app.performance = crate::performance::PerformanceProbe::from_environment(started);
             Ok(Box::new(app))
         }),
@@ -16293,7 +16397,7 @@ mod in2b_tests {
 }
 
 #[cfg(test)]
-mod s3a_tests {
+pub(crate) mod s3a_tests {
     use super::*;
     #[test]
     fn i1b_every_premultiply_pair_matches_color32() {
@@ -16317,7 +16421,7 @@ mod s3a_tests {
         kinewright_media::test_support::TempDirectory,
     );
     #[allow(clippy::too_many_lines)]
-    fn display_app() -> DisplayFixture {
+    pub(crate) fn display_app() -> DisplayFixture {
         let mut descriptor =
             eframe::wgpu::InstanceDescriptor::new_without_display_handle_from_env();
         descriptor.backends = eframe::wgpu::Backends::PRIMARY;
@@ -16491,7 +16595,7 @@ mod s3a_tests {
         assert_eq!(gpu.full_frame_readbacks() - before, 0, "full-frame copies");
         finish(app, engine, &gpu);
     }
-    mod r71 {
+    pub(crate) mod r71 {
         include!("display_r71_tests.rs");
     }
 }
@@ -16715,7 +16819,7 @@ pub(crate) mod ja_observe {
                 json!({"manual_stream":manual_observation,"input_events":inputs,"core_accepted_observed_ns":accepted_observed_ns,
                 "core_history":{"undo_count":history.undo.len(),"redo_count":history.redo.len(),"trace":history},
                 "app_pending_revision":pending_revision,"issued_stamp":stamp(issued),"returned_stamp":stamp(returned),
-                "bound_display_cell":bound.map(|c| json!({"stamp":stamp(c.stamp),"at":c.at,"frame_id":c.frame_id,"stale":c.stale})),
+                "bound_display_cell":bound.as_ref().map(|c| json!({"stamp":stamp(c.stamp),"at":c.at,"frame_id":c.frame_id,"stale":c.stale})),
                 "bound_matches_returned":bound.is_some_and(|c| c.stamp == returned && c.at == at),
                 "paint_callback_observed":mark.is_some(),"paint_mark":mark.map(|m| json!({"stamp":stamp(m.cell.stamp),"at":m.cell.at,"frame_id":m.cell.frame_id,"epoch":m.epoch,"expired":m.expired,"elapsed_ns":m.painted.duration_since(started).as_nanos().to_string()})),
                 "discarded_has_no_mark":discarded_has_no_mark,"ack_consumed_once":ack_consumed_once,
@@ -17373,6 +17477,10 @@ pub(crate) fn ja_c9_bootstrap_save_witness(dirty_named: bool) {
         assert_eq!(core.export_history().unwrap(), before);
         app.status.clear();
         app.poll_background(&ctx);
+        assert!(
+            app.focused().ja1.is_some(),
+            "C2_BOOTSTRAP_SAVE_UI_REMAINS_AVAILABLE"
+        );
         assert!(app.status.contains("Save once"), "{}", app.status);
         assert_eq!(core.export_history().unwrap(), before);
 
